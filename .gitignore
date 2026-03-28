@@ -1,1 +1,4 @@
 .claude/
+
+# Go build output
+/server

@@ -1,0 +1,47 @@
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aileron
+      POSTGRES_PASSWORD: aileron
+      POSTGRES_DB: aileron
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aileron"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: ..
+      dockerfile: core/server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AILERON_ADDR: ":8080"
+      DATABASE_URL: "postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable"
+    ports:
+      - "8080:8080"
+
+  ui:
+    build:
+      context: ../ui
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      AILERON_API_URL: "http://server:8080"
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:

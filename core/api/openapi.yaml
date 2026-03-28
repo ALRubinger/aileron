@@ -1,0 +1,1833 @@
+
+openapi: 3.1.0
+info:
+  title: Agentic Control Plane API
+  version: 0.2.0
+  summary: Policy, approval, execution, and audit APIs for governed agent actions
+  description: |
+    v0.2 extends the base control-plane lifecycle with richer, domain-specific schemas for:
+      - Git and pull request actions
+      - Deploy and cloud actions
+      - Email and calendar actions
+      - Payment and procurement actions
+
+    Core lifecycle:
+      intent -> policy decision -> approval (optional) -> execution grant -> execution -> trace
+
+servers:
+  - url: https://api.agentic-control-plane.example.com
+    description: Production
+  - url: https://sandbox.agentic-control-plane.example.com
+    description: Sandbox
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Intents
+  - name: Approvals
+  - name: Policies
+  - name: Connectors
+  - name: Executions
+  - name: Funding Sources
+  - name: Credentials
+  - name: Traces
+  - name: Analytics
+  - name: Health
+
+paths:
+  /v1/health:
+    get:
+      tags: [Health]
+      summary: Get service health
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /v1/intents:
+    post:
+      tags: [Intents]
+      summary: Submit a new action intent
+      operationId: createIntent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateIntentRequest"
+            examples:
+              gitPullRequest:
+                summary: Create a pull request
+                value:
+                  idempotency_key: "23d6f3ab-7ef9-433e-bd2e-0c6af4bb1001"
+                  agent_id: "agt_codex_repo_alpha"
+                  workspace_id: "ws_engineering"
+                  action:
+                    type: "git.pull_request.create"
+                    summary: "Open PR from feature branch to main"
+                    justification: "Ship checkout bug fix"
+                    target:
+                      kind: "repository"
+                      id: "repo_checkout"
+                      display_name: "github.com/acme/checkout"
+                    domain:
+                      git:
+                        provider: "github"
+                        repository: "acme/checkout"
+                        branch: "fix/checkout-tax-rounding"
+                        base_branch: "main"
+                        commit_shas:
+                          - "abc1234"
+                        files_changed:
+                          - "src/tax.ts"
+                          - "tests/tax.test.ts"
+                        pr_title: "Fix tax rounding on checkout"
+                        pr_body: "This PR fixes checkout tax rounding and adds regression tests."
+                        labels: ["bugfix", "checkout"]
+                  context:
+                    environment: "production"
+                    source_platform: "codex"
+              paymentPurchase:
+                summary: Purchase SaaS subscription
+                value:
+                  idempotency_key: "89967c5b-0340-4781-aa0c-8cde2ef41002"
+                  agent_id: "agt_procurement_ops"
+                  workspace_id: "ws_finops"
+                  action:
+                    type: "payment.charge"
+                    summary: "Purchase annual Figma license"
+                    justification: "Renew expiring seat for jane@company.com"
+                    target:
+                      kind: "vendor"
+                      id: "vendor_figma"
+                      display_name: "Figma"
+                    domain:
+                      payment:
+                        vendor_name: "Figma"
+                        amount:
+                          amount: 18000
+                          currency: "USD"
+                        merchant_category: "software"
+                        budget_code: "design-software"
+                        funding_source_id: "fs_team_software"
+                        payment_instrument_preference: "virtual_card"
+                        line_items:
+                          - description: "Figma Pro Annual"
+                            quantity: 1
+                            unit_amount:
+                              amount: 18000
+                              currency: "USD"
+                        beneficiary:
+                          email: "jane@company.com"
+                  context:
+                    environment: "production"
+                    source_platform: "openclaw"
+      responses:
+        "201":
+          description: Intent created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentEnvelope"
+
+    get:
+      tags: [Intents]
+      summary: List intents
+      operationId: listIntents
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+        - name: workspace_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/IntentStatus"
+        - name: action_type
+          in: query
+          schema:
+            type: string
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Paginated intents
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentListResponse"
+
+  /v1/intents/{intent_id}:
+    get:
+      tags: [Intents]
+      summary: Get an intent
+      operationId: getIntent
+      parameters:
+        - $ref: "#/components/parameters/IntentId"
+      responses:
+        "200":
+          description: Intent details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentEnvelope"
+
+  /v1/intents/{intent_id}/evidence:
+    post:
+      tags: [Intents]
+      summary: Attach evidence to an intent
+      operationId: appendIntentEvidence
+      parameters:
+        - $ref: "#/components/parameters/IntentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppendEvidenceRequest"
+      responses:
+        "200":
+          description: Evidence appended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntentEnvelope"
+
+  /v1/approvals:
+    get:
+      tags: [Approvals]
+      summary: List approval requests
+      operationId: listApprovals
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+        - name: assignee
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalListResponse"
+
+  /v1/approvals/{approval_id}:
+    get:
+      tags: [Approvals]
+      summary: Get an approval request
+      operationId: getApproval
+      parameters:
+        - $ref: "#/components/parameters/ApprovalId"
+      responses:
+        "200":
+          description: Approval details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+
+  /v1/approvals/{approval_id}/approve:
+    post:
+      tags: [Approvals]
+      summary: Approve an action
+      operationId: approveRequest
+      parameters:
+        - $ref: "#/components/parameters/ApprovalId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRequest"
+      responses:
+        "200":
+          description: Approval recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalActionResponse"
+
+  /v1/approvals/{approval_id}/deny:
+    post:
+      tags: [Approvals]
+      summary: Deny an action
+      operationId: denyRequest
+      parameters:
+        - $ref: "#/components/parameters/ApprovalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DenyRequest"
+      responses:
+        "200":
+          description: Denial recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalActionResponse"
+
+  /v1/approvals/{approval_id}/modify:
+    post:
+      tags: [Approvals]
+      summary: Approve with modifications
+      operationId: modifyRequest
+      parameters:
+        - $ref: "#/components/parameters/ApprovalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModifyApprovalRequest"
+      responses:
+        "200":
+          description: Modification recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApprovalActionResponse"
+
+  /v1/policies:
+    get:
+      tags: [Policies]
+      summary: List policies
+      operationId: listPolicies
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Policies
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyListResponse"
+
+    post:
+      tags: [Policies]
+      summary: Create a policy
+      operationId: createPolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePolicyRequest"
+      responses:
+        "201":
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+
+  /v1/policies/{policy_id}:
+    get:
+      tags: [Policies]
+      summary: Get a policy
+      operationId: getPolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyId"
+      responses:
+        "200":
+          description: Policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+
+    patch:
+      tags: [Policies]
+      summary: Update a policy
+      operationId: updatePolicy
+      parameters:
+        - $ref: "#/components/parameters/PolicyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePolicyRequest"
+      responses:
+        "200":
+          description: Policy updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+
+  /v1/policies/simulate:
+    post:
+      tags: [Policies]
+      summary: Simulate policy evaluation
+      operationId: simulatePolicy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PolicySimulationRequest"
+      responses:
+        "200":
+          description: Simulation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicySimulationResponse"
+
+  /v1/connectors:
+    get:
+      tags: [Connectors]
+      summary: List connectors
+      operationId: listConnectors
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Connectors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorListResponse"
+
+    post:
+      tags: [Connectors]
+      summary: Register a connector
+      operationId: createConnector
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateConnectorRequest"
+      responses:
+        "201":
+          description: Connector created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Connector"
+
+  /v1/connectors/{connector_id}:
+    get:
+      tags: [Connectors]
+      summary: Get a connector
+      operationId: getConnector
+      parameters:
+        - $ref: "#/components/parameters/ConnectorId"
+      responses:
+        "200":
+          description: Connector details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Connector"
+
+    patch:
+      tags: [Connectors]
+      summary: Update a connector
+      operationId: updateConnector
+      parameters:
+        - $ref: "#/components/parameters/ConnectorId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateConnectorRequest"
+      responses:
+        "200":
+          description: Connector updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Connector"
+
+  /v1/execution-grants/{grant_id}:
+    get:
+      tags: [Executions]
+      summary: Get an execution grant
+      operationId: getExecutionGrant
+      parameters:
+        - $ref: "#/components/parameters/GrantId"
+      responses:
+        "200":
+          description: Execution grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionGrant"
+
+  /v1/executions/run:
+    post:
+      tags: [Executions]
+      summary: Execute an approved action
+      operationId: runExecution
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutionRunRequest"
+      responses:
+        "202":
+          description: Execution accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionRunResponse"
+
+  /v1/executions/{execution_id}:
+    get:
+      tags: [Executions]
+      summary: Get execution status
+      operationId: getExecution
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+      responses:
+        "200":
+          description: Execution details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Execution"
+
+  /v1/executions/{execution_id}/callback:
+    post:
+      tags: [Executions]
+      summary: Post execution callback
+      operationId: executionCallback
+      parameters:
+        - $ref: "#/components/parameters/ExecutionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecutionCallbackRequest"
+      responses:
+        "200":
+          description: Callback recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Execution"
+
+  /v1/funding-sources:
+    get:
+      tags: [Funding Sources]
+      summary: List funding sources
+      operationId: listFundingSources
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Funding sources
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FundingSourceListResponse"
+
+    post:
+      tags: [Funding Sources]
+      summary: Create a funding source
+      operationId: createFundingSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFundingSourceRequest"
+      responses:
+        "201":
+          description: Funding source created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FundingSource"
+
+  /v1/credentials:
+    get:
+      tags: [Credentials]
+      summary: List credential references
+      operationId: listCredentials
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialListResponse"
+
+    post:
+      tags: [Credentials]
+      summary: Register a credential reference
+      operationId: createCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCredentialRequest"
+      responses:
+        "201":
+          description: Credential created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialReference"
+
+  /v1/traces:
+    get:
+      tags: [Traces]
+      summary: List traces
+      operationId: listTraces
+      parameters:
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/PageToken"
+      responses:
+        "200":
+          description: Traces
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TraceListResponse"
+
+  /v1/analytics/summary:
+    get:
+      tags: [Analytics]
+      summary: Get analytics summary
+      operationId: getAnalyticsSummary
+      parameters:
+        - name: workspace_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IntentId:
+      name: intent_id
+      in: path
+      required: true
+      schema: { type: string }
+    ApprovalId:
+      name: approval_id
+      in: path
+      required: true
+      schema: { type: string }
+    PolicyId:
+      name: policy_id
+      in: path
+      required: true
+      schema: { type: string }
+    ConnectorId:
+      name: connector_id
+      in: path
+      required: true
+      schema: { type: string }
+    GrantId:
+      name: grant_id
+      in: path
+      required: true
+      schema: { type: string }
+    ExecutionId:
+      name: execution_id
+      in: path
+      required: true
+      schema: { type: string }
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    PageToken:
+      name: page_token
+      in: query
+      schema:
+        type: string
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, version, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        service:
+          type: string
+        version:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+            request_id: { type: string }
+
+    Pagination:
+      type: object
+      properties:
+        next_page_token:
+          type: string
+          nullable: true
+
+    IntentStatus:
+      type: string
+      enum: [pending_policy, pending_approval, approved, denied, executing, succeeded, failed, cancelled, expired]
+
+    ApprovalStatus:
+      type: string
+      enum: [pending, approved, denied, modified, delegated, expired, cancelled]
+
+    PolicyStatus:
+      type: string
+      enum: [draft, active, archived]
+
+    ConnectorType:
+      type: string
+      enum: [payments, source_control, cloud, deployment, email, calendar, ticketing, crm, erp, secret_manager, internal_api, custom]
+
+    RiskLevel:
+      type: string
+      enum: [low, medium, high, critical]
+
+    DecisionDisposition:
+      type: string
+      enum: [allow, allow_modified, require_approval, deny, require_more_evidence]
+
+    ActorRef:
+      type: object
+      required: [id, type]
+      properties:
+        id: { type: string }
+        type:
+          type: string
+          enum: [agent, human, service, connector_runtime]
+        display_name: { type: string }
+
+    ActionTarget:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [vendor, repository, environment, api, secret, calendar, email_recipient, ticket, cloud_resource, custom]
+        id: { type: string }
+        display_name: { type: string }
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: integer
+          description: Amount in minor units
+          minimum: 0
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+
+    Recipient:
+      type: object
+      required: [email]
+      properties:
+        name: { type: string }
+        email:
+          type: string
+          format: email
+
+    AttachmentRef:
+      type: object
+      properties:
+        name: { type: string }
+        mime_type: { type: string }
+        url: { type: string, format: uri }
+        storage_ref: { type: string }
+
+    CalendarAttendee:
+      type: object
+      required: [email]
+      properties:
+        name: { type: string }
+        email:
+          type: string
+          format: email
+        optional:
+          type: boolean
+          default: false
+
+    LineItem:
+      type: object
+      required: [description, quantity, unit_amount]
+      properties:
+        description:
+          type: string
+        quantity:
+          type: integer
+          minimum: 1
+        unit_amount:
+          $ref: "#/components/schemas/Money"
+        sku:
+          type: string
+
+    GitAction:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [github, gitlab, bitbucket, custom]
+        repository:
+          type: string
+        branch:
+          type: string
+        base_branch:
+          type: string
+        commit_shas:
+          type: array
+          items:
+            type: string
+        files_changed:
+          type: array
+          items:
+            type: string
+        pr_title:
+          type: string
+        pr_body:
+          type: string
+        labels:
+          type: array
+          items:
+            type: string
+        reviewers:
+          type: array
+          items:
+            type: string
+        checks_required:
+          type: array
+          items:
+            type: string
+
+    DeployAction:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [kubernetes, vercel, netlify, aws, gcp, azure, flyio, custom]
+        service:
+          type: string
+        environment:
+          type: string
+        artifact_ref:
+          type: string
+        image_ref:
+          type: string
+        cluster:
+          type: string
+        namespace:
+          type: string
+        strategy:
+          type: string
+          enum: [rolling, blue_green, canary, replace, custom]
+        rollback_supported:
+          type: boolean
+        change_ticket_id:
+          type: string
+        maintenance_window_id:
+          type: string
+
+    CloudAction:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [aws, gcp, azure, cloudflare, custom]
+        account_id:
+          type: string
+        region:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        operation:
+          type: string
+        estimated_cost:
+          $ref: "#/components/schemas/Money"
+        tags:
+          type: object
+          additionalProperties:
+            type: string
+
+    EmailAction:
+      type: object
+      properties:
+        from:
+          $ref: "#/components/schemas/Recipient"
+        to:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recipient"
+        cc:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recipient"
+        bcc:
+          type: array
+          items:
+            $ref: "#/components/schemas/Recipient"
+        subject:
+          type: string
+        body_text:
+          type: string
+        body_html:
+          type: string
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/AttachmentRef"
+        thread_ref:
+          type: string
+        send_mode:
+          type: string
+          enum: [send_now, draft_only]
+
+    CalendarAction:
+      type: object
+      properties:
+        provider:
+          type: string
+          enum: [google_calendar, outlook, custom]
+        title:
+          type: string
+        description:
+          type: string
+        attendees:
+          type: array
+          items:
+            $ref: "#/components/schemas/CalendarAttendee"
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        timezone:
+          type: string
+        location:
+          type: string
+        conference_type:
+          type: string
+          enum: [none, google_meet, zoom, teams, custom]
+        calendar_id:
+          type: string
+        visibility:
+          type: string
+          enum: [default, public, private]
+
+    PaymentBeneficiary:
+      type: object
+      properties:
+        name: { type: string }
+        email:
+          type: string
+          format: email
+        department: { type: string }
+
+    PaymentAction:
+      type: object
+      properties:
+        vendor_name:
+          type: string
+        vendor_id:
+          type: string
+        amount:
+          $ref: "#/components/schemas/Money"
+        merchant_category:
+          type: string
+        budget_code:
+          type: string
+        funding_source_id:
+          type: string
+        payment_instrument_preference:
+          type: string
+          enum: [virtual_card, ach, wallet, network_proxy, unspecified]
+        beneficiary:
+          $ref: "#/components/schemas/PaymentBeneficiary"
+        line_items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineItem"
+        renewal:
+          type: boolean
+        contract_term:
+          type: string
+        recurring_interval:
+          type: string
+          enum: [none, monthly, quarterly, annual]
+        merchant_reference:
+          type: string
+
+    ProcurementAction:
+      type: object
+      properties:
+        request_type:
+          type: string
+          enum: [software, travel, equipment, contractor, services, other]
+        vendor_name:
+          type: string
+        amount_estimate:
+          $ref: "#/components/schemas/Money"
+        justification:
+          type: string
+        requestor:
+          type: string
+        cost_center:
+          type: string
+        legal_review_required:
+          type: boolean
+        security_review_required:
+          type: boolean
+        line_items:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineItem"
+
+    DomainAction:
+      type: object
+      properties:
+        git:
+          $ref: "#/components/schemas/GitAction"
+        deploy:
+          $ref: "#/components/schemas/DeployAction"
+        cloud:
+          $ref: "#/components/schemas/CloudAction"
+        email:
+          $ref: "#/components/schemas/EmailAction"
+        calendar:
+          $ref: "#/components/schemas/CalendarAction"
+        payment:
+          $ref: "#/components/schemas/PaymentAction"
+        procurement:
+          $ref: "#/components/schemas/ProcurementAction"
+
+    ActionIntent:
+      type: object
+      required: [type, summary]
+      properties:
+        type:
+          type: string
+          examples:
+            - git.pull_request.create
+            - deploy.release
+            - cloud.resource.mutate
+            - email.send
+            - calendar.event.create
+            - payment.charge
+            - procurement.request.submit
+        summary:
+          type: string
+        justification:
+          type: string
+        target:
+          $ref: "#/components/schemas/ActionTarget"
+        domain:
+          $ref: "#/components/schemas/DomainAction"
+        metadata:
+          type: object
+          additionalProperties: true
+
+    IntentContext:
+      type: object
+      properties:
+        environment:
+          type: string
+          examples: [development, staging, production]
+        source_platform:
+          type: string
+          examples: [openclaw, claude_code, codex, openhands, goose, cline, continue, langgraph, custom]
+        source_session_id:
+          type: string
+        source_trace_id:
+          type: string
+        ip_address:
+          type: string
+        risk_hints:
+          type: array
+          items:
+            type: string
+        user_present:
+          type: boolean
+        temporary_grant_id:
+          type: string
+
+    CreateIntentRequest:
+      type: object
+      required: [idempotency_key, agent_id, workspace_id, action]
+      properties:
+        idempotency_key:
+          type: string
+        agent_id:
+          type: string
+        workspace_id:
+          type: string
+        action:
+          $ref: "#/components/schemas/ActionIntent"
+        context:
+          $ref: "#/components/schemas/IntentContext"
+
+    EvidenceItem:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          type: string
+          enum: [text, link, diff_summary, screenshot_ref, receipt_ref, test_result, change_ticket, artifact_ref, custom]
+        label:
+          type: string
+        value:
+          type: string
+
+    AppendEvidenceRequest:
+      type: object
+      required: [evidence]
+      properties:
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceItem"
+
+    PolicyMatch:
+      type: object
+      properties:
+        policy_id: { type: string }
+        policy_version: { type: integer }
+        rule_id: { type: string }
+        explanation: { type: string }
+
+    Decision:
+      type: object
+      required: [disposition, risk_level]
+      properties:
+        disposition:
+          $ref: "#/components/schemas/DecisionDisposition"
+        risk_level:
+          $ref: "#/components/schemas/RiskLevel"
+        matched_policies:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyMatch"
+        requires_approval:
+          type: boolean
+        approval_id:
+          type: string
+          nullable: true
+        execution_grant_id:
+          type: string
+          nullable: true
+        denial_reason:
+          type: string
+          nullable: true
+
+    IntentEnvelope:
+      type: object
+      required: [intent_id, status, workspace_id, agent, action, decision, created_at, updated_at]
+      properties:
+        intent_id:
+          type: string
+        workspace_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/IntentStatus"
+        agent:
+          $ref: "#/components/schemas/ActorRef"
+        action:
+          $ref: "#/components/schemas/ActionIntent"
+        context:
+          $ref: "#/components/schemas/IntentContext"
+        decision:
+          $ref: "#/components/schemas/Decision"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceItem"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    IntentListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/IntentEnvelope"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    ApprovalActor:
+      type: object
+      required: [principal_id]
+      properties:
+        principal_id:
+          type: string
+        display_name:
+          type: string
+        role:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, denied, delegated]
+
+    Approval:
+      type: object
+      required: [approval_id, intent_id, status, requested_at, approvers]
+      properties:
+        approval_id:
+          type: string
+        intent_id:
+          type: string
+        workspace_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ApprovalStatus"
+        rationale:
+          type: string
+        approvers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApprovalActor"
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        requested_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        editable_bounds:
+          type: object
+          additionalProperties: true
+
+    ApprovalListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Approval"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    ApproveRequest:
+      type: object
+      properties:
+        comment:
+          type: string
+        approve_once:
+          type: boolean
+          default: false
+        step_up_auth_assertion:
+          type: string
+
+    DenyRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+        comment:
+          type: string
+
+    ModifyApprovalRequest:
+      type: object
+      required: [modifications]
+      properties:
+        comment:
+          type: string
+        modifications:
+          type: object
+          additionalProperties: true
+
+    ApprovalActionResponse:
+      type: object
+      required: [approval_id, status]
+      properties:
+        approval_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ApprovalStatus"
+        intent_status:
+          $ref: "#/components/schemas/IntentStatus"
+        execution_grant_id:
+          type: string
+          nullable: true
+
+    PolicyCondition:
+      type: object
+      properties:
+        field:
+          type: string
+        operator:
+          type: string
+          enum: [eq, neq, in, not_in, gt, gte, lt, lte, contains, matches]
+        value:
+          oneOf:
+            - type: string
+            - type: number
+            - type: integer
+            - type: boolean
+            - type: array
+              items: {}
+
+    ApprovalRequirement:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [single, any_of_group, all_of_group, quorum]
+        approver_group_id:
+          type: string
+        quorum_count:
+          type: integer
+          minimum: 1
+
+    PolicyRule:
+      type: object
+      required: [rule_id, effect]
+      properties:
+        rule_id:
+          type: string
+        description:
+          type: string
+        conditions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyCondition"
+        effect:
+          type: string
+          enum: [allow, deny, require_approval, allow_with_modification]
+        approval_requirement:
+          $ref: "#/components/schemas/ApprovalRequirement"
+        modifications_template:
+          type: object
+          additionalProperties: true
+        priority:
+          type: integer
+          default: 100
+
+    Policy:
+      type: object
+      required: [policy_id, name, workspace_id, status, version, rules]
+      properties:
+        policy_id:
+          type: string
+        workspace_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        environment:
+          type: string
+        status:
+          $ref: "#/components/schemas/PolicyStatus"
+        version:
+          type: integer
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRule"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreatePolicyRequest:
+      type: object
+      required: [workspace_id, name, rules]
+      properties:
+        workspace_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        environment:
+          type: string
+        status:
+          $ref: "#/components/schemas/PolicyStatus"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRule"
+
+    UpdatePolicyRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: "#/components/schemas/PolicyStatus"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyRule"
+
+    PolicyListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Policy"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    PolicySimulationRequest:
+      type: object
+      required: [workspace_id, action]
+      properties:
+        workspace_id:
+          type: string
+        action:
+          $ref: "#/components/schemas/ActionIntent"
+        context:
+          $ref: "#/components/schemas/IntentContext"
+
+    PolicySimulationResponse:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          $ref: "#/components/schemas/Decision"
+
+    ConnectorAuth:
+      type: object
+      required: [method]
+      properties:
+        method:
+          type: string
+          enum: [oauth2, api_key_ref, service_account_ref, webhook_secret_ref, custom]
+        reference_id:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+
+    Connector:
+      type: object
+      required: [connector_id, workspace_id, type, name, status]
+      properties:
+        connector_id:
+          type: string
+        workspace_id:
+          type: string
+        type:
+          $ref: "#/components/schemas/ConnectorType"
+        name:
+          type: string
+        provider:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled, error]
+        environment:
+          type: string
+        auth:
+          $ref: "#/components/schemas/ConnectorAuth"
+        policy_ids:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    CreateConnectorRequest:
+      type: object
+      required: [workspace_id, type, name, auth]
+      properties:
+        workspace_id:
+          type: string
+        type:
+          $ref: "#/components/schemas/ConnectorType"
+        name:
+          type: string
+        provider:
+          type: string
+        environment:
+          type: string
+        auth:
+          $ref: "#/components/schemas/ConnectorAuth"
+        metadata:
+          type: object
+          additionalProperties: true
+
+    UpdateConnectorRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+        auth:
+          $ref: "#/components/schemas/ConnectorAuth"
+        metadata:
+          type: object
+          additionalProperties: true
+
+    ConnectorListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Connector"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    ExecutionGrant:
+      type: object
+      required: [grant_id, intent_id, status, expires_at]
+      properties:
+        grant_id:
+          type: string
+        intent_id:
+          type: string
+        connector_id:
+          type: string
+        status:
+          type: string
+          enum: [active, consumed, revoked, expired]
+        bounded_parameters:
+          type: object
+          additionalProperties: true
+        expires_at:
+          type: string
+          format: date-time
+
+    ExecutionRunRequest:
+      type: object
+      required: [grant_id]
+      properties:
+        grant_id:
+          type: string
+        override_parameters:
+          type: object
+          additionalProperties: true
+
+    ExecutionRunResponse:
+      type: object
+      required: [execution_id, status]
+      properties:
+        execution_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted, running]
+        accepted_at:
+          type: string
+          format: date-time
+
+    Execution:
+      type: object
+      required: [execution_id, intent_id, status, started_at]
+      properties:
+        execution_id:
+          type: string
+        intent_id:
+          type: string
+        connector_id:
+          type: string
+        status:
+          type: string
+          enum: [accepted, running, succeeded, failed, cancelled]
+        output:
+          type: object
+          additionalProperties: true
+        receipt_ref:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ExecutionCallbackRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [running, succeeded, failed, cancelled]
+        output:
+          type: object
+          additionalProperties: true
+        receipt_ref:
+          type: string
+        error_message:
+          type: string
+
+    FundingSource:
+      type: object
+      required: [funding_source_id, workspace_id, type, name, status]
+      properties:
+        funding_source_id:
+          type: string
+        workspace_id:
+          type: string
+        type:
+          type: string
+          enum: [virtual_card_pool, budget, fiat_account_ref, lightning_wallet_ref, btc_wallet_ref, stored_balance]
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+        currency:
+          type: string
+        spending_controls:
+          type: object
+          properties:
+            max_single_transaction:
+              $ref: "#/components/schemas/Money"
+            allowed_merchants:
+              type: array
+              items:
+                type: string
+            allowed_categories:
+              type: array
+              items:
+                type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    CreateFundingSourceRequest:
+      type: object
+      required: [workspace_id, type, name]
+      properties:
+        workspace_id:
+          type: string
+        type:
+          type: string
+          enum: [virtual_card_pool, budget, fiat_account_ref, lightning_wallet_ref, btc_wallet_ref, stored_balance]
+        name:
+          type: string
+        currency:
+          type: string
+        spending_controls:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+
+    FundingSourceListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/FundingSource"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    CredentialReference:
+      type: object
+      required: [credential_id, workspace_id, type, name, vault_path]
+      properties:
+        credential_id:
+          type: string
+        workspace_id:
+          type: string
+        type:
+          type: string
+          enum: [api_key, oauth_refresh_token, service_account, webhook_secret, custom]
+        name:
+          type: string
+        vault_path:
+          type: string
+        environment:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    CreateCredentialRequest:
+      type: object
+      required: [workspace_id, type, name, vault_path]
+      properties:
+        workspace_id:
+          type: string
+        type:
+          type: string
+          enum: [api_key, oauth_refresh_token, service_account, webhook_secret, custom]
+        name:
+          type: string
+        vault_path:
+          type: string
+        environment:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+
+    CredentialListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/CredentialReference"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    TraceEvent:
+      type: object
+      required: [event_id, event_type, actor, timestamp]
+      properties:
+        event_id:
+          type: string
+        event_type:
+          type: string
+        actor:
+          $ref: "#/components/schemas/ActorRef"
+        payload:
+          type: object
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
+
+    Trace:
+      type: object
+      required: [trace_id, intent_id, events]
+      properties:
+        trace_id:
+          type: string
+        intent_id:
+          type: string
+        workspace_id:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceEvent"
+
+    TraceListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Trace"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        totals:
+          type: object
+          properties:
+            intents: { type: integer }
+            approvals_requested: { type: integer }
+            approvals_granted: { type: integer }
+            denials: { type: integer }
+            executions_succeeded: { type: integer }
+            executions_failed: { type: integer }
+        spend:
+          type: object
+          properties:
+            total_minor_units: { type: integer }
+            currency: { type: string }
+        approval_latency_ms:
+          type: object
+          properties:
+            p50: { type: integer }
+            p95: { type: integer }
+        by_risk_level:
+          type: object
+          additionalProperties:
+            type: integer
