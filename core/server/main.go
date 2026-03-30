@@ -31,21 +31,28 @@ func main() {
 }
 
 func run(log *slog.Logger) error {
+	ctx := context.Background()
 	cfg := configFromEnv()
 
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
-	registry.Register(stripe.New())
-	registry.Register(googlecalendar.New())
-	registry.Register(github.New())
+	registry.Register(ctx, stripe.New())
+	registry.Register(ctx, googlecalendar.New())
+	registry.Register(ctx, github.New())
 
 	// --- HTTP server ---
 	mux := http.NewServeMux()
 	registerRoutes(mux, log, registry)
 
+	// Middleware chain: CORS → request ID → logging → routes.
+	var handler http.Handler = mux
+	handler = loggingMiddleware(log, handler)
+	handler = requestIDMiddleware(handler)
+	handler = corsMiddleware(handler)
+
 	srv := &http.Server{
 		Addr:         cfg.addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,

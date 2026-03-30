@@ -135,6 +135,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IntentEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
     get:
       tags: [Intents]
@@ -166,6 +174,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IntentListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/intents/{intent_id}:
     get:
@@ -181,6 +193,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IntentEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/intents/{intent_id}/evidence:
     post:
@@ -202,6 +220,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IntentEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/approvals:
     get:
@@ -211,6 +237,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageSize"
         - $ref: "#/components/parameters/PageToken"
+        - name: workspace_id
+          in: query
+          required: true
+          schema:
+            type: string
         - name: assignee
           in: query
           schema:
@@ -222,6 +253,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApprovalListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/approvals/{approval_id}:
     get:
@@ -237,6 +272,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Approval"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/approvals/{approval_id}/approve:
     post:
@@ -258,6 +299,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApprovalActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/approvals/{approval_id}/deny:
     post:
@@ -279,6 +328,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApprovalActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/approvals/{approval_id}/modify:
     post:
@@ -300,6 +357,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApprovalActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/policies:
     get:
@@ -309,6 +374,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageSize"
         - $ref: "#/components/parameters/PageToken"
+        - name: workspace_id
+          in: query
+          required: true
+          schema:
+            type: string
       responses:
         "200":
           description: Policies
@@ -316,6 +386,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PolicyListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
     post:
       tags: [Policies]
@@ -334,6 +408,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Policy"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/policies/{policy_id}:
     get:
@@ -349,6 +429,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Policy"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
     patch:
       tags: [Policies]
@@ -369,6 +455,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Policy"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/policies/simulate:
     post:
@@ -388,6 +482,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PolicySimulationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/connectors:
     get:
@@ -397,6 +497,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageSize"
         - $ref: "#/components/parameters/PageToken"
+        - name: workspace_id
+          in: query
+          required: true
+          schema:
+            type: string
       responses:
         "200":
           description: Connectors
@@ -404,6 +509,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConnectorListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
     post:
       tags: [Connectors]
@@ -422,6 +531,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Connector"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/connectors/{connector_id}:
     get:
@@ -437,6 +552,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Connector"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
     patch:
       tags: [Connectors]
@@ -457,6 +578,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Connector"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/execution-grants/{grant_id}:
     get:
@@ -472,6 +601,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExecutionGrant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/executions/run:
     post:
@@ -491,6 +626,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExecutionRunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/executions/{execution_id}:
     get:
@@ -506,6 +649,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Execution"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/executions/{execution_id}/callback:
     post:
@@ -527,6 +676,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Execution"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/funding-sources:
     get:
@@ -536,6 +693,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageSize"
         - $ref: "#/components/parameters/PageToken"
+        - name: workspace_id
+          in: query
+          required: true
+          schema:
+            type: string
       responses:
         "200":
           description: Funding sources
@@ -543,6 +705,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FundingSourceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
     post:
       tags: [Funding Sources]
@@ -561,6 +727,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FundingSource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/credentials:
     get:
@@ -570,6 +742,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageSize"
         - $ref: "#/components/parameters/PageToken"
+        - name: workspace_id
+          in: query
+          required: true
+          schema:
+            type: string
       responses:
         "200":
           description: Credentials
@@ -577,6 +754,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CredentialListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
     post:
       tags: [Credentials]
@@ -595,6 +776,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CredentialReference"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/traces:
     get:
@@ -604,6 +791,11 @@ paths:
       parameters:
         - $ref: "#/components/parameters/PageSize"
         - $ref: "#/components/parameters/PageToken"
+        - name: workspace_id
+          in: query
+          required: true
+          schema:
+            type: string
       responses:
         "200":
           description: Traces
@@ -611,6 +803,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TraceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/analytics/summary:
     get:
@@ -642,6 +838,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AnalyticsSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
 components:
   securitySchemes:
@@ -694,6 +894,38 @@ components:
       in: query
       schema:
         type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Conflict with current resource state
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
 
   schemas:
     HealthResponse:
@@ -1059,6 +1291,20 @@ components:
 
     DomainAction:
       type: object
+      description: |
+        Carries action-type-specific fields. Exactly one field must be populated,
+        corresponding to the prefix of ActionIntent.type:
+          - git.* → git
+          - deploy.* → deploy
+          - cloud.* → cloud
+          - email.* → email
+          - calendar.* → calendar
+          - payment.* → payment
+          - procurement.* → procurement
+        The server rejects requests where the populated domain field does not
+        match the action type prefix.
+      minProperties: 1
+      maxProperties: 1
       properties:
         git:
           $ref: "#/components/schemas/GitAction"
@@ -1139,6 +1385,15 @@ components:
           $ref: "#/components/schemas/ActionIntent"
         context:
           $ref: "#/components/schemas/IntentContext"
+        callback_url:
+          type: string
+          format: uri
+          description: |
+            Optional webhook URL. The control plane will POST status updates
+            to this URL as the intent progresses through the lifecycle
+            (policy evaluated, approval requested, approved/denied, execution
+            started, execution completed). This avoids the need for agents
+            to poll the GET /v1/intents/{id} endpoint.
 
     EvidenceItem:
       type: object

@@ -13,6 +13,8 @@ package audit
 import (
 	"context"
 	"time"
+
+	"github.com/ALRubinger/aileron/core/model"
 )
 
 // Store records and retrieves immutable trace events.
@@ -31,46 +33,12 @@ type Store interface {
 // Event is a single immutable audit record.
 type Event struct {
 	EventID   string
-	EventType EventType
-	Actor     ActorRef
+	EventType model.EventType
+	Actor     model.ActorRef
 	// Payload carries event-specific data. Must be serialisable to JSON.
 	Payload   map[string]any
 	Timestamp time.Time
 }
-
-// ActorRef identifies who or what produced the event.
-type ActorRef struct {
-	ID          string
-	Type        ActorType
-	DisplayName string
-}
-
-// ActorType classifies the event producer.
-type ActorType string
-
-const (
-	ActorTypeAgent            ActorType = "agent"
-	ActorTypeHuman            ActorType = "human"
-	ActorTypeService          ActorType = "service"
-	ActorTypeConnectorRuntime ActorType = "connector_runtime"
-)
-
-// EventType identifies the kind of event.
-type EventType string
-
-const (
-	EventTypeIntentSubmitted    EventType = "intent.submitted"
-	EventTypePolicyEvaluated    EventType = "policy.evaluated"
-	EventTypeApprovalRequested  EventType = "approval.requested"
-	EventTypeApprovalApproved   EventType = "approval.approved"
-	EventTypeApprovalDenied     EventType = "approval.denied"
-	EventTypeApprovalModified   EventType = "approval.modified"
-	EventTypeGrantIssued        EventType = "grant.issued"
-	EventTypeGrantRevoked       EventType = "grant.revoked"
-	EventTypeExecutionStarted   EventType = "execution.started"
-	EventTypeExecutionSucceeded EventType = "execution.succeeded"
-	EventTypeExecutionFailed    EventType = "execution.failed"
-)
 
 // Trace is the full ordered event history for one intent.
 type Trace struct {
@@ -85,7 +53,7 @@ type Filter struct {
 	WorkspaceID string
 	IntentID    string
 	ActorID     string
-	EventType   EventType
+	EventType   model.EventType
 	From        *time.Time
 	To          *time.Time
 	PageSize    int

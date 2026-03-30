@@ -11,7 +11,10 @@
 // happen in the control plane before the connector is called.
 package connector
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // Connector executes an approved action against an external system.
 type Connector interface {
@@ -68,7 +71,9 @@ const (
 )
 
 // Registry holds the registered connectors and routes execution requests.
+// It is safe for concurrent use.
 type Registry struct {
+	mu         sync.RWMutex
 	connectors map[string]Connector
 }
 
@@ -79,13 +84,19 @@ func NewRegistry() *Registry {
 
 // Register adds a connector to the registry.
 // The key is "<type>/<provider>", e.g. "payments/stripe".
-func (r *Registry) Register(c Connector) {
+func (r *Registry) Register(ctx context.Context, c Connector) {
+	_ = ctx // available for future database-backed implementations
 	key := c.Type() + "/" + c.Provider()
+	r.mu.Lock()
 	r.connectors[key] = c
+	r.mu.Unlock()
 }
 
 // Get returns the connector for the given type and provider.
-func (r *Registry) Get(connectorType, provider string) (Connector, bool) {
+func (r *Registry) Get(ctx context.Context, connectorType, provider string) (Connector, bool) {
+	_ = ctx // available for future database-backed implementations
+	r.mu.RLock()
 	c, ok := r.connectors[connectorType+"/"+provider]
+	r.mu.RUnlock()
 	return c, ok
 }
