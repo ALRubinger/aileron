@@ -77,24 +77,53 @@ Additional connectors can be implemented independently without modifying the cor
 
 ### Prerequisites
 
-- [Go](https://go.dev/dl/) 1.23 or later
-- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose (required for running the full stack)
+- [Go](https://go.dev/dl/) 1.23 or later (only needed for local development outside Docker)
+- [Node.js](https://nodejs.org/) 22 and npm (only needed for local UI development outside Docker)
 
-### Build the server
+### Build and run with Docker Compose
 
-```sh
-go build ./core/server
-```
-
-### Run locally with Docker Compose
+The fastest way to get Aileron running is with Docker Compose. This builds all images from source and starts the full stack:
 
 ```sh
 docker compose -f deploy/docker-compose.yml up
 ```
 
-This starts the control plane API server, the management UI, and a PostgreSQL database. The API is available at `http://localhost:8080` and the UI at `http://localhost:3000`.
+This command builds and starts three services:
+
+| Service | Description | Port |
+|---------|-------------|------|
+| **server** | Go API server (`core/server/Dockerfile`) | `http://localhost:8080` |
+| **ui** | Next.js management UI (`ui/Dockerfile`) | `http://localhost:3000` |
+| **postgres** | PostgreSQL 16 database | `localhost:5432` |
+
+To rebuild images after code changes, add the `--build` flag:
+
+```sh
+docker compose -f deploy/docker-compose.yml up --build
+```
+
+To run in detached mode (background):
+
+```sh
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+To stop all services:
+
+```sh
+docker compose -f deploy/docker-compose.yml down
+```
+
+### Build the server locally (without Docker)
+
+```sh
+go build ./core/server
+```
 
 ### Verify
+
+Once the stack is running, confirm the API is healthy:
 
 ```sh
 curl http://localhost:8080/v1/health
