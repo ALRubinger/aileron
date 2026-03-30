@@ -11,7 +11,7 @@ COPY . .
 RUN pnpm build
 
 # Prune to production dependencies only
-RUN pnpm prune --prod
+RUN CI=true pnpm prune --prod
 
 FROM node:22-alpine
 
