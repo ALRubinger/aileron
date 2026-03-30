@@ -6,4 +6,5 @@
 
 # UI
 ui/node_modules/
-ui/.next/
+ui/.svelte-kit/
+ui/build/

@@ -13,7 +13,7 @@ tasks:
       - bin/aileron-server
 
   build:ui:
-    desc: Install UI deps and build Next.js
+    desc: Install UI deps and build SvelteKit
     dir: ui
     cmds:
       - pnpm install --frozen-lockfile
@@ -25,10 +25,10 @@ tasks:
       - go test ./core/... ./sdk/go/...
 
   lint:
-    desc: Run Go vet and UI lint + typecheck
+    desc: Run Go vet and UI typecheck
     cmds:
       - go vet ./core/... ./sdk/go/...
-      - cmd: pnpm lint && pnpm typecheck
+      - cmd: pnpm typecheck
         dir: ui
 
   up:
@@ -52,7 +52,7 @@ tasks:
       - go run ./core/server
 
   dev:ui:
-    desc: Run Next.js dev server
+    desc: Run SvelteKit dev server
     dir: ui
     cmds:
       - pnpm dev
@@ -60,4 +60,4 @@ tasks:
   clean:
     desc: Remove build artifacts
     cmds:
-      - rm -rf bin/ ui/.next ui/node_modules
+      - rm -rf bin/ ui/.svelte-kit ui/build ui/node_modules

@@ -142,7 +142,7 @@ aileron/
 │   ├── go/             Go client SDK
 │   ├── python/         Python client SDK (coming soon)
 │   └── typescript/     TypeScript client SDK (coming soon)
-├── ui/                 Management and approval UI (TypeScript / Next.js)
+├── ui/                 Management and approval UI (TypeScript / SvelteKit)
 ├── deploy/
 │   └── docker-compose.yml  Self-hosted deployment
 └── saas/               Proprietary SaaS overlay (billing, multi-tenancy)
