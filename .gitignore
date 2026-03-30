@@ -5,3 +5,7 @@
 
 # Node
 node_modules/
+
+# SvelteKit
+.svelte-kit/
+ui/build/
