@@ -79,17 +79,38 @@ Additional connectors can be implemented independently without modifying the cor
 
 - [Go](https://go.dev/dl/) 1.23 or later
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- [Node.js](https://nodejs.org/) 22 or later (nvm users: `.nvmrc` is provided)
+- [pnpm](https://pnpm.io/installation) — JavaScript package manager
+- [Task](https://taskfile.dev/installation/) — task runner
+
+### Common tasks
+
+| Task | Description |
+|------|-------------|
+| `task build` | Build server binary and UI |
+| `task build:server` | Build the Go server binary → `bin/aileron-server` |
+| `task build:ui` | Install UI deps and build Next.js |
+| `task test` | Run Go tests |
+| `task lint` | Run Go vet and UI lint + typecheck |
+| `task up` | Start full stack with Docker Compose |
+| `task down` | Stop the stack |
+| `task logs` | Tail container logs |
+| `task dev:server` | Run Go server locally (no Docker) |
+| `task dev:ui` | Run Next.js dev server |
+| `task clean` | Remove build artifacts |
 
 ### Build the server
 
 ```sh
-go build ./core/server
+task build:server
 ```
 
 ### Run locally with Docker Compose
 
 ```sh
-docker compose -f deploy/docker-compose.yml up
+task up      # start the full stack (API, UI, Postgres) in the background
+task down    # stop and remove containers
+task logs    # tail all service logs
 ```
 
 This starts the control plane API server, the management UI, and a PostgreSQL database. The API is available at `http://localhost:8080` and the UI at `http://localhost:3000`.

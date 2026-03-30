@@ -2,3 +2,8 @@
 
 # Go build output
 /server
+/bin/
+
+# UI
+ui/node_modules/
+ui/.next/
