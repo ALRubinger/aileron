@@ -1,0 +1,92 @@
+version: "3"
+
+vars:
+  COMPOSE_FILE: deploy/docker-compose.yml
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build all containers
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} build
+
+  build:server:
+    desc: Build the Go server binary locally
+    cmds:
+      - go build -o server ./core/server
+
+  build:ui:
+    desc: Install UI dependencies and build
+    dir: ui
+    cmds:
+      - pnpm install
+      - pnpm run build
+
+  up:
+    desc: Start all services via Docker Compose
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} up {{.CLI_ARGS}}
+
+  down:
+    desc: Stop all services
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} down {{.CLI_ARGS}}
+
+  clean:
+    desc: Stop services and remove volumes
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} down -v --remove-orphans
+      - rm -f server
+      - rm -rf ui/.svelte-kit ui/build ui/node_modules
+
+  logs:
+    desc: Tail service logs
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} logs -f {{.CLI_ARGS}}
+
+  ps:
+    desc: Show running services
+    cmds:
+      - docker compose -f {{.COMPOSE_FILE}} ps
+
+  dev:ui:
+    desc: Run the UI dev server locally
+    dir: ui
+    cmds:
+      - pnpm dev
+
+  lint:
+    desc: Run linters
+    cmds:
+      - task: lint:go
+      - task: lint:ui
+
+  lint:go:
+    desc: Vet Go code
+    cmds:
+      - go vet ./core/... ./sdk/go/...
+
+  lint:ui:
+    desc: Check the UI for type errors
+    dir: ui
+    cmds:
+      - pnpm check
+
+  test:
+    desc: Run all tests
+    cmds:
+      - task: test:go
+
+  test:go:
+    desc: Run Go tests
+    cmds:
+      - go test ./core/... ./sdk/go/...
+
+  health:
+    desc: Check the server health endpoint
+    cmds:
+      - curl -s http://localhost:8080/v1/health | head -c 500 && echo

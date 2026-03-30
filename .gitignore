@@ -2,3 +2,8 @@
 
 # Go build output
 /server
+
+# UI build output
+ui/.svelte-kit/
+ui/build/
+ui/node_modules/

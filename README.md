@@ -77,27 +77,51 @@ Additional connectors can be implemented independently without modifying the cor
 
 ### Prerequisites
 
-- [Go](https://go.dev/dl/) 1.23 or later
+- [Go](https://go.dev/dl/) 1.24 or later
+- [Node.js](https://nodejs.org/) 24 (see `.nvmrc`)
+- [pnpm](https://pnpm.io/) package manager
+- [go-task](https://taskfile.dev/) task runner
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 
-### Build the server
+### Build
 
 ```sh
-go build ./core/server
+task build
+```
+
+This builds all Docker containers (server, UI, and database).
+
+To build individual components locally:
+
+```sh
+task build:server   # Go server binary
+task build:ui       # SvelteKit UI
 ```
 
 ### Run locally with Docker Compose
 
 ```sh
-docker compose -f deploy/docker-compose.yml up
+task up
+```
+
+To run in detached mode:
+
+```sh
+task up -- -d
 ```
 
 This starts the control plane API server, the management UI, and a PostgreSQL database. The API is available at `http://localhost:8080` and the UI at `http://localhost:3000`.
 
+To stop services:
+
+```sh
+task down
+```
+
 ### Verify
 
 ```sh
-curl http://localhost:8080/v1/health
+task health
 ```
 
 ```json
@@ -121,7 +145,7 @@ aileron/
 │   ├── go/             Go client SDK
 │   ├── python/         Python client SDK (coming soon)
 │   └── typescript/     TypeScript client SDK (coming soon)
-├── ui/                 Management and approval UI (TypeScript / Next.js)
+├── ui/                 Management and approval UI (SvelteKit)
 ├── deploy/
 │   └── docker-compose.yml  Self-hosted deployment
 └── saas/               Proprietary SaaS overlay (billing, multi-tenancy)
