@@ -2,3 +2,6 @@
 
 # Go build output
 /server
+
+# Node
+node_modules/
