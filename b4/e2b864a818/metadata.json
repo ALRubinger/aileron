@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "b4e2b864a818",
+  "strategy": "manual-commit",
+  "branch": "feat/sveltekit-taskfile-build-fix",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".gitignore",
+    "README.md",
+    "core/go.mod",
+    "core/server/Dockerfile",
+    "go.work",
+    "sdk/go/go.mod",
+    "ui/Dockerfile",
+    "ui/package.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/b4/e2b864a818/0/metadata.json",
+      "transcript": "/b4/e2b864a818/0/full.jsonl",
+      "content_hash": "/b4/e2b864a818/0/content_hash.txt",
+      "prompt": "/b4/e2b864a818/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1999,
+    "cache_creation_tokens": 59344,
+    "cache_read_tokens": 1322892,
+    "output_tokens": 11648,
+    "api_call_count": 29
+  }
+}

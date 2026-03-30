@@ -1,0 +1,15 @@
+When running "docker compose up" to start the server, I get:
+
+target ui: failed to solve: process "/bin/sh -c npm ci" did not complete successfully: exit code: 1
+
+Fix this and convert the Next.js app to instead use SvelteKit.
+
+Add Tasks like clean, build, up, down, etc using go-task. 
+
+Add an .nvmrc to denote the node version we build on (24).
+
+Ensure the build is working. Update the README with all build prereqsuisites and build instructions.
+
+---
+
+Continue
