@@ -1,0 +1,5 @@
+Analyze the contents of this project scaffold and based on your understanding of the business domain we’ve discussed in prior conversations, advise if 1) this fits an emergent and important need as a product and business and 2) If the code and apis scaffolded so far are well designed
+
+---
+
+Yes

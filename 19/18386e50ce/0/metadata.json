@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "1918386e50ce",
+  "session_id": "411fbdff-5b5e-44fa-9ea9-6e3506469526",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-30T19:37:12.974253Z",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "core/api/openapi.yaml",
+    "core/audit/spi.go",
+    "core/connector/spi.go",
+    "core/model/model.go",
+    "core/policy/spi.go",
+    "core/server/main.go",
+    "core/server/middleware.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-4-6",
+  "turn_id": "dc4bec7ec833",
+  "token_usage": {
+    "input_tokens": 2972,
+    "cache_creation_tokens": 87810,
+    "cache_read_tokens": 4598207,
+    "output_tokens": 20648,
+    "api_call_count": 64
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-30T19:37:12.126796Z",
+    "agent_lines": 653,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 653,
+    "agent_percentage": 100
+  }
+}
