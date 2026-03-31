@@ -1,0 +1,37 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "ffc0f15b1957",
+  "session_id": "b08c1986-43b4-467b-8a6c-a37d451aaa89",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-31T08:24:05.787619Z",
+  "branch": "fix/scalar-docs-server-url",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "core/api/gen/server.gen.go",
+    "core/api/openapi.yaml"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "2b2f35bbc860",
+  "checkpoint_transcript_start": 190,
+  "transcript_lines_at_start": 190,
+  "token_usage": {
+    "input_tokens": 1,
+    "cache_creation_tokens": 241,
+    "cache_read_tokens": 30499,
+    "output_tokens": 204,
+    "api_call_count": 1
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-31T08:24:05.577071Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}
