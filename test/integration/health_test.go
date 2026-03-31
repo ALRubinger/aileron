@@ -24,4 +24,5 @@ func TestHealthEndpoint(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
+	validateResponse(t, resp)
 }

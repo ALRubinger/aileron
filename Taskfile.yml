@@ -9,6 +9,22 @@ tasks:
     cmds:
       - task --list
 
+  generate:
+    desc: Run all code generators
+    cmds:
+      - task: generate:api
+
+  generate:api:
+    desc: Generate Go types and server interface from OpenAPI spec
+    dir: core
+    cmds:
+      - go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
+    sources:
+      - api/openapi.yaml
+      - api/oapi-codegen.yaml
+    generates:
+      - api/gen/server.gen.go
+
   build:
     desc: Build all containers
     cmds:
@@ -97,6 +113,7 @@ tasks:
   ci:
     desc: Run the full CI pipeline locally
     cmds:
+      - task: generate
       - task: lint
       - task: test
       - task: build
