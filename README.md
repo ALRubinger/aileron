@@ -6,7 +6,7 @@ _Stay on course. The missing protection layer between your agents and the real w
 
 **Aileron is a programmable control plane for agentic AI systems.**
 
-It sits between an AI agent and the real world. When an agent wants to make a payment, open a pull request, send an email, or call an API, Aileron intercepts that action, evaluates it against policy, routes it for human approval if needed, and executes it through a secure abstraction layer — without the agent ever touching credentials directly.
+It sits between an AI agent and the real world. When an agent wants to make a payment, open a pull request, send an email, or call an API, Aileron intercepts the action, evaluates it against policy, routes it for human approval if needed, executes it through a secure abstraction layer, and records it in an immutable audit trail. Your agent never touches credentials directly.
 
 ---
 
