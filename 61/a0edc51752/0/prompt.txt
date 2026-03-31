@@ -1,0 +1,5 @@
+Reorder the "task health" section of the README to come before "task down"; you cannot test the endpoint if the server isn't running
+
+---
+
+Now the "task down" section is in the "Verify" heading; make this make sense to a reader.
