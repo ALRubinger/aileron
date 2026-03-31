@@ -112,12 +112,6 @@ task up -- -d
 
 This starts the control plane API server, the management UI, API documentation, and a PostgreSQL database. The API is available at `http://localhost:8080`, the UI at `http://localhost:3000`, and the API docs at `http://localhost:3001`.
 
-To stop services:
-
-```sh
-task down
-```
-
 ### Verify
 
 ```sh
@@ -126,6 +120,12 @@ task health
 
 ```json
 {"status":"ok","service":"aileron","version":"0.1.0"}
+```
+
+### Stop
+
+```sh
+task down
 ```
 
 ## API Documentation
