@@ -3,41 +3,8 @@
   "checkpoint_id": "2e94d24949f4",
   "strategy": "manual-commit",
   "branch": "feat/core-lifecycle",
-  "checkpoints_count": 5,
-  "files_touched": [
-    "README.md",
-    "Taskfile.yml",
-    "cmd/aileron-mcp/go.mod",
-    "cmd/aileron-mcp/main.go",
-    "core/approval/convert.go",
-    "core/approval/orchestrator.go",
-    "core/connector/git/github/github.go",
-    "core/notify/log.go",
-    "core/policy/engine.go",
-    "core/policy/seed.go",
-    "core/server/handlers.go",
-    "core/server/main.go",
-    "core/store/mem/approval.go",
-    "core/store/mem/audit.go",
-    "core/store/mem/connector.go",
-    "core/store/mem/credential.go",
-    "core/store/mem/execution.go",
-    "core/store/mem/fundingsource.go",
-    "core/store/mem/grant.go",
-    "core/store/mem/intent.go",
-    "core/store/mem/policy.go",
-    "core/store/store.go",
-    "core/vault/mem.go",
-    "go.work",
-    "sdk/go/client.go",
-    "ui/src/lib/api.ts",
-    "ui/src/routes/+layout.svelte",
-    "ui/src/routes/+page.svelte",
-    "ui/src/routes/approvals/+page.svelte",
-    "ui/src/routes/approvals/[id]/+page.svelte",
-    "ui/src/routes/policies/+page.svelte",
-    "ui/src/routes/traces/+page.svelte"
-  ],
+  "checkpoints_count": 0,
+  "files_touched": null,
   "sessions": [
     {
       "metadata": "/2e/94d24949f4/0/metadata.json",
@@ -47,10 +14,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 175,
-    "cache_creation_tokens": 183322,
-    "cache_read_tokens": 19657497,
-    "output_tokens": 88972,
-    "api_call_count": 153
+    "input_tokens": 6,
+    "cache_creation_tokens": 1144,
+    "cache_read_tokens": 782248,
+    "output_tokens": 708,
+    "api_call_count": 4
   }
 }
