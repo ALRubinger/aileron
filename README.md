@@ -110,7 +110,7 @@ To run in detached mode:
 task up -- -d
 ```
 
-This starts the control plane API server, the management UI, and a PostgreSQL database. The API is available at `http://localhost:8080` and the UI at `http://localhost:3000`.
+This starts the control plane API server, the management UI, API documentation, and a PostgreSQL database. The API is available at `http://localhost:8080`, the UI at `http://localhost:3000`, and the API docs at `http://localhost:3001`.
 
 To stop services:
 
@@ -128,12 +128,26 @@ task health
 {"status":"ok","service":"aileron","version":"0.1.0"}
 ```
 
+## API Documentation
+
+Interactive API documentation is available at:
+
+- **Live:** [docs.withaileron.ai](https://docs.withaileron.ai)
+- **Local:** `http://localhost:3001` when running `task up`
+- **Server-embedded:** `http://localhost:8080/docs` on the running API server
+
+The OpenAPI spec at `core/api/openapi.yaml` is the source of truth. Go types and the server interface are generated from it using [oapi-codegen](https://github.com/oapi-codegen/oapi-codegen):
+
+```sh
+task generate:api
+```
+
 ## Project Structure
 
 ```
 aileron/
 ├── core/               Control plane — policy, approval, connectors, vault, audit
-│   ├── api/            OpenAPI specification
+│   ├── api/            OpenAPI specification and generated code
 │   ├── server/         HTTP server entry point
 │   ├── policy/         Policy engine SPI and built-in implementation
 │   ├── approval/       Approval orchestrator SPI and implementation
@@ -146,6 +160,9 @@ aileron/
 │   ├── python/         Python client SDK (coming soon)
 │   └── typescript/     TypeScript client SDK (coming soon)
 ├── ui/                 Management and approval UI (SvelteKit)
+├── docs/               API documentation site (Scalar)
+├── test/
+│   └── integration/    Integration tests with OpenAPI spec validation
 ├── deploy/
 │   └── docker-compose.yml  Self-hosted deployment
 └── saas/               Proprietary SaaS overlay (billing, multi-tenancy)

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/connector"
 	googlecalendar "github.com/ALRubinger/aileron/core/connector/calendar/google"
 	"github.com/ALRubinger/aileron/core/connector/git/github"
@@ -42,7 +44,13 @@ func run(log *slog.Logger) error {
 
 	// --- HTTP server ---
 	mux := http.NewServeMux()
-	registerRoutes(mux, log, registry)
+
+	// Register generated API routes from the OpenAPI spec.
+	server := &apiServer{log: log, registry: registry}
+	api.HandlerFromMux(server, mux)
+
+	// Register non-spec routes (docs, raw spec).
+	registerDocsRoutes(mux)
 
 	// Middleware chain: CORS → request ID → logging → routes.
 	var handler http.Handler = mux
@@ -78,20 +86,142 @@ func run(log *slog.Logger) error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-func registerRoutes(mux *http.ServeMux, log *slog.Logger, _ *connector.Registry) {
-	// Health check — no auth required.
-	mux.HandleFunc("GET /v1/health", handleHealth(log))
-
-	// TODO: register intent, approval, policy, connector, execution,
-	// funding source, credential, trace, and analytics handlers.
+// apiServer implements the generated api.ServerInterface.
+type apiServer struct {
+	log      *slog.Logger
+	registry *connector.Registry
 }
 
-func handleHealth(log *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		log.InfoContext(r.Context(), "health check")
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","service":"aileron","version":"0.1.0"}`)
-	}
+// GetHealth implements api.ServerInterface.
+func (s *apiServer) GetHealth(w http.ResponseWriter, r *http.Request) {
+	s.log.InfoContext(r.Context(), "health check")
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","service":"aileron","version":"0.1.0","timestamp":"%s"}`, time.Now().UTC().Format(time.RFC3339))
+}
+
+// --- Stub implementations (501 Not Implemented) ---
+
+func notImplemented(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"code":    "not_implemented",
+			"message": "This endpoint is not yet implemented",
+		},
+	})
+}
+
+func (s *apiServer) GetAnalyticsSummary(w http.ResponseWriter, r *http.Request, params api.GetAnalyticsSummaryParams) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ListApprovals(w http.ResponseWriter, r *http.Request, params api.ListApprovalsParams) {
+	notImplemented(w)
+}
+
+func (s *apiServer) GetApproval(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ApproveRequest(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) DenyRequest(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ModifyRequest(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ListConnectors(w http.ResponseWriter, r *http.Request, params api.ListConnectorsParams) {
+	notImplemented(w)
+}
+
+func (s *apiServer) CreateConnector(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w)
+}
+
+func (s *apiServer) GetConnector(w http.ResponseWriter, r *http.Request, connectorId api.ConnectorId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) UpdateConnector(w http.ResponseWriter, r *http.Request, connectorId api.ConnectorId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ListCredentials(w http.ResponseWriter, r *http.Request, params api.ListCredentialsParams) {
+	notImplemented(w)
+}
+
+func (s *apiServer) CreateCredential(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w)
+}
+
+func (s *apiServer) GetExecutionGrant(w http.ResponseWriter, r *http.Request, grantId api.GrantId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w)
+}
+
+func (s *apiServer) GetExecution(w http.ResponseWriter, r *http.Request, executionId api.ExecutionId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ExecutionCallback(w http.ResponseWriter, r *http.Request, executionId api.ExecutionId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ListFundingSources(w http.ResponseWriter, r *http.Request, params api.ListFundingSourcesParams) {
+	notImplemented(w)
+}
+
+func (s *apiServer) CreateFundingSource(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ListIntents(w http.ResponseWriter, r *http.Request, params api.ListIntentsParams) {
+	notImplemented(w)
+}
+
+func (s *apiServer) CreateIntent(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w)
+}
+
+func (s *apiServer) GetIntent(w http.ResponseWriter, r *http.Request, intentId api.IntentId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) AppendIntentEvidence(w http.ResponseWriter, r *http.Request, intentId api.IntentId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ListPolicies(w http.ResponseWriter, r *http.Request, params api.ListPoliciesParams) {
+	notImplemented(w)
+}
+
+func (s *apiServer) CreatePolicy(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w)
+}
+
+func (s *apiServer) SimulatePolicy(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w)
+}
+
+func (s *apiServer) GetPolicy(w http.ResponseWriter, r *http.Request, policyId api.PolicyId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) UpdatePolicy(w http.ResponseWriter, r *http.Request, policyId api.PolicyId) {
+	notImplemented(w)
+}
+
+func (s *apiServer) ListTraces(w http.ResponseWriter, r *http.Request, params api.ListTracesParams) {
+	notImplemented(w)
 }
 
 // config holds runtime configuration sourced from environment variables.

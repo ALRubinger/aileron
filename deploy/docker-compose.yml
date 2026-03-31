@@ -43,5 +43,13 @@ services:
     ports:
       - "3000:3000"
 
+  docs:
+    build:
+      context: ..
+      dockerfile: docs/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:80"
+
 volumes:
   postgres_data:
