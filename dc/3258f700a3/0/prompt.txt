@@ -1,0 +1,13 @@
+Let's work on the OpenAPI/Swagger documentation for the API surface of "server". I want to generate an OpenAPI/Swagger spec file from the real API as part of the build, and I want to generate API docs from that spec file. What are some consensus best practices, show me my options. Then we'll make decisions and implement it.
+
+---
+
+Save this plan only. We need to re-run the execution while I quit Claude Code, update the main branch from the origin, and resume in place. Show me how so we don't lose the plan or context.
+
+---
+
+Resume the OpenAPI codegen and docs work. Resolve the merge conflict in Taskfile.yml
+
+---
+
+Are you sure the root of the docs service is not "docs/"?
