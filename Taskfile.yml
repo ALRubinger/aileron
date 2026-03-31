@@ -35,6 +35,11 @@ tasks:
     cmds:
       - go build -o server ./core/server
 
+  build:mcp:
+    desc: Build the MCP server binary locally
+    cmds:
+      - go build -o aileron-mcp ./cmd/aileron-mcp
+
   build:ui:
     desc: Install UI dependencies and build
     dir: ui
@@ -84,7 +89,7 @@ tasks:
   lint:go:
     desc: Vet Go code
     cmds:
-      - go vet ./core/... ./sdk/go/...
+      - go vet ./core/... ./sdk/go/... ./cmd/aileron-mcp/...
 
   lint:ui:
     desc: Check the UI for type errors
@@ -100,7 +105,7 @@ tasks:
   test:go:
     desc: Run Go tests
     cmds:
-      - go test ./core/... ./sdk/go/...
+      - go test ./core/... ./sdk/go/... ./cmd/aileron-mcp/...
 
   test:integration:
     desc: Run integration tests against running services

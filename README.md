@@ -73,6 +73,23 @@ Aileron uses a connector model to integrate with external systems. Each connecto
 
 Additional connectors can be implemented independently without modifying the core.
 
+## Current Status
+
+The core control plane lifecycle is implemented end-to-end:
+
+- **Policy engine** evaluates rules against intents (allow, deny, require approval)
+- **Approval orchestrator** manages human-in-the-loop workflows with approve/deny/modify
+- **Execution layer** runs approved actions via connectors with injected credentials
+- **Audit store** records every event in an immutable trace
+- **GitHub connector** creates, merges, and closes PRs via the GitHub REST API
+- **MCP server** exposes Aileron tools to Claude Code (submit_intent, check_approval, execute_action)
+- **Approval UI** provides a web interface for reviewing and acting on pending approvals
+
+Three seed policies ship by default:
+1. Require approval for PRs targeting `main`, `master`, or `production`
+2. Allow PRs to feature branches
+3. Deny force pushes
+
 ## Getting Started
 
 ### Prerequisites
@@ -96,6 +113,7 @@ To build individual components locally:
 ```sh
 task build:server   # Go server binary
 task build:ui       # SvelteKit UI
+task build:mcp      # MCP server binary for Claude Code
 ```
 
 ### Run locally with Docker Compose
@@ -119,7 +137,37 @@ task health
 ```
 
 ```json
-{"status":"ok","service":"aileron","version":"0.1.0"}
+{"status":"ok","service":"aileron","version":"0.0.1","timestamp":"2026-03-31T09:00:00Z"}
+```
+
+### Connect Claude Code via MCP
+
+Build the MCP server and add it to your project's `.mcp.json`:
+
+```sh
+task build:mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "aileron": {
+      "command": "./aileron-mcp",
+      "env": {
+        "AILERON_API_URL": "http://localhost:8080"
+      }
+    }
+  }
+}
+```
+
+Claude Code can then use `submit_intent`, `check_approval`, `execute_action`, and `list_pending_approvals` as tools.
+
+### Run tests
+
+```sh
+task test:go          # Unit tests
+task test:integration # Integration tests (requires running server)
 ```
 
 ### Stop
@@ -148,18 +196,21 @@ task generate:api
 aileron/
 ├── core/               Control plane — policy, approval, connectors, vault, audit
 │   ├── api/            OpenAPI specification and generated code
-│   ├── server/         HTTP server entry point
-│   ├── policy/         Policy engine SPI and built-in implementation
+│   ├── server/         HTTP server entry point and API handlers
+│   ├── policy/         Policy engine SPI, rule-based implementation, seed policies
 │   ├── approval/       Approval orchestrator SPI and implementation
-│   ├── connector/      Connector SPI and MVP implementations
-│   ├── vault/          Credential vault SPI
-│   ├── notify/         Notification SPI (Slack, email)
-│   └── audit/          Immutable audit store SPI
+│   ├── connector/      Connector SPI and MVP implementations (GitHub, Stripe, Google Calendar)
+│   ├── store/          Persistence interfaces and in-memory implementations
+│   ├── vault/          Credential vault SPI and in-memory implementation
+│   ├── notify/         Notification SPI (log, Slack, email)
+│   ├── audit/          Immutable audit store SPI
+│   └── model/          Shared domain types
+├── cmd/
+│   └── aileron-mcp/    MCP server for Claude Code integration
 ├── sdk/
-│   ├── go/             Go client SDK
-│   ├── python/         Python client SDK (coming soon)
-│   └── typescript/     TypeScript client SDK (coming soon)
+│   └── go/             Go client SDK
 ├── ui/                 Management and approval UI (SvelteKit)
+│   └── src/routes/     Pages: approvals, traces, policies
 ├── docs/               API documentation site (Scalar)
 ├── test/
 │   └── integration/    Integration tests with OpenAPI spec validation

@@ -7,8 +7,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,10 +15,16 @@ import (
 	"time"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/connector"
 	googlecalendar "github.com/ALRubinger/aileron/core/connector/calendar/google"
 	"github.com/ALRubinger/aileron/core/connector/git/github"
 	"github.com/ALRubinger/aileron/core/connector/payments/stripe"
+	"github.com/ALRubinger/aileron/core/notify"
+	"github.com/ALRubinger/aileron/core/policy"
+	"github.com/ALRubinger/aileron/core/store/mem"
+	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -36,17 +40,73 @@ func run(log *slog.Logger) error {
 	ctx := context.Background()
 	cfg := configFromEnv()
 
+	// --- In-memory stores ---
+	intentStore := mem.NewIntentStore()
+	approvalStore := mem.NewApprovalStore()
+	policyStore := mem.NewPolicyStore()
+	grantStore := mem.NewGrantStore()
+	executionStore := mem.NewExecutionStore()
+	connectorStore := mem.NewConnectorStore()
+	credentialStore := mem.NewCredentialStore()
+	fundingSourceStore := mem.NewFundingSourceStore()
+	traceStore := mem.NewTraceStore()
+
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
 	registry.Register(ctx, stripe.New())
 	registry.Register(ctx, googlecalendar.New())
 	registry.Register(ctx, github.New())
 
+	// --- Vault ---
+	v := vault.NewMemVault()
+	// Seed GitHub PAT from environment if available.
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{
+			Type: "api_key",
+			Labels: map[string]string{
+				"connector": "github",
+			},
+		})
+		log.Info("seeded GitHub token into vault")
+	}
+
+	// --- Policy engine ---
+	policyEngine := policy.NewRuleEngine(policyStore)
+
+	// Seed default policies.
+	if err := policy.SeedPolicies(ctx, policyStore); err != nil {
+		return err
+	}
+	log.Info("seeded default policies")
+
+	// --- Approval orchestrator ---
+	idGen := func() string { return uuid.New().String() }
+	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
+
+	// --- Notifier ---
+	notifier := notify.NewLogNotifier(log)
+
 	// --- HTTP server ---
 	mux := http.NewServeMux()
 
-	// Register generated API routes from the OpenAPI spec.
-	server := &apiServer{log: log, registry: registry}
+	server := &apiServer{
+		log:            log,
+		registry:       registry,
+		policyEngine:   policyEngine,
+		orchestrator:   orchestrator,
+		vault:          v,
+		notifier:       notifier,
+		intents:        intentStore,
+		approvals:      approvalStore,
+		policies:       policyStore,
+		grants:         grantStore,
+		executions:     executionStore,
+		connectors:     connectorStore,
+		credentials:    credentialStore,
+		fundingSources: fundingSourceStore,
+		traces:         traceStore,
+		newID:          idGen,
+	}
 	api.HandlerFromMux(server, mux)
 
 	// Register non-spec routes (docs, raw spec).
@@ -88,140 +148,22 @@ func run(log *slog.Logger) error {
 
 // apiServer implements the generated api.ServerInterface.
 type apiServer struct {
-	log      *slog.Logger
-	registry *connector.Registry
-}
-
-// GetHealth implements api.ServerInterface.
-func (s *apiServer) GetHealth(w http.ResponseWriter, r *http.Request) {
-	s.log.InfoContext(r.Context(), "health check")
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"ok","service":"aileron","version":"0.1.0","timestamp":"%s"}`, time.Now().UTC().Format(time.RFC3339))
-}
-
-// --- Stub implementations (501 Not Implemented) ---
-
-func notImplemented(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]any{
-			"code":    "not_implemented",
-			"message": "This endpoint is not yet implemented",
-		},
-	})
-}
-
-func (s *apiServer) GetAnalyticsSummary(w http.ResponseWriter, r *http.Request, params api.GetAnalyticsSummaryParams) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ListApprovals(w http.ResponseWriter, r *http.Request, params api.ListApprovalsParams) {
-	notImplemented(w)
-}
-
-func (s *apiServer) GetApproval(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ApproveRequest(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) DenyRequest(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ModifyRequest(w http.ResponseWriter, r *http.Request, approvalId api.ApprovalId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ListConnectors(w http.ResponseWriter, r *http.Request, params api.ListConnectorsParams) {
-	notImplemented(w)
-}
-
-func (s *apiServer) CreateConnector(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w)
-}
-
-func (s *apiServer) GetConnector(w http.ResponseWriter, r *http.Request, connectorId api.ConnectorId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) UpdateConnector(w http.ResponseWriter, r *http.Request, connectorId api.ConnectorId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ListCredentials(w http.ResponseWriter, r *http.Request, params api.ListCredentialsParams) {
-	notImplemented(w)
-}
-
-func (s *apiServer) CreateCredential(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w)
-}
-
-func (s *apiServer) GetExecutionGrant(w http.ResponseWriter, r *http.Request, grantId api.GrantId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w)
-}
-
-func (s *apiServer) GetExecution(w http.ResponseWriter, r *http.Request, executionId api.ExecutionId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ExecutionCallback(w http.ResponseWriter, r *http.Request, executionId api.ExecutionId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ListFundingSources(w http.ResponseWriter, r *http.Request, params api.ListFundingSourcesParams) {
-	notImplemented(w)
-}
-
-func (s *apiServer) CreateFundingSource(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ListIntents(w http.ResponseWriter, r *http.Request, params api.ListIntentsParams) {
-	notImplemented(w)
-}
-
-func (s *apiServer) CreateIntent(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w)
-}
-
-func (s *apiServer) GetIntent(w http.ResponseWriter, r *http.Request, intentId api.IntentId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) AppendIntentEvidence(w http.ResponseWriter, r *http.Request, intentId api.IntentId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ListPolicies(w http.ResponseWriter, r *http.Request, params api.ListPoliciesParams) {
-	notImplemented(w)
-}
-
-func (s *apiServer) CreatePolicy(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w)
-}
-
-func (s *apiServer) SimulatePolicy(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w)
-}
-
-func (s *apiServer) GetPolicy(w http.ResponseWriter, r *http.Request, policyId api.PolicyId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) UpdatePolicy(w http.ResponseWriter, r *http.Request, policyId api.PolicyId) {
-	notImplemented(w)
-}
-
-func (s *apiServer) ListTraces(w http.ResponseWriter, r *http.Request, params api.ListTracesParams) {
-	notImplemented(w)
+	log            *slog.Logger
+	registry       *connector.Registry
+	policyEngine   *policy.RuleEngine
+	orchestrator   *approval.InMemoryOrchestrator
+	vault          *vault.MemVault
+	notifier       notify.Notifier
+	intents        *mem.IntentStore
+	approvals      *mem.ApprovalStore
+	policies       *mem.PolicyStore
+	grants         *mem.GrantStore
+	executions     *mem.ExecutionStore
+	connectors     *mem.ConnectorStore
+	credentials    *mem.CredentialStore
+	fundingSources *mem.FundingSourceStore
+	traces         *mem.TraceStore
+	newID          func() string
 }
 
 // config holds runtime configuration sourced from environment variables.
