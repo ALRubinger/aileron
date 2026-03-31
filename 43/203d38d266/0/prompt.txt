@@ -1,0 +1,53 @@
+I want to set up CI for this that runs on every commit to `main`, and optionally can run on commits to each branch (and will isolate those deployments). It should stand up the server, the UI webapp, and any other components that need to come up. It should be able to run integration tests against these deployed services. Recommend some hosted solutions for me that are applicable for this use case, then later we'll work on impl.
+
+---
+
+Where is the plan for details?
+
+---
+
+What should the image server be for the server and ui Railway services?
+
+---
+
+How do I set the Dockerfile path?
+
+---
+
+Can you use the Railway CLI to set all this up?
+
+---
+
+Logged in.
+
+---
+
+1, delete both of the existing projects
+
+---
+
+Done
+
+---
+
+Done.
+
+---
+
+Done
+
+---
+
+Always says "Unauthorized" after login
+
+---
+
+My empty services don't need to be associated with a GitHub repo in any way?
+
+---
+
+What permissions should my GitHub token have? Or should it be a classic token?
+
+---
+
+Done.

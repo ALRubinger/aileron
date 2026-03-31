@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "43203d38d266",
+  "strategy": "manual-commit",
+  "branch": "ci/github-actions-railway",
+  "checkpoints_count": 14,
+  "files_touched": [
+    ".github/workflows/ci.yml",
+    ".github/workflows/deploy-preview-cleanup.yml",
+    ".github/workflows/deploy-preview.yml",
+    ".github/workflows/deploy-production.yml",
+    "Taskfile.yml",
+    "go.work",
+    "test/integration/go.mod",
+    "test/integration/health_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/43/203d38d266/0/metadata.json",
+      "transcript": "/43/203d38d266/0/full.jsonl",
+      "content_hash": "/43/203d38d266/0/content_hash.txt",
+      "prompt": "/43/203d38d266/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 86,
+    "cache_creation_tokens": 121023,
+    "cache_read_tokens": 2140788,
+    "output_tokens": 14187,
+    "api_call_count": 52
+  }
+}
