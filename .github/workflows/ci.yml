@@ -70,7 +70,7 @@ jobs:
 
   test:
     name: Unit Tests
-    needs: lint
+    needs: generate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -95,7 +95,7 @@ jobs:
 
   build:
     name: Build Docker Images
-    needs: test
+    needs: [generate, lint, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
