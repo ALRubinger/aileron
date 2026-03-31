@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "fd1b368fc43b",
+  "strategy": "manual-commit",
+  "branch": "fix/scalar-docs-server-url",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "core/api/gen/server.gen.go",
+    "core/api/openapi.yaml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fd/1b368fc43b/0/metadata.json",
+      "transcript": "/fd/1b368fc43b/0/full.jsonl",
+      "content_hash": "/fd/1b368fc43b/0/content_hash.txt",
+      "prompt": "/fd/1b368fc43b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25,
+    "cache_creation_tokens": 20064,
+    "cache_read_tokens": 466052,
+    "output_tokens": 3881,
+    "api_call_count": 19
+  }
+}
