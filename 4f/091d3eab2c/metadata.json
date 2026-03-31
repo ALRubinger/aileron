@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "4f091d3eab2c",
+  "strategy": "manual-commit",
+  "branch": "ci/github-actions-railway",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".github/workflows/deploy-preview.yml",
+    ".github/workflows/deploy-production.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4f/091d3eab2c/0/metadata.json",
+      "transcript": "/4f/091d3eab2c/0/full.jsonl",
+      "content_hash": "/4f/091d3eab2c/0/content_hash.txt",
+      "prompt": "/4f/091d3eab2c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 9,
+    "cache_creation_tokens": 3807,
+    "cache_read_tokens": 383094,
+    "output_tokens": 1153,
+    "api_call_count": 7
+  }
+}

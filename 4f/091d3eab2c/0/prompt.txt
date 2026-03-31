@@ -1,0 +1,14 @@
+Error in GH Actions:
+
+# Capture the public UI URL
+  UI_URL=$(railway domain --service ui --environment "$ENV_NAME" 2>/dev/null || echo "pending")
+  echo "ui_url=$UI_URL" >> "$GITHUB_OUTPUT"
+  shell: /usr/bin/bash -e {0}
+  env:
+    RAILWAY_TOKEN: ***
+    RAILWAY_PROJECT_ID: ***
+error: unexpected argument '--dockerfile' found
+
+  tip: to pass '--dockerfile' as a value, use '-- --dockerfile'
+
+Usage: railway up --service <SERVICE> --environment <ENVIRONMENT> [PATH]
