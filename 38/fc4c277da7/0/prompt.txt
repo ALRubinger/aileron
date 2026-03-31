@@ -1,0 +1,51 @@
+Now fails with: 
+
+go test -tags=integration -race ./test/integration/...
+  shell: /usr/bin/bash -e {0}
+  env:
+    GOTOOLCHAIN: local
+    AILERON_API_URL: http://localhost:8080
+    AILERON_UI_URL: http://localhost:3000
+go: downloading github.com/gorilla/mux v1.8.0
+--- FAIL: TestHealthEndpoint (0.15s)
+    health_test.go:27: response does not match OpenAPI spec: response body doesn't match schema #/components/schemas/HealthResponse: Error at "/timestamp": property "timestamp" is missing
+        Schema:
+          {
+            "properties": {
+              "service": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "ok",
+                  "degraded",
+                  "down"
+                ],
+                "type": "string"
+              },
+              "timestamp": {
+                "format": "date-time",
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "service",
+              "version",
+              "timestamp"
+            ],
+            "type": "object"
+          }
+        
+        Value:
+          {
+            "service": "aileron",
+            "status": "ok",
+            "version": "0.1.0"
+          }
+FAIL
+FAIL    github.com/ALRubinger/aileron/test/integration    0.155s
+FAIL
