@@ -1,0 +1,16 @@
+CI workflow: lint, test, passes. Build Dockerfile fails with: #16 [builder 6/9] RUN go work sync
+#16 0.051 go: cannot load module test/integration listed in go.work file: open test/integration/go.mod: no such file or directory
+#16 ERROR: process "/bin/sh -c go work sync" did not complete successfully: exit code: 1
+------
+ > [builder 6/9] RUN go work sync:
+0.051 go: cannot load module test/integration listed in go.work file: open test/integration/go.mod: no such file or directory
+------
+Dockerfile:10
+--------------------
+   8 |     COPY sdk/go/go.mod sdk/go/go.sum* ./sdk/go/
+   9 |     
+  10 | >>> RUN go work sync
+  11 |     
+  12 |     COPY core/ ./core/
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c go work sync" did not complete successfully: exit code: 1

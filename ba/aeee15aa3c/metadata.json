@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "baaeee15aa3c",
+  "strategy": "manual-commit",
+  "branch": "ci/github-actions-railway",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "core/server/Dockerfile"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ba/aeee15aa3c/0/metadata.json",
+      "transcript": "/ba/aeee15aa3c/0/full.jsonl",
+      "content_hash": "/ba/aeee15aa3c/0/content_hash.txt",
+      "prompt": "/ba/aeee15aa3c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 6,
+    "cache_creation_tokens": 1456,
+    "cache_read_tokens": 246240,
+    "output_tokens": 617,
+    "api_call_count": 4
+  }
+}
