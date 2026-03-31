@@ -55,6 +55,12 @@ tasks:
       - pnpm install
       - pnpm run build
 
+  mcp:setup:
+    desc: Build and register the MCP server with Claude Code
+    cmds:
+      - task: build:mcp
+      - claude mcp add --scope project aileron -- ./build/aileron-mcp
+
   up:
     desc: Start all services via Docker Compose
     cmds:

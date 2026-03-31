@@ -2,6 +2,10 @@
 // the Aileron control plane as tools callable by Claude Code and other MCP clients.
 //
 // It communicates over stdio using JSON-RPC 2.0, per the MCP specification.
+//
+// Modes:
+//   - Embedded (default): runs an in-process Aileron server with in-memory stores.
+//   - Remote: set AILERON_API_URL to connect to an existing Aileron server.
 package main
 
 import (
@@ -9,8 +13,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
 	"os"
 
+	"github.com/ALRubinger/aileron/core/app"
 	aileron "github.com/ALRubinger/aileron/sdk/go"
 )
 
@@ -77,11 +86,25 @@ type server struct {
 
 func main() {
 	apiURL := os.Getenv("AILERON_API_URL")
-	if apiURL == "" {
-		apiURL = "http://localhost:8080"
-	}
-	apiKey := os.Getenv("AILERON_API_KEY")
 
+	if apiURL == "" {
+		// Embedded mode: start an in-process Aileron server on a random port.
+		log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+		handler, err := app.NewHandler(log)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aileron-mcp: failed to start embedded server: %v\n", err)
+			os.Exit(1)
+		}
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aileron-mcp: failed to listen: %v\n", err)
+			os.Exit(1)
+		}
+		go http.Serve(listener, handler)
+		apiURL = "http://" + listener.Addr().String()
+	}
+
+	apiKey := os.Getenv("AILERON_API_KEY")
 	client := aileron.NewClient(apiURL, aileron.WithAPIKey(apiKey))
 	s := &server{client: client}
 
