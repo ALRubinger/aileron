@@ -1,0 +1,38 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "41fbcade297a",
+  "session_id": "784c492a-85a5-43a2-990f-cc8b5e091756",
+  "strategy": "manual-commit",
+  "created_at": "2026-03-31T09:58:27.018976Z",
+  "branch": "refactor/build-task-umbrella",
+  "checkpoints_count": 0,
+  "files_touched": [
+    ".gitignore",
+    "Taskfile.yml",
+    "README.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "a92f9d21bbbf",
+  "checkpoint_transcript_start": 64,
+  "transcript_lines_at_start": 64,
+  "token_usage": {
+    "input_tokens": 18,
+    "cache_creation_tokens": 4833,
+    "cache_read_tokens": 387548,
+    "output_tokens": 2202,
+    "api_call_count": 14
+  },
+  "session_metrics": {
+    "turn_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-03-31T09:58:26.952766Z",
+    "agent_lines": 6,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 6,
+    "agent_percentage": 100
+  }
+}

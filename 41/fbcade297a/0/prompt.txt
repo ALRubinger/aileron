@@ -1,0 +1,5 @@
+Why is there an uncomitted change?
+
+---
+
+yes, and wouldn't it be a good idea for the build output to be under a "build" folder or something we can universally .gitignore for built artifacts?
