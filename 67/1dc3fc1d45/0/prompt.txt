@@ -1,0 +1,8 @@
+Integration tests failed in CI with:
+
+go: downloading github.com/gorilla/mux v1.8.0
+--- FAIL: TestHealthEndpoint (0.15s)
+    health_test.go:27: failed to load OpenAPI spec: invalid components: schema "ActionIntent": extra sibling fields: [examples]
+FAIL
+FAIL    github.com/ALRubinger/aileron/test/integration    0.158s
+FAIL
