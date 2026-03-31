@@ -1,14 +1,18 @@
 # Aileron
+_Stay on course. The missing protection layer between your agents and the real world._
 
-**A programmable control plane for agentic AI systems.**
+![GitHub License](https://img.shields.io/github/license/ALRubinger/aileron?style=for-the-badge)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/ALRubinger/aileron/ci.yml?style=for-the-badge&logo=github)
 
-Aileron sits between an AI agent and the real world. When an agent wants to make a payment, open a pull request, send an email, or call an API, Aileron intercepts that action, evaluates it against policy, routes it for human approval if needed, and executes it through a secure abstraction layer — without the agent ever touching credentials directly.
+**Aileron is a programmable control plane for agentic AI systems.**
+
+It sits between an AI agent and the real world. When an agent wants to make a payment, open a pull request, send an email, or call an API, Aileron intercepts that action, evaluates it against policy, routes it for human approval if needed, and executes it through a secure abstraction layer — without the agent ever touching credentials directly.
 
 ---
 
 ## The Problem
 
-AI agents are becoming capable enough to act on your behalf: booking meetings, paying invoices, merging code. The problem isn't capability — it's trust. Granting an agent real authority means accepting real risk.
+AI agents are acting on our behalf: booking meetings, paying invoices, merging code. The problem isn't capability. It's trust. An agent that's useful is an agent that's risky.
 
 The current workarounds are inadequate:
 
@@ -17,13 +21,13 @@ The current workarounds are inadequate:
 - Over-permissioned API keys that agents hold directly
 - Static payment credentials exposed to systems that shouldn't see them
 
-The result is a forced choice: give the agent enough permission to be useful, or restrict it enough to feel safe. Neither is satisfying.
+The result is a forced choice: give the agent enough permission to be powerful, or restrict it enough to feel safe. Neither is satisfying.
 
 ## The Solution
 
 Aileron introduces a missing layer in the agentic stack: a **control plane that mediates execution**.
 
-Agents remain autonomous in planning. Humans retain authority over execution. Aileron enforces the boundary between the two.
+Agents remain autonomous in planning. We retain authority over execution. Aileron enforces the boundary between the two.
 
 ```
 Agent
