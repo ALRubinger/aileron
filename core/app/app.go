@@ -1,0 +1,106 @@
+// Package app wires together the Aileron control plane components and exposes
+// them as an http.Handler. It is imported by the standalone server binary and
+// the MCP server's embedded mode.
+package app
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"os"
+
+	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/approval"
+	"github.com/ALRubinger/aileron/core/connector"
+	googlecalendar "github.com/ALRubinger/aileron/core/connector/calendar/google"
+	"github.com/ALRubinger/aileron/core/connector/git/github"
+	"github.com/ALRubinger/aileron/core/connector/payments/stripe"
+	"github.com/ALRubinger/aileron/core/notify"
+	"github.com/ALRubinger/aileron/core/policy"
+	"github.com/ALRubinger/aileron/core/store/mem"
+	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/google/uuid"
+)
+
+// NewHandler creates a fully-wired Aileron control plane HTTP handler with
+// in-memory stores, seeded policies, and registered connectors.
+func NewHandler(log *slog.Logger) (http.Handler, error) {
+	ctx := context.Background()
+
+	// --- In-memory stores ---
+	intentStore := mem.NewIntentStore()
+	approvalStore := mem.NewApprovalStore()
+	policyStore := mem.NewPolicyStore()
+	grantStore := mem.NewGrantStore()
+	executionStore := mem.NewExecutionStore()
+	connectorStore := mem.NewConnectorStore()
+	credentialStore := mem.NewCredentialStore()
+	fundingSourceStore := mem.NewFundingSourceStore()
+	traceStore := mem.NewTraceStore()
+
+	// --- Connector registry ---
+	registry := connector.NewRegistry()
+	registry.Register(ctx, stripe.New())
+	registry.Register(ctx, googlecalendar.New())
+	registry.Register(ctx, github.New())
+
+	// --- Vault ---
+	v := vault.NewMemVault()
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{
+			Type: "api_key",
+			Labels: map[string]string{
+				"connector": "github",
+			},
+		})
+		log.Info("seeded GitHub token into vault")
+	}
+
+	// --- Policy engine ---
+	policyEngine := policy.NewRuleEngine(policyStore)
+
+	if err := policy.SeedPolicies(ctx, policyStore); err != nil {
+		return nil, err
+	}
+	log.Info("seeded default policies")
+
+	// --- Approval orchestrator ---
+	idGen := func() string { return uuid.New().String() }
+	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
+
+	// --- Notifier ---
+	notifier := notify.NewLogNotifier(log)
+
+	// --- HTTP handler ---
+	mux := http.NewServeMux()
+
+	server := &apiServer{
+		log:            log,
+		registry:       registry,
+		policyEngine:   policyEngine,
+		orchestrator:   orchestrator,
+		vault:          v,
+		notifier:       notifier,
+		intents:        intentStore,
+		approvals:      approvalStore,
+		policies:       policyStore,
+		grants:         grantStore,
+		executions:     executionStore,
+		connectors:     connectorStore,
+		credentials:    credentialStore,
+		fundingSources: fundingSourceStore,
+		traces:         traceStore,
+		newID:          idGen,
+	}
+	api.HandlerFromMux(server, mux)
+
+	registerDocsRoutes(mux)
+
+	// Middleware chain: CORS -> request ID -> logging -> routes.
+	var handler http.Handler = mux
+	handler = loggingMiddleware(log, handler)
+	handler = requestIDMiddleware(handler)
+	handler = corsMiddleware(handler)
+
+	return handler, nil
+}

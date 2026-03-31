@@ -1,10 +1,11 @@
-package main
+package app
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -16,7 +17,28 @@ import (
 	"github.com/ALRubinger/aileron/core/policy"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
+	"github.com/ALRubinger/aileron/core/vault"
 )
+
+// apiServer implements the generated api.ServerInterface.
+type apiServer struct {
+	log            *slog.Logger
+	registry       *connectorpkg.Registry
+	policyEngine   *policy.RuleEngine
+	orchestrator   *approval.InMemoryOrchestrator
+	vault          *vault.MemVault
+	notifier       notify.Notifier
+	intents        *mem.IntentStore
+	approvals      *mem.ApprovalStore
+	policies       *mem.PolicyStore
+	grants         *mem.GrantStore
+	executions     *mem.ExecutionStore
+	connectors     *mem.ConnectorStore
+	credentials    *mem.CredentialStore
+	fundingSources *mem.FundingSourceStore
+	traces         *mem.TraceStore
+	newID          func() string
+}
 
 // --- JSON helpers ---
 
@@ -888,7 +910,6 @@ func (s *apiServer) ListTraces(w http.ResponseWriter, r *http.Request, params ap
 // --- Analytics (stub) ---
 
 func (s *apiServer) GetAnalyticsSummary(w http.ResponseWriter, r *http.Request, params api.GetAnalyticsSummaryParams) {
-	// Return an empty summary for now.
 	writeJSON(w, http.StatusOK, api.AnalyticsSummary{})
 }
 

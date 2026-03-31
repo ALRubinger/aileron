@@ -147,26 +147,23 @@ task health
 
 ### Connect Claude Code via MCP
 
-Build the MCP server and add it to your project's `.mcp.json`:
+Register the Aileron MCP server so Claude Code can submit intents, check approvals, and execute actions:
+
+```sh
+task mcp:setup
+```
+
+This builds the MCP binary and registers it with Claude Code. By default, the MCP server runs an embedded Aileron instance in-process — no external server required.
+
+To connect to an existing Aileron server instead:
 
 ```sh
 task build:mcp
+claude mcp add --scope project aileron \
+  -e AILERON_API_URL=http://localhost:8080 -- ./build/aileron-mcp
 ```
 
-```json
-{
-  "mcpServers": {
-    "aileron": {
-      "command": "./build/aileron-mcp",
-      "env": {
-        "AILERON_API_URL": "http://localhost:8080"
-      }
-    }
-  }
-}
-```
-
-Claude Code can then use `submit_intent`, `check_approval`, `execute_action`, and `list_pending_approvals` as tools.
+Available tools: `submit_intent`, `check_approval`, `execute_action`, `list_pending_approvals`.
 
 ### Run tests
 
@@ -201,7 +198,8 @@ task generate:api
 aileron/
 ├── core/               Control plane — policy, approval, connectors, vault, audit
 │   ├── api/            OpenAPI specification and generated code
-│   ├── server/         HTTP server entry point and API handlers
+│   ├── app/            Application wiring (handlers, middleware) — importable library
+│   ├── server/         HTTP server entry point
 │   ├── policy/         Policy engine SPI, rule-based implementation, seed policies
 │   ├── approval/       Approval orchestrator SPI and implementation
 │   ├── connector/      Connector SPI and MVP implementations (GitHub, Stripe, Google Calendar)
@@ -211,7 +209,7 @@ aileron/
 │   ├── audit/          Immutable audit store SPI
 │   └── model/          Shared domain types
 ├── cmd/
-│   └── aileron-mcp/    MCP server for Claude Code integration
+│   └── aileron-mcp/    MCP server for Claude Code (embedded or remote mode)
 ├── sdk/
 │   └── go/             Go client SDK
 ├── ui/                 Management and approval UI (SvelteKit)
