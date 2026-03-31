@@ -1,0 +1,13 @@
+Can we parallelize the CI so that Verify Generated Code, Lint, and Unit Tests run in parallel? Are there dependencies between these tasks? Building the Docker images can depend upon those prereqs, correct?
+
+---
+
+Make sure that we can test and lint if generate hasn't run yet
+
+---
+
+What if there are changes and we need to re-run codegen?
+
+---
+
+Yes

@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "0240cb22c33b",
+  "strategy": "manual-commit",
+  "branch": "ci/parallelize-pipeline",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".github/workflows/ci.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/02/40cb22c33b/0/metadata.json",
+      "transcript": "/02/40cb22c33b/0/full.jsonl",
+      "content_hash": "/02/40cb22c33b/0/content_hash.txt",
+      "prompt": "/02/40cb22c33b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25,
+    "cache_creation_tokens": 7658,
+    "cache_read_tokens": 294880,
+    "output_tokens": 2808,
+    "api_call_count": 15
+  }
+}
