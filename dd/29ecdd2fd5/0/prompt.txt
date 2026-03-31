@@ -1,0 +1,26 @@
+I deleted the "pr-6" environment. The CI job passes. The Deploy Preview job fails with:  ENV_NAME="pr-6"
+  
+  # Create environment by duplicating production (idempotent — ignores error if it exists)
+  railway environment new "$ENV_NAME" --duplicate production 2>/dev/null || true
+  
+  # Deploy server (repo root as context — Dockerfile references go.work, core/, sdk/go/)
+  railway up --service server --environment "$ENV_NAME" --detach --project "$RAILWAY_PROJECT_ID" .
+  
+  # Deploy UI (ui/ subdirectory as context)
+  railway up --service ui --environment "$ENV_NAME" --detach --project "$RAILWAY_PROJECT_ID" ./ui
+  
+  # Capture the public UI URL
+  UI_URL=$(railway domain --service ui --environment "$ENV_NAME" 2>/dev/null || echo "pending")
+  echo "ui_url=$UI_URL" >> "$GITHUB_OUTPUT"
+  shell: /usr/bin/bash -e {0}
+  env:
+    RAILWAY_TOKEN: ***
+    RAILWAY_PROJECT_ID: ***
+> Environment name pr-6
+> Duplicate from production
+Indexing...
+prefix not found
+
+---
+
+Yes
