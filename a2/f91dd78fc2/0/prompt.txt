@@ -1,0 +1,9 @@
+Does the "task build" command also invoke "build:mcp" like it does for "build:ui"?
+
+---
+
+Is that a common naming convention for these tasks?
+
+---
+
+Do both, and update the README to reflect
