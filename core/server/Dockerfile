@@ -6,6 +6,7 @@ WORKDIR /src
 COPY go.work go.work.sum* ./
 COPY core/go.mod core/go.sum* ./core/
 COPY sdk/go/go.mod sdk/go/go.sum* ./sdk/go/
+COPY test/integration/go.mod ./test/integration/
 
 RUN go work sync
 

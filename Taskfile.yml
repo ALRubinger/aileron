@@ -86,6 +86,24 @@ tasks:
     cmds:
       - go test ./core/... ./sdk/go/...
 
+  test:integration:
+    desc: Run integration tests against running services
+    cmds:
+      - go test -tags=integration -race ./test/integration/...
+    env:
+      AILERON_API_URL: http://localhost:8080
+      AILERON_UI_URL: http://localhost:3000
+
+  ci:
+    desc: Run the full CI pipeline locally
+    cmds:
+      - task: lint
+      - task: test
+      - task: build
+      - task: up -- -d --build --wait
+      - task: test:integration
+      - task: down
+
   health:
     desc: Check the server health endpoint
     cmds:

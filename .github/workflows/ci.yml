@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache-dependency-path: |
+            core/go.mod
+            sdk/go/go.mod
+            test/integration/go.mod
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Go vet
+        run: go vet ./core/... ./sdk/go/...
+
+      - name: Svelte check
+        working-directory: ui
+        run: pnpm check
+
+  test:
+    name: Unit Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache-dependency-path: |
+            core/go.mod
+            sdk/go/go.mod
+            test/integration/go.mod
+
+      - name: Run Go tests
+        run: go test -race -coverprofile=coverage.out ./core/... ./sdk/go/...
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage
+          path: coverage.out
+
+  build:
+    name: Build Docker Images
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build server image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: core/server/Dockerfile
+          push: false
+          load: true
+          tags: aileron-server:${{ github.sha }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+      - name: Build UI image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./ui
+          file: ui/Dockerfile
+          push: false
+          load: true
+          tags: aileron-ui:${{ github.sha }}
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,mode=max,scope=ui
+
+  integration:
+    name: Integration Tests
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Start full stack
+        run: docker compose -f deploy/docker-compose.yml up -d --build --wait
+        timeout-minutes: 5
+
+      - name: Wait for healthy server
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/v1/health; then
+              echo ""
+              echo "Server healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Server did not become healthy"
+          docker compose -f deploy/docker-compose.yml logs
+          exit 1
+
+      - name: Wait for healthy UI
+        run: |
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:3000; then
+              echo "UI healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "UI did not become healthy"
+          exit 1
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache-dependency-path: |
+            core/go.mod
+            sdk/go/go.mod
+            test/integration/go.mod
+
+      - name: Run integration tests
+        run: go test -tags=integration -race ./test/integration/...
+        env:
+          AILERON_API_URL: http://localhost:8080
+          AILERON_UI_URL: http://localhost:3000
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
