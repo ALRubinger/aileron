@@ -1,0 +1,18 @@
+CI failed on building the Docker images with:
+
+#16 [builder  7/10] RUN go work sync
+#16 0.057 go: cannot load module cmd/aileron-mcp listed in go.work file: open cmd/aileron-mcp/go.mod: no such file or directory
+#16 ERROR: process "/bin/sh -c go work sync" did not complete successfully: exit code: 1
+------
+ > [builder  7/10] RUN go work sync:
+0.057 go: cannot load module cmd/aileron-mcp listed in go.work file: open cmd/aileron-mcp/go.mod: no such file or directory
+------
+Dockerfile:11
+--------------------
+   9 |     COPY test/integration/go.mod ./test/integration/
+  10 |     
+  11 | >>> RUN go work sync
+  12 |     
+  13 |     COPY core/ ./core/
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c go work sync" did not complete successfully: exit code: 1
