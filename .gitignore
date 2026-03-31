@@ -1,7 +1,7 @@
 .claude/
 
-# Go build output
-/server
+# Build output
+/build/
 
 # UI build output
 ui/.svelte-kit/

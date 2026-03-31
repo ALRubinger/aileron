@@ -153,7 +153,7 @@ task build:mcp
 {
   "mcpServers": {
     "aileron": {
-      "command": "./aileron-mcp",
+      "command": "./build/aileron-mcp",
       "env": {
         "AILERON_API_URL": "http://localhost:8080"
       }

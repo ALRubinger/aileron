@@ -41,12 +41,12 @@ tasks:
   build:server:
     desc: Build the Go server binary locally
     cmds:
-      - go build -o server ./core/server
+      - go build -o build/server ./core/server
 
   build:mcp:
     desc: Build the MCP server binary locally
     cmds:
-      - go build -o aileron-mcp ./cmd/aileron-mcp
+      - go build -o build/aileron-mcp ./cmd/aileron-mcp
 
   build:ui:
     desc: Install UI dependencies and build
@@ -69,7 +69,7 @@ tasks:
     desc: Stop services and remove volumes
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} down -v --remove-orphans
-      - rm -f server
+      - rm -rf build
       - rm -rf ui/.svelte-kit ui/build ui/node_modules
 
   logs:
