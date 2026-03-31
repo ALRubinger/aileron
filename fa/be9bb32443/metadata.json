@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "fabe9bb32443",
+  "strategy": "manual-commit",
+  "branch": "build/pin-svelte5",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "ui/package.json",
+    "ui/pnpm-lock.yaml",
+    "ui/svelte.config.js"
+  ],
+  "sessions": [
+    {
+      "metadata": "/fa/be9bb32443/0/metadata.json",
+      "transcript": "/fa/be9bb32443/0/full.jsonl",
+      "content_hash": "/fa/be9bb32443/0/content_hash.txt",
+      "prompt": "/fa/be9bb32443/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 32435,
+    "cache_read_tokens": 358388,
+    "output_tokens": 3396,
+    "api_call_count": 16
+  }
+}

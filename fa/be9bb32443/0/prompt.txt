@@ -1,0 +1,1 @@
+Should we set and mark explicit that we are on SvelteKit 5?
