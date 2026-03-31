@@ -1,0 +1,9 @@
+Can we improve the installation instructions for Claude Code MCP integration in the README? It's not clear to me where to put that JSON block. How easily can we make integration, anything better than copy-pasting JSON into a config file?
+
+---
+
+I also want the MCP server to be able to connect to a running Aileron server in addtion to running its own embedded server if an external one is not specified. In that way, the MCP server can run standalone with no dependencies, and can also connect to an existing server for flexibility
+
+---
+
+Are there tests and README docs changes for this?

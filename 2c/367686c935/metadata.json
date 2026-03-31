@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "2c367686c935",
+  "strategy": "manual-commit",
+  "branch": "feat/mcp-embedded-mode",
+  "checkpoints_count": 2,
+  "files_touched": [
+    ".gitignore",
+    "README.md",
+    "Taskfile.yml",
+    "cmd/aileron-mcp/go.mod",
+    "cmd/aileron-mcp/go.sum",
+    "cmd/aileron-mcp/main.go",
+    "cmd/aileron-mcp/mcp_test.go",
+    "core/app/app.go",
+    "core/app/app_test.go",
+    "core/app/docs.go",
+    "core/app/handlers.go",
+    "core/app/middleware.go",
+    "core/server/docs.go",
+    "core/server/handlers.go",
+    "core/server/main.go",
+    "core/server/middleware.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/2c/367686c935/0/metadata.json",
+      "transcript": "/2c/367686c935/0/full.jsonl",
+      "content_hash": "/2c/367686c935/0/content_hash.txt",
+      "prompt": "/2c/367686c935/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2060,
+    "cache_creation_tokens": 115033,
+    "cache_read_tokens": 5284265,
+    "output_tokens": 41807,
+    "api_call_count": 70
+  }
+}
