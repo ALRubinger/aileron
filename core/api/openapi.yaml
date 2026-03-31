@@ -15,10 +15,8 @@ info:
       intent -> policy decision -> approval (optional) -> execution grant -> execution -> trace
 
 servers:
-  - url: https://api.agentic-control-plane.example.com
+  - url: https://api.withaileron.ai
     description: Production
-  - url: https://sandbox.agentic-control-plane.example.com
-    description: Sandbox
 
 security:
   - bearerAuth: []
