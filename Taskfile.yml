@@ -26,7 +26,15 @@ tasks:
       - api/gen/server.gen.go
 
   build:
-    desc: Build all containers
+    desc: Build everything (containers, server, MCP, UI)
+    cmds:
+      - task: build:docker
+      - task: build:server
+      - task: build:mcp
+      - task: build:ui
+
+  build:docker:
+    desc: Build all Docker containers
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} build
 
@@ -121,7 +129,7 @@ tasks:
       - task: generate
       - task: lint
       - task: test
-      - task: build
+      - task: build:docker
       - task: up -- -d --build --wait
       - task: test:integration
       - task: down

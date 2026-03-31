@@ -106,11 +106,12 @@ Three seed policies ship by default:
 task build
 ```
 
-This builds all Docker containers (server, UI, and database).
+This builds everything: Docker containers, Go server binary, MCP server binary, and the UI.
 
-To build individual components locally:
+To build individual components:
 
 ```sh
+task build:docker   # Docker containers (server, UI, database)
 task build:server   # Go server binary
 task build:ui       # SvelteKit UI
 task build:mcp      # MCP server binary for Claude Code
