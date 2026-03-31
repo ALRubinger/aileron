@@ -6,8 +6,14 @@
 package github
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
 
 	"github.com/ALRubinger/aileron/core/connector"
 )
@@ -15,6 +21,7 @@ import (
 const (
 	connectorType     = "git"
 	connectorProvider = "github"
+	githubAPI         = "https://api.github.com"
 )
 
 // Connector executes git actions via GitHub.
@@ -52,24 +59,158 @@ func (c *Connector) Execute(ctx context.Context, req connector.ExecutionRequest)
 	}
 }
 
-func (c *Connector) createPullRequest(_ context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
-	// TODO: implement via GitHub REST API POST /repos/{owner}/{repo}/pulls.
-	// Steps:
-	//   1. Parse owner/repo from req.Parameters["repository"].
-	//   2. POST pull request with head/base branch, title, body, labels.
-	//   3. Return the PR URL as ReceiptRef.
-	_ = req
-	return connector.ExecutionResult{}, errors.New("github: createPullRequest not yet implemented")
+func (c *Connector) createPullRequest(ctx context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
+	repo := paramStr(req.Parameters, "repository")
+	if repo == "" {
+		return failResult("github: repository parameter required"), nil
+	}
+	head := paramStr(req.Parameters, "branch")
+	base := paramStr(req.Parameters, "base_branch")
+	title := paramStr(req.Parameters, "pr_title")
+	body := paramStr(req.Parameters, "pr_body")
+
+	if head == "" || base == "" || title == "" {
+		return failResult("github: branch, base_branch, and pr_title parameters required"), nil
+	}
+
+	payload := map[string]interface{}{
+		"title": title,
+		"head":  head,
+		"base":  base,
+	}
+	if body != "" {
+		payload["body"] = body
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/pulls", githubAPI, repo)
+	result, err := githubPost(ctx, url, string(req.Credential.Value), payload)
+	if err != nil {
+		return failResult("github: " + err.Error()), nil
+	}
+
+	prURL, _ := result["html_url"].(string)
+	prNumber, _ := result["number"].(float64)
+
+	return connector.ExecutionResult{
+		Status:     connector.ExecutionStatusSucceeded,
+		ReceiptRef: prURL,
+		Output: map[string]any{
+			"pr_url":    prURL,
+			"pr_number": int(prNumber),
+		},
+	}, nil
 }
 
-func (c *Connector) mergePullRequest(_ context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
-	// TODO: implement via GitHub REST API PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge.
-	_ = req
-	return connector.ExecutionResult{}, errors.New("github: mergePullRequest not yet implemented")
+func (c *Connector) mergePullRequest(ctx context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
+	repo := paramStr(req.Parameters, "repository")
+	prNumber := paramStr(req.Parameters, "pr_number")
+	if repo == "" || prNumber == "" {
+		return failResult("github: repository and pr_number parameters required"), nil
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/pulls/%s/merge", githubAPI, repo, prNumber)
+	_, err := githubPut(ctx, url, string(req.Credential.Value), map[string]interface{}{})
+	if err != nil {
+		return failResult("github: " + err.Error()), nil
+	}
+
+	return connector.ExecutionResult{
+		Status: connector.ExecutionStatusSucceeded,
+		Output: map[string]any{"merged": true},
+	}, nil
 }
 
-func (c *Connector) closePullRequest(_ context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
-	// TODO: implement via GitHub REST API PATCH /repos/{owner}/{repo}/pulls/{pull_number}.
-	_ = req
-	return connector.ExecutionResult{}, errors.New("github: closePullRequest not yet implemented")
+func (c *Connector) closePullRequest(ctx context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
+	repo := paramStr(req.Parameters, "repository")
+	prNumber := paramStr(req.Parameters, "pr_number")
+	if repo == "" || prNumber == "" {
+		return failResult("github: repository and pr_number parameters required"), nil
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/pulls/%s", githubAPI, repo, prNumber)
+	_, err := githubPatch(ctx, url, string(req.Credential.Value), map[string]interface{}{
+		"state": "closed",
+	})
+	if err != nil {
+		return failResult("github: " + err.Error()), nil
+	}
+
+	return connector.ExecutionResult{
+		Status: connector.ExecutionStatusSucceeded,
+		Output: map[string]any{"closed": true},
+	}, nil
+}
+
+// --- HTTP helpers ---
+
+func githubPost(ctx context.Context, url, token string, payload map[string]interface{}) (map[string]interface{}, error) {
+	return githubRequest(ctx, http.MethodPost, url, token, payload)
+}
+
+func githubPut(ctx context.Context, url, token string, payload map[string]interface{}) (map[string]interface{}, error) {
+	return githubRequest(ctx, http.MethodPut, url, token, payload)
+}
+
+func githubPatch(ctx context.Context, url, token string, payload map[string]interface{}) (map[string]interface{}, error) {
+	return githubRequest(ctx, http.MethodPatch, url, token, payload)
+}
+
+func githubRequest(ctx context.Context, method, url, token string, payload map[string]interface{}) (map[string]interface{}, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	token = strings.TrimSpace(token)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result map[string]interface{}
+	if len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+	}
+	return result, nil
+}
+
+func paramStr(params map[string]any, key string) string {
+	v, ok := params[key]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return fmt.Sprintf("%v", v)
+	}
+	return s
+}
+
+func failResult(msg string) connector.ExecutionResult {
+	return connector.ExecutionResult{
+		Status: connector.ExecutionStatusFailed,
+		Error:  msg,
+	}
 }
