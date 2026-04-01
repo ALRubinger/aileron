@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "ebdc57cf6baf",
+  "session_id": "126c4980-8253-4970-b846-3f2f85985e01",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-01T23:22:41.984652Z",
+  "branch": "feat/mcp-marketplace",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "175ddd8d7d7d",
+  "token_usage": {
+    "input_tokens": 77,
+    "cache_creation_tokens": 59938,
+    "cache_read_tokens": 3605605,
+    "output_tokens": 18752,
+    "api_call_count": 67
+  },
+  "session_metrics": {
+    "turn_count": 1
+  }
+}
