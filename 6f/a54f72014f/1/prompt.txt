@@ -1,0 +1,21 @@
+I want Aileron to be loved by developers. Yes, it provides protection and auditing with proof of control. And also - by nature of being the agentic control plane, I want it to be the first thing developers using agents install. Through it, it should be extremely simple to install and configure MCPs. Let's explore what a click-to-install flow looks like, either using an existing MCP marketplace or developing our own if absolutely necessary. The Aileron Dashboard should show the user all of their MCP services and allow them to configure.
+
+---
+
+Prep a PR
+
+---
+
+CI vet fails with:
+
+go: downloading github.com/oapi-codegen/runtime v1.3.1
+go: downloading github.com/google/uuid v1.6.0
+go: downloading github.com/apapsch/go-jsonmerge/v2 v2.0.0
+Error: core/app/handlers.go:22:2: no required module provides package github.com/ALRubinger/aileron/core/version; to add it:
+    cd /home/runner/work/aileron/aileron/core
+    go get github.com/ALRubinger/aileron/core/version
+Error: Process completed with exit code 1.
+
+---
+
+Add an ADR for this work to the PR
