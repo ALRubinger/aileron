@@ -1,0 +1,43 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "b96f6bba4edb",
+  "session_id": "fcc82f2a-517f-44e7-8351-c3059bdf8596",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-01T23:00:47.866401Z",
+  "branch": "feat/mcp-marketplace",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "core/api/gen/server.gen.go",
+    "core/api/openapi.yaml",
+    "core/app/app.go",
+    "core/app/handlers.go",
+    "core/registry/client.go",
+    "core/registry/client_test.go",
+    "core/registry/types.go",
+    "core/store/mem/mcpserver.go",
+    "core/store/mem/mcpserver_test.go",
+    "core/store/store.go"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "6f5749297b9b",
+  "token_usage": {
+    "input_tokens": 4511,
+    "cache_creation_tokens": 92240,
+    "cache_read_tokens": 6710974,
+    "output_tokens": 31741,
+    "api_call_count": 99
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-01T23:00:47.144419Z",
+    "agent_lines": 1417,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1417,
+    "agent_percentage": 100
+  }
+}
