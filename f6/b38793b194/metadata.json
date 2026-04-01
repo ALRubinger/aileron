@@ -2,8 +2,8 @@
   "cli_version": "0.5.1",
   "checkpoint_id": "f6b38793b194",
   "strategy": "manual-commit",
-  "branch": "feat/release-system",
-  "checkpoints_count": 1,
+  "branch": "feat/mcp-marketplace",
+  "checkpoints_count": 2,
   "files_touched": [
     ".github/workflows/release.yml",
     ".gitignore",
@@ -19,13 +19,19 @@
       "transcript": "/f6/b38793b194/0/full.jsonl",
       "content_hash": "/f6/b38793b194/0/content_hash.txt",
       "prompt": "/f6/b38793b194/0/prompt.txt"
+    },
+    {
+      "metadata": "/f6/b38793b194/1/metadata.json",
+      "transcript": "/f6/b38793b194/1/full.jsonl",
+      "content_hash": "/f6/b38793b194/1/content_hash.txt",
+      "prompt": "/f6/b38793b194/1/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 57,
-    "cache_creation_tokens": 51718,
-    "cache_read_tokens": 2215155,
-    "output_tokens": 14925,
-    "api_call_count": 47
+    "input_tokens": 66,
+    "cache_creation_tokens": 54116,
+    "cache_read_tokens": 2870256,
+    "output_tokens": 16025,
+    "api_call_count": 54
   }
 }
