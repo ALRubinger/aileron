@@ -17,7 +17,9 @@ import (
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/config"
+	"github.com/ALRubinger/aileron/core/mcp"
 	"github.com/ALRubinger/aileron/core/mcpclient"
+	"github.com/ALRubinger/aileron/core/mcpremote"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/policy"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -36,7 +38,7 @@ const (
 // toolRoute maps a namespaced tool name back to its downstream client and
 // the original (un-prefixed) tool name.
 type toolRoute struct {
-	client       *mcpclient.Client
+	client       mcp.ToolExecutor
 	originalName string
 	serverName   string
 	// toolPrefix from the server's policy_mapping config, if any.
@@ -46,7 +48,7 @@ type toolRoute struct {
 // gateway manages downstream MCP server connections, policy evaluation,
 // approval orchestration, and tool routing.
 type gateway struct {
-	clients      []*mcpclient.Client
+	clients      []mcp.ToolExecutor
 	routes       map[string]toolRoute // namespaced tool name → route
 	tools        []toolDef            // aggregated tool list (cached)
 	policyEngine policy.Engine
@@ -60,6 +62,7 @@ type gateway struct {
 // gatewayConfig holds the dependencies for creating a new gateway.
 type gatewayConfig struct {
 	Cfg          *config.Config
+	APIURL       string // control plane URL for remote server endpoint resolution
 	Vault        vault.Vault
 	PolicyEngine policy.Engine
 	Approvals    approval.Orchestrator
@@ -86,22 +89,42 @@ func newGateway(ctx context.Context, gc gatewayConfig) (*gateway, error) {
 	}
 
 	for _, ds := range gc.Cfg.DownstreamServers {
-		// Resolve vault:// env vars.
-		env, err := resolveEnv(ctx, ds.Env, gc.Vault)
-		if err != nil {
-			return nil, fmt.Errorf("gateway: server %q: %w", ds.Name, err)
+		var client mcp.ToolExecutor
+
+		mode := ds.Mode
+		if mode == "" {
+			mode = config.ModeLocal
 		}
 
-		// Convert map to KEY=VALUE slice for subprocess.
-		envSlice := make([]string, 0, len(env))
-		for k, val := range env {
-			envSlice = append(envSlice, k+"="+val)
-		}
+		switch mode {
+		case config.ModeRemote:
+			endpoint := fmt.Sprintf("%s/mcp/servers/%s", gc.APIURL, ds.Name)
+			rc, err := mcpremote.NewClient(ctx, ds.Name, endpoint)
+			if err != nil {
+				g.closeAll()
+				return nil, fmt.Errorf("gateway: remote server %q: %w", ds.Name, err)
+			}
+			client = rc
 
-		client, err := mcpclient.NewClient(ctx, ds.Name, ds.Command, envSlice)
-		if err != nil {
-			g.closeAll()
-			return nil, fmt.Errorf("gateway: start server %q: %w", ds.Name, err)
+		default: // ModeLocal
+			// Resolve vault:// env vars.
+			env, err := resolveEnv(ctx, ds.Env, gc.Vault)
+			if err != nil {
+				return nil, fmt.Errorf("gateway: server %q: %w", ds.Name, err)
+			}
+
+			// Convert map to KEY=VALUE slice for subprocess.
+			envSlice := make([]string, 0, len(env))
+			for k, val := range env {
+				envSlice = append(envSlice, k+"="+val)
+			}
+
+			lc, err := mcpclient.NewClient(ctx, ds.Name, ds.Command, envSlice)
+			if err != nil {
+				g.closeAll()
+				return nil, fmt.Errorf("gateway: start server %q: %w", ds.Name, err)
+			}
+			client = lc
 		}
 
 		g.clients = append(g.clients, client)

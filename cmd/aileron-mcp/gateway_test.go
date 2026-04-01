@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/approval"
+	"github.com/ALRubinger/aileron/core/mcp"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/policy"
 	"github.com/ALRubinger/aileron/core/store/mem"
@@ -386,6 +387,58 @@ func TestRouteToolCall_PolicyMappingToolPrefix(t *testing.T) {
 	}
 	if capturedReq.ToolCall.Arguments["base"] != "main" {
 		t.Errorf("ToolCall.Arguments[base] = %v, want %q", capturedReq.ToolCall.Arguments["base"], "main")
+	}
+}
+
+// --- Mock tool executor ---
+
+type mockToolExecutor struct {
+	name   string
+	tools  []mcp.ToolDef
+	result *mcp.ToolResult
+	err    error
+}
+
+func (m *mockToolExecutor) Name() string            { return m.name }
+func (m *mockToolExecutor) Tools() []mcp.ToolDef    { return m.tools }
+func (m *mockToolExecutor) Close() error             { return nil }
+func (m *mockToolExecutor) CallTool(_ context.Context, _ string, _ map[string]any) (*mcp.ToolResult, error) {
+	return m.result, m.err
+}
+
+func TestForwardToDownstream_WithMockExecutor(t *testing.T) {
+	pe := &mockPolicyEngine{
+		decision: model.Decision{
+			Disposition: model.DispositionAllow,
+			RiskLevel:   model.RiskLevelLow,
+		},
+	}
+	gw := testGateway(t, pe)
+
+	mock := &mockToolExecutor{
+		name: "github",
+		result: &mcp.ToolResult{
+			Content: []mcp.ToolContent{{Type: "text", Text: "PR #42 created"}},
+		},
+	}
+	gw.routes["github__create_pr"] = toolRoute{
+		client:       mock,
+		originalName: "create_pr",
+		serverName:   "github",
+		toolPrefix:   "git",
+	}
+
+	ctx := context.Background()
+	result := gw.routeToolCall(ctx, "github__create_pr", map[string]any{"title": "fix"})
+
+	if result.IsError {
+		t.Errorf("expected no error, got: %v", result.Content)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected content")
+	}
+	if result.Content[0].Text != "PR #42 created" {
+		t.Errorf("Content[0].Text = %q, want %q", result.Content[0].Text, "PR #42 created")
 	}
 }
 

@@ -149,6 +149,7 @@ func main() {
 	// Connect to downstream MCP servers.
 	gw, err := newGateway(ctx, gatewayConfig{
 		Cfg:          cfg,
+		APIURL:       apiURL,
 		Vault:        v,
 		PolicyEngine: policyEngine,
 		Approvals:    orchestrator,

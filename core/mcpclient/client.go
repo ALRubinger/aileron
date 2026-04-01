@@ -17,26 +17,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/ALRubinger/aileron/core/mcp"
 )
-
-// ToolDef describes a tool exposed by a downstream MCP server.
-type ToolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-}
-
-// ToolResult is the result from a tools/call invocation.
-type ToolResult struct {
-	Content []ToolContent `json:"content"`
-	IsError bool          `json:"isError,omitempty"`
-}
-
-// ToolContent represents a single content block within a tool result.
-type ToolContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}
 
 // Client manages a connection to a single downstream MCP server subprocess.
 type Client struct {
@@ -45,7 +28,7 @@ type Client struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 	mu     sync.Mutex // protects writes to stdin and reads from stdout
-	tools  []ToolDef
+	tools  []mcp.ToolDef
 	nextID int64
 }
 
@@ -144,14 +127,14 @@ func NewClient(ctx context.Context, name string, command []string, env []string)
 }
 
 // DiscoverTools sends a tools/list request and caches the result.
-func (c *Client) DiscoverTools(_ context.Context) ([]ToolDef, error) {
+func (c *Client) DiscoverTools(_ context.Context) ([]mcp.ToolDef, error) {
 	raw, err := c.sendRequest("tools/list", nil)
 	if err != nil {
 		return nil, err
 	}
 
 	var envelope struct {
-		Tools []ToolDef `json:"tools"`
+		Tools []mcp.ToolDef `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("mcpclient: parse tools/list result: %w", err)
@@ -162,7 +145,7 @@ func (c *Client) DiscoverTools(_ context.Context) ([]ToolDef, error) {
 }
 
 // CallTool invokes a tool on the downstream MCP server by name.
-func (c *Client) CallTool(_ context.Context, name string, arguments map[string]any) (*ToolResult, error) {
+func (c *Client) CallTool(_ context.Context, name string, arguments map[string]any) (*mcp.ToolResult, error) {
 	params := map[string]any{
 		"name":      name,
 		"arguments": arguments,
@@ -173,7 +156,7 @@ func (c *Client) CallTool(_ context.Context, name string, arguments map[string]a
 		return nil, err
 	}
 
-	var result ToolResult
+	var result mcp.ToolResult
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, fmt.Errorf("mcpclient: parse tools/call result: %w", err)
 	}
@@ -182,7 +165,7 @@ func (c *Client) CallTool(_ context.Context, name string, arguments map[string]a
 }
 
 // Tools returns the cached list of tools discovered from the server.
-func (c *Client) Tools() []ToolDef {
+func (c *Client) Tools() []mcp.ToolDef {
 	return c.tools
 }
 
