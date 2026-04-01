@@ -15,9 +15,11 @@ import (
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/notify"
 	"github.com/ALRubinger/aileron/core/policy"
+	"github.com/ALRubinger/aileron/core/registry"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/ALRubinger/aileron/core/version"
 )
 
 // apiServer implements the generated api.ServerInterface.
@@ -34,6 +36,8 @@ type apiServer struct {
 	grants         *mem.GrantStore
 	executions     *mem.ExecutionStore
 	connectors     *mem.ConnectorStore
+	mcpServers     *mem.MCPServerStore
+	registryClient *registry.Client
 	credentials    *mem.CredentialStore
 	fundingSources *mem.FundingSourceStore
 	traces         *mem.TraceStore
@@ -78,7 +82,7 @@ func (s *apiServer) GetHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.HealthResponse{
 		Status:    "ok",
 		Service:   "aileron",
-		Version:   "0.0.1",
+		Version:   version.Version,
 		Timestamp: time.Now().UTC(),
 	})
 }
@@ -705,7 +709,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusAccepted, api.ExecutionRunResponse{
 		ExecutionId: execID,
-		Status:      api.Accepted,
+		Status:      api.ExecutionRunResponseStatusAccepted,
 		AcceptedAt:  &now,
 	})
 }
@@ -1145,26 +1149,307 @@ func modelDecisionToAPI(d model.Decision) api.Decision {
 	return apiD
 }
 
-// --- MCP Server management stubs ---
-// These endpoints will be fully implemented when the gateway supports
-// dynamic downstream server management via the REST API.
+// --- MCP Server management ---
 
-func (s *apiServer) ListMCPServers(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+func (s *apiServer) ListMCPServers(w http.ResponseWriter, r *http.Request) {
+	servers, err := s.mcpServers.List(r.Context(), store.MCPServerFilter{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	if servers == nil {
+		servers = []api.MCPServerConfig{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": servers})
 }
 
-func (s *apiServer) CreateMCPServer(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+func (s *apiServer) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
+	var req api.MCPServerConfig
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	id := "mcp_" + s.newID()
+	req.Id = &id
+	now := time.Now().UTC()
+	req.CreatedAt = &now
+	stopped := api.MCPServerConfigStatusStopped
+	req.Status = &stopped
+	if req.Mode == nil {
+		local := api.Local
+		req.Mode = &local
+	}
+
+	if err := s.mcpServers.Create(r.Context(), req); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, req)
 }
 
-func (s *apiServer) GetMCPServer(w http.ResponseWriter, _ *http.Request, _ string) {
-	http.Error(w, "not found", http.StatusNotFound)
+func (s *apiServer) GetMCPServer(w http.ResponseWriter, r *http.Request, id string) {
+	srv, err := s.mcpServers.Get(r.Context(), id)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, srv)
 }
 
-func (s *apiServer) UpdateMCPServer(w http.ResponseWriter, _ *http.Request, _ string) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+func (s *apiServer) UpdateMCPServer(w http.ResponseWriter, r *http.Request, id string) {
+	var req api.MCPServerConfig
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	existing, err := s.mcpServers.Get(r.Context(), id)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	// Preserve read-only fields from existing record.
+	req.Id = existing.Id
+	req.CreatedAt = existing.CreatedAt
+	req.Status = existing.Status
+	now := time.Now().UTC()
+	req.UpdatedAt = &now
+
+	if err := s.mcpServers.Update(r.Context(), req); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, req)
 }
 
-func (s *apiServer) DeleteMCPServer(w http.ResponseWriter, _ *http.Request, _ string) {
-	http.Error(w, "not implemented", http.StatusNotImplemented)
+func (s *apiServer) DeleteMCPServer(w http.ResponseWriter, r *http.Request, id string) {
+	if err := s.mcpServers.Delete(r.Context(), id); err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- MCP Server credentials ---
+
+func (s *apiServer) SetMCPServerCredential(w http.ResponseWriter, r *http.Request, id string) {
+	var req api.SetCredentialRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	ctx := r.Context()
+
+	// Verify server exists.
+	srv, err := s.mcpServers.Get(ctx, id)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	// Store secret in vault.
+	vaultPath := "mcp-servers/" + id + "/" + req.EnvVarName
+	s.vault.Put(ctx, vaultPath, []byte(req.SecretValue), vault.Metadata{
+		Type: "mcp_server_credential",
+		Labels: map[string]string{
+			"server_id": id,
+			"env_var":   req.EnvVarName,
+		},
+	})
+
+	// Update server config env to reference the vault path.
+	envMap := make(map[string]string)
+	if srv.Env != nil {
+		for k, v := range *srv.Env {
+			envMap[k] = v
+		}
+	}
+	envMap[req.EnvVarName] = "vault://" + vaultPath
+	srv.Env = &envMap
+	now := time.Now().UTC()
+	srv.UpdatedAt = &now
+
+	if err := s.mcpServers.Update(ctx, srv); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, api.SetCredentialResponse{
+		EnvVarName: req.EnvVarName,
+		Stored:     true,
+	})
+}
+
+// --- Marketplace ---
+
+func (s *apiServer) ListMarketplaceServers(w http.ResponseWriter, r *http.Request, params api.ListMarketplaceServersParams) {
+	ctx := r.Context()
+
+	var query string
+	if params.Q != nil {
+		query = *params.Q
+	}
+
+	servers, err := s.registryClient.Search(ctx, query)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "registry_error", err.Error())
+		return
+	}
+
+	// Build a set of installed registry IDs for enrichment.
+	installed, _ := s.mcpServers.List(ctx, store.MCPServerFilter{})
+	installedSet := make(map[string]bool, len(installed))
+	for _, srv := range installed {
+		if srv.RegistryId != nil {
+			installedSet[*srv.RegistryId] = true
+		}
+	}
+
+	items := make([]api.MarketplaceServer, 0, len(servers))
+	for _, srv := range servers {
+		ms := api.MarketplaceServer{
+			RegistryId: srv.Name,
+			Name:       srv.Name,
+		}
+		if srv.Description != "" {
+			ms.Description = &srv.Description
+		}
+		if srv.Version != "" {
+			ms.Version = &srv.Version
+		}
+		isInstalled := installedSet[srv.Name]
+		ms.Installed = &isInstalled
+
+		// Collect required env vars from packages.
+		var envVars []api.RequiredEnvVar
+		for _, pkg := range srv.Packages {
+			for _, ev := range pkg.EnvVars {
+				envVars = append(envVars, api.RequiredEnvVar{
+					Name:        ev.Name,
+					Description: &ev.Description,
+					Required:    &ev.Required,
+				})
+			}
+		}
+		if len(envVars) > 0 {
+			ms.RequiredEnvVars = &envVars
+		}
+
+		items = append(items, ms)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *apiServer) InstallMarketplaceServer(w http.ResponseWriter, r *http.Request, registryId string) {
+	ctx := r.Context()
+
+	srv, err := s.registryClient.Get(ctx, registryId)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "registry_error", err.Error())
+		return
+	}
+	if srv == nil {
+		writeError(w, http.StatusNotFound, "not_found", "server not found in registry: "+registryId)
+		return
+	}
+
+	// Derive command from the best available package.
+	command, envVars := deriveCommand(srv)
+
+	id := "mcp_" + s.newID()
+	now := time.Now().UTC()
+	stopped := api.MCPServerConfigStatusStopped
+	local := api.Local
+	config := api.MCPServerConfig{
+		Id:         &id,
+		Name:       srv.Name,
+		Command:    command,
+		Status:     &stopped,
+		Mode:       &local,
+		RegistryId: &registryId,
+		CreatedAt:  &now,
+	}
+	if srv.Description != "" {
+		config.Description = &srv.Description
+	}
+
+	// Pre-populate env map with empty values for required env vars.
+	if len(envVars) > 0 {
+		envMap := make(map[string]string, len(envVars))
+		for _, ev := range envVars {
+			envMap[ev.Name] = ""
+		}
+		config.Env = &envMap
+	}
+
+	if err := s.mcpServers.Create(ctx, config); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	// Build required credentials list.
+	var reqCreds []api.RequiredEnvVar
+	for _, ev := range envVars {
+		reqCreds = append(reqCreds, api.RequiredEnvVar{
+			Name:        ev.Name,
+			Description: &ev.Description,
+			Required:    &ev.Required,
+		})
+	}
+
+	result := api.InstallResult{
+		Server: config,
+	}
+	if len(reqCreds) > 0 {
+		result.RequiredCredentials = &reqCreds
+	}
+
+	writeJSON(w, http.StatusCreated, result)
+}
+
+// deriveCommand picks the best package from a registry server and returns
+// the command array and required env vars.
+func deriveCommand(srv *registry.RegistryServer) ([]string, []registry.EnvVar) {
+	// Prefer npm packages (most common for MCP servers).
+	for _, pkg := range srv.Packages {
+		if pkg.RegistryType == "npm" {
+			cmd := []string{"npx", "-y", pkg.Name}
+			if pkg.Runtime.Args != nil {
+				cmd = append(cmd, pkg.Runtime.Args...)
+			}
+			return cmd, pkg.EnvVars
+		}
+	}
+
+	// Fall back to any package with a runtime command.
+	for _, pkg := range srv.Packages {
+		if pkg.Runtime.Command != "" {
+			cmd := []string{pkg.Runtime.Command}
+			cmd = append(cmd, pkg.Runtime.Args...)
+			return cmd, pkg.EnvVars
+		}
+	}
+
+	// Last resort: use the server name as the command.
+	return []string{srv.Name}, nil
 }

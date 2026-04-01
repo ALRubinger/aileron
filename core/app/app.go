@@ -17,6 +17,7 @@ import (
 	"github.com/ALRubinger/aileron/core/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/core/notify"
 	"github.com/ALRubinger/aileron/core/policy"
+	mcpreg "github.com/ALRubinger/aileron/core/registry"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/google/uuid"
@@ -34,6 +35,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	grantStore := mem.NewGrantStore()
 	executionStore := mem.NewExecutionStore()
 	connectorStore := mem.NewConnectorStore()
+	mcpServerStore := mem.NewMCPServerStore()
 	credentialStore := mem.NewCredentialStore()
 	fundingSourceStore := mem.NewFundingSourceStore()
 	traceStore := mem.NewTraceStore()
@@ -68,6 +70,9 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	idGen := func() string { return uuid.New().String() }
 	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
 
+	// --- MCP Registry client ---
+	registryClient := mcpreg.NewClient(nil)
+
 	// --- Notifier ---
 	notifier := notify.NewLogNotifier(log)
 
@@ -87,6 +92,8 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		grants:         grantStore,
 		executions:     executionStore,
 		connectors:     connectorStore,
+		mcpServers:     mcpServerStore,
+		registryClient: registryClient,
 		credentials:    credentialStore,
 		fundingSources: fundingSourceStore,
 		traces:         traceStore,
