@@ -9,7 +9,12 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ALRubinger/aileron/core/mcp"
 )
+
+// Compile-time check that *Client satisfies mcp.ToolExecutor.
+var _ mcp.ToolExecutor = (*Client)(nil)
 
 // ---------------------------------------------------------------------------
 // Mock MCP server helper process
@@ -74,7 +79,7 @@ func handleMockRequest(req jsonrpcRequest) *jsonrpcResponse {
 
 	case "tools/list":
 		result, _ := json.Marshal(map[string]any{
-			"tools": []ToolDef{
+			"tools": []mcp.ToolDef{
 				{
 					Name:        "echo",
 					Description: "Echoes the input back",
@@ -114,8 +119,8 @@ func handleMockRequest(req jsonrpcRequest) *jsonrpcResponse {
 		switch params.Name {
 		case "echo":
 			msg, _ := params.Arguments["message"].(string)
-			result, _ := json.Marshal(ToolResult{
-				Content: []ToolContent{{Type: "text", Text: msg}},
+			result, _ := json.Marshal(mcp.ToolResult{
+				Content: []mcp.ToolContent{{Type: "text", Text: msg}},
 			})
 			return &jsonrpcResponse{
 				JSONRPC: "2.0",
@@ -124,8 +129,8 @@ func handleMockRequest(req jsonrpcRequest) *jsonrpcResponse {
 			}
 		case "greet":
 			name, _ := params.Arguments["name"].(string)
-			result, _ := json.Marshal(ToolResult{
-				Content: []ToolContent{{Type: "text", Text: "Hello, " + name + "!"}},
+			result, _ := json.Marshal(mcp.ToolResult{
+				Content: []mcp.ToolContent{{Type: "text", Text: "Hello, " + name + "!"}},
 			})
 			return &jsonrpcResponse{
 				JSONRPC: "2.0",
@@ -133,8 +138,8 @@ func handleMockRequest(req jsonrpcRequest) *jsonrpcResponse {
 				Result:  result,
 			}
 		case "fail":
-			result, _ := json.Marshal(ToolResult{
-				Content: []ToolContent{{Type: "text", Text: "something went wrong"}},
+			result, _ := json.Marshal(mcp.ToolResult{
+				Content: []mcp.ToolContent{{Type: "text", Text: "something went wrong"}},
 				IsError: true,
 			})
 			return &jsonrpcResponse{
