@@ -120,6 +120,21 @@ type FundingSourceFilter struct {
 	PageToken   string
 }
 
+// MCPServerStore persists and retrieves MCP server configurations.
+type MCPServerStore interface {
+	Create(ctx context.Context, server api.MCPServerConfig) error
+	Get(ctx context.Context, serverID string) (api.MCPServerConfig, error)
+	List(ctx context.Context, filter MCPServerFilter) ([]api.MCPServerConfig, error)
+	Update(ctx context.Context, server api.MCPServerConfig) error
+	Delete(ctx context.Context, serverID string) error
+}
+
+// MCPServerFilter scopes an MCP server list query.
+type MCPServerFilter struct {
+	Status   *api.MCPServerConfigStatus
+	PageSize int
+}
+
 // ErrNotFound is returned when a requested entity does not exist.
 type ErrNotFound struct {
 	Entity string

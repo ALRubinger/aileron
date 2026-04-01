@@ -920,6 +920,77 @@ paths:
         "204":
           description: Server removed
 
+  /v1/mcp-servers/{id}/credentials:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [MCP Servers]
+      summary: Store a credential for an MCP server
+      operationId: setMCPServerCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetCredentialRequest"
+      responses:
+        "200":
+          description: Credential stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetCredentialResponse"
+        "404":
+          description: Server not found
+
+  /v1/marketplace/servers:
+    get:
+      tags: [Marketplace]
+      summary: Browse the MCP server marketplace
+      operationId: listMarketplaceServers
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+          description: Search query to filter servers by name or description
+      responses:
+        "200":
+          description: List of marketplace servers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MarketplaceServer"
+
+  /v1/marketplace/servers/{registryId}/install:
+    parameters:
+      - name: registryId
+        in: path
+        required: true
+        schema: { type: string }
+        description: Registry identifier (e.g. io.github.user/server)
+    post:
+      tags: [Marketplace]
+      summary: Install an MCP server from the marketplace
+      operationId: installMarketplaceServer
+      responses:
+        "201":
+          description: Server installed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstallResult"
+        "404":
+          description: Server not found in registry
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2174,6 +2245,9 @@ components:
         name:
           type: string
           description: Unique identifier for this server
+        description:
+          type: string
+          description: Human-readable description of this server
         command:
           type: array
           items:
@@ -2184,9 +2258,93 @@ components:
           additionalProperties:
             type: string
           description: Environment variables (vault:// prefix for vault resolution)
+        mode:
+          type: string
+          enum: [local, remote]
+          default: local
+          description: Execution mode (local subprocess or remote HTTP)
+        status:
+          type: string
+          enum: [stopped, running, error]
+          readOnly: true
+          description: Current server status (set by the system)
+        registry_id:
+          type: string
+          description: MCP Registry identifier if installed from marketplace
         policy_mapping:
           type: object
           properties:
             tool_prefix:
               type: string
               description: Maps tool calls to action type namespace
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    SetCredentialRequest:
+      type: object
+      required: [env_var_name, secret_value]
+      properties:
+        env_var_name:
+          type: string
+          description: Environment variable name
+        secret_value:
+          type: string
+          description: Secret value to store in the vault
+
+    SetCredentialResponse:
+      type: object
+      required: [env_var_name, stored]
+      properties:
+        env_var_name:
+          type: string
+        stored:
+          type: boolean
+
+    MarketplaceServer:
+      type: object
+      required: [registry_id, name]
+      properties:
+        registry_id:
+          type: string
+          description: Unique registry identifier (reverse DNS)
+        name:
+          type: string
+        description:
+          type: string
+        version:
+          type: string
+        installed:
+          type: boolean
+          description: Whether this server is already installed locally
+        required_env_vars:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequiredEnvVar"
+
+    RequiredEnvVar:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        required:
+          type: boolean
+
+    InstallResult:
+      type: object
+      required: [server]
+      properties:
+        server:
+          $ref: "#/components/schemas/MCPServerConfig"
+        required_credentials:
+          type: array
+          items:
+            $ref: "#/components/schemas/RequiredEnvVar"
