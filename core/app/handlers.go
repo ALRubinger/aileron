@@ -1144,3 +1144,27 @@ func modelDecisionToAPI(d model.Decision) api.Decision {
 	}
 	return apiD
 }
+
+// --- MCP Server management stubs ---
+// These endpoints will be fully implemented when the gateway supports
+// dynamic downstream server management via the REST API.
+
+func (s *apiServer) ListMCPServers(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+}
+
+func (s *apiServer) CreateMCPServer(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "not implemented", http.StatusNotImplemented)
+}
+
+func (s *apiServer) GetMCPServer(w http.ResponseWriter, _ *http.Request, _ string) {
+	http.Error(w, "not found", http.StatusNotFound)
+}
+
+func (s *apiServer) UpdateMCPServer(w http.ResponseWriter, _ *http.Request, _ string) {
+	http.Error(w, "not implemented", http.StatusNotImplemented)
+}
+
+func (s *apiServer) DeleteMCPServer(w http.ResponseWriter, _ *http.Request, _ string) {
+	http.Error(w, "not implemented", http.StatusNotImplemented)
+}
