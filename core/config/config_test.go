@@ -167,6 +167,104 @@ func TestValidate_EmptyCommand(t *testing.T) {
 	}
 }
 
+func TestValidate_ModeLocal_RequiresCommand(t *testing.T) {
+	cfg := &Config{
+		DownstreamServers: []DownstreamServer{
+			{Name: "local", Mode: "local", Command: []string{"cmd"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+}
+
+func TestValidate_ModeRemote_NoCommandRequired(t *testing.T) {
+	cfg := &Config{
+		DownstreamServers: []DownstreamServer{
+			{Name: "remote", Mode: "remote"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+}
+
+func TestValidate_ModeRemote_CommandMustBeEmpty(t *testing.T) {
+	cfg := &Config{
+		DownstreamServers: []DownstreamServer{
+			{Name: "remote", Mode: "remote", Command: []string{"cmd"}},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error for remote mode with command, got nil")
+	}
+	if !strings.Contains(err.Error(), "command must be empty for remote mode") {
+		t.Errorf("error = %q, want mention of empty command for remote mode", err.Error())
+	}
+}
+
+func TestValidate_InvalidMode(t *testing.T) {
+	cfg := &Config{
+		DownstreamServers: []DownstreamServer{
+			{Name: "bad", Mode: "hybrid", Command: []string{"cmd"}},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error for invalid mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid mode") {
+		t.Errorf("error = %q, want mention of invalid mode", err.Error())
+	}
+}
+
+func TestValidate_EmptyMode_DefaultsToLocal(t *testing.T) {
+	// Empty mode with a command should pass (defaults to local).
+	cfg := &Config{
+		DownstreamServers: []DownstreamServer{
+			{Name: "srv", Command: []string{"cmd"}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() unexpected error: %v", err)
+	}
+
+	// Empty mode without a command should fail (local requires command).
+	cfg2 := &Config{
+		DownstreamServers: []DownstreamServer{
+			{Name: "srv"},
+		},
+	}
+	err := cfg2.Validate()
+	if err == nil {
+		t.Fatal("Validate() expected error for empty mode without command, got nil")
+	}
+}
+
+func TestLoad_RemoteServerConfig(t *testing.T) {
+	yaml := `version: "1"
+downstream_servers:
+  - name: github
+    mode: remote
+    env:
+      GITHUB_TOKEN: "vault://secrets/github/token"
+    policy_mapping:
+      tool_prefix: git
+`
+	path := writeTempFile(t, "remote-*.yaml", yaml)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if len(cfg.DownstreamServers) != 1 {
+		t.Fatalf("len(DownstreamServers) = %d, want 1", len(cfg.DownstreamServers))
+	}
+	if cfg.DownstreamServers[0].Mode != "remote" {
+		t.Errorf("Mode = %q, want %q", cfg.DownstreamServers[0].Mode, "remote")
+	}
+}
+
 func TestValidate_InvalidVersion(t *testing.T) {
 	cfg := &Config{
 		Version: "2",

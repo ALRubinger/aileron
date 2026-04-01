@@ -23,6 +23,18 @@ var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
 // should be resolved from the vault.
 const vaultPrefix = "vault://"
 
+// Execution mode constants for downstream servers.
+const (
+	// ModeLocal runs the MCP server as a local subprocess (stdio transport).
+	// This is the default when Mode is omitted.
+	ModeLocal = "local"
+
+	// ModeRemote connects to a centrally-managed MCP server over HTTP
+	// (Streamable HTTP transport). The control plane manages the server
+	// instance; no local command is needed.
+	ModeRemote = "remote"
+)
+
 // Config is the top-level Aileron gateway configuration.
 type Config struct {
 	// Version is the config file format version. Currently "1".
@@ -42,7 +54,13 @@ type DownstreamServer struct {
 	// Must be a valid identifier (alphanumeric + underscore, no spaces).
 	Name string `yaml:"name"`
 
+	// Mode is the execution mode: "local" (default) or "remote".
+	// Local servers are spawned as subprocesses; remote servers are accessed
+	// over HTTP via the control plane. Omitting Mode defaults to "local".
+	Mode string `yaml:"mode,omitempty"`
+
 	// Command is the command to execute, including any arguments.
+	// Required for local mode; must be empty for remote mode.
 	// Example: ["npx", "-y", "@modelcontextprotocol/server-github"]
 	Command []string `yaml:"command"`
 
@@ -123,8 +141,21 @@ func (c *Config) Validate() error {
 		}
 		seen[ds.Name] = true
 
-		if len(ds.Command) == 0 {
-			return fmt.Errorf("downstream_servers[%d] (%s): command must not be empty", i, ds.Name)
+		// Normalize and validate mode.
+		mode := ds.Mode
+		if mode == "" {
+			mode = ModeLocal
+		}
+		if mode != ModeLocal && mode != ModeRemote {
+			return fmt.Errorf("downstream_servers[%d] (%s): invalid mode %q: must be %q or %q", i, ds.Name, ds.Mode, ModeLocal, ModeRemote)
+		}
+
+		// Local servers require a command; remote servers must not have one.
+		if mode == ModeLocal && len(ds.Command) == 0 {
+			return fmt.Errorf("downstream_servers[%d] (%s): command must not be empty for local mode", i, ds.Name)
+		}
+		if mode == ModeRemote && len(ds.Command) > 0 {
+			return fmt.Errorf("downstream_servers[%d] (%s): command must be empty for remote mode", i, ds.Name)
 		}
 	}
 
