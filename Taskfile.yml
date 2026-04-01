@@ -40,13 +40,21 @@ tasks:
 
   build:server:
     desc: Build the Go server binary locally
+    vars:
+      VERSION: dev
+      COMMIT:
+        sh: git rev-parse --short HEAD
     cmds:
-      - go build -o build/server ./core/server
+      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/server ./core/server
 
   build:mcp:
     desc: Build the MCP server binary locally
+    vars:
+      VERSION: dev
+      COMMIT:
+        sh: git rev-parse --short HEAD
     cmds:
-      - go build -o build/aileron-mcp ./cmd/aileron-mcp
+      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
 
   build:ui:
     desc: Install UI dependencies and build
@@ -139,6 +147,11 @@ tasks:
       - task: up -- -d --build --wait
       - task: test:integration
       - task: down
+
+  release:snapshot:
+    desc: Test GoReleaser locally (snapshot, no publish)
+    cmds:
+      - goreleaser release --snapshot --clean
 
   health:
     desc: Check the server health endpoint

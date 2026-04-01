@@ -31,6 +31,7 @@ import (
 	"github.com/ALRubinger/aileron/core/policy"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/ALRubinger/aileron/core/version"
 	"github.com/google/uuid"
 )
 
@@ -211,7 +212,7 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 				},
 				"serverInfo": map[string]any{
 					"name":    "aileron",
-					"version": "0.0.2",
+					"version": version.Version,
 				},
 			},
 		}

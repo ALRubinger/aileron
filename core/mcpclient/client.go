@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/core/mcp"
+	"github.com/ALRubinger/aileron/core/version"
 )
 
 // Client manages a connection to a single downstream MCP server subprocess.
@@ -100,7 +101,7 @@ func NewClient(ctx context.Context, name string, command []string, env []string)
 		"capabilities":    map[string]any{},
 		"clientInfo": map[string]any{
 			"name":    "aileron-gateway",
-			"version": "0.0.1",
+			"version": version.Version,
 		},
 	}
 
