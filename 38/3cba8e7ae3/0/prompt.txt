@@ -1,0 +1,21 @@
+I want to talk about the architectural changes we made to create Aileron as the one MCP through which other MCPs are installed. We need to asses this for viability. Assuming an enterprise case where Aileron is cloud-hosted, where would the MCP tools for a user run? Seems like we'd be shifting the MCP runtime for N users from running on their individual machines to running centralized? Or can we simply put the policy runtime into the central control plane and the mcp client for the user runs tools locally?
+
+---
+
+Expand on the consequences. We both want to enable the most easy to use case for individual developers as well as the Enterprise management case where policy is centrally controlled (either hosted by Aileron the company or by the organization running it)
+
+---
+
+Good. Plan to implement this.
+
+---
+
+There are tests for all new functionality? Code coverage hasn't declined significantly?
+
+---
+
+Prep a PR
+
+---
+
+Add it to .gitignore and add that change to the PR if it is part of this build and it is not left over from prior work
