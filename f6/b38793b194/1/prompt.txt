@@ -3,3 +3,15 @@ I want Aileron to be loved by developers. Yes, it provides protection and auditi
 ---
 
 Prep a PR
+
+---
+
+CI vet fails with:
+
+go: downloading github.com/oapi-codegen/runtime v1.3.1
+go: downloading github.com/google/uuid v1.6.0
+go: downloading github.com/apapsch/go-jsonmerge/v2 v2.0.0
+Error: core/app/handlers.go:22:2: no required module provides package github.com/ALRubinger/aileron/core/version; to add it:
+    cd /home/runner/work/aileron/aileron/core
+    go get github.com/ALRubinger/aileron/core/version
+Error: Process completed with exit code 1.
