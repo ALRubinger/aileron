@@ -105,7 +105,68 @@ func SeedPolicies(ctx context.Context, policies store.PolicyStore) error {
 		},
 	}
 
-	for _, p := range []api.Policy{protectedBranches, featureBranches, denyForcePush} {
+	// Policy 4: Require approval for tool calls targeting protected branches
+	// via the MCP gateway. This uses tool.* fields set by the gateway when
+	// proxying MCP tool calls.
+	toolProtectedBranches := api.Policy{
+		PolicyId:    "pol_tool_require_approval_protected_branches",
+		WorkspaceId: defaultWorkspace,
+		Name:        "Require approval for gateway tool calls targeting protected branches",
+		Version:     1,
+		Status:      api.PolicyStatusActive,
+		CreatedAt:   &now,
+		UpdatedAt:   &now,
+		Rules: []api.PolicyRule{
+			{
+				RuleId:      "rule_tool_pr_to_main",
+				Description: strPtr("Require approval for tool calls targeting main/master/production"),
+				Effect:      api.PolicyRuleEffectRequireApproval,
+				Priority:    intPtr(100),
+				Conditions: &[]api.PolicyCondition{
+					{
+						Field:    strPtr("tool.argument.base"),
+						Operator: operatorPtr(api.In),
+						Value:    makeValue([]string{"main", "master", "production"}),
+					},
+				},
+			},
+		},
+	}
+
+	// Policy 5: Deny destructive tool calls (delete_* tools).
+	denyDestructiveTools := api.Policy{
+		PolicyId:    "pol_deny_destructive_tools",
+		WorkspaceId: defaultWorkspace,
+		Name:        "Deny destructive tool calls",
+		Version:     1,
+		Status:      api.PolicyStatusActive,
+		CreatedAt:   &now,
+		UpdatedAt:   &now,
+		Rules: []api.PolicyRule{
+			{
+				RuleId:      "rule_deny_delete_tools",
+				Description: strPtr("Deny tool calls with names matching delete_*"),
+				Effect:      api.PolicyRuleEffectDeny,
+				Priority:    intPtr(200),
+				Conditions: &[]api.PolicyCondition{
+					{
+						Field:    strPtr("tool.name"),
+						Operator: operatorPtr(api.Matches),
+						Value:    makeValue("delete_*"),
+					},
+				},
+			},
+		},
+	}
+
+	allPolicies := []api.Policy{
+		protectedBranches,
+		featureBranches,
+		denyForcePush,
+		toolProtectedBranches,
+		denyDestructiveTools,
+	}
+	for _, p := range allPolicies {
 		if err := policies.Create(ctx, p); err != nil {
 			return err
 		}
