@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "c461373b544b",
+  "strategy": "manual-commit",
+  "branch": "feat/mcp-gateway-aggregator",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/c4/61373b544b/0/metadata.json",
+      "transcript": "/c4/61373b544b/0/full.jsonl",
+      "content_hash": "/c4/61373b544b/0/content_hash.txt",
+      "prompt": "/c4/61373b544b/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3633,
+    "cache_creation_tokens": 176858,
+    "cache_read_tokens": 13335189,
+    "output_tokens": 55407,
+    "api_call_count": 117
+  }
+}

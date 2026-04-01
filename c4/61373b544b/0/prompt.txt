@@ -1,0 +1,168 @@
+How is it that when we connect to Claude Code as an MCP server, we are able to intercept calls to external tooling like sending emails, making calendar invites, or making payments? Can we guarantee that we will intercept those actions and Aileron will handle them via connectors, as promised in the README "How it Works", section 4?
+
+---
+
+I want to discuss the architctural direction to see if we cannot lock this down. What is making the agent call "submit_intent"? Is that an Aileron concept? An MCP one? A common agent one? What is the basis for the assumption that the agent will call "submit_intent" and Aileron will receive it so that it can handle the actions on its own?
+
+---
+
+I have an idea what I'd like to do. Recommend which path you believe is best first. And tell me if you believe that the current enforcement model presents a problem because there is nothing guaranteeing we don't bypass Aileron entirely.
+
+---
+
+I want the enforcement of Option B, but that would mean asking folks to give up the tools they already use and love - Claude Code, OpenClaw, etc
+
+---
+
+Yes. Aileron would have to become the only MCP tool used by the agent; and MCP installation would move to Aileron. I also believe this could help in the Enterprise case; employees would all have Aileron installed on their agent, and Aileron in turn could be configured by the enterprise with which MCP services are enabled. Or the user themselves could use Aileron to add MCP services. This gives organizational control over MCP services and further empowers the model where secrets etc are part of the Aileron vault.
+
+---
+
+Yes. Plan to update the OpenAPI spec as necessary, the API surface, the README, and any other changes that needs to be made to create this architectural shift.
+
+---
+
+<task-notification>
+<task-id>ac0e1f55b607e1a3d</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/ac0e1f55b607e1a3d.output</output-file>
+<status>completed</status>
+<summary>Agent "Build config package" completed</summary>
+<result>All 13 tests pass. Here is what was created:
+
+**Files created:**
+- `/Users/alr/git/ALRubinger/aileron/core/config/config.go` -- Package with types (`Config`, `DownstreamServer`, `PolicyMapping`) and functions (`Load`, `LoadFromEnvOrDefault`, `Validate`, `ResolveVaultEnv`)
+- `/Users/alr/git/ALRubinger/aileron/core/config/config_test.go` -- 13 test cases covering all specified scenarios
+
+**Dependency update:**
+- `gopkg.in/yaml.v3` promoted from indirect to direct dependency in `core/go.mod`
+
+All 13 tests pass, including subtests for invalid server name patterns (spaces, leading digits, special characters, dashes).</result>
+<usage><total_tokens>18572</total_tokens><tool_uses>10</tool_uses><duration_ms>94494</duration_ms></usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/ac0e1f55b607e1a3d.output
+
+---
+
+<task-notification>
+<task-id>af37b7094402bb64f</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/af37b7094402bb64f.output</output-file>
+<status>completed</status>
+<summary>Agent "Build MCP client package" completed</summary>
+<result>No changes to go.mod or go.sum. Here is a summary of what was created:
+
+**`/Users/alr/git/ALRubinger/aileron/core/mcpclient/client.go`** -- The MCP client package with:
+- `ToolDef`, `ToolResult`, `ToolContent` public types
+- `Client` struct managing a subprocess connection over stdio
+- `NewClient()` -- spawns subprocess, performs MCP initialize handshake, discovers tools
+- `DiscoverTools()` -- sends `tools/list` and caches results
+- `CallTool()` -- invokes a tool by name with arguments
+- `Tools()` / `Name()` -- accessors for cached state
+- `Close()` -- SIGTERM with 5-second timeout, then SIGKILL
+- Internal helpers: `sendRequest`, `sendNotification`, `readResponse`, `nextRequestID`
+- Uses only stdlib packages; communication is newline-delimited JSON-RPC 2.0
+
+**`/Users/alr/git/ALRubinger/aileron/core/mcpclient/client_test.go`** -- Tests using the `TestHelperProcess` pattern (test binary re-invokes itself as a mock MCP server via `MCPCLIENT_TEST_HELPER=1` env var):
+1. `TestNewClient_InitializesAndDiscoversTools` -- verifies handshake and tool discovery
+2. `TestCallTool_Success` -- tests echo and greet tools return correct results
+3. `TestCallTool_Error` -- verifies `IsError: true` propagation
+4. `TestClose_TerminatesSubprocess` -- confirms process is cleaned up after Close
+5. `TestNewClient_InvalidCommand` -- nonexistent binary returns error
+
+All 6 tests pass. No modifications to go.mod or go.sum.</result>
+<usage><total_tokens>22383</total_tokens><tool_uses>14</tool_uses><duration_ms>124262</duration_ms></usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/af37b7094402bb64f.output
+
+---
+
+<task-notification>
+<task-id>ac74054e0bad3545e</task-id>
+<tool-use-id>toolu_0128wooMkoZoJZ2ueroKz4Ek</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/ac74054e0bad3545e.output</output-file>
+<status>completed</status>
+<summary>Agent "Phase 4 rewrite README" completed</summary>
+<result>The README at `/Users/alr/git/ALRubinger/aileron/README.md` has been rewritten. Here is a summary of the changes:
+
+**Reframed throughout** from cooperative intent-submission model to MCP gateway/aggregator architecture.
+
+**Key changes:**
+- **Header** updated to describe Aileron as an "MCP gateway that enforces governance over every tool call"
+- **The Problem** extended with the bypass risk: agents can skip governance if they have direct API access
+- **The Solution** reframed around Aileron as the single MCP server, aggregating downstream servers and intercepting all tool calls
+- **Architecture diagram** updated to show Agent Host, MCP Gateway, and downstream MCP servers
+- **How It Works** rewritten as a 6-step flow: connect, discover, evaluate, approve, inject credentials, log
+- **For Organizations** section added covering service catalog, credential management, policy governance, and compliance
+- **Configuration** section added showing `aileron.yaml` format with downstream server declarations and vault references
+- **Seed policies** expanded from 3 to 5 (added protected branch and destructive tool call policies)
+- **Architecture Principles** now leads with "Structural enforcement" as the first principle
+- **Project Structure** updated: `cmd/aileron-mcp/` reworded, `core/config/` and `core/mcpclient/` added
+- **Removed** all references to `submit_intent`, `check_approval`, `execute_action`, `list_pending_approvals` as agent-facing tools
+- **Kept** badges, license, prerequisites, test commands, API docs section, and general tone</result>
+<usage><total_tokens>16600</total_tokens><tool_uses>2</tool_uses><duration_ms>76615</duration_ms></usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/ac74054e0bad3545e.output
+
+---
+
+<task-notification>
+<task-id>aa3af31062a7dedae</task-id>
+<tool-use-id>toolu_013cLAjupK3bvai9bxQNboju</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/aa3af31062a7dedae.output</output-file>
+<status>completed</status>
+<summary>Agent "Phase 3b-e production hardening" completed</summary>
+<result>All changes are complete. Here is a summary of what was done:
+
+---
+
+## Summary
+
+### 1. Audit trail wired into gateway
+
+**`/Users/alr/git/ALRubinger/aileron/cmd/aileron-mcp/gateway.go`**:
+- Added `auditStore audit.Store` field to the `gateway` struct
+- Added `AuditStore audit.Store` field to `gatewayConfig`
+- Wired `AuditStore` through in `newGateway`
+- Added `emitAuditEvent` helper method that records events via the audit store (no-op when store is nil)
+- Emit `tool.call.intercepted` at the start of every tool call routing
+- Emit `tool.call.forwarded` when policy allows the call
+- Emit `tool.call.denied` when policy denies (including policy evaluation errors)
+- Emit `tool.call.pending_approval` when held for approval
+
+**`/Users/alr/git/ALRubinger/aileron/cmd/aileron-mcp/auditstore.go`** (new):
+- Minimal in-memory implementation of `audit.Store` for the gateway's embedded mode
+- Thread-safe append-only event storage
+
+### 2. Graceful subprocess lifecycle
+
+**`/Users/alr/git/ALRubinger/aileron/cmd/aileron-mcp/gateway.go`**:
+- `closeAll()` now logs each downstream server shutdown
+- Added `Shutdown(ctx context.Context)` method that logs start/completion, respects context deadline
+
+**`/Users/alr/git/ALRubinger/aileron/cmd/aileron-mcp/main.go`**:
+- Added SIGTERM/SIGINT signal handling that calls `gw.Shutdown()` with a 10-second timeout before exiting
+- Created and passed the `memAuditStore` to the gateway config
+
+### 3. OpenAPI spec updated
+
+**`/Users/alr/git/ALRubinger/aileron/core/api/openapi.yaml`**:
+- Added `MCP Servers` tag
+- Added `/v1/mcp-servers` (GET list, POST create) endpoints
+- Added `/v1/mcp-servers/{id}` (GET, PUT, DELETE) endpoints
+- Added `MCPServerConfig` schema with `id`, `name`, `command`, `env`, and `policy_mapping` properties</result>
+<usage><total_tokens>44992</total_tokens><tool_uses>47</tool_uses><duration_ms>329835</duration_ms></usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/e1e34bc3-392d-4996-92a2-28c011ae841e/tasks/aa3af31062a7dedae.output
+
+---
+
+Test coverage is good? Tests pass?
+
+---
+
+Prep a PR
+
+---
+
+Should cmd/aileron-mcp/aileron-mcp be in .gitignore because it's a build artifact?
