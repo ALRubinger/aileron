@@ -167,7 +167,7 @@ task health
 ```
 
 ```json
-{"status":"ok","service":"aileron","version":"0.0.1","timestamp":"2026-03-31T09:00:00Z"}
+{"status":"ok","service":"aileron","version":"dev","timestamp":"2026-03-31T09:00:00Z"}
 ```
 
 ### Connect Claude Code via MCP
@@ -245,6 +245,49 @@ aileron/
 ├── deploy/
 │   └── docker-compose.yml  Self-hosted deployment
 └── saas/               Proprietary SaaS overlay (billing, multi-tenancy)
+```
+
+## Installation
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/ALRubinger/aileron/releases).
+
+| Platform | Binary | Archive |
+|----------|--------|---------|
+| macOS (Apple Silicon) | `aileron-mcp` | `aileron-mcp_*_darwin_arm64.tar.gz` |
+| macOS (Intel) | `aileron-mcp` | `aileron-mcp_*_darwin_amd64.tar.gz` |
+| Linux (x86_64) | `aileron-mcp` | `aileron-mcp_*_linux_amd64.tar.gz` |
+| Windows (x86_64) | `aileron-mcp.exe` | `aileron-mcp_*_windows_amd64.zip` |
+
+Each release also includes `aileron-server` archives for running the control plane server standalone.
+
+```sh
+# Example: macOS Apple Silicon
+curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron-mcp_0.0.1_darwin_arm64.tar.gz
+tar xzf aileron-mcp_0.0.1_darwin_arm64.tar.gz
+./aileron-mcp --help
+```
+
+Verify the download against the `checksums.txt` file included in each release.
+
+## Releasing
+
+Releases are automated with [GoReleaser](https://goreleaser.com/) and GitHub Actions. Pushing a version tag builds cross-platform binaries and creates a GitHub Release with notes grouped by conventional commit type.
+
+```sh
+git tag -a v0.0.3 -m "Release v0.0.3"
+git push origin v0.0.3
+```
+
+This produces:
+- Binaries for `aileron-server` and `aileron-mcp` across Linux, macOS (Intel + Apple Silicon), and Windows
+- `.tar.gz` archives (unix) and `.zip` archives (Windows)
+- SHA256 checksums (`checksums.txt`)
+- Release notes generated from conventional commits since the last tag
+
+To test the release pipeline locally without publishing:
+
+```sh
+task release:snapshot
 ```
 
 ## Architecture Principles
