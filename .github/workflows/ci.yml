@@ -83,10 +83,11 @@ jobs:
             sdk/go/go.mod
             test/integration/go.mod
 
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: Run Go tests
-        run: |
-          set -o pipefail
-          go test -race -coverprofile=coverage.out -json ./core/... ./sdk/go/... 2>&1 | tee test-results.json
+        run: gotestsum --junitfile test-results.xml -- -race -coverprofile=coverage.out ./core/... ./sdk/go/...
 
       - name: Upload test artifacts
         if: always()
@@ -95,7 +96,7 @@ jobs:
           name: test-results
           path: |
             coverage.out
-            test-results.json
+            test-results.xml
 
       - name: Upload coverage to Codecov
         if: always()
@@ -110,8 +111,8 @@ jobs:
         uses: dorny/test-reporter@v1
         with:
           name: Go Test Results
-          path: test-results.json
-          reporter: go-json
+          path: test-results.xml
+          reporter: java-junit
 
   build:
     name: Build Docker Images
