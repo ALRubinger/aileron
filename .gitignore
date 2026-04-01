@@ -1,9 +1,11 @@
 .claude/
+.task/
 
 # Build output
 /build/
 /dist/
 /aileron-mcp
+cmd/aileron-mcp/aileron-mcp
 
 # UI build output
 ui/.svelte-kit/
