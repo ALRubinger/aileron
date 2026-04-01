@@ -2,23 +2,10 @@
   "cli_version": "0.5.1",
   "checkpoint_id": "f8f795be5d3f",
   "strategy": "manual-commit",
-  "branch": "feat/mcp-gateway-aggregator",
-  "checkpoints_count": 4,
+  "branch": "feat/mcp-gateway-aggregator-v2",
+  "checkpoints_count": 1,
   "files_touched": [
-    "README.md",
-    "cmd/aileron-mcp/callqueue.go",
-    "cmd/aileron-mcp/callqueue_test.go",
-    "cmd/aileron-mcp/gateway.go",
-    "cmd/aileron-mcp/gateway_test.go",
-    "cmd/aileron-mcp/main.go",
-    "cmd/aileron-mcp/mcp_test.go",
-    "core/api/openapi.yaml",
-    "core/mcpclient/client_test.go",
-    "core/model/model.go",
-    "core/policy/engine.go",
-    "core/policy/engine_test.go",
-    "core/policy/seed.go",
-    "core/policy/spi.go"
+    "README.md"
   ],
   "sessions": [
     {
@@ -29,10 +16,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 3623,
-    "cache_creation_tokens": 173387,
-    "cache_read_tokens": 11910052,
-    "output_tokens": 54114,
-    "api_call_count": 109
+    "input_tokens": 3701,
+    "cache_creation_tokens": 197226,
+    "cache_read_tokens": 23127757,
+    "output_tokens": 61728,
+    "api_call_count": 169
   }
 }

@@ -3,44 +3,31 @@
   "checkpoint_id": "f8f795be5d3f",
   "session_id": "e1e34bc3-392d-4996-92a2-28c011ae841e",
   "strategy": "manual-commit",
-  "created_at": "2026-04-01T05:48:56.887129Z",
-  "branch": "feat/mcp-gateway-aggregator",
-  "checkpoints_count": 4,
+  "created_at": "2026-04-01T06:43:08.493133Z",
+  "branch": "feat/mcp-gateway-aggregator-v2",
+  "checkpoints_count": 1,
   "files_touched": [
-    "README.md",
-    "cmd/aileron-mcp/callqueue.go",
-    "cmd/aileron-mcp/callqueue_test.go",
-    "cmd/aileron-mcp/gateway.go",
-    "cmd/aileron-mcp/gateway_test.go",
-    "cmd/aileron-mcp/main.go",
-    "cmd/aileron-mcp/mcp_test.go",
-    "core/api/openapi.yaml",
-    "core/mcpclient/client_test.go",
-    "core/model/model.go",
-    "core/policy/engine.go",
-    "core/policy/engine_test.go",
-    "core/policy/seed.go",
-    "core/policy/spi.go"
+    "README.md"
   ],
   "agent": "Claude Code",
-  "turn_id": "c0d1d3a9c327",
+  "turn_id": "7ce5f818c550",
   "token_usage": {
-    "input_tokens": 3623,
-    "cache_creation_tokens": 173387,
-    "cache_read_tokens": 11910052,
-    "output_tokens": 54114,
-    "api_call_count": 109
+    "input_tokens": 3701,
+    "cache_creation_tokens": 197226,
+    "cache_read_tokens": 23127757,
+    "output_tokens": 61728,
+    "api_call_count": 169
   },
   "session_metrics": {
-    "turn_count": 9
+    "turn_count": 18
   },
   "initial_attribution": {
-    "calculated_at": "2026-04-01T05:48:56.245546Z",
-    "agent_lines": 1302,
-    "human_added": 1456,
-    "human_modified": 49,
+    "calculated_at": "2026-04-01T06:43:07.791686Z",
+    "agent_lines": 0,
+    "human_added": 113,
+    "human_modified": 0,
     "human_removed": 0,
-    "total_committed": 2807,
-    "agent_percentage": 46.38403990024938
+    "total_committed": 113,
+    "agent_percentage": 0
   }
 }
