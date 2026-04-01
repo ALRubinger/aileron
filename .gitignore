@@ -2,6 +2,7 @@
 
 # Build output
 /build/
+/aileron-mcp
 
 # UI build output
 ui/.svelte-kit/
