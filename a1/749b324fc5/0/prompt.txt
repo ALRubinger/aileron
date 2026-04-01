@@ -1,0 +1,9 @@
+Aileron needs a world-class release system. When we make a release, it should be automated, generate release notes I can review, create the binaries for Linux, MacOS (Silicon and Intel), and Windows. Let's talk through the options.
+
+---
+
+Yes prep a PR
+
+---
+
+If they're build artifacts, shouldn't they be in .gitignore?
