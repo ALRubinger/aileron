@@ -19,6 +19,7 @@ import (
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/ALRubinger/aileron/core/version"
 )
 
 // apiServer implements the generated api.ServerInterface.
@@ -81,7 +82,7 @@ func (s *apiServer) GetHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, api.HealthResponse{
 		Status:    "ok",
 		Service:   "aileron",
-		Version:   "0.0.1",
+		Version:   version.Version,
 		Timestamp: time.Now().UTC(),
 	})
 }

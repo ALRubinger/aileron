@@ -1,0 +1,87 @@
+version: 2
+
+builds:
+  - id: aileron-server
+    binary: aileron-server
+    main: ./core/server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/ALRubinger/aileron/core/version.Version={{.Version}}
+      - -X github.com/ALRubinger/aileron/core/version.Commit={{.Commit}}
+
+  - id: aileron-mcp
+    binary: aileron-mcp
+    main: ./cmd/aileron-mcp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/ALRubinger/aileron/core/version.Version={{.Version}}
+      - -X github.com/ALRubinger/aileron/core/version.Commit={{.Commit}}
+
+archives:
+  - id: aileron-server
+    builds:
+      - aileron-server
+    name_template: "aileron-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+  - id: aileron-mcp
+    builds:
+      - aileron-mcp
+    name_template: "aileron-mcp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Performance
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Documentation
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: ALRubinger
+    name: aileron
+  prerelease: auto
+  name_template: "v{{.Version}}"
