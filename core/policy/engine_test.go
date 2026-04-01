@@ -157,6 +157,106 @@ func TestEngine_UnknownActionDefaultsToAllow(t *testing.T) {
 	}
 }
 
+func TestFlattenToolCall(t *testing.T) {
+	tc := &ToolCallContext{
+		ServerName:    "github",
+		ToolName:      "create_pull_request",
+		QualifiedName: "github__create_pull_request",
+		Arguments: map[string]any{
+			"owner": "acme",
+			"repo":  "checkout",
+			"base":  "main",
+			"head":  "fix/tax",
+		},
+	}
+
+	fields := flattenToolCall(tc)
+
+	expected := map[string]any{
+		"tool.server":         "github",
+		"tool.name":           "create_pull_request",
+		"tool.qualified_name": "github__create_pull_request",
+		"tool.argument.owner": "acme",
+		"tool.argument.repo":  "checkout",
+		"tool.argument.base":  "main",
+		"tool.argument.head":  "fix/tax",
+	}
+
+	for k, want := range expected {
+		got, ok := fields[k]
+		if !ok {
+			t.Errorf("missing field %q", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("fields[%q] = %v, want %v", k, got, want)
+		}
+	}
+}
+
+func TestEngine_ToolCallFieldsMergedIntoEvaluation(t *testing.T) {
+	engine := seedAndEngine(t)
+	ctx := context.Background()
+
+	// Evaluate with a ToolCall context alongside the normal Action.
+	// The seed policies match on action.type "git.pull_request.create"
+	// and domain.git.base_branch "main". The ToolCall adds tool.* fields
+	// but shouldn't interfere with existing policy matching.
+	decision, err := engine.Evaluate(ctx, EvaluationRequest{
+		WorkspaceID: "default",
+		AgentID:     "claude_code",
+		Action: model.ActionIntent{
+			Type:    "git.pull_request.create",
+			Summary: "Fix tax rounding",
+			Domain: model.DomainAction{
+				Git: &model.GitAction{
+					Repository: "acme/checkout",
+					Branch:     "fix/tax-rounding",
+					BaseBranch: "main",
+				},
+			},
+		},
+		ToolCall: &ToolCallContext{
+			ServerName:    "github",
+			ToolName:      "create_pull_request",
+			QualifiedName: "github__create_pull_request",
+			Arguments: map[string]any{
+				"base": "main",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	// Should still require approval (same policy match as without ToolCall).
+	if decision.Disposition != model.DispositionRequireApproval {
+		t.Errorf("Disposition = %q, want %q", decision.Disposition, model.DispositionRequireApproval)
+	}
+}
+
+func TestFlattenToolCall_EmptyArguments(t *testing.T) {
+	tc := &ToolCallContext{
+		ServerName:    "slack",
+		ToolName:      "send_message",
+		QualifiedName: "slack__send_message",
+		Arguments:     nil,
+	}
+
+	fields := flattenToolCall(tc)
+	if fields["tool.server"] != "slack" {
+		t.Errorf("tool.server = %v, want %q", fields["tool.server"], "slack")
+	}
+	if fields["tool.name"] != "send_message" {
+		t.Errorf("tool.name = %v, want %q", fields["tool.name"], "send_message")
+	}
+	// No tool.argument.* fields should exist.
+	for k := range fields {
+		if len(k) > 14 && k[:14] == "tool.argument." {
+			t.Errorf("unexpected argument field %q for nil arguments", k)
+		}
+	}
+}
+
 func TestEngine_NoPoliciesDefaultsToAllow(t *testing.T) {
 	// Empty policy store — no rules match.
 	policies := mem.NewPolicyStore()

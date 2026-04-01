@@ -31,6 +31,7 @@ tags:
   - name: Credentials
   - name: Traces
   - name: Analytics
+  - name: MCP Servers
   - name: Health
 
 paths:
@@ -840,6 +841,84 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/mcp-servers:
+    get:
+      tags: [MCP Servers]
+      summary: List configured downstream MCP servers
+      operationId: listMCPServers
+      responses:
+        "200":
+          description: List of MCP server configurations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MCPServerConfig"
+    post:
+      tags: [MCP Servers]
+      summary: Register a downstream MCP server
+      operationId: createMCPServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "201":
+          description: Server registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MCPServerConfig"
+
+  /v1/mcp-servers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [MCP Servers]
+      summary: Get MCP server configuration
+      operationId: getMCPServer
+      responses:
+        "200":
+          description: Server configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MCPServerConfig"
+    put:
+      tags: [MCP Servers]
+      summary: Update MCP server configuration
+      operationId: updateMCPServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "200":
+          description: Server updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MCPServerConfig"
+    delete:
+      tags: [MCP Servers]
+      summary: Remove a downstream MCP server
+      operationId: deleteMCPServer
+      responses:
+        "204":
+          description: Server removed
 
 components:
   securitySchemes:
@@ -2084,3 +2163,30 @@ components:
           type: object
           additionalProperties:
             type: integer
+
+    MCPServerConfig:
+      type: object
+      required: [name, command]
+      properties:
+        id:
+          type: string
+          readOnly: true
+        name:
+          type: string
+          description: Unique identifier for this server
+        command:
+          type: array
+          items:
+            type: string
+          description: Command to execute
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Environment variables (vault:// prefix for vault resolution)
+        policy_mapping:
+          type: object
+          properties:
+            tool_prefix:
+              type: string
+              description: Maps tool calls to action type namespace

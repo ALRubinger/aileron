@@ -6,7 +6,7 @@ import (
 )
 
 func TestHandle_Initialize(t *testing.T) {
-	s := &server{client: nil} // client not needed for initialize
+	s := &server{gw: &gateway{routes: make(map[string]toolRoute), queue: newCallQueue()}}
 
 	req := jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -36,7 +36,7 @@ func TestHandle_Initialize(t *testing.T) {
 }
 
 func TestHandle_Ping(t *testing.T) {
-	s := &server{client: nil}
+	s := &server{gw: &gateway{routes: make(map[string]toolRoute), queue: newCallQueue()}}
 
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -53,7 +53,7 @@ func TestHandle_Ping(t *testing.T) {
 }
 
 func TestHandle_NotificationsInitialized(t *testing.T) {
-	s := &server{client: nil}
+	s := &server{gw: &gateway{routes: make(map[string]toolRoute), queue: newCallQueue()}}
 
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -66,7 +66,7 @@ func TestHandle_NotificationsInitialized(t *testing.T) {
 }
 
 func TestHandle_UnknownMethod(t *testing.T) {
-	s := &server{client: nil}
+	s := &server{gw: &gateway{routes: make(map[string]toolRoute), queue: newCallQueue()}}
 
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -85,8 +85,13 @@ func TestHandle_UnknownMethod(t *testing.T) {
 	}
 }
 
-func TestHandle_ToolsList(t *testing.T) {
-	s := &server{client: nil}
+func TestHandle_ToolsList_IncludesCheckApproval(t *testing.T) {
+	gw := &gateway{
+		routes: make(map[string]toolRoute),
+		tools:  []toolDef{checkApprovalToolDef()},
+		queue:  newCallQueue(),
+	}
+	s := &server{gw: gw}
 
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -108,36 +113,48 @@ func TestHandle_ToolsList(t *testing.T) {
 		t.Fatal("expected tools array")
 	}
 
-	expectedTools := map[string]bool{
-		"submit_intent":          false,
-		"check_approval":        false,
-		"execute_action":        false,
-		"list_pending_approvals": false,
-	}
-
+	found := false
 	for _, tool := range tools {
-		if _, exists := expectedTools[tool.Name]; exists {
-			expectedTools[tool.Name] = true
+		if tool.Name == checkApprovalTool {
+			found = true
+			break
 		}
 	}
-
-	for name, found := range expectedTools {
-		if !found {
-			t.Errorf("tool %q not found in tools list", name)
-		}
+	if !found {
+		t.Errorf("tool %q not found in tools list", checkApprovalTool)
 	}
 }
 
-func TestCallTool_UnknownTool(t *testing.T) {
-	s := &server{client: nil}
+func TestRouteToolCall_UnknownTool(t *testing.T) {
+	gw := &gateway{routes: make(map[string]toolRoute), queue: newCallQueue()}
 
-	result := s.callTool(callToolParams{
-		Name:      "nonexistent_tool",
-		Arguments: map[string]any{},
-	})
-
+	result := gw.routeToolCall(nil, "nonexistent_tool", map[string]any{})
 	if !result.IsError {
 		t.Error("expected error for unknown tool")
+	}
+}
+
+func TestRouteToolCall_CheckApprovalStub(t *testing.T) {
+	gw := &gateway{routes: make(map[string]toolRoute), queue: newCallQueue()}
+
+	result := gw.routeToolCall(nil, checkApprovalTool, map[string]any{
+		"approval_id": "apr_test123",
+	})
+
+	if result.IsError {
+		t.Error("expected no error for check_approval stub")
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected content in result")
+	}
+}
+
+func TestRouteToolCall_CheckApprovalMissingID(t *testing.T) {
+	gw := &gateway{routes: make(map[string]toolRoute), queue: newCallQueue()}
+
+	result := gw.routeToolCall(nil, checkApprovalTool, map[string]any{})
+	if !result.IsError {
+		t.Error("expected error when approval_id is missing")
 	}
 }
 
@@ -158,11 +175,75 @@ func TestHelpers_ArgStr(t *testing.T) {
 	}
 }
 
-func TestHelpers_NilIfEmpty(t *testing.T) {
-	if nilIfEmpty("") != nil {
-		t.Error("nilIfEmpty(\"\") should return nil")
+func TestToSchema_NilInput(t *testing.T) {
+	s := toSchema(nil)
+	if s.Type != "object" {
+		t.Errorf("Type = %q, want %q", s.Type, "object")
 	}
-	if got := nilIfEmpty("foo"); got == nil || *got != "foo" {
-		t.Error("nilIfEmpty(\"foo\") should return pointer to \"foo\"")
+}
+
+func TestToSchema_WithProperties(t *testing.T) {
+	input := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{
+				"type":        "string",
+				"description": "The name",
+			},
+		},
+		"required": []any{"name"},
+	}
+
+	s := toSchema(input)
+	if s.Type != "object" {
+		t.Errorf("Type = %q, want %q", s.Type, "object")
+	}
+	if len(s.Properties) != 1 {
+		t.Fatalf("Properties len = %d, want 1", len(s.Properties))
+	}
+	prop, ok := s.Properties["name"]
+	if !ok {
+		t.Fatal("expected 'name' property")
+	}
+	if prop.Type != "string" {
+		t.Errorf("prop.Type = %q, want %q", prop.Type, "string")
+	}
+	if prop.Description != "The name" {
+		t.Errorf("prop.Description = %q, want %q", prop.Description, "The name")
+	}
+	if len(s.Required) != 1 || s.Required[0] != "name" {
+		t.Errorf("Required = %v, want [name]", s.Required)
+	}
+}
+
+func TestServerNameFromQualified(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"github__create_pr", "github"},
+		{"no_separator", ""},
+		{"multi__sep__name", "multi"},
+	}
+	for _, tc := range tests {
+		if got := serverNameFromQualified(tc.input); got != tc.want {
+			t.Errorf("serverNameFromQualified(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestOriginalNameFromQualified(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"github__create_pr", "create_pr"},
+		{"no_separator", "no_separator"},
+		{"multi__sep__name", "sep__name"},
+	}
+	for _, tc := range tests {
+		if got := originalNameFromQualified(tc.input); got != tc.want {
+			t.Errorf("originalNameFromQualified(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }

@@ -27,4 +27,22 @@ type EvaluationRequest struct {
 	AgentID     string
 	Action      model.ActionIntent
 	Context     model.IntentContext
+
+	// ToolCall, when set, provides context about a proxied MCP tool call.
+	// The gateway populates this field; the policy engine merges the
+	// tool-call fields into the flat field map alongside any action fields.
+	ToolCall *ToolCallContext
+}
+
+// ToolCallContext carries metadata about a proxied MCP tool call for use
+// in policy evaluation. Fields are flattened into the "tool.*" namespace.
+type ToolCallContext struct {
+	// ServerName is the downstream MCP server name (e.g. "github").
+	ServerName string
+	// ToolName is the original tool name on the downstream server.
+	ToolName string
+	// QualifiedName is the namespaced tool name (e.g. "github__create_pull_request").
+	QualifiedName string
+	// Arguments are the tool call arguments provided by the agent.
+	Arguments map[string]any
 }

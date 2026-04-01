@@ -37,6 +37,13 @@ func (e *RuleEngine) Evaluate(ctx context.Context, req EvaluationRequest) (model
 	// Flatten to intent fields for condition evaluation.
 	fields := flattenIntent(req.Action, req.Context)
 
+	// Merge tool-call fields when evaluating a proxied MCP tool call.
+	if req.ToolCall != nil {
+		for k, v := range flattenToolCall(req.ToolCall) {
+			fields[k] = v
+		}
+	}
+
 	// Collect all matching rules across policies, sorted by priority.
 	type match struct {
 		policy api.Policy
@@ -356,4 +363,21 @@ func effectToRiskLevel(effect api.PolicyRuleEffect) model.RiskLevel {
 	default:
 		return model.RiskLevelHigh
 	}
+}
+
+// flattenToolCall creates a flat map of "tool.*" fields from a ToolCallContext
+// for use in condition evaluation. Arguments are flattened one level deep
+// into the "tool.argument.<key>" namespace.
+func flattenToolCall(tc *ToolCallContext) map[string]any {
+	fields := map[string]any{
+		"tool.server":         tc.ServerName,
+		"tool.name":           tc.ToolName,
+		"tool.qualified_name": tc.QualifiedName,
+	}
+
+	for k, v := range tc.Arguments {
+		fields["tool.argument."+k] = v
+	}
+
+	return fields
 }
