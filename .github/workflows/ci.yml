@@ -84,14 +84,34 @@ jobs:
             test/integration/go.mod
 
       - name: Run Go tests
-        run: go test -race -coverprofile=coverage.out ./core/... ./sdk/go/...
+        run: |
+          set -o pipefail
+          go test -race -coverprofile=coverage.out -json ./core/... ./sdk/go/... 2>&1 | tee test-results.json
 
-      - name: Upload coverage
+      - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: coverage
-          path: coverage.out
+          name: test-results
+          path: |
+            coverage.out
+            test-results.json
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      - name: Test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Go Test Results
+          path: test-results.json
+          reporter: go-json
 
   build:
     name: Build Docker Images
