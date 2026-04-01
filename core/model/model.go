@@ -262,4 +262,10 @@ const (
 	EventTypeExecutionStarted   EventType = "execution.started"
 	EventTypeExecutionSucceeded EventType = "execution.succeeded"
 	EventTypeExecutionFailed    EventType = "execution.failed"
+
+	// Gateway tool call events.
+	EventTypeToolCallIntercepted    EventType = "tool.call.intercepted"
+	EventTypeToolCallForwarded      EventType = "tool.call.forwarded"
+	EventTypeToolCallDenied         EventType = "tool.call.denied"
+	EventTypeToolCallPendingApproval EventType = "tool.call.pending_approval"
 )
