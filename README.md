@@ -101,6 +101,15 @@ downstream_servers:
 
 Each downstream server entry specifies the command to launch it, environment variables (with optional vault references for secrets), and policy mapping configuration.
 
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AILERON_ADDR` | `:8080` | Address the control plane server listens on |
+| `AILERON_CONFIG` | `aileron.yaml` | Path to the configuration file |
+| `REGISTRY_REFRESH_INTERVAL` | `15m` | How often the MCP Registry server list is refreshed in the background. Accepts any Go duration string (e.g. `5m`, `1h`). The server prefetches the full registry on startup and refreshes on this interval. |
+| `GITHUB_TOKEN` | | GitHub personal access token, seeded into the vault at startup |
+
 ## Current Status
 
 The MCP gateway architecture is implemented end-to-end:

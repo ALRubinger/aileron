@@ -69,7 +69,7 @@ func TestClient_FetchAll(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 
-	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	client := registry.NewClient(ts.Client(), nil).WithBaseURL(ts.URL)
 	servers, err := client.FetchAll(context.Background())
 	if err != nil {
 		t.Fatalf("FetchAll: %v", err)
@@ -86,7 +86,7 @@ func TestClient_Search(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 
-	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	client := registry.NewClient(ts.Client(), nil).WithBaseURL(ts.URL)
 	ctx := context.Background()
 
 	// Search by description.
@@ -124,7 +124,7 @@ func TestClient_Get(t *testing.T) {
 	ts := newTestServer(t)
 	defer ts.Close()
 
-	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	client := registry.NewClient(ts.Client(), nil).WithBaseURL(ts.URL)
 	ctx := context.Background()
 
 	srv, err := client.Get(ctx, "io.github.example/filesystem")
@@ -158,7 +158,7 @@ func TestClient_Caching(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	client := registry.NewClient(ts.Client(), nil).WithBaseURL(ts.URL)
 	ctx := context.Background()
 
 	// First call hits the server.
@@ -189,7 +189,7 @@ func TestClient_RealRegistryResponse(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	client := registry.NewClient(ts.Client(), nil).WithBaseURL(ts.URL)
 	servers, err := client.FetchAll(context.Background())
 	if err != nil {
 		t.Fatalf("FetchAll failed to decode real registry response: %v", err)
@@ -258,7 +258,7 @@ func TestClient_Pagination(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	client := registry.NewClient(ts.Client(), nil).WithBaseURL(ts.URL)
 	servers, err := client.FetchAll(context.Background())
 	if err != nil {
 		t.Fatalf("FetchAll with pagination: %v", err)
@@ -283,7 +283,7 @@ func TestClient_ErrorHandling(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	client := registry.NewClient(&http.Client{Timeout: 2 * time.Second}).WithBaseURL(ts.URL)
+	client := registry.NewClient(&http.Client{Timeout: 2 * time.Second}, nil).WithBaseURL(ts.URL)
 	_, err := client.FetchAll(context.Background())
 	if err == nil {
 		t.Fatal("expected error for 500 response")

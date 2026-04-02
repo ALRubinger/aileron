@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,30 +16,36 @@ const (
 	// DefaultRegistryURL is the official MCP Registry API endpoint.
 	DefaultRegistryURL = "https://registry.modelcontextprotocol.io"
 
-	// DefaultCacheTTL is how long the server list is cached.
-	DefaultCacheTTL = 15 * time.Minute
+	// DefaultRefreshInterval is how often the registry server list is
+	// refreshed in the background. Override with REGISTRY_REFRESH_INTERVAL.
+	DefaultRefreshInterval = 15 * time.Minute
 )
 
 // Client fetches and caches MCP server metadata from the official registry.
+// Call Start to begin the background refresh loop and prefetch on startup.
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	cacheTTL   time.Duration
+	baseURL         string
+	httpClient      *http.Client
+	refreshInterval time.Duration
+	log             *slog.Logger
 
-	mu        sync.RWMutex
-	cached    []RegistryServer
-	cachedAt  time.Time
+	mu     sync.RWMutex
+	cached []RegistryServer
 }
 
 // NewClient creates a registry client with sensible defaults.
-func NewClient(httpClient *http.Client) *Client {
+func NewClient(httpClient *http.Client, log *slog.Logger) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Client{
-		baseURL:    DefaultRegistryURL,
-		httpClient: httpClient,
-		cacheTTL:   DefaultCacheTTL,
+		baseURL:         DefaultRegistryURL,
+		httpClient:      httpClient,
+		refreshInterval: DefaultRefreshInterval,
+		log:             log,
 	}
 }
 
@@ -48,10 +55,61 @@ func (c *Client) WithBaseURL(url string) *Client {
 	return c
 }
 
-// FetchAll returns every server from the registry, using the cache if fresh.
+// WithRefreshInterval overrides the background refresh interval.
+func (c *Client) WithRefreshInterval(d time.Duration) *Client {
+	c.refreshInterval = d
+	return c
+}
+
+// Start prefetches the registry and starts a background goroutine that
+// refreshes the cache at the configured interval. The goroutine stops
+// when ctx is cancelled.
+func (c *Client) Start(ctx context.Context) {
+	// Prefetch synchronously so the cache is warm before the first request.
+	if err := c.refresh(ctx); err != nil {
+		c.log.Warn("registry prefetch failed; will retry on next interval", "error", err)
+	} else {
+		c.log.Info("registry prefetch complete", "servers", len(c.cached))
+	}
+
+	go func() {
+		ticker := time.NewTicker(c.refreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := c.refresh(ctx); err != nil {
+					c.log.Warn("registry refresh failed", "error", err)
+				} else {
+					c.mu.RLock()
+					count := len(c.cached)
+					c.mu.RUnlock()
+					c.log.Info("registry refresh complete", "servers", count)
+				}
+			}
+		}
+	}()
+}
+
+// refresh fetches all servers from the registry and replaces the cache.
+func (c *Client) refresh(ctx context.Context) error {
+	servers, err := c.fetchFromRegistry(ctx)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.cached = servers
+	c.mu.Unlock()
+	return nil
+}
+
+// FetchAll returns every server from the registry cache. If the cache is
+// empty (Start was not called or prefetch failed), it fetches on demand.
 func (c *Client) FetchAll(ctx context.Context) ([]RegistryServer, error) {
 	c.mu.RLock()
-	if c.cached != nil && time.Since(c.cachedAt) < c.cacheTTL {
+	if c.cached != nil {
 		result := make([]RegistryServer, len(c.cached))
 		copy(result, c.cached)
 		c.mu.RUnlock()
@@ -59,18 +117,14 @@ func (c *Client) FetchAll(ctx context.Context) ([]RegistryServer, error) {
 	}
 	c.mu.RUnlock()
 
-	servers, err := c.fetchFromRegistry(ctx)
-	if err != nil {
+	// Fallback: cache is empty, fetch on demand.
+	if err := c.refresh(ctx); err != nil {
 		return nil, err
 	}
-
-	c.mu.Lock()
-	c.cached = servers
-	c.cachedAt = time.Now()
-	c.mu.Unlock()
-
-	result := make([]RegistryServer, len(servers))
-	copy(result, servers)
+	c.mu.RLock()
+	result := make([]RegistryServer, len(c.cached))
+	copy(result, c.cached)
+	c.mu.RUnlock()
 	return result, nil
 }
 
