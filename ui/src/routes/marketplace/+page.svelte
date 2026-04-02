@@ -2,6 +2,14 @@
 	import { searchMarketplace, installMarketplaceServer, setMCPServerCredential } from '$lib/api';
 	import { onMount } from 'svelte';
 
+	function clickOutside(node: HTMLElement, callback: () => void) {
+		function handleClick(e: MouseEvent) {
+			if (!node.contains(e.target as Node)) callback();
+		}
+		document.addEventListener('click', handleClick, true);
+		return { destroy() { document.removeEventListener('click', handleClick, true); } };
+	}
+
 	let servers = $state<any[]>([]);
 	let loading = $state(true);
 	let error = $state('');
@@ -173,12 +181,16 @@
 							disabled={installing === server.registry_id}
 							style="padding: 0.35rem 0.7rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
 						>
-							{installing === server.registry_id ? 'Installing...' : `Install v${latestVersion}`}
+							{installing === server.registry_id ? 'Installing...' : `Install v${selectedVersions[server.registry_id] || latestVersion}`}
 						</button>
 					{/if}
 				</div>
 				{#if expandedInstall === server.registry_id}
-					<div style="position: absolute; left: 0; right: 0; bottom: 0; padding: 0.75rem 1.25rem 1.25rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 0 0 8px 8px; z-index: 10;">
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div
+					use:clickOutside={() => { expandedInstall = null; }}
+					style="position: absolute; left: 0; right: 0; bottom: 0; padding: 0.75rem 1.25rem 1.25rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 0 0 8px 8px; z-index: 10;"
+				>
 						<div style="display: flex; gap: 0.5rem; align-items: center;">
 							<select
 								bind:value={selectedVersions[server.registry_id]}
