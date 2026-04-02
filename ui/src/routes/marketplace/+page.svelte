@@ -154,39 +154,25 @@
 				{#if server.description}
 					<div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem; flex: 1;">{server.description}</div>
 				{/if}
-				<div style="display: flex; align-items: center; justify-content: space-between; margin-top: auto;">
-					<div style="font-size: 0.8rem; color: var(--text-muted);">
-						{#if latestVersion}v{latestVersion}{/if}
-						{#if versionCount > 1}
-							<span style="margin-left: 0.25rem;">({versionCount} versions)</span>
-						{/if}
-					</div>
+				<div style="display: flex; align-items: center; justify-content: flex-end; gap: 0.4rem; margin-top: auto;">
 					{#if server.installed}
 						<span style="color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 0.2rem 0.6rem; font-size: 0.8rem; font-weight: 600;">Installed</span>
-					{:else if versionCount <= 1}
+					{:else}
 						<button
 							onclick={() => handleInstall(server.registry_id)}
 							disabled={installing === server.registry_id}
-							style="padding: 0.35rem 0.85rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600;"
+							style="padding: 0.35rem 0.7rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
 						>
-							{installing === server.registry_id ? 'Installing...' : 'Install'}
+							{installing === server.registry_id ? 'Installing...' : `Install v${latestVersion}`}
 						</button>
-					{:else}
-						<div style="display: flex; gap: 0.4rem;">
-							<button
-								onclick={() => handleInstall(server.registry_id)}
-								disabled={installing === server.registry_id}
-								style="padding: 0.35rem 0.7rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
-							>
-								{installing === server.registry_id ? 'Installing...' : `Install v${latestVersion}`}
-							</button>
+						{#if versionCount > 1}
 							<button
 								onclick={() => { expandedInstall = expandedInstall === server.registry_id ? null : server.registry_id; if (!selectedVersions[server.registry_id]) selectedVersions[server.registry_id] = versions[0].version; }}
 								style="padding: 0.35rem 0.7rem; background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 0.8rem;"
 							>
 								Select version
 							</button>
-						</div>
+						{/if}
 					{/if}
 				</div>
 				{#if expandedInstall === server.registry_id}
