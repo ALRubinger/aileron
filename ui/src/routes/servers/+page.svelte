@@ -69,7 +69,12 @@
 		{#each servers as server}
 			<a href="/servers/{server.id}" style="display: block; padding: 1rem; border: 1px solid var(--border); border-radius: 8px; text-decoration: none; color: var(--text); background: var(--bg-card);">
 				<div style="display: flex; justify-content: space-between; align-items: center;">
-					<div style="font-weight: 600;">{server.name}</div>
+					<div>
+						<span style="font-weight: 600;">{server.name}</span>
+						{#if server.version}
+							<span style="font-size: 0.8rem; color: var(--text-muted); margin-left: 0.5rem;">v{server.version}</span>
+						{/if}
+					</div>
 					<div style="display: flex; gap: 0.5rem; align-items: center;">
 						<span style="color: {statusColor(server.status)}; border: 1px solid {statusColor(server.status)}; border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
 							{server.status || 'stopped'}

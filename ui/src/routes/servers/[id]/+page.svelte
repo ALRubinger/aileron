@@ -85,6 +85,9 @@
 {:else if server}
 	<div style="display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; margin-bottom: 1.5rem;">
 		<h1 style="font-size: 1.3rem; margin: 0;">{server.name}</h1>
+		{#if server.version}
+			<span style="font-size: 0.85rem; color: var(--text-muted);">v{server.version}</span>
+		{/if}
 		<span style="color: {statusColor(server.status)}; border: 1px solid {statusColor(server.status)}; border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
 			{server.status || 'stopped'}
 		</span>
@@ -110,6 +113,11 @@
 
 			<span style="color: var(--text-muted);">Mode</span>
 			<span>{server.mode || 'local'}</span>
+
+			{#if server.version}
+				<span style="color: var(--text-muted);">Version</span>
+				<span>{server.version}</span>
+			{/if}
 
 			{#if server.registry_id}
 				<span style="color: var(--text-muted);">Registry ID</span>
