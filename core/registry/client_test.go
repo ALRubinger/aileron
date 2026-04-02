@@ -3,6 +3,7 @@ package registry_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -202,6 +203,76 @@ func TestClient_RealRegistryResponse(t *testing.T) {
 	for i, srv := range servers {
 		if srv.Name == "" {
 			t.Errorf("server[%d] has empty name; response envelope likely not unwrapped", i)
+		}
+	}
+}
+
+func TestClient_Pagination(t *testing.T) {
+	// Build 3 pages of servers: page1 (2 servers) -> page2 (2 servers) -> page3 (1 server, no cursor).
+	pages := map[string]struct {
+		entries []registry.RegistryEntry
+		cursor  string
+	}{
+		"": {
+			entries: []registry.RegistryEntry{
+				{Server: registry.RegistryServer{Name: "server-1", Description: "First"}},
+				{Server: registry.RegistryServer{Name: "server-2", Description: "Second"}},
+			},
+			cursor: "page2",
+		},
+		"page2": {
+			entries: []registry.RegistryEntry{
+				{Server: registry.RegistryServer{Name: "server-3", Description: "Third"}},
+				{Server: registry.RegistryServer{Name: "server-4", Description: "Fourth"}},
+			},
+			cursor: "page3",
+		},
+		"page3": {
+			entries: []registry.RegistryEntry{
+				{Server: registry.RegistryServer{Name: "server-5", Description: "Fifth"}},
+			},
+			cursor: "",
+		},
+	}
+
+	requestCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		cursor := r.URL.Query().Get("cursor")
+		page, ok := pages[cursor]
+		if !ok {
+			http.Error(w, "bad cursor", http.StatusBadRequest)
+			return
+		}
+		resp := registry.RegistryResponse{
+			Servers: page.entries,
+		}
+		if page.cursor != "" {
+			resp.Metadata = &registry.RegistryMetadata{
+				NextCursor: page.cursor,
+				Count:      len(page.entries),
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer ts.Close()
+
+	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	servers, err := client.FetchAll(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAll with pagination: %v", err)
+	}
+	if len(servers) != 5 {
+		t.Fatalf("got %d servers, want 5", len(servers))
+	}
+	if requestCount != 3 {
+		t.Fatalf("made %d requests, want 3 (one per page)", requestCount)
+	}
+	for i, srv := range servers {
+		want := fmt.Sprintf("server-%d", i+1)
+		if srv.Name != want {
+			t.Errorf("server[%d].Name = %q, want %q", i, srv.Name, want)
 		}
 	}
 }

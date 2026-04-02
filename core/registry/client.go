@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -108,31 +109,62 @@ func (c *Client) Get(ctx context.Context, registryID string) (*RegistryServer, e
 	return nil, nil
 }
 
+// pageSize is the maximum number of servers per page (registry max is 100).
+const pageSize = 100
+
 func (c *Client) fetchFromRegistry(ctx context.Context) ([]RegistryServer, error) {
-	url := c.baseURL + "/v0/servers"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	var all []RegistryServer
+	var cursor string
+
+	for {
+		page, nextCursor, err := c.fetchPage(ctx, cursor)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if nextCursor == "" || len(page) == 0 {
+			break
+		}
+		cursor = nextCursor
+	}
+	return all, nil
+}
+
+func (c *Client) fetchPage(ctx context.Context, cursor string) ([]RegistryServer, string, error) {
+	u := c.baseURL + "/v0/servers?limit=" + fmt.Sprintf("%d", pageSize)
+	if cursor != "" {
+		u += "&cursor=" + url.QueryEscape(cursor)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, fmt.Errorf("registry: create request: %w", err)
+		return nil, "", fmt.Errorf("registry: create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("registry: fetch: %w", err)
+		return nil, "", fmt.Errorf("registry: fetch: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("registry: unexpected status %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("registry: unexpected status %d", resp.StatusCode)
 	}
 
 	var result RegistryResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("registry: decode: %w", err)
+		return nil, "", fmt.Errorf("registry: decode: %w", err)
 	}
+
 	servers := make([]RegistryServer, len(result.Servers))
 	for i, entry := range result.Servers {
 		servers[i] = entry.Server
 	}
-	return servers, nil
+
+	var nextCursor string
+	if result.Metadata != nil {
+		nextCursor = result.Metadata.NextCursor
+	}
+	return servers, nextCursor, nil
 }
