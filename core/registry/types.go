@@ -3,7 +3,14 @@ package registry
 
 // RegistryResponse is the top-level response from the MCP Registry API.
 type RegistryResponse struct {
-	Servers []RegistryEntry `json:"servers"`
+	Servers  []RegistryEntry  `json:"servers"`
+	Metadata *RegistryMetadata `json:"metadata,omitempty"`
+}
+
+// RegistryMetadata contains pagination information from the registry.
+type RegistryMetadata struct {
+	NextCursor string `json:"nextCursor,omitempty"`
+	Count      int    `json:"count,omitempty"`
 }
 
 // RegistryEntry wraps a server with optional registry metadata.
