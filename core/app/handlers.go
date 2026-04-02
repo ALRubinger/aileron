@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
@@ -1324,22 +1325,20 @@ func (s *apiServer) ListMarketplaceServers(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	items := make([]api.MarketplaceServer, 0, len(servers))
+	// Group registry entries by name, collecting versions. The registry
+	// returns entries in release order, so we preserve that ordering and
+	// then reverse to get most-recent-first.
+	type grouped struct {
+		order       int
+		description string
+		versions    []api.MarketplaceServerVersion
+	}
+	byName := make(map[string]*grouped)
+	var insertOrder int
 	for _, srv := range servers {
-		ms := api.MarketplaceServer{
-			RegistryId: srv.Name,
-			Name:       srv.Name,
+		ver := api.MarketplaceServerVersion{
+			Version: srv.Version,
 		}
-		if srv.Description != "" {
-			ms.Description = &srv.Description
-		}
-		if srv.Version != "" {
-			ms.Version = &srv.Version
-		}
-		isInstalled := installedSet[srv.Name]
-		ms.Installed = &isInstalled
-
-		// Collect required env vars from packages.
 		var envVars []api.RequiredEnvVar
 		for _, pkg := range srv.Packages {
 			for _, ev := range pkg.EnvVars {
@@ -1351,11 +1350,48 @@ func (s *apiServer) ListMarketplaceServers(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		if len(envVars) > 0 {
-			ms.RequiredEnvVars = &envVars
+			ver.RequiredEnvVars = &envVars
 		}
 
+		if g, ok := byName[srv.Name]; ok {
+			g.versions = append(g.versions, ver)
+			// Keep the most recent description (last entry).
+			if srv.Description != "" {
+				g.description = srv.Description
+			}
+		} else {
+			byName[srv.Name] = &grouped{
+				order:       insertOrder,
+				description: srv.Description,
+				versions:    []api.MarketplaceServerVersion{ver},
+			}
+			insertOrder++
+		}
+	}
+
+	// Build response items sorted by first-seen order.
+	items := make([]api.MarketplaceServer, 0, len(byName))
+	for name, g := range byName {
+		// Reverse versions so most recent is first.
+		for i, j := 0, len(g.versions)-1; i < j; i, j = i+1, j-1 {
+			g.versions[i], g.versions[j] = g.versions[j], g.versions[i]
+		}
+		ms := api.MarketplaceServer{
+			RegistryId: name,
+			Name:       name,
+		}
+		if g.description != "" {
+			ms.Description = &g.description
+		}
+		isInstalled := installedSet[name]
+		ms.Installed = &isInstalled
+		ms.Versions = &g.versions
 		items = append(items, ms)
 	}
+	// Stable sort by insertion order.
+	sort.Slice(items, func(i, j int) bool {
+		return byName[items[i].Name].order < byName[items[j].Name].order
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

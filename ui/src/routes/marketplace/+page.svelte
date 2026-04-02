@@ -12,6 +12,8 @@
 	let credError = $state('');
 	let credSaving = $state(false);
 	let debounceTimer: ReturnType<typeof setTimeout>;
+	let selectedVersions = $state<Record<string, string>>({});
+	let expandedInstall = $state<string | null>(null);
 
 	async function load(q?: string) {
 		try {
@@ -29,8 +31,21 @@
 		debounceTimer = setTimeout(() => load(query), 300);
 	}
 
+	function handleInstallClick(server: any) {
+		const versions = server.versions || [];
+		if (versions.length <= 1) {
+			handleInstall(server.registry_id);
+		} else {
+			if (!selectedVersions[server.registry_id]) {
+				selectedVersions[server.registry_id] = versions[0].version;
+			}
+			expandedInstall = expandedInstall === server.registry_id ? null : server.registry_id;
+		}
+	}
+
 	async function handleInstall(registryId: string) {
 		installing = registryId;
+		expandedInstall = null;
 		try {
 			const result = await installMarketplaceServer(registryId);
 			if (result.required_credentials?.length > 0) {
@@ -143,6 +158,9 @@
 {:else}
 	<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem;">
 		{#each servers as server}
+			{@const versions = server.versions || []}
+			{@const latestVersion = versions[0]?.version}
+			{@const versionCount = versions.length}
 			<div style="padding: 1.25rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); display: flex; flex-direction: column;">
 				<div style="font-weight: 600; margin-bottom: 0.25rem;">{server.name}</div>
 				{#if server.description}
@@ -150,16 +168,16 @@
 				{/if}
 				<div style="display: flex; align-items: center; justify-content: space-between; margin-top: auto;">
 					<div style="font-size: 0.8rem; color: var(--text-muted);">
-						{#if server.version}v{server.version}{/if}
-						{#if server.required_env_vars?.length}
-							<span style="margin-left: 0.5rem;">{server.required_env_vars.length} credential{server.required_env_vars.length === 1 ? '' : 's'}</span>
+						{#if latestVersion}v{latestVersion}{/if}
+						{#if versionCount > 1}
+							<span style="margin-left: 0.25rem;">({versionCount} versions)</span>
 						{/if}
 					</div>
 					{#if server.installed}
 						<span style="color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 0.2rem 0.6rem; font-size: 0.8rem; font-weight: 600;">Installed</span>
 					{:else}
 						<button
-							onclick={() => handleInstall(server.registry_id)}
+							onclick={() => handleInstallClick(server)}
 							disabled={installing === server.registry_id}
 							style="padding: 0.35rem 0.85rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600;"
 						>
@@ -167,6 +185,26 @@
 						</button>
 					{/if}
 				</div>
+				{#if expandedInstall === server.registry_id}
+					<div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border);">
+						<div style="display: flex; gap: 0.5rem; align-items: center;">
+							<select
+								bind:value={selectedVersions[server.registry_id]}
+								style="flex: 1; padding: 0.4rem 0.5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.8rem;"
+							>
+								{#each versions as ver}
+									<option value={ver.version}>v{ver.version}</option>
+								{/each}
+							</select>
+							<button
+								onclick={() => handleInstall(server.registry_id)}
+								style="padding: 0.4rem 0.75rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
+							>
+								Install
+							</button>
+						</div>
+					</div>
+				{/if}
 			</div>
 		{/each}
 	</div>
