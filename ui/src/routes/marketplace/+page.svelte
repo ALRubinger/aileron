@@ -31,18 +31,6 @@
 		debounceTimer = setTimeout(() => load(query), 300);
 	}
 
-	function handleInstallClick(server: any) {
-		const versions = server.versions || [];
-		if (versions.length <= 1) {
-			handleInstall(server.registry_id);
-		} else {
-			if (!selectedVersions[server.registry_id]) {
-				selectedVersions[server.registry_id] = versions[0].version;
-			}
-			expandedInstall = expandedInstall === server.registry_id ? null : server.registry_id;
-		}
-	}
-
 	async function handleInstall(registryId: string) {
 		installing = registryId;
 		expandedInstall = null;
@@ -175,14 +163,30 @@
 					</div>
 					{#if server.installed}
 						<span style="color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 0.2rem 0.6rem; font-size: 0.8rem; font-weight: 600;">Installed</span>
-					{:else}
+					{:else if versionCount <= 1}
 						<button
-							onclick={() => handleInstallClick(server)}
+							onclick={() => handleInstall(server.registry_id)}
 							disabled={installing === server.registry_id}
 							style="padding: 0.35rem 0.85rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600;"
 						>
 							{installing === server.registry_id ? 'Installing...' : 'Install'}
 						</button>
+					{:else}
+						<div style="display: flex; gap: 0.4rem;">
+							<button
+								onclick={() => handleInstall(server.registry_id)}
+								disabled={installing === server.registry_id}
+								style="padding: 0.35rem 0.7rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
+							>
+								{installing === server.registry_id ? 'Installing...' : `Install v${latestVersion}`}
+							</button>
+							<button
+								onclick={() => { expandedInstall = expandedInstall === server.registry_id ? null : server.registry_id; if (!selectedVersions[server.registry_id]) selectedVersions[server.registry_id] = versions[0].version; }}
+								style="padding: 0.35rem 0.7rem; background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 0.8rem;"
+							>
+								Select version
+							</button>
+						</div>
 					{/if}
 				</div>
 				{#if expandedInstall === server.registry_id}
@@ -198,6 +202,7 @@
 							</select>
 							<button
 								onclick={() => handleInstall(server.registry_id)}
+								disabled={installing === server.registry_id}
 								style="padding: 0.4rem 0.75rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
 							>
 								Install
