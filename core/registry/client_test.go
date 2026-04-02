@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -169,6 +170,39 @@ func TestClient_Caching(t *testing.T) {
 	_, _ = client.FetchAll(ctx)
 	if callCount != 1 {
 		t.Fatalf("call count after second fetch = %d, want 1 (cached)", callCount)
+	}
+}
+
+// TestClient_RealRegistryResponse verifies that our types can decode an actual
+// response from the MCP Registry API. This prevents regressions like the
+// server-envelope and headers-as-array issues that caused blank marketplace cards.
+func TestClient_RealRegistryResponse(t *testing.T) {
+	payload, err := os.ReadFile("testdata/registry_response.json")
+	if err != nil {
+		t.Fatalf("read testdata: %v", err)
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(payload)
+	}))
+	defer ts.Close()
+
+	client := registry.NewClient(ts.Client()).WithBaseURL(ts.URL)
+	servers, err := client.FetchAll(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAll failed to decode real registry response: %v", err)
+	}
+	if len(servers) == 0 {
+		t.Fatal("expected at least one server from real registry response")
+	}
+
+	// Every server must have a non-empty name — this was blank before the
+	// RegistryEntry envelope fix.
+	for i, srv := range servers {
+		if srv.Name == "" {
+			t.Errorf("server[%d] has empty name; response envelope likely not unwrapped", i)
+		}
 	}
 }
 
