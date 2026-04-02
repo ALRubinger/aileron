@@ -83,14 +83,23 @@ jobs:
             sdk/go/go.mod
             test/integration/go.mod
 
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: Run Go tests
-        run: go test -race -coverprofile=coverage.txt ./core/... ./sdk/go/...
+        run: gotestsum --junitfile junit.xml -- -race -coverprofile=coverage.txt ./core/... ./sdk/go/...
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ALRubinger/aileron
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   build:
     name: Build Docker Images
@@ -180,11 +189,21 @@ jobs:
             sdk/go/go.mod
             test/integration/go.mod
 
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: Run integration tests
-        run: go test -tags=integration -race ./test/integration/...
+        run: gotestsum --junitfile junit-integration.xml -- -tags=integration -race ./test/integration/...
         env:
           AILERON_API_URL: http://localhost:8080
           AILERON_UI_URL: http://localhost:3000
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit-integration.xml
 
       - name: Dump logs on failure
         if: failure()
