@@ -31,6 +31,8 @@
 	<a href="/approvals" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Approvals</a>
 	<a href="/traces" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Traces</a>
 	<a href="/policies" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Policies</a>
+	<a href="/marketplace" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Marketplace</a>
+	<a href="/servers" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Servers</a>
 </nav>
 
 <main style="max-width: 960px; margin: 0 auto; padding: 1.5rem;">

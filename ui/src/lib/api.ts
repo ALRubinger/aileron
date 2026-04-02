@@ -5,6 +5,7 @@ async function apiFetch(path: string, options?: RequestInit) {
 		headers: { 'Content-Type': 'application/json' },
 		...options
 	});
+	if (res.status === 204) return null;
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
 		throw new Error(err.error?.message || res.statusText);
@@ -44,4 +45,34 @@ export async function listTraces(workspaceId = 'default') {
 
 export async function listPolicies(workspaceId = 'default') {
 	return apiFetch(`/v1/policies?workspace_id=${workspaceId}`);
+}
+
+export async function searchMarketplace(query?: string) {
+	const qs = query ? `?q=${encodeURIComponent(query)}` : '';
+	return apiFetch(`/v1/marketplace/servers${qs}`);
+}
+
+export async function installMarketplaceServer(registryId: string) {
+	return apiFetch(`/v1/marketplace/servers/${encodeURIComponent(registryId)}/install`, {
+		method: 'POST'
+	});
+}
+
+export async function listMCPServers() {
+	return apiFetch('/v1/mcp-servers');
+}
+
+export async function getMCPServer(id: string) {
+	return apiFetch(`/v1/mcp-servers/${id}`);
+}
+
+export async function deleteMCPServer(id: string) {
+	return apiFetch(`/v1/mcp-servers/${id}`, { method: 'DELETE' });
+}
+
+export async function setMCPServerCredential(id: string, envVarName: string, secretValue: string) {
+	return apiFetch(`/v1/mcp-servers/${id}/credentials`, {
+		method: 'POST',
+		body: JSON.stringify({ env_var_name: envVarName, secret_value: secretValue })
+	});
 }
