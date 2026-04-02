@@ -3,7 +3,12 @@ package registry
 
 // RegistryResponse is the top-level response from the MCP Registry API.
 type RegistryResponse struct {
-	Servers []RegistryServer `json:"servers"`
+	Servers []RegistryEntry `json:"servers"`
+}
+
+// RegistryEntry wraps a server with optional registry metadata.
+type RegistryEntry struct {
+	Server RegistryServer `json:"server"`
 }
 
 // RegistryServer represents a single server entry from the MCP Registry.

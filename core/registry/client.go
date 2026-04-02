@@ -130,5 +130,9 @@ func (c *Client) fetchFromRegistry(ctx context.Context) ([]RegistryServer, error
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("registry: decode: %w", err)
 	}
-	return result.Servers, nil
+	servers := make([]RegistryServer, len(result.Servers))
+	for i, entry := range result.Servers {
+		servers[i] = entry.Server
+	}
+	return servers, nil
 }
