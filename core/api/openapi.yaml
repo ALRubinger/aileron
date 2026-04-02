@@ -2268,6 +2268,9 @@ components:
           enum: [stopped, running, error]
           readOnly: true
           description: Current server status (set by the system)
+        version:
+          type: string
+          description: Installed version of the server
         registry_id:
           type: string
           description: MCP Registry identifier if installed from marketplace

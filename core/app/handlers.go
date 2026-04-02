@@ -1428,6 +1428,9 @@ func (s *apiServer) InstallMarketplaceServer(w http.ResponseWriter, r *http.Requ
 	if srv.Description != "" {
 		config.Description = &srv.Description
 	}
+	if srv.Version != "" {
+		config.Version = &srv.Version
+	}
 
 	// Pre-populate env map with empty values for required env vars.
 	if len(envVars) > 0 {
