@@ -11,9 +11,9 @@ import (
 	"github.com/ALRubinger/aileron/core/registry"
 )
 
-func fixtureServers() []registry.RegistryServer {
-	return []registry.RegistryServer{
-		{
+func fixtureEntries() []registry.RegistryEntry {
+	return []registry.RegistryEntry{
+		{Server: registry.RegistryServer{
 			Name:        "io.github.example/filesystem",
 			Description: "Access local filesystem",
 			VersionDetail: registry.VersionDetail{
@@ -29,8 +29,8 @@ func fixtureServers() []registry.RegistryServer {
 					},
 				},
 			},
-		},
-		{
+		}},
+		{Server: registry.RegistryServer{
 			Name:        "io.github.example/github",
 			Description: "GitHub API integration",
 			VersionDetail: registry.VersionDetail{
@@ -46,7 +46,7 @@ func fixtureServers() []registry.RegistryServer {
 					},
 				},
 			},
-		},
+		}},
 	}
 }
 
@@ -57,7 +57,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
-		resp := registry.RegistryResponse{Servers: fixtureServers()}
+		resp := registry.RegistryResponse{Servers: fixtureEntries()}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}))
@@ -150,7 +150,7 @@ func TestClient_Caching(t *testing.T) {
 	callCount := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
-		resp := registry.RegistryResponse{Servers: fixtureServers()}
+		resp := registry.RegistryResponse{Servers: fixtureEntries()}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}))
