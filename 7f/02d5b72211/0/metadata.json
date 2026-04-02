@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "7f02d5b72211",
+  "session_id": "91664e17-9f54-4d72-8040-38efadce0bf5",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-02T09:32:13.733459Z",
+  "branch": "refactor/ui-tailwind-shadcn",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "ui/src/routes/+layout.svelte",
+    "ui/src/routes/+page.svelte"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "853149a93394",
+  "token_usage": {
+    "input_tokens": 3916,
+    "cache_creation_tokens": 181939,
+    "cache_read_tokens": 24401843,
+    "output_tokens": 62909,
+    "api_call_count": 210
+  },
+  "session_metrics": {
+    "turn_count": 24
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-02T09:32:12.956468Z",
+    "agent_lines": 0,
+    "human_added": 1913,
+    "human_modified": 52,
+    "human_removed": 0,
+    "total_committed": 1913,
+    "agent_percentage": 0
+  }
+}
