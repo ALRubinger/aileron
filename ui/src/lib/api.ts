@@ -1,4 +1,6 @@
-const API_BASE = 'http://localhost:8080';
+import { PUBLIC_API_BASE } from '$env/static/public';
+
+const API_BASE = PUBLIC_API_BASE;
 
 async function apiFetch(path: string, options?: RequestInit) {
 	const res = await fetch(`${API_BASE}${path}`, {
