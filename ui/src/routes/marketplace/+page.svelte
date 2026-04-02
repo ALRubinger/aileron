@@ -1,6 +1,10 @@
 <script lang="ts">
 	import { searchMarketplace, installMarketplaceServer, setMCPServerCredential } from '$lib/api';
 	import { onMount } from 'svelte';
+	import * as Card from '$lib/components/ui/card';
+	import { Button } from '$lib/components/ui/button';
+	import { Input } from '$lib/components/ui/input';
+	import { Badge } from '$lib/components/ui/badge';
 
 	function clickOutside(node: HTMLElement, callback: () => void) {
 		function handleClick(e: MouseEvent) {
@@ -92,125 +96,132 @@
 	<title>Marketplace - Aileron</title>
 </svelte:head>
 
-<h1 style="font-size: 1.3rem; margin-bottom: 1rem;">Marketplace</h1>
+<h1 class="text-xl font-semibold mb-4">Marketplace</h1>
 
-<input
+<Input
 	type="text"
 	placeholder="Search servers..."
 	bind:value={query}
 	oninput={handleInput}
-	style="width: 100%; padding: 0.6rem 0.75rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.9rem; margin-bottom: 1.5rem; box-sizing: border-box;"
+	class="mb-6"
 />
 
 {#if installResult}
-	<div style="padding: 1.25rem; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg-card); margin-bottom: 1.5rem;">
-		<div style="font-weight: 600; margin-bottom: 0.75rem;">Configure Credentials for {installResult.server.name}</div>
-		<p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">This server requires credentials to function. You can configure them now or later from the server detail page.</p>
-		{#each installResult.required_credentials as cred}
-			<div style="margin-bottom: 0.75rem;">
-				<!-- svelte-ignore a11y_label_has_associated_control -->
-				<label style="display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.25rem;">
-					{cred.name}
-					{#if cred.required}<span style="color: var(--red);">*</span>{/if}
-				</label>
-				{#if cred.description}
-					<div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.25rem;">{cred.description}</div>
-				{/if}
-				<input
-					type="password"
-					bind:value={credentialValues[cred.name]}
-					placeholder="Enter value..."
-					style="width: 100%; padding: 0.5rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem; box-sizing: border-box;"
-				/>
+	<Card.Root class="mb-6 border-status-blue">
+		<Card.Header>
+			<Card.Title>Configure Credentials for {installResult.server.name}</Card.Title>
+			<Card.Description>This server requires credentials to function. You can configure them now or later from the server detail page.</Card.Description>
+		</Card.Header>
+		<Card.Content>
+			{#each installResult.required_credentials as cred}
+				<div class="mb-3">
+					<!-- svelte-ignore a11y_label_has_associated_control -->
+					<label class="block text-sm font-semibold mb-1">
+						{cred.name}
+						{#if cred.required}<span class="text-destructive">*</span>{/if}
+					</label>
+					{#if cred.description}
+						<div class="text-xs text-muted-foreground mb-1">{cred.description}</div>
+					{/if}
+					<Input
+						type="password"
+						bind:value={credentialValues[cred.name]}
+						placeholder="Enter value..."
+					/>
+				</div>
+			{/each}
+			{#if credError}
+				<p class="text-destructive text-sm mb-3">{credError}</p>
+			{/if}
+			<div class="flex gap-3 mt-2">
+				<Button
+					onclick={handleSaveCredentials}
+					disabled={credSaving}
+				>
+					{credSaving ? 'Saving...' : 'Save Credentials'}
+				</Button>
+				<Button
+					variant="outline"
+					onclick={handleSkipCredentials}
+				>
+					Skip for now
+				</Button>
 			</div>
-		{/each}
-		{#if credError}
-			<p style="color: var(--red); font-size: 0.85rem; margin-bottom: 0.75rem;">{credError}</p>
-		{/if}
-		<div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
-			<button
-				onclick={handleSaveCredentials}
-				disabled={credSaving}
-				style="padding: 0.5rem 1rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem;"
-			>
-				{credSaving ? 'Saving...' : 'Save Credentials'}
-			</button>
-			<button
-				onclick={handleSkipCredentials}
-				style="padding: 0.5rem 1rem; background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 0.85rem;"
-			>
-				Skip for now
-			</button>
-		</div>
-	</div>
+		</Card.Content>
+	</Card.Root>
 {/if}
 
 {#if loading}
-	<p style="color: var(--text-muted);">Loading...</p>
+	<p class="text-muted-foreground">Loading...</p>
 {:else if error}
-	<p style="color: var(--red);">{error}</p>
+	<p class="text-destructive">{error}</p>
 {:else if servers.length === 0}
-	<p style="color: var(--text-muted);">No servers found.{query ? ' Try a different search.' : ''}</p>
+	<p class="text-muted-foreground">No servers found.{query ? ' Try a different search.' : ''}</p>
 {:else}
-	<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem;">
+	<div class="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4">
 		{#each servers as server}
 			{@const versions = server.versions || []}
 			{@const latestVersion = versions[0]?.version}
 			{@const versionCount = versions.length}
-			<div style="padding: 1.25rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); display: flex; flex-direction: column; position: relative;">
-				<div style="font-weight: 600; margin-bottom: 0.25rem;">{server.name}</div>
-				{#if server.description}
-					<div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem; flex: 1;">{server.description}</div>
-				{/if}
-				<div style="display: flex; align-items: center; justify-content: space-between; margin-top: auto;">
-					<div>
-						{#if !server.installed && versionCount > 1}
-							<button
-								onclick={() => { expandedInstall = expandedInstall === server.registry_id ? null : server.registry_id; if (!selectedVersions[server.registry_id]) selectedVersions[server.registry_id] = versions[0].version; }}
-								style="padding: 0.35rem 0.7rem; background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 0.8rem;"
+			<Card.Root class="relative flex flex-col">
+				<Card.Header class="flex-1">
+					<Card.Title>{server.name}</Card.Title>
+					{#if server.description}
+						<Card.Description>{server.description}</Card.Description>
+					{/if}
+				</Card.Header>
+				<Card.Content>
+					<div class="flex items-center justify-between">
+						<div>
+							{#if !server.installed && versionCount > 1}
+								<Button
+									variant="outline"
+									size="xs"
+									onclick={() => { expandedInstall = expandedInstall === server.registry_id ? null : server.registry_id; if (!selectedVersions[server.registry_id]) selectedVersions[server.registry_id] = versions[0].version; }}
+								>
+									Select version
+								</Button>
+							{/if}
+						</div>
+						{#if server.installed}
+							<Badge variant="outline" class="text-status-green border-status-green">Installed</Badge>
+						{:else}
+							<Button
+								size="sm"
+								onclick={() => handleInstall(server.registry_id)}
+								disabled={installing === server.registry_id}
 							>
-								Select version
-							</button>
+								{installing === server.registry_id ? 'Installing...' : `Install v${selectedVersions[server.registry_id] || latestVersion}`}
+							</Button>
 						{/if}
 					</div>
-					{#if server.installed}
-						<span style="color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 0.2rem 0.6rem; font-size: 0.8rem; font-weight: 600;">Installed</span>
-					{:else}
-						<button
-							onclick={() => handleInstall(server.registry_id)}
-							disabled={installing === server.registry_id}
-							style="padding: 0.35rem 0.7rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
-						>
-							{installing === server.registry_id ? 'Installing...' : `Install v${selectedVersions[server.registry_id] || latestVersion}`}
-						</button>
-					{/if}
-				</div>
+				</Card.Content>
 				{#if expandedInstall === server.registry_id}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<div
-					use:clickOutside={() => { expandedInstall = null; }}
-					style="position: absolute; left: 0; right: 0; bottom: 0; padding: 0.75rem 1.25rem 1.25rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 0 0 8px 8px; z-index: 10;"
-				>
-						<div style="display: flex; gap: 0.5rem; align-items: center;">
+					<div
+						use:clickOutside={() => { expandedInstall = null; }}
+						class="absolute left-0 right-0 bottom-0 px-4 pb-4 pt-3 bg-card border border-border rounded-b-xl z-10"
+					>
+						<div class="flex gap-2 items-center">
 							<select
 								bind:value={selectedVersions[server.registry_id]}
-								style="flex: 1; padding: 0.4rem 0.5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.8rem;"
+								class="flex-1 h-8 rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm text-foreground"
 							>
 								{#each versions as ver}
 									<option value={ver.version}>v{ver.version}</option>
 								{/each}
 							</select>
-							<button
+							<Button
+								size="sm"
 								onclick={() => handleInstall(server.registry_id)}
 								disabled={installing === server.registry_id}
-								style="padding: 0.4rem 0.75rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; font-weight: 600; white-space: nowrap;"
 							>
 								Install
-							</button>
+							</Button>
 						</div>
 					</div>
 				{/if}
-			</div>
+			</Card.Root>
 		{/each}
 	</div>
 {/if}

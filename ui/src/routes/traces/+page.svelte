@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { listTraces } from '$lib/api';
 	import { onMount } from 'svelte';
+	import { eventColor } from '$lib/colors';
+	import * as Card from '$lib/components/ui/card';
 
 	let traces = $state<any[]>([]);
 	let loading = $state(true);
@@ -23,67 +25,57 @@
 		const interval = setInterval(load, 5000);
 		return () => clearInterval(interval);
 	});
-
-	function eventColor(eventType: string) {
-		if (eventType.includes('submitted')) return 'var(--accent)';
-		if (eventType.includes('approved')) return 'var(--green)';
-		if (eventType.includes('denied')) return 'var(--red)';
-		if (eventType.includes('succeeded')) return 'var(--green)';
-		if (eventType.includes('failed')) return 'var(--red)';
-		if (eventType.includes('granted') || eventType.includes('issued')) return 'var(--green)';
-		return 'var(--text-muted)';
-	}
 </script>
 
 <svelte:head>
 	<title>Traces - Aileron</title>
 </svelte:head>
 
-<h1 style="font-size: 1.3rem; margin-bottom: 1rem;">Audit Traces</h1>
+<h1 class="text-xl font-semibold mb-4">Audit Traces</h1>
 
 {#if loading}
-	<p style="color: var(--text-muted);">Loading...</p>
+	<p class="text-muted-foreground">Loading...</p>
 {:else if error}
-	<p style="color: var(--red);">{error}</p>
+	<p class="text-destructive">{error}</p>
 {:else if traces.length === 0}
-	<p style="color: var(--text-muted);">No traces yet.</p>
+	<p class="text-muted-foreground">No traces yet.</p>
 {:else}
-	<div style="display: flex; flex-direction: column; gap: 0.75rem;">
+	<div class="flex flex-col gap-3">
 		{#each traces as trace}
-			<div style="border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); overflow: hidden;">
+			<Card.Root class="overflow-hidden">
 				<button
 					onclick={() => expandedTrace = expandedTrace === trace.trace_id ? null : trace.trace_id}
-					style="width: 100%; padding: 1rem; background: none; border: none; color: var(--text); text-align: left; cursor: pointer; display: flex; justify-content: space-between; align-items: center;"
+					class="w-full px-4 py-3 bg-transparent border-none text-foreground text-left cursor-pointer flex justify-between items-center"
 				>
 					<div>
-						<span style="font-weight: 600; font-family: monospace; font-size: 0.85rem;">{trace.intent_id}</span>
-						<span style="color: var(--text-muted); margin-left: 0.5rem; font-size: 0.85rem;">{trace.events?.length || 0} events</span>
+						<span class="font-semibold font-mono text-sm">{trace.intent_id}</span>
+						<span class="text-muted-foreground ml-2 text-sm">{trace.events?.length || 0} events</span>
 					</div>
-					<span style="color: var(--text-muted);">{expandedTrace === trace.trace_id ? '−' : '+'}</span>
+					<span class="text-muted-foreground">{expandedTrace === trace.trace_id ? '\u2212' : '+'}</span>
 				</button>
 
 				{#if expandedTrace === trace.trace_id && trace.events}
-					<div style="border-top: 1px solid var(--border); padding: 1rem;">
+					<div class="border-t border-border px-4 py-3">
 						{#each trace.events as event, i}
-							<div style="display: flex; gap: 1rem; align-items: flex-start; padding: 0.5rem 0; {i > 0 ? 'border-top: 1px solid var(--border);' : ''}">
-								<div style="width: 6px; height: 6px; border-radius: 50%; background: {eventColor(event.event_type)}; margin-top: 0.45rem; flex-shrink: 0;"></div>
-								<div style="flex: 1; min-width: 0;">
-									<div style="display: flex; justify-content: space-between; align-items: baseline;">
-										<span style="font-weight: 600; font-size: 0.85rem; color: {eventColor(event.event_type)};">{event.event_type}</span>
-										<span style="font-size: 0.75rem; color: var(--text-muted);">{new Date(event.timestamp).toLocaleTimeString()}</span>
+							<div class="flex gap-4 items-start py-2 {i > 0 ? 'border-t border-border' : ''}">
+								<div class="w-1.5 h-1.5 rounded-full mt-[0.45rem] shrink-0" style="background: {eventColor(event.event_type)}"></div>
+								<div class="flex-1 min-w-0">
+									<div class="flex justify-between items-baseline">
+										<span class="font-semibold text-sm" style="color: {eventColor(event.event_type)}">{event.event_type}</span>
+										<span class="text-xs text-muted-foreground">{new Date(event.timestamp).toLocaleTimeString()}</span>
 									</div>
-									<div style="font-size: 0.8rem; color: var(--text-muted);">
+									<div class="text-xs text-muted-foreground">
 										{event.actor.type}: {event.actor.id}
 									</div>
 									{#if event.payload}
-										<pre style="font-size: 0.75rem; color: var(--text-muted); margin: 0.25rem 0 0; white-space: pre-wrap; word-break: break-all;">{JSON.stringify(event.payload, null, 2)}</pre>
+										<pre class="text-xs text-muted-foreground mt-1 whitespace-pre-wrap break-all">{JSON.stringify(event.payload, null, 2)}</pre>
 									{/if}
 								</div>
 							</div>
 						{/each}
 					</div>
 				{/if}
-			</div>
+			</Card.Root>
 		{/each}
 	</div>
 {/if}

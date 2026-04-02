@@ -3,6 +3,10 @@
 	import { goto } from '$app/navigation';
 	import { getMCPServer, deleteMCPServer, setMCPServerCredential } from '$lib/api';
 	import { onMount } from 'svelte';
+	import { serverStatusColor, modeColor } from '$lib/colors';
+	import * as Card from '$lib/components/ui/card';
+	import { Button } from '$lib/components/ui/button';
+	import { Input } from '$lib/components/ui/input';
 
 	let server = $state<any>(null);
 	let loading = $state(true);
@@ -29,18 +33,6 @@
 	onMount(() => {
 		load();
 	});
-
-	function statusColor(status: string) {
-		switch (status) {
-			case 'running': return 'var(--green)';
-			case 'error': return 'var(--red)';
-			default: return 'var(--text-muted)';
-		}
-	}
-
-	function modeColor(mode: string) {
-		return mode === 'remote' ? 'var(--orange)' : 'var(--accent)';
-	}
 
 	async function handleSetCredential() {
 		if (!credEnvVar.trim() || !credValue.trim()) return;
@@ -76,137 +68,147 @@
 	<title>{server?.name || 'Server'} - Aileron</title>
 </svelte:head>
 
-<a href="/servers" style="color: var(--text-muted); text-decoration: none; font-size: 0.85rem;">&larr; Back to Servers</a>
+<a href="/servers" class="text-muted-foreground no-underline text-sm">&larr; Back to Servers</a>
 
 {#if loading}
-	<p style="color: var(--text-muted); margin-top: 1rem;">Loading...</p>
+	<p class="text-muted-foreground mt-4">Loading...</p>
 {:else if error}
-	<p style="color: var(--red); margin-top: 1rem;">{error}</p>
+	<p class="text-destructive mt-4">{error}</p>
 {:else if server}
-	<div style="display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; margin-bottom: 1.5rem;">
-		<h1 style="font-size: 1.3rem; margin: 0;">{server.name}</h1>
+	<div class="flex items-center gap-3 mt-4 mb-6">
+		<h1 class="text-xl font-semibold m-0">{server.name}</h1>
 		{#if server.version}
-			<span style="font-size: 0.85rem; color: var(--text-muted);">v{server.version}</span>
+			<span class="text-sm text-muted-foreground">v{server.version}</span>
 		{/if}
-		<span style="color: {statusColor(server.status)}; border: 1px solid {statusColor(server.status)}; border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
+		<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase" style="color: {serverStatusColor(server.status)}; border-color: {serverStatusColor(server.status)}">
 			{server.status || 'stopped'}
 		</span>
-		<span style="color: {modeColor(server.mode)}; border: 1px solid {modeColor(server.mode)}; border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
+		<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase" style="color: {modeColor(server.mode)}; border-color: {modeColor(server.mode)}">
 			{server.mode || 'local'}
 		</span>
 	</div>
 
-	<!-- Configuration -->
-	<div style="padding: 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); margin-bottom: 1rem;">
-		<div style="font-weight: 600; margin-bottom: 0.75rem;">Configuration</div>
-		<div style="display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1rem; font-size: 0.85rem;">
-			<span style="color: var(--text-muted);">ID</span>
-			<span style="font-family: monospace;">{server.id}</span>
+	<Card.Root class="mb-4">
+		<Card.Header>
+			<Card.Title>Configuration</Card.Title>
+		</Card.Header>
+		<Card.Content>
+			<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+				<span class="text-muted-foreground">ID</span>
+				<span class="font-mono">{server.id}</span>
 
-			{#if server.description}
-				<span style="color: var(--text-muted);">Description</span>
-				<span>{server.description}</span>
-			{/if}
+				{#if server.description}
+					<span class="text-muted-foreground">Description</span>
+					<span>{server.description}</span>
+				{/if}
 
-			<span style="color: var(--text-muted);">Command</span>
-			<span style="font-family: monospace;">{(server.command || []).join(' ')}</span>
+				<span class="text-muted-foreground">Command</span>
+				<span class="font-mono">{(server.command || []).join(' ')}</span>
 
-			<span style="color: var(--text-muted);">Mode</span>
-			<span>{server.mode || 'local'}</span>
+				<span class="text-muted-foreground">Mode</span>
+				<span>{server.mode || 'local'}</span>
 
-			{#if server.version}
-				<span style="color: var(--text-muted);">Version</span>
-				<span>{server.version}</span>
-			{/if}
+				{#if server.version}
+					<span class="text-muted-foreground">Version</span>
+					<span>{server.version}</span>
+				{/if}
 
-			{#if server.registry_id}
-				<span style="color: var(--text-muted);">Registry ID</span>
-				<span style="font-family: monospace;">{server.registry_id}</span>
-			{/if}
+				{#if server.registry_id}
+					<span class="text-muted-foreground">Registry ID</span>
+					<span class="font-mono">{server.registry_id}</span>
+				{/if}
 
-			{#if server.policy_mapping?.tool_prefix}
-				<span style="color: var(--text-muted);">Tool Prefix</span>
-				<span style="font-family: monospace;">{server.policy_mapping.tool_prefix}</span>
-			{/if}
+				{#if server.policy_mapping?.tool_prefix}
+					<span class="text-muted-foreground">Tool Prefix</span>
+					<span class="font-mono">{server.policy_mapping.tool_prefix}</span>
+				{/if}
 
-			{#if server.created_at}
-				<span style="color: var(--text-muted);">Created</span>
-				<span>{new Date(server.created_at).toLocaleString()}</span>
-			{/if}
+				{#if server.created_at}
+					<span class="text-muted-foreground">Created</span>
+					<span>{new Date(server.created_at).toLocaleString()}</span>
+				{/if}
 
-			{#if server.updated_at}
-				<span style="color: var(--text-muted);">Updated</span>
-				<span>{new Date(server.updated_at).toLocaleString()}</span>
-			{/if}
-		</div>
-	</div>
-
-	<!-- Environment Variables -->
-	{#if server.env && Object.keys(server.env).length > 0}
-		<div style="padding: 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); margin-bottom: 1rem;">
-			<div style="font-weight: 600; margin-bottom: 0.75rem;">Environment Variables</div>
-			<div style="display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1rem; font-size: 0.85rem;">
-				{#each Object.entries(server.env) as [key, value]}
-					<span style="font-family: monospace;">{key}</span>
-					<span style="font-family: monospace; color: var(--text-muted);">
-						{#if typeof value === 'string' && value.startsWith('vault://')}
-							<span title={String(value)}>&#128274; vault-backed</span>
-						{:else}
-							{value || '(empty)'}
-						{/if}
-					</span>
-				{/each}
+				{#if server.updated_at}
+					<span class="text-muted-foreground">Updated</span>
+					<span>{new Date(server.updated_at).toLocaleString()}</span>
+				{/if}
 			</div>
-		</div>
+		</Card.Content>
+	</Card.Root>
+
+	{#if server.env && Object.keys(server.env).length > 0}
+		<Card.Root class="mb-4">
+			<Card.Header>
+				<Card.Title>Environment Variables</Card.Title>
+			</Card.Header>
+			<Card.Content>
+				<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+					{#each Object.entries(server.env) as [key, value]}
+						<span class="font-mono">{key}</span>
+						<span class="font-mono text-muted-foreground">
+							{#if typeof value === 'string' && value.startsWith('vault://')}
+								<span title={String(value)}>&#128274; vault-backed</span>
+							{:else}
+								{value || '(empty)'}
+							{/if}
+						</span>
+					{/each}
+				</div>
+			</Card.Content>
+		</Card.Root>
 	{/if}
 
-	<!-- Set Credential -->
-	<div style="padding: 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); margin-bottom: 1rem;">
-		<div style="font-weight: 600; margin-bottom: 0.75rem;">Set Credential</div>
-		<p style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem;">Store a secret in the vault for this server.</p>
-		<div style="display: flex; gap: 0.5rem; align-items: flex-end; flex-wrap: wrap;">
-			<div>
-				<label for="cred-env-var" style="display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.2rem;">Env var name</label>
-				<input
-					id="cred-env-var"
-					type="text"
-					bind:value={credEnvVar}
-					placeholder="e.g. API_KEY"
-					style="padding: 0.45rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem; font-family: monospace;"
-				/>
+	<Card.Root class="mb-4">
+		<Card.Header>
+			<Card.Title>Set Credential</Card.Title>
+			<Card.Description>Store a secret in the vault for this server.</Card.Description>
+		</Card.Header>
+		<Card.Content>
+			<div class="flex gap-2 items-end flex-wrap">
+				<div>
+					<label for="cred-env-var" class="block text-xs text-muted-foreground mb-1">Env var name</label>
+					<Input
+						id="cred-env-var"
+						type="text"
+						bind:value={credEnvVar}
+						placeholder="e.g. API_KEY"
+						class="font-mono"
+					/>
+				</div>
+				<div>
+					<label for="cred-secret" class="block text-xs text-muted-foreground mb-1">Secret value</label>
+					<Input
+						id="cred-secret"
+						type="password"
+						bind:value={credValue}
+						placeholder="Enter secret..."
+					/>
+				</div>
+				<Button
+					onclick={handleSetCredential}
+					disabled={credSaving}
+				>
+					{credSaving ? 'Saving...' : 'Save'}
+				</Button>
 			</div>
-			<div>
-				<label for="cred-secret" style="display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.2rem;">Secret value</label>
-				<input
-					id="cred-secret"
-					type="password"
-					bind:value={credValue}
-					placeholder="Enter secret..."
-					style="padding: 0.45rem 0.6rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem;"
-				/>
-			</div>
-			<button
-				onclick={handleSetCredential}
-				disabled={credSaving}
-				style="padding: 0.45rem 0.85rem; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem;"
-			>
-				{credSaving ? 'Saving...' : 'Save'}
-			</button>
-		</div>
-		{#if credResult}
-			<p style="margin-top: 0.5rem; font-size: 0.8rem; color: {credResult.startsWith('Error') ? 'var(--red)' : 'var(--green)'};">{credResult}</p>
-		{/if}
-	</div>
+			{#if credResult}
+				<p class="mt-2 text-xs" style="color: {credResult.startsWith('Error') ? 'var(--color-status-red)' : 'var(--color-status-green)'}">{credResult}</p>
+			{/if}
+		</Card.Content>
+	</Card.Root>
 
-	<!-- Danger Zone -->
-	<div style="padding: 1rem; border: 1px solid var(--red); border-radius: 8px; background: var(--bg-card);">
-		<div style="font-weight: 600; margin-bottom: 0.5rem; color: var(--red);">Danger Zone</div>
-		<button
-			onclick={handleDelete}
-			disabled={deleting}
-			style="padding: 0.4rem 0.85rem; background: var(--red); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem;"
-		>
-			{deleting ? 'Removing...' : 'Delete Server'}
-		</button>
-	</div>
+	<Card.Root class="border-destructive">
+		<Card.Header>
+			<Card.Title class="text-destructive">Danger Zone</Card.Title>
+		</Card.Header>
+		<Card.Content>
+			<Button
+				variant="destructive"
+				onclick={handleDelete}
+				disabled={deleting}
+			>
+				{deleting ? 'Removing...' : 'Delete Server'}
+			</Button>
+		</Card.Content>
+	</Card.Root>
 {/if}

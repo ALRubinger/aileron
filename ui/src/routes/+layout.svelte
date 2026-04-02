@@ -1,40 +1,21 @@
 <script>
+	import '../app.css';
 	let { children } = $props();
 </script>
 
 <svelte:head>
-	<style>
-		:root {
-			--bg: #0a0a0a;
-			--bg-card: #141414;
-			--bg-hover: #1a1a1a;
-			--border: #2a2a2a;
-			--text: #e5e5e5;
-			--text-muted: #888;
-			--accent: #3b82f6;
-			--green: #22c55e;
-			--red: #ef4444;
-			--yellow: #eab308;
-			--orange: #f97316;
-			font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-		}
-		body {
-			margin: 0;
-			background: var(--bg);
-			color: var(--text);
-		}
-	</style>
+	<title>Aileron</title>
 </svelte:head>
 
-<nav style="border-bottom: 1px solid var(--border); padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 2rem;">
-	<a href="/" style="font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text);">Aileron</a>
-	<a href="/approvals" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Approvals</a>
-	<a href="/traces" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Traces</a>
-	<a href="/policies" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Policies</a>
-	<a href="/marketplace" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Marketplace</a>
-	<a href="/servers" style="text-decoration: none; color: var(--text-muted); font-size: 0.9rem;">Servers</a>
+<nav class="border-b border-border px-6 py-3 flex items-center gap-8">
+	<a href="/" class="font-bold text-lg no-underline text-foreground">Aileron</a>
+	<a href="/approvals" class="no-underline text-muted-foreground text-sm">Approvals</a>
+	<a href="/traces" class="no-underline text-muted-foreground text-sm">Traces</a>
+	<a href="/policies" class="no-underline text-muted-foreground text-sm">Policies</a>
+	<a href="/marketplace" class="no-underline text-muted-foreground text-sm">Marketplace</a>
+	<a href="/servers" class="no-underline text-muted-foreground text-sm">Servers</a>
 </nav>
 
-<main style="max-width: 960px; margin: 0 auto; padding: 1.5rem;">
+<main class="max-w-[960px] mx-auto p-6">
 	{@render children()}
 </main>
