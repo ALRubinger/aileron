@@ -2317,11 +2317,21 @@ components:
           type: string
         description:
           type: string
-        version:
-          type: string
         installed:
           type: boolean
           description: Whether this server is already installed locally
+        versions:
+          type: array
+          description: Available versions, ordered by most recent first
+          items:
+            $ref: "#/components/schemas/MarketplaceServerVersion"
+
+    MarketplaceServerVersion:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: string
         required_env_vars:
           type: array
           items:
