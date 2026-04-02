@@ -1,0 +1,5 @@
+We've created a marketplace for MCP servers in the backend. Now we need to handle the UI. Let's resume that work.
+
+---
+
+Create an ADR for this UI supplement to ADR-0002
