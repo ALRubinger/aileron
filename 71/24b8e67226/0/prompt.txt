@@ -1,0 +1,17 @@
+Every page except the home page on the PR deployment in Railway says "Failed to Fetch": https://ui-aileron-pr-22.up.railway.app/
+
+---
+
+Will I need to set PUBLIC_API_BASE in Railway for every PR to see the UI calling the appropriate server service? I want it to know which PUBLIC_API_BASE to used dependening upon the Railway environment (ie. PR/branch) that's deployed.
+
+---
+
+Is the CORS an issue? Seems we can simply allowlist the server service?
+
+---
+
+Any security concerns with that approach?
+
+---
+
+Railway reference variable works, then. I do see another issue however; the Marketplace page shows several cards with "Install" buttons but no info about what the available MCP servers are.
