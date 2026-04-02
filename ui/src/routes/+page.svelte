@@ -18,4 +18,12 @@
 		<div style="font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem;">Policies</div>
 		<div style="font-size: 0.85rem; color: var(--text-muted);">View and manage policy rules</div>
 	</a>
+	<a href="/marketplace" style="display: block; padding: 1.5rem; border: 1px solid var(--border); border-radius: 8px; text-decoration: none; color: var(--text); background: var(--bg-card);">
+		<div style="font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem;">Marketplace</div>
+		<div style="font-size: 0.85rem; color: var(--text-muted);">Browse and install MCP servers from the registry</div>
+	</a>
+	<a href="/servers" style="display: block; padding: 1.5rem; border: 1px solid var(--border); border-radius: 8px; text-decoration: none; color: var(--text); background: var(--bg-card);">
+		<div style="font-size: 1.1rem; font-weight: 600; margin-bottom: 0.5rem;">Servers</div>
+		<div style="font-size: 0.85rem; color: var(--text-muted);">Manage installed MCP server configurations</div>
+	</a>
 </div>
