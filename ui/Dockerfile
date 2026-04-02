@@ -8,6 +8,10 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY . .
+
+ARG PUBLIC_API_BASE=http://localhost:8080
+ENV PUBLIC_API_BASE=$PUBLIC_API_BASE
+
 RUN pnpm run build
 
 FROM node:24-alpine
