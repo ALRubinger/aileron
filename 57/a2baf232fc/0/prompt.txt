@@ -1,0 +1,92 @@
+Every page except the home page on the PR deployment in Railway says "Failed to Fetch": https://ui-aileron-pr-22.up.railway.app/
+
+---
+
+Will I need to set PUBLIC_API_BASE in Railway for every PR to see the UI calling the appropriate server service? I want it to know which PUBLIC_API_BASE to used dependening upon the Railway environment (ie. PR/branch) that's deployed.
+
+---
+
+Is the CORS an issue? Seems we can simply allowlist the server service?
+
+---
+
+Any security concerns with that approach?
+
+---
+
+Railway reference variable works, then. I do see another issue however; the Marketplace page shows several cards with "Install" buttons but no info about what the available MCP servers are.
+
+---
+
+Now the Marketplace page shows error:
+
+registry: decode: json: cannot unmarshal array into Go struct field Remote.servers.server.VersionDetail.remotes.headers of type map[string]string
+
+---
+
+Grab a version of the server list from the Registry and save it as a mock response file. Then construct a test to protect against this error in the future.
+
+---
+
+Does the Marketplace page show all MCP servers in the Registry? Do we need to implement paging?
+
+---
+
+<task-notification>
+<task-id>b2usso7yt</task-id>
+<tool-use-id>toolu_01Wp8B99sSRcadk8k9FtMW3a</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/91664e17-9f54-4d72-8040-38efadce0bf5/tasks/b2usso7yt.output</output-file>
+<status>completed</status>
+<summary>Background command "Count total servers in registry" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/91664e17-9f54-4d72-8040-38efadce0bf5/tasks/b2usso7yt.output
+
+---
+
+Add pagination into this PR
+
+---
+
+Organize the list of MCP servers such that each card shows only unique names; when installing, open a dropdown to select which version, with the most recent at the top and ordered in release order descending.
+
+---
+
+Add a pre-fetch and timed job in the server service to prefetch the list of servers from the registry. The user clicking the UI for the first time takes too long to respond for the full list. And run this job to refresh the reistry list every 15 minutes. Then we don't need a timed cache expiry; it'll just refresh every 15 minutes. Make the 15 minutes a configurable property that can be overridden by folks running the server service. And document it; 15 minutes is a default.
+
+---
+
+<task-notification>
+<task-id>b2nd6c2jy</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/91664e17-9f54-4d72-8040-38efadce0bf5/tasks/b2nd6c2jy.output</output-file>
+<status>failed</status>
+<summary>Background command "Run all core tests" failed with exit code 1</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/91664e17-9f54-4d72-8040-38efadce0bf5/tasks/b2nd6c2jy.output
+
+---
+
+<task-notification>
+<task-id>bjt21gpgj</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/91664e17-9f54-4d72-8040-38efadce0bf5/tasks/bjt21gpgj.output</output-file>
+<status>completed</status>
+<summary>Background command "Run registry and app tests" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/91664e17-9f54-4d72-8040-38efadce0bf5/tasks/bjt21gpgj.output
+
+---
+
+3
+
+---
+
+The "Install" button for MCP servers is clunky when there is more than 1 version. When there's more than one version, there should be 2 CTAs: Install Latest ($versionNumber), or Select Version. When selecting a version, that confirmation should be "Install".
+
+---
+
+Remove the version from the card. All "Install" buttons should show the latest version on them, like the ones with many versions do now. If there are meny versions, we see the "Select version" button.
+
+---
+
+The "Select version" button should be left-justified so the "Install" button is in the same position for every card..

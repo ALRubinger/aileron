@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "57a2baf232fc",
+  "strategy": "manual-commit",
+  "branch": "feat/marketplace-ui",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/57/a2baf232fc/0/metadata.json",
+      "transcript": "/57/a2baf232fc/0/full.jsonl",
+      "content_hash": "/57/a2baf232fc/0/content_hash.txt",
+      "prompt": "/57/a2baf232fc/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3874,
+    "cache_creation_tokens": 165298,
+    "cache_read_tokens": 18483852,
+    "output_tokens": 55297,
+    "api_call_count": 176
+  }
+}
