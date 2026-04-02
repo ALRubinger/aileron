@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
@@ -71,7 +72,16 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
 
 	// --- MCP Registry client ---
-	registryClient := mcpreg.NewClient(nil)
+	registryClient := mcpreg.NewClient(nil, log)
+	if interval := os.Getenv("REGISTRY_REFRESH_INTERVAL"); interval != "" {
+		if d, err := time.ParseDuration(interval); err == nil {
+			registryClient = registryClient.WithRefreshInterval(d)
+			log.Info("registry refresh interval overridden", "interval", d)
+		} else {
+			log.Warn("invalid REGISTRY_REFRESH_INTERVAL, using default", "value", interval, "error", err)
+		}
+	}
+	registryClient.Start(ctx)
 
 	// --- Notifier ---
 	notifier := notify.NewLogNotifier(log)
