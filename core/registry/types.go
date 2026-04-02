@@ -34,9 +34,17 @@ type RepoInfo struct {
 
 // Remote represents a remote (HTTP/SSE) transport endpoint.
 type Remote struct {
-	TransportType string            `json:"transportType"`
-	URL           string            `json:"url"`
-	Headers       map[string]string `json:"headers,omitempty"`
+	TransportType string         `json:"type"`
+	URL           string         `json:"url"`
+	Headers       []RemoteHeader `json:"headers,omitempty"`
+}
+
+// RemoteHeader describes a required HTTP header for a remote endpoint.
+type RemoteHeader struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	IsRequired  bool   `json:"isRequired,omitempty"`
+	IsSecret    bool   `json:"isSecret,omitempty"`
 }
 
 // Package represents a distributable package for an MCP server.
