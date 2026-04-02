@@ -149,7 +149,7 @@
 			{@const versions = server.versions || []}
 			{@const latestVersion = versions[0]?.version}
 			{@const versionCount = versions.length}
-			<div style="padding: 1.25rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); display: flex; flex-direction: column;">
+			<div style="padding: 1.25rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); display: flex; flex-direction: column; position: relative;">
 				<div style="font-weight: 600; margin-bottom: 0.25rem;">{server.name}</div>
 				{#if server.description}
 					<div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.75rem; flex: 1;">{server.description}</div>
@@ -178,7 +178,7 @@
 					{/if}
 				</div>
 				{#if expandedInstall === server.registry_id}
-					<div style="margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border);">
+					<div style="position: absolute; left: 0; right: 0; bottom: 0; padding: 0.75rem 1.25rem 1.25rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 0 0 8px 8px; z-index: 10;">
 						<div style="display: flex; gap: 0.5rem; align-items: center;">
 							<select
 								bind:value={selectedVersions[server.registry_id]}
