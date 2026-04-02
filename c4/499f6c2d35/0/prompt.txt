@@ -1,0 +1,9 @@
+CodeCov supports test results but we need to enable it and create a JUnit-like output file for the tests. After we do, we need to add this block to the CI run:
+
+- name: Upload test results to Codecov
+  if: ${{ !cancelled() }}
+  uses: codecov/test-results-action@v1
+  with:
+    token: ${{ secrets.CODECOV_TOKEN }}
+
+Make sure we capture the test results in JUnit format and upload to CodeCov per their docs

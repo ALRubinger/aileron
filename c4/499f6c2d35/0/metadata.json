@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "c4499f6c2d35",
+  "session_id": "cc703376-0635-4d4e-95b7-c9eebff3ac86",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-02T01:08:55.375118Z",
+  "branch": "ci/codecov-test-results",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "0cdb75198429",
+  "token_usage": {
+    "input_tokens": 15,
+    "cache_creation_tokens": 15331,
+    "cache_read_tokens": 260453,
+    "output_tokens": 2159,
+    "api_call_count": 11
+  },
+  "session_metrics": {
+    "turn_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-02T01:08:55.320671Z",
+    "agent_lines": 21,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 21,
+    "agent_percentage": 100
+  }
+}

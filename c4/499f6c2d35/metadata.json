@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "c4499f6c2d35",
+  "strategy": "manual-commit",
+  "branch": "ci/codecov-test-results",
+  "checkpoints_count": 1,
+  "files_touched": [
+    ".github/workflows/ci.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/c4/499f6c2d35/0/metadata.json",
+      "transcript": "/c4/499f6c2d35/0/full.jsonl",
+      "content_hash": "/c4/499f6c2d35/0/content_hash.txt",
+      "prompt": "/c4/499f6c2d35/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 15,
+    "cache_creation_tokens": 15331,
+    "cache_read_tokens": 260453,
+    "output_tokens": 2159,
+    "api_call_count": 11
+  }
+}
