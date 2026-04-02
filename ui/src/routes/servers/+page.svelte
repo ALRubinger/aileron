@@ -1,6 +1,9 @@
 <script lang="ts">
 	import { listMCPServers, deleteMCPServer } from '$lib/api';
 	import { onMount } from 'svelte';
+	import { serverStatusColor, modeColor } from '$lib/colors';
+	import * as Card from '$lib/components/ui/card';
+	import { Button } from '$lib/components/ui/button';
 
 	let servers = $state<any[]>([]);
 	let loading = $state(true);
@@ -24,18 +27,6 @@
 		return () => clearInterval(interval);
 	});
 
-	function statusColor(status: string) {
-		switch (status) {
-			case 'running': return 'var(--green)';
-			case 'error': return 'var(--red)';
-			default: return 'var(--text-muted)';
-		}
-	}
-
-	function modeColor(mode: string) {
-		return mode === 'remote' ? 'var(--orange)' : 'var(--accent)';
-	}
-
 	async function handleDelete(e: Event, id: string, name: string) {
 		e.preventDefault();
 		e.stopPropagation();
@@ -56,54 +47,61 @@
 	<title>Servers - Aileron</title>
 </svelte:head>
 
-<h1 style="font-size: 1.3rem; margin-bottom: 1rem;">Installed Servers</h1>
+<h1 class="text-xl font-semibold mb-4">Installed Servers</h1>
 
 {#if loading}
-	<p style="color: var(--text-muted);">Loading...</p>
+	<p class="text-muted-foreground">Loading...</p>
 {:else if error}
-	<p style="color: var(--red);">{error}</p>
+	<p class="text-destructive">{error}</p>
 {:else if servers.length === 0}
-	<p style="color: var(--text-muted);">No MCP servers installed. <a href="/marketplace" style="color: var(--accent);">Browse the marketplace</a> to get started.</p>
+	<p class="text-muted-foreground">No MCP servers installed. <a href="/marketplace" class="text-status-blue">Browse the marketplace</a> to get started.</p>
 {:else}
-	<div style="display: flex; flex-direction: column; gap: 0.75rem;">
+	<div class="flex flex-col gap-3">
 		{#each servers as server}
-			<a href="/servers/{server.id}" style="display: block; padding: 1rem; border: 1px solid var(--border); border-radius: 8px; text-decoration: none; color: var(--text); background: var(--bg-card);">
-				<div style="display: flex; justify-content: space-between; align-items: center;">
-					<div>
-						<span style="font-weight: 600;">{server.name}</span>
-						{#if server.version}
-							<span style="font-size: 0.8rem; color: var(--text-muted); margin-left: 0.5rem;">v{server.version}</span>
+			<a href="/servers/{server.id}" class="no-underline text-foreground">
+				<Card.Root class="hover:bg-muted/50 transition-colors">
+					<Card.Header>
+						<div class="flex justify-between items-center">
+							<div>
+								<span class="font-semibold">{server.name}</span>
+								{#if server.version}
+									<span class="text-xs text-muted-foreground ml-2">v{server.version}</span>
+								{/if}
+							</div>
+							<div class="flex gap-2 items-center">
+								<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase" style="color: {serverStatusColor(server.status)}; border-color: {serverStatusColor(server.status)}">
+									{server.status || 'stopped'}
+								</span>
+								<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase" style="color: {modeColor(server.mode)}; border-color: {modeColor(server.mode)}">
+									{server.mode || 'local'}
+								</span>
+							</div>
+						</div>
+					</Card.Header>
+					<Card.Content>
+						{#if server.description}
+							<div class="text-sm text-muted-foreground mb-2">{server.description}</div>
 						{/if}
-					</div>
-					<div style="display: flex; gap: 0.5rem; align-items: center;">
-						<span style="color: {statusColor(server.status)}; border: 1px solid {statusColor(server.status)}; border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
-							{server.status || 'stopped'}
-						</span>
-						<span style="color: {modeColor(server.mode)}; border: 1px solid {modeColor(server.mode)}; border-radius: 4px; padding: 0.15rem 0.5rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
-							{server.mode || 'local'}
-						</span>
-					</div>
-				</div>
-				{#if server.description}
-					<div style="margin-top: 0.4rem; font-size: 0.85rem; color: var(--text-muted);">{server.description}</div>
-				{/if}
-				<div style="margin-top: 0.5rem; display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--text-muted);">
-					<div>
-						{#if server.registry_id}
-							<span style="font-family: monospace;">From: {server.registry_id}</span>
-						{/if}
-						{#if server.created_at}
-							<span style="margin-left: 0.75rem;">Created: {new Date(server.created_at).toLocaleDateString()}</span>
-						{/if}
-					</div>
-					<button
-						onclick={(e) => handleDelete(e, server.id, server.name)}
-						disabled={deleting === server.id}
-						style="padding: 0.25rem 0.6rem; background: transparent; color: var(--red); border: 1px solid var(--red); border-radius: 4px; cursor: pointer; font-size: 0.75rem;"
-					>
-						{deleting === server.id ? 'Removing...' : 'Remove'}
-					</button>
-				</div>
+						<div class="flex justify-between items-center text-xs text-muted-foreground">
+							<div>
+								{#if server.registry_id}
+									<span class="font-mono">From: {server.registry_id}</span>
+								{/if}
+								{#if server.created_at}
+									<span class="ml-3">Created: {new Date(server.created_at).toLocaleDateString()}</span>
+								{/if}
+							</div>
+							<Button
+								variant="destructive"
+								size="xs"
+								onclick={(e: Event) => handleDelete(e, server.id, server.name)}
+								disabled={deleting === server.id}
+							>
+								{deleting === server.id ? 'Removing...' : 'Remove'}
+							</Button>
+						</div>
+					</Card.Content>
+				</Card.Root>
 			</a>
 		{/each}
 	</div>
