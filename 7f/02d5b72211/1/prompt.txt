@@ -1,0 +1,1 @@
+The UI service uses CSS in style attributes throughout. I want to standardize our approach. My instinct is to refactor all these custom styles to Tailwind, and I'm open to alternatives. Assess and recommend.
