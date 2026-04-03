@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -30,7 +29,7 @@ func TestApprovalLifecycle_ApproveAndExecute(t *testing.T) {
 		},
 	}
 
-	intentResp := postJSON(t, apiURL()+"/v1/intents", intentBody)
+	intentResp := authedPost(t, apiURL()+"/v1/intents", intentBody)
 	defer intentResp.Body.Close()
 
 	if intentResp.StatusCode != http.StatusCreated {
@@ -49,10 +48,7 @@ func TestApprovalLifecycle_ApproveAndExecute(t *testing.T) {
 	}
 
 	// Step 2: Get the approval.
-	approvalResp, err := http.Get(apiURL() + "/v1/approvals/" + approvalID)
-	if err != nil {
-		t.Fatalf("GetApproval: %v", err)
-	}
+	approvalResp := authedGet(t, apiURL()+"/v1/approvals/"+approvalID)
 	defer approvalResp.Body.Close()
 
 	if approvalResp.StatusCode != http.StatusOK {
@@ -67,16 +63,7 @@ func TestApprovalLifecycle_ApproveAndExecute(t *testing.T) {
 	}
 
 	// Step 3: Approve the request.
-	approveBody := map[string]any{"comment": "Looks good"}
-	approveData, _ := json.Marshal(approveBody)
-	approveResp, err := http.Post(
-		apiURL()+"/v1/approvals/"+approvalID+"/approve",
-		"application/json",
-		bytes.NewReader(approveData),
-	)
-	if err != nil {
-		t.Fatalf("Approve: %v", err)
-	}
+	approveResp := authedPost(t, apiURL()+"/v1/approvals/"+approvalID+"/approve", map[string]any{"comment": "Looks good"})
 	defer approveResp.Body.Close()
 
 	if approveResp.StatusCode != http.StatusOK {
@@ -96,10 +83,7 @@ func TestApprovalLifecycle_ApproveAndExecute(t *testing.T) {
 	}
 
 	// Step 4: Verify intent status updated to approved.
-	intentGetResp, err := http.Get(apiURL() + "/v1/intents/" + intentID)
-	if err != nil {
-		t.Fatalf("GetIntent: %v", err)
-	}
+	intentGetResp := authedGet(t, apiURL()+"/v1/intents/"+intentID)
 	defer intentGetResp.Body.Close()
 
 	var updatedIntent map[string]any
@@ -110,10 +94,7 @@ func TestApprovalLifecycle_ApproveAndExecute(t *testing.T) {
 	}
 
 	// Step 5: Get the execution grant.
-	grantResp, err := http.Get(apiURL() + "/v1/execution-grants/" + grantID)
-	if err != nil {
-		t.Fatalf("GetGrant: %v", err)
-	}
+	grantResp := authedGet(t, apiURL()+"/v1/execution-grants/"+grantID)
 	defer grantResp.Body.Close()
 
 	if grantResp.StatusCode != http.StatusOK {
@@ -148,7 +129,7 @@ func TestApprovalLifecycle_Deny(t *testing.T) {
 		},
 	}
 
-	intentResp := postJSON(t, apiURL()+"/v1/intents", intentBody)
+	intentResp := authedPost(t, apiURL()+"/v1/intents", intentBody)
 	defer intentResp.Body.Close()
 
 	var intent map[string]any
@@ -159,16 +140,7 @@ func TestApprovalLifecycle_Deny(t *testing.T) {
 	intentID := intent["intent_id"].(string)
 
 	// Deny the request.
-	denyBody := map[string]any{"reason": "Not appropriate at this time"}
-	denyData, _ := json.Marshal(denyBody)
-	denyResp, err := http.Post(
-		apiURL()+"/v1/approvals/"+approvalID+"/deny",
-		"application/json",
-		bytes.NewReader(denyData),
-	)
-	if err != nil {
-		t.Fatalf("Deny: %v", err)
-	}
+	denyResp := authedPost(t, apiURL()+"/v1/approvals/"+approvalID+"/deny", map[string]any{"reason": "Not appropriate at this time"})
 	defer denyResp.Body.Close()
 
 	if denyResp.StatusCode != http.StatusOK {
@@ -186,10 +158,7 @@ func TestApprovalLifecycle_Deny(t *testing.T) {
 	}
 
 	// Verify intent is denied.
-	intentGetResp, err := http.Get(apiURL() + "/v1/intents/" + intentID)
-	if err != nil {
-		t.Fatalf("GetIntent: %v", err)
-	}
+	intentGetResp := authedGet(t, apiURL()+"/v1/intents/"+intentID)
 	defer intentGetResp.Body.Close()
 
 	var updatedIntent map[string]any

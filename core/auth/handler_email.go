@@ -86,13 +86,18 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	initialStatus := model.UserStatusPendingVerification
+	if h.autoVerifyEmail {
+		initialStatus = model.UserStatusActive
+	}
+
 	user := model.User{
 		ID:           "usr_" + h.newID(),
 		EnterpriseID: enterprise.ID,
 		Email:        body.Email,
 		DisplayName:  body.DisplayName,
 		Role:         model.UserRoleOwner,
-		Status:       model.UserStatusPendingVerification,
+		Status:       initialStatus,
 		AuthProvider: "email",
 		PasswordHash: string(hash),
 		CreatedAt:    now,
@@ -104,23 +109,26 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate and send verification code.
-	if err := h.sendVerificationCode(ctx, user.ID, body.Email); err != nil {
-		h.log.Error("failed to send verification code", "error", err)
-		// Account created but code failed — user can request a new one.
+	// Send verification code unless auto-verify is enabled.
+	if !h.autoVerifyEmail {
+		if err := h.sendVerificationCode(ctx, user.ID, body.Email); err != nil {
+			h.log.Error("failed to send verification code", "error", err)
+			// Account created but code failed — user can request a new one.
+		}
 	}
 
 	h.log.Info("user signed up",
 		"user_id", user.ID,
 		"email", user.Email,
 		"personal", personal,
+		"auto_verified", h.autoVerifyEmail,
 	)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
 		"user_id": user.ID,
-		"status":  string(model.UserStatusPendingVerification),
+		"status":  string(initialStatus),
 		"message": "verification code sent to " + body.Email,
 	})
 }

@@ -27,7 +27,7 @@ func TestListTraces_AfterIntentCreation(t *testing.T) {
 		},
 	}
 
-	intentResp := postJSON(t, apiURL()+"/v1/intents", intentBody)
+	intentResp := authedPost(t, apiURL()+"/v1/intents", intentBody)
 	defer intentResp.Body.Close()
 
 	if intentResp.StatusCode != http.StatusCreated {
@@ -35,10 +35,7 @@ func TestListTraces_AfterIntentCreation(t *testing.T) {
 	}
 
 	// List traces.
-	traceResp, err := http.Get(apiURL() + "/v1/traces?workspace_id=default")
-	if err != nil {
-		t.Fatalf("ListTraces: %v", err)
-	}
+	traceResp := authedGet(t, apiURL()+"/v1/traces?workspace_id=default")
 	defer traceResp.Body.Close()
 
 	if traceResp.StatusCode != http.StatusOK {
