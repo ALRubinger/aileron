@@ -1,0 +1,76 @@
+We need to work on the account model and enable SSO and OAuth. Let's put together a plan for the cloud/hosted model. Let's start by enabling sign in with Google. We'll also need to plan to interface with providers like Okta. Start high level with the design and we'll have a conversation. We'll likely need to create an account model and update the database schema and APIs to support the notion of an "Enterprise", a top-level account for billing, user management, and other settings pertaining to a business. And the user model will be tied to the Enterprise.
+
+---
+
+I believe it makes sense that the SSO providers can be implementations of an SPI, matching the conventions we use throughout Aileron, no?
+
+---
+
+<task-notification>
+<task-id>bxt910lhx</task-id>
+<tool-use-id>toolu_01GDKoRvvu8Y6YQ8ZoHrJ7UH</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/1e058620-d00b-4150-b5d0-c4264e52f7a7/tasks/bxt910lhx.output</output-file>
+<status>completed</status>
+<summary>Background command "Run full test suite" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/1e058620-d00b-4150-b5d0-c4264e52f7a7/tasks/bxt910lhx.output
+
+---
+
+Will the schema changes auto deploy on Railway when the PR is created and merged?
+
+---
+
+Option A. Yes I have a PostgresSQL instance on Railway and the server service is conneted to it
+
+---
+
+Remove any Railway-specific fallbacks. I want this service to deploy on any infrstructrue with no provider-specific assumptions. We will have to wire up Railway to match the conventions demanded by the project
+
+---
+
+Write up a deployment guide for this in the README. For local and for cloud providers (agnostic). Make another section for Railway specifically (where we are hosting now).
+
+---
+
+All done? We've made OpenAPI changes and have regenerated the API surface?
+
+---
+
+Make a note that the OpenAPI spec is the authoritative source for the API. Any API changes need to go there, and we generate the API from it. In that way Aileron should always be in sync with the spec.
+
+---
+
+For the Google OAuth flow, if a user is not tied to any broader organization, for instance a GMail personal address, they are in their own Enterprise, a special case called a personal Enterprise.
+
+---
+
+The unique ID of a user must be their email address. In that way, when we add more OAuth connectors (x.com, GitHub, etc), no matter which way they come in, they always get their account tied to their email they're sharing for each of these services.
+
+---
+
+Is an email a good choice for a primary key in a database? Seems that the primary key of the user should be immutable and hidden from the user view; we use it internally only as a stable reference. Consider this and make a recommendation based on consensus schema design.
+
+---
+
+Why the "usr_" prfix?
+
+---
+
+Yes, do this.
+
+---
+
+So now, users can still log in through various sources like Google, x.com, Github, etc - but if those services are tied to the same email address, the user will always log into the same account, correct? And email is enforced in the user table as a unique field?
+
+---
+
+We also need a flow where users can sign up and log in with a username/password. Make sure that we are hashing the password with a unique salt, and storing the salt. Verify my direction against consensus security practices. When a user creates an account with an email address and not through an OAuth provider, we need to email them a confirmation code that they must verify before they can activate their account.
+
+---
+
+Yes, use bcrypt. Yes, stub the SPI and we'll add a provider later.
+
+---
+
+Do we need to update the README to reflect these changes since we last did it?
