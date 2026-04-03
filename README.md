@@ -206,14 +206,11 @@ task test:integration # Integration tests (requires running server)
 
 #### Auth environment variables for Docker Compose
 
-Docker Compose connects to PostgreSQL, which enables auth and requires a JWT signing key. The CI workflow (`.github/workflows/ci.yml`) sets these automatically. When running locally or in other environments, export them before starting:
+Docker Compose connects to PostgreSQL, which enables auth and requires a JWT signing key. Locally, `task up` auto-creates `deploy/.env` from `deploy/.env.example` with safe defaults. In CI, the workflow (`.github/workflows/ci.yml`) sets its own values directly. For other environments, create `deploy/.env` with at minimum:
 
-```sh
-export AILERON_JWT_SIGNING_KEY="$(openssl rand -hex 32)"
-task up
 ```
-
-`AILERON_DATABASE_URL` is already set in `deploy/docker-compose.yml` (matching the Postgres service credentials). `AILERON_JWT_SIGNING_KEY` is passed through from the host environment. Without it, the server will refuse to start.
+AILERON_JWT_SIGNING_KEY=<any 32+ character string>
+```
 
 ### Stop
 
@@ -351,13 +348,16 @@ The quickest way to run the full stack locally:
 task up
 ```
 
-This starts PostgreSQL, the API server (with auto-migration), the UI, and API docs. See [Getting Started](#getting-started) for details.
+This starts PostgreSQL, the API server (with auto-migration), the UI, and API docs. On first run, `task up` copies `deploy/.env.example` to `deploy/.env` with safe local defaults (including `AILERON_JWT_SIGNING_KEY`). No manual setup needed.
 
-To enable auth locally, set the required variables. Email/password signup works with just a JWT key — no OAuth credentials needed:
+To customize, edit `deploy/.env` (gitignored). For example, to enable Google OAuth locally:
 
 ```sh
-export AILERON_JWT_SIGNING_KEY="$(openssl rand -hex 32)"
-task up
+# deploy/.env
+AILERON_JWT_SIGNING_KEY=local-dev-signing-key-not-for-production
+GOOGLE_CLIENT_ID=your-client-id
+GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_REDIRECT_URL=http://localhost:8080/auth/google/callback
 ```
 
 Verification codes are printed to the server log (dev mailer). To also enable Google OAuth:

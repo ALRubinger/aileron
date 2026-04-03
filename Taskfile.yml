@@ -72,6 +72,7 @@ tasks:
   up:
     desc: Start all services via Docker Compose
     cmds:
+      - test -f deploy/.env || cp deploy/.env.example deploy/.env
       - docker compose -f {{.COMPOSE_FILE}} up {{.CLI_ARGS}}
 
   down:
