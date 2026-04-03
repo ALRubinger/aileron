@@ -1,6 +1,6 @@
 # ADR-0004: Enterprise Account Model, SSO/OAuth, and Email/Password Auth
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0005](0005-github-oauth-and-auth-spi-evolution.md)
 **Date:** 2026-04-02
 
 ## Context

@@ -65,7 +65,7 @@ paths:
           required: true
           schema:
             type: string
-            examples: [google, okta]
+            examples: [google, github]
       responses:
         "307":
           description: Redirect to auth provider
@@ -2699,7 +2699,7 @@ components:
           enum: [active, pending_verification, invited, suspended]
         auth_provider:
           type: string
-          description: Identity provider used for authentication (e.g. google, okta, saml)
+          description: Identity provider used for authentication (e.g. google, github, saml)
         last_login_at:
           type: string
           format: date-time

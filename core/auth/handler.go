@@ -28,7 +28,6 @@ type Handler struct {
 	mailer            Mailer
 	newID             func() string
 	uiRedirect        string // URL to redirect to after successful auth
-	oauthRedirectURL  string // optional override for OAuth callback URL
 	refreshTTL        time.Duration
 	verificationTTL   time.Duration
 	autoVerifyEmail   bool
@@ -50,11 +49,6 @@ type HandlerConfig struct {
 	AutoVerifyEmail   bool          // skip email verification (dev/CI only)
 	RefreshTTL        time.Duration // e.g. 7 * 24 * time.Hour
 	VerificationTTL   time.Duration // e.g. 15 * time.Minute
-	// OAuthRedirectURL is an optional override for the OAuth callback URL
-	// (e.g. "https://api.example.com/auth/google/callback"). When empty, the
-	// callback URL is derived dynamically from the incoming request host.
-	// Corresponds to the GOOGLE_REDIRECT_URL environment variable.
-	OAuthRedirectURL string
 }
 
 // NewHandler creates an auth handler.
@@ -80,7 +74,6 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		mailer:            cfg.Mailer,
 		newID:             cfg.NewID,
 		uiRedirect:        cfg.UIRedirect,
-		oauthRedirectURL:  cfg.OAuthRedirectURL,
 		refreshTTL:        cfg.RefreshTTL,
 		verificationTTL:   cfg.VerificationTTL,
 		autoVerifyEmail:   cfg.AutoVerifyEmail,
@@ -124,25 +117,35 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   r.TLS != nil,
 	})
 
-	url, err := provider.AuthorizationURL(r.Context(), state, h.callbackURL(r, providerName))
+	result, err := provider.AuthorizationURL(r.Context(), state, h.callbackURL(r, providerName))
 	if err != nil {
 		h.log.Error("failed to generate auth URL", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
 	}
 
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+	// If the provider returned extra state (e.g. PKCE code_verifier), persist
+	// it in a companion cookie so it survives the redirect round-trip.
+	if result.ExtraState != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "oauth_extra",
+			Value:    result.ExtraState,
+			Path:     "/",
+			MaxAge:   600, // 10 minutes
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   r.TLS != nil,
+		})
+	}
+
+	http.Redirect(w, r, result.URL, http.StatusTemporaryRedirect)
 }
 
 // callbackURL returns the OAuth callback URL for the given provider.
-// If OAuthRedirectURL is configured it is returned as-is (useful for
-// production deployments with a custom domain). Otherwise the URL is
-// derived from the incoming request so that branch deployments (e.g. on
-// Railway) work without any manual configuration.
+// The URL is derived from the incoming request so that branch deployments
+// (e.g. on Railway) work without any manual configuration. It respects
+// X-Forwarded-Proto and X-Forwarded-Host for reverse-proxied deployments.
 func (h *Handler) callbackURL(r *http.Request, provider string) string {
-	if h.oauthRedirectURL != "" {
-		return h.oauthRedirectURL
-	}
 	scheme := "https"
 	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
 		scheme = "http"
@@ -188,11 +191,25 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Read optional extra state (e.g. PKCE code_verifier) from companion cookie.
+	var extraState string
+	if extraCookie, err := r.Cookie("oauth_extra"); err == nil {
+		extraState = extraCookie.Value
+		// Clear the extra state cookie.
+		http.SetCookie(w, &http.Cookie{
+			Name:   "oauth_extra",
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
+		})
+	}
+
 	// Exchange code for identity.
 	identity, err := provider.HandleCallback(r.Context(), CallbackRequest{
 		Code:        r.URL.Query().Get("code"),
 		State:       stateCookie.Value,
 		RedirectURL: h.callbackURL(r, providerName),
+		ExtraState:  extraState,
 	})
 	if err != nil {
 		h.log.Error("callback exchange failed", "provider", providerName, "error", err)

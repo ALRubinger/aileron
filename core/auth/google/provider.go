@@ -54,9 +54,9 @@ func (p *Provider) Provider() string { return "google" }
 // AuthorizationURL returns the Google OAuth consent URL.
 // redirectURL must be the callback URL registered in the Google Cloud Console
 // (or match the dynamic URL derived from the request host).
-func (p *Provider) AuthorizationURL(_ context.Context, state, redirectURL string) (string, error) {
+func (p *Provider) AuthorizationURL(_ context.Context, state, redirectURL string) (*auth.AuthorizationResult, error) {
 	url := p.newConfig(redirectURL).AuthCodeURL(state, oauth2.AccessTypeOffline)
-	return url, nil
+	return &auth.AuthorizationResult{URL: url}, nil
 }
 
 // HandleCallback exchanges the authorization code for user identity.

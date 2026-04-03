@@ -35,6 +35,10 @@
 	function handleGoogleLogin() {
 		window.location.href = `${PUBLIC_API_BASE}/auth/google/login`;
 	}
+
+	function handleGitHubLogin() {
+		window.location.href = `${PUBLIC_API_BASE}/auth/github/login`;
+	}
 </script>
 
 <svelte:head>
@@ -91,6 +95,10 @@
 
 			<Button variant="outline" class="w-full" onclick={handleGoogleLogin}>
 				Sign in with Google
+			</Button>
+
+			<Button variant="outline" class="w-full" onclick={handleGitHubLogin}>
+				Sign in with GitHub
 			</Button>
 		</Card.Content>
 		<Card.Footer class="justify-center">

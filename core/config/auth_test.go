@@ -102,7 +102,6 @@ func TestLoadAuthConfig_GoogleEnabled(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("GOOGLE_CLIENT_ID", "my-client-id")
 	t.Setenv("GOOGLE_CLIENT_SECRET", "my-secret")
-	t.Setenv("GOOGLE_REDIRECT_URL", "https://example.com/callback")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
@@ -127,5 +126,36 @@ func TestLoadAuthConfig_GoogleDisabled(t *testing.T) {
 	}
 	if cfg.GoogleEnabled() {
 		t.Error("expected Google disabled when credentials missing")
+	}
+}
+
+func TestLoadAuthConfig_GitHubEnabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "gh-client-id")
+	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "gh-secret")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.GitHubEnabled() {
+		t.Error("expected GitHub enabled")
+	}
+	if cfg.GitHubClientID != "gh-client-id" {
+		t.Errorf("GitHubClientID = %q", cfg.GitHubClientID)
+	}
+}
+
+func TestLoadAuthConfig_GitHubDisabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
+	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GitHubEnabled() {
+		t.Error("expected GitHub disabled when credentials missing")
 	}
 }
