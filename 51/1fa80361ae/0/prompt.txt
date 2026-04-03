@@ -97,3 +97,7 @@ Run for i in $(seq 1 20); do
   exit 1
   shell: /usr/bin/bash -e {0}
 UI did not become healthy
+
+---
+
+Make a default env file for local development so that contributors do not need to do anything special to run "task up". That one may not be in .gitignore and can be copied to .env as part of a local build. Makes sense?
