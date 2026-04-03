@@ -205,14 +205,24 @@ func TestNewHandler_CORSHeaders(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/v1/health")
+	// CORS headers are only set when an Origin header is present.
+	req, err := http.NewRequest("GET", srv.URL+"/v1/health", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Origin", "https://app.withaileron.ai")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /v1/health: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "*")
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://app.withaileron.ai" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "https://app.withaileron.ai")
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("Access-Control-Allow-Credentials = %q, want %q", got, "true")
 	}
 }
 

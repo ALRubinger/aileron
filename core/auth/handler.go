@@ -261,7 +261,8 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set cookies for browser flow.
-	secure := r.TLS != nil
+	// Check both direct TLS and X-Forwarded-Proto (behind reverse proxy).
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
 	http.SetCookie(w, &http.Cookie{
 		Name:     "access_token",
 		Value:    accessToken,

@@ -10,11 +10,11 @@ async function apiFetch(path: string, options?: RequestInit) {
 	};
 
 	const token = getToken();
-	if (token) {
+	if (token && token !== 'cookie-auth') {
 		headers['Authorization'] = `Bearer ${token}`;
 	}
 
-	let res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+	let res = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
 
 	// If unauthorized, attempt token refresh and retry once.
 	if (res.status === 401 && token) {
@@ -24,7 +24,7 @@ async function apiFetch(path: string, options?: RequestInit) {
 			if (newToken) {
 				headers['Authorization'] = `Bearer ${newToken}`;
 			}
-			res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+			res = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: 'include' });
 		} else {
 			clearAuth();
 			if (typeof window !== 'undefined') {

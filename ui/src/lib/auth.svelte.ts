@@ -66,6 +66,7 @@ export async function refreshAuth(): Promise<boolean> {
 	try {
 		const res = await fetch(`${PUBLIC_API_BASE}/auth/refresh`, {
 			method: 'POST',
+			credentials: 'include',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ refresh_token: refreshToken })
 		});
@@ -85,8 +86,14 @@ export async function refreshAuth(): Promise<boolean> {
 
 /** Fetch the current user profile from /v1/users/me. */
 async function fetchCurrentUser() {
+	const headers: Record<string, string> = {};
+	// Use Bearer token for password-based auth; use cookies for OAuth flow.
+	if (_token && _token !== 'cookie-auth') {
+		headers['Authorization'] = `Bearer ${_token}`;
+	}
 	const res = await fetch(`${PUBLIC_API_BASE}/v1/users/me`, {
-		headers: { Authorization: `Bearer ${_token}` }
+		headers,
+		credentials: 'include'
 	});
 	if (!res.ok) throw new Error('Failed to fetch user');
 	_user = await res.json();
