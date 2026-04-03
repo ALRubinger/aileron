@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "f4ef5b8e3b6c",
+  "strategy": "manual-commit",
+  "branch": "feat/enterprise-auth-sso",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "deploy/docker-compose.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f4/ef5b8e3b6c/0/metadata.json",
+      "transcript": "/f4/ef5b8e3b6c/0/full.jsonl",
+      "content_hash": "/f4/ef5b8e3b6c/0/content_hash.txt",
+      "prompt": "/f4/ef5b8e3b6c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3398,
+    "cache_creation_tokens": 263539,
+    "cache_read_tokens": 59050225,
+    "output_tokens": 116540,
+    "api_call_count": 359
+  }
+}
