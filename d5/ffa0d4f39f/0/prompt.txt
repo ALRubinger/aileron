@@ -1,0 +1,33 @@
+Time to wire up 2 more auth providers: GitHub and x.com. These should be pluggable implementations into the existing API and SPI, so call out if there's anything in those existing APIs and SPIs that needs changing or makes assumptions about the existing provider of Google. Make sure that each of thee new providers can fulfill the requirements and features noted by the existing APIs and SPIs so that there are no gaps in functionality no matter which provider someone is signing in from.
+
+---
+
+Do we need to create an ADR update to the one where we put OAuth in place to begin with?
+
+---
+
+No, ADRs are never edited. Once merged, they can only be superceded by further ADRs. Read this: https://martinfowler.com/bliki/ArchitectureDecisionRecord.html. Note for now and all future work that ADRs should follow these conventions. And then create an updated ADR which supercedes the last one.
+
+---
+
+You may edit ADR-0004 only to note that it is superceded by ADR-0005. Note that when superceding ADRs we will note them in the prior one. Show me your notes concerning ADRs. Then update the README.
+
+---
+
+Will the authorization callback URLs (configured in Google and GitHub) work when on Railway branch deployments? Those values in Google and GitHub will reference the production deployment.
+
+---
+
+Defer the plan outlined in 2 and create a GitHub issue for it.
+
+---
+
+Why does the README reference railway? That is a provider-specific implementation detail that the instructions should not assume.
+
+---
+
+My mistake. I meant that only the OAuth instructions in the README should not reference Railway. The instructions for deploying on Railway are quite nice and convenient.
+
+---
+
+Test coverage for the new changes are near 100%? Make a note to always check this when doing work.
