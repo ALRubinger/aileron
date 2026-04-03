@@ -153,7 +153,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			authRegistry.Register(googleauth.New(
 				authCfg.GoogleClientID,
 				authCfg.GoogleClientSecret,
-				authCfg.GoogleRedirectURL,
 			))
 			log.Info("registered Google OAuth provider")
 		}
@@ -174,6 +173,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			Mailer:            mailer,
 			NewID:             idGen,
 			UIRedirect:        authCfg.UIRedirectURL,
+			OAuthRedirectURL:  authCfg.GoogleRedirectURL,
 			RefreshTTL:        authCfg.RefreshTokenTTL,
 			AutoVerifyEmail:   authCfg.AutoVerifyEmail,
 		})

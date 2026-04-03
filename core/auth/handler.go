@@ -28,6 +28,7 @@ type Handler struct {
 	mailer            Mailer
 	newID             func() string
 	uiRedirect        string // URL to redirect to after successful auth
+	oauthRedirectURL  string // optional override for OAuth callback URL
 	refreshTTL        time.Duration
 	verificationTTL   time.Duration
 	autoVerifyEmail   bool
@@ -49,6 +50,11 @@ type HandlerConfig struct {
 	AutoVerifyEmail   bool          // skip email verification (dev/CI only)
 	RefreshTTL        time.Duration // e.g. 7 * 24 * time.Hour
 	VerificationTTL   time.Duration // e.g. 15 * time.Minute
+	// OAuthRedirectURL is an optional override for the OAuth callback URL
+	// (e.g. "https://api.example.com/auth/google/callback"). When empty, the
+	// callback URL is derived dynamically from the incoming request host.
+	// Corresponds to the GOOGLE_REDIRECT_URL environment variable.
+	OAuthRedirectURL string
 }
 
 // NewHandler creates an auth handler.
@@ -74,6 +80,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		mailer:            cfg.Mailer,
 		newID:             cfg.NewID,
 		uiRedirect:        cfg.UIRedirect,
+		oauthRedirectURL:  cfg.OAuthRedirectURL,
 		refreshTTL:        cfg.RefreshTTL,
 		verificationTTL:   cfg.VerificationTTL,
 		autoVerifyEmail:   cfg.AutoVerifyEmail,
@@ -117,7 +124,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   r.TLS != nil,
 	})
 
-	url, err := provider.AuthorizationURL(r.Context(), state)
+	url, err := provider.AuthorizationURL(r.Context(), state, h.callbackURL(r, providerName))
 	if err != nil {
 		h.log.Error("failed to generate auth URL", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -125,6 +132,26 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
+
+// callbackURL returns the OAuth callback URL for the given provider.
+// If OAuthRedirectURL is configured it is returned as-is (useful for
+// production deployments with a custom domain). Otherwise the URL is
+// derived from the incoming request so that branch deployments (e.g. on
+// Railway) work without any manual configuration.
+func (h *Handler) callbackURL(r *http.Request, provider string) string {
+	if h.oauthRedirectURL != "" {
+		return h.oauthRedirectURL
+	}
+	scheme := "https"
+	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+		scheme = "http"
+	}
+	host := r.Host
+	if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
+		host = fwdHost
+	}
+	return fmt.Sprintf("%s://%s/auth/%s/callback", scheme, host, provider)
 }
 
 // handleCallback processes the OAuth callback and creates a session.
@@ -163,8 +190,9 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Exchange code for identity.
 	identity, err := provider.HandleCallback(r.Context(), CallbackRequest{
-		Code:  r.URL.Query().Get("code"),
-		State: stateCookie.Value,
+		Code:        r.URL.Query().Get("code"),
+		State:       stateCookie.Value,
+		RedirectURL: h.callbackURL(r, providerName),
 	})
 	if err != nil {
 		h.log.Error("callback exchange failed", "provider", providerName, "error", err)

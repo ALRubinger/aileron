@@ -25,8 +25,9 @@ type AuthProvider interface {
 
 	// AuthorizationURL returns the URL to redirect the user to for login.
 	// The state parameter is an opaque CSRF token that must be echoed back
-	// in the callback.
-	AuthorizationURL(ctx context.Context, state string) (string, error)
+	// in the callback. redirectURL is the callback URL the provider should
+	// redirect to after authentication.
+	AuthorizationURL(ctx context.Context, state, redirectURL string) (string, error)
 
 	// HandleCallback exchanges the authorization code from the IdP callback
 	// for a resolved user identity.
@@ -35,8 +36,9 @@ type AuthProvider interface {
 
 // CallbackRequest contains the data from the OAuth/OIDC callback.
 type CallbackRequest struct {
-	Code  string
-	State string
+	Code        string
+	State       string
+	RedirectURL string // must match the redirectURL used in AuthorizationURL
 }
 
 // Identity is the authenticated user identity returned by a provider.
