@@ -103,7 +103,7 @@ jobs:
 
   build:
     name: Build Docker Images
-    needs: [generate, lint, test]
+    needs: generate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -146,7 +146,7 @@ jobs:
 
   integration:
     name: Integration Tests
-    needs: build
+    needs: [build, lint, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
