@@ -154,6 +154,9 @@ jobs:
       - name: Start full stack
         run: docker compose -f deploy/docker-compose.yml up -d --build --wait
         timeout-minutes: 5
+        env:
+          AILERON_DATABASE_URL: postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable
+          AILERON_JWT_SIGNING_KEY: ci-test-signing-key-not-for-production
 
       - name: Wait for healthy server
         run: |

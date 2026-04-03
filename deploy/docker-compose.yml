@@ -28,6 +28,7 @@ services:
     environment:
       AILERON_ADDR: ":8080"
       AILERON_DATABASE_URL: "postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable"
+      AILERON_JWT_SIGNING_KEY: "${AILERON_JWT_SIGNING_KEY}"
     ports:
       - "8080:8080"
 
