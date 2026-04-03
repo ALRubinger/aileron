@@ -248,6 +248,31 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+    patch:
+      tags: [Enterprises]
+      summary: Update current enterprise
+      description: Updates the authenticated user's enterprise. Requires owner or admin role.
+      operationId: updateCurrentEnterprise
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateEnterpriseRequest"
+      responses:
+        "200":
+          description: Enterprise updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enterprise"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/users/me:
     get:
       tags: [Users]
@@ -261,6 +286,29 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    patch:
+      tags: [Users]
+      summary: Update current user
+      description: Updates the authenticated user's profile.
+      operationId: updateCurrentUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: User updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -2684,6 +2732,33 @@ components:
         status:
           type: string
           enum: [logged_out]
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+
+    UpdateEnterpriseRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        billing_email:
+          type: string
+          format: email
+        sso_required:
+          type: boolean
+        allowed_auth_providers:
+          type: array
+          items:
+            type: string
+          description: Restrict sign-in to these providers. Empty array means all allowed.
+        allowed_email_domains:
+          type: array
+          items:
+            type: string
+          description: Restrict sign-in to these email domains. Empty array means all allowed.
 
     SignupRequest:
       type: object

@@ -84,6 +84,11 @@ export async function refreshAuth(): Promise<boolean> {
 	}
 }
 
+/** Re-fetch the current user profile and update reactive state. */
+export async function refreshUser() {
+	return fetchCurrentUser();
+}
+
 /** Fetch the current user profile from /v1/users/me. */
 async function fetchCurrentUser() {
 	const headers: Record<string, string> = {};

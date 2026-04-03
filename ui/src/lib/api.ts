@@ -105,3 +105,31 @@ export async function setMCPServerCredential(id: string, envVarName: string, sec
 		body: JSON.stringify({ env_var_name: envVarName, secret_value: secretValue })
 	});
 }
+
+export async function getCurrentUser() {
+	return apiFetch('/v1/users/me');
+}
+
+export async function updateCurrentUser(data: { display_name?: string }) {
+	return apiFetch('/v1/users/me', {
+		method: 'PATCH',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function getCurrentEnterprise() {
+	return apiFetch('/v1/enterprises/me');
+}
+
+export async function updateCurrentEnterprise(data: {
+	name?: string;
+	billing_email?: string;
+	sso_required?: boolean;
+	allowed_auth_providers?: string[];
+	allowed_email_domains?: string[];
+}) {
+	return apiFetch('/v1/enterprises/me', {
+		method: 'PATCH',
+		body: JSON.stringify(data)
+	});
+}

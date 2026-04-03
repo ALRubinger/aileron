@@ -107,6 +107,34 @@ func TestMiddleware_SkipAuthRoutes(t *testing.T) {
 	}
 }
 
+func TestContextWithClaims(t *testing.T) {
+	claims := &Claims{
+		EnterpriseID: "ent_1",
+		Email:        "alice@example.com",
+		Role:         "owner",
+	}
+	claims.Subject = "usr_1"
+
+	ctx := ContextWithClaims(t.Context(), claims)
+	got := ClaimsFromContext(ctx)
+	if got == nil {
+		t.Fatal("expected claims from context")
+	}
+	if got.Subject != "usr_1" {
+		t.Errorf("Subject = %q, want %q", got.Subject, "usr_1")
+	}
+	if got.EnterpriseID != "ent_1" {
+		t.Errorf("EnterpriseID = %q, want %q", got.EnterpriseID, "ent_1")
+	}
+}
+
+func TestContextWithClaims_NilReturnsNil(t *testing.T) {
+	got := ClaimsFromContext(t.Context())
+	if got != nil {
+		t.Errorf("expected nil claims from empty context, got %+v", got)
+	}
+}
+
 func TestMiddleware_CookieToken(t *testing.T) {
 	issuer := NewTokenIssuer([]byte("test-secret-key-32-bytes-long!!!"), "test", 15*time.Minute)
 	token, _ := issuer.Issue("usr_1", "ent_1", "alice@example.com", "owner")
