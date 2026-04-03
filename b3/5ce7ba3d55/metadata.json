@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "b35ce7ba3d55",
+  "strategy": "manual-commit",
+  "branch": "feat/enterprise-auth-sso",
+  "checkpoints_count": 1,
+  "files_touched": null,
+  "sessions": [
+    {
+      "metadata": "/b3/5ce7ba3d55/0/metadata.json",
+      "transcript": "/b3/5ce7ba3d55/0/full.jsonl",
+      "content_hash": "/b3/5ce7ba3d55/0/content_hash.txt",
+      "prompt": "/b3/5ce7ba3d55/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3334,
+    "cache_creation_tokens": 231997,
+    "cache_read_tokens": 46562108,
+    "output_tokens": 100071,
+    "api_call_count": 309
+  }
+}

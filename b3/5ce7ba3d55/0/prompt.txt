@@ -1,0 +1,25 @@
+Another error on CI:
+
+go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
+  shell: /usr/bin/bash -e {0}
+  env:
+    GOTOOLCHAIN: local
+go: module github.com/jackc/pgx/v5@v5.9.1 requires go >= 1.25.0 (running go 1.24.13; GOTOOLCHAIN=local)
+Error: Process completed with exit code 1.
+
+---
+
+Another CI error:
+
+  go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
+  shell: /usr/bin/bash -e {0}
+  env:
+    GOTOOLCHAIN: local
+go: module golang.org/x/crypto@v0.49.0 requires go >= 1.25.0 (running go 1.24.13; GOTOOLCHAIN=local)
+Error: Process completed with exit code 1.
+
+---
+
+Server deployment on Railway failed with :
+
+go: golang.org/x/crypto@v0.49.0: module golang.org/x/crypto@v0.49.0 requires go >= 1.25.0 (running go 1.24.13; GOTOOLCHAIN=local)
