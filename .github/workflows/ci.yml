@@ -161,13 +161,13 @@ jobs:
 
       - name: Wait for healthy server
         run: |
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             if curl -sf http://localhost:8080/v1/health; then
               echo ""
               echo "Server healthy"
               exit 0
             fi
-            sleep 2
+            sleep 3
           done
           echo "Server did not become healthy"
           docker compose -f deploy/docker-compose.yml logs
