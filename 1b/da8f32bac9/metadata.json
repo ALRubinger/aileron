@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "1bda8f32bac9",
+  "strategy": "manual-commit",
+  "branch": "feat/enterprise-auth-sso",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "core/go.mod"
+  ],
+  "sessions": [
+    {
+      "metadata": "/1b/da8f32bac9/0/metadata.json",
+      "transcript": "/1b/da8f32bac9/0/full.jsonl",
+      "content_hash": "/1b/da8f32bac9/0/content_hash.txt",
+      "prompt": "/1b/da8f32bac9/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 16,
+    "cache_creation_tokens": 4096,
+    "cache_read_tokens": 3111888,
+    "output_tokens": 1602,
+    "api_call_count": 14
+  }
+}
