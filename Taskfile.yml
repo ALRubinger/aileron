@@ -158,3 +158,18 @@ tasks:
     desc: Check the server health endpoint
     cmds:
       - curl -s http://localhost:8080/v1/health | head -c 500 && echo
+
+  check:oauth-callback:
+    desc: Verify stable OAuth callback domain configuration
+    cmds:
+      - |
+        if [ -z "${AILERON_OAUTH_CALLBACK_BASE_URL}" ]; then
+          echo "AILERON_OAUTH_CALLBACK_BASE_URL is not set — using dynamic callback URLs (default)"
+        else
+          echo "Stable callback URL: ${AILERON_OAUTH_CALLBACK_BASE_URL}"
+          echo "Trusted origins:     ${AILERON_TRUSTED_ORIGINS:-<not set>}"
+          echo ""
+          echo "Register these URIs with your OAuth providers:"
+          echo "  Google:  ${AILERON_OAUTH_CALLBACK_BASE_URL}/auth/google/callback"
+          echo "  GitHub:  ${AILERON_OAUTH_CALLBACK_BASE_URL}/auth/github/callback"
+        fi
