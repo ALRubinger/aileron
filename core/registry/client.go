@@ -65,14 +65,19 @@ func (c *Client) WithRefreshInterval(d time.Duration) *Client {
 // refreshes the cache at the configured interval. The goroutine stops
 // when ctx is cancelled.
 func (c *Client) Start(ctx context.Context) {
-	// Prefetch synchronously so the cache is warm before the first request.
-	if err := c.refresh(ctx); err != nil {
-		c.log.Warn("registry prefetch failed; will retry on next interval", "error", err)
-	} else {
-		c.log.Info("registry prefetch complete", "servers", len(c.cached))
-	}
-
 	go func() {
+		// Prefetch asynchronously so the server can start accepting
+		// requests immediately. Marketplace queries will return empty
+		// results until the first refresh completes.
+		if err := c.refresh(ctx); err != nil {
+			c.log.Warn("registry prefetch failed; will retry on next interval", "error", err)
+		} else {
+			c.mu.RLock()
+			count := len(c.cached)
+			c.mu.RUnlock()
+			c.log.Info("registry prefetch complete", "servers", count)
+		}
+
 		ticker := time.NewTicker(c.refreshInterval)
 		defer ticker.Stop()
 		for {
