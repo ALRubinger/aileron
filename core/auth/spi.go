@@ -20,18 +20,32 @@ import "context"
 
 // AuthProvider authenticates users via an external identity provider.
 type AuthProvider interface {
-	// Provider returns the provider identifier (e.g. "google", "okta").
+	// Provider returns the provider identifier (e.g. "google", "github").
 	Provider() string
 
-	// AuthorizationURL returns the URL to redirect the user to for login.
-	// The state parameter is an opaque CSRF token that must be echoed back
-	// in the callback. redirectURL is the callback URL the provider should
-	// redirect to after authentication.
-	AuthorizationURL(ctx context.Context, state, redirectURL string) (string, error)
+	// AuthorizationURL returns the authorization result containing the URL to
+	// redirect the user to for login. The state parameter is an opaque CSRF
+	// token that must be echoed back in the callback. redirectURL is the
+	// callback URL the provider should redirect to after authentication.
+	//
+	// Providers that require PKCE can return an ExtraState in the result (e.g.
+	// the code_verifier); the handler will persist it across the redirect and
+	// supply it back in CallbackRequest.ExtraState.
+	AuthorizationURL(ctx context.Context, state, redirectURL string) (*AuthorizationResult, error)
 
 	// HandleCallback exchanges the authorization code from the IdP callback
 	// for a resolved user identity.
 	HandleCallback(ctx context.Context, req CallbackRequest) (*Identity, error)
+}
+
+// AuthorizationResult is returned by AuthProvider.AuthorizationURL.
+type AuthorizationResult struct {
+	// URL is the provider's authorization endpoint URL to redirect to.
+	URL string
+	// ExtraState is opaque provider data that the handler persists across the
+	// OAuth redirect (e.g. a PKCE code_verifier). It is returned to the
+	// provider via CallbackRequest.ExtraState. Empty means nothing to store.
+	ExtraState string
 }
 
 // CallbackRequest contains the data from the OAuth/OIDC callback.
@@ -39,6 +53,7 @@ type CallbackRequest struct {
 	Code        string
 	State       string
 	RedirectURL string // must match the redirectURL used in AuthorizationURL
+	ExtraState  string // opaque data from AuthorizationResult, if any
 }
 
 // Identity is the authenticated user identity returned by a provider.

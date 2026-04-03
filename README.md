@@ -241,7 +241,8 @@ aileron/
 │   ├── api/            OpenAPI specification and generated code
 │   ├── app/            Application wiring (handlers, middleware) — importable library
 │   ├── auth/           Auth SPI, enforcer, JWT, middleware, and provider implementations
-│   │   └── google/     Google OAuth 2.0 provider
+│   │   ├── google/     Google OAuth 2.0 provider
+│   │   └── github/     GitHub OAuth 2.0 provider
 │   ├── server/         HTTP server entry point and entrypoint script
 │   ├── schema/         Atlas declarative database schema (HCL)
 │   ├── policy/         Policy engine SPI, rule-based implementation, seed policies
@@ -319,7 +320,7 @@ Aileron supports SSO and OAuth for the hosted control plane. Authentication is *
 
 When `AILERON_DATABASE_URL` is set, the server enables:
 - **Email/password signup** with email verification (bcrypt-hashed passwords, 6-digit verification codes)
-- **Google OAuth sign-in** (with Okta and SAML planned)
+- **Google and GitHub OAuth sign-in** (with Okta and SAML planned)
 - Enterprise account model (auto-created on first sign-in or signup)
 - JWT-based session management with refresh token rotation
 - Enterprise-level SSO enforcement (provider restrictions, email domain restrictions)
@@ -337,7 +338,10 @@ When `AILERON_DATABASE_URL` is set, the server enables:
 | `AILERON_UI_REDIRECT_URL` | No | `/` | Redirect destination after successful login |
 | `GOOGLE_CLIENT_ID` | No | | Google OAuth 2.0 client ID |
 | `GOOGLE_CLIENT_SECRET` | No | | Google OAuth 2.0 client secret |
-| `GOOGLE_REDIRECT_URL` | No | _(derived from request)_ | OAuth callback URL override (e.g. `https://api.example.com/auth/google/callback`). When unset, the callback URL is derived dynamically from the incoming request host, enabling OAuth to work on branch deployments without manual configuration. |
+| `GITHUB_OAUTH_CLIENT_ID` | No | | GitHub OAuth 2.0 client ID |
+| `GITHUB_OAUTH_CLIENT_SECRET` | No | | GitHub OAuth 2.0 client secret |
+
+OAuth callback URLs are derived dynamically from the incoming request host, enabling OAuth to work on branch deployments without manual configuration.
 
 ## Deployment
 
@@ -351,21 +355,18 @@ task up
 
 This starts PostgreSQL, the API server (with auto-migration), the UI, and API docs. On first run, `task up` copies `deploy/.env.example` to `deploy/.env` with safe local defaults (including `AILERON_JWT_SIGNING_KEY`). No manual setup needed.
 
-To customize, edit `deploy/.env` (gitignored). For example, to enable Google OAuth locally:
+To customize, edit `deploy/.env` (gitignored). For example, to enable OAuth providers locally:
 
 ```sh
 # deploy/.env
 AILERON_JWT_SIGNING_KEY=local-dev-signing-key-not-for-production
-GOOGLE_CLIENT_ID=your-client-id
-GOOGLE_CLIENT_SECRET=your-client-secret
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+GITHUB_OAUTH_CLIENT_ID=your-github-client-id
+GITHUB_OAUTH_CLIENT_SECRET=your-github-client-secret
 ```
 
-Verification codes are printed to the server log (dev mailer). To also enable Google OAuth:
-
-```sh
-export GOOGLE_CLIENT_ID="your-client-id"
-export GOOGLE_CLIENT_SECRET="your-client-secret"
-```
+Verification codes for email/password signup are printed to the server log (dev mailer). Each OAuth provider is independently optional — configure whichever you need.
 
 ### Cloud (Provider-Agnostic)
 
@@ -393,12 +394,26 @@ Aileron is a standard Docker container with no infrastructure-specific assumptio
    AILERON_JWT_SIGNING_KEY=<random-32-char-string>
    GOOGLE_CLIENT_ID=<from-google-cloud-console>
    GOOGLE_CLIENT_SECRET=<from-google-cloud-console>
+   GITHUB_OAUTH_CLIENT_ID=<from-github-developer-settings>
+   GITHUB_OAUTH_CLIENT_SECRET=<from-github-developer-settings>
    ```
-   `GOOGLE_REDIRECT_URL` is optional. When omitted, the OAuth callback URL is derived from the request host automatically. Set it explicitly only if the server is behind a reverse proxy that obscures the public hostname.
+   Each OAuth provider is optional. OAuth callback URLs are derived from the request host automatically.
 
 4. **Deploy the container.** The entrypoint automatically runs Atlas schema migrations against `AILERON_DATABASE_URL` before starting the server. Migrations are declarative and idempotent — safe to run on every deploy.
 
-5. **Verify:**
+5. **Configure OAuth providers** (optional — each is independent):
+
+   **Google** — in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
+   - Create an OAuth 2.0 Client ID (Web application type)
+   - Add `https://<your-domain>/auth/google/callback` as an authorized redirect URI
+   - Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+
+   **GitHub** — in [GitHub Developer Settings](https://github.com/settings/developers):
+   - Create a new OAuth App
+   - Set the authorization callback URL to `https://<your-domain>/auth/github/callback`
+   - Set `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET`
+
+6. **Verify:**
    ```sh
    curl https://api.yourdomain.com/v1/health
    ```
@@ -421,16 +436,12 @@ Aileron is currently hosted on [Railway](https://railway.com). The server servic
    | `AILERON_JWT_SIGNING_KEY` | Generate with `openssl rand -hex 32` |
    | `GOOGLE_CLIENT_ID` | From Google Cloud Console |
    | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console |
+   | `GITHUB_OAUTH_CLIENT_ID` | From GitHub Developer Settings |
+   | `GITHUB_OAUTH_CLIENT_SECRET` | From GitHub Developer Settings |
 
-   `GOOGLE_REDIRECT_URL` is **not required** on Railway. The callback URL is derived automatically from the request host, so Google OAuth works on both the production domain and branch deployments without any per-branch configuration.
+   Each OAuth provider is optional. Callback URLs are derived automatically from the request host.
 
 3. **Deploy** — push to the branch Railway is watching. The Dockerfile builds the image, and on startup the entrypoint applies schema migrations automatically.
-
-4. **Google OAuth setup** — in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
-   - Create an OAuth 2.0 Client ID (Web application type)
-   - Add `https://<your-production-domain>.railway.app/auth/google/callback` as an authorized redirect URI
-   - For branch deployments, add the branch URL (e.g. `https://<branch-name>.railway.app/auth/google/callback`) as an additional authorized redirect URI — the callback URL is derived from the request host automatically, so no env var changes are needed per branch
-   - Copy the client ID and secret into the Railway variables above
 
 ## Architecture Principles
 

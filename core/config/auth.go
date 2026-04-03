@@ -42,7 +42,10 @@ type AuthConfig struct {
 	// Google OAuth configuration.
 	GoogleClientID     string // Env: GOOGLE_CLIENT_ID
 	GoogleClientSecret string // Env: GOOGLE_CLIENT_SECRET
-	GoogleRedirectURL  string // Env: GOOGLE_REDIRECT_URL
+
+	// GitHub OAuth configuration.
+	GitHubClientID     string // Env: GITHUB_OAUTH_CLIENT_ID
+	GitHubClientSecret string // Env: GITHUB_OAUTH_CLIENT_SECRET
 }
 
 // LoadAuthConfig loads auth configuration from environment variables.
@@ -57,7 +60,8 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		AutoVerifyEmail:    os.Getenv("AILERON_AUTO_VERIFY_EMAIL") == "true",
 		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GoogleRedirectURL:  os.Getenv("GOOGLE_REDIRECT_URL"),
+		GitHubClientID:     os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
+		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
 	}
 
 	// Parse durations with defaults.
@@ -92,6 +96,11 @@ func (c *AuthConfig) AuthEnabled() bool {
 // GoogleEnabled reports whether Google OAuth is configured.
 func (c *AuthConfig) GoogleEnabled() bool {
 	return c.GoogleClientID != "" && c.GoogleClientSecret != ""
+}
+
+// GitHubEnabled reports whether GitHub OAuth is configured.
+func (c *AuthConfig) GitHubEnabled() bool {
+	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
 }
 
 func envOrDefault(key, def string) string {

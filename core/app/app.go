@@ -13,6 +13,7 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/auth"
+	githubauth "github.com/ALRubinger/aileron/core/auth/github"
 	googleauth "github.com/ALRubinger/aileron/core/auth/google"
 	"github.com/ALRubinger/aileron/core/config"
 	"github.com/ALRubinger/aileron/core/connector"
@@ -156,6 +157,13 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			))
 			log.Info("registered Google OAuth provider")
 		}
+		if authCfg.GitHubEnabled() {
+			authRegistry.Register(githubauth.New(
+				authCfg.GitHubClientID,
+				authCfg.GitHubClientSecret,
+			))
+			log.Info("registered GitHub OAuth provider")
+		}
 
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)
 
@@ -173,7 +181,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			Mailer:            mailer,
 			NewID:             idGen,
 			UIRedirect:        authCfg.UIRedirectURL,
-			OAuthRedirectURL:  authCfg.GoogleRedirectURL,
 			RefreshTTL:        authCfg.RefreshTokenTTL,
 			AutoVerifyEmail:   authCfg.AutoVerifyEmail,
 		})

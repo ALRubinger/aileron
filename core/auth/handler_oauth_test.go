@@ -19,8 +19,10 @@ type fakeProvider struct {
 
 func (f *fakeProvider) Provider() string { return f.name }
 
-func (f *fakeProvider) AuthorizationURL(_ context.Context, state, _ string) (string, error) {
-	return "https://fake-provider.example.com/auth?state=" + state, nil
+func (f *fakeProvider) AuthorizationURL(_ context.Context, state, _ string) (*AuthorizationResult, error) {
+	return &AuthorizationResult{
+		URL: "https://fake-provider.example.com/auth?state=" + state,
+	}, nil
 }
 
 func (f *fakeProvider) HandleCallback(_ context.Context, _ CallbackRequest) (*Identity, error) {
@@ -312,6 +314,93 @@ func TestOAuthLogin_Redirect(t *testing.T) {
 	if !hasStateCookie {
 		t.Error("expected oauth_state cookie to be set")
 	}
+}
+
+func TestOAuthLogin_ExtraStateCookie(t *testing.T) {
+	te := newTestEnv()
+
+	// Register a provider that returns ExtraState (simulating PKCE).
+	te.handler.registry.Register(&fakeProviderWithExtraState{
+		name:       "pkce",
+		extraState: "test-code-verifier-abc123",
+		identity:   &Identity{Subject: "sub", Email: "a@b.com", Provider: "pkce"},
+	})
+
+	w := te.do("GET", "/auth/pkce/login", "")
+
+	if w.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusTemporaryRedirect)
+	}
+
+	// Should set oauth_extra cookie with the ExtraState value.
+	var hasExtraCookie bool
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == "oauth_extra" && cookie.Value == "test-code-verifier-abc123" {
+			hasExtraCookie = true
+		}
+	}
+	if !hasExtraCookie {
+		t.Error("expected oauth_extra cookie to be set with ExtraState value")
+	}
+}
+
+func TestOAuthCallback_ExtraStatePassedToProvider(t *testing.T) {
+	te := newTestEnv()
+
+	// Register a provider that captures the ExtraState from the callback.
+	fp := &fakeProviderWithExtraState{
+		name:       "pkce",
+		extraState: "verifier-xyz",
+		identity:   &Identity{Subject: "sub-1", Email: "alice@acme.com", DisplayName: "Alice", Provider: "pkce"},
+	}
+	te.handler.registry.Register(fp)
+
+	// Simulate callback with both oauth_state and oauth_extra cookies.
+	r := httptest.NewRequest("GET", "/auth/pkce/callback?code=c1&state=s1", nil)
+	r.AddCookie(&http.Cookie{Name: "oauth_state", Value: "s1"})
+	r.AddCookie(&http.Cookie{Name: "oauth_extra", Value: "verifier-xyz"})
+	w := httptest.NewRecorder()
+	te.mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusTemporaryRedirect, w.Body.String())
+	}
+
+	// Verify the provider received the ExtraState.
+	if fp.receivedExtraState != "verifier-xyz" {
+		t.Errorf("provider received ExtraState = %q, want verifier-xyz", fp.receivedExtraState)
+	}
+
+	// Verify oauth_extra cookie was cleared.
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == "oauth_extra" && cookie.MaxAge == -1 {
+			return // cleared as expected
+		}
+	}
+	t.Error("expected oauth_extra cookie to be cleared")
+}
+
+// fakeProviderWithExtraState is a test AuthProvider that returns ExtraState
+// from AuthorizationURL and captures it from HandleCallback.
+type fakeProviderWithExtraState struct {
+	name               string
+	extraState         string
+	identity           *Identity
+	receivedExtraState string
+}
+
+func (f *fakeProviderWithExtraState) Provider() string { return f.name }
+
+func (f *fakeProviderWithExtraState) AuthorizationURL(_ context.Context, state, _ string) (*AuthorizationResult, error) {
+	return &AuthorizationResult{
+		URL:        "https://fake-pkce.example.com/auth?state=" + state,
+		ExtraState: f.extraState,
+	}, nil
+}
+
+func (f *fakeProviderWithExtraState) HandleCallback(_ context.Context, req CallbackRequest) (*Identity, error) {
+	f.receivedExtraState = req.ExtraState
+	return f.identity, nil
 }
 
 func TestOAuthLogin_UnknownProvider(t *testing.T) {

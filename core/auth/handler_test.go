@@ -64,17 +64,17 @@ func TestCallbackURL_Dynamic(t *testing.T) {
 	}
 }
 
-func TestCallbackURL_Override(t *testing.T) {
-	override := "https://api.example.com/auth/google/callback"
-	h := &Handler{oauthRedirectURL: override}
+func TestCallbackURL_GitHubProvider(t *testing.T) {
+	h := &Handler{}
 
-	r := httptest.NewRequest("GET", "/auth/google/login", nil)
-	r.Host = "some-branch.railway.app"
+	r := httptest.NewRequest("GET", "/auth/github/login", nil)
+	r.Host = "api.example.com"
 	r.Header.Set("X-Forwarded-Proto", "https")
 
-	got := h.callbackURL(r, "google")
-	if got != override {
-		t.Errorf("callbackURL = %q, want override %q", got, override)
+	got := h.callbackURL(r, "github")
+	want := "https://api.example.com/auth/github/callback"
+	if got != want {
+		t.Errorf("callbackURL = %q, want %q", got, want)
 	}
 }
 

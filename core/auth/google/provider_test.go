@@ -21,10 +21,11 @@ func TestProvider_Provider(t *testing.T) {
 
 func TestProvider_AuthorizationURL(t *testing.T) {
 	p := New("my-client-id", "my-secret")
-	url, err := p.AuthorizationURL(context.Background(), "test-state-123", "https://example.com/callback")
+	result, err := p.AuthorizationURL(context.Background(), "test-state-123", "https://example.com/callback")
 	if err != nil {
 		t.Fatalf("AuthorizationURL: %v", err)
 	}
+	url := result.URL
 	if !strings.Contains(url, "client_id=my-client-id") {
 		t.Errorf("URL missing client_id: %s", url)
 	}
@@ -40,6 +41,9 @@ func TestProvider_AuthorizationURL(t *testing.T) {
 	}
 	if !strings.Contains(url, "access_type=offline") {
 		t.Errorf("URL missing access_type=offline: %s", url)
+	}
+	if result.ExtraState != "" {
+		t.Errorf("ExtraState = %q, want empty (Google does not use PKCE)", result.ExtraState)
 	}
 }
 
