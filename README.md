@@ -204,16 +204,16 @@ task test:go          # Unit tests
 task test:integration # Integration tests (requires running server)
 ```
 
-#### CI environment variables
+#### Auth environment variables for Docker Compose
 
-Integration tests run via Docker Compose, which connects to PostgreSQL and therefore requires auth configuration. Set these as GitHub Actions secrets (or repository variables — they are not sensitive in CI context):
+Docker Compose connects to PostgreSQL, which enables auth and requires a JWT signing key. The CI workflow (`.github/workflows/ci.yml`) sets these automatically. When running locally or in other environments, export them before starting:
 
-| Variable | CI Value |
-|----------|----------|
-| `AILERON_DATABASE_URL` | `postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable` |
-| `AILERON_JWT_SIGNING_KEY` | Any 32+ character string (e.g. `ci-test-signing-key-not-for-production`) |
+```sh
+export AILERON_JWT_SIGNING_KEY="$(openssl rand -hex 32)"
+task up
+```
 
-These match the Postgres credentials in `deploy/docker-compose.yml`. Without them, the server will refuse to start when a database is configured.
+`AILERON_DATABASE_URL` is already set in `deploy/docker-compose.yml` (matching the Postgres service credentials). `AILERON_JWT_SIGNING_KEY` is passed through from the host environment. Without it, the server will refuse to start.
 
 ### Stop
 
