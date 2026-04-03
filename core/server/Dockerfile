@@ -5,16 +5,16 @@ WORKDIR /src
 # Copy module files first for layer caching.
 COPY go.work go.work.sum* ./
 COPY cmd/aileron-mcp/go.mod ./cmd/aileron-mcp/
-COPY core/go.mod core/go.sum* ./core/
+COPY core/go.mod core/go.sum ./core/
 COPY sdk/go/go.mod sdk/go/go.sum* ./sdk/go/
 COPY test/integration/go.mod ./test/integration/
 
-RUN go work sync
+RUN cd core && go mod download
 
 COPY core/ ./core/
 COPY sdk/go/ ./sdk/go/
 
-RUN go build -o /aileron-server ./core/server
+RUN cd core && go build -o /aileron-server ./server
 
 FROM alpine:3.20
 
