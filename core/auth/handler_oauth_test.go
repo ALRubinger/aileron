@@ -19,7 +19,7 @@ type fakeProvider struct {
 
 func (f *fakeProvider) Provider() string { return f.name }
 
-func (f *fakeProvider) AuthorizationURL(_ context.Context, state string) (string, error) {
+func (f *fakeProvider) AuthorizationURL(_ context.Context, state, _ string) (string, error) {
 	return "https://fake-provider.example.com/auth?state=" + state, nil
 }
 

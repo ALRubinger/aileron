@@ -21,20 +21,30 @@ const userinfoURL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 // Provider implements auth.AuthProvider for Google OAuth 2.0.
 type Provider struct {
-	cfg *oauth2.Config
+	clientID     string
+	clientSecret string
+	endpoint     oauth2.Endpoint
 }
 
 // New creates a Google OAuth provider with the given credentials.
-// redirectURL is the callback URL (e.g. "https://app.example.com/auth/google/callback").
-func New(clientID, clientSecret, redirectURL string) *Provider {
+// The redirect URL is supplied per-request via AuthorizationURL and HandleCallback,
+// allowing it to be derived dynamically from the incoming request host.
+func New(clientID, clientSecret string) *Provider {
 	return &Provider{
-		cfg: &oauth2.Config{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-			RedirectURL:  redirectURL,
-			Endpoint:     google.Endpoint,
-			Scopes:       []string{"openid", "email", "profile"},
-		},
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		endpoint:     google.Endpoint,
+	}
+}
+
+// newConfig builds an oauth2.Config for a single request using the given redirectURL.
+func (p *Provider) newConfig(redirectURL string) *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:     p.clientID,
+		ClientSecret: p.clientSecret,
+		RedirectURL:  redirectURL,
+		Endpoint:     p.endpoint,
+		Scopes:       []string{"openid", "email", "profile"},
 	}
 }
 
@@ -42,19 +52,22 @@ func New(clientID, clientSecret, redirectURL string) *Provider {
 func (p *Provider) Provider() string { return "google" }
 
 // AuthorizationURL returns the Google OAuth consent URL.
-func (p *Provider) AuthorizationURL(_ context.Context, state string) (string, error) {
-	url := p.cfg.AuthCodeURL(state, oauth2.AccessTypeOffline)
+// redirectURL must be the callback URL registered in the Google Cloud Console
+// (or match the dynamic URL derived from the request host).
+func (p *Provider) AuthorizationURL(_ context.Context, state, redirectURL string) (string, error) {
+	url := p.newConfig(redirectURL).AuthCodeURL(state, oauth2.AccessTypeOffline)
 	return url, nil
 }
 
 // HandleCallback exchanges the authorization code for user identity.
 func (p *Provider) HandleCallback(ctx context.Context, req auth.CallbackRequest) (*auth.Identity, error) {
-	token, err := p.cfg.Exchange(ctx, req.Code)
+	cfg := p.newConfig(req.RedirectURL)
+	token, err := cfg.Exchange(ctx, req.Code)
 	if err != nil {
 		return nil, fmt.Errorf("exchanging code: %w", err)
 	}
 
-	client := p.cfg.Client(ctx, token)
+	client := cfg.Client(ctx, token)
 	resp, err := client.Get(userinfoURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetching userinfo: %w", err)

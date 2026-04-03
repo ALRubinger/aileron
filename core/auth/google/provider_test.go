@@ -13,15 +13,15 @@ import (
 )
 
 func TestProvider_Provider(t *testing.T) {
-	p := New("id", "secret", "https://example.com/callback")
+	p := New("id", "secret")
 	if p.Provider() != "google" {
 		t.Errorf("Provider() = %q, want google", p.Provider())
 	}
 }
 
 func TestProvider_AuthorizationURL(t *testing.T) {
-	p := New("my-client-id", "my-secret", "https://example.com/callback")
-	url, err := p.AuthorizationURL(context.Background(), "test-state-123")
+	p := New("my-client-id", "my-secret")
+	url, err := p.AuthorizationURL(context.Background(), "test-state-123", "https://example.com/callback")
 	if err != nil {
 		t.Fatalf("AuthorizationURL: %v", err)
 	}
@@ -73,29 +73,12 @@ func TestProvider_HandleCallback_Success(t *testing.T) {
 	defer userinfoServer.Close()
 
 	p := &Provider{
-		cfg: &oauth2.Config{
-			ClientID:     "test-client",
-			ClientSecret: "test-secret",
-			Endpoint: oauth2.Endpoint{
-				TokenURL: tokenServer.URL,
-			},
+		clientID:     "test-client",
+		clientSecret: "test-secret",
+		endpoint: oauth2.Endpoint{
+			TokenURL: tokenServer.URL,
 		},
 	}
-
-	// Override the userinfo URL for this test.
-	origURL := userinfoURL
-	// We can't override the const, so we'll use a custom approach:
-	// create the provider with a custom HTTP client that redirects
-	// userinfo requests to our fake server. Actually, the simpler
-	// approach is to test using the provider's internals.
-	// Let's just test the full flow by having the token server
-	// return a token, then manually calling the userinfo endpoint.
-
-	// Actually, HandleCallback calls p.cfg.Client(ctx, token).Get(userinfoURL)
-	// which goes to the real Google URL. We need to intercept that.
-	// The cleanest way: override the HTTP transport.
-
-	_ = origURL // we'll use a different approach
 
 	// Create a transport that routes userinfo requests to our fake server.
 	transport := &fakeTransport{
@@ -108,8 +91,9 @@ func TestProvider_HandleCallback_Success(t *testing.T) {
 	})
 
 	identity, err := p.HandleCallback(ctx, auth.CallbackRequest{
-		Code:  "fake-auth-code",
-		State: "test-state",
+		Code:        "fake-auth-code",
+		State:       "test-state",
+		RedirectURL: "https://example.com/callback",
 	})
 	if err != nil {
 		t.Fatalf("HandleCallback: %v", err)
@@ -143,12 +127,10 @@ func TestProvider_HandleCallback_TokenExchangeError(t *testing.T) {
 	defer tokenServer.Close()
 
 	p := &Provider{
-		cfg: &oauth2.Config{
-			ClientID:     "test-client",
-			ClientSecret: "test-secret",
-			Endpoint: oauth2.Endpoint{
-				TokenURL: tokenServer.URL,
-			},
+		clientID:     "test-client",
+		clientSecret: "test-secret",
+		endpoint: oauth2.Endpoint{
+			TokenURL: tokenServer.URL,
 		},
 	}
 
@@ -181,12 +163,10 @@ func TestProvider_HandleCallback_UserinfoError(t *testing.T) {
 	defer userinfoServer.Close()
 
 	p := &Provider{
-		cfg: &oauth2.Config{
-			ClientID:     "test-client",
-			ClientSecret: "test-secret",
-			Endpoint: oauth2.Endpoint{
-				TokenURL: tokenServer.URL,
-			},
+		clientID:     "test-client",
+		clientSecret: "test-secret",
+		endpoint: oauth2.Endpoint{
+			TokenURL: tokenServer.URL,
 		},
 	}
 
