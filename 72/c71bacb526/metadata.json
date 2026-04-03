@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "72c71bacb526",
+  "strategy": "manual-commit",
+  "branch": "docs/restructure-deployment-guide",
+  "checkpoints_count": 15,
+  "files_touched": [
+    "README.md",
+    "deploy/.env.example"
+  ],
+  "sessions": [
+    {
+      "metadata": "/72/c71bacb526/0/metadata.json",
+      "transcript": "/72/c71bacb526/0/full.jsonl",
+      "content_hash": "/72/c71bacb526/0/content_hash.txt",
+      "prompt": "/72/c71bacb526/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 109,
+    "cache_creation_tokens": 93200,
+    "cache_read_tokens": 3792970,
+    "output_tokens": 22441,
+    "api_call_count": 75
+  }
+}

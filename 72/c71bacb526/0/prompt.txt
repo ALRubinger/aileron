@@ -1,0 +1,61 @@
+I need to set up auth.withaileron.ai on Railway. Show me how.
+
+---
+
+yes.
+
+---
+
+I'm looking at the README and I suspect something isn't right. Under the section "Step 3 — Set shared environment variables across all services", I think that shared variables are shared across all services, not all environments. Look through the entire Railway configuration guide and assess that the instructions there are correct.
+
+---
+
+It's in the README
+
+---
+
+I just updated from origin. It's there now.
+
+---
+
+Yes. And I accidentally deleted "ui/src/lib/hooks/"; is this a problem?
+
+---
+
+Branch deploys each get their own environment, however. WIll they inherit from the variables defined in the service?
+
+---
+
+Branch deploys inherit the variables defined in the service. I don't think we need the shared variables in the project at all. Does any service except for the "server" service need AILERON_OAUTH_CALLBACK_BASE_URL or AILERON_TRUSTED_ORIGINS?
+
+---
+
+In the "Cloud (Provider-Agnostic)", we should be explicit about which variables need to be set on which service. Right now they're all lumped together. There is a server service, a ui service, an auth domain (which points to the server service), docs, and PostgreSQL.
+
+---
+
+Shouldn't the trusted origins be a subdomain of withaileron.ai? Coming from the server service or the ui service?
+
+---
+
+Is it a security issue if we allow any *.up.railway.app as a trusted origin? Railway has other customers besides us. Is there a prefix we can use for our namespace?
+
+---
+
+1
+
+---
+
+Update the README. Remove Railway from .env.example.
+
+---
+
+We use "PUBLIC_API_BASE" in the UI service. Change this everywhere to be AILERON_PUBLIC_API_URL for consistency.
+
+---
+
+skip entirely.
+
+---
+
+Now I want the README to have most of its cloud based configuration in a generic configuration section. It should not assume a user has any particular provider. All the variables and their values should be listed there, along with which services need access to whih variables. The Railway section should contain Railway-specific information only, as a convenience to guide the process of setting Aileron up in Railway. The "Cloud (Provider-Agnostic) section should note everything needed from the perspective of thr end state needed; the Railway section can describe how to do this specifically in Railway. Make these changes. Make the guide step-by-step clear to follow what needs to be done.
