@@ -1,5 +1,5 @@
 import { PUBLIC_API_BASE } from '$env/static/public';
-import { getToken, refreshAuth, clearAuth } from '$lib/auth.js';
+import { getToken, refreshAuth, clearAuth } from '$lib/auth.svelte.js';
 
 const API_BASE = PUBLIC_API_BASE;
 

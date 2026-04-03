@@ -4,7 +4,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import { Button } from '$lib/components/ui/button';
-	import { initAuth, isAuthenticated, getUser, logout } from '$lib/auth.js';
+	import { initAuth, isAuthenticated, getUser, logout } from '$lib/auth.svelte.js';
 
 	let { children } = $props();
 	let mounted = $state(false);

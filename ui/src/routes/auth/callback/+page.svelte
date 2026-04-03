@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { PUBLIC_API_BASE } from '$env/static/public';
-	import { setAuth } from '$lib/auth.js';
+	import { setAuth } from '$lib/auth.svelte.js';
 	import { onMount } from 'svelte';
 
 	let error = $state('');
