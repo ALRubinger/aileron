@@ -31,6 +31,11 @@ type Client struct {
 
 	mu     sync.RWMutex
 	cached []RegistryServer
+
+	// ready is closed once the first prefetch completes (success or failure).
+	// FetchAll blocks on this so callers see results rather than empty data.
+	ready   chan struct{}
+	started bool
 }
 
 // NewClient creates a registry client with sensible defaults.
@@ -46,6 +51,7 @@ func NewClient(httpClient *http.Client, log *slog.Logger) *Client {
 		httpClient:      httpClient,
 		refreshInterval: DefaultRefreshInterval,
 		log:             log,
+		ready:           make(chan struct{}),
 	}
 }
 
@@ -65,10 +71,11 @@ func (c *Client) WithRefreshInterval(d time.Duration) *Client {
 // refreshes the cache at the configured interval. The goroutine stops
 // when ctx is cancelled.
 func (c *Client) Start(ctx context.Context) {
+	c.started = true
 	go func() {
 		// Prefetch asynchronously so the server can start accepting
-		// requests immediately. Marketplace queries will return empty
-		// results until the first refresh completes.
+		// requests immediately. Marketplace queries block on c.ready
+		// until this completes.
 		if err := c.refresh(ctx); err != nil {
 			c.log.Warn("registry prefetch failed; will retry on next interval", "error", err)
 		} else {
@@ -77,6 +84,7 @@ func (c *Client) Start(ctx context.Context) {
 			c.mu.RUnlock()
 			c.log.Info("registry prefetch complete", "servers", count)
 		}
+		close(c.ready)
 
 		ticker := time.NewTicker(c.refreshInterval)
 		defer ticker.Stop()
@@ -110,22 +118,29 @@ func (c *Client) refresh(ctx context.Context) error {
 	return nil
 }
 
-// FetchAll returns every server from the registry cache. If the cache is
-// empty (Start was not called or prefetch failed), it fetches on demand.
+// FetchAll returns every server from the registry cache. If Start was called
+// and the initial prefetch has not completed yet, it blocks until ready (or
+// ctx is cancelled). If Start was not called, it fetches on demand.
 func (c *Client) FetchAll(ctx context.Context) ([]RegistryServer, error) {
-	c.mu.RLock()
-	if c.cached != nil {
-		result := make([]RegistryServer, len(c.cached))
-		copy(result, c.cached)
+	if c.started {
+		// Wait for the initial prefetch to complete.
+		select {
+		case <-c.ready:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	} else {
+		// Start was not called — fetch on demand if cache is empty.
+		c.mu.RLock()
+		empty := c.cached == nil
 		c.mu.RUnlock()
-		return result, nil
+		if empty {
+			if err := c.refresh(ctx); err != nil {
+				return nil, err
+			}
+		}
 	}
-	c.mu.RUnlock()
 
-	// Fallback: cache is empty, fetch on demand.
-	if err := c.refresh(ctx); err != nil {
-		return nil, err
-	}
 	c.mu.RLock()
 	result := make([]RegistryServer, len(c.cached))
 	copy(result, c.cached)
