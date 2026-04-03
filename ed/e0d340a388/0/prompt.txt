@@ -1,0 +1,136 @@
+Another error on CI:
+
+go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
+  shell: /usr/bin/bash -e {0}
+  env:
+    GOTOOLCHAIN: local
+go: module github.com/jackc/pgx/v5@v5.9.1 requires go >= 1.25.0 (running go 1.24.13; GOTOOLCHAIN=local)
+Error: Process completed with exit code 1.
+
+---
+
+Another CI error:
+
+  go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
+  shell: /usr/bin/bash -e {0}
+  env:
+    GOTOOLCHAIN: local
+go: module golang.org/x/crypto@v0.49.0 requires go >= 1.25.0 (running go 1.24.13; GOTOOLCHAIN=local)
+Error: Process completed with exit code 1.
+
+---
+
+Server deployment on Railway failed with :
+
+go: golang.org/x/crypto@v0.49.0: module golang.org/x/crypto@v0.49.0 requires go >= 1.25.0 (running go 1.24.13; GOTOOLCHAIN=local)
+
+---
+
+The UI has no changes to reflect the login or signup flows.
+
+---
+
+Yes.
+
+---
+
+Write up an ADR for all the changes we made, why, and the notable implementation approaches. Call out work that is still left to be fleshed out. We can use this as a basis for further development and to understand the rationale behind the design and impl choices we made.
+
+---
+
+What should I set AILERON_DATABASE_URL and AILERON_JWT_SIGNING_KEY to in GitHub Actions Secrets for the integration tests to pass? They're failing now:
+
+server-1    | {"time":"2026-04-03T06:16:27.366837102Z","level":"ERROR","msg":"server exited with error","error":"AILERON_JWT_SIGNING_KEY is required when AILERON_DATABASE_URL is set"}
+
+---
+
+Note these values need to be set for CI to work in the README
+
+---
+
+I changed my mind. Add these instead to the CI workflow, and update the README to denote that the CI workflow sets these but folks will need to put them in place when running locally or in other contexts. I will remove these GH Actions Secrets because they'll be in the CI workflow.
+
+---
+
+Code Coverage for this brand is sub-par. Here's what CodeCov reports:
+
+codecov/patch — 7.97% of diff hit (target 80.00%)
+codecov/project
+codecov/project — 22.20% (-4.55%) compared to ffa3ed8
+
+Are we violating the rule that every new feature and function should be tested according to spec? Note that this is required, and that tests must be written based on the expected behaviour, not based on what the current implementation is doing.
+
+---
+
+Error in CI Integration Tests:
+
+server-1    | panic: pattern "GET /auth/{provider}/login" (registered at /src/core/auth/handler.go:82) conflicts with pattern "GET /auth/{provider}/login" (registered at /src/core/api/gen/server.gen.go:4197):
+server-1    |     GET /auth/{provider}/login matches the same requests as GET /auth/{provider}/login
+server-1    | 
+server-1    | goroutine 1 [running]:
+server-1    | net/http.(*ServeMux).register(...)
+server-1    |     /usr/local/go/src/net/http/server.go:2872
+server-1    | net/http.(*ServeMux).HandleFunc(0x415ae5?, {0xa56795?, 0xa315a0?}, 0xc000b45701?)
+server-1    |     /usr/local/go/src/net/http/server.go:2846 +0x65
+server-1    | github.com/ALRubinger/aileron/core/auth.(*Handler).RegisterRoutes(0xc00104e500, 0xc0010f6240)
+server-1    |     /src/core/auth/handler.go:82 +0x6c
+server-1    | github.com/ALRubinger/aileron/core/app.NewHandler(0xc000032b90)
+server-1    |     /src/core/app/app.go:179 +0x153a
+server-1    | main.run(0xc000032b90)
+server-1    |     /src/core/server/main.go:31 +0x65
+server-1    | main.main()
+server-1    |     /src/core/server/main.go:19 +0x171
+
+---
+
+CI Integration tests:
+
+Run for i in $(seq 1 20); do
+  for i in $(seq 1 20); do
+    if curl -sf http://localhost:3000; then
+      echo "UI healthy"
+      exit 0
+    fi
+    sleep 2
+  done
+  echo "UI did not become healthy"
+  exit 1
+  shell: /usr/bin/bash -e {0}
+UI did not become healthy
+
+---
+
+Make a default env file for local development so that contributors do not need to do anything special to run "task up". That one may not be in .gitignore and can be copied to .env as part of a local build. Makes sense?
+
+---
+
+Locally: ui-1        | [500] GET /
+ui-1        | ReferenceError: $state is not defined
+ui-1        |     at file:///app/build/server/chunks/auth-Cem6b3oE.js:4:14
+ui-1        |     at ModuleJob.run (node:internal/modules/esm/module_job:430:25)
+ui-1        |     at async onImport.tracePromise.__proto__ (node:internal/modules/esm/loader:661:26)
+ui-1        |     at async Module.component (file:///app/build/server/chunks/0-CvxdYOm_.js:3:52)
+ui-1        |     at async Promise.all (index 0)
+ui-1        |     at async render_response (file:///app/build/server/index.js:2707:21)
+ui-1        |     at async render_page (file:///app/build/server/index.js:3832:12)
+ui-1        |     at async resolve2 (file:///app/build/server/index.js:5082:25)
+ui-1        |     at async fn (file:///app/build/server/index.js:4942:16)
+ui-1        |     at async internal_respond (file:///app/build/server/index.js:4923:22)
+
+---
+
+CI fails: = Failed
+=== FAIL: github.com/ALRubinger/aileron/test/integration TestApprovalLifecycle_ApproveAndExecute (0.00s)
+    approval_lifecycle_test.go:37: CreateIntent: expected 201, got 401
+
+=== FAIL: github.com/ALRubinger/aileron/test/integration TestApprovalLifecycle_Deny (0.00s)
+panic: interface conversion: interface {} is nil, not map[string]interface {} [recovered]
+    panic: interface conversion: interface {} is nil, not map[string]interface {}
+
+---
+
+Integration tests passing on CI now. Excellent. Now CodeCov is saying: 46.37% of diff hit (target 80.00%). Can we meaningfully increase test coverage? Is CodeCov here testing only the unit tests, or integration tests as well?
+
+---
+
+Yes
