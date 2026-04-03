@@ -1,0 +1,496 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/store"
+)
+
+// Handler serves the authentication HTTP routes.
+type Handler struct {
+	log               *slog.Logger
+	registry          *Registry
+	enforcer          Enforcer
+	issuer            *TokenIssuer
+	users             store.UserStore
+	enterprises       store.EnterpriseStore
+	sessions          store.SessionStore
+	verificationCodes store.VerificationCodeStore
+	mailer            Mailer
+	newID             func() string
+	uiRedirect        string // URL to redirect to after successful auth
+	refreshTTL        time.Duration
+	verificationTTL   time.Duration
+}
+
+// HandlerConfig configures the auth handler.
+type HandlerConfig struct {
+	Log               *slog.Logger
+	Registry          *Registry
+	Enforcer          Enforcer
+	Issuer            *TokenIssuer
+	Users             store.UserStore
+	Enterprises       store.EnterpriseStore
+	Sessions          store.SessionStore
+	VerificationCodes store.VerificationCodeStore
+	Mailer            Mailer
+	NewID             func() string
+	UIRedirect        string        // e.g. "http://localhost:5173"
+	RefreshTTL        time.Duration // e.g. 7 * 24 * time.Hour
+	VerificationTTL   time.Duration // e.g. 15 * time.Minute
+}
+
+// NewHandler creates an auth handler.
+func NewHandler(cfg HandlerConfig) *Handler {
+	if cfg.RefreshTTL == 0 {
+		cfg.RefreshTTL = 7 * 24 * time.Hour
+	}
+	if cfg.VerificationTTL == 0 {
+		cfg.VerificationTTL = 15 * time.Minute
+	}
+	if cfg.UIRedirect == "" {
+		cfg.UIRedirect = "/"
+	}
+	return &Handler{
+		log:               cfg.Log,
+		registry:          cfg.Registry,
+		enforcer:          cfg.Enforcer,
+		issuer:            cfg.Issuer,
+		users:             cfg.Users,
+		enterprises:       cfg.Enterprises,
+		sessions:          cfg.Sessions,
+		verificationCodes: cfg.VerificationCodes,
+		mailer:            cfg.Mailer,
+		newID:             cfg.NewID,
+		uiRedirect:        cfg.UIRedirect,
+		refreshTTL:        cfg.RefreshTTL,
+		verificationTTL:   cfg.VerificationTTL,
+	}
+}
+
+// RegisterRoutes registers auth routes on the given mux.
+func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /auth/{provider}/login", h.handleLogin)
+	mux.HandleFunc("GET /auth/{provider}/callback", h.handleCallback)
+	mux.HandleFunc("POST /auth/signup", h.handleSignup)
+	mux.HandleFunc("POST /auth/verify-email", h.handleVerifyEmail)
+	mux.HandleFunc("POST /auth/login", h.handleEmailLogin)
+	mux.HandleFunc("POST /auth/refresh", h.handleRefresh)
+	mux.HandleFunc("POST /auth/logout", h.handleLogout)
+}
+
+// handleLogin redirects to the provider's authorization URL.
+func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	providerName := r.PathValue("provider")
+	provider, ok := h.registry.Get(providerName)
+	if !ok {
+		http.Error(w, `{"error":"unknown auth provider"}`, http.StatusBadRequest)
+		return
+	}
+
+	state, err := generateState()
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Store state in a short-lived cookie for CSRF validation.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    state,
+		Path:     "/",
+		MaxAge:   600, // 10 minutes
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	})
+
+	url, err := provider.AuthorizationURL(r.Context(), state)
+	if err != nil {
+		h.log.Error("failed to generate auth URL", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+}
+
+// handleCallback processes the OAuth callback and creates a session.
+func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
+	providerName := r.PathValue("provider")
+	provider, ok := h.registry.Get(providerName)
+	if !ok {
+		http.Error(w, `{"error":"unknown auth provider"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Validate CSRF state.
+	stateCookie, err := r.Cookie("oauth_state")
+	if err != nil || stateCookie.Value == "" {
+		http.Error(w, `{"error":"missing state cookie"}`, http.StatusBadRequest)
+		return
+	}
+	if r.URL.Query().Get("state") != stateCookie.Value {
+		http.Error(w, `{"error":"state mismatch"}`, http.StatusBadRequest)
+		return
+	}
+	// Clear the state cookie.
+	http.SetCookie(w, &http.Cookie{
+		Name:   "oauth_state",
+		Value:  "",
+		Path:   "/",
+		MaxAge: -1,
+	})
+
+	// Check for error from provider.
+	if errParam := r.URL.Query().Get("error"); errParam != "" {
+		h.log.Warn("auth provider returned error", "provider", providerName, "error", errParam)
+		http.Error(w, fmt.Sprintf(`{"error":"provider error: %s"}`, errParam), http.StatusBadRequest)
+		return
+	}
+
+	// Exchange code for identity.
+	identity, err := provider.HandleCallback(r.Context(), CallbackRequest{
+		Code:  r.URL.Query().Get("code"),
+		State: stateCookie.Value,
+	})
+	if err != nil {
+		h.log.Error("callback exchange failed", "provider", providerName, "error", err)
+		http.Error(w, `{"error":"authentication failed"}`, http.StatusUnauthorized)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Look up user: first by provider+subject (fast path for returning users),
+	// then by email (handles sign-in via a new provider for an existing account).
+	user, err := h.users.GetByProviderSubject(ctx, identity.Provider, identity.Subject)
+	if err != nil && isNotFound(err) {
+		// Provider subject not seen before — check if the email already exists.
+		user, err = h.users.GetByEmail(ctx, identity.Email)
+	}
+	if err != nil {
+		if !isNotFound(err) {
+			h.log.Error("user lookup failed", "error", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		// Entirely new user — auto-create enterprise and user.
+		user, err = h.createEnterpriseAndUser(ctx, identity)
+		if err != nil {
+			h.log.Error("failed to create enterprise/user", "error", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Existing user — enforce SSO policies.
+		allowed, err := h.enforcer.IsProviderAllowed(ctx, user.EnterpriseID, identity.Provider)
+		if err != nil {
+			h.log.Error("provider check failed", "error", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if !allowed {
+			http.Error(w, `{"error":"auth provider not allowed for this enterprise"}`, http.StatusForbidden)
+			return
+		}
+
+		domainAllowed, err := h.enforcer.IsEmailDomainAllowed(ctx, user.EnterpriseID, identity.Email)
+		if err != nil {
+			h.log.Error("domain check failed", "error", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if !domainAllowed {
+			http.Error(w, `{"error":"email domain not allowed for this enterprise"}`, http.StatusForbidden)
+			return
+		}
+
+		// Update last login.
+		now := time.Now()
+		user.LastLoginAt = &now
+		user.DisplayName = identity.DisplayName
+		user.AvatarURL = identity.AvatarURL
+		user.UpdatedAt = now
+		if err := h.users.Update(ctx, user); err != nil {
+			h.log.Error("failed to update user", "error", err)
+		}
+	}
+
+	// Issue tokens.
+	accessToken, err := h.issuer.Issue(user.ID, user.EnterpriseID, user.Email, string(user.Role))
+	if err != nil {
+		h.log.Error("failed to issue token", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	refreshRaw, refreshHash, err := GenerateRefreshToken()
+	if err != nil {
+		h.log.Error("failed to generate refresh token", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	now := time.Now()
+	session := model.Session{
+		ID:               "ses_" + h.newID(),
+		UserID:           user.ID,
+		TokenHash:        HashToken(accessToken),
+		RefreshTokenHash: refreshHash,
+		ExpiresAt:        now.Add(h.refreshTTL),
+		CreatedAt:        now,
+	}
+	if err := h.sessions.Create(ctx, session); err != nil {
+		h.log.Error("failed to create session", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Set cookies for browser flow.
+	secure := r.TLS != nil
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    accessToken,
+		Path:     "/",
+		MaxAge:   900, // 15 minutes
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshRaw,
+		Path:     "/auth/refresh",
+		MaxAge:   int(h.refreshTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+	})
+
+	h.log.Info("user authenticated", "user_id", user.ID, "provider", providerName)
+	http.Redirect(w, r, h.uiRedirect, http.StatusTemporaryRedirect)
+}
+
+// handleRefresh exchanges a refresh token for a new access token.
+func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	refreshToken := ""
+	if c, err := r.Cookie("refresh_token"); err == nil {
+		refreshToken = c.Value
+	}
+	if refreshToken == "" {
+		// Try JSON body.
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			refreshToken = body.RefreshToken
+		}
+	}
+	if refreshToken == "" {
+		http.Error(w, `{"error":"missing refresh token"}`, http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	hash := HashToken(refreshToken)
+	session, err := h.sessions.GetByRefreshTokenHash(ctx, hash)
+	if err != nil {
+		http.Error(w, `{"error":"invalid refresh token"}`, http.StatusUnauthorized)
+		return
+	}
+	if time.Now().After(session.ExpiresAt) {
+		_ = h.sessions.Delete(ctx, session.ID)
+		http.Error(w, `{"error":"refresh token expired"}`, http.StatusUnauthorized)
+		return
+	}
+
+	user, err := h.users.Get(ctx, session.UserID)
+	if err != nil {
+		http.Error(w, `{"error":"user not found"}`, http.StatusUnauthorized)
+		return
+	}
+
+	// Issue new access token.
+	accessToken, err := h.issuer.Issue(user.ID, user.EnterpriseID, user.Email, string(user.Role))
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Rotate refresh token.
+	newRefreshRaw, newRefreshHash, err := GenerateRefreshToken()
+	if err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Delete old session, create new one.
+	_ = h.sessions.Delete(ctx, session.ID)
+	now := time.Now()
+	newSession := model.Session{
+		ID:               "ses_" + h.newID(),
+		UserID:           user.ID,
+		TokenHash:        HashToken(accessToken),
+		RefreshTokenHash: newRefreshHash,
+		ExpiresAt:        now.Add(h.refreshTTL),
+		CreatedAt:        now,
+	}
+	if err := h.sessions.Create(ctx, newSession); err != nil {
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	secure := r.TLS != nil
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    accessToken,
+		Path:     "/",
+		MaxAge:   900,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    newRefreshRaw,
+		Path:     "/auth/refresh",
+		MaxAge:   int(h.refreshTTL.Seconds()),
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"access_token": accessToken,
+	})
+}
+
+// handleLogout deletes the session and clears cookies.
+func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Try to find and delete the session via refresh token.
+	if c, err := r.Cookie("refresh_token"); err == nil && c.Value != "" {
+		hash := HashToken(c.Value)
+		if sess, err := h.sessions.GetByRefreshTokenHash(r.Context(), hash); err == nil {
+			_ = h.sessions.Delete(r.Context(), sess.ID)
+		}
+	}
+
+	// Clear cookies.
+	http.SetCookie(w, &http.Cookie{Name: "access_token", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: "refresh_token", Value: "", Path: "/auth/refresh", MaxAge: -1})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"logged_out"}`))
+}
+
+// personalEmailDomains are well-known consumer email providers. Users signing
+// in with these domains get a personal enterprise rather than an organizational one.
+var personalEmailDomains = map[string]bool{
+	"gmail.com":      true,
+	"googlemail.com": true,
+	"yahoo.com":      true,
+	"hotmail.com":    true,
+	"outlook.com":    true,
+	"live.com":       true,
+	"aol.com":        true,
+	"icloud.com":     true,
+	"me.com":         true,
+	"mac.com":        true,
+	"protonmail.com": true,
+	"proton.me":      true,
+}
+
+// isPersonalEmail reports whether the email address belongs to a consumer
+// email provider rather than an organization domain.
+func isPersonalEmail(email string) bool {
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	return personalEmailDomains[strings.ToLower(parts[1])]
+}
+
+// createEnterpriseAndUser auto-creates an enterprise and user on first sign-in.
+// If the user signs in with a personal email (e.g. Gmail), a personal enterprise
+// is created. Otherwise an organizational enterprise is created.
+func (h *Handler) createEnterpriseAndUser(ctx context.Context, identity *Identity) (model.User, error) {
+	now := time.Now()
+	personal := isPersonalEmail(identity.Email)
+
+	// Generate a slug from the email username.
+	slug := strings.SplitN(identity.Email, "@", 2)[0]
+	slug = strings.ToLower(strings.ReplaceAll(slug, ".", "-"))
+
+	var name string
+	if personal {
+		name = identity.DisplayName
+	} else {
+		name = identity.DisplayName + "'s Organization"
+	}
+
+	enterprise := model.Enterprise{
+		ID:           "ent_" + h.newID(),
+		Name:         name,
+		Slug:         slug + "-" + h.newID()[:8],
+		Plan:         model.EnterprisePlanFree,
+		Personal:     personal,
+		BillingEmail: identity.Email,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := h.enterprises.Create(ctx, enterprise); err != nil {
+		return model.User{}, fmt.Errorf("creating enterprise: %w", err)
+	}
+
+	user := model.User{
+		ID:                    "usr_" + h.newID(),
+		EnterpriseID:          enterprise.ID,
+		Email:                 identity.Email,
+		DisplayName:           identity.DisplayName,
+		AvatarURL:             identity.AvatarURL,
+		Role:                  model.UserRoleOwner,
+		Status:                model.UserStatusActive,
+		AuthProvider:          identity.Provider,
+		AuthProviderSubjectID: identity.Subject,
+		LastLoginAt:           &now,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+	if err := h.users.Create(ctx, user); err != nil {
+		return model.User{}, fmt.Errorf("creating user: %w", err)
+	}
+
+	h.log.Info("auto-created enterprise and user",
+		"enterprise_id", enterprise.ID,
+		"user_id", user.ID,
+		"email", user.Email,
+		"personal", personal,
+	)
+
+	return user, nil
+}
+
+func generateState() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func isNotFound(err error) bool {
+	_, ok := err.(*store.ErrNotFound)
+	return ok
+}

@@ -27,7 +27,7 @@ services:
         condition: service_healthy
     environment:
       AILERON_ADDR: ":8080"
-      DATABASE_URL: "postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable"
+      AILERON_DATABASE_URL: "postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable"
     ports:
       - "8080:8080"
 

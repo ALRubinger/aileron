@@ -10,6 +10,7 @@ import (
 	"context"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/model"
 )
 
 // IntentStore persists and retrieves action intents.
@@ -133,6 +134,60 @@ type MCPServerStore interface {
 type MCPServerFilter struct {
 	Status   *api.MCPServerConfigStatus
 	PageSize int
+}
+
+// EnterpriseStore persists and retrieves enterprises.
+type EnterpriseStore interface {
+	Create(ctx context.Context, enterprise model.Enterprise) error
+	Get(ctx context.Context, enterpriseID string) (model.Enterprise, error)
+	GetBySlug(ctx context.Context, slug string) (model.Enterprise, error)
+	Update(ctx context.Context, enterprise model.Enterprise) error
+}
+
+// UserStore persists and retrieves users. The ID is a surrogate key (usr_ + UUID).
+// Email is a unique column used for cross-provider deduplication.
+type UserStore interface {
+	Create(ctx context.Context, user model.User) error
+	Get(ctx context.Context, userID string) (model.User, error)
+	GetByEmail(ctx context.Context, email string) (model.User, error)
+	GetByProviderSubject(ctx context.Context, provider, subjectID string) (model.User, error)
+	List(ctx context.Context, filter UserFilter) ([]model.User, error)
+	Update(ctx context.Context, user model.User) error
+}
+
+// UserFilter scopes a user list query.
+type UserFilter struct {
+	EnterpriseID string
+	Status       *model.UserStatus
+	PageSize     int
+	PageToken    string
+}
+
+// SessionStore persists and retrieves login sessions.
+type SessionStore interface {
+	Create(ctx context.Context, session model.Session) error
+	GetByTokenHash(ctx context.Context, tokenHash string) (model.Session, error)
+	GetByRefreshTokenHash(ctx context.Context, refreshHash string) (model.Session, error)
+	Delete(ctx context.Context, sessionID string) error
+	DeleteAllForUser(ctx context.Context, userID string) error
+}
+
+// VerificationCodeStore persists and retrieves email verification codes.
+type VerificationCodeStore interface {
+	Create(ctx context.Context, code model.VerificationCode) error
+	// GetActiveByUserID returns the most recent unused, unexpired code for the user.
+	GetActiveByUserID(ctx context.Context, userID string) (model.VerificationCode, error)
+	MarkUsed(ctx context.Context, codeID string) error
+	DeleteExpiredForUser(ctx context.Context, userID string) error
+}
+
+// SSOConfigStore persists and retrieves per-enterprise SSO configurations.
+type SSOConfigStore interface {
+	Create(ctx context.Context, cfg model.SSOConfig) error
+	Get(ctx context.Context, configID string) (model.SSOConfig, error)
+	GetByEnterprise(ctx context.Context, enterpriseID string) ([]model.SSOConfig, error)
+	Update(ctx context.Context, cfg model.SSOConfig) error
+	Delete(ctx context.Context, configID string) error
 }
 
 // ErrNotFound is returned when a requested entity does not exist.

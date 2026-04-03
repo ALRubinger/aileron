@@ -19,10 +19,18 @@ RUN go build -o /aileron-server ./core/server
 FROM alpine:3.20
 
 RUN addgroup -S aileron && adduser -S aileron -G aileron
-USER aileron
+
+# Install Atlas CLI for schema migrations.
+RUN apk add --no-cache curl && \
+    curl -sSf https://atlasgo.sh | sh && \
+    apk del curl
 
 COPY --from=builder /aileron-server /usr/local/bin/aileron-server
+COPY core/schema/schema.hcl /schema/schema.hcl
+COPY core/server/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+USER aileron
 
 EXPOSE 8080
 
-ENTRYPOINT ["aileron-server"]
+ENTRYPOINT ["entrypoint.sh"]

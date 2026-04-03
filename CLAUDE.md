@@ -1,3 +1,13 @@
+# OpenAPI Spec is the Source of Truth
+
+The OpenAPI specification at `core/api/openapi.yaml` is the authoritative definition of the Aileron API. All API changes — new endpoints, schema modifications, parameter changes — **must** be made in the spec first. The Go server interface and types are generated from it:
+
+```sh
+task generate:api
+```
+
+Never hand-edit `core/api/gen/server.gen.go`. If the spec and the code diverge, the spec wins. Regenerate after every spec change to keep them in sync.
+
 # Commit Message Format
 
 All commits must use **Conventional Commits** format:
