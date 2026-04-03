@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,24 @@ import (
 )
 
 // --- in-memory stores for tests ---
+
+// failingStore wraps a memUserStore but forces Update to fail.
+type failingUserStore struct {
+	*memUserStore
+}
+
+func (s *failingUserStore) Update(context.Context, model.User) error {
+	return fmt.Errorf("simulated update failure")
+}
+
+// failingEnterpriseStore wraps a memEnterpriseStore but forces Update to fail.
+type failingEnterpriseStore struct {
+	*memEnterpriseStore
+}
+
+func (s *failingEnterpriseStore) Update(context.Context, model.Enterprise) error {
+	return fmt.Errorf("simulated update failure")
+}
 
 type memUserStore struct {
 	mu    sync.Mutex
@@ -202,21 +221,82 @@ func TestGetCurrentUser(t *testing.T) {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
 		}
 	})
+
+	t.Run("nil store", func(t *testing.T) {
+		srv := &apiServer{users: nil, enterprises: nil}
+		w := httptest.NewRecorder()
+		srv.GetCurrentUser(w, authedRequest("GET", "/v1/users/me", "", ownerClaims))
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("user not found", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
+		unknownClaims := &auth.Claims{
+			EnterpriseID: "ent_test1",
+			Email:        "unknown@example.com",
+			Role:         "owner",
+		}
+		unknownClaims.Subject = "usr_nonexistent"
+
+		w := httptest.NewRecorder()
+		srv.GetCurrentUser(w, authedRequest("GET", "/v1/users/me", "", unknownClaims))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
 }
 
 func TestGetCurrentEnterprise(t *testing.T) {
-	srv, _, _ := newAuthServer(t)
+	t.Run("authenticated", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
 
-	w := httptest.NewRecorder()
-	srv.GetCurrentEnterprise(w, authedRequest("GET", "/v1/enterprises/me", "", ownerClaims))
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	var e api.Enterprise
-	json.NewDecoder(w.Body).Decode(&e)
-	if e.Name != "Test Corp" {
-		t.Errorf("name = %q, want %q", e.Name, "Test Corp")
-	}
+		w := httptest.NewRecorder()
+		srv.GetCurrentEnterprise(w, authedRequest("GET", "/v1/enterprises/me", "", ownerClaims))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+		}
+		var e api.Enterprise
+		json.NewDecoder(w.Body).Decode(&e)
+		if e.Name != "Test Corp" {
+			t.Errorf("name = %q, want %q", e.Name, "Test Corp")
+		}
+	})
+
+	t.Run("unauthenticated", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
+		w := httptest.NewRecorder()
+		srv.GetCurrentEnterprise(w, authedRequest("GET", "/v1/enterprises/me", "", nil))
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+		}
+	})
+
+	t.Run("nil store", func(t *testing.T) {
+		srv := &apiServer{users: nil, enterprises: nil}
+		w := httptest.NewRecorder()
+		srv.GetCurrentEnterprise(w, authedRequest("GET", "/v1/enterprises/me", "", ownerClaims))
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("enterprise not found", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
+		unknownClaims := &auth.Claims{
+			EnterpriseID: "ent_nonexistent",
+			Email:        "alice@example.com",
+			Role:         "owner",
+		}
+		unknownClaims.Subject = "usr_test1"
+
+		w := httptest.NewRecorder()
+		srv.GetCurrentEnterprise(w, authedRequest("GET", "/v1/enterprises/me", "", unknownClaims))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
 }
 
 func TestUpdateCurrentUser(t *testing.T) {
@@ -268,6 +348,61 @@ func TestUpdateCurrentUser(t *testing.T) {
 			`{"display_name":"X"}`, nil))
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+		}
+	})
+
+	t.Run("nil store", func(t *testing.T) {
+		srv := &apiServer{users: nil, enterprises: nil}
+		w := httptest.NewRecorder()
+		srv.UpdateCurrentUser(w, authedRequest("PATCH", "/v1/users/me",
+			`{"display_name":"X"}`, ownerClaims))
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("invalid body", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
+		w := httptest.NewRecorder()
+		req := authedRequest("PATCH", "/v1/users/me", "not json", ownerClaims)
+		srv.UpdateCurrentUser(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("user not found", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
+		unknownClaims := &auth.Claims{
+			EnterpriseID: "ent_test1",
+			Email:        "unknown@example.com",
+			Role:         "owner",
+		}
+		unknownClaims.Subject = "usr_nonexistent"
+
+		w := httptest.NewRecorder()
+		srv.UpdateCurrentUser(w, authedRequest("PATCH", "/v1/users/me",
+			`{"display_name":"X"}`, unknownClaims))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("update store failure", func(t *testing.T) {
+		us := newMemUserStore()
+		now := time.Now().UTC()
+		_ = us.Create(context.Background(), model.User{
+			ID: "usr_test1", EnterpriseID: "ent_test1", Email: "alice@example.com",
+			DisplayName: "Alice", Role: model.UserRoleOwner, Status: model.UserStatusActive,
+			AuthProvider: "google", CreatedAt: now, UpdatedAt: now,
+		})
+		srv := &apiServer{users: &failingUserStore{us}, enterprises: newMemEnterpriseStore()}
+
+		w := httptest.NewRecorder()
+		srv.UpdateCurrentUser(w, authedRequest("PATCH", "/v1/users/me",
+			`{"display_name":"X"}`, ownerClaims))
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
 		}
 	})
 }
@@ -346,6 +481,61 @@ func TestUpdateCurrentEnterprise(t *testing.T) {
 		}
 		if e.BillingEmail != "billing@example.com" {
 			t.Errorf("billing_email = %q, want %q (should be unchanged)", e.BillingEmail, "billing@example.com")
+		}
+	})
+
+	t.Run("nil store", func(t *testing.T) {
+		srv := &apiServer{users: nil, enterprises: nil}
+		w := httptest.NewRecorder()
+		srv.UpdateCurrentEnterprise(w, authedRequest("PATCH", "/v1/enterprises/me",
+			`{"name":"X"}`, ownerClaims))
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("invalid body", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
+		w := httptest.NewRecorder()
+		srv.UpdateCurrentEnterprise(w, authedRequest("PATCH", "/v1/enterprises/me",
+			"not json", ownerClaims))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("enterprise not found", func(t *testing.T) {
+		srv, _, _ := newAuthServer(t)
+		unknownClaims := &auth.Claims{
+			EnterpriseID: "ent_nonexistent",
+			Email:        "alice@example.com",
+			Role:         "owner",
+		}
+		unknownClaims.Subject = "usr_test1"
+
+		w := httptest.NewRecorder()
+		srv.UpdateCurrentEnterprise(w, authedRequest("PATCH", "/v1/enterprises/me",
+			`{"name":"X"}`, unknownClaims))
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("update store failure", func(t *testing.T) {
+		es := newMemEnterpriseStore()
+		now := time.Now().UTC()
+		_ = es.Create(context.Background(), model.Enterprise{
+			ID: "ent_test1", Name: "Test Corp", Slug: "test-corp",
+			Plan: model.EnterprisePlanFree, BillingEmail: "billing@example.com",
+			CreatedAt: now, UpdatedAt: now,
+		})
+		srv := &apiServer{users: newMemUserStore(), enterprises: &failingEnterpriseStore{es}}
+
+		w := httptest.NewRecorder()
+		srv.UpdateCurrentEnterprise(w, authedRequest("PATCH", "/v1/enterprises/me",
+			`{"name":"X"}`, ownerClaims))
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
 		}
 	})
 }
@@ -432,6 +622,36 @@ func TestEnterpriseToAPI_OmitsEmptyOptionals(t *testing.T) {
 			t.Errorf("expected key %q to be omitted when zero value, but it was present", key)
 		}
 	}
+}
+
+func TestUserToAPI_AvatarURL(t *testing.T) {
+	t.Run("with avatar", func(t *testing.T) {
+		u := model.User{
+			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
+			DisplayName: "Test", AvatarURL: "https://example.com/avatar.png",
+			Role: model.UserRoleOwner, Status: model.UserStatusActive,
+			AuthProvider: "google", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}
+		out := userToAPI(u)
+		if out.AvatarUrl == nil {
+			t.Fatal("expected avatar_url to be set")
+		}
+		if *out.AvatarUrl != "https://example.com/avatar.png" {
+			t.Errorf("avatar_url = %q, want %q", *out.AvatarUrl, "https://example.com/avatar.png")
+		}
+	})
+
+	t.Run("without avatar", func(t *testing.T) {
+		u := model.User{
+			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
+			DisplayName: "Test", Role: model.UserRoleOwner, Status: model.UserStatusActive,
+			AuthProvider: "email", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}
+		out := userToAPI(u)
+		if out.AvatarUrl != nil {
+			t.Errorf("expected avatar_url to be nil, got %q", *out.AvatarUrl)
+		}
+	})
 }
 
 func TestUserToAPI_SnakeCaseJSON(t *testing.T) {
