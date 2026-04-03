@@ -5,45 +5,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/model"
-	"github.com/ALRubinger/aileron/core/store"
 )
-
-// stubEnterpriseStore is a minimal in-memory enterprise store for tests.
-type stubEnterpriseStore struct {
-	enterprises map[string]model.Enterprise
-}
-
-func (s *stubEnterpriseStore) Create(_ context.Context, e model.Enterprise) error {
-	s.enterprises[e.ID] = e
-	return nil
-}
-func (s *stubEnterpriseStore) Get(_ context.Context, id string) (model.Enterprise, error) {
-	e, ok := s.enterprises[id]
-	if !ok {
-		return model.Enterprise{}, &store.ErrNotFound{Entity: "enterprise", ID: id}
-	}
-	return e, nil
-}
-func (s *stubEnterpriseStore) GetBySlug(_ context.Context, slug string) (model.Enterprise, error) {
-	for _, e := range s.enterprises {
-		if e.Slug == slug {
-			return e, nil
-		}
-	}
-	return model.Enterprise{}, &store.ErrNotFound{Entity: "enterprise", ID: slug}
-}
-func (s *stubEnterpriseStore) Update(_ context.Context, e model.Enterprise) error {
-	s.enterprises[e.ID] = e
-	return nil
-}
-
-func newStubStore(ents ...model.Enterprise) *stubEnterpriseStore {
-	m := make(map[string]model.Enterprise)
-	for _, e := range ents {
-		m[e.ID] = e
-	}
-	return &stubEnterpriseStore{enterprises: m}
-}
 
 func TestStoreEnforcer_IsProviderAllowed(t *testing.T) {
 	tests := []struct {
