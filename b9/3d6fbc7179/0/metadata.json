@@ -1,0 +1,23 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "b93d6fbc7179",
+  "session_id": "1e058620-d00b-4150-b5d0-c4264e52f7a7",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-03T06:11:59.43181Z",
+  "branch": "feat/enterprise-auth-sso",
+  "checkpoints_count": 1,
+  "files_touched": [],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "73fbaeedcdec",
+  "token_usage": {
+    "input_tokens": 3371,
+    "cache_creation_tokens": 252017,
+    "cache_read_tokens": 54144743,
+    "output_tokens": 110687,
+    "api_call_count": 340
+  },
+  "session_metrics": {
+    "turn_count": 24
+  }
+}
