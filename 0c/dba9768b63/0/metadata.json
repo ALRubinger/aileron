@@ -1,0 +1,47 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "0cdba9768b63",
+  "session_id": "d9e29fd0-3834-43d1-bc2c-776bb9354ef4",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-03T19:30:57.015422Z",
+  "branch": "feat/settings-ui",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "README.md",
+    "core/api/gen/server.gen.go",
+    "core/api/openapi.yaml",
+    "core/app/handlers_auth.go",
+    "core/app/handlers_auth_test.go",
+    "core/auth/middleware.go",
+    "core/auth/middleware_test.go",
+    "ui/src/lib/api.ts",
+    "ui/src/lib/auth.svelte.ts",
+    "ui/src/routes/+layout.svelte",
+    "ui/src/routes/settings/+layout.svelte",
+    "ui/src/routes/settings/+page.svelte",
+    "ui/src/routes/settings/organization/+page.svelte",
+    "ui/src/routes/settings/profile/+page.svelte"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "9722a7eb22d4",
+  "token_usage": {
+    "input_tokens": 104,
+    "cache_creation_tokens": 104038,
+    "cache_read_tokens": 6209510,
+    "output_tokens": 31989,
+    "api_call_count": 96
+  },
+  "session_metrics": {
+    "turn_count": 3
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-03T19:30:56.383678Z",
+    "agent_lines": 1448,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 1448,
+    "agent_percentage": 100
+  }
+}

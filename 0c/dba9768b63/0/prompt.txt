@@ -1,0 +1,9 @@
+We enabled SSO and Log in with Google. The UI has not received any significant updates for this work, for instance a user profile page, settings for the organization, etc. Let's walk through everything we need to do for this work and then get it done.
+
+---
+
+A. Make sure that as we're making changes, we are not putting anything specific to the Google provider in the API or SPI. Google is one implementation and we will add more later, so let's build in a way that plans for that
+
+---
+
+Tests for everything new? Updates to README necessary?
