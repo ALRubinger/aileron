@@ -19,6 +19,11 @@ func ClaimsFromContext(ctx context.Context) *Claims {
 	return c
 }
 
+// ContextWithClaims returns a context with the given claims attached.
+func ContextWithClaims(ctx context.Context, claims *Claims) context.Context {
+	return context.WithValue(ctx, claimsKey, claims)
+}
+
 // Middleware returns HTTP middleware that validates Bearer JWTs and injects
 // claims into the request context. Requests to paths in skipPaths bypass
 // authentication (e.g. health checks, auth callbacks).

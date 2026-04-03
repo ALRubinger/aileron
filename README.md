@@ -120,6 +120,7 @@ The MCP gateway architecture is implemented end-to-end:
 - **Credential vault** injects secrets into downstream servers at launch time
 - **Audit store** records every event in an immutable trace
 - **Approval UI** provides a web interface for reviewing and acting on pending approvals
+- **User profile and organization settings** let users manage their account and configure SSO policies (allowed providers, email domains, SSO enforcement)
 
 Five seed policies ship by default:
 1. Require approval for PRs targeting `main`, `master`, or `production`
@@ -260,7 +261,7 @@ aileron/
 ├── sdk/
 │   └── go/             Go client SDK
 ├── ui/                 Management and approval UI (SvelteKit)
-│   └── src/routes/     Pages: approvals, traces, policies
+│   └── src/routes/     Pages: approvals, traces, policies, settings (profile, organization)
 ├── docs/               API documentation site (Scalar)
 ├── test/
 │   └── integration/    Integration tests with OpenAPI spec validation
