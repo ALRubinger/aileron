@@ -9,10 +9,7 @@ import (
 )
 
 func TestListPolicies_SeedPoliciesExist(t *testing.T) {
-	resp, err := http.Get(apiURL() + "/v1/policies?workspace_id=default")
-	if err != nil {
-		t.Fatalf("ListPolicies: %v", err)
-	}
+	resp := authedGet(t, apiURL()+"/v1/policies?workspace_id=default")
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -66,7 +63,7 @@ func TestSimulatePolicy(t *testing.T) {
 		},
 	}
 
-	resp := postJSON(t, apiURL()+"/v1/policies/simulate", body)
+	resp := authedPost(t, apiURL()+"/v1/policies/simulate", body)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -104,7 +101,7 @@ func TestCreatePolicy(t *testing.T) {
 		},
 	}
 
-	resp := postJSON(t, apiURL()+"/v1/policies", body)
+	resp := authedPost(t, apiURL()+"/v1/policies", body)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {

@@ -34,6 +34,11 @@ type AuthConfig struct {
 	// Env: AILERON_UI_REDIRECT_URL (default: "/")
 	UIRedirectURL string
 
+	// AutoVerifyEmail skips email verification on signup, activating
+	// accounts immediately. For development and CI only.
+	// Env: AILERON_AUTO_VERIFY_EMAIL
+	AutoVerifyEmail bool
+
 	// Google OAuth configuration.
 	GoogleClientID     string // Env: GOOGLE_CLIENT_ID
 	GoogleClientSecret string // Env: GOOGLE_CLIENT_SECRET
@@ -49,6 +54,7 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		JWTSigningKey:      os.Getenv("AILERON_JWT_SIGNING_KEY"),
 		JWTIssuer:          envOrDefault("AILERON_JWT_ISSUER", "aileron"),
 		UIRedirectURL:      envOrDefault("AILERON_UI_REDIRECT_URL", "/"),
+		AutoVerifyEmail:    os.Getenv("AILERON_AUTO_VERIFY_EMAIL") == "true",
 		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GoogleRedirectURL:  os.Getenv("GOOGLE_REDIRECT_URL"),

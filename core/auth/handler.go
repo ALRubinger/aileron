@@ -30,6 +30,7 @@ type Handler struct {
 	uiRedirect        string // URL to redirect to after successful auth
 	refreshTTL        time.Duration
 	verificationTTL   time.Duration
+	autoVerifyEmail   bool
 }
 
 // HandlerConfig configures the auth handler.
@@ -45,6 +46,7 @@ type HandlerConfig struct {
 	Mailer            Mailer
 	NewID             func() string
 	UIRedirect        string        // e.g. "http://localhost:5173"
+	AutoVerifyEmail   bool          // skip email verification (dev/CI only)
 	RefreshTTL        time.Duration // e.g. 7 * 24 * time.Hour
 	VerificationTTL   time.Duration // e.g. 15 * time.Minute
 }
@@ -74,6 +76,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		uiRedirect:        cfg.UIRedirect,
 		refreshTTL:        cfg.RefreshTTL,
 		verificationTTL:   cfg.VerificationTTL,
+		autoVerifyEmail:   cfg.AutoVerifyEmail,
 	}
 }
 

@@ -3,7 +3,6 @@
 package integration
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -33,7 +32,7 @@ func TestCreateIntent_AutoApproveFeatureBranch(t *testing.T) {
 		},
 	}
 
-	resp := postJSON(t, apiURL()+"/v1/intents", body)
+	resp := authedPost(t, apiURL()+"/v1/intents", body)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
@@ -79,7 +78,7 @@ func TestCreateIntent_RequireApprovalForMain(t *testing.T) {
 		},
 	}
 
-	resp := postJSON(t, apiURL()+"/v1/intents", body)
+	resp := authedPost(t, apiURL()+"/v1/intents", body)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
@@ -116,7 +115,7 @@ func TestCreateIntent_DenyForcePush(t *testing.T) {
 		},
 	}
 
-	resp := postJSON(t, apiURL()+"/v1/intents", body)
+	resp := authedPost(t, apiURL()+"/v1/intents", body)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
@@ -139,15 +138,3 @@ func TestCreateIntent_DenyForcePush(t *testing.T) {
 	}
 }
 
-func postJSON(t *testing.T, url string, body any) *http.Response {
-	t.Helper()
-	data, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
-	if err != nil {
-		t.Fatalf("POST %s: %v", url, err)
-	}
-	return resp
-}
