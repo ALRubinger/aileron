@@ -340,8 +340,10 @@ When `AILERON_DATABASE_URL` is set, the server enables:
 | `GOOGLE_CLIENT_SECRET` | No | | Google OAuth 2.0 client secret |
 | `GITHUB_OAUTH_CLIENT_ID` | No | | GitHub OAuth 2.0 client ID |
 | `GITHUB_OAUTH_CLIENT_SECRET` | No | | GitHub OAuth 2.0 client secret |
+| `AILERON_OAUTH_CALLBACK_BASE_URL` | No | | Stable domain for OAuth callbacks (e.g. `https://auth.withaileron.ai`). Required for Railway branch deployments; see below. |
+| `AILERON_TRUSTED_ORIGINS` | No | | Comma-separated list of hostname patterns allowed as relay targets (e.g. `*.up.railway.app,withaileron.ai`). Required on the stable domain when relaying. |
 
-OAuth callback URLs are derived dynamically from the incoming request host, enabling OAuth to work on branch deployments without manual configuration.
+By default, OAuth callback URLs are derived dynamically from the incoming request host. For Railway branch deployments — where each branch gets a unique hostname — set `AILERON_OAUTH_CALLBACK_BASE_URL` to a stable domain so OAuth providers only need one registered redirect URI. See the [Railway setup section](#railway) below for configuration details.
 
 ## Deployment
 
@@ -424,9 +426,9 @@ Aileron is a standard Docker container with no infrastructure-specific assumptio
 
 Aileron is currently hosted on [Railway](https://railway.com). The server service is connected to a Railway-managed PostgreSQL instance.
 
-**Setup:**
+#### Basic Setup
 
-1. **PostgreSQL service** — already provisioned and linked to the server service.
+1. **PostgreSQL service** — provision a Railway-managed PostgreSQL instance and link it to the server service.
 
 2. **Server service environment variables** — set these in the Railway dashboard under the server service's Variables tab:
 
@@ -434,14 +436,62 @@ Aileron is currently hosted on [Railway](https://railway.com). The server servic
    |----------|-------|
    | `AILERON_DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway variable reference) |
    | `AILERON_JWT_SIGNING_KEY` | Generate with `openssl rand -hex 32` |
-   | `GOOGLE_CLIENT_ID` | From Google Cloud Console |
-   | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console |
-   | `GITHUB_OAUTH_CLIENT_ID` | From GitHub Developer Settings |
-   | `GITHUB_OAUTH_CLIENT_SECRET` | From GitHub Developer Settings |
-
-   Each OAuth provider is optional. Callback URLs are derived automatically from the request host.
+   | `GOOGLE_CLIENT_ID` | From Google Cloud Console (optional) |
+   | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console (optional) |
+   | `GITHUB_OAUTH_CLIENT_ID` | From GitHub Developer Settings (optional) |
+   | `GITHUB_OAUTH_CLIENT_SECRET` | From GitHub Developer Settings (optional) |
 
 3. **Deploy** — push to the branch Railway is watching. The Dockerfile builds the image, and on startup the entrypoint applies schema migrations automatically.
+
+#### Stable OAuth Callback Domain (required for branch deployments)
+
+Railway gives every branch deploy a unique, unpredictable hostname (e.g. `feat-foo-abc123.up.railway.app`). OAuth providers require all callback URLs to be pre-registered, so each new branch URL would need manual registration. The stable callback domain feature solves this: all OAuth flows route through one stable domain, and only that URL is registered with providers.
+
+**Step 1 — Designate a stable callback domain.**
+
+Attach a custom domain to your production Railway service, e.g. `auth.withaileron.ai`. This domain will receive all OAuth callbacks from every deployment (production, staging, branch deploys).
+
+In the Railway dashboard:
+- Go to your production server service → **Settings** → **Networking** → **Custom Domain**
+- Add your stable domain (e.g. `auth.withaileron.ai`)
+- Point the DNS record to the Railway-provided target
+
+**Step 2 — Register the stable callback URL with OAuth providers.**
+
+Register exactly one callback URL per provider — the stable domain:
+
+- **Google** (in [Google Cloud Console](https://console.cloud.google.com/apis/credentials)):
+  - OAuth 2.0 Client → Authorized redirect URIs → `https://auth.withaileron.ai/auth/google/callback`
+
+- **GitHub** (in [GitHub Developer Settings](https://github.com/settings/developers)):
+  - OAuth App → Authorization callback URL → `https://auth.withaileron.ai/auth/github/callback`
+
+You do not need to add branch deploy URLs to either provider.
+
+**Step 3 — Set shared environment variables across all services.**
+
+In your Railway project, set these as **shared variables** (available to all services and environments) so branch deployments inherit them automatically:
+
+| Variable | Value |
+|----------|-------|
+| `AILERON_OAUTH_CALLBACK_BASE_URL` | `https://auth.withaileron.ai` |
+| `AILERON_TRUSTED_ORIGINS` | `*.up.railway.app,withaileron.ai` |
+
+To set shared variables in Railway:
+- Go to your project → **Variables** → **Shared Variables**
+- Add both variables with the values above
+- Adjust `AILERON_TRUSTED_ORIGINS` to include your exact domain patterns
+
+**Step 4 — Verify the flow.**
+
+After deploying, open a branch deployment and initiate sign-in with Google or GitHub:
+
+1. The branch deploy (`feat-foo-abc123.up.railway.app`) redirects to the provider with `redirect_uri=https://auth.withaileron.ai/auth/github/callback`.
+2. After authorization, the provider redirects to `auth.withaileron.ai`.
+3. `auth.withaileron.ai` detects the originating host in the state parameter, validates it against `AILERON_TRUSTED_ORIGINS`, and relays the callback to `feat-foo-abc123.up.railway.app`.
+4. The branch deployment completes the token exchange and creates a session.
+
+The round-trip is transparent to the user (a single extra redirect).
 
 ## Architecture Principles
 

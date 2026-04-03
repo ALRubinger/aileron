@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -46,6 +47,21 @@ type AuthConfig struct {
 	// GitHub OAuth configuration.
 	GitHubClientID     string // Env: GITHUB_OAUTH_CLIENT_ID
 	GitHubClientSecret string // Env: GITHUB_OAUTH_CLIENT_SECRET
+
+	// OAuthCallbackBaseURL, when set, is used as the base URL for all OAuth
+	// callback redirects instead of deriving it from the incoming request host.
+	// Set this to a stable domain (e.g. "https://auth.withaileron.ai") so that
+	// OAuth providers only need one registered redirect URI regardless of how
+	// many branch deployments exist.
+	// Env: AILERON_OAUTH_CALLBACK_BASE_URL
+	OAuthCallbackBaseURL string
+
+	// TrustedOrigins is a comma-separated list of origin patterns that are
+	// allowed as relay targets when OAuthCallbackBaseURL is set. Patterns may
+	// use a leading "*." wildcard to match any subdomain
+	// (e.g. "*.up.railway.app"). Exact hostnames are also supported.
+	// Env: AILERON_TRUSTED_ORIGINS
+	TrustedOrigins []string
 }
 
 // LoadAuthConfig loads auth configuration from environment variables.
@@ -58,10 +74,19 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		JWTIssuer:          envOrDefault("AILERON_JWT_ISSUER", "aileron"),
 		UIRedirectURL:      envOrDefault("AILERON_UI_REDIRECT_URL", "/"),
 		AutoVerifyEmail:    os.Getenv("AILERON_AUTO_VERIFY_EMAIL") == "true",
-		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GitHubClientID:     os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
-		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+		GoogleClientID:       os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GitHubClientID:       os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
+		GitHubClientSecret:   os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+		OAuthCallbackBaseURL: os.Getenv("AILERON_OAUTH_CALLBACK_BASE_URL"),
+	}
+
+	if raw := os.Getenv("AILERON_TRUSTED_ORIGINS"); raw != "" {
+		for _, p := range strings.Split(raw, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				cfg.TrustedOrigins = append(cfg.TrustedOrigins, p)
+			}
+		}
 	}
 
 	// Parse durations with defaults.
