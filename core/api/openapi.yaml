@@ -22,6 +22,9 @@ security:
   - bearerAuth: []
 
 tags:
+  - name: Auth
+  - name: Enterprises
+  - name: Users
   - name: Intents
   - name: Approvals
   - name: Policies
@@ -48,6 +51,218 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+
+  /auth/{provider}/login:
+    get:
+      tags: [Auth]
+      summary: Initiate OAuth login
+      description: Redirects the user to the specified auth provider's consent screen.
+      operationId: authLogin
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            examples: [google, okta]
+      responses:
+        "307":
+          description: Redirect to auth provider
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/{provider}/callback:
+    get:
+      tags: [Auth]
+      summary: OAuth callback
+      description: |
+        Handles the OAuth callback from the auth provider. Exchanges the
+        authorization code for user identity, creates or looks up the user
+        and enterprise, issues session tokens, and redirects to the UI.
+      operationId: authCallback
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "307":
+          description: Redirect to UI with session cookies set
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /auth/signup:
+    post:
+      tags: [Auth]
+      summary: Sign up with email and password
+      description: |
+        Creates a new account with email and password. The account starts in
+        pending_verification status. A 6-digit verification code is sent to
+        the email address and must be submitted via /auth/verify-email before
+        the account can be used.
+      operationId: authSignup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignupRequest"
+      responses:
+        "201":
+          description: Account created, verification code sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignupResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Verify email address
+      description: |
+        Submits the 6-digit verification code sent to the user's email.
+        On success, the account status changes from pending_verification to active.
+      operationId: authVerifyEmail
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyEmailRequest"
+      responses:
+        "200":
+          description: Email verified, account activated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyEmailResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email and password
+      description: Authenticates with email and password and returns an access token.
+      operationId: authEmailLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailLoginRequest"
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshTokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      description: Exchanges a refresh token for a new access token. The refresh token is rotated.
+      operationId: authRefresh
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshTokenRequest"
+      responses:
+        "200":
+          description: New access token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshTokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out
+      description: Deletes the session and clears authentication cookies.
+      operationId: authLogout
+      security: []
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogoutResponse"
+
+  /v1/enterprises/me:
+    get:
+      tags: [Enterprises]
+      summary: Get current enterprise
+      description: Returns the enterprise for the authenticated user.
+      operationId: getCurrentEnterprise
+      responses:
+        "200":
+          description: Current enterprise
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Enterprise"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/users/me:
+    get:
+      tags: [Users]
+      summary: Get current user
+      description: Returns the authenticated user's profile.
+      operationId: getCurrentUser
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /v1/intents:
     post:
@@ -2361,3 +2576,168 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RequiredEnvVar"
+
+    # --- Auth & Account schemas ---
+
+    Enterprise:
+      type: object
+      required: [id, name, slug, plan, billing_email, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          examples: [ent_abc123]
+        name:
+          type: string
+        slug:
+          type: string
+          description: URL-friendly unique identifier
+        plan:
+          type: string
+          enum: [free, pro, enterprise]
+        personal:
+          type: boolean
+          default: false
+          description: True for single-user personal accounts (e.g. Gmail sign-in)
+        billing_email:
+          type: string
+          format: email
+        sso_required:
+          type: boolean
+          default: false
+        allowed_auth_providers:
+          type: array
+          items:
+            type: string
+          description: Restrict sign-in to these providers. Empty means all allowed.
+        allowed_email_domains:
+          type: array
+          items:
+            type: string
+          description: Restrict sign-in to these email domains. Empty means all allowed.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    User:
+      type: object
+      description: |
+        A user account. The id is an opaque surrogate key (usr_ + UUID). Email is
+        the stable logical identity used to deduplicate across OAuth providers.
+      required: [id, enterprise_id, email, display_name, role, status, auth_provider, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: Opaque surrogate key — immutable, never changes
+          examples: [usr_abc123]
+        enterprise_id:
+          type: string
+        email:
+          type: string
+          format: email
+          description: Unique email — the stable identity across OAuth providers
+        display_name:
+          type: string
+        avatar_url:
+          type: string
+          format: uri
+        role:
+          type: string
+          enum: [owner, admin, member]
+        status:
+          type: string
+          enum: [active, pending_verification, invited, suspended]
+        auth_provider:
+          type: string
+          description: Identity provider used for authentication (e.g. google, okta, saml)
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RefreshTokenRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+          description: Refresh token (alternatively sent via httpOnly cookie)
+
+    RefreshTokenResponse:
+      type: object
+      required: [access_token]
+      properties:
+        access_token:
+          type: string
+
+    LogoutResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [logged_out]
+
+    SignupRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        display_name:
+          type: string
+          description: Defaults to the email username if omitted
+
+    SignupResponse:
+      type: object
+      required: [user_id, status, message]
+      properties:
+        user_id:
+          type: string
+        status:
+          type: string
+          enum: [pending_verification]
+        message:
+          type: string
+
+    VerifyEmailRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+          description: 6-digit verification code
+
+    VerifyEmailResponse:
+      type: object
+      required: [status, message]
+      properties:
+        status:
+          type: string
+          enum: [verified]
+        message:
+          type: string
+
+    EmailLoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string

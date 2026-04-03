@@ -12,6 +12,9 @@ import (
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
+	"github.com/ALRubinger/aileron/core/auth"
+	googleauth "github.com/ALRubinger/aileron/core/auth/google"
+	"github.com/ALRubinger/aileron/core/config"
 	"github.com/ALRubinger/aileron/core/connector"
 	googlecalendar "github.com/ALRubinger/aileron/core/connector/calendar/google"
 	"github.com/ALRubinger/aileron/core/connector/git/github"
@@ -20,6 +23,7 @@ import (
 	"github.com/ALRubinger/aileron/core/policy"
 	mcpreg "github.com/ALRubinger/aileron/core/registry"
 	"github.com/ALRubinger/aileron/core/store/mem"
+	"github.com/ALRubinger/aileron/core/store/postgres"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/google/uuid"
 )
@@ -113,8 +117,74 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 
 	registerDocsRoutes(mux)
 
-	// Middleware chain: CORS -> request ID -> logging -> routes.
+	// --- Auth (optional — enabled when AILERON_DATABASE_URL is set) ---
+	authCfg, err := config.LoadAuthConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	// Middleware chain: CORS -> request ID -> logging -> [auth] -> routes.
 	var handler http.Handler = mux
+
+	if authCfg.AuthEnabled() {
+		db, err := postgres.NewDB(ctx, authCfg.DatabaseURL)
+		if err != nil {
+			return nil, err
+		}
+		log.Info("connected to PostgreSQL")
+
+		enterpriseStore := postgres.NewEnterpriseStore(db)
+		userStore := postgres.NewUserStore(db)
+		sessionStore := postgres.NewSessionStore(db)
+		verificationCodeStore := postgres.NewVerificationCodeStore(db)
+
+		// Wire stores into apiServer for /me endpoints.
+		server.enterprises = enterpriseStore
+		server.users = userStore
+
+		tokenIssuer := auth.NewTokenIssuer(
+			[]byte(authCfg.JWTSigningKey),
+			authCfg.JWTIssuer,
+			authCfg.AccessTokenTTL,
+		)
+
+		authRegistry := auth.NewRegistry()
+		if authCfg.GoogleEnabled() {
+			authRegistry.Register(googleauth.New(
+				authCfg.GoogleClientID,
+				authCfg.GoogleClientSecret,
+				authCfg.GoogleRedirectURL,
+			))
+			log.Info("registered Google OAuth provider")
+		}
+
+		enforcer := auth.NewStoreEnforcer(enterpriseStore)
+
+		mailer := auth.NewLogMailer(log)
+
+		authHandler := auth.NewHandler(auth.HandlerConfig{
+			Log:               log,
+			Registry:          authRegistry,
+			Enforcer:          enforcer,
+			Issuer:            tokenIssuer,
+			Users:             userStore,
+			Enterprises:       enterpriseStore,
+			Sessions:          sessionStore,
+			VerificationCodes: verificationCodeStore,
+			Mailer:            mailer,
+			NewID:             idGen,
+			UIRedirect:        authCfg.UIRedirectURL,
+			RefreshTTL:        authCfg.RefreshTokenTTL,
+		})
+		authHandler.RegisterRoutes(mux)
+
+		skipPaths := map[string]bool{
+			"/v1/health": true,
+		}
+		handler = auth.Middleware(tokenIssuer, skipPaths)(handler)
+		log.Info("auth middleware enabled")
+	}
+
 	handler = loggingMiddleware(log, handler)
 	handler = requestIDMiddleware(handler)
 	handler = corsMiddleware(handler)

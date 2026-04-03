@@ -42,6 +42,8 @@ type apiServer struct {
 	credentials    *mem.CredentialStore
 	fundingSources *mem.FundingSourceStore
 	traces         *mem.TraceStore
+	enterprises    store.EnterpriseStore // nil when auth is disabled
+	users          store.UserStore       // nil when auth is disabled
 	newID          func() string
 }
 

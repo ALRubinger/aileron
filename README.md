@@ -228,20 +228,25 @@ task generate:api
 
 ```
 aileron/
-├── core/               Control plane — policy, approval, vault, audit
+├── core/               Control plane — policy, approval, vault, audit, auth
 │   ├── api/            OpenAPI specification and generated code
 │   ├── app/            Application wiring (handlers, middleware) — importable library
-│   ├── server/         HTTP server entry point
+│   ├── auth/           Auth SPI, enforcer, JWT, middleware, and provider implementations
+│   │   └── google/     Google OAuth 2.0 provider
+│   ├── server/         HTTP server entry point and entrypoint script
+│   ├── schema/         Atlas declarative database schema (HCL)
 │   ├── policy/         Policy engine SPI, rule-based implementation, seed policies
 │   ├── approval/       Approval orchestrator SPI and implementation
-│   ├── config/         YAML configuration loading and validation
+│   ├── config/         YAML and environment-based configuration
 │   ├── mcpclient/      MCP client for downstream server connections
 │   ├── connector/      Connector SPI and implementations
-│   ├── store/          Persistence interfaces and in-memory implementations
+│   ├── store/          Persistence interfaces
+│   │   ├── mem/        In-memory implementations (dev/test)
+│   │   └── postgres/   PostgreSQL implementations (production)
 │   ├── vault/          Credential vault SPI and in-memory implementation
 │   ├── notify/         Notification SPI (log, Slack, email)
 │   ├── audit/          Immutable audit store SPI
-│   └── model/          Shared domain types
+│   └── model/          Shared domain types (including Enterprise, User, Session)
 ├── cmd/
 │   └── aileron-mcp/    MCP gateway that aggregates and proxies downstream MCP servers
 ├── sdk/
@@ -298,6 +303,122 @@ To test the release pipeline locally without publishing:
 ```sh
 task release:snapshot
 ```
+
+## Authentication
+
+Aileron supports SSO and OAuth for the hosted control plane. Authentication is **opt-in** — when no database is configured, the server runs without auth (suitable for local development and the MCP gateway use case).
+
+When `AILERON_DATABASE_URL` is set, the server enables:
+- **Email/password signup** with email verification (bcrypt-hashed passwords, 6-digit verification codes)
+- **Google OAuth sign-in** (with Okta and SAML planned)
+- Enterprise account model (auto-created on first sign-in or signup)
+- JWT-based session management with refresh token rotation
+- Enterprise-level SSO enforcement (provider restrictions, email domain restrictions)
+- Cross-provider deduplication — signing in via different providers with the same email resolves to the same account
+
+### Auth Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AILERON_DATABASE_URL` | Yes (to enable auth) | | PostgreSQL connection string |
+| `AILERON_JWT_SIGNING_KEY` | Yes (when auth enabled) | | HMAC signing key for access tokens (32+ characters) |
+| `AILERON_JWT_ISSUER` | No | `aileron` | `iss` claim in issued JWTs |
+| `AILERON_ACCESS_TOKEN_TTL` | No | `15m` | Access token lifetime |
+| `AILERON_REFRESH_TOKEN_TTL` | No | `168h` | Refresh token lifetime (default 7 days) |
+| `AILERON_UI_REDIRECT_URL` | No | `/` | Redirect destination after successful login |
+| `GOOGLE_CLIENT_ID` | No | | Google OAuth 2.0 client ID |
+| `GOOGLE_CLIENT_SECRET` | No | | Google OAuth 2.0 client secret |
+| `GOOGLE_REDIRECT_URL` | No | | OAuth callback URL (e.g. `https://api.example.com/auth/google/callback`) |
+
+## Deployment
+
+### Local (Docker Compose)
+
+The quickest way to run the full stack locally:
+
+```sh
+task up
+```
+
+This starts PostgreSQL, the API server (with auto-migration), the UI, and API docs. See [Getting Started](#getting-started) for details.
+
+To enable auth locally, set the required variables. Email/password signup works with just a JWT key — no OAuth credentials needed:
+
+```sh
+export AILERON_JWT_SIGNING_KEY="$(openssl rand -hex 32)"
+task up
+```
+
+Verification codes are printed to the server log (dev mailer). To also enable Google OAuth:
+
+```sh
+export GOOGLE_CLIENT_ID="your-client-id"
+export GOOGLE_CLIENT_SECRET="your-client-secret"
+export GOOGLE_REDIRECT_URL="http://localhost:8080/auth/google/callback"
+```
+
+### Cloud (Provider-Agnostic)
+
+Aileron is a standard Docker container with no infrastructure-specific assumptions. It runs on any platform that supports containers and PostgreSQL.
+
+**Requirements:**
+- A PostgreSQL 16+ instance
+- A container runtime (Docker, Kubernetes, ECS, Cloud Run, etc.)
+- The environment variables listed above
+
+**Steps:**
+
+1. **Provision PostgreSQL.** Any managed Postgres service works (AWS RDS, GCP Cloud SQL, Supabase, Neon, etc.).
+
+2. **Build and push the server image:**
+   ```sh
+   docker build -f core/server/Dockerfile -t aileron-server .
+   docker tag aileron-server your-registry.example.com/aileron-server:latest
+   docker push your-registry.example.com/aileron-server:latest
+   ```
+
+3. **Set environment variables** on your container runtime:
+   ```
+   AILERON_DATABASE_URL=postgres://user:pass@host:5432/aileron?sslmode=require
+   AILERON_JWT_SIGNING_KEY=<random-32-char-string>
+   GOOGLE_CLIENT_ID=<from-google-cloud-console>
+   GOOGLE_CLIENT_SECRET=<from-google-cloud-console>
+   GOOGLE_REDIRECT_URL=https://api.yourdomain.com/auth/google/callback
+   ```
+
+4. **Deploy the container.** The entrypoint automatically runs Atlas schema migrations against `AILERON_DATABASE_URL` before starting the server. Migrations are declarative and idempotent — safe to run on every deploy.
+
+5. **Verify:**
+   ```sh
+   curl https://api.yourdomain.com/v1/health
+   ```
+
+**Schema migrations** are handled automatically. The Docker image includes the [Atlas](https://atlasgo.io) CLI and the schema definition. On each container start, the entrypoint runs `atlas schema apply` to converge the database to the declared state. No manual migration steps are needed.
+
+### Railway
+
+Aileron is currently hosted on [Railway](https://railway.com). The server service is connected to a Railway-managed PostgreSQL instance.
+
+**Setup:**
+
+1. **PostgreSQL service** — already provisioned and linked to the server service.
+
+2. **Server service environment variables** — set these in the Railway dashboard under the server service's Variables tab:
+
+   | Variable | Value |
+   |----------|-------|
+   | `AILERON_DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway variable reference) |
+   | `AILERON_JWT_SIGNING_KEY` | Generate with `openssl rand -hex 32` |
+   | `GOOGLE_CLIENT_ID` | From Google Cloud Console |
+   | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console |
+   | `GOOGLE_REDIRECT_URL` | `https://<your-server-domain>.railway.app/auth/google/callback` |
+
+3. **Deploy** — push to the branch Railway is watching. The Dockerfile builds the image, and on startup the entrypoint applies schema migrations automatically.
+
+4. **Google OAuth setup** — in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
+   - Create an OAuth 2.0 Client ID (Web application type)
+   - Add `https://<your-server-domain>.railway.app/auth/google/callback` as an authorized redirect URI
+   - Copy the client ID and secret into the Railway variables above
 
 ## Architecture Principles
 
