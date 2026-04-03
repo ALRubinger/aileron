@@ -4,3 +4,8 @@ generate:
   - std-http-server
   - types
   - spec
+# Auth endpoints are handled by core/auth.Handler directly on the mux.
+# They are declared in the OpenAPI spec for documentation but excluded
+# from code generation to avoid duplicate route registration.
+exclude-tags:
+  - Auth
