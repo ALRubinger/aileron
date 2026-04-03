@@ -4,7 +4,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import * as Card from '$lib/components/ui/card';
-	import { verifyEmail } from '$lib/auth.js';
+	import { verifyEmail } from '$lib/auth.svelte.js';
 
 	let email = $state(page.url.searchParams.get('email') || '');
 	let code = $state('');

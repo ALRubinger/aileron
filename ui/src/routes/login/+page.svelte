@@ -3,7 +3,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import * as Card from '$lib/components/ui/card';
-	import { emailLogin, setAuth, isAuthenticated } from '$lib/auth.js';
+	import { emailLogin, setAuth, isAuthenticated } from '$lib/auth.svelte.js';
 	import { PUBLIC_API_BASE } from '$env/static/public';
 	import { onMount } from 'svelte';
 
