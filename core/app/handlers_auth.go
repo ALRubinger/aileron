@@ -3,42 +3,12 @@ package app
 import (
 	"net/http"
 
-	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/auth"
 )
 
-// Auth and account endpoints are handled by the auth.Handler registered
-// directly on the mux. These stubs satisfy the generated ServerInterface.
-// When auth is disabled they return 501; when auth is enabled the auth
-// handler's mux routes take priority over these.
-
-func (s *apiServer) AuthLogin(w http.ResponseWriter, r *http.Request, provider string) {
-	http.Error(w, `{"error":"auth not enabled"}`, http.StatusNotImplemented)
-}
-
-func (s *apiServer) AuthCallback(w http.ResponseWriter, r *http.Request, provider string, params api.AuthCallbackParams) {
-	http.Error(w, `{"error":"auth not enabled"}`, http.StatusNotImplemented)
-}
-
-func (s *apiServer) AuthSignup(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, `{"error":"auth not enabled"}`, http.StatusNotImplemented)
-}
-
-func (s *apiServer) AuthVerifyEmail(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, `{"error":"auth not enabled"}`, http.StatusNotImplemented)
-}
-
-func (s *apiServer) AuthEmailLogin(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, `{"error":"auth not enabled"}`, http.StatusNotImplemented)
-}
-
-func (s *apiServer) AuthRefresh(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, `{"error":"auth not enabled"}`, http.StatusNotImplemented)
-}
-
-func (s *apiServer) AuthLogout(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, `{"error":"auth not enabled"}`, http.StatusNotImplemented)
-}
+// GetCurrentEnterprise and GetCurrentUser are generated ServerInterface
+// methods for the Enterprises and Users tags. Auth endpoints (Auth tag)
+// are excluded from code generation and handled by core/auth.Handler.
 
 func (s *apiServer) GetCurrentEnterprise(w http.ResponseWriter, r *http.Request) {
 	claims := auth.ClaimsFromContext(r.Context())
