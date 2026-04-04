@@ -3,13 +3,11 @@ package auth
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -32,13 +30,7 @@ type Handler struct {
 	uiRedirect        string // URL to redirect to after successful auth
 	refreshTTL        time.Duration
 	verificationTTL   time.Duration
-	autoVerifyEmail   bool
-	// callbackBaseURL, when non-empty, is used as the base URL for all OAuth
-	// callback redirects. If set, the originating host is encoded in the OAuth
-	// state parameter so the stable domain can relay the callback back.
-	callbackBaseURL string
-	// trustedOrigins is the set of origin patterns allowed as relay targets.
-	trustedOrigins []string
+	autoVerifyEmail bool
 }
 
 // HandlerConfig configures the auth handler.
@@ -54,16 +46,9 @@ type HandlerConfig struct {
 	Mailer            Mailer
 	NewID             func() string
 	UIRedirect        string        // e.g. "http://localhost:5173"
-	AutoVerifyEmail   bool          // skip email verification (dev/CI only)
-	RefreshTTL        time.Duration // e.g. 7 * 24 * time.Hour
-	VerificationTTL   time.Duration // e.g. 15 * time.Minute
-	// CallbackBaseURL, when set, overrides the dynamically derived callback URL
-	// with a stable domain. Used to support OAuth on Railway branch deployments.
-	// e.g. "https://auth.withaileron.ai"
-	CallbackBaseURL string
-	// TrustedOrigins lists origin patterns (e.g. "*.up.railway.app") that are
-	// allowed as relay targets in the stable-domain callback flow.
-	TrustedOrigins []string
+	AutoVerifyEmail bool          // skip email verification (dev/CI only)
+	RefreshTTL      time.Duration // e.g. 7 * 24 * time.Hour
+	VerificationTTL time.Duration // e.g. 15 * time.Minute
 }
 
 // NewHandler creates an auth handler.
@@ -91,9 +76,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		uiRedirect:        cfg.UIRedirect,
 		refreshTTL:        cfg.RefreshTTL,
 		verificationTTL:   cfg.VerificationTTL,
-		autoVerifyEmail:   cfg.AutoVerifyEmail,
-		callbackBaseURL:   strings.TrimRight(cfg.CallbackBaseURL, "/"),
-		trustedOrigins:    cfg.TrustedOrigins,
+		autoVerifyEmail: cfg.AutoVerifyEmail,
 	}
 }
 
@@ -117,19 +100,10 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	csrfToken, err := generateState()
+	state, err := generateState()
 	if err != nil {
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 		return
-	}
-
-	// When a stable callback base URL is configured, encode the originating
-	// host into the state so the relay can return to this deployment.
-	state := csrfToken
-	if h.callbackBaseURL != "" {
-		if originatingHost := requestHost(r); originatingHost != stableHost(h.callbackBaseURL) {
-			state = composeState(csrfToken, originatingHost)
-		}
 	}
 
 	// Store state in a short-lived cookie for CSRF validation.
@@ -167,15 +141,9 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, result.URL, http.StatusTemporaryRedirect)
 }
 
-// callbackURL returns the OAuth callback URL for the given provider.
-// When callbackBaseURL is set, that stable domain is used so that all OAuth
-// providers only need one registered redirect URI. Otherwise the URL is derived
-// from the incoming request, which works for single-domain deployments and local
-// development. It respects X-Forwarded-Proto and X-Forwarded-Host.
+// callbackURL returns the OAuth callback URL for the given provider, derived
+// from the incoming request. It respects X-Forwarded-Proto and X-Forwarded-Host.
 func (h *Handler) callbackURL(r *http.Request, provider string) string {
-	if h.callbackBaseURL != "" {
-		return fmt.Sprintf("%s/auth/%s/callback", h.callbackBaseURL, provider)
-	}
 	scheme := "https"
 	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
 		scheme = "http"
@@ -188,10 +156,6 @@ func (h *Handler) callbackURL(r *http.Request, provider string) string {
 }
 
 // handleCallback processes the OAuth callback and creates a session.
-// When callbackBaseURL is configured and the state encodes an originating host
-// that differs from the current host, this acts as a relay: it validates the
-// originating host against trustedOrigins and redirects the code+state back to
-// the originating deployment to complete the token exchange there.
 func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	providerName := r.PathValue("provider")
 	provider, ok := h.registry.Get(providerName)
@@ -201,33 +165,6 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stateParam := r.URL.Query().Get("state")
-
-	// Relay mode: if state encodes an originating host that differs from ours,
-	// validate it and forward the callback there to complete the auth flow.
-	if _, originatingHost := parseState(stateParam); originatingHost != "" && originatingHost != requestHost(r) {
-		if !isTrustedOrigin(originatingHost, h.trustedOrigins) {
-			h.log.Warn("relay rejected: untrusted originating host", "host", originatingHost)
-			http.Error(w, `{"error":"untrusted originating host"}`, http.StatusBadRequest)
-			return
-		}
-
-		// Check for provider error before relaying so we don't send bad codes.
-		if errParam := r.URL.Query().Get("error"); errParam != "" {
-			h.log.Warn("auth provider returned error during relay", "provider", providerName, "error", errParam)
-			http.Error(w, fmt.Sprintf(`{"error":"provider error: %s"}`, errParam), http.StatusBadRequest)
-			return
-		}
-
-		relayURL := fmt.Sprintf("https://%s/auth/%s/callback?code=%s&state=%s",
-			originatingHost,
-			providerName,
-			url.QueryEscape(r.URL.Query().Get("code")),
-			url.QueryEscape(stateParam),
-		)
-		h.log.Info("relaying OAuth callback to originating host", "host", originatingHost, "provider", providerName)
-		http.Redirect(w, r, relayURL, http.StatusFound)
-		return
-	}
 
 	// Validate CSRF state.
 	stateCookie, err := r.Cookie("oauth_state")
@@ -600,65 +537,6 @@ func generateState() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
-}
-
-// composeState builds a state value that embeds the originating host so the
-// stable-domain relay can return the OAuth callback to the correct deployment.
-// Format: "{csrf_token}.{base64url(originatingHost)}"
-func composeState(csrfToken, originatingHost string) string {
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(originatingHost))
-	return csrfToken + "." + encoded
-}
-
-// parseState splits a state value into its CSRF token and optional originating
-// host. If the state has no embedded host, originatingHost is empty.
-func parseState(state string) (csrfToken, originatingHost string) {
-	idx := strings.Index(state, ".")
-	if idx < 0 {
-		return state, ""
-	}
-	csrf := state[:idx]
-	decoded, err := base64.RawURLEncoding.DecodeString(state[idx+1:])
-	if err != nil {
-		// Not a valid compound state — treat the whole value as the CSRF token.
-		return state, ""
-	}
-	return csrf, string(decoded)
-}
-
-// requestHost returns the effective host of the incoming request, respecting
-// the X-Forwarded-Host header for reverse-proxied deployments.
-func requestHost(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
-		return fwd
-	}
-	return r.Host
-}
-
-// stableHost extracts just the host portion from a base URL string.
-// Returns an empty string if the URL cannot be parsed.
-func stableHost(baseURL string) string {
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return ""
-	}
-	return u.Host
-}
-
-// isTrustedOrigin reports whether host matches any of the provided patterns.
-// Patterns may use a leading "*." wildcard to match any subdomain.
-func isTrustedOrigin(host string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if strings.HasPrefix(pattern, "*.") {
-			suffix := pattern[1:] // e.g. ".up.railway.app"
-			if strings.HasSuffix(host, suffix) {
-				return true
-			}
-		} else if host == pattern {
-			return true
-		}
-	}
-	return false
 }
 
 func isNotFound(err error) bool {

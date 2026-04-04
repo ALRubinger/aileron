@@ -182,9 +182,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			NewID:             idGen,
 			UIRedirect:        authCfg.UIRedirectURL,
 			RefreshTTL:        authCfg.RefreshTokenTTL,
-			AutoVerifyEmail:   authCfg.AutoVerifyEmail,
-			CallbackBaseURL:   authCfg.OAuthCallbackBaseURL,
-			TrustedOrigins:    authCfg.TrustedOrigins,
+			AutoVerifyEmail: authCfg.AutoVerifyEmail,
 		})
 		authHandler.RegisterRoutes(mux)
 
