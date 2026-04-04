@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "35cb1e60671e",
+  "strategy": "manual-commit",
+  "branch": "remove-auth-subdomain",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "README.md",
+    "docs/adr/0006-stable-oauth-callback-domain.md",
+    "docs/adr/0007-remove-stable-oauth-callback-domain.md"
+  ],
+  "sessions": [
+    {
+      "metadata": "/35/cb1e60671e/0/metadata.json",
+      "transcript": "/35/cb1e60671e/0/full.jsonl",
+      "content_hash": "/35/cb1e60671e/0/content_hash.txt",
+      "prompt": "/35/cb1e60671e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 321,
+    "cache_creation_tokens": 26527,
+    "cache_read_tokens": 603709,
+    "output_tokens": 4360,
+    "api_call_count": 23
+  }
+}

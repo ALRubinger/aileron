@@ -1,0 +1,36 @@
+I'm getting an error in production when signing in with Google. 
+
+Error 400: redirect_uri_mismatch
+
+You can't sign in to this app because it doesn't comply with Google's OAuth 2.0 policy.
+
+If you're the app developer, register the redirect URI in the Google Cloud Console.
+Request details: redirect_uri=https://api.withaileron.ai/auth/google/callback flowName=GeneralOAuthFlow
+
+In Google Cloud Console the redirect URI is set to: https://auth.withaileron.ai/auth/google/callback
+
+My AILERON_UI_REDIRECT_URL variable on the server service is: https://auth.withaileron.ai/auth/callback
+
+---
+
+Is option 1 correct for separating out auth to its own subdomain?
+
+---
+
+api and auth are both pointing to the same service in Railway
+
+---
+
+What's the purpose of the separate auth and api subdomains at this point? I believe we set these up so that branch deploys would work with OAuth, and we removed that
+
+---
+
+Yes.
+
+---
+
+Have we updated ADR-0006 to note it is superceded by 0007?
+
+---
+
+Now I'm getting 404 in Production as it redirects to https://api.withaileron.ai/auth/callback. Shouldn't it be "app.withaileron.ai"?
