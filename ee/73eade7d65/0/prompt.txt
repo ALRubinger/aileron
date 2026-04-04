@@ -1,0 +1,5 @@
+Is it true that new branch deployments will go to $something.preview.withaileron.ai now? That doesn't sound right.
+
+---
+
+Let's take another approach. We will assume that OAuth will not work on branch deployments. It's adding too much complexty. Remove all the OAuth support for branch deployments. Instead on the branch the user will simply have to log in using email.

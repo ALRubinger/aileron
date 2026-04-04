@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "ee73eade7d65",
+  "session_id": "c3ee88e9-0c60-40db-9b5b-80fd97e364c6",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-04T00:15:23.91522Z",
+  "branch": "docs/restructure-deployment-guide",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "core/auth/handler.go",
+    "core/config/auth.go",
+    "core/app/app.go",
+    "core/config/auth_test.go",
+    "README.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-4-6[1m]",
+  "turn_id": "515d58f2f021",
+  "checkpoint_transcript_start": 427,
+  "transcript_lines_at_start": 427,
+  "token_usage": {
+    "input_tokens": 47,
+    "cache_creation_tokens": 25616,
+    "cache_read_tokens": 4506556,
+    "output_tokens": 11681,
+    "api_call_count": 43
+  },
+  "session_metrics": {
+    "turn_count": 18
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-04T00:15:22.837465Z",
+    "agent_lines": 13,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 13,
+    "agent_percentage": 100
+  }
+}
