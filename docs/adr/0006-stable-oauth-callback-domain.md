@@ -1,6 +1,6 @@
 # ADR-0006: Stable OAuth Callback Domain for Branch Deployments
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0007](0007-remove-stable-oauth-callback-domain.md)
 **Date:** 2026-04-03
 **Supersedes:** ADR-0005 (specifically the "Removal of OAuthRedirectURL override" decision)
 

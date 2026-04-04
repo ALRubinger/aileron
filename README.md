@@ -479,15 +479,14 @@ Add custom domains in each service's **Settings → Networking → Custom Domain
 | Domain | Railway Service | DNS Record |
 |--------|----------------|------------|
 | `api.withaileron.ai` | server | CNAME → Railway target |
-| `auth.withaileron.ai` | server | CNAME → Railway target |
 | `app.withaileron.ai` | ui | CNAME → Railway target |
 
 #### 4. Register OAuth callback URLs
 
-Register the production auth domain with each provider:
+Register the API domain with each provider:
 
-- **Google:** `https://auth.withaileron.ai/auth/google/callback`
-- **GitHub:** `https://auth.withaileron.ai/auth/github/callback`
+- **Google:** `https://api.withaileron.ai/auth/google/callback`
+- **GitHub:** `https://api.withaileron.ai/auth/github/callback`
 
 #### 5. Deploy
 
@@ -498,8 +497,6 @@ Push to the branch Railway is watching. The Dockerfile builds the image, and on 
 ```sh
 curl https://api.withaileron.ai/v1/health
 ```
-
-To verify the OAuth relay flow on a branch deploy, open the branch deployment URL and initiate sign-in.
 
 ## Architecture Principles
 
