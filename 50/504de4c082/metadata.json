@@ -1,0 +1,41 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "50504de4c082",
+  "strategy": "manual-commit",
+  "branch": "feat/per-user-enterprise-mcp-scoping",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "README.md",
+    "core/api/gen/server.gen.go",
+    "core/api/openapi.yaml",
+    "core/app/app.go",
+    "core/app/handlers.go",
+    "core/app/handlers_mcp_test.go",
+    "core/store/mem/enterprise_mcpserver.go",
+    "core/store/mem/enterprise_mcpserver_test.go",
+    "core/store/mem/mcpserver.go",
+    "core/store/mem/mcpserver_test.go",
+    "core/store/store.go",
+    "docs/adr/0008-per-user-enterprise-mcp-server-scoping.md",
+    "ui/src/lib/api.ts",
+    "ui/src/routes/servers/+page.svelte",
+    "ui/src/routes/servers/[id]/+page.svelte",
+    "ui/src/routes/settings/+layout.svelte",
+    "ui/src/routes/settings/mcp-servers/+page.svelte"
+  ],
+  "sessions": [
+    {
+      "metadata": "/50/504de4c082/0/metadata.json",
+      "transcript": "/50/504de4c082/0/full.jsonl",
+      "content_hash": "/50/504de4c082/0/content_hash.txt",
+      "prompt": "/50/504de4c082/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 212,
+    "cache_creation_tokens": 372437,
+    "cache_read_tokens": 12732589,
+    "output_tokens": 63043,
+    "api_call_count": 122
+  }
+}

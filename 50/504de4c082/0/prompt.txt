@@ -1,0 +1,39 @@
+When installing MCP servers, the installed servers are effective for all users across the system. Installing and configuring an MCP server needs to be per user. For instance, when user A installs an MCP server, it should not appear or be active in User B's server list. Let's review the OpenAPI specs, SPI, implementation, tests, and UI changes necessary to make this.
+
+---
+
+Tests for everything new? All tests pass? Code coverage is above 80% and not lower than it was before? Make an ADR to supercede any prior ones on the user/Enterprise model. Update the README as necessary.
+
+---
+
+<task-notification>
+<task-id>acd602bf2e8072905</task-id>
+<tool-use-id>toolu_018noTqVkJTi46GnA1cov9E5</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/06370dcb-fc78-4dfd-abac-beccc2c2cf6c/tasks/acd602bf2e8072905.output</output-file>
+<status>completed</status>
+<summary>Agent "Write ADR-0008 for MCP scoping" completed</summary>
+<result>ADR-0008 has been written to `/Users/alr/git/ALRubinger/aileron/docs/adr/0008-per-user-enterprise-mcp-server-scoping.md`, following the same format as ADR-0007 with the title, status, date, relation to ADR-0004, and the Context/Decision/Consequences sections populated from the provided details.</result>
+<usage><total_tokens>11097</total_tokens><tool_uses>1</tool_uses><duration_ms>15462</duration_ms></usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/06370dcb-fc78-4dfd-abac-beccc2c2cf6c/tasks/acd602bf2e8072905.output
+
+---
+
+<task-notification>
+<task-id>af3b4ebb71d974d0c</task-id>
+<tool-use-id>REDACTED</tool-use-id>
+<output-file>/private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/06370dcb-fc78-4dfd-abac-beccc2c2cf6c/tasks/af3b4ebb71d974d0c.output</output-file>
+<status>completed</status>
+<summary>Agent "Update README for MCP scoping" completed</summary>
+<result>All four updates have been applied to `/Users/alr/git/ALRubinger/aileron/README.md`:
+
+1. **Current Status section** (lines ~124-125): Added two new bullet points for per-user MCP server installations and enterprise MCP server governance with admin-curated approved lists.
+
+2. **For Organizations section** (line ~80): Updated the "Service catalog" bullet to mention admin auto-enable and the combined personal + enterprise server view for members.
+
+3. **Project Structure section** (line ~265): Updated the `ui/` routes line to include servers, marketplace, and MCP servers settings pages.
+
+4. **Authentication section** (line ~329): Added a note that MCP server endpoints enforce authentication when enabled, with graceful fallback for local development.</result>
+<usage><total_tokens>18394</total_tokens><tool_uses>5</tool_uses><duration_ms>34402</duration_ms></usage>
+</task-notification>
+Full transcript available at: /private/tmp/claude-501/-Users-alr-git-ALRubinger-aileron/06370dcb-fc78-4dfd-abac-beccc2c2cf6c/tasks/af3b4ebb71d974d0c.output
