@@ -121,6 +121,50 @@ func TestMCPServerStore_ListWithStatusFilter(t *testing.T) {
 	}
 }
 
+func TestMCPServerStore_ListWithUserFilter(t *testing.T) {
+	ctx := context.Background()
+	s := mem.NewMCPServerStore()
+
+	_ = s.Create(ctx, api.MCPServerConfig{
+		Id:      ptr("mcp_a"),
+		Name:    "user-a-server",
+		Command: []string{"cmd"},
+		UserId:  ptr("usr_a"),
+	})
+	_ = s.Create(ctx, api.MCPServerConfig{
+		Id:      ptr("mcp_b"),
+		Name:    "user-b-server",
+		Command: []string{"cmd"},
+		UserId:  ptr("usr_b"),
+	})
+	_ = s.Create(ctx, api.MCPServerConfig{
+		Id:      ptr("mcp_c"),
+		Name:    "no-owner-server",
+		Command: []string{"cmd"},
+	})
+
+	// Filter by user A — should only get user A's server.
+	list, err := s.List(ctx, store.MCPServerFilter{UserID: "usr_a"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("filtered list length = %d, want 1", len(list))
+	}
+	if list[0].Name != "user-a-server" {
+		t.Errorf("filtered Name = %q, want %q", list[0].Name, "user-a-server")
+	}
+
+	// No user filter — returns all servers.
+	all, err := s.List(ctx, store.MCPServerFilter{})
+	if err != nil {
+		t.Fatalf("List all: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("unfiltered list length = %d, want 3", len(all))
+	}
+}
+
 func isErrNotFound(err error, target **store.ErrNotFound) bool {
 	if err == nil {
 		return false

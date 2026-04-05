@@ -6,7 +6,8 @@
 
 	const navItems = [
 		{ href: '/settings/profile', label: 'Profile' },
-		{ href: '/settings/organization', label: 'Organization' }
+		{ href: '/settings/organization', label: 'Organization' },
+		{ href: '/settings/mcp-servers', label: 'MCP Servers' }
 	];
 </script>
 

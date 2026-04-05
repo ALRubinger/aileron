@@ -77,7 +77,7 @@ Every tool call interception, policy decision, approval, and execution is record
 
 Aileron gives organizations centralized control over agent activity across teams.
 
-- **Service catalog.** Configure which MCP servers are available to employees. Agents only see the tools you expose.
+- **Service catalog.** Configure which MCP servers are available to employees. Admins can auto-enable MCP servers for all organization members, and each member sees their personal servers alongside enterprise auto-enabled ones. Agents only see the tools you expose.
 - **Credential management.** API keys, tokens, and secrets live in the Aileron vault. Teams use agents without handling credentials directly.
 - **Policy governance.** Define rules that apply across all agent activity — spend limits, branch protections, vendor allowlists, time-of-day controls.
 - **Compliance.** An immutable audit trail records every tool call, policy decision, and approval for review and export.
@@ -121,6 +121,8 @@ The MCP gateway architecture is implemented end-to-end:
 - **Audit store** records every event in an immutable trace
 - **Approval UI** provides a web interface for reviewing and acting on pending approvals
 - **User profile and organization settings** let users manage their account and configure SSO policies (allowed providers, email domains, SSO enforcement)
+- **Per-user MCP server installations** allow each user to maintain their own list of configured MCP servers
+- **Enterprise MCP server governance** lets admins curate an approved server list with auto-enable, ensuring consistent tooling across the organization
 
 Five seed policies ship by default:
 1. Require approval for PRs targeting `main`, `master`, or `production`
@@ -262,7 +264,7 @@ aileron/
 ├── sdk/
 │   └── go/             Go client SDK
 ├── ui/                 Management and approval UI (SvelteKit)
-│   └── src/routes/     Pages: approvals, traces, policies, settings (profile, organization)
+│   └── src/routes/     Pages: approvals, traces, policies, servers, marketplace, settings (profile, organization, MCP servers)
 ├── docs/               API documentation site (Scalar)
 ├── test/
 │   └── integration/    Integration tests with OpenAPI spec validation
@@ -325,6 +327,8 @@ When `AILERON_DATABASE_URL` is set, the server enables:
 - JWT-based session management with refresh token rotation
 - Enterprise-level SSO enforcement (provider restrictions, email domain restrictions)
 - Cross-provider deduplication — signing in via different providers with the same email resolves to the same account
+
+MCP server management endpoints enforce authentication when auth is enabled. When auth is disabled (no database configured), these endpoints fall back to unscoped behavior suitable for local development.
 
 Auth environment variables are listed in the [Cloud deployment](#environment-variables) section below.
 

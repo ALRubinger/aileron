@@ -41,6 +41,9 @@ func (s *MCPServerStore) List(_ context.Context, filter store.MCPServerFilter) (
 	defer s.mu.RUnlock()
 	var result []api.MCPServerConfig
 	for _, srv := range s.servers {
+		if filter.UserID != "" && (srv.UserId == nil || *srv.UserId != filter.UserID) {
+			continue
+		}
 		if filter.Status != nil && (srv.Status == nil || *srv.Status != *filter.Status) {
 			continue
 		}
