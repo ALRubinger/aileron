@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/registry"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -711,4 +714,580 @@ func TestSetEnterpriseMCPServerCredential_BadRequest(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("bad request status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
+}
+
+// --- Registry test helper ---
+
+func newRegistryServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v0/servers" {
+			http.NotFound(w, r)
+			return
+		}
+		resp := registry.RegistryResponse{
+			Servers: []registry.RegistryEntry{
+				{Server: registry.RegistryServer{
+					Name:        "io.example/filesystem",
+					Description: "Filesystem access",
+					VersionDetail: registry.VersionDetail{
+						Version: "1.0.0",
+						Packages: []registry.Package{{
+							RegistryType: "npm",
+							Name:         "@example/mcp-fs",
+							Runtime:      registry.RuntimeConfig{Type: "node", Command: "npx"},
+							EnvVars: []registry.EnvVar{
+								{Name: "FS_ROOT", Description: "Root dir", Required: true},
+							},
+						}},
+					},
+				}},
+				{Server: registry.RegistryServer{
+					Name:        "io.example/github",
+					Description: "GitHub integration",
+					VersionDetail: registry.VersionDetail{
+						Version: "2.0.0",
+						Packages: []registry.Package{{
+							RegistryType: "npm",
+							Name:         "@example/mcp-github",
+							Runtime:      registry.RuntimeConfig{Type: "node", Command: "npx"},
+							EnvVars: []registry.EnvVar{
+								{Name: "GITHUB_TOKEN", Description: "PAT", Required: true},
+							},
+						}},
+					},
+				}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func newMCPServerWithRegistry(t *testing.T) (*apiServer, *httptest.Server) {
+	t.Helper()
+	ts := newRegistryServer(t)
+	client := registry.NewClient(ts.Client(), slog.Default()).WithBaseURL(ts.URL)
+	// Prefetch so FetchAll doesn't block.
+	client.Start(t.Context())
+
+	srv := &apiServer{
+		mcpServers:           mem.NewMCPServerStore(),
+		enterpriseMCPServers: mem.NewEnterpriseMCPServerStore(),
+		vault:                vault.NewMemVault(),
+		registryClient:       client,
+		newID:                func() string { return "mkt-test-id" },
+	}
+	return srv, ts
+}
+
+// --- Marketplace tests ---
+
+func TestListMarketplaceServers_Success(t *testing.T) {
+	srv, ts := newMCPServerWithRegistry(t)
+	defer ts.Close()
+
+	w := httptest.NewRecorder()
+	srv.ListMarketplaceServers(w, mcpRequest("GET", "/v1/marketplace/servers", "", userAClaims), api.ListMarketplaceServersParams{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var result struct {
+		Items []api.MarketplaceServer `json:"items"`
+	}
+	json.NewDecoder(w.Body).Decode(&result)
+	if len(result.Items) != 2 {
+		t.Fatalf("items length = %d, want 2", len(result.Items))
+	}
+	// Nothing installed yet.
+	for _, item := range result.Items {
+		if item.Installed != nil && *item.Installed {
+			t.Errorf("server %q should not be installed", item.Name)
+		}
+	}
+}
+
+func TestListMarketplaceServers_WithSearch(t *testing.T) {
+	srv, ts := newMCPServerWithRegistry(t)
+	defer ts.Close()
+
+	q := "filesystem"
+	w := httptest.NewRecorder()
+	srv.ListMarketplaceServers(w, mcpRequest("GET", "/v1/marketplace/servers?q=filesystem", "", userAClaims), api.ListMarketplaceServersParams{Q: &q})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var result struct {
+		Items []api.MarketplaceServer `json:"items"`
+	}
+	json.NewDecoder(w.Body).Decode(&result)
+	if len(result.Items) != 1 {
+		t.Fatalf("filtered items length = %d, want 1", len(result.Items))
+	}
+	if result.Items[0].Name != "io.example/filesystem" {
+		t.Errorf("Name = %q, want %q", result.Items[0].Name, "io.example/filesystem")
+	}
+}
+
+func TestListMarketplaceServers_InstalledFlagReflectsUserAndEnterprise(t *testing.T) {
+	srv, ts := newMCPServerWithRegistry(t)
+	defer ts.Close()
+
+	// User A installs filesystem from marketplace.
+	w := httptest.NewRecorder()
+	srv.InstallMarketplaceServer(w, mcpRequest("POST", "/v1/marketplace/servers/io.example%2Ffilesystem/install", "", userAClaims), "io.example/filesystem")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("Install status = %d; body: %s", w.Code, w.Body.String())
+	}
+
+	// Enterprise auto-enables github.
+	srv.newID = func() string { return "ent-gh" }
+	w = httptest.NewRecorder()
+	srv.CreateEnterpriseMCPServer(w, mcpRequest("POST", "/v1/enterprise/mcp-servers",
+		`{"name":"github","command":["cmd"],"auto_enabled":true,"registry_id":"io.example/github"}`, adminClaims))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateEnterprise status = %d", w.Code)
+	}
+
+	// User A lists marketplace — both should show installed.
+	srv.newID = func() string { return "unused" }
+	w = httptest.NewRecorder()
+	srv.ListMarketplaceServers(w, mcpRequest("GET", "/v1/marketplace/servers", "", userAClaims), api.ListMarketplaceServersParams{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+
+	var result struct {
+		Items []api.MarketplaceServer `json:"items"`
+	}
+	json.NewDecoder(w.Body).Decode(&result)
+	installedCount := 0
+	for _, item := range result.Items {
+		if item.Installed != nil && *item.Installed {
+			installedCount++
+		}
+	}
+	if installedCount != 2 {
+		t.Errorf("installed count = %d, want 2", installedCount)
+	}
+}
+
+func TestListMarketplaceServers_UnauthWithAuth(t *testing.T) {
+	srv, ts := newMCPServerWithRegistry(t)
+	defer ts.Close()
+	srv.users = &stubUserStore{}
+
+	w := httptest.NewRecorder()
+	srv.ListMarketplaceServers(w, mcpRequest("GET", "/v1/marketplace/servers", "", nil), api.ListMarketplaceServersParams{})
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestInstallMarketplaceServer_Success(t *testing.T) {
+	srv, ts := newMCPServerWithRegistry(t)
+	defer ts.Close()
+
+	w := httptest.NewRecorder()
+	srv.InstallMarketplaceServer(w, mcpRequest("POST", "/v1/marketplace/servers/io.example%2Ffilesystem/install", "", userAClaims), "io.example/filesystem")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+
+	var result api.InstallResult
+	json.NewDecoder(w.Body).Decode(&result)
+
+	if result.Server.Name != "io.example/filesystem" {
+		t.Errorf("Name = %q, want %q", result.Server.Name, "io.example/filesystem")
+	}
+	if result.Server.UserId == nil || *result.Server.UserId != "usr_a" {
+		t.Errorf("UserId = %v, want usr_a", result.Server.UserId)
+	}
+	if result.Server.Source == nil || *result.Server.Source != api.MCPServerConfigSourcePersonal {
+		t.Error("Source should be personal")
+	}
+	if result.Server.RegistryId == nil || *result.Server.RegistryId != "io.example/filesystem" {
+		t.Errorf("RegistryId = %v", result.Server.RegistryId)
+	}
+	if result.RequiredCredentials == nil || len(*result.RequiredCredentials) != 1 {
+		t.Fatalf("RequiredCredentials length = %v, want 1", result.RequiredCredentials)
+	}
+	if (*result.RequiredCredentials)[0].Name != "FS_ROOT" {
+		t.Errorf("first required cred = %q, want FS_ROOT", (*result.RequiredCredentials)[0].Name)
+	}
+}
+
+func TestInstallMarketplaceServer_NotFound(t *testing.T) {
+	srv, ts := newMCPServerWithRegistry(t)
+	defer ts.Close()
+
+	w := httptest.NewRecorder()
+	srv.InstallMarketplaceServer(w, mcpRequest("POST", "/v1/marketplace/servers/nonexistent/install", "", userAClaims), "nonexistent")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestInstallMarketplaceServer_UnauthWithAuth(t *testing.T) {
+	srv, ts := newMCPServerWithRegistry(t)
+	defer ts.Close()
+	srv.users = &stubUserStore{}
+
+	w := httptest.NewRecorder()
+	srv.InstallMarketplaceServer(w, mcpRequest("POST", "/v1/marketplace/servers/io.example%2Ffilesystem/install", "", nil), "io.example/filesystem")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+// --- deriveCommand tests ---
+
+func TestDeriveCommand_NpmPackage(t *testing.T) {
+	srv := &registry.RegistryServer{
+		Name: "test-server",
+		VersionDetail: registry.VersionDetail{
+			Packages: []registry.Package{{
+				RegistryType: "npm",
+				Name:         "@example/mcp-test",
+				Runtime:      registry.RuntimeConfig{Args: []string{"--stdio"}},
+				EnvVars:      []registry.EnvVar{{Name: "KEY", Required: true}},
+			}},
+		},
+	}
+	cmd, envVars := deriveCommand(srv)
+	if len(cmd) != 4 || cmd[0] != "npx" || cmd[1] != "-y" || cmd[2] != "@example/mcp-test" || cmd[3] != "--stdio" {
+		t.Errorf("npm command = %v", cmd)
+	}
+	if len(envVars) != 1 || envVars[0].Name != "KEY" {
+		t.Errorf("envVars = %v", envVars)
+	}
+}
+
+func TestDeriveCommand_RuntimeCommand(t *testing.T) {
+	srv := &registry.RegistryServer{
+		Name: "test-server",
+		VersionDetail: registry.VersionDetail{
+			Packages: []registry.Package{{
+				RegistryType: "docker",
+				Name:         "example/mcp",
+				Runtime:      registry.RuntimeConfig{Command: "docker", Args: []string{"run", "example/mcp"}},
+			}},
+		},
+	}
+	cmd, _ := deriveCommand(srv)
+	if len(cmd) != 3 || cmd[0] != "docker" {
+		t.Errorf("runtime command = %v", cmd)
+	}
+}
+
+func TestDeriveCommand_FallbackToName(t *testing.T) {
+	srv := &registry.RegistryServer{
+		Name:          "my-server",
+		VersionDetail: registry.VersionDetail{},
+	}
+	cmd, envVars := deriveCommand(srv)
+	if len(cmd) != 1 || cmd[0] != "my-server" {
+		t.Errorf("fallback command = %v", cmd)
+	}
+	if envVars != nil {
+		t.Errorf("fallback envVars should be nil, got %v", envVars)
+	}
+}
+
+func TestDeriveCommand_NpmWithoutArgs(t *testing.T) {
+	srv := &registry.RegistryServer{
+		Name: "test-server",
+		VersionDetail: registry.VersionDetail{
+			Packages: []registry.Package{{
+				RegistryType: "npm",
+				Name:         "@example/simple",
+				Runtime:      registry.RuntimeConfig{},
+			}},
+		},
+	}
+	cmd, _ := deriveCommand(srv)
+	if len(cmd) != 3 || cmd[0] != "npx" || cmd[1] != "-y" || cmd[2] != "@example/simple" {
+		t.Errorf("npm command without args = %v", cmd)
+	}
+}
+
+// --- Additional error path coverage ---
+
+func TestGetMCPServer_Nonexistent(t *testing.T) {
+	srv := newMCPServer()
+
+	w := httptest.NewRecorder()
+	srv.GetMCPServer(w, mcpRequest("GET", "/v1/mcp-servers/nonexistent", "", userAClaims), "nonexistent")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestGetEnterpriseMCPServer_Nonexistent(t *testing.T) {
+	srv := newMCPServer()
+
+	w := httptest.NewRecorder()
+	srv.GetEnterpriseMCPServer(w, mcpRequest("GET", "/v1/enterprise/mcp-servers/nonexistent", "", adminClaims), "nonexistent")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestDeleteEnterpriseMCPServer_Nonexistent(t *testing.T) {
+	srv := newMCPServer()
+
+	w := httptest.NewRecorder()
+	srv.DeleteEnterpriseMCPServer(w, mcpRequest("DELETE", "/v1/enterprise/mcp-servers/nonexistent", "", adminClaims), "nonexistent")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+}
+
+func TestEnterpriseMCPToUserView_WithPolicyMapping(t *testing.T) {
+	prefix := "git"
+	es := api.EnterpriseMCPServer{
+		Id:      ptrS("emcp_1"),
+		Name:    "test",
+		Command: []string{"cmd"},
+		Mode:    ptrMode(api.EnterpriseMCPServerModeRemote),
+		PolicyMapping: &struct {
+			ToolPrefix *string `json:"tool_prefix,omitempty"`
+		}{ToolPrefix: &prefix},
+	}
+	source := api.MCPServerConfigSourceEnterprise
+	cfg := enterpriseMCPToUserView(es, source)
+
+	if cfg.PolicyMapping == nil || cfg.PolicyMapping.ToolPrefix == nil || *cfg.PolicyMapping.ToolPrefix != "git" {
+		t.Errorf("PolicyMapping.ToolPrefix = %v, want git", cfg.PolicyMapping)
+	}
+	if cfg.Mode == nil || *cfg.Mode != api.MCPServerConfigModeRemote {
+		t.Errorf("Mode = %v, want remote", cfg.Mode)
+	}
+}
+
+func ptrS(s string) *string { return &s }
+func ptrMode(m api.EnterpriseMCPServerMode) *api.EnterpriseMCPServerMode { return &m }
+
+// --- Error-injecting store for internal error paths ---
+
+type errorMCPServerStore struct {
+	*mem.MCPServerStore
+	listErr   error
+	getErr    error
+	createErr error
+	updateErr error
+	deleteErr error
+}
+
+func (s *errorMCPServerStore) List(_ context.Context, _ store.MCPServerFilter) ([]api.MCPServerConfig, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.MCPServerStore.List(context.Background(), store.MCPServerFilter{})
+}
+
+func (s *errorMCPServerStore) Get(_ context.Context, id string) (api.MCPServerConfig, error) {
+	if s.getErr != nil {
+		return api.MCPServerConfig{}, s.getErr
+	}
+	return s.MCPServerStore.Get(context.Background(), id)
+}
+
+func (s *errorMCPServerStore) Create(_ context.Context, srv api.MCPServerConfig) error {
+	if s.createErr != nil {
+		return s.createErr
+	}
+	return s.MCPServerStore.Create(context.Background(), srv)
+}
+
+func (s *errorMCPServerStore) Update(_ context.Context, srv api.MCPServerConfig) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	return s.MCPServerStore.Update(context.Background(), srv)
+}
+
+func (s *errorMCPServerStore) Delete(_ context.Context, id string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	return s.MCPServerStore.Delete(context.Background(), id)
+}
+
+type errorEntMCPServerStore struct {
+	*mem.EnterpriseMCPServerStore
+	listErr   error
+	getErr    error
+	createErr error
+	updateErr error
+	deleteErr error
+}
+
+func (s *errorEntMCPServerStore) List(_ context.Context, _ store.EnterpriseMCPServerFilter) ([]api.EnterpriseMCPServer, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	return s.EnterpriseMCPServerStore.List(context.Background(), store.EnterpriseMCPServerFilter{})
+}
+
+func (s *errorEntMCPServerStore) Get(_ context.Context, id string) (api.EnterpriseMCPServer, error) {
+	if s.getErr != nil {
+		return api.EnterpriseMCPServer{}, s.getErr
+	}
+	return s.EnterpriseMCPServerStore.Get(context.Background(), id)
+}
+
+func (s *errorEntMCPServerStore) Create(_ context.Context, srv api.EnterpriseMCPServer) error {
+	if s.createErr != nil {
+		return s.createErr
+	}
+	return s.EnterpriseMCPServerStore.Create(context.Background(), srv)
+}
+
+func (s *errorEntMCPServerStore) Update(_ context.Context, srv api.EnterpriseMCPServer) error {
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	return s.EnterpriseMCPServerStore.Update(context.Background(), srv)
+}
+
+func (s *errorEntMCPServerStore) Delete(_ context.Context, id string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	return s.EnterpriseMCPServerStore.Delete(context.Background(), id)
+}
+
+func TestMCPServer_InternalErrors(t *testing.T) {
+	internalErr := fmt.Errorf("database connection failed")
+
+	t.Run("ListMCPServers store error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.mcpServers = &errorMCPServerStore{MCPServerStore: mem.NewMCPServerStore(), listErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.ListMCPServers(w, mcpRequest("GET", "/v1/mcp-servers", "", userAClaims))
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("CreateMCPServer store error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.mcpServers = &errorMCPServerStore{MCPServerStore: mem.NewMCPServerStore(), createErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.CreateMCPServer(w, mcpRequest("POST", "/v1/mcp-servers", `{"name":"x","command":["x"]}`, userAClaims))
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("GetMCPServer store error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.mcpServers = &errorMCPServerStore{MCPServerStore: mem.NewMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.GetMCPServer(w, mcpRequest("GET", "/v1/mcp-servers/x", "", userAClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("UpdateMCPServer store get error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.mcpServers = &errorMCPServerStore{MCPServerStore: mem.NewMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.UpdateMCPServer(w, mcpRequest("PUT", "/v1/mcp-servers/x", `{"name":"x","command":["x"]}`, userAClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("DeleteMCPServer store get error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.mcpServers = &errorMCPServerStore{MCPServerStore: mem.NewMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.DeleteMCPServer(w, mcpRequest("DELETE", "/v1/mcp-servers/x", "", userAClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("SetMCPServerCredential store get error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.mcpServers = &errorMCPServerStore{MCPServerStore: mem.NewMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.SetMCPServerCredential(w, mcpRequest("POST", "/v1/mcp-servers/x/credentials",
+			`{"env_var_name":"K","secret_value":"V"}`, userAClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+}
+
+func TestEnterpriseMCPServer_InternalErrors(t *testing.T) {
+	internalErr := fmt.Errorf("database connection failed")
+
+	t.Run("ListEnterpriseMCPServers store error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.enterpriseMCPServers = &errorEntMCPServerStore{EnterpriseMCPServerStore: mem.NewEnterpriseMCPServerStore(), listErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.ListEnterpriseMCPServers(w, mcpRequest("GET", "/v1/enterprise/mcp-servers", "", adminClaims))
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("CreateEnterpriseMCPServer store error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.enterpriseMCPServers = &errorEntMCPServerStore{EnterpriseMCPServerStore: mem.NewEnterpriseMCPServerStore(), createErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.CreateEnterpriseMCPServer(w, mcpRequest("POST", "/v1/enterprise/mcp-servers",
+			`{"name":"x","command":["x"]}`, adminClaims))
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("GetEnterpriseMCPServer store error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.enterpriseMCPServers = &errorEntMCPServerStore{EnterpriseMCPServerStore: mem.NewEnterpriseMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.GetEnterpriseMCPServer(w, mcpRequest("GET", "/v1/enterprise/mcp-servers/x", "", adminClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("UpdateEnterpriseMCPServer store get error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.enterpriseMCPServers = &errorEntMCPServerStore{EnterpriseMCPServerStore: mem.NewEnterpriseMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.UpdateEnterpriseMCPServer(w, mcpRequest("PUT", "/v1/enterprise/mcp-servers/x",
+			`{"name":"x","command":["x"]}`, adminClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("DeleteEnterpriseMCPServer store get error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.enterpriseMCPServers = &errorEntMCPServerStore{EnterpriseMCPServerStore: mem.NewEnterpriseMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.DeleteEnterpriseMCPServer(w, mcpRequest("DELETE", "/v1/enterprise/mcp-servers/x", "", adminClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
+
+	t.Run("SetEnterpriseMCPServerCredential store get error", func(t *testing.T) {
+		srv := newMCPServer()
+		srv.enterpriseMCPServers = &errorEntMCPServerStore{EnterpriseMCPServerStore: mem.NewEnterpriseMCPServerStore(), getErr: internalErr}
+		w := httptest.NewRecorder()
+		srv.SetEnterpriseMCPServerCredential(w, mcpRequest("POST", "/v1/enterprise/mcp-servers/x/credentials",
+			`{"env_var_name":"K","secret_value":"V"}`, adminClaims), "x")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", w.Code)
+		}
+	})
 }
