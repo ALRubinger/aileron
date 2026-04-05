@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.1",
+  "checkpoint_id": "6a0c35fa792e",
+  "strategy": "manual-commit",
+  "branch": "feat/per-user-enterprise-mcp-scoping",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "codecov.yml"
+  ],
+  "sessions": [
+    {
+      "metadata": "/6a/0c35fa792e/0/metadata.json",
+      "transcript": "/6a/0c35fa792e/0/full.jsonl",
+      "content_hash": "/6a/0c35fa792e/0/content_hash.txt",
+      "prompt": "/6a/0c35fa792e/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 13,
+    "cache_creation_tokens": 5053,
+    "cache_read_tokens": 2280666,
+    "output_tokens": 2783,
+    "api_call_count": 11
+  }
+}
