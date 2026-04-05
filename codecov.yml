@@ -8,6 +8,11 @@ coverage:
       default:
         target: 80%
 
+ignore:
+  - "core/api/gen/**"   # generated code (oapi-codegen) — DO NOT EDIT
+  - "ui/**"             # SvelteKit UI — needs its own test framework
+  - "docs/**"           # documentation and ADRs
+
 comment:
   layout: "condensed_header, diff, flags, components"
   require_changes: true
