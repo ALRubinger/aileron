@@ -42,6 +42,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	executionStore := mem.NewExecutionStore()
 	connectorStore := mem.NewConnectorStore()
 	mcpServerStore := mem.NewMCPServerStore()
+	enterpriseMCPServerStore := mem.NewEnterpriseMCPServerStore()
 	credentialStore := mem.NewCredentialStore()
 	fundingSourceStore := mem.NewFundingSourceStore()
 	traceStore := mem.NewTraceStore()
@@ -107,8 +108,9 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		grants:         grantStore,
 		executions:     executionStore,
 		connectors:     connectorStore,
-		mcpServers:     mcpServerStore,
-		registryClient: registryClient,
+		mcpServers:           mcpServerStore,
+		enterpriseMCPServers: enterpriseMCPServerStore,
+		registryClient:       registryClient,
 		credentials:    credentialStore,
 		fundingSources: fundingSourceStore,
 		traces:         traceStore,

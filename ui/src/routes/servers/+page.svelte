@@ -69,6 +69,15 @@
 								{/if}
 							</div>
 							<div class="flex gap-2 items-center">
+								{#if server.source === 'enterprise'}
+									<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase border-purple-500 text-purple-500">
+										Enterprise
+									</span>
+								{:else}
+									<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase border-sky-500 text-sky-500">
+										Personal
+									</span>
+								{/if}
 								<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase" style="color: {serverStatusColor(server.status)}; border-color: {serverStatusColor(server.status)}">
 									{server.status || 'stopped'}
 								</span>
@@ -91,14 +100,18 @@
 									<span class="ml-3">Created: {new Date(server.created_at).toLocaleDateString()}</span>
 								{/if}
 							</div>
-							<Button
-								variant="destructive"
-								size="xs"
-								onclick={(e: Event) => handleDelete(e, server.id, server.name)}
-								disabled={deleting === server.id}
-							>
-								{deleting === server.id ? 'Removing...' : 'Remove'}
-							</Button>
+							{#if server.source !== 'enterprise'}
+								<Button
+									variant="destructive"
+									size="xs"
+									onclick={(e: Event) => handleDelete(e, server.id, server.name)}
+									disabled={deleting === server.id}
+								>
+									{deleting === server.id ? 'Removing...' : 'Remove'}
+								</Button>
+							{:else}
+								<span class="text-xs text-muted-foreground italic">Managed by organization</span>
+							{/if}
 						</div>
 					</Card.Content>
 				</Card.Root>

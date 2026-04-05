@@ -35,6 +35,7 @@ tags:
   - name: Traces
   - name: Analytics
   - name: MCP Servers
+  - name: Enterprise MCP Servers
   - name: Health
 
 paths:
@@ -1108,7 +1109,7 @@ paths:
   /v1/mcp-servers:
     get:
       tags: [MCP Servers]
-      summary: List configured downstream MCP servers
+      summary: List the current user's MCP servers (personal + enterprise auto-enabled)
       operationId: listMCPServers
       responses:
         "200":
@@ -1122,9 +1123,11 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/MCPServerConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     post:
       tags: [MCP Servers]
-      summary: Register a downstream MCP server
+      summary: Register a personal downstream MCP server
       operationId: createMCPServer
       requestBody:
         required: true
@@ -1139,6 +1142,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MCPServerConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /v1/mcp-servers/{id}:
     parameters:
@@ -1158,6 +1163,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MCPServerConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
     put:
       tags: [MCP Servers]
       summary: Update MCP server configuration
@@ -1175,6 +1184,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MCPServerConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
     delete:
       tags: [MCP Servers]
       summary: Remove a downstream MCP server
@@ -1182,6 +1197,12 @@ paths:
       responses:
         "204":
           description: Server removed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/mcp-servers/{id}/credentials:
     parameters:
@@ -1206,8 +1227,140 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SetCredentialResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
-          description: Server not found
+          $ref: "#/components/responses/NotFound"
+
+  /v1/enterprise/mcp-servers:
+    get:
+      tags: [Enterprise MCP Servers]
+      summary: List the enterprise's approved MCP servers
+      operationId: listEnterpriseMCPServers
+      responses:
+        "200":
+          description: List of enterprise MCP server configurations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EnterpriseMCPServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Enterprise MCP Servers]
+      summary: Add an MCP server to the enterprise approved list
+      operationId: createEnterpriseMCPServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnterpriseMCPServer"
+      responses:
+        "201":
+          description: Server added to enterprise approved list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseMCPServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/enterprise/mcp-servers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Enterprise MCP Servers]
+      summary: Get enterprise MCP server configuration
+      operationId: getEnterpriseMCPServer
+      responses:
+        "200":
+          description: Enterprise server configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseMCPServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Enterprise MCP Servers]
+      summary: Update enterprise MCP server configuration
+      operationId: updateEnterpriseMCPServer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnterpriseMCPServer"
+      responses:
+        "200":
+          description: Server updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnterpriseMCPServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Enterprise MCP Servers]
+      summary: Remove an MCP server from the enterprise approved list
+      operationId: deleteEnterpriseMCPServer
+      responses:
+        "204":
+          description: Server removed from enterprise list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/enterprise/mcp-servers/{id}/credentials:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Enterprise MCP Servers]
+      summary: Store a credential for an enterprise MCP server
+      operationId: setEnterpriseMCPServerCredential
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetCredentialRequest"
+      responses:
+        "200":
+          description: Credential stored
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetCredentialResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/marketplace/servers:
     get:
@@ -1232,6 +1385,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/MarketplaceServer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /v1/marketplace/servers/{registryId}/install:
     parameters:
@@ -1251,6 +1406,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InstallResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           description: Server not found in registry
 
@@ -2505,6 +2662,15 @@ components:
         id:
           type: string
           readOnly: true
+        user_id:
+          type: string
+          readOnly: true
+          description: Owning user ID
+        source:
+          type: string
+          enum: [personal, enterprise]
+          readOnly: true
+          description: Whether this server is a personal installation or enterprise-managed
         name:
           type: string
           description: Unique identifier for this server
@@ -2537,6 +2703,62 @@ components:
         registry_id:
           type: string
           description: MCP Registry identifier if installed from marketplace
+        policy_mapping:
+          type: object
+          properties:
+            tool_prefix:
+              type: string
+              description: Maps tool calls to action type namespace
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
+
+    EnterpriseMCPServer:
+      type: object
+      required: [name, command]
+      properties:
+        id:
+          type: string
+          readOnly: true
+        enterprise_id:
+          type: string
+          readOnly: true
+        name:
+          type: string
+          description: Unique identifier for this server
+        description:
+          type: string
+          description: Human-readable description of this server
+        command:
+          type: array
+          items:
+            type: string
+          description: Command to execute
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: Environment variables (vault:// prefix for vault resolution)
+        mode:
+          type: string
+          enum: [local, remote]
+          default: local
+          description: Execution mode (local subprocess or remote HTTP)
+        version:
+          type: string
+          description: Installed version of the server
+        registry_id:
+          type: string
+          description: MCP Registry identifier if installed from marketplace
+        auto_enabled:
+          type: boolean
+          default: false
+          description: If true, this server is automatically active for all enterprise users
         policy_mapping:
           type: object
           properties:

@@ -86,6 +86,15 @@
 		<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase" style="color: {modeColor(server.mode)}; border-color: {modeColor(server.mode)}">
 			{server.mode || 'local'}
 		</span>
+		{#if server.source === 'enterprise'}
+			<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase border-purple-500 text-purple-500">
+				Enterprise
+			</span>
+		{:else}
+			<span class="rounded border px-2 py-0.5 text-xs font-semibold uppercase border-sky-500 text-sky-500">
+				Personal
+			</span>
+		{/if}
 	</div>
 
 	<Card.Root class="mb-4">
@@ -158,57 +167,65 @@
 		</Card.Root>
 	{/if}
 
-	<Card.Root class="mb-4">
-		<Card.Header>
-			<Card.Title>Set Credential</Card.Title>
-			<Card.Description>Store a secret in the vault for this server.</Card.Description>
-		</Card.Header>
-		<Card.Content>
-			<div class="flex gap-2 items-end flex-wrap">
-				<div>
-					<label for="cred-env-var" class="block text-xs text-muted-foreground mb-1">Env var name</label>
-					<Input
-						id="cred-env-var"
-						type="text"
-						bind:value={credEnvVar}
-						placeholder="e.g. API_KEY"
-						class="font-mono"
-					/>
+	{#if server.source !== 'enterprise'}
+		<Card.Root class="mb-4">
+			<Card.Header>
+				<Card.Title>Set Credential</Card.Title>
+				<Card.Description>Store a secret in the vault for this server.</Card.Description>
+			</Card.Header>
+			<Card.Content>
+				<div class="flex gap-2 items-end flex-wrap">
+					<div>
+						<label for="cred-env-var" class="block text-xs text-muted-foreground mb-1">Env var name</label>
+						<Input
+							id="cred-env-var"
+							type="text"
+							bind:value={credEnvVar}
+							placeholder="e.g. API_KEY"
+							class="font-mono"
+						/>
+					</div>
+					<div>
+						<label for="cred-secret" class="block text-xs text-muted-foreground mb-1">Secret value</label>
+						<Input
+							id="cred-secret"
+							type="password"
+							bind:value={credValue}
+							placeholder="Enter secret..."
+						/>
+					</div>
+					<Button
+						onclick={handleSetCredential}
+						disabled={credSaving}
+					>
+						{credSaving ? 'Saving...' : 'Save'}
+					</Button>
 				</div>
-				<div>
-					<label for="cred-secret" class="block text-xs text-muted-foreground mb-1">Secret value</label>
-					<Input
-						id="cred-secret"
-						type="password"
-						bind:value={credValue}
-						placeholder="Enter secret..."
-					/>
-				</div>
-				<Button
-					onclick={handleSetCredential}
-					disabled={credSaving}
-				>
-					{credSaving ? 'Saving...' : 'Save'}
-				</Button>
-			</div>
-			{#if credResult}
-				<p class="mt-2 text-xs" style="color: {credResult.startsWith('Error') ? 'var(--color-status-red)' : 'var(--color-status-green)'}">{credResult}</p>
-			{/if}
-		</Card.Content>
-	</Card.Root>
+				{#if credResult}
+					<p class="mt-2 text-xs" style="color: {credResult.startsWith('Error') ? 'var(--color-status-red)' : 'var(--color-status-green)'}">{credResult}</p>
+				{/if}
+			</Card.Content>
+		</Card.Root>
 
-	<Card.Root class="border-destructive">
-		<Card.Header>
-			<Card.Title class="text-destructive">Danger Zone</Card.Title>
-		</Card.Header>
-		<Card.Content>
-			<Button
-				variant="destructive"
-				onclick={handleDelete}
-				disabled={deleting}
-			>
-				{deleting ? 'Removing...' : 'Delete Server'}
-			</Button>
-		</Card.Content>
-	</Card.Root>
+		<Card.Root class="border-destructive">
+			<Card.Header>
+				<Card.Title class="text-destructive">Danger Zone</Card.Title>
+			</Card.Header>
+			<Card.Content>
+				<Button
+					variant="destructive"
+					onclick={handleDelete}
+					disabled={deleting}
+				>
+					{deleting ? 'Removing...' : 'Delete Server'}
+				</Button>
+			</Card.Content>
+		</Card.Root>
+	{:else}
+		<Card.Root class="mb-4">
+			<Card.Content>
+				<p class="text-sm text-muted-foreground italic">This server is managed by your organization. Contact an administrator to modify credentials or remove it.</p>
+			</Card.Content>
+		</Card.Root>
+	{/if}
 {/if}

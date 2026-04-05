@@ -106,6 +106,53 @@ export async function setMCPServerCredential(id: string, envVarName: string, sec
 	});
 }
 
+export async function listEnterpriseMCPServers() {
+	return apiFetch('/v1/enterprise/mcp-servers');
+}
+
+export async function createEnterpriseMCPServer(data: {
+	name: string;
+	command: string[];
+	description?: string;
+	env?: Record<string, string>;
+	mode?: string;
+	auto_enabled?: boolean;
+}) {
+	return apiFetch('/v1/enterprise/mcp-servers', {
+		method: 'POST',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function getEnterpriseMCPServer(id: string) {
+	return apiFetch(`/v1/enterprise/mcp-servers/${id}`);
+}
+
+export async function updateEnterpriseMCPServer(id: string, data: {
+	name: string;
+	command: string[];
+	description?: string;
+	env?: Record<string, string>;
+	mode?: string;
+	auto_enabled?: boolean;
+}) {
+	return apiFetch(`/v1/enterprise/mcp-servers/${id}`, {
+		method: 'PUT',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function deleteEnterpriseMCPServer(id: string) {
+	return apiFetch(`/v1/enterprise/mcp-servers/${id}`, { method: 'DELETE' });
+}
+
+export async function setEnterpriseMCPServerCredential(id: string, envVarName: string, secretValue: string) {
+	return apiFetch(`/v1/enterprise/mcp-servers/${id}/credentials`, {
+		method: 'POST',
+		body: JSON.stringify({ env_var_name: envVarName, secret_value: secretValue })
+	});
+}
+
 export async function getCurrentUser() {
 	return apiFetch('/v1/users/me');
 }
