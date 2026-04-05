@@ -38,8 +38,8 @@ type apiServer struct {
 	grants         *mem.GrantStore
 	executions     *mem.ExecutionStore
 	connectors     *mem.ConnectorStore
-	mcpServers           *mem.MCPServerStore
-	enterpriseMCPServers *mem.EnterpriseMCPServerStore
+	mcpServers           store.MCPServerStore
+	enterpriseMCPServers store.EnterpriseMCPServerStore
 	registryClient       *registry.Client
 	credentials    *mem.CredentialStore
 	fundingSources *mem.FundingSourceStore
