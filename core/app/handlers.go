@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/auth"
@@ -44,9 +45,11 @@ type apiServer struct {
 	credentials    *mem.CredentialStore
 	fundingSources *mem.FundingSourceStore
 	traces         *mem.TraceStore
-	enterprises    store.EnterpriseStore // nil when auth is disabled
-	users          store.UserStore       // nil when auth is disabled
-	newID          func() string
+	connectedAccounts store.ConnectedAccountStore
+	accountService    *account.GoogleService // nil when Google OAuth not configured
+	enterprises       store.EnterpriseStore  // nil when auth is disabled
+	users             store.UserStore        // nil when auth is disabled
+	newID             func() string
 }
 
 // --- JSON helpers ---

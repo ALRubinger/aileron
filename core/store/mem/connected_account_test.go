@@ -1,0 +1,167 @@
+package mem_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/store/mem"
+)
+
+func newTestAccount(id, userID string, provider model.ConnectedAccountProvider) model.ConnectedAccount {
+	return model.ConnectedAccount{
+		ID:        id,
+		UserID:    userID,
+		Provider:  provider,
+		Email:     "test@example.com",
+		Scopes:    []string{"email", "calendar"},
+		Status:    model.ConnectedAccountStatusActive,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+}
+
+func TestConnectedAccountStore_CreateAndGet(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	acc := newTestAccount("conn_1", "usr_1", model.ConnectedAccountProviderGmail)
+	if err := s.Create(ctx, acc); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Get(ctx, "conn_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "conn_1" || got.UserID != "usr_1" || got.Provider != model.ConnectedAccountProviderGmail {
+		t.Fatalf("unexpected account: %+v", got)
+	}
+}
+
+func TestConnectedAccountStore_GetNotFound(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	_, err := s.Get(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var nf *store.ErrNotFound
+	if !isErrNotFound(err, &nf) {
+		t.Fatalf("expected ErrNotFound, got %T: %v", err, err)
+	}
+}
+
+func TestConnectedAccountStore_GetByUserAndProvider(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	acc := newTestAccount("conn_1", "usr_1", model.ConnectedAccountProviderGmail)
+	s.Create(ctx, acc)
+
+	got, err := s.GetByUserAndProvider(ctx, "usr_1", model.ConnectedAccountProviderGmail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "conn_1" {
+		t.Fatalf("expected conn_1, got %s", got.ID)
+	}
+
+	// Not found case.
+	_, err = s.GetByUserAndProvider(ctx, "usr_1", model.ConnectedAccountProviderGoogleCalendar)
+	if err == nil {
+		t.Fatal("expected error for missing provider")
+	}
+}
+
+func TestConnectedAccountStore_List(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	s.Create(ctx, newTestAccount("conn_1", "usr_1", model.ConnectedAccountProviderGmail))
+	s.Create(ctx, newTestAccount("conn_2", "usr_1", model.ConnectedAccountProviderGoogleCalendar))
+	s.Create(ctx, newTestAccount("conn_3", "usr_2", model.ConnectedAccountProviderGmail))
+
+	// List all for user 1.
+	accounts, err := s.List(ctx, store.ConnectedAccountFilter{UserID: "usr_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("expected 2 accounts for usr_1, got %d", len(accounts))
+	}
+
+	// Filter by provider.
+	gmail := model.ConnectedAccountProviderGmail
+	accounts, err = s.List(ctx, store.ConnectedAccountFilter{UserID: "usr_1", Provider: &gmail})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 gmail account for usr_1, got %d", len(accounts))
+	}
+
+	// Filter by status.
+	expired := model.ConnectedAccountStatusExpired
+	accounts, err = s.List(ctx, store.ConnectedAccountFilter{UserID: "usr_1", Status: &expired})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("expected 0 expired accounts, got %d", len(accounts))
+	}
+}
+
+func TestConnectedAccountStore_Update(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	acc := newTestAccount("conn_1", "usr_1", model.ConnectedAccountProviderGmail)
+	s.Create(ctx, acc)
+
+	acc.Status = model.ConnectedAccountStatusExpired
+	if err := s.Update(ctx, acc); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.Get(ctx, "conn_1")
+	if got.Status != model.ConnectedAccountStatusExpired {
+		t.Fatalf("expected expired, got %s", got.Status)
+	}
+}
+
+func TestConnectedAccountStore_UpdateNotFound(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	acc := newTestAccount("conn_nonexistent", "usr_1", model.ConnectedAccountProviderGmail)
+	err := s.Update(context.Background(), acc)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestConnectedAccountStore_Delete(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	acc := newTestAccount("conn_1", "usr_1", model.ConnectedAccountProviderGmail)
+	s.Create(ctx, acc)
+
+	if err := s.Delete(ctx, "conn_1"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.Get(ctx, "conn_1")
+	if err == nil {
+		t.Fatal("expected not found after delete")
+	}
+}
+
+func TestConnectedAccountStore_DeleteNotFound(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	err := s.Delete(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+

@@ -1,6 +1,6 @@
 # ADR-0008: Per-User and Enterprise-Governed MCP Server Management
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0009](0009-deterministic-execution-plane.md)
 **Date:** 2026-04-04
 **Relates to:** ADR-0004
 

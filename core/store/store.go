@@ -207,6 +207,26 @@ type SSOConfigStore interface {
 	Delete(ctx context.Context, configID string) error
 }
 
+// ConnectedAccountStore persists and retrieves connected external accounts.
+// Connected accounts link a user's external service (Gmail, Google Calendar,
+// etc.) to Aileron so it can execute irreversible actions on the user's behalf.
+type ConnectedAccountStore interface {
+	Create(ctx context.Context, account model.ConnectedAccount) error
+	Get(ctx context.Context, accountID string) (model.ConnectedAccount, error)
+	GetByUserAndProvider(ctx context.Context, userID string, provider model.ConnectedAccountProvider) (model.ConnectedAccount, error)
+	List(ctx context.Context, filter ConnectedAccountFilter) ([]model.ConnectedAccount, error)
+	Update(ctx context.Context, account model.ConnectedAccount) error
+	Delete(ctx context.Context, accountID string) error
+}
+
+// ConnectedAccountFilter scopes a connected account list query.
+type ConnectedAccountFilter struct {
+	UserID   string
+	Provider *model.ConnectedAccountProvider
+	Status   *model.ConnectedAccountStatus
+	PageSize int
+}
+
 // ErrNotFound is returned when a requested entity does not exist.
 type ErrNotFound struct {
 	Entity string

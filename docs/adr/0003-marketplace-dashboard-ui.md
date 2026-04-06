@@ -1,6 +1,6 @@
 # ADR-0003: Marketplace Dashboard UI
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0009](0009-deterministic-execution-plane.md)
 **Date:** 2026-04-02
 
 ## Context

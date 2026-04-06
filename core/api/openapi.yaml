@@ -34,6 +34,7 @@ tags:
   - name: Credentials
   - name: Traces
   - name: Analytics
+  - name: Connected Accounts
   - name: MCP Servers
   - name: Enterprise MCP Servers
   - name: Health
@@ -1105,6 +1106,105 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/connected-accounts:
+    get:
+      tags: [Connected Accounts]
+      summary: List the current user's connected external accounts
+      operationId: listConnectedAccounts
+      responses:
+        "200":
+          description: List of connected accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ConnectedAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/connected-accounts/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [Connected Accounts]
+      summary: Get a connected account
+      operationId: getConnectedAccount
+      responses:
+        "200":
+          description: Connected account details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectedAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Connected Accounts]
+      summary: Disconnect an external account
+      operationId: deleteConnectedAccount
+      responses:
+        "204":
+          description: Account disconnected
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /auth/connect/{provider}:
+    parameters:
+      - name: provider
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [gmail, google_calendar, outlook, microsoft_calendar]
+        description: External service provider to connect
+    get:
+      tags: [Connected Accounts]
+      summary: Initiate OAuth flow to connect an external account
+      operationId: connectAccount
+      description: Redirects the user to the provider's OAuth consent screen with service-specific scopes.
+      security: []
+      responses:
+        "302":
+          description: Redirect to provider consent screen
+
+  /auth/connect/{provider}/callback:
+    parameters:
+      - name: provider
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [gmail, google_calendar, outlook, microsoft_calendar]
+    get:
+      tags: [Connected Accounts]
+      summary: Handle OAuth callback for account connection
+      operationId: connectAccountCallback
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "302":
+          description: Redirect to connected accounts page on success
 
   /v1/mcp-servers:
     get:
@@ -3038,3 +3138,40 @@ components:
           format: email
         password:
           type: string
+
+    ConnectedAccount:
+      type: object
+      properties:
+        id:
+          type: string
+          readOnly: true
+        user_id:
+          type: string
+          readOnly: true
+        provider:
+          type: string
+          enum: [gmail, google_calendar, outlook, microsoft_calendar]
+          readOnly: true
+        email:
+          type: string
+          format: email
+          readOnly: true
+          description: Email address of the connected external account
+        scopes:
+          type: array
+          items:
+            type: string
+          readOnly: true
+          description: OAuth scopes granted to Aileron
+        status:
+          type: string
+          enum: [active, expired, revoked]
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true

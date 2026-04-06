@@ -1,6 +1,6 @@
 # ADR-0002: MCP Marketplace Integration
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0009](0009-deterministic-execution-plane.md)
 **Date:** 2026-04-01
 
 ## Context

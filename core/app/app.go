@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/auth"
@@ -46,6 +47,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	credentialStore := mem.NewCredentialStore()
 	fundingSourceStore := mem.NewFundingSourceStore()
 	traceStore := mem.NewTraceStore()
+	connectedAccountStore := mem.NewConnectedAccountStore()
 
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
@@ -111,10 +113,11 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		mcpServers:           mcpServerStore,
 		enterpriseMCPServers: enterpriseMCPServerStore,
 		registryClient:       registryClient,
-		credentials:    credentialStore,
-		fundingSources: fundingSourceStore,
-		traces:         traceStore,
-		newID:          idGen,
+		connectedAccounts: connectedAccountStore,
+		credentials:       credentialStore,
+		fundingSources:    fundingSourceStore,
+		traces:            traceStore,
+		newID:             idGen,
 	}
 	api.HandlerFromMux(server, mux)
 
@@ -158,6 +161,15 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 				authCfg.GoogleClientSecret,
 			))
 			log.Info("registered Google OAuth provider")
+
+			// Enable connected accounts for Google services (Gmail, Calendar).
+			server.accountService = account.NewGoogleService(
+				authCfg.GoogleClientID,
+				authCfg.GoogleClientSecret,
+				connectedAccountStore,
+				v,
+			)
+			log.Info("enabled Google connected accounts (Gmail, Calendar)")
 		}
 		if authCfg.GitHubEnabled() {
 			authRegistry.Register(githubauth.New(
