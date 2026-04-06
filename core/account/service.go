@@ -1,0 +1,202 @@
+package account
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/google/uuid"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+)
+
+// providerConfig holds the OAuth configuration for a connected account provider.
+type providerConfig struct {
+	provider model.ConnectedAccountProvider
+	scopes   []string
+	endpoint oauth2.Endpoint
+}
+
+// googleProviders maps provider identifiers to their OAuth scopes.
+// Gmail and Google Calendar use the same Google OAuth endpoint but request
+// different scopes.
+var googleProviders = map[model.ConnectedAccountProvider]providerConfig{
+	model.ConnectedAccountProviderGmail: {
+		provider: model.ConnectedAccountProviderGmail,
+		scopes: []string{
+			"https://www.googleapis.com/auth/gmail.readonly",
+			"https://www.googleapis.com/auth/gmail.send",
+			"https://www.googleapis.com/auth/gmail.compose",
+			"https://www.googleapis.com/auth/userinfo.email",
+		},
+		endpoint: google.Endpoint,
+	},
+	model.ConnectedAccountProviderGoogleCalendar: {
+		provider: model.ConnectedAccountProviderGoogleCalendar,
+		scopes: []string{
+			"https://www.googleapis.com/auth/calendar",
+			"https://www.googleapis.com/auth/calendar.events",
+			"https://www.googleapis.com/auth/userinfo.email",
+		},
+		endpoint: google.Endpoint,
+	},
+}
+
+const userinfoURL = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+// GoogleService manages connected accounts for Google-based services.
+type GoogleService struct {
+	clientID     string
+	clientSecret string
+	accounts     store.ConnectedAccountStore
+	vault        vault.Vault
+}
+
+// NewGoogleService creates a service that handles Gmail and Google Calendar connections.
+func NewGoogleService(clientID, clientSecret string, accounts store.ConnectedAccountStore, v vault.Vault) *GoogleService {
+	return &GoogleService{
+		clientID:     clientID,
+		clientSecret: clientSecret,
+		accounts:     accounts,
+		vault:        v,
+	}
+}
+
+func (s *GoogleService) Providers() []model.ConnectedAccountProvider {
+	return []model.ConnectedAccountProvider{
+		model.ConnectedAccountProviderGmail,
+		model.ConnectedAccountProviderGoogleCalendar,
+	}
+}
+
+func (s *GoogleService) oauthConfig(provider model.ConnectedAccountProvider, redirectURL string) (*oauth2.Config, error) {
+	pc, ok := googleProviders[provider]
+	if !ok {
+		return nil, fmt.Errorf("unsupported provider: %s", provider)
+	}
+	return &oauth2.Config{
+		ClientID:     s.clientID,
+		ClientSecret: s.clientSecret,
+		RedirectURL:  redirectURL,
+		Endpoint:     pc.endpoint,
+		Scopes:       pc.scopes,
+	}, nil
+}
+
+func (s *GoogleService) AuthorizationURL(_ context.Context, provider model.ConnectedAccountProvider, state, redirectURL string) (*ConnectResult, error) {
+	cfg, err := s.oauthConfig(provider, redirectURL)
+	if err != nil {
+		return nil, err
+	}
+	url := cfg.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
+	return &ConnectResult{URL: url}, nil
+}
+
+func (s *GoogleService) HandleCallback(ctx context.Context, provider model.ConnectedAccountProvider, req CallbackRequest) (*CallbackResult, error) {
+	cfg, err := s.oauthConfig(provider, req.RedirectURL)
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := cfg.Exchange(ctx, req.Code)
+	if err != nil {
+		return nil, fmt.Errorf("exchanging code: %w", err)
+	}
+
+	if token.RefreshToken == "" {
+		return nil, fmt.Errorf("no refresh token returned; user may need to re-consent")
+	}
+
+	// Fetch the email address associated with this Google account.
+	client := cfg.Client(ctx, token)
+	email, err := fetchGoogleEmail(client)
+	if err != nil {
+		return nil, fmt.Errorf("fetching account email: %w", err)
+	}
+
+	pc := googleProviders[provider]
+
+	account := model.ConnectedAccount{
+		ID:        "conn_" + uuid.New().String(),
+		UserID:    req.UserID,
+		Provider:  provider,
+		Email:     email,
+		Scopes:    pc.scopes,
+		Status:    model.ConnectedAccountStatusActive,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	// Store the refresh token in the vault.
+	tokenJSON, err := json.Marshal(token)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling token: %w", err)
+	}
+	if err := s.vault.Put(ctx, account.VaultPath(), tokenJSON, vault.Metadata{
+		Type: "oauth_refresh_token",
+		Labels: map[string]string{
+			"provider": string(provider),
+			"user_id":  req.UserID,
+		},
+	}); err != nil {
+		return nil, fmt.Errorf("storing token in vault: %w", err)
+	}
+
+	// Create the account record.
+	if err := s.accounts.Create(ctx, account); err != nil {
+		return nil, fmt.Errorf("creating account record: %w", err)
+	}
+
+	return &CallbackResult{Account: account}, nil
+}
+
+func (s *GoogleService) List(ctx context.Context, userID string) ([]model.ConnectedAccount, error) {
+	return s.accounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
+}
+
+func (s *GoogleService) Get(ctx context.Context, accountID string) (model.ConnectedAccount, error) {
+	return s.accounts.Get(ctx, accountID)
+}
+
+func (s *GoogleService) Disconnect(ctx context.Context, accountID string) error {
+	account, err := s.accounts.Get(ctx, accountID)
+	if err != nil {
+		return err
+	}
+
+	// Remove token from vault.
+	if err := s.vault.Delete(ctx, account.VaultPath()); err != nil {
+		return fmt.Errorf("removing token from vault: %w", err)
+	}
+
+	// Delete the account record.
+	return s.accounts.Delete(ctx, accountID)
+}
+
+// fetchGoogleEmail calls the Google userinfo endpoint to retrieve the email.
+func fetchGoogleEmail(client *http.Client) (string, error) {
+	resp, err := client.Get(userinfoURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("userinfo returned %d: %s", resp.StatusCode, body)
+	}
+
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&claims); err != nil {
+		return "", fmt.Errorf("decoding userinfo: %w", err)
+	}
+	return claims.Email, nil
+}

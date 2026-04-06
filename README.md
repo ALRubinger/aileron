@@ -4,31 +4,25 @@ _Stay on course. The missing protection layer between your agents and the real w
 ![GitHub License](https://img.shields.io/github/license/ALRubinger/aileron?style=for-the-badge)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/ALRubinger/aileron/ci.yml?style=for-the-badge&logo=github)
 
-**Aileron is an MCP gateway that enforces governance over every tool call an AI agent makes.**
+**Aileron is a deterministic execution plane for AI agents.** It owns your identity, enforces policy, and executes irreversible actions — so agents never hold your credentials or act without authorization.
 
-It sits between an agent host and the MCP servers the agent uses. Aileron aggregates downstream MCP servers, re-exposes their tools, and intercepts every tool call for policy evaluation — without the agent ever touching credentials directly.
+Agents decide what to do. Aileron decides whether to do it, and executes it safely.
 
 ---
 
 ## The Problem
 
-AI agents are acting on our behalf: booking meetings, paying invoices, merging code. The problem isn't capability. It's trust. An agent that's useful is an agent that's risky.
+AI agents are acting on our behalf: sending emails, booking meetings, paying invoices. The problem isn't capability. It's trust. An agent that's useful is an agent that's risky.
 
-The current workarounds are inadequate:
-
-- Hardcoded rules buried inside agents, invisible to the people they affect
-- Manual approvals handled out-of-band in Slack or email, disconnected from execution
-- Over-permissioned API keys that agents hold directly
-- Static payment credentials exposed to systems that shouldn't see them
-- Agents can bypass governance tools entirely if they have direct access to APIs or other MCP servers
+Existing "control planes" for agents (Fiddler, Galileo, Unleash) monitor and block — but they still rely on the agent holding credentials and executing actions. Prompt injection, context compression, or model errors can bypass safety rules because the enforcement layer is advisory, not structural.
 
 The result is a forced choice: give the agent enough permission to be powerful, or restrict it enough to feel safe. Neither is satisfying.
 
 ## The Solution
 
-Aileron is the **single MCP server** that an agent host connects to. It aggregates downstream MCP servers, re-exposes their tools under namespaced names, and intercepts every tool call for policy evaluation. The agent can't bypass Aileron because Aileron IS the tool surface.
+Aileron separates **intent** from **execution**. Agents submit structured intents (send this email, schedule this meeting, make this purchase). Aileron owns the credentials, evaluates deterministic policy, and executes the action itself — returning only safe, structured results to the agent.
 
-Agents remain autonomous in planning. We retain authority over execution. Aileron enforces the boundary between the two — by construction, not by cooperation.
+The agent never holds your Gmail token, calendar credentials, or payment instruments. Aileron does.
 
 ```
 Agent Host (Claude Code, OpenClaw, etc.)
@@ -36,51 +30,53 @@ Agent Host (Claude Code, OpenClaw, etc.)
   │  MCP (stdio)
   │
   ▼
-Aileron MCP Gateway
-  ├── Policy Engine         evaluates rules per tool call
-  ├── Approval Orchestrator routes to humans when required
-  ├── Credential Vault      injects secrets at launch time
-  └── Audit Store           immutable record of every decision
+Aileron Execution Plane
+  ├── Intent Tools           list_inbox_briefs, send_email_intent, request_purchase, ...
+  ├── Policy Engine          deterministic rules per action (no LLM in enforcement)
+  ├── Approval Orchestrator  routes to humans when required
+  ├── Credential Vault       OAuth tokens for connected accounts
+  └── Audit Store            immutable record of every decision and execution
   │
-  ├──► Downstream MCP Server A (e.g. GitHub)
-  ├──► Downstream MCP Server B (e.g. Stripe)
-  └──► Downstream MCP Server C (e.g. Slack)
+  ├──► Gmail API         (Aileron sends the email)
+  ├──► Google Calendar   (Aileron creates the event)
+  └──► Stripe Issuing    (Aileron mints the virtual card)
 ```
 
 ## How It Works
 
-**1. Agent host connects to Aileron as its only MCP server**
+**1. Connect your accounts**
 
-Claude Code, OpenClaw, or any MCP-compatible agent host is configured with Aileron as the sole MCP server. The agent sees only the tools that Aileron exposes.
+Open the Protected Actions catalog and connect your Gmail, Google Calendar, or payment accounts via OAuth. Aileron stores refresh tokens in its vault — agents never see them.
 
-**2. Aileron discovers tools from downstream MCP servers**
+**2. Agents submit intents**
 
-On startup, Aileron connects to configured downstream MCP servers, discovers their tools, and re-exposes them under namespaced names (e.g. `github__create_pull_request`).
+The agent calls Aileron's intent tools: `list_inbox_briefs`, `draft_reply`, `send_email_intent`, `create_event_intent`, `request_purchase`. These are the only tools the agent sees.
 
-**3. Every tool call passes through policy evaluation**
+**3. Policy evaluates every irreversible action**
 
-When the agent calls a tool, Aileron intercepts it, maps it to the policy engine, and evaluates it against configured rules. The disposition is allow, deny, require approval, or allow with modifications.
+Read-only operations (list inbox, check calendar) flow freely. Irreversible actions (send email, create invite, issue payment) are evaluated against deterministic policies. No LLM in the enforcement loop.
 
 **4. Humans approve high-risk actions**
 
-If approval is required, Aileron holds the tool call and notifies approvers. The agent can poll with `aileron__check_approval`. When approved, Aileron auto-executes the queued call and returns the real result.
+If policy requires approval, Aileron holds the action and notifies approvers. Defaults: internal emails auto-send, external emails require review, payments above threshold require approval.
 
-**5. Credentials are injected from the vault**
+**5. Aileron executes**
 
-Downstream MCP servers receive credentials from the Aileron vault at launch time. Agents never see API keys, tokens, or secrets.
+Once approved (or auto-approved by policy), Aileron executes the action itself using the connected account's credentials. The agent receives a structured result — never raw credentials.
 
 **6. Everything is logged**
 
-Every tool call interception, policy decision, approval, and execution is recorded in an immutable audit trail. You have a verifiable record of what every agent did, who approved it, and when.
+Every intent, policy decision, approval, and execution is recorded in an immutable audit trail. The execution graph becomes indispensable for compliance and trust.
 
 ## For Organizations
 
 Aileron gives organizations centralized control over agent activity across teams.
 
-- **Service catalog.** Configure which MCP servers are available to employees. Admins can auto-enable MCP servers for all organization members, and each member sees their personal servers alongside enterprise auto-enabled ones. Agents only see the tools you expose.
-- **Credential management.** API keys, tokens, and secrets live in the Aileron vault. Teams use agents without handling credentials directly.
-- **Policy governance.** Define rules that apply across all agent activity — spend limits, branch protections, vendor allowlists, time-of-day controls.
-- **Compliance.** An immutable audit trail records every tool call, policy decision, and approval for review and export.
+- **Protected Actions catalog.** A curated set of irreversible actions (email, calendar, payments) that Aileron owns and executes. Connect once, and all agents benefit.
+- **Identity ownership.** OAuth tokens and payment instruments live in the Aileron vault. Teams use agents without handling credentials directly.
+- **Policy governance.** Define rules that apply across all agent activity — internal/external recipient controls, spend limits, vendor allowlists, time-of-day rules.
+- **Multi-agent hub.** Multiple agents share the same identity, policies, and audit trail. No per-agent credential management.
+- **Compliance.** An immutable execution graph records every action, policy decision, and approval for review and export.
 
 ## Configuration
 
@@ -112,24 +108,18 @@ Each downstream server entry specifies the command to launch it, environment var
 
 ## Current Status
 
-The MCP gateway architecture is implemented end-to-end:
+The execution plane architecture is being built incrementally:
 
-- **MCP gateway** aggregates downstream MCP servers and re-exposes their tools
-- **Policy engine** evaluates rules against every tool call (allow, deny, require approval, allow with modifications)
+- **Connected accounts** — users can connect external services (Gmail, Google Calendar) via OAuth. Tokens stored in vault, agents never see them.
+- **Policy engine** evaluates deterministic rules per action (allow, deny, require approval, allow with modifications)
 - **Approval orchestrator** manages human-in-the-loop workflows with approve/deny/modify
-- **Credential vault** injects secrets into downstream servers at launch time
+- **Credential vault** stores OAuth tokens for connected accounts and injects them at execution time
 - **Audit store** records every event in an immutable trace
 - **Approval UI** provides a web interface for reviewing and acting on pending approvals
-- **User profile and organization settings** let users manage their account and configure SSO policies (allowed providers, email domains, SSO enforcement)
-- **Per-user MCP server installations** allow each user to maintain their own list of configured MCP servers
-- **Enterprise MCP server governance** lets admins curate an approved server list with auto-enable, ensuring consistent tooling across the organization
+- **Enterprise auth** with Google and GitHub OAuth, email/password signup, SSO enforcement
+- **Protected Actions catalog** (in progress) — replaces the MCP server marketplace with a curated set of actions Aileron owns
 
-Five seed policies ship by default:
-1. Require approval for PRs targeting `main`, `master`, or `production`
-2. Allow PRs to feature branches
-3. Deny force pushes
-4. Require approval for tool calls with base argument targeting protected branches
-5. Deny destructive tool calls (`delete_*`)
+Next up: Gmail connector, email intent tools, and email-specific policies.
 
 ## Getting Started
 
@@ -239,32 +229,32 @@ task generate:api
 
 ```
 aileron/
-├── core/               Control plane — policy, approval, vault, audit, auth
+├── core/               Execution plane — policy, approval, vault, audit, auth, connectors
 │   ├── api/            OpenAPI specification and generated code
+│   ├── account/        Connected accounts SPI and Google OAuth service
 │   ├── app/            Application wiring (handlers, middleware) — importable library
 │   ├── auth/           Auth SPI, enforcer, JWT, middleware, and provider implementations
-│   │   ├── google/     Google OAuth 2.0 provider
-│   │   └── github/     GitHub OAuth 2.0 provider
+│   │   ├── google/     Google OAuth 2.0 provider (Aileron login)
+│   │   └── github/     GitHub OAuth 2.0 provider (Aileron login)
 │   ├── server/         HTTP server entry point and entrypoint script
 │   ├── schema/         Atlas declarative database schema (HCL)
 │   ├── policy/         Policy engine SPI, rule-based implementation, seed policies
 │   ├── approval/       Approval orchestrator SPI and implementation
-│   ├── config/         YAML and environment-based configuration
-│   ├── mcpclient/      MCP client for downstream server connections
-│   ├── connector/      Connector SPI and implementations
+│   ├── config/         Configuration
+│   ├── connector/      Connector SPI and implementations (email, calendar, payments)
 │   ├── store/          Persistence interfaces
 │   │   ├── mem/        In-memory implementations (dev/test)
 │   │   └── postgres/   PostgreSQL implementations (production)
 │   ├── vault/          Credential vault SPI and in-memory implementation
 │   ├── notify/         Notification SPI (log, Slack, email)
 │   ├── audit/          Immutable audit store SPI
-│   └── model/          Shared domain types (including Enterprise, User, Session)
+│   └── model/          Shared domain types (Enterprise, User, ConnectedAccount, intents)
 ├── cmd/
-│   └── aileron-mcp/    MCP gateway that aggregates and proxies downstream MCP servers
+│   └── aileron-mcp/    MCP server exposing intent tools to agent hosts
 ├── sdk/
 │   └── go/             Go client SDK
 ├── ui/                 Management and approval UI (SvelteKit)
-│   └── src/routes/     Pages: approvals, traces, policies, servers, marketplace, settings (profile, organization, MCP servers)
+│   └── src/routes/     Pages: approvals, traces, policies, marketplace (Protected Actions), settings
 ├── docs/               API documentation site (Scalar)
 ├── test/
 │   └── integration/    Integration tests with OpenAPI spec validation
@@ -504,13 +494,15 @@ curl https://api.withaileron.ai/v1/health
 
 ## Architecture Principles
 
-**Structural enforcement.** Aileron is the only MCP server the agent connects to. Governance is enforced by construction, not by cooperation. The agent cannot bypass policy because there is no alternative path to the tools.
+**Agents decide; Aileron acts.** Agents handle planning and research. Aileron owns credentials, evaluates deterministic policy, and executes irreversible actions. The separation is structural, not advisory.
 
-**SPIs throughout.** Every major subsystem — the policy engine, approval orchestrator, vault, and notifiers — is defined as a Go interface. Built-in implementations cover the common cases. Alternative implementations can be swapped in without modifying the core.
+**Identity ownership.** Aileron holds OAuth tokens and payment instruments in its vault. Agents submit intents and receive structured results — they never see raw credentials. This prevents prompt injection or context compression from bypassing safety rules.
 
-**Credentials never reach agents.** The vault resolves secrets at launch time and injects them into downstream MCP servers. Agents interact with tools through Aileron, never with credentials.
+**Deterministic enforcement.** No LLM in the policy enforcement loop. Rules are evaluated against structured intent fields. The policy engine is predictable and auditable.
 
-**The audit trail is append-only.** Every event is written once and never modified. The trail is the ground truth for what happened, not a log that can be cleaned up.
+**SPIs throughout.** Every major subsystem — connectors, policy engine, approval orchestrator, vault, and notifiers — is defined as a Go interface. Built-in implementations cover the common cases. Alternative implementations can be swapped in without modifying the core.
+
+**The audit trail is append-only.** Every event is written once and never modified. The execution graph is the ground truth for what happened, not a log that can be cleaned up.
 
 **OSS core, SaaS overlay.** Everything in `core/`, `sdk/`, and `ui/` is open source. The `saas/` layer adds multi-tenancy and billing on top without forking the core.
 
