@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,25 @@ func TestResendMailer_SendVerificationCode_ErrorResponse(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-2xx response")
 	}
+}
+
+func TestResendMailer_SendVerificationCode_NetworkError(t *testing.T) {
+	mailer := NewResendMailer(ResendMailerConfig{
+		APIKey: "re_test",
+		HTTPClient: &http.Client{Transport: &failingTransport{}},
+	})
+
+	err := mailer.SendVerificationCode(context.Background(), "bob@example.com", "123456")
+	if err == nil {
+		t.Fatal("expected error for network failure")
+	}
+}
+
+// failingTransport always returns a connection error.
+type failingTransport struct{}
+
+func (t *failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("connection refused")
 }
 
 // hostOverrideTransport rewrites requests targeting `replace` to `target`.

@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ALRubinger/aileron/core/auth"
+	"github.com/ALRubinger/aileron/core/config"
 )
 
 func newTestHandler(t *testing.T) http.Handler {
@@ -253,5 +256,28 @@ func TestNewHandler_RequestIDMiddleware(t *testing.T) {
 
 	if got := resp2.Header.Get("X-Request-ID"); got != "my-request-id" {
 		t.Errorf("X-Request-ID = %q, want %q", got, "my-request-id")
+	}
+}
+
+func TestNewMailer_Resend(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cfg := &config.AuthConfig{
+		ResendAPIKey: "re_test_key",
+		MailFrom:     "hello@example.com",
+	}
+
+	m := newMailer(log, cfg)
+	if _, ok := m.(*auth.ResendMailer); !ok {
+		t.Errorf("expected *auth.ResendMailer, got %T", m)
+	}
+}
+
+func TestNewMailer_LogFallback(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cfg := &config.AuthConfig{}
+
+	m := newMailer(log, cfg)
+	if _, ok := m.(*auth.LogMailer); !ok {
+		t.Errorf("expected *auth.LogMailer, got %T", m)
 	}
 }

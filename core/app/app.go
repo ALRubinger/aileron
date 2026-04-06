@@ -181,17 +181,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)
 
-		var mailer auth.Mailer
-		if authCfg.ResendEnabled() {
-			mailer = auth.NewResendMailer(auth.ResendMailerConfig{
-				APIKey: authCfg.ResendAPIKey,
-				From:   authCfg.MailFrom,
-			})
-			log.Info("email delivery via Resend", "from", authCfg.MailFrom)
-		} else {
-			mailer = auth.NewLogMailer(log)
-			log.Warn("RESEND_API_KEY not set — verification codes will be printed to the log (dev mode)")
-		}
+		mailer := newMailer(log, authCfg)
 
 		authHandler := auth.NewHandler(auth.HandlerConfig{
 			Log:               log,
@@ -222,4 +212,18 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	handler = corsMiddleware(handler)
 
 	return handler, nil
+}
+
+// newMailer returns a ResendMailer when a Resend API key is configured,
+// otherwise a LogMailer for development/CI.
+func newMailer(log *slog.Logger, cfg *config.AuthConfig) auth.Mailer {
+	if cfg.ResendEnabled() {
+		log.Info("email delivery via Resend", "from", cfg.MailFrom)
+		return auth.NewResendMailer(auth.ResendMailerConfig{
+			APIKey: cfg.ResendAPIKey,
+			From:   cfg.MailFrom,
+		})
+	}
+	log.Warn("RESEND_API_KEY not set — verification codes will be printed to the log (dev mode)")
+	return auth.NewLogMailer(log)
 }
