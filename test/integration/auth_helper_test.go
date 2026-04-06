@@ -110,6 +110,24 @@ func authedPost(t *testing.T, url string, body any) *http.Response {
 	return resp
 }
 
+// authedDelete sends an authenticated DELETE request.
+func authedDelete(t *testing.T, url string) *http.Response {
+	t.Helper()
+	token := ensureAuth(t)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE %s: %v", url, err)
+	}
+	return resp
+}
+
 // authedGet sends an authenticated GET request.
 func authedGet(t *testing.T, url string) *http.Response {
 	t.Helper()

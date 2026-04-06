@@ -2,12 +2,14 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/store"
 )
 
 // fakeProvider is a test AuthProvider that returns a fixed identity.
@@ -432,3 +434,176 @@ func TestOAuthLogin_UnknownProvider(t *testing.T) {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }
+
+func TestOAuthCallback_LinkLookupError(t *testing.T) {
+	// When GetByProviderSubject returns a non-notfound error, should get 500.
+	te := newOAuthTestEnv(&Identity{
+		Subject: "sub-1", Email: "alice@acme.com",
+		DisplayName: "Alice", Provider: "fake",
+	})
+	te.handler.userAuthProviders = &erroringAuthProviderStore{err: fmt.Errorf("db connection lost")}
+
+	w := te.doOAuthCallback("fake", "code1", "state1")
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+}
+
+func TestOAuthCallback_UserLookupByLinkFailed(t *testing.T) {
+	// When the link exists but user lookup fails, should get 500.
+	te := newOAuthTestEnv(&Identity{
+		Subject: "sub-1", Email: "alice@acme.com",
+		DisplayName: "Alice", Provider: "fake",
+	})
+
+	// Pre-create a link that points to a non-existent user.
+	te.authProviders.Create(t.Context(), model.UserAuthProvider{
+		ID: "uap_orphan", UserID: "usr_deleted", Provider: "fake", SubjectID: "sub-1",
+	})
+
+	w := te.doOAuthCallback("fake", "code1", "state1")
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+}
+
+func TestOAuthCallback_EmailLookupNonNotFoundError(t *testing.T) {
+	// When GetByEmail returns a non-notfound error, should get 500.
+	te := newOAuthTestEnv(&Identity{
+		Subject: "sub-1", Email: "alice@acme.com",
+		DisplayName: "Alice", Provider: "fake",
+	})
+	te.handler.users = &erroringUserStore{err: fmt.Errorf("db timeout")}
+
+	w := te.doOAuthCallback("fake", "code1", "state1")
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+}
+
+func TestOAuthCallback_CreateEnterpriseAndUserFails(t *testing.T) {
+	// When a new user signs in but enterprise creation fails, should get 500.
+	te := newOAuthTestEnv(&Identity{
+		Subject: "sub-new", Email: "newuser@brand-new-domain.com",
+		DisplayName: "New User", Provider: "fake",
+	})
+	// Make enterprise creation fail.
+	te.handler.enterprises = &erroringEnterpriseStore{err: fmt.Errorf("db full")}
+
+	w := te.doOAuthCallback("fake", "code1", "state1")
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+}
+
+func TestOAuthCallback_LinkCreationNonFatal(t *testing.T) {
+	// When a user exists by email and a new provider link creation fails,
+	// the login should still succeed (link failure is non-fatal).
+	te := newTestEnv()
+
+	// Register provider_a and create user via first login.
+	te.handler.registry.Register(&fakeProvider{
+		name: "provider_a",
+		identity: &Identity{
+			Subject: "sub-a", Email: "alice@acme.com",
+			DisplayName: "Alice", Provider: "provider_a",
+		},
+	})
+	r1 := httptest.NewRequest("GET", "/auth/provider_a/callback?code=c1&state=s1", nil)
+	r1.AddCookie(&http.Cookie{Name: "oauth_state", Value: "s1"})
+	w1 := httptest.NewRecorder()
+	te.mux.ServeHTTP(w1, r1)
+	if w1.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("first login: status = %d, want 307", w1.Code)
+	}
+
+	// Now switch to a failing auth provider store for Create.
+	te.handler.userAuthProviders = &createFailingAuthProviderStore{
+		UserAuthProviderStore: te.authProviders,
+		createErr:             fmt.Errorf("simulated create failure"),
+	}
+
+	// Register provider_b with same email.
+	te.handler.registry.Register(&fakeProvider{
+		name: "provider_b",
+		identity: &Identity{
+			Subject: "sub-b", Email: "alice@acme.com",
+			DisplayName: "Alice B", Provider: "provider_b",
+		},
+	})
+
+	// Second login via provider_b — should still succeed despite link creation failure.
+	r2 := httptest.NewRequest("GET", "/auth/provider_b/callback?code=c2&state=s2", nil)
+	r2.AddCookie(&http.Cookie{Name: "oauth_state", Value: "s2"})
+	w2 := httptest.NewRecorder()
+	te.mux.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusTemporaryRedirect {
+		t.Errorf("second login: status = %d, want 307; body: %s", w2.Code, w2.Body.String())
+	}
+}
+
+// createFailingAuthProviderStore delegates to the real store except Create fails.
+type createFailingAuthProviderStore struct {
+	store.UserAuthProviderStore
+	createErr error
+}
+
+func (s *createFailingAuthProviderStore) Create(_ context.Context, _ model.UserAuthProvider) error {
+	return s.createErr
+}
+
+// erroringEnterpriseStore returns an error for all operations.
+type erroringEnterpriseStore struct {
+	err error
+}
+
+func (s *erroringEnterpriseStore) Create(_ context.Context, _ model.Enterprise) error {
+	return s.err
+}
+func (s *erroringEnterpriseStore) Get(_ context.Context, _ string) (model.Enterprise, error) {
+	return model.Enterprise{}, s.err
+}
+func (s *erroringEnterpriseStore) GetBySlug(_ context.Context, _ string) (model.Enterprise, error) {
+	return model.Enterprise{}, s.err
+}
+func (s *erroringEnterpriseStore) Update(_ context.Context, _ model.Enterprise) error {
+	return s.err
+}
+
+// erroringAuthProviderStore returns an error for all operations.
+type erroringAuthProviderStore struct {
+	err error
+}
+
+func (s *erroringAuthProviderStore) Create(_ context.Context, _ model.UserAuthProvider) error {
+	return s.err
+}
+func (s *erroringAuthProviderStore) GetByProviderSubject(_ context.Context, _, _ string) (model.UserAuthProvider, error) {
+	return model.UserAuthProvider{}, s.err
+}
+func (s *erroringAuthProviderStore) ListByUser(_ context.Context, _ string) ([]model.UserAuthProvider, error) {
+	return nil, s.err
+}
+func (s *erroringAuthProviderStore) Delete(_ context.Context, _ string) error {
+	return s.err
+}
+func (s *erroringAuthProviderStore) DeleteByUserAndProvider(_ context.Context, _, _ string) error {
+	return s.err
+}
+
+// erroringUserStore returns an error for email lookup to test error paths.
+type erroringUserStore struct {
+	err error
+}
+
+func (s *erroringUserStore) Create(_ context.Context, _ model.User) error { return s.err }
+func (s *erroringUserStore) Get(_ context.Context, _ string) (model.User, error) {
+	return model.User{}, s.err
+}
+func (s *erroringUserStore) GetByEmail(_ context.Context, _ string) (model.User, error) {
+	return model.User{}, s.err
+}
+func (s *erroringUserStore) List(_ context.Context, _ store.UserFilter) ([]model.User, error) {
+	return nil, s.err
+}
+func (s *erroringUserStore) Update(_ context.Context, _ model.User) error { return s.err }
