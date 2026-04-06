@@ -31,7 +31,7 @@ type apiServer struct {
 	registry       *connectorpkg.Registry
 	policyEngine   *policy.RuleEngine
 	orchestrator   *approval.InMemoryOrchestrator
-	vault          *vault.MemVault
+	vault          vault.Vault
 	notifier       notify.Notifier
 	intents        *mem.IntentStore
 	approvals      *mem.ApprovalStore
