@@ -3,8 +3,10 @@
 package integration
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
 	"testing"
 )
 
@@ -12,14 +14,25 @@ func TestGetCurrentUser_AuthProviders(t *testing.T) {
 	resp := authedGet(t, apiURL()+"/v1/users/me")
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}
+
+	// Read body so we can both validate and decode.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+
+	// Restore body for OpenAPI validation.
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	validateResponse(t, resp)
 
 	var user map[string]any
-	json.NewDecoder(resp.Body).Decode(&user)
+	if err := json.Unmarshal(body, &user); err != nil {
+		t.Fatalf("decoding user: %v", err)
+	}
 
 	// Email/password user should have has_password=true.
 	if hp, ok := user["has_password"].(bool); !ok || !hp {
@@ -37,15 +50,12 @@ func TestGetCurrentUser_AuthProviders(t *testing.T) {
 }
 
 func TestDisconnectAuthProvider_NotConnected(t *testing.T) {
-	// Try to disconnect a provider that was never connected.
-	// Should get 400 (last method guard) since the user has no OAuth providers
-	// and only one auth method (password).
+	// With 0 OAuth providers and a password set, the last-method guard passes
+	// (password exists), so the delete proceeds — returning 404 (not found).
 	resp := authedDelete(t, apiURL()+"/v1/users/me/auth-providers/google")
 	defer resp.Body.Close()
 
-	// With 0 OAuth providers and a password, the guard sees len(providers) <= 1
-	// and password IS set, so it proceeds to delete — which returns 404 (not found).
-	if resp.StatusCode != 404 {
+	if resp.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(resp.Body)
 		t.Errorf("expected 404, got %d: %s", resp.StatusCode, body)
 	}
