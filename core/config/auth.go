@@ -46,6 +46,15 @@ type AuthConfig struct {
 	// GitHub OAuth configuration.
 	GitHubClientID     string // Env: GITHUB_OAUTH_CLIENT_ID
 	GitHubClientSecret string // Env: GITHUB_OAUTH_CLIENT_SECRET
+
+	// Resend email configuration.
+	// ResendAPIKey enables real email sending via Resend. When set, ResendMailer
+	// is used; otherwise LogMailer is used (prints to log, safe for dev/CI).
+	// Env: RESEND_API_KEY
+	ResendAPIKey string
+	// MailFrom is the sender address for outgoing emails.
+	// Env: MAIL_FROM (default: "noreply@withaileron.ai")
+	MailFrom string
 }
 
 // LoadAuthConfig loads auth configuration from environment variables.
@@ -62,6 +71,8 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		GoogleClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GitHubClientID:     os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
 		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+		ResendAPIKey:       os.Getenv("RESEND_API_KEY"),
+		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
 	}
 
 	// Parse durations with defaults.
@@ -101,6 +112,11 @@ func (c *AuthConfig) GoogleEnabled() bool {
 // GitHubEnabled reports whether GitHub OAuth is configured.
 func (c *AuthConfig) GitHubEnabled() bool {
 	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
+}
+
+// ResendEnabled reports whether Resend email delivery is configured.
+func (c *AuthConfig) ResendEnabled() bool {
+	return c.ResendAPIKey != ""
 }
 
 func envOrDefault(key, def string) string {

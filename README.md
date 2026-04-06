@@ -345,7 +345,7 @@ GITHUB_OAUTH_CLIENT_ID=your-github-client-id
 GITHUB_OAUTH_CLIENT_SECRET=your-github-client-secret
 ```
 
-Verification codes for email/password signup are printed to the server log (dev mailer). Each OAuth provider is independently optional — configure whichever you need.
+Verification codes for email/password signup are printed to the server log when `RESEND_API_KEY` is not set (dev mode). To send real emails, add `RESEND_API_KEY` (and optionally `MAIL_FROM`) to your `.env`. Each OAuth provider is independently optional — configure whichever you need.
 
 ### Cloud
 
@@ -387,6 +387,8 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `GOOGLE_CLIENT_SECRET` | No | | Google OAuth 2.0 client secret |
 | `GITHUB_OAUTH_CLIENT_ID` | No | | GitHub OAuth 2.0 client ID |
 | `GITHUB_OAUTH_CLIENT_SECRET` | No | | GitHub OAuth 2.0 client secret |
+| `RESEND_API_KEY` | No | | [Resend](https://resend.com) API key. When set, verification emails are delivered via Resend. When unset, codes are printed to the log (dev/CI mode). |
+| `MAIL_FROM` | No | `noreply@withaileron.ai` | Sender address for transactional emails (requires `RESEND_API_KEY`) |
 
 **UI service:**
 

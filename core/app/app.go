@@ -181,7 +181,17 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)
 
-		mailer := auth.NewLogMailer(log)
+		var mailer auth.Mailer
+		if authCfg.ResendEnabled() {
+			mailer = auth.NewResendMailer(auth.ResendMailerConfig{
+				APIKey: authCfg.ResendAPIKey,
+				From:   authCfg.MailFrom,
+			})
+			log.Info("email delivery via Resend", "from", authCfg.MailFrom)
+		} else {
+			mailer = auth.NewLogMailer(log)
+			log.Warn("RESEND_API_KEY not set — verification codes will be printed to the log (dev mode)")
+		}
 
 		authHandler := auth.NewHandler(auth.HandlerConfig{
 			Log:               log,
