@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,12 +122,97 @@ func (s *memEnterpriseStore) Update(_ context.Context, e model.Enterprise) error
 	return nil
 }
 
+// memUserAuthProviderStore is an in-memory user auth provider store for tests.
+type memUserAuthProviderStore struct {
+	mu    sync.Mutex
+	links map[string]model.UserAuthProvider
+}
+
+func newMemUserAuthProviderStore() *memUserAuthProviderStore {
+	return &memUserAuthProviderStore{links: make(map[string]model.UserAuthProvider)}
+}
+
+func (s *memUserAuthProviderStore) Create(_ context.Context, link model.UserAuthProvider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.links[link.ID] = link
+	return nil
+}
+
+func (s *memUserAuthProviderStore) GetByProviderSubject(_ context.Context, provider, subjectID string) (model.UserAuthProvider, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, link := range s.links {
+		if link.Provider == provider && link.SubjectID == subjectID {
+			return link, nil
+		}
+	}
+	return model.UserAuthProvider{}, &store.ErrNotFound{Entity: "user_auth_provider", ID: provider + "/" + subjectID}
+}
+
+func (s *memUserAuthProviderStore) ListByUser(_ context.Context, userID string) ([]model.UserAuthProvider, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []model.UserAuthProvider
+	for _, link := range s.links {
+		if link.UserID == userID {
+			result = append(result, link)
+		}
+	}
+	return result, nil
+}
+
+func (s *memUserAuthProviderStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.links[id]; !ok {
+		return &store.ErrNotFound{Entity: "user_auth_provider", ID: id}
+	}
+	delete(s.links, id)
+	return nil
+}
+
+func (s *memUserAuthProviderStore) DeleteByUserAndProvider(_ context.Context, userID, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, link := range s.links {
+		if link.UserID == userID && link.Provider == provider {
+			delete(s.links, id)
+			return nil
+		}
+	}
+	return &store.ErrNotFound{Entity: "user_auth_provider", ID: userID + "/" + provider}
+}
+
+// failingUserAuthProviderStore forces ListByUser to fail.
+type failingUserAuthProviderStore struct {
+	*memUserAuthProviderStore
+}
+
+func (s *failingUserAuthProviderStore) ListByUser(context.Context, string) ([]model.UserAuthProvider, error) {
+	return nil, fmt.Errorf("simulated list failure")
+}
+
 // --- test helpers ---
+
+type authServerEnv struct {
+	srv  *apiServer
+	us   *memUserStore
+	es   *memEnterpriseStore
+	uaps *memUserAuthProviderStore
+}
 
 func newAuthServer(t *testing.T) (*apiServer, *memUserStore, *memEnterpriseStore) {
 	t.Helper()
+	env := newAuthServerEnv(t)
+	return env.srv, env.us, env.es
+}
+
+func newAuthServerEnv(t *testing.T) *authServerEnv {
+	t.Helper()
 	us := newMemUserStore()
 	es := newMemEnterpriseStore()
+	uaps := newMemUserAuthProviderStore()
 
 	now := time.Now().UTC()
 	_ = us.Create(context.Background(), model.User{
@@ -149,10 +235,17 @@ func newAuthServer(t *testing.T) (*apiServer, *memUserStore, *memEnterpriseStore
 		UpdatedAt:    now,
 	})
 
-	return &apiServer{
-		users:       us,
-		enterprises: es,
-	}, us, es
+	return &authServerEnv{
+		srv: &apiServer{
+			log:               slog.Default(),
+			users:             us,
+			enterprises:       es,
+			userAuthProviders: uaps,
+		},
+		us:   us,
+		es:   es,
+		uaps: uaps,
+	}
 }
 
 func authedRequest(method, path, body string, claims *auth.Claims) *http.Request {
@@ -667,5 +760,258 @@ func TestUserToAPI_SnakeCaseJSON(t *testing.T) {
 		if _, ok := m[key]; !ok {
 			t.Errorf("expected snake_case key %q in JSON output", key)
 		}
+	}
+}
+
+func TestUserToAPI_AuthProviders(t *testing.T) {
+	t.Run("with providers", func(t *testing.T) {
+		now := time.Now()
+		u := model.User{
+			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
+			DisplayName: "Test", Role: model.UserRoleOwner, Status: model.UserStatusActive,
+			CreatedAt: now, UpdatedAt: now,
+			AuthProviders: []model.UserAuthProvider{
+				{ID: "uap_1", UserID: "usr_1", Provider: "google", SubjectID: "g-123", CreatedAt: now},
+				{ID: "uap_2", UserID: "usr_1", Provider: "github", SubjectID: "gh-456", CreatedAt: now},
+			},
+		}
+		out := userToAPI(u)
+		if len(out.AuthProviders) != 2 {
+			t.Fatalf("auth_providers length = %d, want 2", len(out.AuthProviders))
+		}
+		if out.AuthProviders[0].Provider != "google" {
+			t.Errorf("provider[0] = %q, want google", out.AuthProviders[0].Provider)
+		}
+		if out.AuthProviders[1].Provider != "github" {
+			t.Errorf("provider[1] = %q, want github", out.AuthProviders[1].Provider)
+		}
+	})
+
+	t.Run("empty providers returns empty array", func(t *testing.T) {
+		u := model.User{
+			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
+			DisplayName: "Test", Role: model.UserRoleOwner, Status: model.UserStatusActive,
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}
+		out := userToAPI(u)
+		if out.AuthProviders == nil {
+			t.Fatal("auth_providers should not be nil")
+		}
+		if len(out.AuthProviders) != 0 {
+			t.Errorf("auth_providers length = %d, want 0", len(out.AuthProviders))
+		}
+	})
+
+	t.Run("has_password true when password set", func(t *testing.T) {
+		u := model.User{
+			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
+			DisplayName: "Test", Role: model.UserRoleOwner, Status: model.UserStatusActive,
+			PasswordHash: "$2a$12$xxx",
+			CreatedAt:    time.Now(), UpdatedAt: time.Now(),
+		}
+		out := userToAPI(u)
+		if !out.HasPassword {
+			t.Error("has_password should be true when password hash is set")
+		}
+	})
+
+	t.Run("has_password false when no password", func(t *testing.T) {
+		u := model.User{
+			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
+			DisplayName: "Test", Role: model.UserRoleOwner, Status: model.UserStatusActive,
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		}
+		out := userToAPI(u)
+		if out.HasPassword {
+			t.Error("has_password should be false when password hash is empty")
+		}
+	})
+}
+
+func TestGetCurrentUser_WithAuthProviders(t *testing.T) {
+	env := newAuthServerEnv(t)
+
+	// Add auth provider links for the test user.
+	now := time.Now().UTC()
+	_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+		ID: "uap_1", UserID: "usr_test1", Provider: "google", SubjectID: "g-123", CreatedAt: now,
+	})
+	_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+		ID: "uap_2", UserID: "usr_test1", Provider: "github", SubjectID: "gh-456", CreatedAt: now,
+	})
+
+	w := httptest.NewRecorder()
+	env.srv.GetCurrentUser(w, authedRequest("GET", "/v1/users/me", "", ownerClaims))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var u api.User
+	json.NewDecoder(w.Body).Decode(&u)
+	if len(u.AuthProviders) != 2 {
+		t.Fatalf("auth_providers = %d, want 2", len(u.AuthProviders))
+	}
+}
+
+func TestDisconnectAuthProvider(t *testing.T) {
+	t.Run("disconnect with multiple providers", func(t *testing.T) {
+		env := newAuthServerEnv(t)
+		now := time.Now().UTC()
+		_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+			ID: "uap_1", UserID: "usr_test1", Provider: "google", SubjectID: "g-123", CreatedAt: now,
+		})
+		_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+			ID: "uap_2", UserID: "usr_test1", Provider: "github", SubjectID: "gh-456", CreatedAt: now,
+		})
+
+		w := httptest.NewRecorder()
+		env.srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/google", "", ownerClaims), "google")
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusNoContent, w.Body.String())
+		}
+
+		// Verify google was removed.
+		links, _ := env.uaps.ListByUser(context.Background(), "usr_test1")
+		if len(links) != 1 {
+			t.Errorf("remaining links = %d, want 1", len(links))
+		}
+		if links[0].Provider != "github" {
+			t.Errorf("remaining provider = %q, want github", links[0].Provider)
+		}
+	})
+
+	t.Run("disconnect with password allows last provider removal", func(t *testing.T) {
+		env := newAuthServerEnv(t)
+		// Set password on user.
+		u, _ := env.us.Get(context.Background(), "usr_test1")
+		u.PasswordHash = "$2a$12$xxx"
+		_ = env.us.Update(context.Background(), u)
+
+		now := time.Now().UTC()
+		_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+			ID: "uap_1", UserID: "usr_test1", Provider: "google", SubjectID: "g-123", CreatedAt: now,
+		})
+
+		w := httptest.NewRecorder()
+		env.srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/google", "", ownerClaims), "google")
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusNoContent, w.Body.String())
+		}
+	})
+
+	t.Run("cannot disconnect last provider without password", func(t *testing.T) {
+		env := newAuthServerEnv(t)
+		now := time.Now().UTC()
+		_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+			ID: "uap_1", UserID: "usr_test1", Provider: "google", SubjectID: "g-123", CreatedAt: now,
+		})
+
+		w := httptest.NewRecorder()
+		env.srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/google", "", ownerClaims), "google")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+		}
+	})
+
+	t.Run("provider not connected", func(t *testing.T) {
+		env := newAuthServerEnv(t)
+		now := time.Now().UTC()
+		// Need at least 2 providers so the last-method guard passes.
+		_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+			ID: "uap_1", UserID: "usr_test1", Provider: "google", SubjectID: "g-123", CreatedAt: now,
+		})
+		_ = env.uaps.Create(context.Background(), model.UserAuthProvider{
+			ID: "uap_2", UserID: "usr_test1", Provider: "github", SubjectID: "gh-456", CreatedAt: now,
+		})
+
+		w := httptest.NewRecorder()
+		env.srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/nonexistent", "", ownerClaims), "nonexistent")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("unauthenticated", func(t *testing.T) {
+		env := newAuthServerEnv(t)
+
+		w := httptest.NewRecorder()
+		env.srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/google", "", nil), "google")
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+		}
+	})
+
+	t.Run("nil store", func(t *testing.T) {
+		srv := &apiServer{users: newMemUserStore(), enterprises: newMemEnterpriseStore(), userAuthProviders: nil}
+		w := httptest.NewRecorder()
+		srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/google", "", ownerClaims), "google")
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("user not found", func(t *testing.T) {
+		env := newAuthServerEnv(t)
+		unknownClaims := &auth.Claims{
+			EnterpriseID: "ent_test1",
+			Email:        "unknown@example.com",
+			Role:         "owner",
+		}
+		unknownClaims.Subject = "usr_nonexistent"
+
+		w := httptest.NewRecorder()
+		env.srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/google", "", unknownClaims), "google")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("list providers failure", func(t *testing.T) {
+		env := newAuthServerEnv(t)
+		env.srv.userAuthProviders = &failingUserAuthProviderStore{env.uaps}
+
+		w := httptest.NewRecorder()
+		env.srv.DisconnectAuthProvider(w, authedRequest("DELETE", "/v1/users/me/auth-providers/google", "", ownerClaims), "google")
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusInternalServerError)
+		}
+	})
+}
+
+func TestGetCurrentUser_AuthProviderStoreError(t *testing.T) {
+	// When ListByUser fails, GetCurrentUser should still return the user
+	// (just without auth providers).
+	env := newAuthServerEnv(t)
+	env.srv.userAuthProviders = &failingUserAuthProviderStore{env.uaps}
+
+	w := httptest.NewRecorder()
+	env.srv.GetCurrentUser(w, authedRequest("GET", "/v1/users/me", "", ownerClaims))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var u api.User
+	json.NewDecoder(w.Body).Decode(&u)
+	if len(u.AuthProviders) != 0 {
+		t.Errorf("auth_providers = %d, want 0 when store fails", len(u.AuthProviders))
+	}
+}
+
+func TestGetCurrentUser_NilAuthProviderStore(t *testing.T) {
+	// When userAuthProviders is nil, GetCurrentUser should still work
+	// and return an empty auth_providers array.
+	srv, _, _ := newAuthServer(t)
+	srv.userAuthProviders = nil
+
+	w := httptest.NewRecorder()
+	srv.GetCurrentUser(w, authedRequest("GET", "/v1/users/me", "", ownerClaims))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var u api.User
+	json.NewDecoder(w.Body).Decode(&u)
+	if len(u.AuthProviders) != 0 {
+		t.Errorf("auth_providers = %d, want 0 when store is nil", len(u.AuthProviders))
 	}
 }

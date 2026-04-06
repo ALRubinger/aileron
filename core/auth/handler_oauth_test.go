@@ -143,6 +143,20 @@ func TestOAuthCallback_ReturningUser(t *testing.T) {
 	if user2.AvatarURL != "https://example.com/new-avatar.jpg" {
 		t.Errorf("avatar not updated")
 	}
+
+	// The auth provider link should still exist (only one — same provider).
+	if te.authProviders.count() != 1 {
+		t.Errorf("auth provider links = %d, want 1 (same provider, no duplicate)", te.authProviders.count())
+	}
+
+	// Verify the link is correctly associated.
+	link, err := te.authProviders.GetByProviderSubject(t.Context(), "fake", "google-sub-123")
+	if err != nil {
+		t.Fatalf("expected link to exist: %v", err)
+	}
+	if link.UserID != user1.ID {
+		t.Errorf("link.UserID = %q, want %q", link.UserID, user1.ID)
+	}
 }
 
 func TestOAuthCallback_CrossProviderDedup(t *testing.T) {
