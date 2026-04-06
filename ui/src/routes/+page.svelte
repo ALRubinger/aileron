@@ -14,8 +14,7 @@
 		{ href: '/approvals', title: 'Approvals', desc: 'Review and act on pending approval requests' },
 		{ href: '/traces', title: 'Traces', desc: 'Audit trail of all control plane events' },
 		{ href: '/policies', title: 'Policies', desc: 'View and manage policy rules' },
-		{ href: '/marketplace', title: 'Marketplace', desc: 'Browse and install MCP servers from the registry' },
-		{ href: '/servers', title: 'Servers', desc: 'Manage installed MCP server configurations' },
+		{ href: '/marketplace', title: 'Protected Actions', desc: 'View and manage protected actions' },
 	] as item}
 		<a href={item.href} class="no-underline text-foreground">
 			<Card.Root class="h-full hover:bg-muted/50 transition-colors">
