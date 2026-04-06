@@ -14,7 +14,14 @@ RUN cd core && go mod download
 COPY core/ ./core/
 COPY sdk/go/ ./sdk/go/
 
-RUN cd core && go build -o /aileron-server ./server
+# COVERAGE=true builds with Go -cover instrumentation for integration test coverage.
+# The resulting binary writes coverage data to $GOCOVERDIR on exit.
+ARG COVERAGE=false
+RUN if [ "$COVERAGE" = "true" ]; then \
+    cd core && go build -cover -o /aileron-server ./server; \
+  else \
+    cd core && go build -o /aileron-server ./server; \
+  fi
 
 FROM alpine:3.20
 
@@ -28,6 +35,9 @@ RUN apk add --no-cache curl && \
 COPY --from=builder /aileron-server /usr/local/bin/aileron-server
 COPY core/schema/schema.hcl /schema/schema.hcl
 COPY core/server/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Create output directory for coverage-instrumented builds (used when COVERAGE=true).
+RUN mkdir -p /tmp/gocoverdir && chown aileron:aileron /tmp/gocoverdir
 
 USER aileron
 

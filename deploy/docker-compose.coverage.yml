@@ -1,0 +1,25 @@
+# Coverage override for docker-compose.yml.
+#
+# Builds the server with Go's -cover instrumentation so that integration tests
+# capture server-side coverage. The binary writes coverage data to GOCOVERDIR
+# on graceful shutdown; the bind mount makes that data available on the host.
+#
+# Usage:
+#   mkdir -p gocoverdir && chmod 777 gocoverdir
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml up -d --build --wait
+#   # ... run integration tests ...
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml stop server
+#   go tool covdata textfmt -i=gocoverdir -o=coverage-integration.txt
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml down -v
+
+services:
+  server:
+    build:
+      args:
+        COVERAGE: "true"
+    environment:
+      GOCOVERDIR: /tmp/gocoverdir
+    volumes:
+      - type: bind
+        source: ../gocoverdir
+        target: /tmp/gocoverdir
