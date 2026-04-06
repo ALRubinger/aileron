@@ -167,9 +167,18 @@ type UserStore interface {
 	Create(ctx context.Context, user model.User) error
 	Get(ctx context.Context, userID string) (model.User, error)
 	GetByEmail(ctx context.Context, email string) (model.User, error)
-	GetByProviderSubject(ctx context.Context, provider, subjectID string) (model.User, error)
 	List(ctx context.Context, filter UserFilter) ([]model.User, error)
 	Update(ctx context.Context, user model.User) error
+}
+
+// UserAuthProviderStore persists and retrieves OAuth/SSO identity links for users.
+// Each link maps a user to an external provider + subject pair.
+type UserAuthProviderStore interface {
+	Create(ctx context.Context, link model.UserAuthProvider) error
+	GetByProviderSubject(ctx context.Context, provider, subjectID string) (model.UserAuthProvider, error)
+	ListByUser(ctx context.Context, userID string) ([]model.UserAuthProvider, error)
+	Delete(ctx context.Context, id string) error
+	DeleteByUserAndProvider(ctx context.Context, userID, provider string) error
 }
 
 // UserFilter scopes a user list query.

@@ -67,10 +67,6 @@ func (s *memUserStore) GetByEmail(context.Context, string) (model.User, error) {
 	return model.User{}, &store.ErrNotFound{Entity: "user"}
 }
 
-func (s *memUserStore) GetByProviderSubject(context.Context, string, string) (model.User, error) {
-	return model.User{}, &store.ErrNotFound{Entity: "user"}
-}
-
 func (s *memUserStore) List(context.Context, store.UserFilter) ([]model.User, error) {
 	return nil, nil
 }
@@ -140,7 +136,6 @@ func newAuthServer(t *testing.T) (*apiServer, *memUserStore, *memEnterpriseStore
 		DisplayName:  "Alice",
 		Role:         model.UserRoleOwner,
 		Status:       model.UserStatusActive,
-		AuthProvider: "google",
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	})
@@ -394,7 +389,7 @@ func TestUpdateCurrentUser(t *testing.T) {
 		_ = us.Create(context.Background(), model.User{
 			ID: "usr_test1", EnterpriseID: "ent_test1", Email: "alice@example.com",
 			DisplayName: "Alice", Role: model.UserRoleOwner, Status: model.UserStatusActive,
-			AuthProvider: "google", CreatedAt: now, UpdatedAt: now,
+			CreatedAt: now, UpdatedAt: now,
 		})
 		srv := &apiServer{users: &failingUserStore{us}, enterprises: newMemEnterpriseStore()}
 
@@ -551,7 +546,6 @@ func TestUpdateCurrentEnterprise_AdminCanUpdate(t *testing.T) {
 		DisplayName:  "Admin",
 		Role:         model.UserRoleAdmin,
 		Status:       model.UserStatusActive,
-		AuthProvider: "google",
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 	})
@@ -630,7 +624,7 @@ func TestUserToAPI_AvatarURL(t *testing.T) {
 			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
 			DisplayName: "Test", AvatarURL: "https://example.com/avatar.png",
 			Role: model.UserRoleOwner, Status: model.UserStatusActive,
-			AuthProvider: "google", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		}
 		out := userToAPI(u)
 		if out.AvatarUrl == nil {
@@ -645,7 +639,7 @@ func TestUserToAPI_AvatarURL(t *testing.T) {
 		u := model.User{
 			ID: "usr_1", EnterpriseID: "ent_1", Email: "test@example.com",
 			DisplayName: "Test", Role: model.UserRoleOwner, Status: model.UserStatusActive,
-			AuthProvider: "email", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		}
 		out := userToAPI(u)
 		if out.AvatarUrl != nil {
@@ -662,7 +656,6 @@ func TestUserToAPI_SnakeCaseJSON(t *testing.T) {
 		DisplayName:  "Test",
 		Role:         model.UserRoleOwner,
 		Status:       model.UserStatusActive,
-		AuthProvider: "google",
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -670,7 +663,7 @@ func TestUserToAPI_SnakeCaseJSON(t *testing.T) {
 	m := make(map[string]any)
 	json.Unmarshal(b, &m)
 
-	for _, key := range []string{"id", "enterprise_id", "email", "display_name", "role", "status", "auth_provider", "created_at", "updated_at"} {
+	for _, key := range []string{"id", "enterprise_id", "email", "display_name", "role", "status", "auth_providers", "has_password", "created_at", "updated_at"} {
 		if _, ok := m[key]; !ok {
 			t.Errorf("expected snake_case key %q in JSON output", key)
 		}

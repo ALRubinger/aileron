@@ -314,6 +314,32 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/users/me/auth-providers/{provider}:
+    delete:
+      tags: [Users]
+      summary: Disconnect an auth provider
+      description: |
+        Removes an OAuth identity provider link from the current user's account.
+        Cannot disconnect the last auth method — the user must have another
+        connected provider or a password set.
+      operationId: disconnectAuthProvider
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Provider name to disconnect (e.g. google, github)
+      responses:
+        "204":
+          description: Provider disconnected
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/intents:
     post:
       tags: [Intents]
@@ -2996,7 +3022,7 @@ components:
       description: |
         A user account. The id is an opaque surrogate key (usr_ + UUID). Email is
         the stable logical identity used to deduplicate across OAuth providers.
-      required: [id, enterprise_id, email, display_name, role, status, auth_provider, created_at, updated_at]
+      required: [id, enterprise_id, email, display_name, role, status, auth_providers, has_password, created_at, updated_at]
       properties:
         id:
           type: string
@@ -3019,9 +3045,14 @@ components:
         status:
           type: string
           enum: [active, pending_verification, invited, suspended]
-        auth_provider:
-          type: string
-          description: Identity provider used for authentication (e.g. google, github, saml)
+        auth_providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserAuthProviderLink"
+          description: Connected identity providers for this user
+        has_password:
+          type: boolean
+          description: Whether the user has a password set for email/password login
         last_login_at:
           type: string
           format: date-time
@@ -3030,6 +3061,17 @@ components:
           type: string
           format: date-time
         updated_at:
+          type: string
+          format: date-time
+
+    UserAuthProviderLink:
+      type: object
+      required: [provider, connected_at]
+      properties:
+        provider:
+          type: string
+          description: "Auth provider name (google, github, okta, saml, etc.)"
+        connected_at:
           type: string
           format: date-time
 

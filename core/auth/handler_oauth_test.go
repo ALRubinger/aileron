@@ -72,14 +72,17 @@ func TestOAuthCallback_NewUser(t *testing.T) {
 	if user.DisplayName != "Alice Smith" {
 		t.Errorf("display_name = %q, want Alice Smith", user.DisplayName)
 	}
-	if user.AuthProvider != "fake" {
-		t.Errorf("auth_provider = %q, want fake", user.AuthProvider)
-	}
-	if user.AuthProviderSubjectID != "google-sub-123" {
-		t.Errorf("subject = %q, want google-sub-123", user.AuthProviderSubjectID)
-	}
 	if user.Status != model.UserStatusActive {
 		t.Errorf("status = %q, want active (OAuth skips verification)", user.Status)
+	}
+
+	// Auth provider link should be created.
+	link, err := te.authProviders.GetByProviderSubject(t.Context(), "fake", "google-sub-123")
+	if err != nil {
+		t.Fatalf("auth provider link not found: %v", err)
+	}
+	if link.UserID != user.ID {
+		t.Errorf("link.UserID = %q, want %q", link.UserID, user.ID)
 	}
 
 	// Enterprise should be created.
@@ -185,6 +188,11 @@ func TestOAuthCallback_CrossProviderDedup(t *testing.T) {
 	user2, _ := te.users.GetByEmail(t.Context(), "alice@acme.com")
 	if user2.ID != user1.ID {
 		t.Errorf("expected same user ID across providers: %q != %q", user2.ID, user1.ID)
+	}
+
+	// Should have two auth provider links for the same user.
+	if te.authProviders.countForUser(user1.ID) != 2 {
+		t.Errorf("auth provider links = %d, want 2", te.authProviders.countForUser(user1.ID))
 	}
 }
 

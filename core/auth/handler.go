@@ -22,6 +22,7 @@ type Handler struct {
 	enforcer          Enforcer
 	issuer            *TokenIssuer
 	users             store.UserStore
+	userAuthProviders store.UserAuthProviderStore
 	enterprises       store.EnterpriseStore
 	sessions          store.SessionStore
 	verificationCodes store.VerificationCodeStore
@@ -40,6 +41,7 @@ type HandlerConfig struct {
 	Enforcer          Enforcer
 	Issuer            *TokenIssuer
 	Users             store.UserStore
+	UserAuthProviders store.UserAuthProviderStore
 	Enterprises       store.EnterpriseStore
 	Sessions          store.SessionStore
 	VerificationCodes store.VerificationCodeStore
@@ -68,6 +70,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		enforcer:          cfg.Enforcer,
 		issuer:            cfg.Issuer,
 		users:             cfg.Users,
+		userAuthProviders: cfg.UserAuthProviders,
 		enterprises:       cfg.Enterprises,
 		sessions:          cfg.Sessions,
 		verificationCodes: cfg.VerificationCodes,
@@ -219,28 +222,57 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Look up user: first by provider+subject (fast path for returning users),
-	// then by email (handles sign-in via a new provider for an existing account).
-	user, err := h.users.GetByProviderSubject(ctx, identity.Provider, identity.Subject)
-	if err != nil && isNotFound(err) {
+	// Look up user: first by provider+subject in the auth providers table
+	// (fast path for returning users), then by email (handles sign-in via
+	// a new provider for an existing account).
+	var user model.User
+	link, err := h.userAuthProviders.GetByProviderSubject(ctx, identity.Provider, identity.Subject)
+	if err == nil {
+		// Known provider link — fetch the user.
+		user, err = h.users.Get(ctx, link.UserID)
+		if err != nil {
+			h.log.Error("user lookup by link failed", "error", err)
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+	} else if isNotFound(err) {
 		// Provider subject not seen before — check if the email already exists.
 		user, err = h.users.GetByEmail(ctx, identity.Email)
-	}
-	if err != nil {
-		if !isNotFound(err) {
+		if err != nil && !isNotFound(err) {
 			h.log.Error("user lookup failed", "error", err)
 			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 			return
 		}
-
-		// Entirely new user — auto-create enterprise and user.
-		user, err = h.createEnterpriseAndUser(ctx, identity)
-		if err != nil {
-			h.log.Error("failed to create enterprise/user", "error", err)
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-			return
+		if isNotFound(err) {
+			// Entirely new user — auto-create enterprise and user.
+			user, err = h.createEnterpriseAndUser(ctx, identity)
+			if err != nil {
+				h.log.Error("failed to create enterprise/user", "error", err)
+				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				return
+			}
+			// createEnterpriseAndUser already created the auth provider link.
+			goto issueTokens
+		}
+		// Existing user found by email — create a new auth provider link.
+		newLink := model.UserAuthProvider{
+			ID:        "uap_" + h.newID(),
+			UserID:    user.ID,
+			Provider:  identity.Provider,
+			SubjectID: identity.Subject,
+			CreatedAt: time.Now(),
+		}
+		if err := h.userAuthProviders.Create(ctx, newLink); err != nil {
+			h.log.Error("failed to create auth provider link", "error", err)
+			// Non-fatal: user can still log in, link just won't be saved.
 		}
 	} else {
+		h.log.Error("auth provider lookup failed", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+
+	{
 		// Existing user — enforce SSO policies.
 		allowed, err := h.enforcer.IsProviderAllowed(ctx, user.EnterpriseID, identity.Provider)
 		if err != nil {
@@ -274,6 +306,8 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 			h.log.Error("failed to update user", "error", err)
 		}
 	}
+
+issueTokens:
 
 	// Issue tokens.
 	accessToken, err := h.issuer.Issue(user.ID, user.EnterpriseID, user.Email, string(user.Role))
@@ -504,21 +538,31 @@ func (h *Handler) createEnterpriseAndUser(ctx context.Context, identity *Identit
 	}
 
 	user := model.User{
-		ID:                    "usr_" + h.newID(),
-		EnterpriseID:          enterprise.ID,
-		Email:                 identity.Email,
-		DisplayName:           identity.DisplayName,
-		AvatarURL:             identity.AvatarURL,
-		Role:                  model.UserRoleOwner,
-		Status:                model.UserStatusActive,
-		AuthProvider:          identity.Provider,
-		AuthProviderSubjectID: identity.Subject,
-		LastLoginAt:           &now,
-		CreatedAt:             now,
-		UpdatedAt:             now,
+		ID:           "usr_" + h.newID(),
+		EnterpriseID: enterprise.ID,
+		Email:        identity.Email,
+		DisplayName:  identity.DisplayName,
+		AvatarURL:    identity.AvatarURL,
+		Role:         model.UserRoleOwner,
+		Status:       model.UserStatusActive,
+		LastLoginAt:  &now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	if err := h.users.Create(ctx, user); err != nil {
 		return model.User{}, fmt.Errorf("creating user: %w", err)
+	}
+
+	// Create the auth provider link.
+	link := model.UserAuthProvider{
+		ID:        "uap_" + h.newID(),
+		UserID:    user.ID,
+		Provider:  identity.Provider,
+		SubjectID: identity.Subject,
+		CreatedAt: now,
+	}
+	if err := h.userAuthProviders.Create(ctx, link); err != nil {
+		return model.User{}, fmt.Errorf("creating auth provider link: %w", err)
 	}
 
 	h.log.Info("auto-created enterprise and user",

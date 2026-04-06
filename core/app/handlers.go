@@ -45,11 +45,12 @@ type apiServer struct {
 	credentials    *mem.CredentialStore
 	fundingSources *mem.FundingSourceStore
 	traces         *mem.TraceStore
-	connectedAccounts store.ConnectedAccountStore
-	accountService    *account.GoogleService // nil when Google OAuth not configured
-	enterprises       store.EnterpriseStore  // nil when auth is disabled
-	users             store.UserStore        // nil when auth is disabled
-	newID             func() string
+	connectedAccounts  store.ConnectedAccountStore
+	accountService     *account.GoogleService // nil when Google OAuth not configured
+	enterprises        store.EnterpriseStore  // nil when auth is disabled
+	users              store.UserStore        // nil when auth is disabled
+	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
+	newID              func() string
 }
 
 // --- JSON helpers ---

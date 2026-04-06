@@ -98,7 +98,6 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  body.DisplayName,
 		Role:         model.UserRoleOwner,
 		Status:       initialStatus,
-		AuthProvider: "email",
 		PasswordHash: string(hash),
 		CreatedAt:    now,
 		UpdatedAt:    now,
