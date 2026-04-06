@@ -86,6 +86,15 @@ func NewGoogleService(clientID, clientSecret string, accounts store.ConnectedAcc
 	}
 }
 
+// WithVault returns a shallow copy of the service that uses the given vault
+// for token storage. This enables per-request vault scoping (e.g. wrapping
+// the base vault with a UserScopedVault to encrypt tokens with the user's KEK).
+func (s *GoogleService) WithVault(v vault.Vault) *GoogleService {
+	cp := *s
+	cp.vault = v
+	return &cp
+}
+
 func (s *GoogleService) getExchanger() tokenExchanger {
 	if s.exchangeToken != nil {
 		return s.exchangeToken

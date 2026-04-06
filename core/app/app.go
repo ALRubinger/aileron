@@ -146,12 +146,14 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		verificationCodeStore := postgres.NewVerificationCodeStore(db)
 
 		userKeyMaterialStore := mem.NewUserKeyMaterialStore()
+		kekCache := auth.NewKEKSessionCache(authCfg.KEKSessionTTL())
 
 		// Wire stores into apiServer for /me endpoints.
 		server.enterprises = enterpriseStore
 		server.users = userStore
 		server.userAuthProviders = userAuthProviderStore
 		server.userKeyMaterials = userKeyMaterialStore
+		server.kekCache = kekCache
 
 		tokenIssuer := auth.NewTokenIssuer(
 			[]byte(authCfg.JWTSigningKey),
