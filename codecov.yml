@@ -1,7 +1,6 @@
 codecov:
   notify:
     after_n_builds: 2
-    wait_for_ci: true
 
 coverage:
   status:
@@ -9,9 +8,11 @@ coverage:
       default:
         target: auto
         threshold: 1%
+        after_n_builds: 2
     patch:
       default:
         target: 80%
+        after_n_builds: 2
 
 flags:
   unit:
