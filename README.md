@@ -3,6 +3,7 @@ _Stay on course. The missing protection layer between your agents and the real w
 
 ![GitHub License](https://img.shields.io/github/license/ALRubinger/aileron?style=for-the-badge)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/ALRubinger/aileron/ci.yml?style=for-the-badge&logo=github)
+![Codecov](https://img.shields.io/codecov/c/github/ALRubinger/aileron?style=for-the-badge)
 
 **Aileron is a deterministic execution plane for AI agents.** It owns your identity, enforces policy, and executes irreversible actions — so agents never hold your credentials or act without authorization.
 
