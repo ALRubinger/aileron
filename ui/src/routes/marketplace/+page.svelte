@@ -54,7 +54,7 @@
 
 	function handleConnect(provider: string) {
 		// Redirect to the OAuth connect flow on the backend.
-		window.location.href = `${PUBLIC_API_BASE}/auth/connect/${provider}`;
+		window.location.href = `${PUBLIC_API_BASE}/v1/connect/${provider}`;
 	}
 
 	async function handleDisconnect(accountId: string) {

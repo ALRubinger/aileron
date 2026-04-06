@@ -1161,7 +1161,7 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
-  /auth/connect/{provider}:
+  /v1/connect/{provider}:
     parameters:
       - name: provider
         in: path
@@ -1180,7 +1180,7 @@ paths:
         "302":
           description: Redirect to provider consent screen
 
-  /auth/connect/{provider}/callback:
+  /v1/connect/{provider}/callback:
     parameters:
       - name: provider
         in: path

@@ -104,7 +104,7 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 	if r.TLS == nil {
 		scheme = "http"
 	}
-	redirectURL := scheme + "://" + r.Host + "/auth/connect/" + providerStr + "/callback"
+	redirectURL := scheme + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
 
 	result, err := s.accountService.AuthorizationURL(r.Context(), provider, state, redirectURL)
 	if err != nil {
@@ -115,7 +115,7 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 	http.SetCookie(w, &http.Cookie{
 		Name:     "aileron_connect_state",
 		Value:    state,
-		Path:     "/auth/connect/",
+		Path:     "/v1/connect/",
 		MaxAge:   600,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -155,7 +155,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	if r.TLS == nil {
 		scheme = "http"
 	}
-	redirectURL := scheme + "://" + r.Host + "/auth/connect/" + providerStr + "/callback"
+	redirectURL := scheme + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
 
 	_, err = s.accountService.HandleCallback(r.Context(), provider, account.CallbackRequest{
 		Code:        params.Code,
