@@ -50,12 +50,30 @@ var googleProviders = map[model.ConnectedAccountProvider]providerConfig{
 
 const userinfoURL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
+// tokenExchanger exchanges an authorization code for an OAuth token.
+type tokenExchanger func(ctx context.Context, cfg *oauth2.Config, code string) (*oauth2.Token, error)
+
+// emailFetcher retrieves the email from a Google userinfo response.
+type emailFetcher func(ctx context.Context, cfg *oauth2.Config, token *oauth2.Token) (string, error)
+
+func defaultTokenExchange(ctx context.Context, cfg *oauth2.Config, code string) (*oauth2.Token, error) {
+	return cfg.Exchange(ctx, code)
+}
+
+func defaultEmailFetch(ctx context.Context, cfg *oauth2.Config, token *oauth2.Token) (string, error) {
+	client := cfg.Client(ctx, token)
+	return fetchGoogleEmail(client)
+}
+
 // GoogleService manages connected accounts for Google-based services.
 type GoogleService struct {
 	clientID     string
 	clientSecret string
 	accounts     store.ConnectedAccountStore
 	vault        vault.Vault
+	// Testing hooks — nil means use defaults.
+	exchangeToken tokenExchanger
+	fetchEmail    emailFetcher
 }
 
 // NewGoogleService creates a service that handles Gmail and Google Calendar connections.
@@ -66,6 +84,20 @@ func NewGoogleService(clientID, clientSecret string, accounts store.ConnectedAcc
 		accounts:     accounts,
 		vault:        v,
 	}
+}
+
+func (s *GoogleService) getExchanger() tokenExchanger {
+	if s.exchangeToken != nil {
+		return s.exchangeToken
+	}
+	return defaultTokenExchange
+}
+
+func (s *GoogleService) getFetcher() emailFetcher {
+	if s.fetchEmail != nil {
+		return s.fetchEmail
+	}
+	return defaultEmailFetch
 }
 
 func (s *GoogleService) Providers() []model.ConnectedAccountProvider {
@@ -104,7 +136,7 @@ func (s *GoogleService) HandleCallback(ctx context.Context, provider model.Conne
 		return nil, err
 	}
 
-	token, err := cfg.Exchange(ctx, req.Code)
+	token, err := s.getExchanger()(ctx, cfg, req.Code)
 	if err != nil {
 		return nil, fmt.Errorf("exchanging code: %w", err)
 	}
@@ -113,9 +145,7 @@ func (s *GoogleService) HandleCallback(ctx context.Context, provider model.Conne
 		return nil, fmt.Errorf("no refresh token returned; user may need to re-consent")
 	}
 
-	// Fetch the email address associated with this Google account.
-	client := cfg.Client(ctx, token)
-	email, err := fetchGoogleEmail(client)
+	email, err := s.getFetcher()(ctx, cfg, token)
 	if err != nil {
 		return nil, fmt.Errorf("fetching account email: %w", err)
 	}
