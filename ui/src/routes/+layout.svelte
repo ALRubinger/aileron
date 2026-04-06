@@ -52,8 +52,7 @@
 		<a href="/approvals" class="no-underline text-muted-foreground text-sm">Approvals</a>
 		<a href="/traces" class="no-underline text-muted-foreground text-sm">Traces</a>
 		<a href="/policies" class="no-underline text-muted-foreground text-sm">Policies</a>
-		<a href="/marketplace" class="no-underline text-muted-foreground text-sm">Marketplace</a>
-		<a href="/servers" class="no-underline text-muted-foreground text-sm">Servers</a>
+		<a href="/marketplace" class="no-underline text-muted-foreground text-sm">Protected Actions</a>
 
 		<div class="ml-auto relative">
 			<button
