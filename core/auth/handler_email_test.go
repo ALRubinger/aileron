@@ -56,6 +56,9 @@ func TestSignup_Success(t *testing.T) {
 	if resp["user_id"] == "" {
 		t.Error("expected user_id in response")
 	}
+	if want := "verification code sent to alice@acme.com"; resp["message"] != want {
+		t.Errorf("message = %q, want %q", resp["message"], want)
+	}
 
 	// Verify user was created with correct state.
 	user, err := te.users.GetByEmail(t.Context(), "alice@acme.com")
@@ -84,6 +87,26 @@ func TestSignup_Success(t *testing.T) {
 	// Verify verification code was sent.
 	if te.mailer.lastCode() == "" {
 		t.Error("expected verification code to be sent")
+	}
+}
+
+func TestSignup_AutoVerifyEmail(t *testing.T) {
+	te := newTestEnv()
+	te.handler.autoVerifyEmail = true
+
+	w := te.do("POST", "/auth/signup", `{"email":"bob@acme.com","password":"securepass123","display_name":"Bob"}`)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+
+	var resp map[string]string
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["status"] != "active" {
+		t.Errorf("status = %q, want active", resp["status"])
+	}
+	if resp["message"] != "account created and activated" {
+		t.Errorf("message = %q, want %q", resp["message"], "account created and activated")
 	}
 }
 
