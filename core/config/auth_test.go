@@ -159,3 +159,49 @@ func TestLoadAuthConfig_GitHubDisabled(t *testing.T) {
 		t.Error("expected GitHub disabled when credentials missing")
 	}
 }
+
+func TestLoadAuthConfig_ResendEnabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("RESEND_API_KEY", "re_test_key")
+	t.Setenv("MAIL_FROM", "hello@example.com")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.ResendEnabled() {
+		t.Error("expected Resend enabled")
+	}
+	if cfg.ResendAPIKey != "re_test_key" {
+		t.Errorf("ResendAPIKey = %q", cfg.ResendAPIKey)
+	}
+	if cfg.MailFrom != "hello@example.com" {
+		t.Errorf("MailFrom = %q, want hello@example.com", cfg.MailFrom)
+	}
+}
+
+func TestLoadAuthConfig_ResendDisabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("RESEND_API_KEY", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ResendEnabled() {
+		t.Error("expected Resend disabled when API key missing")
+	}
+}
+
+func TestLoadAuthConfig_MailFromDefault(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("MAIL_FROM", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MailFrom != "noreply@withaileron.ai" {
+		t.Errorf("MailFrom = %q, want noreply@withaileron.ai", cfg.MailFrom)
+	}
+}
