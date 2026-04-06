@@ -124,12 +124,17 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 		"auto_verified", h.autoVerifyEmail,
 	)
 
+	message := "verification code sent to " + body.Email
+	if h.autoVerifyEmail {
+		message = "account created and activated"
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
 		"user_id": user.ID,
 		"status":  string(initialStatus),
-		"message": "verification code sent to " + body.Email,
+		"message": message,
 	})
 }
 
