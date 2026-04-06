@@ -50,6 +50,7 @@ type apiServer struct {
 	enterprises        store.EnterpriseStore  // nil when auth is disabled
 	users              store.UserStore        // nil when auth is disabled
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
+	userKeyMaterials   store.UserKeyMaterialStore  // nil when auth is disabled
 	newID              func() string
 }
 

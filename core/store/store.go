@@ -236,6 +236,15 @@ type ConnectedAccountFilter struct {
 	PageSize int
 }
 
+// UserKeyMaterialStore persists and retrieves user key material for the
+// zero-knowledge vault. The KEK itself is never stored — only the Argon2id
+// salt and an encrypted verification blob.
+type UserKeyMaterialStore interface {
+	Create(ctx context.Context, material model.UserKeyMaterial) error
+	Get(ctx context.Context, userID string) (model.UserKeyMaterial, error)
+	Update(ctx context.Context, material model.UserKeyMaterial) error
+}
+
 // ErrNotFound is returned when a requested entity does not exist.
 type ErrNotFound struct {
 	Entity string

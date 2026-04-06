@@ -340,6 +340,81 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/users/me/passphrase:
+    post:
+      tags: [Users]
+      summary: Set or rotate vault passphrase
+      description: |
+        Derives a Key Encryption Key (KEK) from the provided passphrase using
+        Argon2id, stores the salt and a verification blob server-side, and
+        returns the salt. The KEK itself is never stored. On subsequent calls,
+        the existing key material is rotated (callers must re-encrypt vault
+        secrets separately).
+      operationId: setPassphrase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetPassphraseRequest"
+      responses:
+        "200":
+          description: Passphrase set successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PassphraseSaltResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/users/me/passphrase/verify:
+    post:
+      tags: [Users]
+      summary: Verify vault passphrase
+      description: |
+        Verifies the provided passphrase by re-deriving the KEK and attempting
+        to decrypt the stored verification blob. On success, establishes a
+        KEK session for the caller.
+      operationId: verifyPassphrase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyPassphraseRequest"
+      responses:
+        "200":
+          description: Passphrase verification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyPassphraseResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/users/me/passphrase/salt:
+    get:
+      tags: [Users]
+      summary: Get passphrase salt
+      description: |
+        Returns the Argon2id salt for the current user's passphrase, allowing
+        client-side KEK derivation. Also indicates whether the user has set a
+        passphrase.
+      operationId: getPassphraseSalt
+      responses:
+        "200":
+          description: Salt and passphrase status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PassphraseSaltResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/intents:
     post:
       tags: [Intents]
@@ -3217,3 +3292,43 @@ components:
           type: string
           format: date-time
           readOnly: true
+    SetPassphraseRequest:
+      type: object
+      required: [passphrase]
+      properties:
+        passphrase:
+          type: string
+          minLength: 8
+          description: User's vault passphrase used to derive the KEK
+
+    VerifyPassphraseRequest:
+      type: object
+      required: [passphrase]
+      properties:
+        passphrase:
+          type: string
+          description: User's vault passphrase to verify
+
+    VerifyPassphraseResponse:
+      type: object
+      required: [valid]
+      properties:
+        valid:
+          type: boolean
+          description: Whether the passphrase is correct
+        salt:
+          type: string
+          format: byte
+          description: Base64-encoded Argon2id salt (returned when valid)
+
+    PassphraseSaltResponse:
+      type: object
+      required: [has_passphrase]
+      properties:
+        has_passphrase:
+          type: boolean
+          description: Whether the user has set a vault passphrase
+        salt:
+          type: string
+          format: byte
+          description: Base64-encoded Argon2id salt (omitted when no passphrase is set)

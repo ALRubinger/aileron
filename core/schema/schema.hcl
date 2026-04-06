@@ -299,6 +299,46 @@ table "verification_codes" {
   }
 }
 
+table "user_key_materials" {
+  schema = schema.public
+
+  column "user_id" {
+    type    = varchar(64)
+    null    = false
+    comment = "Owning user (usr_ + UUID)"
+  }
+  column "salt" {
+    type    = bytea
+    null    = false
+    comment = "Argon2id salt for KEK derivation"
+  }
+  column "kek_verification" {
+    type    = bytea
+    null    = false
+    comment = "Known constant encrypted with KEK — used to verify passphrase without revealing KEK"
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+  column "updated_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.user_id]
+  }
+
+  foreign_key "fk_user_key_materials_user" {
+    columns     = [column.user_id]
+    ref_columns = [table.users.column.id]
+    on_delete   = CASCADE
+  }
+}
+
 table "sso_configs" {
   schema = schema.public
 
