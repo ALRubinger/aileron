@@ -202,7 +202,7 @@ func TestConnectAccountCallback_ValidStateButBadCode(t *testing.T) {
 
 	state := "test-state-123"
 	w := httptest.NewRecorder()
-	r := mcpRequest("GET", "/auth/connect/gmail/callback?code=invalid&state="+state, "", userAClaims)
+	r := mcpRequest("GET", "/v1/connect/gmail/callback?code=invalid&state="+state, "", userAClaims)
 	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
 	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "invalid", State: state})
 
@@ -239,7 +239,7 @@ func TestConnectAccount_RedirectsToGoogle(t *testing.T) {
 	srv.accountService = account.NewGoogleService("test-client-id", "secret", srv.connectedAccounts, srv.vault)
 
 	w := httptest.NewRecorder()
-	r := mcpRequest("GET", "/auth/connect/gmail", "", nil)
+	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
 	srv.ConnectAccount(w, r, "gmail")
 
 	if w.Code != http.StatusFound {
@@ -273,7 +273,7 @@ func TestConnectAccount_UnsupportedProvider(t *testing.T) {
 	srv.accountService = account.NewGoogleService("id", "secret", srv.connectedAccounts, srv.vault)
 
 	w := httptest.NewRecorder()
-	r := mcpRequest("GET", "/auth/connect/outlook", "", nil)
+	r := mcpRequest("GET", "/v1/connect/outlook", "", nil)
 	srv.ConnectAccount(w, r, "outlook")
 
 	if w.Code != http.StatusBadRequest {
@@ -295,7 +295,7 @@ func TestConnectAccount_NotConfigured(t *testing.T) {
 	srv.accountService = nil
 
 	w := httptest.NewRecorder()
-	r := mcpRequest("GET", "/auth/connect/gmail", "", nil)
+	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
 	srv.ConnectAccount(w, r, "gmail")
 
 	if w.Code != http.StatusNotImplemented {
@@ -308,7 +308,7 @@ func TestConnectAccountCallback_NotConfigured(t *testing.T) {
 	srv.accountService = nil
 
 	w := httptest.NewRecorder()
-	r := mcpRequest("GET", "/auth/connect/gmail/callback?code=x&state=y", "", nil)
+	r := mcpRequest("GET", "/v1/connect/gmail/callback?code=x&state=y", "", nil)
 	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "x", State: "y"})
 
 	if w.Code != http.StatusNotImplemented {
@@ -321,7 +321,7 @@ func TestConnectAccountCallback_StateMismatch(t *testing.T) {
 	srv.accountService = account.NewGoogleService("id", "secret", srv.connectedAccounts, srv.vault)
 
 	w := httptest.NewRecorder()
-	r := mcpRequest("GET", "/auth/connect/gmail/callback?code=x&state=bad", "", nil)
+	r := mcpRequest("GET", "/v1/connect/gmail/callback?code=x&state=bad", "", nil)
 	// No cookie set, so state will mismatch.
 	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "x", State: "bad"})
 
