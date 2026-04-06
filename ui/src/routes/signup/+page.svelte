@@ -23,8 +23,12 @@
 		loading = true;
 
 		try {
-			await signup(email, password, displayName || undefined);
-			goto(`/verify-email?email=${encodeURIComponent(email)}`);
+			const result = await signup(email, password, displayName || undefined);
+			if (result.status === 'active') {
+				goto('/login');
+			} else {
+				goto(`/verify-email?email=${encodeURIComponent(email)}`);
+			}
 		} catch (err: any) {
 			error = err.message || 'Signup failed';
 		} finally {

@@ -332,7 +332,7 @@ The quickest way to run the full stack locally:
 task up
 ```
 
-This starts PostgreSQL, the API server (with auto-migration), the UI, and API docs. On first run, `task up` copies `deploy/.env.example` to `deploy/.env` with safe local defaults (including `AILERON_JWT_SIGNING_KEY`). No manual setup needed.
+This starts PostgreSQL, the API server (with auto-migration), the UI, and API docs. On first run, `task up` copies `deploy/.env.example` to `deploy/.env` with safe local defaults (including `AILERON_JWT_SIGNING_KEY`). No manual setup needed. Email verification is disabled by default locally (`AILERON_AUTO_VERIFY_EMAIL=true`), so new accounts are activated immediately after signup — no confirmation email required.
 
 To customize, edit `deploy/.env` (gitignored). For example, to enable OAuth providers locally:
 
@@ -383,6 +383,7 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `AILERON_ACCESS_TOKEN_TTL` | No | `15m` | Access token lifetime |
 | `AILERON_REFRESH_TOKEN_TTL` | No | `168h` | Refresh token lifetime (7 days) |
 | `AILERON_UI_REDIRECT_URL` | No | `/` | Redirect destination after successful login |
+| `AILERON_AUTO_VERIFY_EMAIL` | No | `false` | Skip email verification on signup — accounts are activated immediately. Set to `true` in `deploy/.env.example` for local installs. **Never enable in production.** |
 | `GOOGLE_CLIENT_ID` | No | | Google OAuth 2.0 client ID |
 | `GOOGLE_CLIENT_SECRET` | No | | Google OAuth 2.0 client secret |
 | `GITHUB_OAUTH_CLIENT_ID` | No | | GitHub OAuth 2.0 client ID |
