@@ -119,6 +119,16 @@ func (c *AuthConfig) ResendEnabled() bool {
 	return c.ResendAPIKey != ""
 }
 
+// KEKSessionTTL returns the TTL for in-memory KEK sessions.
+// Env: AILERON_KEK_SESSION_TTL (default: "30m")
+func (c *AuthConfig) KEKSessionTTL() time.Duration {
+	d, err := parseDurationOrDefault("AILERON_KEK_SESSION_TTL", 30*time.Minute)
+	if err != nil {
+		return 30 * time.Minute
+	}
+	return d
+}
+
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

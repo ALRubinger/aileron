@@ -7,6 +7,7 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/vault"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -157,7 +158,18 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	}
 	redirectURL := scheme + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
 
-	_, err = s.accountService.HandleCallback(r.Context(), provider, account.CallbackRequest{
+	// If the user has an active KEK session, wrap the vault with per-user
+	// encryption so the OAuth token is encrypted before storage.
+	svc := s.accountService
+	if s.kekCache != nil {
+		kek := s.kekCache.Get(userID)
+		if kek != nil {
+			svc = svc.WithVault(vault.NewUserScopedVault(s.vault, kek))
+			defer zeroBytes(kek)
+		}
+	}
+
+	_, err = svc.HandleCallback(r.Context(), provider, account.CallbackRequest{
 		Code:        params.Code,
 		State:       params.State,
 		RedirectURL: redirectURL,

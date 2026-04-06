@@ -153,6 +153,12 @@ func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
 	if valid {
 		salt := material.Salt
 		resp.Salt = &salt
+
+		// Cache the KEK for this user's session so that subsequent
+		// requests can decrypt vault secrets without re-prompting.
+		if s.kekCache != nil {
+			s.kekCache.Set(userID, kek)
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
