@@ -6,6 +6,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
 	import { initAuth, isAuthenticated, getUser, logout } from '$lib/auth.svelte.js';
+	import { initPosthog, posthog } from '$lib/posthog.js';
 
 	let { children } = $props();
 	let mounted = $state(false);
@@ -15,7 +16,14 @@
 
 	onMount(() => {
 		initAuth();
+		initPosthog();
 		mounted = true;
+	});
+
+	$effect(() => {
+		if (mounted) {
+			posthog.capture('$pageview', { $current_url: page.url.href });
+		}
 	});
 
 	$effect(() => {
