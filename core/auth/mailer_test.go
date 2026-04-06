@@ -40,6 +40,19 @@ func TestResendMailer_ImplementsMailer(t *testing.T) {
 	var _ Mailer = NewResendMailer(ResendMailerConfig{APIKey: "re_test"})
 }
 
+func TestNewResendMailer_Defaults(t *testing.T) {
+	m := NewResendMailer(ResendMailerConfig{APIKey: "re_test"})
+	if m.from != "noreply@withaileron.ai" {
+		t.Errorf("from = %q, want noreply@withaileron.ai", m.from)
+	}
+	if m.httpClient != http.DefaultClient {
+		t.Error("expected default http client when none provided")
+	}
+	if m.apiKey != "re_test" {
+		t.Errorf("apiKey = %q, want re_test", m.apiKey)
+	}
+}
+
 func TestResendMailer_SendVerificationCode(t *testing.T) {
 	var gotReq struct {
 		From    string   `json:"from"`
