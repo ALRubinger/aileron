@@ -68,9 +68,6 @@ func TestSignup_Success(t *testing.T) {
 	if user.Status != model.UserStatusPendingVerification {
 		t.Errorf("user status = %q, want pending_verification", user.Status)
 	}
-	if user.AuthProvider != "email" {
-		t.Errorf("auth_provider = %q, want email", user.AuthProvider)
-	}
 	if user.PasswordHash == "" {
 		t.Error("expected password hash to be set")
 	}
@@ -324,10 +321,9 @@ func TestEmailLogin_OAuthOnlyUser(t *testing.T) {
 	te := newTestEnv()
 	// Create a user without a password (OAuth-only).
 	te.users.Create(t.Context(), model.User{
-		ID:           "usr_oauth",
-		Email:        "alice@acme.com",
-		Status:       model.UserStatusActive,
-		AuthProvider: "google",
+		ID:     "usr_oauth",
+		Email:  "alice@acme.com",
+		Status: model.UserStatusActive,
 	})
 
 	w := te.do("POST", "/auth/login", `{"email":"alice@acme.com","password":"anypassword"}`)

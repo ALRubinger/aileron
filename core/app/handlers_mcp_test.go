@@ -47,9 +47,6 @@ func (s *stubUserStore) Get(_ context.Context, _ string) (model.User, error) {
 func (s *stubUserStore) GetByEmail(_ context.Context, _ string) (model.User, error) {
 	return model.User{}, nil
 }
-func (s *stubUserStore) GetByProviderSubject(_ context.Context, _, _ string) (model.User, error) {
-	return model.User{}, nil
-}
 func (s *stubUserStore) List(_ context.Context, _ store.UserFilter) ([]model.User, error) {
 	return nil, nil
 }

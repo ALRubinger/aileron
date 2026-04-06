@@ -110,16 +110,6 @@ table "users" {
     null    = false
     default = "active"
   }
-  column "auth_provider" {
-    type = varchar(64)
-    null = false
-  }
-  column "auth_provider_subject_id" {
-    type    = varchar(255)
-    null    = false
-    default = ""
-    comment = "External IdP subject identifier; empty for email auth"
-  }
   column "password_hash" {
     type    = text
     null    = false
@@ -160,8 +150,51 @@ table "users" {
     columns = [column.enterprise_id]
   }
 
-  index "idx_users_provider_subject" {
-    columns = [column.auth_provider, column.auth_provider_subject_id]
+}
+
+table "user_auth_providers" {
+  schema = schema.public
+
+  column "id" {
+    type = varchar(64)
+    null = false
+  }
+  column "user_id" {
+    type = varchar(64)
+    null = false
+  }
+  column "provider" {
+    type    = varchar(64)
+    null    = false
+    comment = "OAuth provider name (google, github, okta, saml, etc.)"
+  }
+  column "subject_id" {
+    type    = varchar(255)
+    null    = false
+    comment = "External IdP subject identifier"
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  foreign_key "fk_user_auth_providers_user" {
+    columns     = [column.user_id]
+    ref_columns = [table.users.column.id]
+    on_delete   = CASCADE
+  }
+
+  index "idx_user_auth_providers_user" {
+    columns = [column.user_id]
+  }
+
+  index "idx_user_auth_providers_provider_subject" {
+    columns = [column.provider, column.subject_id]
     unique  = true
   }
 }

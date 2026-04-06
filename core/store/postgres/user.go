@@ -20,15 +20,15 @@ func NewUserStore(db *DB) *UserStore {
 }
 
 const userColumns = `id, enterprise_id, email, display_name, avatar_url, role, status,
-	auth_provider, auth_provider_subject_id, password_hash, last_login_at, created_at, updated_at`
+	password_hash, last_login_at, created_at, updated_at`
 
 func (s *UserStore) Create(ctx context.Context, u model.User) error {
 	_, err := s.db.Pool.Exec(ctx,
 		`INSERT INTO users
 			(`+userColumns+`)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		u.ID, u.EnterpriseID, u.Email, u.DisplayName, u.AvatarURL,
-		string(u.Role), string(u.Status), u.AuthProvider, u.AuthProviderSubjectID,
+		string(u.Role), string(u.Status),
 		u.PasswordHash,
 		u.LastLoginAt, u.CreatedAt, u.UpdatedAt,
 	)
@@ -43,12 +43,6 @@ func (s *UserStore) Get(ctx context.Context, id string) (model.User, error) {
 func (s *UserStore) GetByEmail(ctx context.Context, email string) (model.User, error) {
 	return s.scanOne(ctx,
 		`SELECT `+userColumns+` FROM users WHERE email = $1`, email)
-}
-
-func (s *UserStore) GetByProviderSubject(ctx context.Context, provider, subjectID string) (model.User, error) {
-	return s.scanOne(ctx,
-		`SELECT `+userColumns+` FROM users WHERE auth_provider = $1 AND auth_provider_subject_id = $2`,
-		provider, subjectID)
 }
 
 func (s *UserStore) List(ctx context.Context, filter store.UserFilter) ([]model.User, error) {
@@ -95,11 +89,10 @@ func (s *UserStore) Update(ctx context.Context, u model.User) error {
 	tag, err := s.db.Pool.Exec(ctx,
 		`UPDATE users
 		 SET enterprise_id=$2, email=$3, display_name=$4, avatar_url=$5, role=$6,
-			 status=$7, auth_provider=$8, auth_provider_subject_id=$9,
-			 password_hash=$10, last_login_at=$11, updated_at=$12
+			 status=$7, password_hash=$8, last_login_at=$9, updated_at=$10
 		 WHERE id=$1`,
 		u.ID, u.EnterpriseID, u.Email, u.DisplayName, u.AvatarURL,
-		string(u.Role), string(u.Status), u.AuthProvider, u.AuthProviderSubjectID,
+		string(u.Role), string(u.Status),
 		u.PasswordHash, u.LastLoginAt, u.UpdatedAt,
 	)
 	if err != nil {
@@ -117,7 +110,7 @@ func (s *UserStore) scanOne(ctx context.Context, query string, args ...any) (mod
 	var role, status string
 	err := row.Scan(
 		&u.ID, &u.EnterpriseID, &u.Email, &u.DisplayName, &u.AvatarURL,
-		&role, &status, &u.AuthProvider, &u.AuthProviderSubjectID,
+		&role, &status,
 		&u.PasswordHash, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
@@ -137,7 +130,7 @@ func scanUser(rows pgx.Rows) (model.User, error) {
 	var role, status string
 	err := rows.Scan(
 		&u.ID, &u.EnterpriseID, &u.Email, &u.DisplayName, &u.AvatarURL,
-		&role, &status, &u.AuthProvider, &u.AuthProviderSubjectID,
+		&role, &status,
 		&u.PasswordHash, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {

@@ -107,17 +107,6 @@ func (s *stubUserStore) GetByEmail(_ context.Context, email string) (model.User,
 	return model.User{}, &store.ErrNotFound{Entity: "user", ID: email}
 }
 
-func (s *stubUserStore) GetByProviderSubject(_ context.Context, provider, subject string) (model.User, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, u := range s.users {
-		if u.AuthProvider == provider && u.AuthProviderSubjectID == subject {
-			return u, nil
-		}
-	}
-	return model.User{}, &store.ErrNotFound{Entity: "user", ID: provider + "/" + subject}
-}
-
 func (s *stubUserStore) List(_ context.Context, _ store.UserFilter) ([]model.User, error) {
 	return nil, nil
 }
@@ -127,6 +116,86 @@ func (s *stubUserStore) Update(_ context.Context, u model.User) error {
 	defer s.mu.Unlock()
 	s.users[u.ID] = u
 	return nil
+}
+
+// stubUserAuthProviderStore is an in-memory user auth provider store for tests.
+type stubUserAuthProviderStore struct {
+	mu    sync.RWMutex
+	links map[string]model.UserAuthProvider
+}
+
+func newStubUserAuthProviderStore() *stubUserAuthProviderStore {
+	return &stubUserAuthProviderStore{links: make(map[string]model.UserAuthProvider)}
+}
+
+func (s *stubUserAuthProviderStore) Create(_ context.Context, link model.UserAuthProvider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.links[link.ID] = link
+	return nil
+}
+
+func (s *stubUserAuthProviderStore) GetByProviderSubject(_ context.Context, provider, subjectID string) (model.UserAuthProvider, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, link := range s.links {
+		if link.Provider == provider && link.SubjectID == subjectID {
+			return link, nil
+		}
+	}
+	return model.UserAuthProvider{}, &store.ErrNotFound{Entity: "user_auth_provider", ID: provider + "/" + subjectID}
+}
+
+func (s *stubUserAuthProviderStore) ListByUser(_ context.Context, userID string) ([]model.UserAuthProvider, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var result []model.UserAuthProvider
+	for _, link := range s.links {
+		if link.UserID == userID {
+			result = append(result, link)
+		}
+	}
+	return result, nil
+}
+
+func (s *stubUserAuthProviderStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.links[id]; !ok {
+		return &store.ErrNotFound{Entity: "user_auth_provider", ID: id}
+	}
+	delete(s.links, id)
+	return nil
+}
+
+func (s *stubUserAuthProviderStore) DeleteByUserAndProvider(_ context.Context, userID, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, link := range s.links {
+		if link.UserID == userID && link.Provider == provider {
+			delete(s.links, id)
+			return nil
+		}
+	}
+	return &store.ErrNotFound{Entity: "user_auth_provider", ID: userID + "/" + provider}
+}
+
+func (s *stubUserAuthProviderStore) count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.links)
+}
+
+func (s *stubUserAuthProviderStore) countForUser(userID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, link := range s.links {
+		if link.UserID == userID {
+			n++
+		}
+	}
+	return n
 }
 
 // stubSessionStore is an in-memory session store for tests.
@@ -261,18 +330,20 @@ func (m *capturingMailer) lastCode() string {
 
 // testEnv bundles all stubs and the handler for a test scenario.
 type testEnv struct {
-	handler  *Handler
-	mux      *http.ServeMux
-	users    *stubUserStore
-	ents     *stubEnterpriseStore
-	sessions *stubSessionStore
-	codes    *stubVerificationCodeStore
-	mailer   *capturingMailer
-	issuer   *TokenIssuer
+	handler       *Handler
+	mux           *http.ServeMux
+	users         *stubUserStore
+	authProviders *stubUserAuthProviderStore
+	ents          *stubEnterpriseStore
+	sessions      *stubSessionStore
+	codes         *stubVerificationCodeStore
+	mailer        *capturingMailer
+	issuer        *TokenIssuer
 }
 
 func newTestEnv() *testEnv {
 	users := newStubUserStore()
+	authProviders := newStubUserAuthProviderStore()
 	ents := &stubEnterpriseStore{enterprises: make(map[string]model.Enterprise)}
 	sessions := newStubSessionStore()
 	codes := newStubVerificationCodeStore()
@@ -291,6 +362,7 @@ func newTestEnv() *testEnv {
 		Enforcer:          NewStoreEnforcer(ents),
 		Issuer:            issuer,
 		Users:             users,
+		UserAuthProviders: authProviders,
 		Enterprises:       ents,
 		Sessions:          sessions,
 		VerificationCodes: codes,
@@ -304,14 +376,15 @@ func newTestEnv() *testEnv {
 	h.RegisterRoutes(mux)
 
 	return &testEnv{
-		handler:  h,
-		mux:      mux,
-		users:    users,
-		ents:     ents,
-		sessions: sessions,
-		codes:    codes,
-		mailer:   mailer,
-		issuer:   issuer,
+		handler:       h,
+		mux:           mux,
+		users:         users,
+		authProviders: authProviders,
+		ents:          ents,
+		sessions:      sessions,
+		codes:         codes,
+		mailer:        mailer,
+		issuer:        issuer,
 	}
 }
 

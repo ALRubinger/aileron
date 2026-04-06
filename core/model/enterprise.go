@@ -54,19 +54,28 @@ const (
 // logical identity used to deduplicate across OAuth providers — when any
 // provider returns an email, we look up or create the user by email.
 type User struct {
-	ID                    string // usr_ + UUID — immutable surrogate key
-	EnterpriseID          string
-	Email                 string // unique, used for cross-provider deduplication
-	DisplayName           string
-	AvatarURL             string
-	Role                  UserRole
-	Status                UserStatus
-	AuthProvider          string // "email", "google", "okta", "saml", etc.
-	AuthProviderSubjectID string // external IdP subject identifier; empty for email auth
-	PasswordHash          string // bcrypt hash; empty for OAuth-only users
-	LastLoginAt           *time.Time
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	ID            string // usr_ + UUID — immutable surrogate key
+	EnterpriseID  string
+	Email         string // unique, used for cross-provider deduplication
+	DisplayName   string
+	AvatarURL     string
+	Role          UserRole
+	Status        UserStatus
+	PasswordHash  string // bcrypt hash; empty for OAuth-only users
+	LastLoginAt   *time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	AuthProviders []UserAuthProvider // populated by handler; not stored on users table
+}
+
+// UserAuthProvider links a user to an external OAuth/SSO identity provider.
+// Each row represents one connected provider (e.g. Google, GitHub).
+type UserAuthProvider struct {
+	ID        string // uap_ + UUID
+	UserID    string
+	Provider  string // "google", "github", "okta", "saml", etc.
+	SubjectID string // external IdP subject identifier
+	CreatedAt time.Time
 }
 
 // VerificationCode is a single-use code sent to a user's email to verify

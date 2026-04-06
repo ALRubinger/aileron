@@ -171,6 +171,12 @@ export async function getCurrentUser() {
 	return apiFetch('/v1/users/me');
 }
 
+export async function disconnectAuthProvider(provider: string) {
+	return apiFetch(`/v1/users/me/auth-providers/${encodeURIComponent(provider)}`, {
+		method: 'DELETE'
+	});
+}
+
 export async function updateCurrentUser(data: { display_name?: string }) {
 	return apiFetch('/v1/users/me', {
 		method: 'PATCH',

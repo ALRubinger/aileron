@@ -141,12 +141,14 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 
 		enterpriseStore := postgres.NewEnterpriseStore(db)
 		userStore := postgres.NewUserStore(db)
+		userAuthProviderStore := postgres.NewUserAuthProviderStore(db)
 		sessionStore := postgres.NewSessionStore(db)
 		verificationCodeStore := postgres.NewVerificationCodeStore(db)
 
 		// Wire stores into apiServer for /me endpoints.
 		server.enterprises = enterpriseStore
 		server.users = userStore
+		server.userAuthProviders = userAuthProviderStore
 
 		tokenIssuer := auth.NewTokenIssuer(
 			[]byte(authCfg.JWTSigningKey),
@@ -189,6 +191,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			Enforcer:          enforcer,
 			Issuer:            tokenIssuer,
 			Users:             userStore,
+			UserAuthProviders: userAuthProviderStore,
 			Enterprises:       enterpriseStore,
 			Sessions:          sessionStore,
 			VerificationCodes: verificationCodeStore,

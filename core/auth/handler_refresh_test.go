@@ -102,7 +102,7 @@ func TestRefresh_ExpiredToken(t *testing.T) {
 	// Manually create an expired session.
 	user := model.User{
 		ID: "usr_test", EnterpriseID: "ent_test", Email: "alice@acme.com",
-		Role: model.UserRoleOwner, Status: model.UserStatusActive, AuthProvider: "email",
+		Role: model.UserRoleOwner, Status: model.UserStatusActive,
 	}
 	te.users.Create(t.Context(), user)
 
