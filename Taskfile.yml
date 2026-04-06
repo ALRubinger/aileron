@@ -138,6 +138,19 @@ tasks:
       AILERON_API_URL: http://localhost:8080
       AILERON_UI_URL: http://localhost:3000
 
+  test:integration:coverage:
+    desc: Start a coverage-instrumented stack, run integration tests, and emit coverage-integration.txt
+    cmds:
+      - mkdir -p gocoverdir && chmod 777 gocoverdir
+      - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml up -d --build --wait
+      - go test -tags=integration -race ./test/integration/...
+      - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml stop server
+      - go tool covdata textfmt -i=gocoverdir -o=coverage-integration.txt
+      - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml down -v
+    env:
+      AILERON_API_URL: http://localhost:8080
+      AILERON_UI_URL: http://localhost:3000
+
   ci:
     desc: Run the full CI pipeline locally
     cmds:
