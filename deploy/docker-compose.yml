@@ -43,6 +43,9 @@ services:
     build:
       context: ../ui
       dockerfile: Dockerfile
+      args:
+        PUBLIC_POSTHOG_KEY: "${PUBLIC_POSTHOG_KEY:-}"
+        PUBLIC_POSTHOG_HOST: "${PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}"
     restart: unless-stopped
     depends_on:
       - server
