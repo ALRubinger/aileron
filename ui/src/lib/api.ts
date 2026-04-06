@@ -153,6 +153,20 @@ export async function setEnterpriseMCPServerCredential(id: string, envVarName: s
 	});
 }
 
+// --- Connected Accounts ---
+
+export async function listConnectedAccounts() {
+	return apiFetch('/v1/connected-accounts');
+}
+
+export async function getConnectedAccount(id: string) {
+	return apiFetch(`/v1/connected-accounts/${id}`);
+}
+
+export async function deleteConnectedAccount(id: string) {
+	return apiFetch(`/v1/connected-accounts/${id}`, { method: 'DELETE' });
+}
+
 export async function getCurrentUser() {
 	return apiFetch('/v1/users/me');
 }
