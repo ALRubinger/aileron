@@ -397,6 +397,8 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `PUBLIC_API_BASE` | Yes | `http://localhost:8080` | URL of the server service (e.g. `https://api.yourdomain.com`) |
+| `PUBLIC_POSTHOG_KEY` | No | | PostHog project API key. When set, enables analytics. Passed as a Docker build arg. |
+| `PUBLIC_POSTHOG_HOST` | No | `https://us.i.posthog.com` | PostHog ingest endpoint. Passed as a Docker build arg. |
 
 **Docs service:** No configuration required.
 
@@ -467,6 +469,7 @@ Link the Postgres plugin to the server service.
 | Variable | Value |
 |----------|-------|
 | `PUBLIC_API_BASE` | `https://api.withaileron.ai` |
+| `PUBLIC_POSTHOG_KEY` | PostHog project API key (optional) |
 
 Branch deploys inherit service variables automatically. OAuth is not available on branch deploys (use email/password login instead).
 
