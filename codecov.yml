@@ -23,7 +23,7 @@ flags:
   integration:
     paths:
       - core/
-    carryforward: false
+    carryforward: true
 
 ignore:
   - "core/api/gen/**"   # generated code (oapi-codegen) — DO NOT EDIT
