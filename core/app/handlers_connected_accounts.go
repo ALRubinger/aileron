@@ -210,7 +210,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		http.Redirect(w, r, "/marketplace", http.StatusFound)
+		http.Redirect(w, r, "/settings", http.StatusFound)
 		return
 	}
 
@@ -236,7 +236,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	http.Redirect(w, r, "/marketplace", http.StatusFound)
+	http.Redirect(w, r, "/settings", http.StatusFound)
 }
 
 func connectedAccountToAPI(a model.ConnectedAccount) api.ConnectedAccount {
