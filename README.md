@@ -23,7 +23,7 @@ The result is a forced choice: give the agent enough permission to be powerful, 
 
 Aileron separates **intent** from **execution**. Agents submit structured intents (send this email, schedule this meeting, make this purchase). Aileron owns the credentials, evaluates deterministic policy, and executes the action itself — returning only safe, structured results to the agent.
 
-The agent never holds your Gmail token, calendar credentials, or payment instruments. Aileron does.
+The agent never holds your Gmail token, calendar credentials, or payment instruments. Aileron executes on your behalf, but your secrets are encrypted with a key only you know.
 
 ```
 Agent Host (Claude Code, OpenClaw, etc.)
@@ -35,7 +35,7 @@ Aileron Execution Plane
   ├── Intent Tools           list_inbox_briefs, send_email_intent, request_purchase, ...
   ├── Policy Engine          deterministic rules per action (no LLM in enforcement)
   ├── Approval Orchestrator  routes to humans when required
-  ├── Credential Vault       OAuth tokens for connected accounts
+  ├── Credential Vault       zero-knowledge encrypted storage (user-derived keys)
   └── Audit Store            immutable record of every decision and execution
   │
   ├──► Gmail API         (Aileron sends the email)
@@ -47,7 +47,7 @@ Aileron Execution Plane
 
 **1. Connect your accounts**
 
-Open the Protected Actions catalog and connect your Gmail, Google Calendar, or payment accounts via OAuth. Aileron stores refresh tokens in its vault — agents never see them.
+Open the Protected Actions catalog and connect your Gmail, Google Calendar, or payment accounts via OAuth. Aileron stores refresh tokens in its zero-knowledge vault — encrypted with a key only you control. Agents never see them. Neither does Aileron.
 
 **2. Agents submit intents**
 
@@ -74,10 +74,29 @@ Every intent, policy decision, approval, and execution is recorded in an immutab
 Aileron gives organizations centralized control over agent activity across teams.
 
 - **Protected Actions catalog.** A curated set of irreversible actions (email, calendar, payments) that Aileron owns and executes. Connect once, and all agents benefit.
-- **Identity ownership.** OAuth tokens and payment instruments live in the Aileron vault. Teams use agents without handling credentials directly.
+- **Identity ownership.** OAuth tokens and payment instruments live in the zero-knowledge vault, encrypted with user-derived keys. Teams use agents without handling credentials — and Aileron can't access them either.
 - **Policy governance.** Define rules that apply across all agent activity — internal/external recipient controls, spend limits, vendor allowlists, time-of-day rules.
 - **Multi-agent hub.** Multiple agents share the same identity, policies, and audit trail. No per-agent credential management.
 - **Compliance.** An immutable execution graph records every action, policy decision, and approval for review and export.
+
+## Zero-Knowledge Vault
+
+Aileron's credential vault uses a zero-knowledge architecture: your secrets are encrypted with a key derived from a passphrase that only you know. Aileron stores the encrypted ciphertext and the Argon2id salt — never the key itself.
+
+**How it works:**
+
+1. You set a vault passphrase. Aileron derives a 256-bit Key Encryption Key (KEK) using Argon2id, stores only the salt and a verification blob, then discards the KEK from memory.
+2. When you connect an external account (Gmail, Calendar, etc.), the OAuth refresh token is encrypted with your KEK before storage. The database holds only ciphertext.
+3. To execute actions, you verify your passphrase to unlock a time-limited session (default: 30 minutes). The KEK is held in memory only for the session duration.
+4. When an agent triggers an execution, Aileron decrypts the credential with the session KEK, calls the external API, and discards the plaintext.
+
+**What this means:**
+
+- A database breach yields only ciphertext — useless without your passphrase.
+- Aileron operators cannot read your credentials, even with full database access.
+- Hosting providers (AWS, Railway, etc.) see only encrypted data.
+
+**What's next:** [Confidential computing](https://github.com/ALRubinger/aileron/issues/52) will move credential decryption and connector execution into a hardware-isolated enclave (AWS Nitro Enclaves), so plaintext credentials never exist on the host — even in memory. See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md) for the full trust model.
 
 ## Configuration
 
@@ -114,13 +133,13 @@ The execution plane architecture is being built incrementally:
 - **Connected accounts** — users can connect external services (Gmail, Google Calendar) via OAuth. Tokens stored in vault, agents never see them.
 - **Policy engine** evaluates deterministic rules per action (allow, deny, require approval, allow with modifications)
 - **Approval orchestrator** manages human-in-the-loop workflows with approve/deny/modify
-- **Credential vault** stores OAuth tokens for connected accounts and injects them at execution time
+- **Zero-knowledge credential vault** — user secrets are encrypted with a passphrase-derived key (Argon2id + AES-256-GCM). Aileron operators and hosting providers cannot access plaintext credentials. Users unlock the vault per session; encrypted secrets are decrypted only at execution time. See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md).
 - **Audit store** records every event in an immutable trace
 - **Approval UI** provides a web interface for reviewing and acting on pending approvals
 - **Enterprise auth** with Google and GitHub OAuth, email/password signup, SSO enforcement
 - **Protected Actions catalog** (in progress) — replaces the MCP server marketplace with a curated set of actions Aileron owns
 
-Next up: Gmail connector, email intent tools, and email-specific policies.
+Next up: Gmail connector, email intent tools, and confidential computing (TEE) execution layer ([#52](https://github.com/ALRubinger/aileron/issues/52)).
 
 ## Getting Started
 
@@ -391,6 +410,7 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `GITHUB_OAUTH_CLIENT_SECRET` | No | | GitHub OAuth 2.0 client secret |
 | `RESEND_API_KEY` | No | | [Resend](https://resend.com) API key. When set, verification emails are delivered via Resend. When unset, codes are printed to the log (dev/CI mode). |
 | `MAIL_FROM` | No | `noreply@withaileron.ai` | Sender address for transactional emails (requires `RESEND_API_KEY`) |
+| `AILERON_KEK_SESSION_TTL` | No | `30m` | How long a verified vault passphrase session remains active. After expiry, the user must re-verify their passphrase to unlock encrypted credentials. |
 
 **UI service:**
 
