@@ -3,11 +3,14 @@ package app
 import (
 	"net/http"
 
+	"time"
+
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/ALRubinger/aileron/enclave"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
@@ -158,8 +161,60 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	}
 	redirectURL := scheme + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
 
-	// If the user has an active KEK session, wrap the vault with per-user
-	// encryption so the OAuth token is encrypted before storage.
+	// TEE mode: forward the OAuth code to the enclave. The enclave exchanges
+	// the code for tokens, encrypts them with the user's KEK, and returns
+	// only the ciphertext. The server never sees the plaintext tokens.
+	if s.enclaveClient != nil {
+		oauthResp, oauthErr := s.enclaveClient.OAuthExchange(r.Context(), enclave.OAuthExchangeRequest{
+			UserID:           userID,
+			Provider:         providerStr,
+			Code:             params.Code,
+			RedirectURI:      redirectURL,
+			ClientID:         s.accountService.ClientID(),
+			ClientSecret:     s.accountService.ClientSecret(),
+			Scopes:           s.accountService.ScopesFor(provider),
+			TokenEndpoint:    s.accountService.TokenEndpointFor(provider),
+			UserInfoEndpoint: s.accountService.UserInfoEndpoint(),
+		})
+		if oauthErr != nil {
+			s.log.Error("enclave OAuth exchange failed", "error", oauthErr, "provider", providerStr)
+			writeError(w, http.StatusInternalServerError, "callback_error", "failed to connect account: "+oauthErr.Error())
+			return
+		}
+
+		// Store the encrypted token in the vault — server never saw plaintext.
+		now := time.Now().UTC()
+		acct := model.ConnectedAccount{
+			ID:        "conn_" + s.newID(),
+			UserID:    userID,
+			Provider:  provider,
+			Email:     oauthResp.Email,
+			Scopes:    s.accountService.ScopesFor(provider),
+			Status:    model.ConnectedAccountStatusActive,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		if err := s.vault.Put(r.Context(), acct.VaultPath(), oauthResp.EncryptedToken, vault.Metadata{
+			Type: "oauth_refresh_token",
+			Labels: map[string]string{
+				"provider":  providerStr,
+				"user_id":   userID,
+				"encrypted": "true",
+			},
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, "vault_error", "failed to store encrypted token")
+			return
+		}
+		if err := s.connectedAccounts.Create(r.Context(), acct); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", "failed to create account record")
+			return
+		}
+
+		http.Redirect(w, r, "/marketplace", http.StatusFound)
+		return
+	}
+
+	// Direct mode: exchange code on the host and optionally encrypt with KEK.
 	svc := s.accountService
 	if s.kekCache != nil {
 		kek := s.kekCache.Get(userID)

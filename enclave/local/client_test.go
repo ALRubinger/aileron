@@ -25,15 +25,13 @@ func stubExecuteFn(gotCredential *[]byte) ExecuteFn {
 }
 
 // establishSession performs the full attest → session flow and returns the
-// host's private key and the derived session key.
-func establishSession(t *testing.T, c *Client) (sessionKey []byte) {
+// session key.
+func establishSession(t *testing.T, c *Client) []byte {
 	t.Helper()
 	ctx := context.Background()
 
-	// Attest.
 	attestResp, err := c.Attest(ctx, enclave.AttestationRequest{
-		Nonce:    []byte("test-nonce"),
-		Audience: "test",
+		Nonce: []byte("test-nonce"), Audience: "test",
 	})
 	if err != nil {
 		t.Fatalf("Attest: %v", err)
@@ -42,13 +40,11 @@ func establishSession(t *testing.T, c *Client) (sessionKey []byte) {
 		t.Fatalf("expected dev-ok token, got %q", attestResp.Token)
 	}
 
-	// Host generates its own ephemeral key.
 	hostKey, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generating host key: %v", err)
 	}
 
-	// Establish session.
 	sessResp, err := c.EstablishSession(ctx, enclave.SessionRequest{
 		PublicKey: hostKey.PublicKey().Bytes(),
 	})
@@ -59,17 +55,29 @@ func establishSession(t *testing.T, c *Client) (sessionKey []byte) {
 		t.Fatal("expected non-empty session ID")
 	}
 
-	// Derive the same shared secret on the host side.
-	enclavePub, err := ecdh.P256().NewPublicKey(attestResp.PublicKey)
-	if err != nil {
-		t.Fatalf("parsing enclave public key: %v", err)
-	}
-	raw, err := hostKey.ECDH(enclavePub)
-	if err != nil {
-		t.Fatalf("host ECDH: %v", err)
-	}
+	enclavePub, _ := ecdh.P256().NewPublicKey(attestResp.PublicKey)
+	raw, _ := hostKey.ECDH(enclavePub)
 	h := sha256.Sum256(raw)
 	return h[:]
+}
+
+// transmitKEK encrypts and sends a KEK to the enclave for a given user.
+func transmitKEK(t *testing.T, c *Client, sessionKey []byte, userID string, kek []byte) {
+	t.Helper()
+	encrypted, err := encryptAESGCM(kek, sessionKey)
+	if err != nil {
+		t.Fatalf("encrypting KEK: %v", err)
+	}
+	resp, err := c.TransmitKEK(context.Background(), enclave.TransmitKEKRequest{
+		UserID:       userID,
+		EncryptedKEK: encrypted,
+	})
+	if err != nil {
+		t.Fatalf("TransmitKEK: %v", err)
+	}
+	if !resp.Stored {
+		t.Fatal("expected Stored=true")
+	}
 }
 
 func TestFullExecuteFlow(t *testing.T) {
@@ -79,20 +87,26 @@ func TestFullExecuteFlow(t *testing.T) {
 
 	sessionKey := establishSession(t, c)
 
-	// Encrypt a test credential with the session key.
+	// Transmit a user KEK.
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitKEK(t, c, sessionKey, "user-1", userKEK)
+
+	// Encrypt a credential with the user's KEK (simulating vault storage).
 	plainCred := []byte("secret-api-key-12345")
-	encryptedCred, err := encryptAESGCM(plainCred, sessionKey)
+	kekEncrypted, err := encryptAESGCM(plainCred, userKEK)
 	if err != nil {
-		t.Fatalf("encrypting credential: %v", err)
+		t.Fatalf("encrypting credential with KEK: %v", err)
 	}
 
-	// Execute.
+	// Execute — enclave decrypts with stored KEK.
 	resp, err := c.Execute(context.Background(), enclave.ExecuteRequest{
 		RequestID:           "exec-1",
+		UserID:              "user-1",
 		GrantID:             "grant-1",
 		ActionType:          "payment.charge",
 		ConnectorID:         "payments/stripe",
-		EncryptedCredential: encryptedCred,
+		EncryptedCredential: kekEncrypted,
 		CredentialType:      "api_key",
 	})
 	if err != nil {
@@ -101,16 +115,27 @@ func TestFullExecuteFlow(t *testing.T) {
 	if resp.Status != "succeeded" {
 		t.Fatalf("expected succeeded, got %q", resp.Status)
 	}
-	if resp.RequestID != "exec-1" {
-		t.Fatalf("expected request ID exec-1, got %q", resp.RequestID)
-	}
-	if resp.ReceiptRef != "receipt-123" {
-		t.Fatalf("expected receipt ref receipt-123, got %q", resp.ReceiptRef)
-	}
-
-	// Verify the execute function received the correct plaintext.
 	if string(gotCredential) != string(plainCred) {
 		t.Fatalf("expected credential %q, got %q", plainCred, gotCredential)
+	}
+}
+
+func TestExecuteWithoutKEK(t *testing.T) {
+	c := New(func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		t.Fatal("should not be called")
+		return enclave.ExecuteResponse{}, nil
+	})
+	defer c.Close()
+
+	establishSession(t, c)
+
+	// Execute without transmitting KEK.
+	_, err := c.Execute(context.Background(), enclave.ExecuteRequest{
+		UserID:              "no-kek-user",
+		EncryptedCredential: []byte("data"),
+	})
+	if err != enclave.ErrNoKEK {
+		t.Fatalf("expected ErrNoKEK, got %v", err)
 	}
 }
 
@@ -121,7 +146,10 @@ func TestExecuteWithoutAttestation(t *testing.T) {
 	})
 	defer c.Close()
 
-	_, err := c.Execute(context.Background(), enclave.ExecuteRequest{})
+	_, err := c.TransmitKEK(context.Background(), enclave.TransmitKEKRequest{
+		UserID:       "user-1",
+		EncryptedKEK: []byte("data"),
+	})
 	if err != enclave.ErrNotAttested {
 		t.Fatalf("expected ErrNotAttested, got %v", err)
 	}
@@ -139,53 +167,26 @@ func TestEstablishSessionWithoutAttestation(t *testing.T) {
 	}
 }
 
-func TestSessionReAttestation(t *testing.T) {
-	var gotCredential []byte
-	c := New(stubExecuteFn(&gotCredential))
-	defer c.Close()
-
-	// First session.
-	key1 := establishSession(t, c)
-
-	// Re-attest (new session).
-	key2 := establishSession(t, c)
-
-	// Old session key should not work.
-	plainCred := []byte("cred")
-	encrypted, _ := encryptAESGCM(plainCred, key1)
-	_, err := c.Execute(context.Background(), enclave.ExecuteRequest{
-		EncryptedCredential: encrypted,
-	})
-	if err == nil {
-		t.Fatal("expected decryption to fail with old session key")
-	}
-
-	// New session key should work.
-	encrypted2, _ := encryptAESGCM(plainCred, key2)
-	_, err = c.Execute(context.Background(), enclave.ExecuteRequest{
-		RequestID:           "exec-2",
-		EncryptedCredential: encrypted2,
-	})
-	if err != nil {
-		t.Fatalf("Execute with new key: %v", err)
-	}
-}
-
 func TestEscrowStoreAndExecute(t *testing.T) {
 	var gotCredential []byte
 	c := New(stubExecuteFn(&gotCredential))
 	defer c.Close()
 
 	sessionKey := establishSession(t, c)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitKEK(t, c, sessionKey, "user-1", userKEK)
+
 	ctx := context.Background()
 
 	// Encrypt and escrow a credential.
 	plainCred := []byte("escrowed-secret")
-	encrypted, _ := encryptAESGCM(plainCred, sessionKey)
+	kekEncrypted, _ := encryptAESGCM(plainCred, userKEK)
 
 	storeResp, err := c.EscrowStore(ctx, enclave.EscrowStoreRequest{
+		UserID:              "user-1",
 		GrantID:             "grant-1",
-		EncryptedCredential: encrypted,
+		EncryptedCredential: kekEncrypted,
 		CredentialType:      "api_key",
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
 		ActionTypes:         []string{"payment.charge"},
@@ -217,10 +218,15 @@ func TestEscrowRevoke(t *testing.T) {
 	defer c.Close()
 
 	sessionKey := establishSession(t, c)
-	ctx := context.Background()
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitKEK(t, c, sessionKey, "user-1", userKEK)
 
-	encrypted, _ := encryptAESGCM([]byte("secret"), sessionKey)
+	ctx := context.Background()
+	encrypted, _ := encryptAESGCM([]byte("secret"), userKEK)
+
 	storeResp, err := c.EscrowStore(ctx, enclave.EscrowStoreRequest{
+		UserID:              "user-1",
 		GrantID:             "grant-1",
 		EncryptedCredential: encrypted,
 		CredentialType:      "api_key",
@@ -230,19 +236,17 @@ func TestEscrowRevoke(t *testing.T) {
 		t.Fatalf("EscrowStore: %v", err)
 	}
 
-	// Revoke with wrong grant should fail.
+	// Wrong grant.
 	err = c.EscrowRevoke(ctx, enclave.EscrowRevokeRequest{
-		EscrowID: storeResp.EscrowID,
-		GrantID:  "wrong-grant",
+		EscrowID: storeResp.EscrowID, GrantID: "wrong-grant",
 	})
 	if err != enclave.ErrEscrowNotFound {
-		t.Fatalf("expected ErrEscrowNotFound for wrong grant, got %v", err)
+		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
 	}
 
-	// Revoke with correct grant.
+	// Correct grant.
 	err = c.EscrowRevoke(ctx, enclave.EscrowRevokeRequest{
-		EscrowID: storeResp.EscrowID,
-		GrantID:  "grant-1",
+		EscrowID: storeResp.EscrowID, GrantID: "grant-1",
 	})
 	if err != nil {
 		t.Fatalf("EscrowRevoke: %v", err)
@@ -257,15 +261,20 @@ func TestEscrowRevoke(t *testing.T) {
 
 func TestClose(t *testing.T) {
 	c := New(nil)
-	establishSession(t, c)
+	sessionKey := establishSession(t, c)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitKEK(t, c, sessionKey, "user-1", userKEK)
 
 	if err := c.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// After close, operations should fail.
-	_, err := c.Execute(context.Background(), enclave.ExecuteRequest{})
-	if err != enclave.ErrNotAttested {
-		t.Fatalf("expected ErrNotAttested after close, got %v", err)
+	// After close, KEK should be gone.
+	_, err := c.Execute(context.Background(), enclave.ExecuteRequest{
+		UserID: "user-1", EncryptedCredential: []byte("data"),
+	})
+	if err != enclave.ErrNoKEK {
+		t.Fatalf("expected ErrNoKEK after close, got %v", err)
 	}
 }

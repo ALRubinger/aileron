@@ -7,6 +7,7 @@ import (
 	"time"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/enclave"
 )
 
@@ -18,7 +19,24 @@ type teeState struct {
 	attestResp    enclave.AttestationResponse
 	sessionActive bool
 	sessionID     string
+	sessionKey    []byte // ECDH-derived session key for KEK transit encryption
 	expiresAt     time.Time
+}
+
+// getSessionKey returns a copy of the TEE session key, used to encrypt
+// the KEK before transmitting it to the enclave.
+func (s *apiServer) getSessionKey() []byte {
+	if s.teeState == nil {
+		return nil
+	}
+	s.teeState.mu.Lock()
+	defer s.teeState.mu.Unlock()
+	if s.teeState.sessionKey == nil {
+		return nil
+	}
+	cpy := make([]byte, len(s.teeState.sessionKey))
+	copy(cpy, s.teeState.sessionKey)
+	return cpy
 }
 
 func (s *apiServer) GetTeeStatus(w http.ResponseWriter, _ *http.Request) {
@@ -117,9 +135,6 @@ func (s *apiServer) EstablishTeeSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// req.Nonce and req.PublicKey are []byte, automatically base64-decoded
-	// by json.Unmarshal.
-
 	// Verify attestation.
 	claims, err := s.enclaveVerifier.Verify(r.Context(), req.Token, req.Nonce)
 	if err != nil {
@@ -127,22 +142,49 @@ func (s *apiServer) EstablishTeeSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Establish session with enclave.
+	// Generate host's ephemeral ECDH key pair.
+	hostKey, err := crypto.GenerateKeyPair()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "key_error", "failed to generate host key pair")
+		return
+	}
+
+	// Establish session with enclave using host's public key.
 	sessResp, err := s.enclaveClient.EstablishSession(r.Context(), enclave.SessionRequest{
-		PublicKey: req.PublicKey,
+		PublicKey: crypto.MarshalPublicKey(hostKey.PublicKey()),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", err.Error())
 		return
 	}
 
+	// Derive the same shared secret on the host side using the enclave's
+	// public key (received during attestation).
+	s.teeState.mu.Lock()
+	enclavePubKeyBytes := s.teeState.attestResp.PublicKey
+	s.teeState.mu.Unlock()
+
+	enclavePub, err := crypto.UnmarshalPublicKey(enclavePubKeyBytes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "key_error", "failed to parse enclave public key")
+		return
+	}
+
+	sessionKey, err := crypto.DeriveSharedSecret(hostKey, enclavePub)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "key_error", "ECDH failed")
+		return
+	}
+
 	// Parse expiry.
 	expiresAt, _ := time.Parse(time.RFC3339, sessResp.ExpiresAt)
 
-	// Update state.
+	// Update state — store session key for KEK transit encryption.
 	s.teeState.mu.Lock()
+	zeroBytes(s.teeState.sessionKey)
 	s.teeState.sessionActive = true
 	s.teeState.sessionID = sessResp.SessionID
+	s.teeState.sessionKey = sessionKey
 	s.teeState.expiresAt = expiresAt
 	s.teeState.mu.Unlock()
 

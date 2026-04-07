@@ -703,11 +703,17 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TEE mode: delegate execution to enclave. The credential stays encrypted;
-	// only the enclave can decrypt it.
+	// TEE mode: delegate execution to enclave. The credential stays
+	// KEK-encrypted; only the enclave (which holds the user's KEK) can
+	// decrypt it. The server never sees the plaintext credential.
 	if s.enclaveClient != nil {
+		var execUserID string
+		if claims := auth.ClaimsFromContext(ctx); claims != nil {
+			execUserID = claims.Subject
+		}
 		enclaveResp, enclaveErr := s.enclaveClient.Execute(ctx, enclave.ExecuteRequest{
 			RequestID:           execID,
+			UserID:              execUserID,
 			GrantID:             grant.GrantId,
 			IntentID:            grant.IntentId,
 			ActionType:          intent.Action.Type,

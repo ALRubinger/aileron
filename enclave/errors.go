@@ -15,4 +15,7 @@ var (
 
 	// ErrEscrowExpired indicates that the escrow entry has passed its expiry time.
 	ErrEscrowExpired = errors.New("enclave: escrow entry expired")
+
+	// ErrNoKEK indicates that no KEK has been transmitted for the given user.
+	ErrNoKEK = errors.New("enclave: no KEK stored for user")
 )

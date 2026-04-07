@@ -83,6 +83,24 @@ func (c *Client) EscrowStore(ctx context.Context, req enclave.EscrowStoreRequest
 	return resp, nil
 }
 
+// TransmitKEK sends a user's KEK to the enclave.
+func (c *Client) TransmitKEK(ctx context.Context, req enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
+	var resp enclave.TransmitKEKResponse
+	if err := c.post(ctx, "/kek", req, &resp); err != nil {
+		return enclave.TransmitKEKResponse{}, fmt.Errorf("gcs: transmit KEK: %w", err)
+	}
+	return resp, nil
+}
+
+// OAuthExchange asks the enclave to exchange an OAuth code for tokens.
+func (c *Client) OAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
+	var resp enclave.OAuthExchangeResponse
+	if err := c.post(ctx, "/oauth/exchange", req, &resp); err != nil {
+		return enclave.OAuthExchangeResponse{}, fmt.Errorf("gcs: OAuth exchange: %w", err)
+	}
+	return resp, nil
+}
+
 // EscrowRevoke sends an escrow revoke request to the enclave.
 func (c *Client) EscrowRevoke(ctx context.Context, req enclave.EscrowRevokeRequest) error {
 	if err := c.post(ctx, "/escrow/revoke", req, nil); err != nil {

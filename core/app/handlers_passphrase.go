@@ -9,6 +9,7 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/enclave"
 )
 
 // kekVerificationConstant is the known plaintext encrypted with the KEK.
@@ -154,9 +155,25 @@ func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
 		salt := material.Salt
 		resp.Salt = &salt
 
-		// Cache the KEK for this user's session so that subsequent
-		// requests can decrypt vault secrets without re-prompting.
-		if s.kekCache != nil {
+		// When TEE is active, transmit the KEK to the enclave (encrypted
+		// with the session key) and do NOT cache it on the host. The
+		// enclave holds the KEK in hardware-isolated memory.
+		if s.enclaveClient != nil {
+			encrypted, encErr := crypto.Encrypt(kek, s.getSessionKey())
+			if encErr != nil {
+				writeError(w, http.StatusInternalServerError, "internal", "failed to encrypt KEK for enclave")
+				return
+			}
+			_, transmitErr := s.enclaveClient.TransmitKEK(ctx, enclave.TransmitKEKRequest{
+				UserID:       userID,
+				EncryptedKEK: encrypted,
+			})
+			if transmitErr != nil {
+				writeError(w, http.StatusInternalServerError, "enclave_error", "failed to transmit KEK to enclave: "+transmitErr.Error())
+				return
+			}
+		} else if s.kekCache != nil {
+			// Direct mode (no TEE): cache the KEK locally.
 			s.kekCache.Set(userID, kek)
 		}
 	}
