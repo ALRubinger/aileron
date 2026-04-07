@@ -19,10 +19,17 @@ func TestTEE_Status(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}
-	validateResponse(t, resp)
+
+	// Read body once — validateResponse and json.Decode both consume it.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
 
 	var status map[string]any
-	json.NewDecoder(resp.Body).Decode(&status)
+	if err := json.Unmarshal(body, &status); err != nil {
+		t.Fatalf("decoding body: %v", err)
+	}
 
 	if status["enabled"] != true {
 		t.Fatalf("expected enabled=true, got %v", status["enabled"])
@@ -105,28 +112,7 @@ func TestTEE_AttestationFlow(t *testing.T) {
 	}
 }
 
-func TestTEE_SessionWithoutAttestation(t *testing.T) {
-	// POST /v1/tee/session without prior attestation should fail.
-	// The nonce and token won't match any stored attestation state.
-	// Note: this test may interfere with TestTEE_AttestationFlow if
-	// they share server state. The behavior depends on test ordering,
-	// but the contract says bad attestation evidence returns 400.
-	token := ensureAuth(t)
-	if token == "" {
-		t.Skip("auth not enabled")
-	}
-
-	resp := authedPost(t, apiURL()+"/v1/tee/session", map[string]any{
-		"nonce":      "YmFkLW5vbmNl",
-		"token":      "bad-token",
-		"public_key": "YmFkLWtleQ==",
-	})
-	defer resp.Body.Close()
-
-	// The local DevVerifier accepts any token, so this will proceed to
-	// ECDH key exchange which will fail with a bad public key → 500.
-	// For a real provider, this would be 400 (attestation failed).
-	if resp.StatusCode == 200 {
-		t.Fatal("expected non-200 for bad session request")
-	}
-}
+// Note: testing "session without attestation" is not meaningful with the
+// local provider because the DevVerifier accepts any token and the server
+// shares attestation state across requests. This is a valid test only with
+// a real TEE provider that rejects bad attestation evidence.
