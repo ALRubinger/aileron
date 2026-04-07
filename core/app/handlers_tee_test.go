@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -369,6 +370,86 @@ func TestVerifyPassphraseTEEBranch(t *testing.T) {
 	}
 	if resp.Salt == nil {
 		t.Fatal("expected salt in response")
+	}
+}
+
+// failVerifier is a Verifier that always returns an error.
+type failVerifier struct{ err error }
+
+func (v *failVerifier) Verify(_ context.Context, _ string, _ []byte) (enclave.AttestationClaims, error) {
+	return enclave.AttestationClaims{}, v.err
+}
+
+func TestInitiateAttestationBadJSON(t *testing.T) {
+	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		return enclave.ExecuteResponse{Status: "succeeded"}, nil
+	}
+	client := local.New(executeFn)
+	s := &apiServer{
+		enclaveClient: client,
+		teeState:      &teeState{},
+		teeCfg:        &config.TEEConfig{Provider: "local"},
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/tee/attestation", bytes.NewReader([]byte("not json")))
+	r.Header.Set("Content-Type", "application/json")
+	s.InitiateAttestation(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEstablishTeeSessionBadJSON(t *testing.T) {
+	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		return enclave.ExecuteResponse{Status: "succeeded"}, nil
+	}
+	client := local.New(executeFn)
+	s := &apiServer{
+		enclaveClient: client,
+		teeState:      &teeState{},
+		teeCfg:        &config.TEEConfig{Provider: "local"},
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/tee/session", bytes.NewReader([]byte("not json")))
+	r.Header.Set("Content-Type", "application/json")
+	s.EstablishTeeSession(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEstablishTeeSessionVerificationFailed(t *testing.T) {
+	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		return enclave.ExecuteResponse{Status: "succeeded"}, nil
+	}
+	client := local.New(executeFn)
+	s := &apiServer{
+		enclaveClient:   client,
+		enclaveVerifier: &failVerifier{err: fmt.Errorf("attestation token invalid")},
+		teeState:        &teeState{},
+		teeCfg:          &config.TEEConfig{Provider: "local"},
+	}
+
+	w := httptest.NewRecorder()
+	r := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
+		Nonce:     []byte("nonce"),
+		Token:     "bad-token",
+		PublicKey: []byte("pubkey"),
+	})
+	s.EstablishTeeSession(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var errResp api.Error
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if errResp.Error.Code != "attestation_failed" {
+		t.Fatalf("expected error code 'attestation_failed', got %q", errResp.Error.Code)
 	}
 }
 
