@@ -1,25 +1,16 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/auth"
-	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
-	"github.com/ALRubinger/aileron/core/store"
-	"github.com/ALRubinger/aileron/core/vault"
-	"github.com/ALRubinger/aileron/enclave"
 )
 
-// kekVerificationConstant is the known plaintext encrypted with the KEK.
-// On passphrase verification, we re-derive the KEK and attempt to decrypt
-// this value. If decryption succeeds and the result matches, the passphrase
-// is correct. The constant itself is not secret — it's a fixed sentinel.
-var kekVerificationConstant = []byte("aileron-kek-verification-ok")
+const saltLength = 16
 
 func (s *apiServer) SetPassphrase(w http.ResponseWriter, r *http.Request) {
 	claims := auth.ClaimsFromContext(r.Context())
@@ -39,46 +30,28 @@ func (s *apiServer) SetPassphrase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Passphrase) < 8 {
-		writeError(w, http.StatusBadRequest, "weak_passphrase", "passphrase must be at least 8 characters")
+	if len(req.Salt) != saltLength {
+		writeError(w, http.StatusBadRequest, "invalid_salt", "salt must be exactly 16 bytes")
+		return
+	}
+	if len(req.KekVerification) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_verification", "kek_verification must not be empty")
 		return
 	}
 
 	userID := claims.Subject
-
-	// Generate salt and derive KEK.
-	salt, err := crypto.GenerateSalt()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "failed to generate salt")
-		return
-	}
-
-	kek, err := crypto.DeriveKEK([]byte(req.Passphrase), salt)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "failed to derive KEK")
-		return
-	}
-	defer zeroBytes(kek)
-
-	// Encrypt the verification constant with the KEK.
-	verification, err := crypto.Encrypt(kekVerificationConstant, kek)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "failed to create verification blob")
-		return
-	}
-
 	now := time.Now().UTC()
 	material := model.UserKeyMaterial{
 		UserID:          userID,
-		Salt:            salt,
-		KEKVerification: verification,
+		Salt:            req.Salt,
+		KEKVerification: req.KekVerification,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
 
 	// Check if key material already exists (rotation case).
 	ctx := r.Context()
-	_, err = s.userKeyMaterials.Get(ctx, userID)
+	_, err := s.userKeyMaterials.Get(ctx, userID)
 	if err != nil {
 		if isNotFound(err) {
 			// First time — create.
@@ -98,13 +71,14 @@ func (s *apiServer) SetPassphrase(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	salt := req.Salt
 	writeJSON(w, http.StatusOK, api.PassphraseSaltResponse{
 		HasPassphrase: true,
 		Salt:          &salt,
 	})
 }
 
-func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
+func (s *apiServer) GetPassphraseVerification(w http.ResponseWriter, r *http.Request) {
 	claims := auth.ClaimsFromContext(r.Context())
 	if claims == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "not authenticated")
@@ -116,82 +90,22 @@ func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req api.VerifyPassphraseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
-		return
-	}
-
 	userID := claims.Subject
-	ctx := r.Context()
-
-	material, err := s.userKeyMaterials.Get(ctx, userID)
+	material, err := s.userKeyMaterials.Get(r.Context(), userID)
 	if err != nil {
 		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "no_passphrase", "no passphrase set for this user")
+			writeJSON(w, http.StatusOK, api.PassphraseVerificationResponse{HasPassphrase: false})
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal", "failed to retrieve key material")
 		return
 	}
 
-	// Re-derive KEK from passphrase + stored salt.
-	kek, err := crypto.DeriveKEK([]byte(req.Passphrase), material.Salt)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "failed to derive KEK")
-		return
-	}
-	defer zeroBytes(kek)
-
-	// Attempt to decrypt the verification blob.
-	plaintext, err := crypto.Decrypt(material.KEKVerification, kek)
-	if err != nil {
-		// Decryption failed — wrong passphrase.
-		writeJSON(w, http.StatusOK, api.VerifyPassphraseResponse{Valid: false})
-		return
-	}
-
-	// Check that decrypted value matches the expected constant.
-	valid := string(plaintext) == string(kekVerificationConstant)
-	resp := api.VerifyPassphraseResponse{Valid: valid}
-	if valid {
-		salt := material.Salt
-		resp.Salt = &salt
-
-		// When TEE is active and a session is established, transmit the
-		// KEK to the enclave (encrypted with the session key) so the
-		// enclave holds it in hardware-isolated memory.
-		if s.enclaveClient != nil && s.getSessionKey() != nil {
-			encrypted, encErr := crypto.Encrypt(kek, s.getSessionKey())
-			if encErr != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "failed to encrypt KEK for enclave")
-				return
-			}
-			_, transmitErr := s.enclaveClient.TransmitKEK(ctx, enclave.TransmitKEKRequest{
-				UserID:       userID,
-				EncryptedKEK: encrypted,
-			})
-			if transmitErr != nil {
-				writeError(w, http.StatusInternalServerError, "enclave_error", "failed to transmit KEK to enclave: "+transmitErr.Error())
-				return
-			}
-
-			// Auto-escrow: escrow all active connected account credentials
-			// into TEE memory so agents can execute autonomously.
-			escrowed := s.autoEscrowCredentials(ctx, userID)
-			resp.EscrowedCount = &escrowed
-		}
-		// Cache KEK locally as fallback. When TEE session is active,
-		// execution uses the enclave's copy; the local cache serves
-		// as fallback for direct-mode execution or when the TEE
-		// session has not yet been established.
-		if s.kekCache != nil {
-			s.kekCache.Set(userID, kek)
-			expiresAt := time.Now().Add(s.kekCache.TTL())
-			resp.SessionExpiresAt = &expiresAt
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
+	verification := material.KEKVerification
+	writeJSON(w, http.StatusOK, api.PassphraseVerificationResponse{
+		HasPassphrase:   true,
+		KekVerification: &verification,
+	})
 }
 
 func (s *apiServer) GetPassphraseSalt(w http.ResponseWriter, r *http.Request) {
@@ -222,91 +136,6 @@ func (s *apiServer) GetPassphraseSalt(w http.ResponseWriter, r *http.Request) {
 		HasPassphrase: true,
 		Salt:          &salt,
 	})
-}
-
-func (s *apiServer) GetPassphraseSession(w http.ResponseWriter, r *http.Request) {
-	claims := auth.ClaimsFromContext(r.Context())
-	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "not authenticated")
-		return
-	}
-
-	resp := api.KEKSessionStatus{Active: false}
-
-	if s.kekCache != nil {
-		if expiresAt := s.kekCache.ExpiresAt(claims.Subject); expiresAt != nil {
-			resp.Active = true
-			resp.ExpiresAt = expiresAt
-		}
-	}
-
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// autoEscrowCredentials escrows all active connected account credentials into
-// the TEE for autonomous execution. Returns the number of successfully
-// escrowed credentials.
-func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) int {
-	if s.connectedAccounts == nil {
-		return 0
-	}
-
-	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
-	if err != nil {
-		return 0
-	}
-
-	escrowed := 0
-	for _, acc := range accounts {
-		if acc.Status != model.ConnectedAccountStatusActive {
-			continue
-		}
-
-		secret, err := s.vault.Get(ctx, acc.VaultPath())
-		if err != nil {
-			continue
-		}
-
-		if !vault.IsEncrypted(secret.Metadata) {
-			continue
-		}
-
-		expiresAt := time.Now().Add(s.escrowTTL)
-		grantID := "auto-escrow-" + acc.ID
-
-		resp, err := s.enclaveClient.EscrowStore(ctx, enclave.EscrowStoreRequest{
-			UserID:              userID,
-			GrantID:             grantID,
-			EncryptedCredential: secret.Value,
-			CredentialType:      secret.Metadata.Type,
-			ExpiresAt:           expiresAt.Format(time.RFC3339),
-			ActionTypes:         actionTypesForProvider(acc.Provider),
-		})
-		if err != nil {
-			continue
-		}
-
-		s.escrowIndex.Store(acc.VaultPath(), resp.EscrowID)
-		escrowed++
-	}
-	return escrowed
-}
-
-// actionTypesForProvider returns the action types allowed for a connected
-// account provider.
-func actionTypesForProvider(provider model.ConnectedAccountProvider) []string {
-	switch provider {
-	case model.ConnectedAccountProviderGmail:
-		return []string{"email.send"}
-	case model.ConnectedAccountProviderGoogleCalendar:
-		return []string{"calendar.create"}
-	case model.ConnectedAccountProviderOutlook:
-		return []string{"email.send"}
-	case model.ConnectedAccountProviderMicrosoftCalendar:
-		return []string{"calendar.create"}
-	default:
-		return nil
-	}
 }
 
 // zeroBytes overwrites a byte slice with zeros.

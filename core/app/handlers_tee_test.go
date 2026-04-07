@@ -3,8 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +14,8 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/config"
+	"github.com/ALRubinger/aileron/core/crypto"
+	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -56,7 +58,7 @@ func TestGetTeeStatusDisabled(t *testing.T) {
 func TestGetTeeStatusEnabled(t *testing.T) {
 	s := &apiServer{
 		teeCfg:   &config.TEEConfig{Provider: "local"},
-		teeState: &teeState{},
+		teeState: newTeeState(),
 	}
 
 	w := httptest.NewRecorder()
@@ -76,7 +78,7 @@ func TestGetTeeStatusEnabled(t *testing.T) {
 func TestGetTeeStatusConfidentialSpace(t *testing.T) {
 	s := &apiServer{
 		teeCfg:   &config.TEEConfig{Provider: "confidential-space"},
-		teeState: &teeState{},
+		teeState: newTeeState(),
 	}
 
 	w := httptest.NewRecorder()
@@ -109,7 +111,7 @@ func TestInitiateAttestationLocal(t *testing.T) {
 	client := local.New(executeFn)
 	s := &apiServer{
 		enclaveClient: client,
-		teeState:      &teeState{},
+		teeState:      newTeeState(),
 		teeCfg:        &config.TEEConfig{Provider: "local"},
 	}
 
@@ -146,181 +148,35 @@ func TestEstablishTeeSessionDisabled(t *testing.T) {
 	}
 }
 
-func TestEstablishTeeSessionLocal(t *testing.T) {
-	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
-		return enclave.ExecuteResponse{Status: "succeeded"}, nil
-	}
-	client := local.New(executeFn)
-	verifier := &local.DevVerifier{}
-
+func TestEstablishTeeSessionUnauthenticated(t *testing.T) {
+	client := local.New(nil)
 	s := &apiServer{
-		enclaveClient:   client,
-		enclaveVerifier: verifier,
-		teeState:        &teeState{},
-		teeCfg:          &config.TEEConfig{Provider: "local"},
+		enclaveClient: client,
+		teeState:      newTeeState(),
+		teeCfg:        &config.TEEConfig{Provider: "local"},
 	}
 
-	// First attest.
-	w1 := httptest.NewRecorder()
-	r1 := teeJSONRequest(t, http.MethodPost, "/v1/tee/attestation", api.TeeAttestationRequest{})
-	s.InitiateAttestation(w1, r1)
-
-	var attestResp api.TeeAttestationResponse
-	json.NewDecoder(w1.Body).Decode(&attestResp)
-
-	// Then establish session.
-	w2 := httptest.NewRecorder()
-	r2 := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
-		Nonce:     attestResp.Nonce,
-		Token:     attestResp.Token,
-		PublicKey: attestResp.PublicKey,
+	w := httptest.NewRecorder()
+	r := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
+		EncryptedKek:    []byte("encrypted"),
+		ClientPublicKey: []byte("pubkey"),
 	})
-	s.EstablishTeeSession(w2, r2)
+	// No auth claims attached.
+	s.EstablishTeeSession(w, r)
 
-	if w2.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w2.Code, w2.Body.String())
-	}
-
-	var sessResp api.TeeSessionResponse
-	json.NewDecoder(w2.Body).Decode(&sessResp)
-	if !sessResp.Verified {
-		t.Fatal("expected verified=true")
-	}
-	if sessResp.SessionId == "" {
-		t.Fatal("expected non-empty session ID")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-func TestGetSessionKeyNilState(t *testing.T) {
-	s := &apiServer{
-		teeState: nil,
-	}
-
-	key := s.getSessionKey()
-	if key != nil {
-		t.Fatal("expected nil session key when teeState is nil")
-	}
-}
-
-func TestGetSessionKeyWithKey(t *testing.T) {
-	original := []byte("0123456789abcdef0123456789abcdef")
-	s := &apiServer{
-		teeState: &teeState{
-			sessionKey: original,
-		},
-	}
-
-	key := s.getSessionKey()
-	if key == nil {
-		t.Fatal("expected non-nil session key")
-	}
-	if len(key) != len(original) {
-		t.Fatalf("expected key length %d, got %d", len(original), len(key))
-	}
-	// Verify it is a copy, not the same slice.
-	if &key[0] == &original[0] {
-		t.Fatal("expected a copy of the session key, not the same slice")
-	}
-	for i := range original {
-		if key[i] != original[i] {
-			t.Fatalf("key byte %d differs: got %d, want %d", i, key[i], original[i])
-		}
-	}
-}
-
-func TestEstablishTeeSessionWithECDH(t *testing.T) {
-	// This test performs the full attest -> session flow and verifies the
-	// session key is stored in teeState.
-	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
-		return enclave.ExecuteResponse{Status: "succeeded"}, nil
-	}
-	client := local.New(executeFn)
-	verifier := &local.DevVerifier{}
-
-	s := &apiServer{
-		enclaveClient:   client,
-		enclaveVerifier: verifier,
-		teeState:        &teeState{},
-		teeCfg:          &config.TEEConfig{Provider: "local"},
-	}
-
-	// Step 1: Attest.
-	w1 := httptest.NewRecorder()
-	r1 := teeJSONRequest(t, http.MethodPost, "/v1/tee/attestation", api.TeeAttestationRequest{})
-	s.InitiateAttestation(w1, r1)
-	if w1.Code != http.StatusOK {
-		t.Fatalf("attestation: expected 200, got %d: %s", w1.Code, w1.Body.String())
-	}
-
-	var attestResp api.TeeAttestationResponse
-	json.NewDecoder(w1.Body).Decode(&attestResp)
-
-	// Step 2: Establish session.
-	w2 := httptest.NewRecorder()
-	r2 := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
-		Nonce:     attestResp.Nonce,
-		Token:     attestResp.Token,
-		PublicKey: attestResp.PublicKey,
-	})
-	s.EstablishTeeSession(w2, r2)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("session: expected 200, got %d: %s", w2.Code, w2.Body.String())
-	}
-
-	var sessResp api.TeeSessionResponse
-	json.NewDecoder(w2.Body).Decode(&sessResp)
-	if !sessResp.Verified {
-		t.Fatal("expected verified=true")
-	}
-	if sessResp.SessionId == "" {
-		t.Fatal("expected non-empty session ID")
-	}
-
-	// Verify that the session key was stored in teeState.
-	sessionKey := s.getSessionKey()
-	if sessionKey == nil {
-		t.Fatal("expected non-nil session key after ECDH exchange")
-	}
-	if len(sessionKey) == 0 {
-		t.Fatal("expected non-empty session key")
-	}
-
-	// Verify session state flags.
-	s.teeState.mu.Lock()
-	active := s.teeState.sessionActive
-	sid := s.teeState.sessionID
-	s.teeState.mu.Unlock()
-
-	if !active {
-		t.Fatal("expected sessionActive=true")
-	}
-	if sid == "" {
-		t.Fatal("expected non-empty sessionID in teeState")
-	}
-}
-
-func TestVerifyPassphraseTEEBranch(t *testing.T) {
-	// Set up a full TEE session so the enclave client can decrypt the KEK.
-	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
-		return enclave.ExecuteResponse{Status: "succeeded"}, nil
-	}
-	client := local.New(executeFn)
-	verifier := &local.DevVerifier{}
-
-	teeClaims := &auth.Claims{
-		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_tee_test"},
-		EnterpriseID:     "ent_test",
-		Email:            "tee@example.com",
-		Role:             "owner",
-	}
-
-	srv := &apiServer{
-		userKeyMaterials: mem.NewUserKeyMaterialStore(),
-		enclaveClient:    client,
-		enclaveVerifier:  verifier,
-		teeState:         &teeState{},
-		teeCfg:           &config.TEEConfig{Provider: "local"},
-	}
+// attestAndEstablishSession performs the full client-side flow:
+// 1. Attest (get enclave public key)
+// 2. Generate client ECDH key pair
+// 3. Derive shared secret
+// 4. Encrypt KEK with shared secret
+// 5. Call EstablishTeeSession with encrypted blob
+func attestAndEstablishSession(t *testing.T, srv *apiServer, claims *auth.Claims, kek []byte) api.TeeSessionResponse {
+	t.Helper()
 
 	// Step 1: Attest.
 	w1 := httptest.NewRecorder()
@@ -332,53 +188,180 @@ func TestVerifyPassphraseTEEBranch(t *testing.T) {
 	var attestResp api.TeeAttestationResponse
 	json.NewDecoder(w1.Body).Decode(&attestResp)
 
-	// Step 2: Establish session (derives session key via ECDH).
+	// Step 2: Generate client ECDH key pair and derive shared secret.
+	clientKey, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generating client key pair: %v", err)
+	}
+	enclavePub, err := crypto.UnmarshalPublicKey(attestResp.PublicKey)
+	if err != nil {
+		t.Fatalf("unmarshaling enclave public key: %v", err)
+	}
+	sharedSecret, err := crypto.DeriveSharedSecret(clientKey, enclavePub)
+	if err != nil {
+		t.Fatalf("deriving shared secret: %v", err)
+	}
+
+	// Step 3: Encrypt KEK with shared secret.
+	encryptedKEK, err := crypto.Encrypt(kek, sharedSecret)
+	if err != nil {
+		t.Fatalf("encrypting KEK: %v", err)
+	}
+
+	// Step 4: Establish session.
+	clientPubBytes := crypto.MarshalPublicKey(clientKey.PublicKey())
+	sessionReq := api.TeeSessionRequest{
+		EncryptedKek:    encryptedKEK,
+		ClientPublicKey: clientPubBytes,
+	}
 	w2 := httptest.NewRecorder()
-	r2 := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
-		Nonce:     attestResp.Nonce,
-		Token:     attestResp.Token,
-		PublicKey: attestResp.PublicKey,
-	})
+	r2 := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", sessionReq)
+	r2 = r2.WithContext(auth.ContextWithClaims(r2.Context(), claims))
 	srv.EstablishTeeSession(w2, r2)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("session: expected 200, got %d: %s", w2.Code, w2.Body.String())
 	}
 
-	passphrase := "correct horse battery staple"
+	var sessResp api.TeeSessionResponse
+	json.NewDecoder(w2.Body).Decode(&sessResp)
+	return sessResp
+}
 
-	// Step 3: Set passphrase.
-	setReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase",
-		`{"passphrase":"`+passphrase+`"}`, teeClaims)
-	w3 := httptest.NewRecorder()
-	srv.SetPassphrase(w3, setReq)
-	if w3.Code != http.StatusOK {
-		t.Fatalf("set passphrase: expected 200, got %d: %s", w3.Code, w3.Body.String())
+func TestEstablishTeeSessionLocal(t *testing.T) {
+	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		return enclave.ExecuteResponse{Status: "succeeded"}, nil
+	}
+	client := local.New(executeFn)
+
+	teeClaims := &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_tee_test"},
+		EnterpriseID:     "ent_test",
+		Email:            "tee@example.com",
+		Role:             "owner",
 	}
 
-	// Step 4: Verify passphrase — should transmit KEK to enclave.
-	verifyReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase/verify",
-		`{"passphrase":"`+passphrase+`"}`, teeClaims)
-	w4 := httptest.NewRecorder()
-	srv.VerifyPassphrase(w4, verifyReq)
-	if w4.Code != http.StatusOK {
-		t.Fatalf("verify passphrase: expected 200, got %d: %s", w4.Code, w4.Body.String())
+	srv := &apiServer{
+		enclaveClient: client,
+		teeState:      newTeeState(),
+		teeCfg:        &config.TEEConfig{Provider: "local"},
 	}
 
-	var resp api.VerifyPassphraseResponse
-	json.NewDecoder(w4.Body).Decode(&resp)
-	if !resp.Valid {
-		t.Fatal("expected valid=true")
+	// Generate a test KEK.
+	kek := []byte("0123456789abcdef0123456789abcdef")
+
+	sessResp := attestAndEstablishSession(t, srv, teeClaims, kek)
+
+	if sessResp.SessionId == "" {
+		t.Fatal("expected non-empty session ID")
 	}
-	if resp.Salt == nil {
-		t.Fatal("expected salt in response")
+	if sessResp.ExpiresAt == nil {
+		t.Fatal("expected non-nil expires_at")
+	}
+
+	// Verify the user session was tracked.
+	srv.teeState.mu.Lock()
+	_, tracked := srv.teeState.userSessions[teeClaims.Subject]
+	srv.teeState.mu.Unlock()
+	if !tracked {
+		t.Fatal("expected user session to be tracked in teeState")
 	}
 }
 
-// failVerifier is a Verifier that always returns an error.
-type failVerifier struct{ err error }
+func TestEstablishTeeSession_TransmitKEKFails(t *testing.T) {
+	// Use a client that fails on TransmitKEK.
+	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		return enclave.ExecuteResponse{Status: "succeeded"}, nil
+	}
+	client := local.New(executeFn)
 
-func (v *failVerifier) Verify(_ context.Context, _ string, _ []byte) (enclave.AttestationClaims, error) {
-	return enclave.AttestationClaims{}, v.err
+	teeClaims := &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_tee_fail"},
+		EnterpriseID:     "ent_test",
+		Email:            "fail@example.com",
+		Role:             "owner",
+	}
+
+	srv := &apiServer{
+		enclaveClient: client,
+		teeState:      newTeeState(),
+		teeCfg:        &config.TEEConfig{Provider: "local"},
+	}
+
+	// Attest first.
+	w1 := httptest.NewRecorder()
+	r1 := teeJSONRequest(t, http.MethodPost, "/v1/tee/attestation", api.TeeAttestationRequest{})
+	srv.InitiateAttestation(w1, r1)
+	var attestResp api.TeeAttestationResponse
+	json.NewDecoder(w1.Body).Decode(&attestResp)
+
+	// Generate keys and encrypt a blob, but use wrong/garbage data that
+	// the enclave can't decrypt.
+	clientKey, _ := crypto.GenerateKeyPair()
+	clientPubBytes := crypto.MarshalPublicKey(clientKey.PublicKey())
+
+	w2 := httptest.NewRecorder()
+	r2 := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
+		EncryptedKek:    []byte("garbage-encrypted-kek-data"),
+		ClientPublicKey: clientPubBytes,
+	})
+	r2 = r2.WithContext(auth.ContextWithClaims(r2.Context(), teeClaims))
+	srv.EstablishTeeSession(w2, r2)
+
+	if w2.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w2.Code, w2.Body.String())
+	}
+}
+
+func TestEstablishTeeSession_AutoEscrows(t *testing.T) {
+	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		return enclave.ExecuteResponse{Status: "succeeded"}, nil
+	}
+	client := local.New(executeFn)
+
+	teeClaims := &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_escrow_test"},
+		EnterpriseID:     "ent_test",
+		Email:            "escrow@example.com",
+		Role:             "owner",
+	}
+
+	connAccounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+	connAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_1", UserID: teeClaims.Subject,
+		Provider: model.ConnectedAccountProviderGmail,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+
+	v := vault.NewMemVault()
+	encMeta := vault.Metadata{Type: "oauth_refresh_token", Labels: map[string]string{vault.EncryptedLabel: "true"}}
+
+	// The KEK we'll transmit.
+	passphrase := "correct horse battery staple"
+	salt, _ := crypto.GenerateSalt()
+	kek, _ := crypto.DeriveKEK([]byte(passphrase), salt)
+
+	// Encrypt a credential with this KEK so escrow can decrypt it.
+	encryptedCred, _ := crypto.Encrypt([]byte(`{"refresh_token":"rt"}`), kek)
+	v.Put(ctx, "connected-accounts/"+teeClaims.Subject+"/gmail", encryptedCred, encMeta)
+
+	srv := &apiServer{
+		enclaveClient:     client,
+		teeState:          newTeeState(),
+		teeCfg:            &config.TEEConfig{Provider: "local"},
+		connectedAccounts: connAccounts,
+		vault:             v,
+		escrowTTL:         7 * 24 * 3600e9, // 7 days
+	}
+
+	sessResp := attestAndEstablishSession(t, srv, teeClaims, kek)
+	if sessResp.EscrowedCount == nil || *sessResp.EscrowedCount != 1 {
+		escrowed := 0
+		if sessResp.EscrowedCount != nil {
+			escrowed = *sessResp.EscrowedCount
+		}
+		t.Fatalf("expected escrowed_count=1, got %d", escrowed)
+	}
 }
 
 func TestInitiateAttestationBadJSON(t *testing.T) {
@@ -388,7 +371,7 @@ func TestInitiateAttestationBadJSON(t *testing.T) {
 	client := local.New(executeFn)
 	s := &apiServer{
 		enclaveClient: client,
-		teeState:      &teeState{},
+		teeState:      newTeeState(),
 		teeCfg:        &config.TEEConfig{Provider: "local"},
 	}
 
@@ -409,58 +392,30 @@ func TestEstablishTeeSessionBadJSON(t *testing.T) {
 	client := local.New(executeFn)
 	s := &apiServer{
 		enclaveClient: client,
-		teeState:      &teeState{},
+		teeState:      newTeeState(),
 		teeCfg:        &config.TEEConfig{Provider: "local"},
+	}
+
+	teeClaims := &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_bad_json"},
+		EnterpriseID:     "ent_test",
+		Email:            "bad@example.com",
+		Role:             "owner",
 	}
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/v1/tee/session", bytes.NewReader([]byte("not json")))
 	r.Header.Set("Content-Type", "application/json")
+	r = r.WithContext(auth.ContextWithClaims(r.Context(), teeClaims))
 	s.EstablishTeeSession(w, r)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestEstablishTeeSessionVerificationFailed(t *testing.T) {
-	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
-		return enclave.ExecuteResponse{Status: "succeeded"}, nil
-	}
-	client := local.New(executeFn)
-	s := &apiServer{
-		enclaveClient:   client,
-		enclaveVerifier: &failVerifier{err: fmt.Errorf("attestation token invalid")},
-		teeState:        &teeState{},
-		teeCfg:          &config.TEEConfig{Provider: "local"},
-	}
-
-	w := httptest.NewRecorder()
-	r := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
-		Nonce:     []byte("nonce"),
-		Token:     "bad-token",
-		PublicKey: []byte("pubkey"),
-	})
-	s.EstablishTeeSession(w, r)
-
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var errResp api.Error
-	json.NewDecoder(w.Body).Decode(&errResp)
-	if errResp.Error.Code != "attestation_failed" {
-		t.Fatalf("expected error code 'attestation_failed', got %q", errResp.Error.Code)
 	}
 }
 
 func TestConnectAccountCallbackTEEBranch(t *testing.T) {
-	// This test exercises the TEE branch in ConnectAccountCallback where
-	// OAuthExchange is called on the enclave client. The local enclave will
-	// attempt a real HTTP call to the token endpoint, which we intercept
-	// with a test server.
-
-	// Create a mock token endpoint.
+	// Create mock token and userinfo endpoints.
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
@@ -471,7 +426,6 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 
-	// Create a mock userinfo endpoint.
 	userinfoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
@@ -484,7 +438,6 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 		return enclave.ExecuteResponse{Status: "succeeded"}, nil
 	}
 	client := local.New(executeFn)
-	verifier := &local.DevVerifier{}
 
 	callbackClaims := &auth.Claims{
 		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_cb_test"},
@@ -501,8 +454,7 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 	srv := &apiServer{
 		log:               slog.Default(),
 		enclaveClient:     client,
-		enclaveVerifier:   verifier,
-		teeState:          &teeState{},
+		teeState:          newTeeState(),
 		teeCfg:            &config.TEEConfig{Provider: "local"},
 		connectedAccounts: connectedAccounts,
 		vault:             v,
@@ -512,59 +464,27 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 		userKeyMaterials:  mem.NewUserKeyMaterialStore(),
 	}
 
-	// Step 1: Attest.
-	w1 := httptest.NewRecorder()
-	r1 := teeJSONRequest(t, http.MethodPost, "/v1/tee/attestation", api.TeeAttestationRequest{})
-	srv.InitiateAttestation(w1, r1)
-	if w1.Code != http.StatusOK {
-		t.Fatalf("attestation: expected 200, got %d: %s", w1.Code, w1.Body.String())
-	}
-	var attestResp api.TeeAttestationResponse
-	json.NewDecoder(w1.Body).Decode(&attestResp)
-
-	// Step 2: Establish session.
-	w2 := httptest.NewRecorder()
-	r2 := teeJSONRequest(t, http.MethodPost, "/v1/tee/session", api.TeeSessionRequest{
-		Nonce:     attestResp.Nonce,
-		Token:     attestResp.Token,
-		PublicKey: attestResp.PublicKey,
-	})
-	srv.EstablishTeeSession(w2, r2)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("session: expected 200, got %d: %s", w2.Code, w2.Body.String())
-	}
-
-	// Step 3: Set passphrase and transmit KEK to enclave.
+	// Step 1: Transmit KEK to enclave using the client-side flow.
 	passphrase := "correct horse battery staple"
-	setReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase",
-		`{"passphrase":"`+passphrase+`"}`, callbackClaims)
-	w3 := httptest.NewRecorder()
-	srv.SetPassphrase(w3, setReq)
-	if w3.Code != http.StatusOK {
-		t.Fatalf("set passphrase: expected 200, got %d: %s", w3.Code, w3.Body.String())
+	salt, _ := crypto.GenerateSalt()
+	kek, _ := crypto.DeriveKEK([]byte(passphrase), salt)
+	_ = attestAndEstablishSession(t, srv, callbackClaims, kek)
+
+	// Step 2: Set passphrase (for vault metadata).
+	verification, _ := crypto.Encrypt(testVerificationConstant, kek)
+	setBody := map[string]string{
+		"salt":             base64.StdEncoding.EncodeToString(salt),
+		"kek_verification": base64.StdEncoding.EncodeToString(verification),
+	}
+	setJSON, _ := json.Marshal(setBody)
+	setReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase", string(setJSON), callbackClaims)
+	wSet := httptest.NewRecorder()
+	srv.SetPassphrase(wSet, setReq)
+	if wSet.Code != http.StatusOK {
+		t.Fatalf("set passphrase: expected 200, got %d: %s", wSet.Code, wSet.Body.String())
 	}
 
-	// Verify passphrase to transmit KEK.
-	verifyReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase/verify",
-		`{"passphrase":"`+passphrase+`"}`, callbackClaims)
-	w3v := httptest.NewRecorder()
-	srv.VerifyPassphrase(w3v, verifyReq)
-	if w3v.Code != http.StatusOK {
-		t.Fatalf("verify passphrase: expected 200, got %d: %s", w3v.Code, w3v.Body.String())
-	}
-
-	// Step 4: Call ConnectAccountCallback in TEE mode.
-	// The local enclave's OAuthExchange will call the real token endpoint,
-	// so we can't easily intercept it in-process. However, the enclave
-	// uses http.DefaultClient. The local client calls exchangeOAuthCode
-	// which uses the TokenEndpoint from the request. We pass our test
-	// server URLs directly via the enclave.OAuthExchangeRequest path.
-	//
-	// Unfortunately, ConnectAccountCallback constructs the OAuthExchangeRequest
-	// internally using s.accountService methods (TokenEndpointFor, etc.) which
-	// return hardcoded Google URLs. The token exchange will fail because it
-	// tries to reach Google. We verify the TEE path is entered by checking
-	// the error is about the OAuth exchange, not about other branches.
+	// Step 3: Call ConnectAccountCallback in TEE mode.
 	state := "test-state"
 	w4 := httptest.NewRecorder()
 	r4 := mcpRequest("GET", "/v1/connect/gmail/callback?code=test-code&state="+state, "", callbackClaims)
@@ -574,9 +494,6 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 		State: state,
 	})
 
-	// The TEE branch should succeed: enclave exchanges the code with our mock
-	// token server, encrypts the token with the user's KEK, and returns
-	// ciphertext. The handler stores it in the vault and creates the account.
 	if w4.Code != http.StatusFound {
 		t.Fatalf("expected 302 redirect, got %d: %s", w4.Code, w4.Body.String())
 	}

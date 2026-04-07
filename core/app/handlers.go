@@ -16,7 +16,6 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/config"
 	connectorpkg "github.com/ALRubinger/aileron/core/connector"
-	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/notify"
 	"github.com/ALRubinger/aileron/core/policy"
@@ -50,7 +49,6 @@ type apiServer struct {
 	users              store.UserStore        // nil when auth is disabled
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
 	userKeyMaterials   store.UserKeyMaterialStore  // nil when auth is disabled
-	kekCache           *auth.KEKSessionCache      // nil when auth is disabled
 	enclaveClient      enclave.Client             // nil when TEE is disabled
 	enclaveVerifier    enclave.Verifier           // nil when TEE is disabled
 	teeCfg             *config.TEEConfig          // nil when TEE is disabled
@@ -748,28 +746,11 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Direct mode: decrypt credential in-process and execute.
+	// Encrypted credentials require TEE — the server never holds the KEK.
 	if vault.IsEncrypted(secret.Metadata) {
-		claims := auth.ClaimsFromContext(ctx)
-		if claims == nil || s.kekCache == nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "encrypted credential requires authenticated session")
-			writeError(w, http.StatusLocked, "vault_locked", "vault is locked — verify your passphrase to unlock")
-			return
-		}
-		kek := s.kekCache.Get(claims.Subject)
-		if kek == nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "no KEK session — passphrase verification required")
-			writeError(w, http.StatusLocked, "vault_locked", "vault is locked — verify your passphrase to unlock")
-			return
-		}
-		defer zeroBytes(kek)
-
-		plaintext, decErr := crypto.Decrypt(secret.Value, kek)
-		if decErr != nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "failed to decrypt credential")
-			writeError(w, http.StatusInternalServerError, "decrypt_error", "failed to decrypt credential")
-			return
-		}
-		secret.Value = plaintext
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "encrypted credential execution requires TEE — configure a TEE provider")
+		writeError(w, http.StatusNotImplemented, "tee_required", "encrypted credential execution requires a TEE provider")
+		return
 	}
 
 	result, err := conn.Execute(ctx, connectorpkg.ExecutionRequest{

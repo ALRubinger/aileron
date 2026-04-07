@@ -371,94 +371,21 @@ func authedExecRequest(grantID string, claims *auth.Claims) *http.Request {
 	return req
 }
 
-func TestRunExecution_EncryptedCredential_NoClaims(t *testing.T) {
+func TestRunExecution_EncryptedCredential_RequiresTEE(t *testing.T) {
 	s := newExecutionServer()
 	ctx := context.Background()
 
 	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
 	s.registry.Register(ctx, conn)
-	s.kekCache = auth.NewKEKSessionCache(time.Hour)
 
 	kek := make([]byte, 32)
 	seedEncryptedGrantAndIntent(ctx, s, "grant_enc1", "int_enc1", kek)
 
 	w := httptest.NewRecorder()
-	// No auth claims on request.
-	s.RunExecution(w, execRequest("grant_enc1"))
-	if w.Code != http.StatusLocked {
-		t.Fatalf("expected 423 Locked, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestRunExecution_EncryptedCredential_NoKEKSession(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-
-	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
-	s.registry.Register(ctx, conn)
-	s.kekCache = auth.NewKEKSessionCache(time.Hour)
-	// KEK cache exists but has no entry for this user.
-
-	kek := make([]byte, 32)
-	seedEncryptedGrantAndIntent(ctx, s, "grant_enc2", "int_enc2", kek)
-
-	w := httptest.NewRecorder()
-	s.RunExecution(w, authedExecRequest("grant_enc2", userAClaims))
-	if w.Code != http.StatusLocked {
-		t.Fatalf("expected 423 Locked, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestRunExecution_EncryptedCredential_DecryptError(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-
-	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
-	s.registry.Register(ctx, conn)
-	s.kekCache = auth.NewKEKSessionCache(time.Hour)
-	// Store a wrong KEK so decryption fails.
-	wrongKEK := make([]byte, 32)
-	wrongKEK[0] = 0xFF
-	s.kekCache.Set(userAClaims.Subject, wrongKEK)
-
-	correctKEK := make([]byte, 32)
-	seedEncryptedGrantAndIntent(ctx, s, "grant_enc3", "int_enc3", correctKEK)
-
-	w := httptest.NewRecorder()
-	s.RunExecution(w, authedExecRequest("grant_enc3", userAClaims))
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestRunExecution_EncryptedCredential_Success(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-
-	conn := &stubConnector{
-		result: connectorpkg.ExecutionResult{
-			Status:     connectorpkg.ExecutionStatusSucceeded,
-			Output:     map[string]any{"sha": "abc"},
-			ReceiptRef: "receipt_enc",
-		},
-	}
-	s.registry.Register(ctx, conn)
-	s.kekCache = auth.NewKEKSessionCache(time.Hour)
-
-	kek := make([]byte, 32)
-	s.kekCache.Set(userAClaims.Subject, kek)
-	seedEncryptedGrantAndIntent(ctx, s, "grant_enc4", "int_enc4", kek)
-
-	w := httptest.NewRecorder()
-	s.RunExecution(w, authedExecRequest("grant_enc4", userAClaims))
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var resp api.ExecutionRunResponse
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.Status != api.Accepted {
-		t.Errorf("expected status 'accepted', got %s", resp.Status)
+	s.RunExecution(w, authedExecRequest("grant_enc1", userAClaims))
+	// Encrypted credentials now require TEE — server returns 501.
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -494,20 +421,20 @@ func TestRunExecution_TEEMode_WithEscrow(t *testing.T) {
 	}
 }
 
-func TestRunExecution_EncryptedCredential_NoKEKCache(t *testing.T) {
+func TestRunExecution_EncryptedCredential_NoTEE(t *testing.T) {
 	s := newExecutionServer()
 	ctx := context.Background()
 
 	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
 	s.registry.Register(ctx, conn)
-	// kekCache is nil (auth/TEE not configured).
+	// No TEE configured — encrypted credential execution returns 501.
 
 	kek := make([]byte, 32)
 	seedEncryptedGrantAndIntent(ctx, s, "grant_enc5", "int_enc5", kek)
 
 	w := httptest.NewRecorder()
 	s.RunExecution(w, authedExecRequest("grant_enc5", userAClaims))
-	if w.Code != http.StatusLocked {
-		t.Fatalf("expected 423 Locked, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d: %s", w.Code, w.Body.String())
 	}
 }

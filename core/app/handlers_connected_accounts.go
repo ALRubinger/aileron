@@ -214,15 +214,11 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Direct mode: exchange code on the host and optionally encrypt with KEK.
+	// Direct mode: exchange code on the host.
+	// Note: KEK-based vault encryption requires TEE mode. In direct mode,
+	// credentials are stored unencrypted (or not at all if vault encryption
+	// is required by policy).
 	svc := s.accountService
-	if s.kekCache != nil {
-		kek := s.kekCache.Get(userID)
-		if kek != nil {
-			svc = svc.WithVault(vault.NewUserScopedVault(s.vault, kek))
-			defer zeroBytes(kek)
-		}
-	}
 
 	_, err = svc.HandleCallback(r.Context(), provider, account.CallbackRequest{
 		Code:        params.Code,

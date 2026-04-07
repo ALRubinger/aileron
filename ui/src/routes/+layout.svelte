@@ -8,8 +8,7 @@
 	import { initAuth, isAuthenticated, getUser, logout } from '$lib/auth.svelte.js';
 	import { initPosthog, posthog } from '$lib/posthog.js';
 	import PassphraseModal from '$lib/components/PassphraseModal.svelte';
-	import { sessionExpiresAt, setSessionExpiresAt } from '$lib/vault.svelte.js';
-	import { getPassphraseSession } from '$lib/api';
+	import { sessionExpiresAt } from '$lib/vault.svelte.js';
 
 	let { children } = $props();
 	let mounted = $state(false);
@@ -40,19 +39,9 @@
 		initPosthog();
 		mounted = true;
 
-		// Poll vault session status.
+		// Update vault timer display from client-side session tracking.
 		const timer = setInterval(updateVaultTimer, 30000);
 		updateVaultTimer();
-
-		// Fetch initial session status.
-		getPassphraseSession()
-			.then((resp: any) => {
-				if (resp?.active && resp.expires_at) {
-					setSessionExpiresAt(new Date(resp.expires_at));
-					updateVaultTimer();
-				}
-			})
-			.catch(() => {});
 
 		return () => clearInterval(timer);
 	});

@@ -134,13 +134,40 @@ export async function updateCurrentEnterprise(data: {
 
 // --- Vault / Passphrase ---
 
-export async function verifyPassphrase(passphrase: string) {
-	return apiFetch('/v1/users/me/passphrase/verify', {
+export async function getPassphraseSalt() {
+	return apiFetch('/v1/users/me/passphrase/salt');
+}
+
+export async function getPassphraseVerification() {
+	return apiFetch('/v1/users/me/passphrase/verification');
+}
+
+export async function setPassphrase(data: { salt: string; kek_verification: string }) {
+	return apiFetch('/v1/users/me/passphrase', {
 		method: 'POST',
-		body: JSON.stringify({ passphrase })
+		body: JSON.stringify(data)
 	});
 }
 
-export async function getPassphraseSession() {
-	return apiFetch('/v1/users/me/passphrase/session');
+// --- TEE ---
+
+export async function initiateAttestation(audience?: string) {
+	return apiFetch('/v1/tee/attestation', {
+		method: 'POST',
+		body: JSON.stringify({ audience })
+	});
+}
+
+export async function establishTeeSession(data: {
+	encrypted_kek: string;
+	client_public_key: string;
+}) {
+	return apiFetch('/v1/tee/session', {
+		method: 'POST',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function getTeeStatus() {
+	return apiFetch('/v1/tee/status');
 }
