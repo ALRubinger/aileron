@@ -541,6 +541,182 @@ func TestExecuteWithExpiredEscrow(t *testing.T) {
 	execResp.Body.Close()
 }
 
+func TestTransmitKEKEndpoint(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+}
+
+func TestTransmitKEKWithoutSession(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/kek", enclave.TransmitKEKRequest{
+		UserID:       "user-1",
+		EncryptedKEK: []byte("data"),
+	})
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestTransmitKEKBadDecryption(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	resp := postJSON(t, server, "/kek", enclave.TransmitKEKRequest{
+		UserID:       "user-1",
+		EncryptedKEK: []byte("not-encrypted"),
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestTransmitKEKBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/kek", "application/json", bytes.NewReader([]byte("bad")))
+	if err != nil {
+		t.Fatalf("POST /kek: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestOAuthExchangeEndpoint(t *testing.T) {
+	// Mock token endpoint.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"access_token":  "at-123",
+			"refresh_token": "rt-456",
+			"token_type":    "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+
+	// Mock userinfo endpoint.
+	userinfoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"email": "test@example.com"})
+	}))
+	defer userinfoServer.Close()
+
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	resp := postJSON(t, server, "/oauth/exchange", enclave.OAuthExchangeRequest{
+		UserID:           "user-1",
+		Provider:         "test",
+		Code:             "auth-code",
+		RedirectURI:      "http://localhost/cb",
+		ClientID:         "cid",
+		ClientSecret:     "csec",
+		TokenEndpoint:    tokenServer.URL,
+		UserInfoEndpoint: userinfoServer.URL,
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	result := decodeResp[enclave.OAuthExchangeResponse](t, resp)
+	if result.Email != "test@example.com" {
+		t.Fatalf("expected test@example.com, got %q", result.Email)
+	}
+	if result.TokenType != "Bearer" {
+		t.Fatalf("expected Bearer, got %q", result.TokenType)
+	}
+	if len(result.EncryptedToken) == 0 {
+		t.Fatal("expected non-empty encrypted token")
+	}
+
+	// Verify the token can be decrypted with the user's KEK.
+	tokenJSON, err := crypto.Decrypt(result.EncryptedToken, userKEK)
+	if err != nil {
+		t.Fatalf("decrypting token: %v", err)
+	}
+	var tokenData map[string]string
+	if err := json.Unmarshal(tokenJSON, &tokenData); err != nil {
+		t.Fatalf("unmarshaling token: %v", err)
+	}
+	if tokenData["refresh_token"] != "rt-456" {
+		t.Fatalf("expected rt-456, got %q", tokenData["refresh_token"])
+	}
+}
+
+func TestOAuthExchangeWithoutKEK(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	resp := postJSON(t, server, "/oauth/exchange", enclave.OAuthExchangeRequest{
+		UserID: "no-kek",
+		Code:   "code",
+	})
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestOAuthExchangeTokenEndpointError(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer tokenServer.Close()
+
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	resp := postJSON(t, server, "/oauth/exchange", enclave.OAuthExchangeRequest{
+		UserID:        "user-1",
+		Code:          "bad-code",
+		TokenEndpoint: tokenServer.URL,
+	})
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestOAuthExchangeBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/oauth/exchange", "application/json", bytes.NewReader([]byte("bad")))
+	if err != nil {
+		t.Fatalf("POST /oauth/exchange: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
 func TestResolveConnectorID(t *testing.T) {
 	tests := []struct {
 		input      string

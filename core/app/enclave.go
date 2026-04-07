@@ -7,7 +7,6 @@ import (
 
 	"github.com/ALRubinger/aileron/core/config"
 	"github.com/ALRubinger/aileron/core/connector"
-	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/enclave"
 	"github.com/ALRubinger/aileron/enclave/gcs"
 	"github.com/ALRubinger/aileron/enclave/local"
@@ -87,11 +86,4 @@ func buildLocalExecuteFn(registry *connector.Registry) local.ExecuteFn {
 			Error:      result.Error,
 		}, nil
 	}
-}
-
-// reEncryptForSession re-encrypts a vault secret with the ECDH session key
-// so it can be transmitted to the enclave. The credential is first decrypted
-// with the user's KEK (if encrypted), then re-encrypted with the session key.
-func reEncryptForSession(ciphertext, sessionKey []byte) ([]byte, error) {
-	return crypto.Encrypt(ciphertext, sessionKey)
 }
