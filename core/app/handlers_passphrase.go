@@ -155,10 +155,10 @@ func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
 		salt := material.Salt
 		resp.Salt = &salt
 
-		// When TEE is active, transmit the KEK to the enclave (encrypted
-		// with the session key) and do NOT cache it on the host. The
-		// enclave holds the KEK in hardware-isolated memory.
-		if s.enclaveClient != nil {
+		// When TEE is active and a session is established, transmit the
+		// KEK to the enclave (encrypted with the session key) so the
+		// enclave holds it in hardware-isolated memory.
+		if s.enclaveClient != nil && s.getSessionKey() != nil {
 			encrypted, encErr := crypto.Encrypt(kek, s.getSessionKey())
 			if encErr != nil {
 				writeError(w, http.StatusInternalServerError, "internal", "failed to encrypt KEK for enclave")
@@ -172,8 +172,12 @@ func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "enclave_error", "failed to transmit KEK to enclave: "+transmitErr.Error())
 				return
 			}
-		} else if s.kekCache != nil {
-			// Direct mode (no TEE): cache the KEK locally.
+		}
+		// Cache KEK locally as fallback. When TEE session is active,
+		// execution uses the enclave's copy; the local cache serves
+		// as fallback for direct-mode execution or when the TEE
+		// session has not yet been established.
+		if s.kekCache != nil {
 			s.kekCache.Set(userID, kek)
 		}
 	}
