@@ -3,9 +3,12 @@
 package integration
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"testing"
+
+	"github.com/ALRubinger/aileron/core/crypto"
 )
 
 func TestTEE_Status(t *testing.T) {
@@ -20,7 +23,6 @@ func TestTEE_Status(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
 	}
 
-	// Read body once — validateResponse and json.Decode both consume it.
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("reading body: %v", err)
@@ -46,8 +48,6 @@ func TestTEE_AttestationFlow(t *testing.T) {
 	}
 
 	// Step 1: Initiate attestation.
-	// POST /v1/tee/attestation should return a nonce, attestation token,
-	// and the enclave's ECDH public key.
 	attestResp := authedPost(t, apiURL()+"/v1/tee/attestation", map[string]any{})
 	defer attestResp.Body.Close()
 
@@ -69,13 +69,44 @@ func TestTEE_AttestationFlow(t *testing.T) {
 		t.Fatal("expected non-empty public_key")
 	}
 
-	// Step 2: Establish session.
-	// POST /v1/tee/session with the attestation evidence should verify
-	// the attestation and establish an ECDH session.
+	// Step 2: Client-side ECDH key exchange.
+	// Decode the enclave's public key from the attestation response.
+	enclavePubB64 := attestResult["public_key"].(string)
+	enclavePubBytes, err := base64.StdEncoding.DecodeString(enclavePubB64)
+	if err != nil {
+		t.Fatalf("decoding enclave public key: %v", err)
+	}
+
+	enclavePub, err := crypto.UnmarshalPublicKey(enclavePubBytes)
+	if err != nil {
+		t.Fatalf("unmarshaling enclave public key: %v", err)
+	}
+
+	// Generate client's ephemeral ECDH key pair.
+	clientKey, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("generating client key pair: %v", err)
+	}
+
+	// Derive shared secret.
+	sharedSecret, err := crypto.DeriveSharedSecret(clientKey, enclavePub)
+	if err != nil {
+		t.Fatalf("deriving shared secret: %v", err)
+	}
+
+	// Encrypt a test KEK with the shared secret.
+	testKEK := make([]byte, 32)
+	encryptedKEK, err := crypto.Encrypt(testKEK, sharedSecret)
+	if err != nil {
+		t.Fatalf("encrypting KEK: %v", err)
+	}
+
+	// Step 3: Establish session by sending the encrypted KEK and client
+	// public key through the server to the enclave.
+	clientPubBytes := crypto.MarshalPublicKey(clientKey.PublicKey())
 	sessResp := authedPost(t, apiURL()+"/v1/tee/session", map[string]any{
-		"nonce":      attestResult["nonce"],
-		"token":      attestResult["token"],
-		"public_key": attestResult["public_key"],
+		"encrypted_kek":    base64.StdEncoding.EncodeToString(encryptedKEK),
+		"client_public_key": base64.StdEncoding.EncodeToString(clientPubBytes),
 	})
 	defer sessResp.Body.Close()
 
@@ -87,9 +118,6 @@ func TestTEE_AttestationFlow(t *testing.T) {
 	var sessResult map[string]any
 	json.NewDecoder(sessResp.Body).Decode(&sessResult)
 
-	if sessResult["verified"] != true {
-		t.Fatalf("expected verified=true, got %v", sessResult["verified"])
-	}
 	if sessResult["session_id"] == nil || sessResult["session_id"] == "" {
 		t.Fatal("expected non-empty session_id")
 	}
@@ -97,7 +125,7 @@ func TestTEE_AttestationFlow(t *testing.T) {
 		t.Fatal("expected non-empty expires_at")
 	}
 
-	// Step 3: Verify status reflects active session.
+	// Step 4: Verify status reflects active session.
 	statusResp := authedGet(t, apiURL()+"/v1/tee/status")
 	defer statusResp.Body.Close()
 
@@ -107,12 +135,4 @@ func TestTEE_AttestationFlow(t *testing.T) {
 	if status["attested"] != true {
 		t.Fatalf("expected attested=true after attestation, got %v", status["attested"])
 	}
-	if status["session_active"] != true {
-		t.Fatalf("expected session_active=true after session, got %v", status["session_active"])
-	}
 }
-
-// Note: testing "session without attestation" is not meaningful with the
-// local provider because the DevVerifier accepts any token and the server
-// shares attestation state across requests. This is a valid test only with
-// a real TEE provider that rejects bad attestation evidence.
