@@ -20,6 +20,7 @@ flags:
       - core/
       - enclave/
       - cmd/aileron-enclave/
+      - cmd/aileron-mcp/
       - sdk/go/
     carryforward: false
   integration:
@@ -27,6 +28,7 @@ flags:
       - core/
       - enclave/
       - cmd/aileron-enclave/
+      - cmd/aileron-mcp/
     carryforward: false
 
 ignore:
