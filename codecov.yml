@@ -23,12 +23,13 @@ flags:
   integration:
     paths:
       - core/
-    carryforward: true
+    carryforward: false
 
 ignore:
-  - "core/api/gen/**"   # generated code (oapi-codegen) — DO NOT EDIT
-  - "ui/**"             # SvelteKit UI — needs its own test framework
-  - "docs/**"           # documentation and ADRs
+  - "core/api/gen/**"       # generated code (oapi-codegen) — DO NOT EDIT
+  - "core/store/postgres/**" # requires live PostgreSQL — covered by integration tests
+  - "ui/**"                  # SvelteKit UI — needs its own test framework
+  - "docs/**"                # documentation and ADRs
 
 comment:
   layout: "condensed_header, diff, flags, components"
