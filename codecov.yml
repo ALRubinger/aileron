@@ -18,11 +18,15 @@ flags:
   unit:
     paths:
       - core/
+      - enclave/
+      - cmd/aileron-enclave/
       - sdk/go/
     carryforward: false
   integration:
     paths:
       - core/
+      - enclave/
+      - cmd/aileron-enclave/
     carryforward: false
 
 ignore:
