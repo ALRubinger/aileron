@@ -133,6 +133,58 @@ func TestClientEscrowStore(t *testing.T) {
 	}
 }
 
+func TestClientTransmitKEK(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/kek" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(enclave.TransmitKEKResponse{Stored: true})
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	resp, err := c.TransmitKEK(context.Background(), enclave.TransmitKEKRequest{
+		UserID:       "user-1",
+		EncryptedKEK: []byte("encrypted-kek"),
+	})
+	if err != nil {
+		t.Fatalf("TransmitKEK: %v", err)
+	}
+	if !resp.Stored {
+		t.Fatal("expected Stored=true")
+	}
+}
+
+func TestClientOAuthExchange(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/exchange" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(enclave.OAuthExchangeResponse{
+			EncryptedToken: []byte("encrypted-token"),
+			Email:          "user@example.com",
+			TokenType:      "Bearer",
+		})
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	resp, err := c.OAuthExchange(context.Background(), enclave.OAuthExchangeRequest{
+		UserID:   "user-1",
+		Provider: "google",
+		Code:     "auth-code",
+	})
+	if err != nil {
+		t.Fatalf("OAuthExchange: %v", err)
+	}
+	if resp.Email != "user@example.com" {
+		t.Fatalf("expected user@example.com, got %q", resp.Email)
+	}
+	if resp.TokenType != "Bearer" {
+		t.Fatalf("expected Bearer, got %q", resp.TokenType)
+	}
+}
+
 func TestClientEscrowRevoke(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/escrow/revoke" {
