@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
@@ -59,6 +60,8 @@ type apiServer struct {
 	enclaveVerifier    enclave.Verifier           // nil when TEE is disabled
 	teeCfg             *config.TEEConfig          // nil when TEE is disabled
 	teeState           *teeState                  // nil when TEE is disabled
+	escrowTTL          time.Duration              // TTL for auto-escrowed credentials
+	escrowIndex        sync.Map                   // vault path (string) -> escrow ID (string)
 	newID              func() string
 }
 
@@ -711,7 +714,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		if claims := auth.ClaimsFromContext(ctx); claims != nil {
 			execUserID = claims.Subject
 		}
-		enclaveResp, enclaveErr := s.enclaveClient.Execute(ctx, enclave.ExecuteRequest{
+		execReq := enclave.ExecuteRequest{
 			RequestID:           execID,
 			UserID:              execUserID,
 			GrantID:             grant.GrantId,
@@ -721,7 +724,15 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 			Parameters:          params,
 			EncryptedCredential: secret.Value,
 			CredentialType:      secret.Metadata.Type,
-		})
+		}
+		// If credential is escrowed in TEE memory, use the escrow ID
+		// instead of sending the encrypted credential. This allows
+		// execution without an active KEK session.
+		if escrowID, ok := s.escrowIndex.Load(vaultPath); ok {
+			execReq.EscrowID = escrowID.(string)
+			execReq.EncryptedCredential = nil
+		}
+		enclaveResp, enclaveErr := s.enclaveClient.Execute(ctx, execReq)
 		if enclaveErr != nil {
 			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", enclaveErr.Error())
 			writeError(w, http.StatusInternalServerError, "enclave_error", enclaveErr.Error())

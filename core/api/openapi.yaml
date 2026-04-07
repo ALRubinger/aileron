@@ -397,6 +397,24 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/users/me/passphrase/session:
+    get:
+      tags: [Users]
+      summary: Get KEK session status
+      description: |
+        Returns the current KEK session status for the authenticated user,
+        including whether the vault is unlocked and when the session expires.
+      operationId: getPassphraseSession
+      responses:
+        "200":
+          description: KEK session status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KEKSessionStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/users/me/passphrase/salt:
     get:
       tags: [Users]
@@ -3393,6 +3411,25 @@ components:
           type: string
           format: byte
           description: Base64-encoded Argon2id salt (returned when valid)
+        session_expires_at:
+          type: string
+          format: date-time
+          description: When the KEK session expires (returned when valid)
+        escrowed_count:
+          type: integer
+          description: Number of credentials auto-escrowed into TEE (returned when valid and TEE active)
+
+    KEKSessionStatus:
+      type: object
+      required: [active]
+      properties:
+        active:
+          type: boolean
+          description: Whether the user has an active KEK session
+        expires_at:
+          type: string
+          format: date-time
+          description: When the KEK session expires (omitted when not active)
 
     PassphraseSaltResponse:
       type: object

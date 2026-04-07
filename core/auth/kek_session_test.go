@@ -175,3 +175,55 @@ func TestKEKFromContext_Empty(t *testing.T) {
 		t.Fatal("expected nil from empty context")
 	}
 }
+
+func TestKEKSessionCache_ExpiresAt(t *testing.T) {
+	now := time.Now()
+	cache := NewKEKSessionCache(5 * time.Minute)
+	cache.now = func() time.Time { return now }
+
+	kek := []byte("0123456789abcdef0123456789abcdef")
+	cache.Set("ses_1", kek)
+
+	// Should return the expected expiry.
+	expiresAt := cache.ExpiresAt("ses_1")
+	if expiresAt == nil {
+		t.Fatal("expected non-nil expiry")
+	}
+	expected := now.Add(5 * time.Minute)
+	if !expiresAt.Equal(expected) {
+		t.Fatalf("expiry = %v, want %v", *expiresAt, expected)
+	}
+}
+
+func TestKEKSessionCache_ExpiresAt_NotFound(t *testing.T) {
+	cache := NewKEKSessionCache(5 * time.Minute)
+	if cache.ExpiresAt("nonexistent") != nil {
+		t.Fatal("expected nil for missing session")
+	}
+}
+
+func TestKEKSessionCache_ExpiresAt_Expired(t *testing.T) {
+	now := time.Now()
+	cache := NewKEKSessionCache(1 * time.Minute)
+	cache.now = func() time.Time { return now }
+
+	cache.Set("ses_1", []byte("0123456789abcdef0123456789abcdef"))
+
+	// Advance past TTL.
+	cache.now = func() time.Time { return now.Add(2 * time.Minute) }
+
+	if cache.ExpiresAt("ses_1") != nil {
+		t.Fatal("expected nil for expired session")
+	}
+	// Should be evicted.
+	if cache.Len() != 0 {
+		t.Fatalf("expected 0 entries after expired ExpiresAt, got %d", cache.Len())
+	}
+}
+
+func TestKEKSessionCache_TTL(t *testing.T) {
+	cache := NewKEKSessionCache(42 * time.Minute)
+	if cache.TTL() != 42*time.Minute {
+		t.Fatalf("TTL = %v, want 42m", cache.TTL())
+	}
+}

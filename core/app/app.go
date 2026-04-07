@@ -173,6 +173,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.userAuthProviders = userAuthProviderStore
 		server.userKeyMaterials = userKeyMaterialStore
 		server.kekCache = kekCache
+		server.escrowTTL = authCfg.EscrowTTL()
 
 		tokenIssuer := auth.NewTokenIssuer(
 			[]byte(authCfg.JWTSigningKey),

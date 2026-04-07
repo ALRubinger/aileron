@@ -614,3 +614,49 @@ func TestClose(t *testing.T) {
 		t.Fatalf("expected ErrNoKEK after close, got %v", err)
 	}
 }
+
+func TestWithSessionTTL(t *testing.T) {
+	c := New(nil, WithSessionTTL(10*time.Minute))
+	defer c.Close()
+
+	if c.sessionTTL != 10*time.Minute {
+		t.Fatalf("sessionTTL = %v, want 10m", c.sessionTTL)
+	}
+
+	// Verify it's used in EstablishSession.
+	sessionKey := establishSession(t, c)
+	if sessionKey == nil {
+		t.Fatal("expected session to be established")
+	}
+
+	// Session expiry should be ~10 minutes from now, not 24h.
+	c.mu.Lock()
+	expiresAt := c.expiresAt
+	c.mu.Unlock()
+
+	remaining := time.Until(expiresAt)
+	if remaining > 11*time.Minute || remaining < 9*time.Minute {
+		t.Fatalf("session expires in %v, expected ~10m", remaining)
+	}
+}
+
+func TestWithKEKTTL(t *testing.T) {
+	c := New(nil, WithKEKTTL(2*time.Minute))
+	defer c.Close()
+
+	if c.keks.ttl != 2*time.Minute {
+		t.Fatalf("keks.ttl = %v, want 2m", c.keks.ttl)
+	}
+}
+
+func TestNewDefaultTTLs(t *testing.T) {
+	c := New(nil)
+	defer c.Close()
+
+	if c.sessionTTL != 24*time.Hour {
+		t.Fatalf("default sessionTTL = %v, want 24h", c.sessionTTL)
+	}
+	if c.keks.ttl != 24*time.Hour {
+		t.Fatalf("default keks.ttl = %v, want 24h", c.keks.ttl)
+	}
+}

@@ -196,8 +196,8 @@ func TestLoadAuthConfig_ResendDisabled(t *testing.T) {
 func TestKEKSessionTTL_Default(t *testing.T) {
 	t.Setenv("AILERON_KEK_SESSION_TTL", "")
 	cfg := &AuthConfig{}
-	if got := cfg.KEKSessionTTL(); got != 30*time.Minute {
-		t.Errorf("KEKSessionTTL = %v, want 30m", got)
+	if got := cfg.KEKSessionTTL(); got != 24*time.Hour {
+		t.Errorf("KEKSessionTTL = %v, want 24h", got)
 	}
 }
 
@@ -212,8 +212,32 @@ func TestKEKSessionTTL_Custom(t *testing.T) {
 func TestKEKSessionTTL_Invalid(t *testing.T) {
 	t.Setenv("AILERON_KEK_SESSION_TTL", "not-a-duration")
 	cfg := &AuthConfig{}
-	if got := cfg.KEKSessionTTL(); got != 30*time.Minute {
-		t.Errorf("KEKSessionTTL = %v, want 30m (fallback)", got)
+	if got := cfg.KEKSessionTTL(); got != 24*time.Hour {
+		t.Errorf("KEKSessionTTL = %v, want 24h (fallback)", got)
+	}
+}
+
+func TestEscrowTTL_Default(t *testing.T) {
+	t.Setenv("AILERON_ESCROW_TTL", "")
+	cfg := &AuthConfig{}
+	if got := cfg.EscrowTTL(); got != 7*24*time.Hour {
+		t.Errorf("EscrowTTL = %v, want 168h", got)
+	}
+}
+
+func TestEscrowTTL_Custom(t *testing.T) {
+	t.Setenv("AILERON_ESCROW_TTL", "48h")
+	cfg := &AuthConfig{}
+	if got := cfg.EscrowTTL(); got != 48*time.Hour {
+		t.Errorf("EscrowTTL = %v, want 48h", got)
+	}
+}
+
+func TestEscrowTTL_Invalid(t *testing.T) {
+	t.Setenv("AILERON_ESCROW_TTL", "not-a-duration")
+	cfg := &AuthConfig{}
+	if got := cfg.EscrowTTL(); got != 7*24*time.Hour {
+		t.Errorf("EscrowTTL = %v, want 168h (fallback)", got)
 	}
 }
 
