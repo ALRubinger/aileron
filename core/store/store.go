@@ -121,38 +121,6 @@ type FundingSourceFilter struct {
 	PageToken   string
 }
 
-// MCPServerStore persists and retrieves MCP server configurations.
-type MCPServerStore interface {
-	Create(ctx context.Context, server api.MCPServerConfig) error
-	Get(ctx context.Context, serverID string) (api.MCPServerConfig, error)
-	List(ctx context.Context, filter MCPServerFilter) ([]api.MCPServerConfig, error)
-	Update(ctx context.Context, server api.MCPServerConfig) error
-	Delete(ctx context.Context, serverID string) error
-}
-
-// MCPServerFilter scopes an MCP server list query.
-type MCPServerFilter struct {
-	UserID   string
-	Status   *api.MCPServerConfigStatus
-	PageSize int
-}
-
-// EnterpriseMCPServerStore persists and retrieves enterprise-level MCP server configurations.
-type EnterpriseMCPServerStore interface {
-	Create(ctx context.Context, server api.EnterpriseMCPServer) error
-	Get(ctx context.Context, serverID string) (api.EnterpriseMCPServer, error)
-	List(ctx context.Context, filter EnterpriseMCPServerFilter) ([]api.EnterpriseMCPServer, error)
-	Update(ctx context.Context, server api.EnterpriseMCPServer) error
-	Delete(ctx context.Context, serverID string) error
-}
-
-// EnterpriseMCPServerFilter scopes an enterprise MCP server list query.
-type EnterpriseMCPServerFilter struct {
-	EnterpriseID string
-	AutoEnabled  *bool
-	PageSize     int
-}
-
 // EnterpriseStore persists and retrieves enterprises.
 type EnterpriseStore interface {
 	Create(ctx context.Context, enterprise model.Enterprise) error

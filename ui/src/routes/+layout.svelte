@@ -97,7 +97,6 @@
 		<a href="/approvals" class="no-underline text-muted-foreground text-sm">Approvals</a>
 		<a href="/traces" class="no-underline text-muted-foreground text-sm">Traces</a>
 		<a href="/policies" class="no-underline text-muted-foreground text-sm">Policies</a>
-		<a href="/marketplace" class="no-underline text-muted-foreground text-sm">Protected Actions</a>
 
 		{#if vaultTimeRemaining}
 			<span class="text-xs text-muted-foreground flex items-center gap-1">

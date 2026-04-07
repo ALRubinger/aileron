@@ -9,20 +9,6 @@ export function approvalStatusColor(status: string): string {
 	}
 }
 
-/** Server status colors */
-export function serverStatusColor(status: string): string {
-	switch (status) {
-		case 'running': return 'var(--color-status-green)';
-		case 'error': return 'var(--color-status-red)';
-		default: return 'var(--color-muted-foreground)';
-	}
-}
-
-/** Server mode colors */
-export function modeColor(mode: string): string {
-	return mode === 'remote' ? 'var(--color-status-orange)' : 'var(--color-status-blue)';
-}
-
 /** Risk level colors */
 export function riskColor(level: string): string {
 	switch (level) {

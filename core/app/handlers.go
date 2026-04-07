@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
 
@@ -21,7 +20,6 @@ import (
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/notify"
 	"github.com/ALRubinger/aileron/core/policy"
-	"github.com/ALRubinger/aileron/core/registry"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -43,9 +41,6 @@ type apiServer struct {
 	grants         *mem.GrantStore
 	executions     *mem.ExecutionStore
 	connectors     *mem.ConnectorStore
-	mcpServers           store.MCPServerStore
-	enterpriseMCPServers store.EnterpriseMCPServerStore
-	registryClient       *registry.Client
 	credentials    *mem.CredentialStore
 	fundingSources *mem.FundingSourceStore
 	traces         *mem.TraceStore
@@ -1285,731 +1280,60 @@ func (s *apiServer) requireAuth(w http.ResponseWriter, r *http.Request) (userID,
 	return "", "", false
 }
 
+// --- Removed endpoints (stubs satisfy ServerInterface until server.gen.go is regenerated) ---
+
 func (s *apiServer) ListMCPServers(w http.ResponseWriter, r *http.Request) {
-	userID, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	ctx := r.Context()
-
-	// Fetch user's personal servers.
-	filter := store.MCPServerFilter{}
-	if userID != "" {
-		filter.UserID = userID
-	}
-	servers, err := s.mcpServers.List(ctx, filter)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	// Tag personal servers with source.
-	personal := api.MCPServerConfigSourcePersonal
-	for i := range servers {
-		servers[i].Source = &personal
-	}
-
-	// Merge enterprise auto-enabled servers.
-	if enterpriseID != "" {
-		autoEnabled := true
-		entServers, err := s.enterpriseMCPServers.List(ctx, store.EnterpriseMCPServerFilter{
-			EnterpriseID: enterpriseID,
-			AutoEnabled:  &autoEnabled,
-		})
-		if err == nil {
-			enterprise := api.MCPServerConfigSourceEnterprise
-			for _, es := range entServers {
-				servers = append(servers, enterpriseMCPToUserView(es, enterprise))
-			}
-		}
-	}
-
-	if servers == nil {
-		servers = []api.MCPServerConfig{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": servers})
-}
-
-// enterpriseMCPToUserView converts an EnterpriseMCPServer to MCPServerConfig for the
-// merged user server list.
-func enterpriseMCPToUserView(es api.EnterpriseMCPServer, source api.MCPServerConfigSource) api.MCPServerConfig {
-	cfg := api.MCPServerConfig{
-		Id:          es.Id,
-		Name:        es.Name,
-		Description: es.Description,
-		Command:     es.Command,
-		Env:         es.Env,
-		Version:     es.Version,
-		RegistryId:  es.RegistryId,
-		Source:      &source,
-		CreatedAt:   es.CreatedAt,
-		UpdatedAt:   es.UpdatedAt,
-	}
-	if es.Mode != nil {
-		mode := api.MCPServerConfigMode(*es.Mode)
-		cfg.Mode = &mode
-	}
-	if es.PolicyMapping != nil {
-		cfg.PolicyMapping = &struct {
-			ToolPrefix *string `json:"tool_prefix,omitempty"`
-		}{
-			ToolPrefix: es.PolicyMapping.ToolPrefix,
-		}
-	}
-	stopped := api.MCPServerConfigStatusStopped
-	cfg.Status = &stopped
-	return cfg
+	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
 }
 
 func (s *apiServer) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
-	userID, _, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	var req api.MCPServerConfig
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	id := "mcp_" + s.newID()
-	req.Id = &id
-	if userID != "" {
-		req.UserId = &userID
-	}
-	now := time.Now().UTC()
-	req.CreatedAt = &now
-	stopped := api.MCPServerConfigStatusStopped
-	req.Status = &stopped
-	personal := api.MCPServerConfigSourcePersonal
-	req.Source = &personal
-	if req.Mode == nil {
-		local := api.MCPServerConfigModeLocal
-		req.Mode = &local
-	}
-
-	if err := s.mcpServers.Create(r.Context(), req); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, req)
+	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
 }
 
 func (s *apiServer) GetMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	userID, _, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	srv, err := s.mcpServers.Get(r.Context(), id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	// Verify ownership (skip when auth is disabled).
-	if userID != "" && srv.UserId != nil && *srv.UserId != userID {
-		writeError(w, http.StatusNotFound, "not_found", "mcp_server not found: "+id)
-		return
-	}
-
-	personal := api.MCPServerConfigSourcePersonal
-	srv.Source = &personal
-	writeJSON(w, http.StatusOK, srv)
+	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
 }
 
 func (s *apiServer) UpdateMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	userID, _, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	var req api.MCPServerConfig
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	existing, err := s.mcpServers.Get(r.Context(), id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	// Verify ownership.
-	if userID != "" && existing.UserId != nil && *existing.UserId != userID {
-		writeError(w, http.StatusNotFound, "not_found", "mcp_server not found: "+id)
-		return
-	}
-
-	// Preserve read-only fields from existing record.
-	req.Id = existing.Id
-	req.UserId = existing.UserId
-	req.Source = existing.Source
-	req.CreatedAt = existing.CreatedAt
-	req.Status = existing.Status
-	now := time.Now().UTC()
-	req.UpdatedAt = &now
-
-	if err := s.mcpServers.Update(r.Context(), req); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, req)
+	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
 }
 
 func (s *apiServer) DeleteMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	userID, _, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	existing, err := s.mcpServers.Get(r.Context(), id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	// Verify ownership.
-	if userID != "" && existing.UserId != nil && *existing.UserId != userID {
-		writeError(w, http.StatusNotFound, "not_found", "mcp_server not found: "+id)
-		return
-	}
-
-	if err := s.mcpServers.Delete(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
 }
-
-// --- MCP Server credentials ---
 
 func (s *apiServer) SetMCPServerCredential(w http.ResponseWriter, r *http.Request, id string) {
-	userID, _, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	var req api.SetCredentialRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	ctx := r.Context()
-
-	// Verify server exists and user owns it.
-	srv, err := s.mcpServers.Get(ctx, id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	if userID != "" && srv.UserId != nil && *srv.UserId != userID {
-		writeError(w, http.StatusNotFound, "not_found", "mcp_server not found: "+id)
-		return
-	}
-
-	// Store secret in vault.
-	vaultPath := "mcp-servers/" + id + "/" + req.EnvVarName
-	s.vault.Put(ctx, vaultPath, []byte(req.SecretValue), vault.Metadata{
-		Type: "mcp_server_credential",
-		Labels: map[string]string{
-			"server_id": id,
-			"env_var":   req.EnvVarName,
-		},
-	})
-
-	// Update server config env to reference the vault path.
-	envMap := make(map[string]string)
-	if srv.Env != nil {
-		for k, v := range *srv.Env {
-			envMap[k] = v
-		}
-	}
-	envMap[req.EnvVarName] = "vault://" + vaultPath
-	srv.Env = &envMap
-	now := time.Now().UTC()
-	srv.UpdatedAt = &now
-
-	if err := s.mcpServers.Update(ctx, srv); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, api.SetCredentialResponse{
-		EnvVarName: req.EnvVarName,
-		Stored:     true,
-	})
+	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
 }
 
-// --- Enterprise MCP Server management ---
-
 func (s *apiServer) ListEnterpriseMCPServers(w http.ResponseWriter, r *http.Request) {
-	_, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	filter := store.EnterpriseMCPServerFilter{}
-	if enterpriseID != "" {
-		filter.EnterpriseID = enterpriseID
-	}
-	servers, err := s.enterpriseMCPServers.List(r.Context(), filter)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	if servers == nil {
-		servers = []api.EnterpriseMCPServer{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": servers})
+	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
 }
 
 func (s *apiServer) CreateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request) {
-	_, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-	if !isAdmin(r) {
-		writeError(w, http.StatusForbidden, "forbidden", "owner or admin role required")
-		return
-	}
-
-	var req api.EnterpriseMCPServer
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	id := "emcp_" + s.newID()
-	req.Id = &id
-	if enterpriseID != "" {
-		req.EnterpriseId = &enterpriseID
-	}
-	now := time.Now().UTC()
-	req.CreatedAt = &now
-	if req.AutoEnabled == nil {
-		f := false
-		req.AutoEnabled = &f
-	}
-	if req.Mode == nil {
-		local := api.EnterpriseMCPServerModeLocal
-		req.Mode = &local
-	}
-
-	if err := s.enterpriseMCPServers.Create(r.Context(), req); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, req)
+	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
 }
 
 func (s *apiServer) GetEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	_, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	srv, err := s.enterpriseMCPServers.Get(r.Context(), id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	if enterpriseID != "" && srv.EnterpriseId != nil && *srv.EnterpriseId != enterpriseID {
-		writeError(w, http.StatusNotFound, "not_found", "enterprise_mcp_server not found: "+id)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, srv)
+	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
 }
 
 func (s *apiServer) UpdateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	_, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-	if !isAdmin(r) {
-		writeError(w, http.StatusForbidden, "forbidden", "owner or admin role required")
-		return
-	}
-
-	var req api.EnterpriseMCPServer
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	existing, err := s.enterpriseMCPServers.Get(r.Context(), id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	if enterpriseID != "" && existing.EnterpriseId != nil && *existing.EnterpriseId != enterpriseID {
-		writeError(w, http.StatusNotFound, "not_found", "enterprise_mcp_server not found: "+id)
-		return
-	}
-
-	// Preserve read-only fields.
-	req.Id = existing.Id
-	req.EnterpriseId = existing.EnterpriseId
-	req.CreatedAt = existing.CreatedAt
-	now := time.Now().UTC()
-	req.UpdatedAt = &now
-
-	if err := s.enterpriseMCPServers.Update(r.Context(), req); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, req)
+	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
 }
 
 func (s *apiServer) DeleteEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	_, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-	if !isAdmin(r) {
-		writeError(w, http.StatusForbidden, "forbidden", "owner or admin role required")
-		return
-	}
-
-	existing, err := s.enterpriseMCPServers.Get(r.Context(), id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	if enterpriseID != "" && existing.EnterpriseId != nil && *existing.EnterpriseId != enterpriseID {
-		writeError(w, http.StatusNotFound, "not_found", "enterprise_mcp_server not found: "+id)
-		return
-	}
-
-	if err := s.enterpriseMCPServers.Delete(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
 }
 
 func (s *apiServer) SetEnterpriseMCPServerCredential(w http.ResponseWriter, r *http.Request, id string) {
-	_, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-	if !isAdmin(r) {
-		writeError(w, http.StatusForbidden, "forbidden", "owner or admin role required")
-		return
-	}
-
-	var req api.SetCredentialRequest
-	if err := decodeBody(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	ctx := r.Context()
-
-	srv, err := s.enterpriseMCPServers.Get(ctx, id)
-	if err != nil {
-		if isNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	if enterpriseID != "" && srv.EnterpriseId != nil && *srv.EnterpriseId != enterpriseID {
-		writeError(w, http.StatusNotFound, "not_found", "enterprise_mcp_server not found: "+id)
-		return
-	}
-
-	vaultPath := "mcp-servers/enterprise/" + enterpriseID + "/" + id + "/" + req.EnvVarName
-	s.vault.Put(ctx, vaultPath, []byte(req.SecretValue), vault.Metadata{
-		Type: "enterprise_mcp_server_credential",
-		Labels: map[string]string{
-			"enterprise_id": enterpriseID,
-			"server_id":     id,
-			"env_var":       req.EnvVarName,
-		},
-	})
-
-	envMap := make(map[string]string)
-	if srv.Env != nil {
-		for k, v := range *srv.Env {
-			envMap[k] = v
-		}
-	}
-	envMap[req.EnvVarName] = "vault://" + vaultPath
-	srv.Env = &envMap
-	now := time.Now().UTC()
-	srv.UpdatedAt = &now
-
-	if err := s.enterpriseMCPServers.Update(ctx, srv); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, api.SetCredentialResponse{
-		EnvVarName: req.EnvVarName,
-		Stored:     true,
-	})
+	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
 }
 
-// --- Marketplace ---
-
 func (s *apiServer) ListMarketplaceServers(w http.ResponseWriter, r *http.Request, params api.ListMarketplaceServersParams) {
-	userID, enterpriseID, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	ctx := r.Context()
-
-	var query string
-	if params.Q != nil {
-		query = *params.Q
-	}
-
-	servers, err := s.registryClient.Search(ctx, query)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "registry_error", err.Error())
-		return
-	}
-
-	// Build a set of installed registry IDs for enrichment (user's personal + enterprise auto-enabled).
-	mcpFilter := store.MCPServerFilter{}
-	if userID != "" {
-		mcpFilter.UserID = userID
-	}
-	installed, _ := s.mcpServers.List(ctx, mcpFilter)
-	installedSet := make(map[string]bool, len(installed))
-	for _, srv := range installed {
-		if srv.RegistryId != nil {
-			installedSet[*srv.RegistryId] = true
-		}
-	}
-	if enterpriseID != "" {
-		autoEnabled := true
-		entServers, _ := s.enterpriseMCPServers.List(ctx, store.EnterpriseMCPServerFilter{
-			EnterpriseID: enterpriseID,
-			AutoEnabled:  &autoEnabled,
-		})
-		for _, srv := range entServers {
-			if srv.RegistryId != nil {
-				installedSet[*srv.RegistryId] = true
-			}
-		}
-	}
-
-	// Group registry entries by name, collecting versions. The registry
-	// returns entries in release order, so we preserve that ordering and
-	// then reverse to get most-recent-first.
-	type grouped struct {
-		order       int
-		description string
-		versions    []api.MarketplaceServerVersion
-	}
-	byName := make(map[string]*grouped)
-	var insertOrder int
-	for _, srv := range servers {
-		ver := api.MarketplaceServerVersion{
-			Version: srv.Version,
-		}
-		var envVars []api.RequiredEnvVar
-		for _, pkg := range srv.Packages {
-			for _, ev := range pkg.EnvVars {
-				envVars = append(envVars, api.RequiredEnvVar{
-					Name:        ev.Name,
-					Description: &ev.Description,
-					Required:    &ev.Required,
-				})
-			}
-		}
-		if len(envVars) > 0 {
-			ver.RequiredEnvVars = &envVars
-		}
-
-		if g, ok := byName[srv.Name]; ok {
-			g.versions = append(g.versions, ver)
-			// Keep the most recent description (last entry).
-			if srv.Description != "" {
-				g.description = srv.Description
-			}
-		} else {
-			byName[srv.Name] = &grouped{
-				order:       insertOrder,
-				description: srv.Description,
-				versions:    []api.MarketplaceServerVersion{ver},
-			}
-			insertOrder++
-		}
-	}
-
-	// Build response items sorted by first-seen order.
-	items := make([]api.MarketplaceServer, 0, len(byName))
-	for name, g := range byName {
-		// Reverse versions so most recent is first.
-		for i, j := 0, len(g.versions)-1; i < j; i, j = i+1, j-1 {
-			g.versions[i], g.versions[j] = g.versions[j], g.versions[i]
-		}
-		ms := api.MarketplaceServer{
-			RegistryId: name,
-			Name:       name,
-		}
-		if g.description != "" {
-			ms.Description = &g.description
-		}
-		isInstalled := installedSet[name]
-		ms.Installed = &isInstalled
-		ms.Versions = &g.versions
-		items = append(items, ms)
-	}
-	// Stable sort by insertion order.
-	sort.Slice(items, func(i, j int) bool {
-		return byName[items[i].Name].order < byName[items[j].Name].order
-	})
-
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeError(w, http.StatusGone, "removed", "marketplace has been removed")
 }
 
 func (s *apiServer) InstallMarketplaceServer(w http.ResponseWriter, r *http.Request, registryId string) {
-	userID, _, ok := s.requireAuth(w, r)
-	if !ok {
-		return
-	}
-
-	ctx := r.Context()
-
-	srv, err := s.registryClient.Get(ctx, registryId)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "registry_error", err.Error())
-		return
-	}
-	if srv == nil {
-		writeError(w, http.StatusNotFound, "not_found", "server not found in registry: "+registryId)
-		return
-	}
-
-	// Derive command from the best available package.
-	command, envVars := deriveCommand(srv)
-
-	id := "mcp_" + s.newID()
-	now := time.Now().UTC()
-	stopped := api.MCPServerConfigStatusStopped
-	local := api.MCPServerConfigModeLocal
-	personal := api.MCPServerConfigSourcePersonal
-	config := api.MCPServerConfig{
-		Id:         &id,
-		Name:       srv.Name,
-		Command:    command,
-		Status:     &stopped,
-		Mode:       &local,
-		Source:     &personal,
-		RegistryId: &registryId,
-		CreatedAt:  &now,
-	}
-	if userID != "" {
-		config.UserId = &userID
-	}
-	if srv.Description != "" {
-		config.Description = &srv.Description
-	}
-	if srv.Version != "" {
-		config.Version = &srv.Version
-	}
-
-	// Pre-populate env map with empty values for required env vars.
-	if len(envVars) > 0 {
-		envMap := make(map[string]string, len(envVars))
-		for _, ev := range envVars {
-			envMap[ev.Name] = ""
-		}
-		config.Env = &envMap
-	}
-
-	if err := s.mcpServers.Create(ctx, config); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-
-	// Build required credentials list.
-	var reqCreds []api.RequiredEnvVar
-	for _, ev := range envVars {
-		reqCreds = append(reqCreds, api.RequiredEnvVar{
-			Name:        ev.Name,
-			Description: &ev.Description,
-			Required:    &ev.Required,
-		})
-	}
-
-	result := api.InstallResult{
-		Server: config,
-	}
-	if len(reqCreds) > 0 {
-		result.RequiredCredentials = &reqCreds
-	}
-
-	writeJSON(w, http.StatusCreated, result)
-}
-
-// deriveCommand picks the best package from a registry server and returns
-// the command array and required env vars.
-func deriveCommand(srv *registry.RegistryServer) ([]string, []registry.EnvVar) {
-	// Prefer npm packages (most common for MCP servers).
-	for _, pkg := range srv.Packages {
-		if pkg.RegistryType == "npm" {
-			cmd := []string{"npx", "-y", pkg.Name}
-			if pkg.Runtime.Args != nil {
-				cmd = append(cmd, pkg.Runtime.Args...)
-			}
-			return cmd, pkg.EnvVars
-		}
-	}
-
-	// Fall back to any package with a runtime command.
-	for _, pkg := range srv.Packages {
-		if pkg.Runtime.Command != "" {
-			cmd := []string{pkg.Runtime.Command}
-			cmd = append(cmd, pkg.Runtime.Args...)
-			return cmd, pkg.EnvVars
-		}
-	}
-
-	// Last resort: use the server name as the command.
-	return []string{srv.Name}, nil
+	writeError(w, http.StatusGone, "removed", "marketplace has been removed")
 }

@@ -49,7 +49,7 @@ tasks:
       - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/server ./core/server
 
   build:mcp:
-    desc: Build the MCP server binary locally
+    desc: Build the Aileron MCP server binary locally
     vars:
       VERSION: dev
       COMMIT:
@@ -74,10 +74,10 @@ tasks:
       - pnpm run build
 
   mcp:setup:
-    desc: Build and register the MCP server with Claude Code
+    desc: Build and register the Aileron MCP server with Claude Code
     cmds:
       - task: build:mcp
-      - claude mcp add --scope project aileron -- ./build/aileron-mcp
+      - claude mcp add --scope project aileron -e AILERON_URL=http://localhost:8080 -- ./build/aileron-mcp
 
   up:
     desc: Start all services via Docker Compose

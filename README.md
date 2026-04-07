@@ -101,31 +101,14 @@ Aileron's credential vault uses a zero-knowledge architecture: your secrets are 
 
 ## Configuration
 
-Aileron is configured with an `aileron.yaml` file that declares downstream MCP servers, credential references, and policy mappings.
-
-```yaml
-version: "1"
-downstream_servers:
-  - name: "github"
-    command: ["npx", "-y", "@modelcontextprotocol/server-github"]
-    env:
-      GITHUB_PERSONAL_ACCESS_TOKEN: "vault://connectors/github/default"
-    policy_mapping:
-      tool_prefix: "git"
-  - name: "filesystem"
-    command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
-```
-
-Each downstream server entry specifies the command to launch it, environment variables (with optional vault references for secrets), and policy mapping configuration.
-
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AILERON_ADDR` | `:8080` | Address the control plane server listens on |
-| `AILERON_CONFIG` | `aileron.yaml` | Path to the configuration file |
-| `REGISTRY_REFRESH_INTERVAL` | `15m` | How often the MCP Registry server list is refreshed in the background. Accepts any Go duration string (e.g. `5m`, `1h`). The server prefetches the full registry on startup and refreshes on this interval. |
 | `GITHUB_TOKEN` | | GitHub personal access token, seeded into the vault at startup |
+| `AILERON_URL` | | URL of the Aileron API server (used by the MCP server binary) |
+| `AILERON_TOKEN` | | Bearer token for authenticating with the Aileron API (used by the MCP server binary) |
 
 ## Current Status
 
@@ -138,7 +121,7 @@ The execution plane architecture is being built incrementally:
 - **Audit store** records every event in an immutable trace
 - **Approval UI** provides a web interface for reviewing and acting on pending approvals
 - **Enterprise auth** with Google and GitHub OAuth, email/password signup, SSO enforcement
-- **Protected Actions catalog** (in progress) — replaces the MCP server marketplace with a curated set of actions Aileron owns
+- **Protected Actions catalog** (in progress) — a curated set of actions Aileron owns and executes on behalf of agents
 
 - **Confidential computing (TEE)** — credential decryption and connector execution can run inside a hardware-isolated enclave ([#52](https://github.com/ALRubinger/aileron/issues/52)). Provider SPI with local dev and Google Confidential Space implementations. Remote attestation, ECDH session key exchange, and auto-escrow of credentials on passphrase verification for autonomous agent execution ([#55](https://github.com/ALRubinger/aileron/issues/55)). See [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md) and [ADR-0012](docs/adr/0012-auto-escrow-and-decoupled-session-lifetimes.md).
 
@@ -160,7 +143,7 @@ Next up: Gmail connector and email intent tools.
 task build
 ```
 
-This builds everything: Docker containers, Go server binary, MCP gateway binary, enclave binary, and the UI.
+This builds everything: Docker containers, Go server binary, MCP server binary, enclave binary, and the UI.
 
 To build individual components:
 
@@ -168,7 +151,7 @@ To build individual components:
 task build:docker    # Docker containers (server, UI, database)
 task build:server    # Go server binary
 task build:ui        # SvelteKit UI
-task build:mcp       # MCP gateway binary
+task build:mcp       # MCP server binary
 task build:enclave   # TEE enclave binary
 ```
 
@@ -198,20 +181,21 @@ task health
 
 ### Connect Claude Code via MCP
 
-Register Aileron as the MCP gateway for Claude Code:
+Register Aileron as an MCP server for Claude Code:
 
 ```sh
 task mcp:setup
 ```
 
-This builds the MCP gateway binary, adds your `aileron.yaml` configuration, and registers Aileron with Claude Code as its MCP server. The gateway discovers downstream servers, re-exposes their tools, and intercepts every tool call for policy evaluation.
+This builds the MCP server binary and registers Aileron with Claude Code. The MCP server exposes a `submit_intent` tool that agents use to submit governed intents to the Aileron execution plane.
 
-To connect to an existing Aileron server instead:
+To connect to a running Aileron server:
 
 ```sh
 task build:mcp
 claude mcp add --scope project aileron \
-  -e AILERON_API_URL=http://localhost:8080 -- ./build/aileron-mcp
+  -e AILERON_URL=http://localhost:8080 \
+  -e AILERON_TOKEN=<your-token> -- ./build/aileron-mcp
 ```
 
 ### Run tests
@@ -282,7 +266,7 @@ aileron/
 ├── sdk/
 │   └── go/             Go client SDK
 ├── ui/                 Management and approval UI (SvelteKit)
-│   └── src/routes/     Pages: approvals, traces, policies, marketplace (Protected Actions), settings
+│   └── src/routes/     Pages: approvals, traces, policies, settings
 ├── docs/               API documentation site (Scalar)
 ├── test/
 │   └── integration/    Integration tests with OpenAPI spec validation
@@ -346,7 +330,7 @@ When `AILERON_DATABASE_URL` is set, the server enables:
 - Enterprise-level SSO enforcement (provider restrictions, email domain restrictions)
 - Cross-provider deduplication — signing in via different providers with the same email resolves to the same account
 
-MCP server management endpoints enforce authentication when auth is enabled. When auth is disabled (no database configured), these endpoints fall back to unscoped behavior suitable for local development.
+Authentication is enforced on all endpoints when auth is enabled. When auth is disabled (no database configured), endpoints fall back to unscoped behavior suitable for local development.
 
 Auth environment variables are listed in the [Cloud deployment](#environment-variables) section below.
 

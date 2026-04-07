@@ -1,38 +1,29 @@
-// Package main implements the Aileron MCP gateway server.
+// Package main implements the Aileron MCP server.
 //
-// The gateway is the single MCP server that an agent host (Claude Code, etc.)
-// connects to. It aggregates tools from downstream MCP servers, re-exposes
-// them under namespaced names, and intercepts every tools/call for governance.
+// Aileron acts as an MCP server installed into agent hosts (Claude Code, etc.).
+// It exposes a submit_intent tool that agents use to submit governed intents to
+// the Aileron execution plane for policy evaluation and execution.
 //
 // It communicates over stdio using JSON-RPC 2.0, per the MCP specification.
 //
-// Modes:
-//   - Embedded (default): runs an in-process Aileron server with in-memory stores.
-//   - Remote: set AILERON_API_URL to connect to an existing Aileron server.
+// Configuration:
+//
+//	AILERON_URL   - URL of the Aileron API server (required)
+//	AILERON_TOKEN - Bearer token for authenticating with the Aileron API
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/ALRubinger/aileron/core/app"
-	"github.com/ALRubinger/aileron/core/approval"
-	"github.com/ALRubinger/aileron/core/config"
-	"github.com/ALRubinger/aileron/core/policy"
-	"github.com/ALRubinger/aileron/core/store/mem"
-	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/core/version"
-	"github.com/google/uuid"
 )
 
 // --- JSON-RPC types ---
@@ -93,89 +84,49 @@ type toolContent struct {
 // --- Server ---
 
 type server struct {
-	gw  *gateway
-	log *slog.Logger
+	aileronURL   string
+	aileronToken string
+	httpClient   *http.Client
+}
+
+// submitIntentTool is the single tool exposed by the Aileron MCP server.
+var submitIntentTool = toolDef{
+	Name:        "submit_intent",
+	Description: "Submit a governed intent to Aileron for execution",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"intent": {
+				Type:        "string",
+				Description: "Natural language description of the action to perform",
+			},
+		},
+		Required: []string{"intent"},
+	},
 }
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	ctx := context.Background()
+	aileronURL := os.Getenv("AILERON_URL")
+	aileronToken := os.Getenv("AILERON_TOKEN")
 
-	// Start embedded Aileron server if no remote URL is configured.
-	// This provides the control plane (policy engine, approval orchestrator, vault).
-	var v vault.Vault
-	apiURL := os.Getenv("AILERON_API_URL")
-	if apiURL == "" {
-		discardLog := slog.New(slog.NewJSONHandler(io.Discard, nil))
-		handler, err := app.NewHandler(discardLog)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "aileron-mcp: failed to start embedded server: %v\n", err)
-			os.Exit(1)
-		}
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "aileron-mcp: failed to listen: %v\n", err)
-			os.Exit(1)
-		}
-		go http.Serve(listener, handler)
-		apiURL = "http://" + listener.Addr().String()
-
-		// In embedded mode, create an in-memory vault for credential injection.
-		v = vault.NewMemVault()
-	}
-
-	// Load gateway configuration.
-	cfg, err := config.LoadFromEnvOrDefault()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "aileron-mcp: failed to load config: %v\n", err)
+	if aileronURL == "" {
+		fmt.Fprintln(os.Stderr, "aileron-mcp: AILERON_URL is required")
 		os.Exit(1)
 	}
 
-	// Build policy engine with seeded policies.
-	policyStore := mem.NewPolicyStore()
-	if err := policy.SeedPolicies(ctx, policyStore); err != nil {
-		fmt.Fprintf(os.Stderr, "aileron-mcp: failed to seed policies: %v\n", err)
-		os.Exit(1)
-	}
-	policyEngine := policy.NewRuleEngine(policyStore)
-
-	// Build approval orchestrator.
-	approvalStore := mem.NewApprovalStore()
-	idGen := func() string { return uuid.New().String() }
-	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
-
-	// Build in-memory audit store.
-	auditStore := newMemAuditStore()
-
-	// Connect to downstream MCP servers.
-	gw, err := newGateway(ctx, gatewayConfig{
-		Cfg:          cfg,
-		APIURL:       apiURL,
-		Vault:        v,
-		PolicyEngine: policyEngine,
-		Approvals:    orchestrator,
-		AuditStore:   auditStore,
-		Log:          log,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "aileron-mcp: failed to start gateway: %v\n", err)
-		os.Exit(1)
+	s := &server{
+		aileronURL:   aileronURL,
+		aileronToken: aileronToken,
+		httpClient:   &http.Client{},
 	}
 
 	// Handle SIGTERM and SIGINT for graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
-		sig := <-sigCh
-		log.Info("received signal, shutting down", "signal", sig.String())
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		gw.Shutdown(shutdownCtx)
+		<-sigCh
 		os.Exit(0)
 	}()
-	defer gw.closeAll()
-
-	s := &server{gw: gw, log: log}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -225,7 +176,7 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: map[string]any{
-				"tools": s.gw.aggregatedTools(),
+				"tools": []toolDef{submitIntentTool},
 			},
 		}
 
@@ -235,7 +186,7 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 			return errorResponse(req.ID, -32602, "invalid params: "+err.Error())
 		}
 		ctx := context.Background()
-		result := s.gw.routeToolCall(ctx, params.Name, params.Arguments)
+		result := s.dispatchTool(ctx, params.Name, params.Arguments)
 		return &jsonrpcResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
@@ -254,19 +205,57 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 	}
 }
 
-// --- Helpers ---
-
-func argStr(args map[string]any, key string) string {
-	v, ok := args[key]
-	if !ok {
-		return ""
+func (s *server) dispatchTool(ctx context.Context, name string, args map[string]any) toolResult {
+	switch name {
+	case "submit_intent":
+		return s.submitIntent(ctx, args)
+	default:
+		return errorResult("unknown tool: " + name)
 	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
 }
+
+func (s *server) submitIntent(ctx context.Context, args map[string]any) toolResult {
+	intentText, ok := args["intent"].(string)
+	if !ok || intentText == "" {
+		return errorResult("intent parameter is required")
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"action": map[string]any{
+			"summary": intentText,
+			"type":    "custom",
+		},
+		"agent_id":     "aileron-mcp",
+		"workspace_id": "default",
+	})
+	if err != nil {
+		return errorResult("failed to encode request: " + err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.aileronURL+"/v1/intents", bytes.NewReader(body))
+	if err != nil {
+		return errorResult("failed to create request: " + err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.aileronToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return errorResult("failed to submit intent: " + err.Error())
+	}
+	defer resp.Body.Close()
+
+	var result any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return errorResult("failed to decode response: " + err.Error())
+	}
+
+	return jsonResult(result)
+}
+
+// --- Helpers ---
 
 func jsonResult(v any) toolResult {
 	data, _ := json.MarshalIndent(v, "", "  ")

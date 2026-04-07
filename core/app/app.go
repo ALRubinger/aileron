@@ -1,6 +1,5 @@
 // Package app wires together the Aileron control plane components and exposes
-// them as an http.Handler. It is imported by the standalone server binary and
-// the MCP server's embedded mode.
+// them as an http.Handler. It is imported by the standalone server binary.
 package app
 
 import (
@@ -8,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
@@ -23,7 +21,6 @@ import (
 	"github.com/ALRubinger/aileron/core/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/core/notify"
 	"github.com/ALRubinger/aileron/core/policy"
-	mcpreg "github.com/ALRubinger/aileron/core/registry"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/store/postgres"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -43,8 +40,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	grantStore := mem.NewGrantStore()
 	executionStore := mem.NewExecutionStore()
 	connectorStore := mem.NewConnectorStore()
-	mcpServerStore := mem.NewMCPServerStore()
-	enterpriseMCPServerStore := mem.NewEnterpriseMCPServerStore()
 	credentialStore := mem.NewCredentialStore()
 	fundingSourceStore := mem.NewFundingSourceStore()
 	traceStore := mem.NewTraceStore()
@@ -80,18 +75,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	idGen := func() string { return uuid.New().String() }
 	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
 
-	// --- MCP Registry client ---
-	registryClient := mcpreg.NewClient(nil, log)
-	if interval := os.Getenv("REGISTRY_REFRESH_INTERVAL"); interval != "" {
-		if d, err := time.ParseDuration(interval); err == nil {
-			registryClient = registryClient.WithRefreshInterval(d)
-			log.Info("registry refresh interval overridden", "interval", d)
-		} else {
-			log.Warn("invalid REGISTRY_REFRESH_INTERVAL, using default", "value", interval, "error", err)
-		}
-	}
-	registryClient.Start(ctx)
-
 	// --- Notifier ---
 	notifier := notify.NewLogNotifier(log)
 
@@ -123,9 +106,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		grants:         grantStore,
 		executions:     executionStore,
 		connectors:     connectorStore,
-		mcpServers:           mcpServerStore,
-		enterpriseMCPServers: enterpriseMCPServerStore,
-		registryClient:       registryClient,
 		connectedAccounts: connectedAccountStore,
 		credentials:       credentialStore,
 		fundingSources:    fundingSourceStore,
