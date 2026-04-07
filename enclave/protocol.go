@@ -7,12 +7,69 @@
 // each other's dependency trees.
 package enclave
 
+// TransmitKEKRequest sends a user's KEK to the enclave for secure storage.
+// The KEK is encrypted with the ECDH session key for transit. Once received,
+// the enclave holds the KEK in its hardware-isolated memory and uses it to
+// decrypt vault credentials for that user.
+type TransmitKEKRequest struct {
+	// UserID identifies the user whose KEK is being transmitted.
+	UserID string `json:"user_id"`
+	// EncryptedKEK is the user's KEK, encrypted with the session key.
+	EncryptedKEK []byte `json:"encrypted_kek"`
+}
+
+// TransmitKEKResponse confirms the enclave has stored the KEK.
+type TransmitKEKResponse struct {
+	Stored bool `json:"stored"`
+}
+
+// OAuthExchangeRequest asks the enclave to exchange an OAuth authorization
+// code for tokens. The enclave calls the provider's token endpoint, encrypts
+// the resulting refresh token with the user's KEK (already stored in the
+// enclave), and returns only the ciphertext. The host server never sees the
+// plaintext token.
+type OAuthExchangeRequest struct {
+	// UserID identifies the user whose KEK will encrypt the token.
+	UserID string `json:"user_id"`
+	// Provider is the OAuth provider, e.g. "google".
+	Provider string `json:"provider"`
+	// Code is the authorization code from the OAuth redirect.
+	Code string `json:"code"`
+	// RedirectURI is the callback URL registered with the provider.
+	RedirectURI string `json:"redirect_uri"`
+	// ClientID is Aileron's OAuth application client ID.
+	ClientID string `json:"client_id"`
+	// ClientSecret is Aileron's OAuth application client secret.
+	ClientSecret string `json:"client_secret"`
+	// Scopes are the OAuth scopes that were requested.
+	Scopes []string `json:"scopes"`
+	// TokenEndpoint is the provider's token exchange URL.
+	TokenEndpoint string `json:"token_endpoint"`
+	// UserInfoEndpoint is the URL to fetch the user's email after exchange.
+	UserInfoEndpoint string `json:"user_info_endpoint"`
+}
+
+// OAuthExchangeResponse contains the KEK-encrypted token and non-secret
+// metadata. The host stores the encrypted token in the vault without ever
+// seeing the plaintext.
+type OAuthExchangeResponse struct {
+	// EncryptedToken is the OAuth token JSON, encrypted with the user's KEK.
+	EncryptedToken []byte `json:"encrypted_token"`
+	// Email is the account email fetched from the userinfo endpoint.
+	Email string `json:"email"`
+	// TokenType is the OAuth token type (typically "Bearer").
+	TokenType string `json:"token_type"`
+}
+
 // ExecuteRequest is sent from the host to the enclave to execute a connector
-// action. The credential is encrypted with the session key established during
-// attestation; the enclave decrypts it internally.
+// action. The credential is the raw vault ciphertext (KEK-encrypted); the
+// enclave decrypts it using the user's KEK that was previously transmitted
+// via TransmitKEK.
 type ExecuteRequest struct {
 	// RequestID is the execution ID assigned by the host.
 	RequestID string `json:"request_id"`
+	// UserID identifies the user whose KEK decrypts the credential.
+	UserID string `json:"user_id"`
 	// GrantID is the execution grant that authorised this action.
 	GrantID string `json:"grant_id"`
 	// IntentID is the intent that originated the action.
@@ -23,8 +80,8 @@ type ExecuteRequest struct {
 	ConnectorID string `json:"connector_id"`
 	// Parameters are the bounded, approved parameters for execution.
 	Parameters map[string]any `json:"parameters"`
-	// EncryptedCredential is the AES-256-GCM ciphertext from the vault,
-	// re-encrypted with the ECDH session key for transmission.
+	// EncryptedCredential is the KEK-encrypted ciphertext from the vault.
+	// The enclave decrypts it using the user's stored KEK.
 	EncryptedCredential []byte `json:"encrypted_credential"`
 	// CredentialType describes the credential kind, e.g. "api_key".
 	CredentialType string `json:"credential_type"`
@@ -77,6 +134,7 @@ type SessionResponse struct {
 // EscrowStoreRequest asks the enclave to escrow a credential for
 // asynchronous or scheduled execution when the user is offline.
 type EscrowStoreRequest struct {
+	UserID              string   `json:"user_id"`
 	GrantID             string   `json:"grant_id"`
 	EncryptedCredential []byte   `json:"encrypted_credential"`
 	CredentialType      string   `json:"credential_type"`

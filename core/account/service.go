@@ -109,6 +109,31 @@ func (s *GoogleService) getFetcher() emailFetcher {
 	return defaultEmailFetch
 }
 
+// ClientID returns Aileron's OAuth client ID (not a user secret).
+func (s *GoogleService) ClientID() string { return s.clientID }
+
+// ClientSecret returns Aileron's OAuth client secret (not a user secret).
+func (s *GoogleService) ClientSecret() string { return s.clientSecret }
+
+// ScopesFor returns the OAuth scopes for a given provider.
+func (s *GoogleService) ScopesFor(provider model.ConnectedAccountProvider) []string {
+	if pc, ok := googleProviders[provider]; ok {
+		return pc.scopes
+	}
+	return nil
+}
+
+// TokenEndpointFor returns the OAuth token exchange URL for a provider.
+func (s *GoogleService) TokenEndpointFor(provider model.ConnectedAccountProvider) string {
+	if pc, ok := googleProviders[provider]; ok {
+		return pc.endpoint.TokenURL
+	}
+	return ""
+}
+
+// UserInfoEndpoint returns the Google userinfo URL.
+func (s *GoogleService) UserInfoEndpoint() string { return userinfoURL }
+
 func (s *GoogleService) Providers() []model.ConnectedAccountProvider {
 	return []model.ConnectedAccountProvider{
 		model.ConnectedAccountProviderGmail,

@@ -29,6 +29,7 @@ type enclaveServer struct {
 	sessionKey []byte
 	sessionID  string
 	expiresAt  time.Time
+	keks       *kekStore
 	escrow     *escrowStore
 }
 
@@ -37,6 +38,7 @@ func newEnclaveServer(log *slog.Logger, registry *connector.Registry, provider s
 		log:      log,
 		registry: registry,
 		provider: provider,
+		keks:     newKEKStore(),
 		escrow:   newEscrowStore(),
 	}
 }
@@ -44,6 +46,8 @@ func newEnclaveServer(log *slog.Logger, registry *connector.Registry, provider s
 func (s *enclaveServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /attest", s.handleAttest)
 	mux.HandleFunc("POST /session", s.handleSession)
+	mux.HandleFunc("POST /kek", s.handleTransmitKEK)
+	mux.HandleFunc("POST /oauth/exchange", s.handleOAuthExchange)
 	mux.HandleFunc("POST /execute", s.handleExecute)
 	mux.HandleFunc("POST /escrow", s.handleEscrowStore)
 	mux.HandleFunc("POST /escrow/revoke", s.handleEscrowRevoke)
@@ -125,8 +129,8 @@ func (s *enclaveServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
-	var req enclave.ExecuteRequest
+func (s *enclaveServer) handleTransmitKEK(w http.ResponseWriter, r *http.Request) {
+	var req enclave.TransmitKEKRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -134,15 +138,72 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	sessionKey := copyBytes(s.sessionKey)
-	expiresAt := s.expiresAt
 	s.mu.Unlock()
 
 	if sessionKey == nil {
 		writeErr(w, http.StatusPreconditionFailed, "no active session")
 		return
 	}
-	if time.Now().After(expiresAt) {
-		writeErr(w, http.StatusUnauthorized, "session expired")
+	defer zeroBytes(sessionKey)
+
+	// Decrypt KEK using session key.
+	kek, err := crypto.Decrypt(req.EncryptedKEK, sessionKey)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "KEK decryption failed: "+err.Error())
+		return
+	}
+
+	s.keks.Store(req.UserID, kek)
+	zeroBytes(kek)
+	s.log.Info("KEK stored for user", "user_id", req.UserID)
+
+	writeJSON(w, http.StatusOK, enclave.TransmitKEKResponse{Stored: true})
+}
+
+func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Request) {
+	var req enclave.OAuthExchangeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Get user's KEK.
+	kek, err := s.keks.Get(req.UserID)
+	if err != nil {
+		writeErr(w, http.StatusPreconditionFailed, "no KEK for user: "+err.Error())
+		return
+	}
+	defer zeroBytes(kek)
+
+	// Exchange authorization code for tokens.
+	tokenJSON, accessToken, tokenType, err := doOAuthExchange(r.Context(), req)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "OAuth exchange failed: "+err.Error())
+		return
+	}
+	defer zeroBytes(tokenJSON)
+
+	// Fetch user email.
+	email, _ := doFetchEmail(r.Context(), req.UserInfoEndpoint, accessToken)
+
+	// Encrypt token JSON with user's KEK.
+	encrypted, err := crypto.Encrypt(tokenJSON, kek)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encrypting token: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, enclave.OAuthExchangeResponse{
+		EncryptedToken: encrypted,
+		Email:          email,
+		TokenType:      tokenType,
+	})
+}
+
+func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
+	var req enclave.ExecuteRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -156,16 +217,21 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 		}
 		credential = cred
 	} else {
-		// Decrypt credential with session key.
-		plain, err := crypto.Decrypt(req.EncryptedCredential, sessionKey)
+		// Decrypt credential with user's KEK.
+		kek, err := s.keks.Get(req.UserID)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, "decryption failed: "+err.Error())
+			writeErr(w, http.StatusPreconditionFailed, "no KEK for user: "+err.Error())
+			return
+		}
+		plain, decErr := crypto.Decrypt(req.EncryptedCredential, kek)
+		zeroBytes(kek)
+		if decErr != nil {
+			writeErr(w, http.StatusBadRequest, "decryption failed: "+decErr.Error())
 			return
 		}
 		credential = plain
 	}
 	defer zeroBytes(credential)
-	defer zeroBytes(sessionKey)
 
 	// Resolve connector.
 	connType, connProvider := resolveConnectorID(req.ConnectorID)
@@ -216,18 +282,15 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.mu.Lock()
-	sessionKey := copyBytes(s.sessionKey)
-	s.mu.Unlock()
-
-	if sessionKey == nil {
-		writeErr(w, http.StatusPreconditionFailed, "no active session")
+	// Decrypt credential with user's KEK.
+	kek, err := s.keks.Get(req.UserID)
+	if err != nil {
+		writeErr(w, http.StatusPreconditionFailed, "no KEK for user: "+err.Error())
 		return
 	}
-	defer zeroBytes(sessionKey)
 
-	// Decrypt credential.
-	plaintext, err := crypto.Decrypt(req.EncryptedCredential, sessionKey)
+	plaintext, err := crypto.Decrypt(req.EncryptedCredential, kek)
+	zeroBytes(kek)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "decryption failed: "+err.Error())
 		return

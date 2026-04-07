@@ -95,6 +95,20 @@ func establishTestSession(t *testing.T, server *httptest.Server) []byte {
 	return h[:]
 }
 
+// transmitTestKEK encrypts a KEK with the session key and sends it to the enclave for a user.
+func transmitTestKEK(t *testing.T, server *httptest.Server, sessionKey []byte, userID string, kek []byte) {
+	t.Helper()
+	encrypted, _ := crypto.Encrypt(kek, sessionKey)
+	resp := postJSON(t, server, "/kek", enclave.TransmitKEKRequest{
+		UserID:       userID,
+		EncryptedKEK: encrypted,
+	})
+	result := decodeResp[enclave.TransmitKEKResponse](t, resp)
+	if !result.Stored {
+		t.Fatal("expected Stored=true")
+	}
+}
+
 func TestHealthEndpoint(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
@@ -122,20 +136,26 @@ func TestFullExecuteFlow(t *testing.T) {
 
 	sessionKey := establishTestSession(t, server)
 
-	// Encrypt a credential with the session key.
+	// Transmit a user KEK.
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	// Encrypt credential with the user's KEK (simulating vault storage).
 	plainCred := []byte("test-api-key")
-	encrypted, err := crypto.Encrypt(plainCred, sessionKey)
+	kekEncrypted, err := crypto.Encrypt(plainCred, userKEK)
 	if err != nil {
-		t.Fatalf("encrypting: %v", err)
+		t.Fatalf("encrypting with KEK: %v", err)
 	}
 
-	// Execute.
+	// Execute — enclave decrypts with stored KEK.
 	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
 		RequestID:           "exec-1",
+		UserID:              "user-1",
 		GrantID:             "grant-1",
 		ActionType:          "test.action",
 		ConnectorID:         "test/stub",
-		EncryptedCredential: encrypted,
+		EncryptedCredential: kekEncrypted,
 		CredentialType:      "api_key",
 	})
 	execResult := decodeResp[enclave.ExecuteResponse](t, execResp)
@@ -147,11 +167,18 @@ func TestFullExecuteFlow(t *testing.T) {
 	}
 }
 
-func TestExecuteWithoutSession(t *testing.T) {
+func TestExecuteWithoutKEK(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{})
+	establishTestSession(t, server)
+
+	// Execute without transmitting KEK.
+	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		UserID:              "no-kek-user",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("data"),
+	})
 	if resp.StatusCode != http.StatusPreconditionFailed {
 		t.Fatalf("expected 412, got %d", resp.StatusCode)
 	}
@@ -176,9 +203,13 @@ func TestExecuteUnknownConnector(t *testing.T) {
 	defer server.Close()
 
 	sessionKey := establishTestSession(t, server)
-	encrypted, _ := crypto.Encrypt([]byte("cred"), sessionKey)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
 
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
 	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		UserID:              "user-1",
 		ConnectorID:         "unknown/provider",
 		EncryptedCredential: encrypted,
 	})
@@ -193,10 +224,15 @@ func TestEscrowFlow(t *testing.T) {
 	defer server.Close()
 
 	sessionKey := establishTestSession(t, server)
-	encrypted, _ := crypto.Encrypt([]byte("escrowed-cred"), sessionKey)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("escrowed-cred"), userKEK)
 
 	// Store.
 	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		UserID:              "user-1",
 		GrantID:             "grant-1",
 		EncryptedCredential: encrypted,
 		CredentialType:      "api_key",
@@ -295,9 +331,13 @@ func TestExecuteBadDecryption(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	establishTestSession(t, server)
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
 
 	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		UserID:              "user-1",
 		ConnectorID:         "test/stub",
 		EncryptedCredential: []byte("not-encrypted"),
 	})
@@ -307,11 +347,16 @@ func TestExecuteBadDecryption(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestEscrowStoreWithoutSession(t *testing.T) {
+func TestEscrowStoreWithoutKEK(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{GrantID: "g1"})
+	establishTestSession(t, server)
+
+	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		UserID:  "no-kek-user",
+		GrantID: "g1",
+	})
 	if resp.StatusCode != http.StatusPreconditionFailed {
 		t.Fatalf("expected 412, got %d", resp.StatusCode)
 	}
@@ -322,9 +367,13 @@ func TestEscrowStoreBadDecryption(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	establishTestSession(t, server)
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
 
 	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		UserID:              "user-1",
 		GrantID:             "g1",
 		EncryptedCredential: []byte("bad"),
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -340,9 +389,13 @@ func TestEscrowStoreBadExpiry(t *testing.T) {
 	defer server.Close()
 
 	sessionKey := establishTestSession(t, server)
-	encrypted, _ := crypto.Encrypt([]byte("cred"), sessionKey)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
 
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
 	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		UserID:              "user-1",
 		GrantID:             "g1",
 		EncryptedCredential: encrypted,
 		ExpiresAt:           "not-a-date",
@@ -460,10 +513,15 @@ func TestExecuteWithExpiredEscrow(t *testing.T) {
 	defer server.Close()
 
 	sessionKey := establishTestSession(t, server)
-	encrypted, _ := crypto.Encrypt([]byte("cred"), sessionKey)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
 
 	// Store with past expiry.
 	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		UserID:              "user-1",
 		GrantID:             "g1",
 		EncryptedCredential: encrypted,
 		CredentialType:      "api_key",

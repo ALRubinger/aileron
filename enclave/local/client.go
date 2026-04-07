@@ -12,7 +12,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sync"
 	"time"
 
@@ -34,6 +37,7 @@ type Client struct {
 	sessionKey []byte           // derived shared secret after EstablishSession
 	sessionID  string
 	expiresAt  time.Time
+	keks       *kekStore   // per-user KEK storage
 	escrow     *escrowStore
 }
 
@@ -42,6 +46,7 @@ type Client struct {
 func New(executeFn ExecuteFn) *Client {
 	return &Client{
 		executeFn: executeFn,
+		keks:      newKEKStore(),
 		escrow:    newEscrowStore(),
 	}
 }
@@ -65,7 +70,7 @@ func (c *Client) Attest(_ context.Context, _ enclave.AttestationRequest) (enclav
 }
 
 // EstablishSession completes the ECDH key exchange and derives the session
-// key used to decrypt credentials sent via Execute.
+// key used for KEK transit encryption.
 func (c *Client) EstablishSession(_ context.Context, req enclave.SessionRequest) (enclave.SessionResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -101,21 +106,67 @@ func (c *Client) EstablishSession(_ context.Context, req enclave.SessionRequest)
 	}, nil
 }
 
-// Execute decrypts the credential using the session key and calls the
-// injected ExecuteFn.
-func (c *Client) Execute(ctx context.Context, req enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
+// TransmitKEK receives a user's KEK encrypted with the session key,
+// decrypts it, and stores the plaintext KEK for that user.
+func (c *Client) TransmitKEK(_ context.Context, req enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
 	c.mu.Lock()
 	sessionKey := copyBytes(c.sessionKey)
-	expiresAt := c.expiresAt
 	c.mu.Unlock()
 
 	if sessionKey == nil {
-		return enclave.ExecuteResponse{}, enclave.ErrNotAttested
+		return enclave.TransmitKEKResponse{}, enclave.ErrNotAttested
 	}
-	if time.Now().After(expiresAt) {
-		return enclave.ExecuteResponse{}, enclave.ErrSessionExpired
+	defer zeroBytes(sessionKey)
+
+	kek, err := decryptAESGCM(req.EncryptedKEK, sessionKey)
+	if err != nil {
+		return enclave.TransmitKEKResponse{}, fmt.Errorf("local: decrypting KEK: %w", err)
 	}
 
+	c.keks.Store(req.UserID, kek)
+	zeroBytes(kek)
+
+	return enclave.TransmitKEKResponse{Stored: true}, nil
+}
+
+// OAuthExchange exchanges an OAuth authorization code for tokens, encrypts
+// the token with the user's stored KEK, and returns the ciphertext.
+func (c *Client) OAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
+	kek, err := c.keks.Get(req.UserID)
+	if err != nil {
+		return enclave.OAuthExchangeResponse{}, err
+	}
+	defer zeroBytes(kek)
+
+	// Exchange authorization code for tokens.
+	tokenResp, err := exchangeOAuthCode(ctx, req)
+	if err != nil {
+		return enclave.OAuthExchangeResponse{}, fmt.Errorf("local: OAuth exchange: %w", err)
+	}
+	defer zeroBytes(tokenResp.tokenJSON)
+
+	// Fetch user email from userinfo endpoint.
+	email, err := fetchUserEmail(ctx, req.UserInfoEndpoint, tokenResp.accessToken)
+	if err != nil {
+		return enclave.OAuthExchangeResponse{}, fmt.Errorf("local: fetching email: %w", err)
+	}
+
+	// Encrypt token JSON with user's KEK.
+	encrypted, err := encryptAESGCM(tokenResp.tokenJSON, kek)
+	if err != nil {
+		return enclave.OAuthExchangeResponse{}, fmt.Errorf("local: encrypting token: %w", err)
+	}
+
+	return enclave.OAuthExchangeResponse{
+		EncryptedToken: encrypted,
+		Email:          email,
+		TokenType:      tokenResp.tokenType,
+	}, nil
+}
+
+// Execute decrypts the credential using the user's stored KEK and calls
+// the injected ExecuteFn.
+func (c *Client) Execute(ctx context.Context, req enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
 	// If EscrowID is set, use the escrowed credential instead.
 	if req.EscrowID != "" {
 		credential, err := c.escrow.Get(req.EscrowID)
@@ -127,29 +178,32 @@ func (c *Client) Execute(ctx context.Context, req enclave.ExecuteRequest) (encla
 		return c.executeFn(ctx, req, cred)
 	}
 
-	// Decrypt credential with session key.
-	plaintext, err := decryptAESGCM(req.EncryptedCredential, sessionKey)
+	// Decrypt credential with user's KEK.
+	kek, err := c.keks.Get(req.UserID)
+	if err != nil {
+		return enclave.ExecuteResponse{}, err
+	}
+	defer zeroBytes(kek)
+
+	plaintext, err := decryptAESGCM(req.EncryptedCredential, kek)
 	if err != nil {
 		return enclave.ExecuteResponse{}, fmt.Errorf("local: decrypting credential: %w", err)
 	}
 	defer zeroBytes(plaintext)
-	defer zeroBytes(sessionKey)
 
 	return c.executeFn(ctx, req, plaintext)
 }
 
-// EscrowStore decrypts the credential and stores it in the in-memory escrow.
+// EscrowStore decrypts the credential using the user's KEK and stores it
+// in the in-memory escrow.
 func (c *Client) EscrowStore(_ context.Context, req enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
-	c.mu.Lock()
-	sessionKey := copyBytes(c.sessionKey)
-	c.mu.Unlock()
-
-	if sessionKey == nil {
-		return enclave.EscrowStoreResponse{}, enclave.ErrNotAttested
+	kek, err := c.keks.Get(req.UserID)
+	if err != nil {
+		return enclave.EscrowStoreResponse{}, err
 	}
-	defer zeroBytes(sessionKey)
+	defer zeroBytes(kek)
 
-	plaintext, err := decryptAESGCM(req.EncryptedCredential, sessionKey)
+	plaintext, err := decryptAESGCM(req.EncryptedCredential, kek)
 	if err != nil {
 		return enclave.EscrowStoreResponse{}, fmt.Errorf("local: decrypting credential for escrow: %w", err)
 	}
@@ -169,19 +223,108 @@ func (c *Client) EscrowRevoke(_ context.Context, req enclave.EscrowRevokeRequest
 	return c.escrow.Revoke(req.EscrowID, req.GrantID)
 }
 
-// Close zeros the session key and clears the escrow store.
+// Close zeros the session key, KEKs, and clears the escrow store.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	zeroBytes(c.sessionKey)
 	c.sessionKey = nil
 	c.enclaveKey = nil
+	c.keks.Clear()
 	c.escrow.Clear()
 	return nil
 }
 
-// decryptAESGCM decrypts AES-256-GCM ciphertext. The first 12 bytes are the
-// nonce, followed by the ciphertext + GCM tag.
+// --- OAuth helpers ---
+
+type oauthTokenResponse struct {
+	accessToken  string
+	tokenType    string
+	tokenJSON    []byte // full JSON for vault storage
+}
+
+func exchangeOAuthCode(ctx context.Context, req enclave.OAuthExchangeRequest) (*oauthTokenResponse, error) {
+	form := "grant_type=authorization_code" +
+		"&code=" + req.Code +
+		"&redirect_uri=" + req.RedirectURI +
+		"&client_id=" + req.ClientID +
+		"&client_secret=" + req.ClientSecret
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, req.TokenEndpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Body = io.NopCloser(stringReader(form))
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenData struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(body, &tokenData); err != nil {
+		return nil, fmt.Errorf("parsing token response: %w", err)
+	}
+
+	if tokenData.RefreshToken == "" {
+		return nil, fmt.Errorf("no refresh token returned; user may need to re-consent")
+	}
+
+	return &oauthTokenResponse{
+		accessToken: tokenData.AccessToken,
+		tokenType:   tokenData.TokenType,
+		tokenJSON:   body,
+	}, nil
+}
+
+func fetchUserEmail(ctx context.Context, userinfoEndpoint, accessToken string) (string, error) {
+	if userinfoEndpoint == "" {
+		return "", nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userinfoEndpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("userinfo returned %d: %s", resp.StatusCode, body)
+	}
+
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&claims); err != nil {
+		return "", fmt.Errorf("decoding userinfo: %w", err)
+	}
+	return claims.Email, nil
+}
+
+// --- Crypto helpers ---
+
 func decryptAESGCM(ciphertext, key []byte) ([]byte, error) {
 	if len(key) != 32 {
 		return nil, fmt.Errorf("local: invalid key length %d, want 32", len(key))
@@ -202,7 +345,6 @@ func decryptAESGCM(ciphertext, key []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ct, nil)
 }
 
-// encryptAESGCM encrypts plaintext with AES-256-GCM. Returns nonce || ciphertext || tag.
 func encryptAESGCM(plaintext, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -233,3 +375,12 @@ func copyBytes(b []byte) []byte {
 	copy(c, b)
 	return c
 }
+
+type stringReaderType struct{ s string; i int }
+
+func (r *stringReaderType) Read(b []byte) (int, error) {
+	if r.i >= len(r.s) { return 0, io.EOF }
+	n := copy(b, r.s[r.i:]); r.i += n; return n, nil
+}
+
+func stringReader(s string) io.Reader { return &stringReaderType{s: s} }
