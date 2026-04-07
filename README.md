@@ -96,7 +96,7 @@ Aileron's credential vault uses a zero-knowledge architecture: your secrets are 
 - Aileron operators cannot read your credentials, even with full database access.
 - Hosting providers (AWS, Railway, etc.) see only encrypted data.
 
-**What's next:** [Confidential computing](https://github.com/ALRubinger/aileron/issues/52) will move credential decryption and connector execution into a hardware-isolated enclave (AWS Nitro Enclaves), so plaintext credentials never exist on the host — even in memory. See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md) for the full trust model.
+**Confidential computing (Stage 2):** Credential decryption and connector execution can run inside a hardware-isolated enclave, so plaintext credentials never exist on the host — even in memory. The TEE layer uses a provider SPI with pluggable backends. Set `AILERON_TEE_PROVIDER=local` for development (in-process, no hardware isolation) or `AILERON_TEE_PROVIDER=confidential-space` for production on Google Confidential Space (AMD SEV-SNP). See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md) for the trust model and [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md) for TEE provider decisions.
 
 ## Configuration
 
@@ -139,7 +139,9 @@ The execution plane architecture is being built incrementally:
 - **Enterprise auth** with Google and GitHub OAuth, email/password signup, SSO enforcement
 - **Protected Actions catalog** (in progress) — replaces the MCP server marketplace with a curated set of actions Aileron owns
 
-Next up: Gmail connector, email intent tools, and confidential computing (TEE) execution layer ([#52](https://github.com/ALRubinger/aileron/issues/52)).
+- **Confidential computing (TEE)** — credential decryption and connector execution can run inside a hardware-isolated enclave ([#52](https://github.com/ALRubinger/aileron/issues/52)). Provider SPI with local dev and Google Confidential Space implementations. Remote attestation, ECDH session key exchange, and time-limited credential escrow for offline scheduled actions. See [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md).
+
+Next up: Gmail connector and email intent tools.
 
 ## Getting Started
 
@@ -157,15 +159,16 @@ Next up: Gmail connector, email intent tools, and confidential computing (TEE) e
 task build
 ```
 
-This builds everything: Docker containers, Go server binary, MCP gateway binary, and the UI.
+This builds everything: Docker containers, Go server binary, MCP gateway binary, enclave binary, and the UI.
 
 To build individual components:
 
 ```sh
-task build:docker   # Docker containers (server, UI, database)
-task build:server   # Go server binary
-task build:ui       # SvelteKit UI
-task build:mcp      # MCP gateway binary
+task build:docker    # Docker containers (server, UI, database)
+task build:server    # Go server binary
+task build:ui        # SvelteKit UI
+task build:mcp       # MCP gateway binary
+task build:enclave   # TEE enclave binary
 ```
 
 ### Run locally with Docker Compose
@@ -269,8 +272,12 @@ aileron/
 │   ├── notify/         Notification SPI (log, Slack, email)
 │   ├── audit/          Immutable audit store SPI
 │   └── model/          Shared domain types (Enterprise, User, ConnectedAccount, intents)
+├── enclave/            TEE provider SPI, protocol types, and provider implementations
+│   ├── local/          In-process provider for dev/test (no hardware isolation)
+│   └── gcs/            Google Confidential Space provider (HTTPS + OIDC attestation)
 ├── cmd/
-│   └── aileron-mcp/    MCP server exposing intent tools to agent hosts
+│   ├── aileron-mcp/    MCP server exposing intent tools to agent hosts
+│   └── aileron-enclave/ TEE enclave binary (runs inside confidential VM or locally)
 ├── sdk/
 │   └── go/             Go client SDK
 ├── ui/                 Management and approval UI (SvelteKit)
@@ -376,6 +383,7 @@ Aileron is a set of standard Docker containers with no infrastructure-specific a
 | Service | Dockerfile | Port | Description |
 |---------|-----------|------|-------------|
 | **server** | `core/server/Dockerfile` | 8080 | API server and auth handler |
+| **enclave** | `cmd/aileron-enclave/Dockerfile` | 8443 | TEE enclave binary (optional — only when using confidential computing) |
 | **ui** | `ui/Dockerfile` | 3000 | SvelteKit management UI |
 | **docs** | `docs/Dockerfile` | 80 | OpenAPI documentation (Scalar) |
 | **PostgreSQL** | — | 5432 | Database (any managed Postgres 16+ works) |
@@ -411,6 +419,10 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `RESEND_API_KEY` | No | | [Resend](https://resend.com) API key. When set, verification emails are delivered via Resend. When unset, codes are printed to the log (dev/CI mode). |
 | `MAIL_FROM` | No | `noreply@withaileron.ai` | Sender address for transactional emails (requires `RESEND_API_KEY`) |
 | `AILERON_KEK_SESSION_TTL` | No | `30m` | How long a verified vault passphrase session remains active. After expiry, the user must re-verify their passphrase to unlock encrypted credentials. |
+| `AILERON_TEE_PROVIDER` | No | *(empty)* | TEE provider: `local` (dev/test, in-process), `confidential-space` (production), or empty (disabled). When disabled, credentials are decrypted in the server process. |
+| `AILERON_ENCLAVE_URL` | No | | Base URL of the enclave binary (e.g. `https://enclave.internal:8443`). Required when `AILERON_TEE_PROVIDER=confidential-space`. |
+| `AILERON_ENCLAVE_IMAGE_DIGEST` | No | | Expected container image digest (`sha256:...`) for attestation verification. Ensures only the expected enclave binary is trusted. |
+| `AILERON_GCP_PROJECT_ID` | No | | Expected GCP project ID for attestation verification. Ensures the enclave is running in the expected project. |
 
 **UI service:**
 
@@ -431,6 +443,7 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
    docker build -f core/server/Dockerfile -t your-registry/aileron-server .
    docker build -f ui/Dockerfile -t your-registry/aileron-ui ui/
    docker build -f docs/Dockerfile -t your-registry/aileron-docs docs/
+   docker build -f cmd/aileron-enclave/Dockerfile -t your-registry/aileron-enclave .  # optional, for TEE
    ```
 
 3. **Configure environment variables** on each service as listed above.
@@ -453,6 +466,43 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
    ```sh
    curl https://api.yourdomain.com/v1/health
    ```
+
+### TEE Enclave (Confidential Computing)
+
+The enclave service is **optional**. When `AILERON_TEE_PROVIDER` is empty or unset, the server decrypts credentials in-process (Stage 1 behavior). When enabled, the server delegates credential decryption and connector execution to the enclave binary running inside a hardware-isolated TEE.
+
+#### Local development
+
+Set `AILERON_TEE_PROVIDER=local` on the **server** service. No enclave binary is needed — the local provider executes connectors in-process with the same ECDH session protocol but no hardware isolation. Useful for testing the attestation and session flow end-to-end.
+
+#### Production (Google Confidential Space)
+
+Running the enclave in production requires:
+
+1. **A Confidential Space VM** on GCP — an AMD SEV-SNP confidential VM running the Confidential Space base image. Create one via `gcloud compute instances create` with `--confidential-compute` and the Confidential Space image family.
+
+2. **The enclave container image** — build and push to a container registry accessible from the Confidential Space VM:
+   ```sh
+   docker build -f cmd/aileron-enclave/Dockerfile -t your-registry/aileron-enclave .
+   docker push your-registry/aileron-enclave
+   ```
+
+3. **Note the image digest** — after pushing, record the `sha256:...` digest. This is used for attestation verification.
+
+4. **Configure the server service:**
+
+   | Variable | Value |
+   |----------|-------|
+   | `AILERON_TEE_PROVIDER` | `confidential-space` |
+   | `AILERON_ENCLAVE_URL` | URL of the enclave (e.g. `https://10.128.0.5:8443` or internal DNS) |
+   | `AILERON_ENCLAVE_IMAGE_DIGEST` | `sha256:...` (from the pushed image) |
+   | `AILERON_GCP_PROJECT_ID` | Your GCP project ID |
+
+5. **Configure the enclave VM** — the Confidential Space VM runs the container image directly. Set `AILERON_ENCLAVE_PORT` (default `8443`) and `AILERON_TEE_PROVIDER=confidential-space` as container environment variables.
+
+6. **Network access** — the server must be able to reach the enclave URL over HTTPS. The enclave must be able to reach external APIs (Gmail, Stripe, etc.) to execute connector actions. The GCE metadata service (`http://metadata.google.internal`) must be accessible from within the VM for attestation token retrieval.
+
+**How attestation works:** On startup, the server requests an attestation token from the enclave. The enclave fetches an OIDC JWT from the GCE metadata service, signed by Google. The server verifies the JWT signature against Google's JWKS, then checks that the container image digest and GCP project ID match the expected values. Only after successful verification does the server establish an ECDH session and begin delegating executions.
 
 ### Railway
 

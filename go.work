@@ -1,8 +1,10 @@
 go 1.24
 
 use (
+	./cmd/aileron-enclave
 	./cmd/aileron-mcp
 	./core
+	./enclave
 	./sdk/go
 	./test/integration
 )

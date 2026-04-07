@@ -37,6 +37,7 @@ tags:
   - name: Connected Accounts
   - name: MCP Servers
   - name: Enterprise MCP Servers
+  - name: TEE
   - name: Health
 
 paths:
@@ -1612,6 +1613,69 @@ paths:
         "404":
           description: Server not found in registry
 
+  /v1/tee/status:
+    get:
+      tags: [TEE]
+      summary: Get TEE status
+      operationId: getTeeStatus
+      responses:
+        "200":
+          description: TEE configuration and session status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeeStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/tee/attestation:
+    post:
+      tags: [TEE]
+      summary: Initiate remote attestation
+      operationId: initiateAttestation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeeAttestationRequest"
+      responses:
+        "200":
+          description: Attestation evidence from the enclave
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeeAttestationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "501":
+          description: TEE not enabled
+
+  /v1/tee/session:
+    post:
+      tags: [TEE]
+      summary: Establish TEE session after attestation verification
+      operationId: establishTeeSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeeSessionRequest"
+      responses:
+        "200":
+          description: Session established
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeeSessionResponse"
+        "400":
+          description: Invalid attestation or key exchange failure
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "501":
+          description: TEE not enabled
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2606,6 +2670,15 @@ components:
         expires_at:
           type: string
           format: date-time
+        escrow_policy:
+          type: string
+          enum: [none, session, escrowed]
+          default: none
+          description: |
+            How credentials are managed for this grant.
+            - none: no TEE (credentials decrypted in host process)
+            - session: credentials sent to TEE per-execution (real-time only)
+            - escrowed: credentials escrowed inside TEE for async/scheduled use
 
     ExecutionRunRequest:
       type: object
@@ -3332,3 +3405,83 @@ components:
           type: string
           format: byte
           description: Base64-encoded Argon2id salt (omitted when no passphrase is set)
+
+    TeeStatus:
+      type: object
+      required: [enabled, provider]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether a TEE provider is configured
+        provider:
+          type: string
+          enum: [none, local, confidential-space]
+          description: The active TEE provider
+        attested:
+          type: boolean
+          description: Whether the enclave has been attested
+        session_active:
+          type: boolean
+          description: Whether an active session exists with the enclave
+        session_expires_at:
+          type: string
+          format: date-time
+          description: When the current session expires
+
+    TeeAttestationRequest:
+      type: object
+      properties:
+        audience:
+          type: string
+          description: Expected audience for the attestation token
+
+    TeeAttestationResponse:
+      type: object
+      required: [nonce, token, public_key]
+      properties:
+        nonce:
+          type: string
+          format: byte
+          description: Random nonce used for attestation freshness
+        token:
+          type: string
+          description: Attestation evidence (OIDC JWT for Confidential Space, "dev-ok" for local)
+        public_key:
+          type: string
+          format: byte
+          description: Enclave's ephemeral ECDH public key (base64)
+
+    TeeSessionRequest:
+      type: object
+      required: [nonce, token, public_key]
+      properties:
+        nonce:
+          type: string
+          format: byte
+          description: The nonce from the attestation request
+        token:
+          type: string
+          description: The attestation token to verify
+        public_key:
+          type: string
+          format: byte
+          description: Host's ephemeral ECDH public key (base64)
+
+    TeeSessionResponse:
+      type: object
+      required: [verified, session_id]
+      properties:
+        verified:
+          type: boolean
+          description: Whether attestation verification succeeded
+        session_id:
+          type: string
+          description: Session identifier for subsequent requests
+        expires_at:
+          type: string
+          format: date-time
+          description: When the session expires
+        claims:
+          type: object
+          additionalProperties: true
+          description: Verified attestation claims (image_digest, project_id, etc.)

@@ -27,6 +27,7 @@ import (
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/store/postgres"
 	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/ALRubinger/aileron/enclave"
 	"github.com/google/uuid"
 )
 
@@ -94,6 +95,18 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// --- Notifier ---
 	notifier := notify.NewLogNotifier(log)
 
+	// --- TEE (optional — enabled when AILERON_TEE_PROVIDER is set) ---
+	teeCfg := config.LoadTEEConfig()
+	var enclaveClient enclave.Client
+	var enclaveVerifier enclave.Verifier
+	if teeCfg.TEEEnabled() {
+		var teeErr error
+		enclaveClient, enclaveVerifier, teeErr = newEnclaveClient(teeCfg, log, registry)
+		if teeErr != nil {
+			return nil, teeErr
+		}
+	}
+
 	// --- HTTP handler ---
 	mux := http.NewServeMux()
 
@@ -117,7 +130,13 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		credentials:       credentialStore,
 		fundingSources:    fundingSourceStore,
 		traces:            traceStore,
+		enclaveClient:     enclaveClient,
+		enclaveVerifier:   enclaveVerifier,
+		teeCfg:            teeCfg,
 		newID:             idGen,
+	}
+	if teeCfg.TEEEnabled() {
+		server.teeState = &teeState{}
 	}
 	api.HandlerFromMux(server, mux)
 
