@@ -7,8 +7,6 @@ import (
 	"github.com/ALRubinger/aileron/enclave"
 )
 
-const kekTTL = 30 * time.Minute
-
 type kekEntry struct {
 	kek       []byte
 	expiresAt time.Time
@@ -18,10 +16,14 @@ type kekEntry struct {
 type kekStore struct {
 	mu      sync.RWMutex
 	entries map[string]*kekEntry // keyed by user ID
+	ttl     time.Duration
 }
 
-func newKEKStore() *kekStore {
-	return &kekStore{entries: make(map[string]*kekEntry)}
+func newKEKStore(ttl time.Duration) *kekStore {
+	return &kekStore{
+		entries: make(map[string]*kekEntry),
+		ttl:     ttl,
+	}
 }
 
 // Store saves a KEK for a user. Any previous KEK for the user is zeroed.
@@ -37,7 +39,7 @@ func (s *kekStore) Store(userID string, kek []byte) {
 	copy(cpy, kek)
 	s.entries[userID] = &kekEntry{
 		kek:       cpy,
-		expiresAt: time.Now().Add(kekTTL),
+		expiresAt: time.Now().Add(s.ttl),
 	}
 }
 

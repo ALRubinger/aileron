@@ -87,8 +87,9 @@ Aileron's credential vault uses a zero-knowledge architecture: your secrets are 
 
 1. You set a vault passphrase. Aileron derives a 256-bit Key Encryption Key (KEK) using Argon2id, stores only the salt and a verification blob, then discards the KEK from memory.
 2. When you connect an external account (Gmail, Calendar, etc.), the OAuth refresh token is encrypted with your KEK before storage. The database holds only ciphertext.
-3. To execute actions, you verify your passphrase to unlock a time-limited session (default: 30 minutes). The KEK is held in memory only for the session duration.
-4. When an agent triggers an execution, Aileron decrypts the credential with the session KEK, calls the external API, and discards the plaintext.
+3. To execute actions, you verify your passphrase to unlock a time-limited session (default: 24 hours). The KEK is held in memory only for the session duration.
+4. When TEE is active, verifying your passphrase automatically escrows all connected account credentials into the hardware-isolated enclave. Escrowed credentials persist for 7 days (configurable), independent of the KEK session — so your agents run autonomously without interruption.
+5. When an agent triggers an execution, Aileron uses the escrowed credential (TEE mode) or decrypts with the session KEK (direct mode), calls the external API, and discards the plaintext.
 
 **What this means:**
 
@@ -96,7 +97,7 @@ Aileron's credential vault uses a zero-knowledge architecture: your secrets are 
 - Aileron operators cannot read your credentials, even with full database access.
 - Hosting providers (AWS, Railway, etc.) see only encrypted data.
 
-**Confidential computing (Stage 2):** Credential decryption and connector execution can run inside a hardware-isolated enclave, so plaintext credentials never exist on the host — even in memory. The TEE layer uses a provider SPI with pluggable backends. Set `AILERON_TEE_PROVIDER=local` for development (in-process, no hardware isolation) or `AILERON_TEE_PROVIDER=confidential-space` for production on Google Confidential Space (AMD SEV-SNP). See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md) for the trust model and [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md) for TEE provider decisions.
+**Confidential computing (Stage 2):** Credential decryption and connector execution can run inside a hardware-isolated enclave, so plaintext credentials never exist on the host — even in memory. The TEE layer uses a provider SPI with pluggable backends. Set `AILERON_TEE_PROVIDER=local` for development (in-process, no hardware isolation) or `AILERON_TEE_PROVIDER=confidential-space` for production on Google Confidential Space (AMD SEV-SNP). See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md) for the trust model, [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md) for TEE provider decisions, and [ADR-0012](docs/adr/0012-auto-escrow-and-decoupled-session-lifetimes.md) for auto-escrow and session lifetime design.
 
 ## Configuration
 
@@ -139,7 +140,7 @@ The execution plane architecture is being built incrementally:
 - **Enterprise auth** with Google and GitHub OAuth, email/password signup, SSO enforcement
 - **Protected Actions catalog** (in progress) — replaces the MCP server marketplace with a curated set of actions Aileron owns
 
-- **Confidential computing (TEE)** — credential decryption and connector execution can run inside a hardware-isolated enclave ([#52](https://github.com/ALRubinger/aileron/issues/52)). Provider SPI with local dev and Google Confidential Space implementations. Remote attestation, ECDH session key exchange, and time-limited credential escrow for offline scheduled actions. See [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md).
+- **Confidential computing (TEE)** — credential decryption and connector execution can run inside a hardware-isolated enclave ([#52](https://github.com/ALRubinger/aileron/issues/52)). Provider SPI with local dev and Google Confidential Space implementations. Remote attestation, ECDH session key exchange, and auto-escrow of credentials on passphrase verification for autonomous agent execution ([#55](https://github.com/ALRubinger/aileron/issues/55)). See [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md) and [ADR-0012](docs/adr/0012-auto-escrow-and-decoupled-session-lifetimes.md).
 
 Next up: Gmail connector and email intent tools.
 
@@ -418,7 +419,8 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `GITHUB_OAUTH_CLIENT_SECRET` | No | | GitHub OAuth 2.0 client secret |
 | `RESEND_API_KEY` | No | | [Resend](https://resend.com) API key. When set, verification emails are delivered via Resend. When unset, codes are printed to the log (dev/CI mode). |
 | `MAIL_FROM` | No | `noreply@withaileron.ai` | Sender address for transactional emails (requires `RESEND_API_KEY`) |
-| `AILERON_KEK_SESSION_TTL` | No | `30m` | How long a verified vault passphrase session remains active. After expiry, the user must re-verify their passphrase to unlock encrypted credentials. |
+| `AILERON_KEK_SESSION_TTL` | No | `24h` | How long a verified vault passphrase session remains active. Controls interactive vault operations (UI, connecting accounts). After expiry, the user must re-verify. |
+| `AILERON_ESCROW_TTL` | No | `168h` | How long auto-escrowed credentials persist in TEE memory for autonomous agent execution. Independent of the KEK session. Re-verification refreshes the escrow window. |
 | `AILERON_TEE_PROVIDER` | No | *(empty)* | TEE provider: `local` (dev/test, in-process), `confidential-space` (production), or empty (disabled). When disabled, credentials are decrypted in the server process. |
 | `AILERON_ENCLAVE_URL` | No | | Base URL of the enclave binary (e.g. `https://enclave.internal:8443`). Required when `AILERON_TEE_PROVIDER=confidential-space`. |
 | `AILERON_ENCLAVE_IMAGE_DIGEST` | No | | Expected container image digest (`sha256:...`) for attestation verification. Ensures only the expected enclave binary is trusted. |

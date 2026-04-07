@@ -120,11 +120,26 @@ func (c *AuthConfig) ResendEnabled() bool {
 }
 
 // KEKSessionTTL returns the TTL for in-memory KEK sessions.
-// Env: AILERON_KEK_SESSION_TTL (default: "30m")
+// The KEK session controls how long the derived key stays in process memory
+// for UI/management operations (viewing credentials, connecting accounts).
+// Env: AILERON_KEK_SESSION_TTL (default: "24h")
 func (c *AuthConfig) KEKSessionTTL() time.Duration {
-	d, err := parseDurationOrDefault("AILERON_KEK_SESSION_TTL", 30*time.Minute)
+	d, err := parseDurationOrDefault("AILERON_KEK_SESSION_TTL", 24*time.Hour)
 	if err != nil {
-		return 30 * time.Minute
+		return 24 * time.Hour
+	}
+	return d
+}
+
+// EscrowTTL returns the TTL for credentials escrowed in TEE memory.
+// Escrowed credentials persist independently of the KEK session, allowing
+// autonomous agent execution without the user being online. The escrow is
+// refreshed each time the user verifies their passphrase.
+// Env: AILERON_ESCROW_TTL (default: "168h" = 7 days)
+func (c *AuthConfig) EscrowTTL() time.Duration {
+	d, err := parseDurationOrDefault("AILERON_ESCROW_TTL", 7*24*time.Hour)
+	if err != nil {
+		return 7 * 24 * time.Hour
 	}
 	return d
 }

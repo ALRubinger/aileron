@@ -7,6 +7,9 @@
 	import { Separator } from '$lib/components/ui/separator';
 	import { initAuth, isAuthenticated, getUser, logout } from '$lib/auth.svelte.js';
 	import { initPosthog, posthog } from '$lib/posthog.js';
+	import PassphraseModal from '$lib/components/PassphraseModal.svelte';
+	import { sessionExpiresAt, setSessionExpiresAt } from '$lib/vault.svelte.js';
+	import { getPassphraseSession } from '$lib/api';
 
 	let { children } = $props();
 	let mounted = $state(false);
@@ -14,10 +17,44 @@
 
 	const publicPaths = ['/login', '/signup', '/verify-email', '/auth/callback'];
 
+	let vaultTimeRemaining = $state('');
+
+	function updateVaultTimer() {
+		const expires = sessionExpiresAt();
+		if (!expires) {
+			vaultTimeRemaining = '';
+			return;
+		}
+		const diff = expires.getTime() - Date.now();
+		if (diff <= 0) {
+			vaultTimeRemaining = '';
+			return;
+		}
+		const hours = Math.floor(diff / 3600000);
+		const minutes = Math.floor((diff % 3600000) / 60000);
+		vaultTimeRemaining = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+	}
+
 	onMount(() => {
 		initAuth();
 		initPosthog();
 		mounted = true;
+
+		// Poll vault session status.
+		const timer = setInterval(updateVaultTimer, 30000);
+		updateVaultTimer();
+
+		// Fetch initial session status.
+		getPassphraseSession()
+			.then((resp: { active: boolean; expires_at?: string }) => {
+				if (resp?.active && resp.expires_at) {
+					setSessionExpiresAt(new Date(resp.expires_at));
+					updateVaultTimer();
+				}
+			})
+			.catch(() => {});
+
+		return () => clearInterval(timer);
 	});
 
 	$effect(() => {
@@ -61,6 +98,13 @@
 		<a href="/traces" class="no-underline text-muted-foreground text-sm">Traces</a>
 		<a href="/policies" class="no-underline text-muted-foreground text-sm">Policies</a>
 		<a href="/marketplace" class="no-underline text-muted-foreground text-sm">Protected Actions</a>
+
+		{#if vaultTimeRemaining}
+			<span class="text-xs text-muted-foreground flex items-center gap-1">
+				<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>
+				Vault unlocked ({vaultTimeRemaining})
+			</span>
+		{/if}
 
 		<div class="ml-auto relative">
 			<button
@@ -127,3 +171,5 @@
 <main class="max-w-[960px] mx-auto p-6">
 	{@render children()}
 </main>
+
+<PassphraseModal />

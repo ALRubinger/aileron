@@ -116,6 +116,32 @@ func (c *KEKSessionCache) EvictExpired() {
 	}
 }
 
+// ExpiresAt returns the expiry time for the given session, or nil if the
+// session is not found or has expired. Unlike Get, it does not return the
+// KEK bytes — safe for status checks.
+func (c *KEKSessionCache) ExpiresAt(sessionID string) *time.Time {
+	c.mu.RLock()
+	entry, ok := c.entries[sessionID]
+	c.mu.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	if c.now().After(entry.expiresAt) {
+		c.Clear(sessionID)
+		return nil
+	}
+
+	t := entry.expiresAt
+	return &t
+}
+
+// TTL returns the configured session TTL.
+func (c *KEKSessionCache) TTL() time.Duration {
+	return c.ttl
+}
+
 // Len returns the number of entries in the cache (for testing).
 func (c *KEKSessionCache) Len() int {
 	c.mu.RLock()

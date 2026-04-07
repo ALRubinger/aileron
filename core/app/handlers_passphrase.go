@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/enclave"
 )
 
@@ -172,6 +175,11 @@ func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, "enclave_error", "failed to transmit KEK to enclave: "+transmitErr.Error())
 				return
 			}
+
+			// Auto-escrow: escrow all active connected account credentials
+			// into TEE memory so agents can execute autonomously.
+			escrowed := s.autoEscrowCredentials(ctx, userID)
+			resp.EscrowedCount = &escrowed
 		}
 		// Cache KEK locally as fallback. When TEE session is active,
 		// execution uses the enclave's copy; the local cache serves
@@ -179,6 +187,8 @@ func (s *apiServer) VerifyPassphrase(w http.ResponseWriter, r *http.Request) {
 		// session has not yet been established.
 		if s.kekCache != nil {
 			s.kekCache.Set(userID, kek)
+			expiresAt := time.Now().Add(s.kekCache.TTL())
+			resp.SessionExpiresAt = &expiresAt
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -212,6 +222,91 @@ func (s *apiServer) GetPassphraseSalt(w http.ResponseWriter, r *http.Request) {
 		HasPassphrase: true,
 		Salt:          &salt,
 	})
+}
+
+func (s *apiServer) GetPassphraseSession(w http.ResponseWriter, r *http.Request) {
+	claims := auth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "not authenticated")
+		return
+	}
+
+	resp := api.KEKSessionStatus{Active: false}
+
+	if s.kekCache != nil {
+		if expiresAt := s.kekCache.ExpiresAt(claims.Subject); expiresAt != nil {
+			resp.Active = true
+			resp.ExpiresAt = expiresAt
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// autoEscrowCredentials escrows all active connected account credentials into
+// the TEE for autonomous execution. Returns the number of successfully
+// escrowed credentials.
+func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) int {
+	if s.connectedAccounts == nil {
+		return 0
+	}
+
+	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
+	if err != nil {
+		return 0
+	}
+
+	escrowed := 0
+	for _, acc := range accounts {
+		if acc.Status != model.ConnectedAccountStatusActive {
+			continue
+		}
+
+		secret, err := s.vault.Get(ctx, acc.VaultPath())
+		if err != nil {
+			continue
+		}
+
+		if !vault.IsEncrypted(secret.Metadata) {
+			continue
+		}
+
+		expiresAt := time.Now().Add(s.escrowTTL)
+		grantID := "auto-escrow-" + acc.ID
+
+		resp, err := s.enclaveClient.EscrowStore(ctx, enclave.EscrowStoreRequest{
+			UserID:              userID,
+			GrantID:             grantID,
+			EncryptedCredential: secret.Value,
+			CredentialType:      secret.Metadata.Type,
+			ExpiresAt:           expiresAt.Format(time.RFC3339),
+			ActionTypes:         actionTypesForProvider(acc.Provider),
+		})
+		if err != nil {
+			continue
+		}
+
+		s.escrowIndex.Store(acc.VaultPath(), resp.EscrowID)
+		escrowed++
+	}
+	return escrowed
+}
+
+// actionTypesForProvider returns the action types allowed for a connected
+// account provider.
+func actionTypesForProvider(provider model.ConnectedAccountProvider) []string {
+	switch provider {
+	case model.ConnectedAccountProviderGmail:
+		return []string{"email.send"}
+	case model.ConnectedAccountProviderGoogleCalendar:
+		return []string{"calendar.create"}
+	case model.ConnectedAccountProviderOutlook:
+		return []string{"email.send"}
+	case model.ConnectedAccountProviderMicrosoftCalendar:
+		return []string{"calendar.create"}
+	default:
+		return nil
+	}
 }
 
 // zeroBytes overwrites a byte slice with zeros.

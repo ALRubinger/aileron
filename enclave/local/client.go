@@ -22,8 +22,6 @@ import (
 	"github.com/ALRubinger/aileron/enclave"
 )
 
-const sessionTTL = 30 * time.Minute
-
 // ExecuteFn executes a connector action given the decrypted credential.
 // This is injected at construction to avoid the enclave module depending
 // on core/connector.
@@ -37,18 +35,37 @@ type Client struct {
 	sessionKey []byte           // derived shared secret after EstablishSession
 	sessionID  string
 	expiresAt  time.Time
+	sessionTTL time.Duration
 	keks       *kekStore   // per-user KEK storage
 	escrow     *escrowStore
 }
 
+// Option configures a local enclave Client.
+type Option func(*Client)
+
+// WithSessionTTL sets the ECDH session lifetime. Default: 24h.
+func WithSessionTTL(d time.Duration) Option {
+	return func(c *Client) { c.sessionTTL = d }
+}
+
+// WithKEKTTL sets the per-user KEK storage lifetime. Default: 24h.
+func WithKEKTTL(d time.Duration) Option {
+	return func(c *Client) { c.keks = newKEKStore(d) }
+}
+
 // New creates a local enclave client. The executeFn is called to perform
 // connector execution after credential decryption.
-func New(executeFn ExecuteFn) *Client {
-	return &Client{
-		executeFn: executeFn,
-		keks:      newKEKStore(),
-		escrow:    newEscrowStore(),
+func New(executeFn ExecuteFn, opts ...Option) *Client {
+	c := &Client{
+		executeFn:  executeFn,
+		sessionTTL: 24 * time.Hour,
+		keks:       newKEKStore(24 * time.Hour),
+		escrow:     newEscrowStore(),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Attest generates an ephemeral ECDH key pair and returns a dev attestation
@@ -94,7 +111,7 @@ func (c *Client) EstablishSession(_ context.Context, req enclave.SessionRequest)
 	zeroBytes(c.sessionKey)
 
 	c.sessionKey = h[:]
-	c.expiresAt = time.Now().Add(sessionTTL)
+	c.expiresAt = time.Now().Add(c.sessionTTL)
 
 	b := make([]byte, 16)
 	rand.Read(b)

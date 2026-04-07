@@ -9,7 +9,7 @@ import (
 )
 
 func TestKEKStoreAndGet(t *testing.T) {
-	s := newKEKStore()
+	s := newKEKStore(30 * time.Minute)
 	kek := make([]byte, 32)
 	rand.Read(kek)
 
@@ -32,7 +32,7 @@ func TestKEKStoreAndGet(t *testing.T) {
 }
 
 func TestKEKStoreNotFound(t *testing.T) {
-	s := newKEKStore()
+	s := newKEKStore(30 * time.Minute)
 	_, err := s.Get("nonexistent")
 	if err != enclave.ErrNoKEK {
 		t.Fatalf("expected ErrNoKEK, got %v", err)
@@ -40,7 +40,7 @@ func TestKEKStoreNotFound(t *testing.T) {
 }
 
 func TestKEKStoreExpired(t *testing.T) {
-	s := newKEKStore()
+	s := newKEKStore(30 * time.Minute)
 	kek := make([]byte, 32)
 	rand.Read(kek)
 
@@ -64,7 +64,7 @@ func TestKEKStoreExpired(t *testing.T) {
 }
 
 func TestKEKStoreOverwrite(t *testing.T) {
-	s := newKEKStore()
+	s := newKEKStore(30 * time.Minute)
 	kek1 := make([]byte, 32)
 	kek2 := make([]byte, 32)
 	rand.Read(kek1)
@@ -89,7 +89,7 @@ func TestKEKStoreOverwrite(t *testing.T) {
 }
 
 func TestKEKStoreClear(t *testing.T) {
-	s := newKEKStore()
+	s := newKEKStore(30 * time.Minute)
 	kek := make([]byte, 32)
 	rand.Read(kek)
 	s.Store("user-1", kek)
@@ -108,7 +108,7 @@ func TestKEKStoreClear(t *testing.T) {
 }
 
 func TestKEKStoreRemoveNonExistent(t *testing.T) {
-	s := newKEKStore()
+	s := newKEKStore(30 * time.Minute)
 	// Should not panic.
 	s.remove("nonexistent")
 }

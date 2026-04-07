@@ -1,5 +1,6 @@
 import { PUBLIC_API_BASE } from '$env/static/public';
 import { getToken, refreshAuth, clearAuth } from '$lib/auth.svelte.js';
+import { requestUnlock } from '$lib/vault.svelte.js';
 
 const API_BASE = PUBLIC_API_BASE;
 
@@ -35,6 +36,12 @@ async function apiFetch(path: string, options?: RequestInit) {
 	}
 
 	if (res.status === 204) return null;
+
+	// Vault locked — open passphrase modal and retry.
+	if (res.status === 423) {
+		return requestUnlock(() => apiFetch(path, options));
+	}
+
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
 		throw new Error(err.error?.message || res.statusText);
@@ -199,4 +206,17 @@ export async function updateCurrentEnterprise(data: {
 		method: 'PATCH',
 		body: JSON.stringify(data)
 	});
+}
+
+// --- Vault / Passphrase ---
+
+export async function verifyPassphrase(passphrase: string) {
+	return apiFetch('/v1/users/me/passphrase/verify', {
+		method: 'POST',
+		body: JSON.stringify({ passphrase })
+	});
+}
+
+export async function getPassphraseSession() {
+	return apiFetch('/v1/users/me/passphrase/session');
 }
