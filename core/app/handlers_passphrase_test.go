@@ -13,8 +13,37 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store/mem"
+	"github.com/ALRubinger/aileron/enclave"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// failingTransmitClient is an enclave client whose TransmitKEK always fails.
+type failingTransmitClient struct {
+	err error
+}
+
+func (c *failingTransmitClient) Attest(_ context.Context, _ enclave.AttestationRequest) (enclave.AttestationResponse, error) {
+	return enclave.AttestationResponse{}, nil
+}
+func (c *failingTransmitClient) EstablishSession(_ context.Context, _ enclave.SessionRequest) (enclave.SessionResponse, error) {
+	return enclave.SessionResponse{}, nil
+}
+func (c *failingTransmitClient) TransmitKEK(_ context.Context, _ enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
+	return enclave.TransmitKEKResponse{}, c.err
+}
+func (c *failingTransmitClient) OAuthExchange(_ context.Context, _ enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
+	return enclave.OAuthExchangeResponse{}, nil
+}
+func (c *failingTransmitClient) Execute(_ context.Context, _ enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
+	return enclave.ExecuteResponse{}, nil
+}
+func (c *failingTransmitClient) EscrowStore(_ context.Context, _ enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
+	return enclave.EscrowStoreResponse{}, nil
+}
+func (c *failingTransmitClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
+	return nil
+}
+func (c *failingTransmitClient) Close() error { return nil }
 
 func passphraseServer() *apiServer {
 	return &apiServer{
@@ -455,6 +484,80 @@ func TestGetPassphraseSalt_AuthNotEnabled(t *testing.T) {
 
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotImplemented)
+	}
+}
+
+// TestVerifyPassphrase_TEE_TransmitKEKFails verifies the contract:
+// Given a user with a valid passphrase and an active TEE session,
+// when TransmitKEK to the enclave fails, then return 500 with enclave_error.
+func TestVerifyPassphrase_TEE_TransmitKEKFails(t *testing.T) {
+	srv := passphraseServer()
+	srv.enclaveClient = &failingTransmitClient{err: errors.New("enclave unreachable")}
+	srv.teeState = &teeState{sessionKey: make([]byte, 32)} // simulate active session
+
+	// Set passphrase first.
+	setReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase",
+		`{"passphrase":"a-valid-passphrase"}`, testClaims)
+	w1 := httptest.NewRecorder()
+	srv.SetPassphrase(w1, setReq)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("SetPassphrase: expected 200, got %d", w1.Code)
+	}
+
+	// Verify passphrase — should attempt TransmitKEK and fail.
+	verifyReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase/verify",
+		`{"passphrase":"a-valid-passphrase"}`, testClaims)
+	w2 := httptest.NewRecorder()
+	srv.VerifyPassphrase(w2, verifyReq)
+
+	if w2.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w2.Code, w2.Body.String())
+	}
+	var errResp api.Error
+	json.NewDecoder(w2.Body).Decode(&errResp)
+	if errResp.Error.Code != "enclave_error" {
+		t.Fatalf("expected error code enclave_error, got %q", errResp.Error.Code)
+	}
+}
+
+// TestVerifyPassphrase_TEE_NoSessionFallsBackToCache verifies the contract:
+// Given a user with a valid passphrase and TEE enabled but no session,
+// when passphrase is verified, then KEK is cached locally (not transmitted).
+func TestVerifyPassphrase_TEE_NoSessionFallsBackToCache(t *testing.T) {
+	kekCache := auth.NewKEKSessionCache(30 * time.Minute)
+	srv := passphraseServer()
+	srv.enclaveClient = &failingTransmitClient{} // TEE enabled, but...
+	srv.teeState = &teeState{}                   // ...no session key
+	srv.kekCache = kekCache
+
+	// Set passphrase.
+	setReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase",
+		`{"passphrase":"a-valid-passphrase"}`, testClaims)
+	w1 := httptest.NewRecorder()
+	srv.SetPassphrase(w1, setReq)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("SetPassphrase: expected 200, got %d", w1.Code)
+	}
+
+	// Verify passphrase — no TEE session, should fall back to kekCache.
+	verifyReq := authedRequest(http.MethodPost, "/v1/users/me/passphrase/verify",
+		`{"passphrase":"a-valid-passphrase"}`, testClaims)
+	w2 := httptest.NewRecorder()
+	srv.VerifyPassphrase(w2, verifyReq)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+	var resp api.VerifyPassphraseResponse
+	json.NewDecoder(w2.Body).Decode(&resp)
+	if !resp.Valid {
+		t.Fatal("expected valid=true")
+	}
+
+	// KEK should be in the local cache.
+	kek := kekCache.Get(testClaims.Subject)
+	if kek == nil {
+		t.Fatal("expected KEK to be cached locally when TEE session is not active")
 	}
 }
 
