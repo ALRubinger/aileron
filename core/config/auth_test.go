@@ -193,6 +193,30 @@ func TestLoadAuthConfig_ResendDisabled(t *testing.T) {
 	}
 }
 
+func TestKEKSessionTTL_Default(t *testing.T) {
+	t.Setenv("AILERON_KEK_SESSION_TTL", "")
+	cfg := &AuthConfig{}
+	if got := cfg.KEKSessionTTL(); got != 30*time.Minute {
+		t.Errorf("KEKSessionTTL = %v, want 30m", got)
+	}
+}
+
+func TestKEKSessionTTL_Custom(t *testing.T) {
+	t.Setenv("AILERON_KEK_SESSION_TTL", "1h")
+	cfg := &AuthConfig{}
+	if got := cfg.KEKSessionTTL(); got != time.Hour {
+		t.Errorf("KEKSessionTTL = %v, want 1h", got)
+	}
+}
+
+func TestKEKSessionTTL_Invalid(t *testing.T) {
+	t.Setenv("AILERON_KEK_SESSION_TTL", "not-a-duration")
+	cfg := &AuthConfig{}
+	if got := cfg.KEKSessionTTL(); got != 30*time.Minute {
+		t.Errorf("KEKSessionTTL = %v, want 30m (fallback)", got)
+	}
+}
+
 func TestLoadAuthConfig_MailFromDefault(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("MAIL_FROM", "")

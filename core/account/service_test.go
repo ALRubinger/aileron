@@ -372,6 +372,27 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestGoogleService_WithVault(t *testing.T) {
+	v1 := vault.NewMemVault()
+	v2 := vault.NewMemVault()
+	svc := NewGoogleService("id", "secret", mem.NewConnectedAccountStore(), v1)
+
+	scoped := svc.WithVault(v2)
+
+	// Original should still use v1.
+	if svc.vault == v2 {
+		t.Fatal("original service should keep its vault")
+	}
+	// Scoped copy should use v2.
+	if scoped.vault != v2 {
+		t.Fatal("scoped service should use the new vault")
+	}
+	// Should preserve other fields.
+	if scoped.clientID != "id" || scoped.clientSecret != "secret" {
+		t.Fatal("WithVault should preserve client credentials")
+	}
+}
+
 func mustParseURL(raw string) *net_url.URL {
 	u, err := net_url.Parse(raw)
 	if err != nil {
