@@ -624,24 +624,6 @@ func (e EnterprisePlan) Valid() bool {
 	}
 }
 
-// Defines values for EnterpriseMCPServerMode.
-const (
-	EnterpriseMCPServerModeLocal  EnterpriseMCPServerMode = "local"
-	EnterpriseMCPServerModeRemote EnterpriseMCPServerMode = "remote"
-)
-
-// Valid indicates whether the value is a known member of the EnterpriseMCPServerMode enum.
-func (e EnterpriseMCPServerMode) Valid() bool {
-	switch e {
-	case EnterpriseMCPServerModeLocal:
-		return true
-	case EnterpriseMCPServerModeRemote:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for EvidenceItemType.
 const (
 	EvidenceItemTypeArtifactRef   EvidenceItemType = "artifact_ref"
@@ -921,63 +903,6 @@ func (e IntentStatus) Valid() bool {
 	case PendingPolicy:
 		return true
 	case Succeeded:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for MCPServerConfigMode.
-const (
-	MCPServerConfigModeLocal  MCPServerConfigMode = "local"
-	MCPServerConfigModeRemote MCPServerConfigMode = "remote"
-)
-
-// Valid indicates whether the value is a known member of the MCPServerConfigMode enum.
-func (e MCPServerConfigMode) Valid() bool {
-	switch e {
-	case MCPServerConfigModeLocal:
-		return true
-	case MCPServerConfigModeRemote:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for MCPServerConfigSource.
-const (
-	MCPServerConfigSourceEnterprise MCPServerConfigSource = "enterprise"
-	MCPServerConfigSourcePersonal   MCPServerConfigSource = "personal"
-)
-
-// Valid indicates whether the value is a known member of the MCPServerConfigSource enum.
-func (e MCPServerConfigSource) Valid() bool {
-	switch e {
-	case MCPServerConfigSourceEnterprise:
-		return true
-	case MCPServerConfigSourcePersonal:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for MCPServerConfigStatus.
-const (
-	MCPServerConfigStatusError   MCPServerConfigStatus = "error"
-	MCPServerConfigStatusRunning MCPServerConfigStatus = "running"
-	MCPServerConfigStatusStopped MCPServerConfigStatus = "stopped"
-)
-
-// Valid indicates whether the value is a known member of the MCPServerConfigStatus enum.
-func (e MCPServerConfigStatus) Valid() bool {
-	switch e {
-	case MCPServerConfigStatusError:
-		return true
-	case MCPServerConfigStatusRunning:
-		return true
-	case MCPServerConfigStatusStopped:
 		return true
 	default:
 		return false
@@ -1686,44 +1611,6 @@ type Enterprise struct {
 // EnterprisePlan defines model for Enterprise.Plan.
 type EnterprisePlan string
 
-// EnterpriseMCPServer defines model for EnterpriseMCPServer.
-type EnterpriseMCPServer struct {
-	// AutoEnabled If true, this server is automatically active for all enterprise users
-	AutoEnabled *bool `json:"auto_enabled,omitempty"`
-
-	// Command Command to execute
-	Command   []string   `json:"command"`
-	CreatedAt *time.Time `json:"created_at,omitempty"`
-
-	// Description Human-readable description of this server
-	Description  *string `json:"description,omitempty"`
-	EnterpriseId *string `json:"enterprise_id,omitempty"`
-
-	// Env Environment variables (vault:// prefix for vault resolution)
-	Env *map[string]string `json:"env,omitempty"`
-	Id  *string            `json:"id,omitempty"`
-
-	// Mode Execution mode (local subprocess or remote HTTP)
-	Mode *EnterpriseMCPServerMode `json:"mode,omitempty"`
-
-	// Name Unique identifier for this server
-	Name          string `json:"name"`
-	PolicyMapping *struct {
-		// ToolPrefix Maps tool calls to action type namespace
-		ToolPrefix *string `json:"tool_prefix,omitempty"`
-	} `json:"policy_mapping,omitempty"`
-
-	// RegistryId MCP Registry identifier if installed from marketplace
-	RegistryId *string    `json:"registry_id,omitempty"`
-	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
-
-	// Version Installed version of the server
-	Version *string `json:"version,omitempty"`
-}
-
-// EnterpriseMCPServerMode Execution mode (local subprocess or remote HTTP)
-type EnterpriseMCPServerMode string
-
 // Error defines model for Error.
 type Error struct {
 	Error struct {
@@ -1868,12 +1755,6 @@ type HealthResponse struct {
 // HealthResponseStatus defines model for HealthResponse.Status.
 type HealthResponseStatus string
 
-// InstallResult defines model for InstallResult.
-type InstallResult struct {
-	RequiredCredentials *[]RequiredEnvVar `json:"required_credentials,omitempty"`
-	Server              MCPServerConfig   `json:"server"`
-}
-
 // IntentContext defines model for IntentContext.
 type IntentContext struct {
 	Environment      *string   `json:"environment,omitempty"`
@@ -1924,76 +1805,6 @@ type LineItem struct {
 	Quantity    int     `json:"quantity"`
 	Sku         *string `json:"sku,omitempty"`
 	UnitAmount  Money   `json:"unit_amount"`
-}
-
-// MCPServerConfig defines model for MCPServerConfig.
-type MCPServerConfig struct {
-	// Command Command to execute
-	Command   []string   `json:"command"`
-	CreatedAt *time.Time `json:"created_at,omitempty"`
-
-	// Description Human-readable description of this server
-	Description *string `json:"description,omitempty"`
-
-	// Env Environment variables (vault:// prefix for vault resolution)
-	Env *map[string]string `json:"env,omitempty"`
-	Id  *string            `json:"id,omitempty"`
-
-	// Mode Execution mode (local subprocess or remote HTTP)
-	Mode *MCPServerConfigMode `json:"mode,omitempty"`
-
-	// Name Unique identifier for this server
-	Name          string `json:"name"`
-	PolicyMapping *struct {
-		// ToolPrefix Maps tool calls to action type namespace
-		ToolPrefix *string `json:"tool_prefix,omitempty"`
-	} `json:"policy_mapping,omitempty"`
-
-	// RegistryId MCP Registry identifier if installed from marketplace
-	RegistryId *string `json:"registry_id,omitempty"`
-
-	// Source Whether this server is a personal installation or enterprise-managed
-	Source *MCPServerConfigSource `json:"source,omitempty"`
-
-	// Status Current server status (set by the system)
-	Status    *MCPServerConfigStatus `json:"status,omitempty"`
-	UpdatedAt *time.Time             `json:"updated_at,omitempty"`
-
-	// UserId Owning user ID
-	UserId *string `json:"user_id,omitempty"`
-
-	// Version Installed version of the server
-	Version *string `json:"version,omitempty"`
-}
-
-// MCPServerConfigMode Execution mode (local subprocess or remote HTTP)
-type MCPServerConfigMode string
-
-// MCPServerConfigSource Whether this server is a personal installation or enterprise-managed
-type MCPServerConfigSource string
-
-// MCPServerConfigStatus Current server status (set by the system)
-type MCPServerConfigStatus string
-
-// MarketplaceServer defines model for MarketplaceServer.
-type MarketplaceServer struct {
-	Description *string `json:"description,omitempty"`
-
-	// Installed Whether this server is already installed locally
-	Installed *bool  `json:"installed,omitempty"`
-	Name      string `json:"name"`
-
-	// RegistryId Unique registry identifier (reverse DNS)
-	RegistryId string `json:"registry_id"`
-
-	// Versions Available versions, ordered by most recent first
-	Versions *[]MarketplaceServerVersion `json:"versions,omitempty"`
-}
-
-// MarketplaceServerVersion defines model for MarketplaceServerVersion.
-type MarketplaceServerVersion struct {
-	RequiredEnvVars *[]RequiredEnvVar `json:"required_env_vars,omitempty"`
-	Version         string            `json:"version"`
 }
 
 // ModifyApprovalRequest defines model for ModifyApprovalRequest.
@@ -2162,30 +1973,8 @@ type Recipient struct {
 	Name  *string             `json:"name,omitempty"`
 }
 
-// RequiredEnvVar defines model for RequiredEnvVar.
-type RequiredEnvVar struct {
-	Description *string `json:"description,omitempty"`
-	Name        string  `json:"name"`
-	Required    *bool   `json:"required,omitempty"`
-}
-
 // RiskLevel defines model for RiskLevel.
 type RiskLevel string
-
-// SetCredentialRequest defines model for SetCredentialRequest.
-type SetCredentialRequest struct {
-	// EnvVarName Environment variable name
-	EnvVarName string `json:"env_var_name"`
-
-	// SecretValue Secret value to store in the vault
-	SecretValue string `json:"secret_value"`
-}
-
-// SetCredentialResponse defines model for SetCredentialResponse.
-type SetCredentialResponse struct {
-	EnvVarName string `json:"env_var_name"`
-	Stored     bool   `json:"stored"`
-}
 
 // SetPassphraseRequest defines model for SetPassphraseRequest.
 type SetPassphraseRequest struct {
@@ -2468,12 +2257,6 @@ type ListIntentsParams struct {
 	AgentId     *string       `form:"agent_id,omitempty" json:"agent_id,omitempty"`
 }
 
-// ListMarketplaceServersParams defines parameters for ListMarketplaceServers.
-type ListMarketplaceServersParams struct {
-	// Q Search query to filter servers by name or description
-	Q *string `form:"q,omitempty" json:"q,omitempty"`
-}
-
 // ListPoliciesParams defines parameters for ListPolicies.
 type ListPoliciesParams struct {
 	PageSize    *PageSize  `form:"page_size,omitempty" json:"page_size,omitempty"`
@@ -2506,15 +2289,6 @@ type UpdateConnectorJSONRequestBody = UpdateConnectorRequest
 // CreateCredentialJSONRequestBody defines body for CreateCredential for application/json ContentType.
 type CreateCredentialJSONRequestBody = CreateCredentialRequest
 
-// CreateEnterpriseMCPServerJSONRequestBody defines body for CreateEnterpriseMCPServer for application/json ContentType.
-type CreateEnterpriseMCPServerJSONRequestBody = EnterpriseMCPServer
-
-// UpdateEnterpriseMCPServerJSONRequestBody defines body for UpdateEnterpriseMCPServer for application/json ContentType.
-type UpdateEnterpriseMCPServerJSONRequestBody = EnterpriseMCPServer
-
-// SetEnterpriseMCPServerCredentialJSONRequestBody defines body for SetEnterpriseMCPServerCredential for application/json ContentType.
-type SetEnterpriseMCPServerCredentialJSONRequestBody = SetCredentialRequest
-
 // UpdateCurrentEnterpriseJSONRequestBody defines body for UpdateCurrentEnterprise for application/json ContentType.
 type UpdateCurrentEnterpriseJSONRequestBody = UpdateEnterpriseRequest
 
@@ -2532,15 +2306,6 @@ type CreateIntentJSONRequestBody = CreateIntentRequest
 
 // AppendIntentEvidenceJSONRequestBody defines body for AppendIntentEvidence for application/json ContentType.
 type AppendIntentEvidenceJSONRequestBody = AppendEvidenceRequest
-
-// CreateMCPServerJSONRequestBody defines body for CreateMCPServer for application/json ContentType.
-type CreateMCPServerJSONRequestBody = MCPServerConfig
-
-// UpdateMCPServerJSONRequestBody defines body for UpdateMCPServer for application/json ContentType.
-type UpdateMCPServerJSONRequestBody = MCPServerConfig
-
-// SetMCPServerCredentialJSONRequestBody defines body for SetMCPServerCredential for application/json ContentType.
-type SetMCPServerCredentialJSONRequestBody = SetCredentialRequest
 
 // CreatePolicyJSONRequestBody defines body for CreatePolicy for application/json ContentType.
 type CreatePolicyJSONRequestBody = CreatePolicyRequest
@@ -2759,24 +2524,6 @@ type ServerInterface interface {
 	// Register a credential reference
 	// (POST /v1/credentials)
 	CreateCredential(w http.ResponseWriter, r *http.Request)
-	// List the enterprise's approved MCP servers
-	// (GET /v1/enterprise/mcp-servers)
-	ListEnterpriseMCPServers(w http.ResponseWriter, r *http.Request)
-	// Add an MCP server to the enterprise approved list
-	// (POST /v1/enterprise/mcp-servers)
-	CreateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request)
-	// Remove an MCP server from the enterprise approved list
-	// (DELETE /v1/enterprise/mcp-servers/{id})
-	DeleteEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string)
-	// Get enterprise MCP server configuration
-	// (GET /v1/enterprise/mcp-servers/{id})
-	GetEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string)
-	// Update enterprise MCP server configuration
-	// (PUT /v1/enterprise/mcp-servers/{id})
-	UpdateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string)
-	// Store a credential for an enterprise MCP server
-	// (POST /v1/enterprise/mcp-servers/{id}/credentials)
-	SetEnterpriseMCPServerCredential(w http.ResponseWriter, r *http.Request, id string)
 	// Get current enterprise
 	// (GET /v1/enterprises/me)
 	GetCurrentEnterprise(w http.ResponseWriter, r *http.Request)
@@ -2816,30 +2563,6 @@ type ServerInterface interface {
 	// Attach evidence to an intent
 	// (POST /v1/intents/{intent_id}/evidence)
 	AppendIntentEvidence(w http.ResponseWriter, r *http.Request, intentId IntentId)
-	// Browse the MCP server marketplace
-	// (GET /v1/marketplace/servers)
-	ListMarketplaceServers(w http.ResponseWriter, r *http.Request, params ListMarketplaceServersParams)
-	// Install an MCP server from the marketplace
-	// (POST /v1/marketplace/servers/{registryId}/install)
-	InstallMarketplaceServer(w http.ResponseWriter, r *http.Request, registryId string)
-	// List the current user's MCP servers (personal + enterprise auto-enabled)
-	// (GET /v1/mcp-servers)
-	ListMCPServers(w http.ResponseWriter, r *http.Request)
-	// Register a personal downstream MCP server
-	// (POST /v1/mcp-servers)
-	CreateMCPServer(w http.ResponseWriter, r *http.Request)
-	// Remove a downstream MCP server
-	// (DELETE /v1/mcp-servers/{id})
-	DeleteMCPServer(w http.ResponseWriter, r *http.Request, id string)
-	// Get MCP server configuration
-	// (GET /v1/mcp-servers/{id})
-	GetMCPServer(w http.ResponseWriter, r *http.Request, id string)
-	// Update MCP server configuration
-	// (PUT /v1/mcp-servers/{id})
-	UpdateMCPServer(w http.ResponseWriter, r *http.Request, id string)
-	// Store a credential for an MCP server
-	// (POST /v1/mcp-servers/{id}/credentials)
-	SetMCPServerCredential(w http.ResponseWriter, r *http.Request, id string)
 	// List policies
 	// (GET /v1/policies)
 	ListPolicies(w http.ResponseWriter, r *http.Request, params ListPoliciesParams)
@@ -3536,170 +3259,6 @@ func (siw *ServerInterfaceWrapper) CreateCredential(w http.ResponseWriter, r *ht
 	handler.ServeHTTP(w, r)
 }
 
-// ListEnterpriseMCPServers operation middleware
-func (siw *ServerInterfaceWrapper) ListEnterpriseMCPServers(w http.ResponseWriter, r *http.Request) {
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListEnterpriseMCPServers(w, r)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// CreateEnterpriseMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) CreateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.CreateEnterpriseMCPServer(w, r)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// DeleteEnterpriseMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) DeleteEnterpriseMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.DeleteEnterpriseMCPServer(w, r, id)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// GetEnterpriseMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) GetEnterpriseMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetEnterpriseMCPServer(w, r, id)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// UpdateEnterpriseMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) UpdateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.UpdateEnterpriseMCPServer(w, r, id)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// SetEnterpriseMCPServerCredential operation middleware
-func (siw *ServerInterfaceWrapper) SetEnterpriseMCPServerCredential(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.SetEnterpriseMCPServerCredential(w, r, id)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
 // GetCurrentEnterprise operation middleware
 func (siw *ServerInterfaceWrapper) GetCurrentEnterprise(w http.ResponseWriter, r *http.Request) {
 
@@ -4089,234 +3648,6 @@ func (siw *ServerInterfaceWrapper) AppendIntentEvidence(w http.ResponseWriter, r
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.AppendIntentEvidence(w, r, intentId)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// ListMarketplaceServers operation middleware
-func (siw *ServerInterfaceWrapper) ListMarketplaceServers(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	// Parameter object where we will unmarshal all parameters from the context
-	var params ListMarketplaceServersParams
-
-	// ------------- Optional query parameter "q" -------------
-
-	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
-		return
-	}
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListMarketplaceServers(w, r, params)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// InstallMarketplaceServer operation middleware
-func (siw *ServerInterfaceWrapper) InstallMarketplaceServer(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "registryId" -------------
-	var registryId string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "registryId", r.PathValue("registryId"), &registryId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "registryId", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.InstallMarketplaceServer(w, r, registryId)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// ListMCPServers operation middleware
-func (siw *ServerInterfaceWrapper) ListMCPServers(w http.ResponseWriter, r *http.Request) {
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListMCPServers(w, r)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// CreateMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.CreateMCPServer(w, r)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// DeleteMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) DeleteMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.DeleteMCPServer(w, r, id)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// GetMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) GetMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetMCPServer(w, r, id)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// UpdateMCPServer operation middleware
-func (siw *ServerInterfaceWrapper) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.UpdateMCPServer(w, r, id)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// SetMCPServerCredential operation middleware
-func (siw *ServerInterfaceWrapper) SetMCPServerCredential(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-
-	// ------------- Path parameter "id" -------------
-	var id string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
-		return
-	}
-
-	ctx := r.Context()
-
-	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
-
-	r = r.WithContext(ctx)
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.SetMCPServerCredential(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -4888,12 +4219,6 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("PATCH "+options.BaseURL+"/v1/connectors/{connector_id}", wrapper.UpdateConnector)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/credentials", wrapper.ListCredentials)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/credentials", wrapper.CreateCredential)
-	m.HandleFunc("GET "+options.BaseURL+"/v1/enterprise/mcp-servers", wrapper.ListEnterpriseMCPServers)
-	m.HandleFunc("POST "+options.BaseURL+"/v1/enterprise/mcp-servers", wrapper.CreateEnterpriseMCPServer)
-	m.HandleFunc("DELETE "+options.BaseURL+"/v1/enterprise/mcp-servers/{id}", wrapper.DeleteEnterpriseMCPServer)
-	m.HandleFunc("GET "+options.BaseURL+"/v1/enterprise/mcp-servers/{id}", wrapper.GetEnterpriseMCPServer)
-	m.HandleFunc("PUT "+options.BaseURL+"/v1/enterprise/mcp-servers/{id}", wrapper.UpdateEnterpriseMCPServer)
-	m.HandleFunc("POST "+options.BaseURL+"/v1/enterprise/mcp-servers/{id}/credentials", wrapper.SetEnterpriseMCPServerCredential)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/enterprises/me", wrapper.GetCurrentEnterprise)
 	m.HandleFunc("PATCH "+options.BaseURL+"/v1/enterprises/me", wrapper.UpdateCurrentEnterprise)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/execution-grants/{grant_id}", wrapper.GetExecutionGrant)
@@ -4907,14 +4232,6 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("POST "+options.BaseURL+"/v1/intents", wrapper.CreateIntent)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/intents/{intent_id}", wrapper.GetIntent)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/intents/{intent_id}/evidence", wrapper.AppendIntentEvidence)
-	m.HandleFunc("GET "+options.BaseURL+"/v1/marketplace/servers", wrapper.ListMarketplaceServers)
-	m.HandleFunc("POST "+options.BaseURL+"/v1/marketplace/servers/{registryId}/install", wrapper.InstallMarketplaceServer)
-	m.HandleFunc("GET "+options.BaseURL+"/v1/mcp-servers", wrapper.ListMCPServers)
-	m.HandleFunc("POST "+options.BaseURL+"/v1/mcp-servers", wrapper.CreateMCPServer)
-	m.HandleFunc("DELETE "+options.BaseURL+"/v1/mcp-servers/{id}", wrapper.DeleteMCPServer)
-	m.HandleFunc("GET "+options.BaseURL+"/v1/mcp-servers/{id}", wrapper.GetMCPServer)
-	m.HandleFunc("PUT "+options.BaseURL+"/v1/mcp-servers/{id}", wrapper.UpdateMCPServer)
-	m.HandleFunc("POST "+options.BaseURL+"/v1/mcp-servers/{id}/credentials", wrapper.SetMCPServerCredential)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/policies", wrapper.ListPolicies)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/policies", wrapper.CreatePolicy)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/policies/simulate", wrapper.SimulatePolicy)

@@ -1236,8 +1236,6 @@ func modelDecisionToAPI(d model.Decision) api.Decision {
 	return apiD
 }
 
-// --- MCP Server management ---
-
 // userIDFromRequest extracts the authenticated user ID from the request context.
 // Returns empty string if auth is not enabled or the request is unauthenticated.
 func userIDFromRequest(r *http.Request) string {
@@ -1278,62 +1276,4 @@ func (s *apiServer) requireAuth(w http.ResponseWriter, r *http.Request) (userID,
 	}
 	writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 	return "", "", false
-}
-
-// --- Removed endpoints (stubs satisfy ServerInterface until server.gen.go is regenerated) ---
-
-func (s *apiServer) ListMCPServers(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
-}
-
-func (s *apiServer) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
-}
-
-func (s *apiServer) GetMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
-}
-
-func (s *apiServer) UpdateMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
-}
-
-func (s *apiServer) DeleteMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
-}
-
-func (s *apiServer) SetMCPServerCredential(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "MCP server management has been removed")
-}
-
-func (s *apiServer) ListEnterpriseMCPServers(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
-}
-
-func (s *apiServer) CreateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
-}
-
-func (s *apiServer) GetEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
-}
-
-func (s *apiServer) UpdateEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
-}
-
-func (s *apiServer) DeleteEnterpriseMCPServer(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
-}
-
-func (s *apiServer) SetEnterpriseMCPServerCredential(w http.ResponseWriter, r *http.Request, id string) {
-	writeError(w, http.StatusGone, "removed", "enterprise MCP server management has been removed")
-}
-
-func (s *apiServer) ListMarketplaceServers(w http.ResponseWriter, r *http.Request, params api.ListMarketplaceServersParams) {
-	writeError(w, http.StatusGone, "removed", "marketplace has been removed")
-}
-
-func (s *apiServer) InstallMarketplaceServer(w http.ResponseWriter, r *http.Request, registryId string) {
-	writeError(w, http.StatusGone, "removed", "marketplace has been removed")
 }
