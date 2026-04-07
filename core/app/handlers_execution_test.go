@@ -11,7 +11,9 @@ import (
 	"time"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/auth"
 	connectorpkg "github.com/ALRubinger/aileron/core/connector"
+	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/enclave"
@@ -328,5 +330,184 @@ func TestRunExecution_DirectMode_ConnectorFailed(t *testing.T) {
 	// Even on connector failure, the handler returns 202 with the execution ID.
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Encrypted credential (KEK) path tests ---
+
+func seedEncryptedGrantAndIntent(ctx context.Context, s *apiServer, grantID, intentID string, kek []byte) {
+	s.intents.Create(ctx, api.IntentEnvelope{
+		IntentId:    intentID,
+		WorkspaceId: "ws_1",
+		Status:      api.Approved,
+		Action: api.ActionIntent{
+			Type:    "git.push",
+			Summary: "push to main",
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	})
+	s.grants.Create(ctx, api.ExecutionGrant{
+		GrantId:   grantID,
+		IntentId:  intentID,
+		Status:    api.ExecutionGrantStatusActive,
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+
+	// Store an encrypted credential in vault.
+	ciphertext, _ := crypto.Encrypt([]byte("ghp_secret_token"), kek)
+	s.vault.Put(ctx, "connectors/github/default", ciphertext, vault.Metadata{
+		Type:   "api_key",
+		Labels: map[string]string{vault.EncryptedLabel: "true"},
+	})
+}
+
+func authedExecRequest(grantID string, claims *auth.Claims) *http.Request {
+	req := execRequest(grantID)
+	if claims != nil {
+		ctx := auth.ContextWithClaims(req.Context(), claims)
+		req = req.WithContext(ctx)
+	}
+	return req
+}
+
+func TestRunExecution_EncryptedCredential_NoClaims(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+
+	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
+	s.registry.Register(ctx, conn)
+	s.kekCache = auth.NewKEKSessionCache(time.Hour)
+
+	kek := make([]byte, 32)
+	seedEncryptedGrantAndIntent(ctx, s, "grant_enc1", "int_enc1", kek)
+
+	w := httptest.NewRecorder()
+	// No auth claims on request.
+	s.RunExecution(w, execRequest("grant_enc1"))
+	if w.Code != http.StatusLocked {
+		t.Fatalf("expected 423 Locked, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRunExecution_EncryptedCredential_NoKEKSession(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+
+	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
+	s.registry.Register(ctx, conn)
+	s.kekCache = auth.NewKEKSessionCache(time.Hour)
+	// KEK cache exists but has no entry for this user.
+
+	kek := make([]byte, 32)
+	seedEncryptedGrantAndIntent(ctx, s, "grant_enc2", "int_enc2", kek)
+
+	w := httptest.NewRecorder()
+	s.RunExecution(w, authedExecRequest("grant_enc2", userAClaims))
+	if w.Code != http.StatusLocked {
+		t.Fatalf("expected 423 Locked, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRunExecution_EncryptedCredential_DecryptError(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+
+	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
+	s.registry.Register(ctx, conn)
+	s.kekCache = auth.NewKEKSessionCache(time.Hour)
+	// Store a wrong KEK so decryption fails.
+	wrongKEK := make([]byte, 32)
+	wrongKEK[0] = 0xFF
+	s.kekCache.Set(userAClaims.Subject, wrongKEK)
+
+	correctKEK := make([]byte, 32)
+	seedEncryptedGrantAndIntent(ctx, s, "grant_enc3", "int_enc3", correctKEK)
+
+	w := httptest.NewRecorder()
+	s.RunExecution(w, authedExecRequest("grant_enc3", userAClaims))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRunExecution_EncryptedCredential_Success(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+
+	conn := &stubConnector{
+		result: connectorpkg.ExecutionResult{
+			Status:     connectorpkg.ExecutionStatusSucceeded,
+			Output:     map[string]any{"sha": "abc"},
+			ReceiptRef: "receipt_enc",
+		},
+	}
+	s.registry.Register(ctx, conn)
+	s.kekCache = auth.NewKEKSessionCache(time.Hour)
+
+	kek := make([]byte, 32)
+	s.kekCache.Set(userAClaims.Subject, kek)
+	seedEncryptedGrantAndIntent(ctx, s, "grant_enc4", "int_enc4", kek)
+
+	w := httptest.NewRecorder()
+	s.RunExecution(w, authedExecRequest("grant_enc4", userAClaims))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp api.ExecutionRunResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Status != api.Accepted {
+		t.Errorf("expected status 'accepted', got %s", resp.Status)
+	}
+}
+
+func TestRunExecution_TEEMode_WithEscrow(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+	s.enclaveClient = &stubEnclaveClient{
+		resp: enclave.ExecuteResponse{
+			Status:     "succeeded",
+			Output:     map[string]any{"result": "ok"},
+			ReceiptRef: "receipt_esc",
+		},
+	}
+
+	seedGrantAndIntent(ctx, s, "grant_esc", "int_esc")
+
+	// Pre-populate escrow index so the handler uses the escrow ID path.
+	s.escrowIndex.Store("connectors/github/default", "escrow_123")
+
+	w := httptest.NewRecorder()
+	s.RunExecution(w, authedExecRequest("grant_esc", userAClaims))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp api.ExecutionRunResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Status != api.Accepted {
+		t.Errorf("expected status 'accepted', got %s", resp.Status)
+	}
+}
+
+func TestRunExecution_EncryptedCredential_NoKEKCache(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+
+	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
+	s.registry.Register(ctx, conn)
+	// kekCache is nil (auth/TEE not configured).
+
+	kek := make([]byte, 32)
+	seedEncryptedGrantAndIntent(ctx, s, "grant_enc5", "int_enc5", kek)
+
+	w := httptest.NewRecorder()
+	s.RunExecution(w, authedExecRequest("grant_enc5", userAClaims))
+	if w.Code != http.StatusLocked {
+		t.Fatalf("expected 423 Locked, got %d: %s", w.Code, w.Body.String())
 	}
 }
