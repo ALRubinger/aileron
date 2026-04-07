@@ -46,7 +46,7 @@
 
 		// Fetch initial session status.
 		getPassphraseSession()
-			.then((resp: { active: boolean; expires_at?: string }) => {
+			.then((resp: any) => {
 				if (resp?.active && resp.expires_at) {
 					setSessionExpiresAt(new Date(resp.expires_at));
 					updateVaultTimer();
