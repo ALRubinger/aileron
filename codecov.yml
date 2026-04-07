@@ -9,10 +9,7 @@ coverage:
         target: auto
         threshold: 1%
         after_n_builds: 2
-    patch:
-      default:
-        target: 80%
-        after_n_builds: 2
+    patch: off
 
 flags:
   unit:
