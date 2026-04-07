@@ -483,6 +483,23 @@ func TestGoogleService_UserInfoEndpoint(t *testing.T) {
 	}
 }
 
+func TestGoogleService_WithEndpoints(t *testing.T) {
+	svc := NewGoogleService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	overridden := svc.WithEndpoints("http://token.test", "http://userinfo.test")
+
+	if overridden.TokenEndpointFor(model.ConnectedAccountProviderGmail) != "http://token.test" {
+		t.Fatalf("expected overridden token endpoint, got %s", overridden.TokenEndpointFor(model.ConnectedAccountProviderGmail))
+	}
+	if overridden.UserInfoEndpoint() != "http://userinfo.test" {
+		t.Fatalf("expected overridden userinfo endpoint, got %s", overridden.UserInfoEndpoint())
+	}
+
+	// Original should be unchanged.
+	if svc.TokenEndpointFor(model.ConnectedAccountProviderGmail) == "http://token.test" {
+		t.Fatal("original service should not be modified")
+	}
+}
+
 func mustParseURL(raw string) *net_url.URL {
 	u, err := net_url.Parse(raw)
 	if err != nil {
