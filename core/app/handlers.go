@@ -742,7 +742,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 
 		writeJSON(w, http.StatusAccepted, api.ExecutionRunResponse{
 			ExecutionId: execID,
-			Status:      api.ExecutionRunResponseStatusAccepted,
+			Status:      api.Accepted,
 		})
 		return
 	}
@@ -796,7 +796,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusAccepted, api.ExecutionRunResponse{
 		ExecutionId: execID,
-		Status:      api.ExecutionRunResponseStatusAccepted,
+		Status:      api.Accepted,
 		AcceptedAt:  &now,
 	})
 }
