@@ -344,11 +344,11 @@ paths:
       tags: [Users]
       summary: Set or rotate vault passphrase
       description: |
-        Derives a Key Encryption Key (KEK) from the provided passphrase using
-        Argon2id, stores the salt and a verification blob server-side, and
-        returns the salt. The KEK itself is never stored. On subsequent calls,
-        the existing key material is rotated (callers must re-encrypt vault
-        secrets separately).
+        Stores the client-provided salt and KEK verification blob. The client
+        derives the KEK locally using Argon2id, encrypts a known verification
+        constant, and sends only the salt and encrypted blob — the passphrase
+        and KEK never leave the browser. On subsequent calls, the existing key
+        material is rotated (callers must re-encrypt vault secrets separately).
       operationId: setPassphrase
       requestBody:
         required: true
@@ -368,48 +368,23 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /v1/users/me/passphrase/verify:
-    post:
-      tags: [Users]
-      summary: Verify vault passphrase
-      description: |
-        Verifies the provided passphrase by re-deriving the KEK and attempting
-        to decrypt the stored verification blob. On success, establishes a
-        KEK session for the caller.
-      operationId: verifyPassphrase
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/VerifyPassphraseRequest"
-      responses:
-        "200":
-          description: Passphrase verification result
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/VerifyPassphraseResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /v1/users/me/passphrase/session:
+  /v1/users/me/passphrase/verification:
     get:
       tags: [Users]
-      summary: Get KEK session status
+      summary: Get KEK verification blob
       description: |
-        Returns the current KEK session status for the authenticated user,
-        including whether the vault is unlocked and when the session expires.
-      operationId: getPassphraseSession
+        Returns the encrypted verification blob for client-side passphrase
+        verification. The client derives the KEK locally from the passphrase
+        and salt, then decrypts this blob to check correctness. The server
+        never sees the passphrase or KEK.
+      operationId: getPassphraseVerification
       responses:
         "200":
-          description: KEK session status
+          description: Verification blob
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/KEKSessionStatus"
+                $ref: "#/components/schemas/PassphraseVerificationResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -1365,7 +1340,13 @@ paths:
   /v1/tee/session:
     post:
       tags: [TEE]
-      summary: Establish TEE session after attestation verification
+      summary: Establish TEE session and transmit KEK
+      description: |
+        Accepts the client's ephemeral ECDH public key and an encrypted KEK
+        blob. The server forwards both to the enclave as an opaque pass-through
+        — it cannot derive the shared secret or decrypt the KEK. The enclave
+        performs the ECDH key exchange, decrypts the KEK, and stores it in
+        hardware-isolated memory. Auto-escrows active credentials on success.
       operationId: establishTeeSession
       requestBody:
         required: true
@@ -1375,13 +1356,13 @@ paths:
               $ref: "#/components/schemas/TeeSessionRequest"
       responses:
         "200":
-          description: Session established
+          description: Session established and KEK transmitted
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TeeSessionResponse"
         "400":
-          description: Invalid attestation or key exchange failure
+          description: Key exchange or KEK transmission failure
         "401":
           $ref: "#/components/responses/Unauthorized"
         "501":
@@ -2886,51 +2867,28 @@ components:
           readOnly: true
     SetPassphraseRequest:
       type: object
-      required: [passphrase]
+      required: [salt, kek_verification]
       properties:
-        passphrase:
-          type: string
-          minLength: 8
-          description: User's vault passphrase used to derive the KEK
-
-    VerifyPassphraseRequest:
-      type: object
-      required: [passphrase]
-      properties:
-        passphrase:
-          type: string
-          description: User's vault passphrase to verify
-
-    VerifyPassphraseResponse:
-      type: object
-      required: [valid]
-      properties:
-        valid:
-          type: boolean
-          description: Whether the passphrase is correct
         salt:
           type: string
           format: byte
-          description: Base64-encoded Argon2id salt (returned when valid)
-        session_expires_at:
+          description: Base64-encoded 16-byte Argon2id salt generated by the client
+        kek_verification:
           type: string
-          format: date-time
-          description: When the KEK session expires (returned when valid)
-        escrowed_count:
-          type: integer
-          description: Number of credentials auto-escrowed into TEE (returned when valid and TEE active)
+          format: byte
+          description: Verification constant encrypted with the client-derived KEK (base64)
 
-    KEKSessionStatus:
+    PassphraseVerificationResponse:
       type: object
-      required: [active]
+      required: [has_passphrase]
       properties:
-        active:
+        has_passphrase:
           type: boolean
-          description: Whether the user has an active KEK session
-        expires_at:
+          description: Whether the user has set a vault passphrase
+        kek_verification:
           type: string
-          format: date-time
-          description: When the KEK session expires (omitted when not active)
+          format: byte
+          description: Encrypted verification blob for client-side decryption (omitted when no passphrase is set)
 
     PassphraseSaltResponse:
       type: object
@@ -2991,35 +2949,28 @@ components:
 
     TeeSessionRequest:
       type: object
-      required: [nonce, token, public_key]
+      required: [encrypted_kek, client_public_key]
       properties:
-        nonce:
+        encrypted_kek:
           type: string
           format: byte
-          description: The nonce from the attestation request
-        token:
-          type: string
-          description: The attestation token to verify
-        public_key:
+          description: KEK encrypted with the ECDH-derived shared secret (opaque to server)
+        client_public_key:
           type: string
           format: byte
-          description: Host's ephemeral ECDH public key (base64)
+          description: Client's ephemeral ECDH public key for enclave key exchange
 
     TeeSessionResponse:
       type: object
-      required: [verified, session_id]
+      required: [session_id]
       properties:
-        verified:
-          type: boolean
-          description: Whether attestation verification succeeded
         session_id:
           type: string
-          description: Session identifier for subsequent requests
+          description: Session identifier
         expires_at:
           type: string
           format: date-time
           description: When the session expires
-        claims:
-          type: object
-          additionalProperties: true
-          description: Verified attestation claims (image_digest, project_id, etc.)
+        escrowed_count:
+          type: integer
+          description: Number of credentials auto-escrowed into TEE

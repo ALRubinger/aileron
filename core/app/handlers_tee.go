@@ -1,42 +1,33 @@
 package app
 
 import (
+	"context"
 	"crypto/rand"
 	"net/http"
 	"sync"
 	"time"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
-	"github.com/ALRubinger/aileron/core/crypto"
+	"github.com/ALRubinger/aileron/core/auth"
+	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/enclave"
 )
 
 // teeState tracks attestation and session state for the host-side TEE flow.
 type teeState struct {
-	mu            sync.Mutex
-	attested      bool
-	nonce         []byte
-	attestResp    enclave.AttestationResponse
-	sessionActive bool
-	sessionID     string
-	sessionKey    []byte // ECDH-derived session key for KEK transit encryption
-	expiresAt     time.Time
+	mu           sync.Mutex
+	attested     bool
+	nonce        []byte
+	attestResp   enclave.AttestationResponse
+	userSessions map[string]time.Time // userID -> session expiry
 }
 
-// getSessionKey returns a copy of the TEE session key, used to encrypt
-// the KEK before transmitting it to the enclave.
-func (s *apiServer) getSessionKey() []byte {
-	if s.teeState == nil {
-		return nil
+func newTeeState() *teeState {
+	return &teeState{
+		userSessions: make(map[string]time.Time),
 	}
-	s.teeState.mu.Lock()
-	defer s.teeState.mu.Unlock()
-	if s.teeState.sessionKey == nil {
-		return nil
-	}
-	cpy := make([]byte, len(s.teeState.sessionKey))
-	copy(cpy, s.teeState.sessionKey)
-	return cpy
 }
 
 func (s *apiServer) GetTeeStatus(w http.ResponseWriter, _ *http.Request) {
@@ -61,15 +52,12 @@ func (s *apiServer) GetTeeStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.teeState != nil {
 		s.teeState.mu.Lock()
 		attested := s.teeState.attested
-		sessionActive := s.teeState.sessionActive
-		expiresAt := s.teeState.expiresAt
 		s.teeState.mu.Unlock()
 
 		status.Attested = &attested
+		// Session is per-user; report aggregate active state.
+		sessionActive := false
 		status.SessionActive = &sessionActive
-		if sessionActive {
-			status.SessionExpiresAt = &expiresAt
-		}
 	}
 
 	writeJSON(w, http.StatusOK, status)
@@ -108,7 +96,7 @@ func (s *apiServer) InitiateAttestation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Store state for verification.
+	// Store state for the session establishment step.
 	s.teeState.mu.Lock()
 	s.teeState.nonce = nonce
 	s.teeState.attestResp = attestResp
@@ -129,74 +117,124 @@ func (s *apiServer) EstablishTeeSession(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	claims := auth.ClaimsFromContext(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "not authenticated")
+		return
+	}
+
 	var req api.TeeSessionRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 
-	// Verify attestation.
-	claims, err := s.enclaveVerifier.Verify(r.Context(), req.Token, req.Nonce)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "attestation_failed", err.Error())
-		return
-	}
-
-	// Generate host's ephemeral ECDH key pair.
-	hostKey, err := crypto.GenerateKeyPair()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "key_error", "failed to generate host key pair")
-		return
-	}
-
-	// Establish session with enclave using host's public key.
+	// Forward the client's public key to the enclave for ECDH key exchange.
+	// The server never generates its own key pair — it's a pass-through.
 	sessResp, err := s.enclaveClient.EstablishSession(r.Context(), enclave.SessionRequest{
-		PublicKey: crypto.MarshalPublicKey(hostKey.PublicKey()),
+		PublicKey: req.ClientPublicKey,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", err.Error())
 		return
 	}
 
-	// Derive the same shared secret on the host side using the enclave's
-	// public key (received during attestation).
-	s.teeState.mu.Lock()
-	enclavePubKeyBytes := s.teeState.attestResp.PublicKey
-	s.teeState.mu.Unlock()
-
-	enclavePub, err := crypto.UnmarshalPublicKey(enclavePubKeyBytes)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "key_error", "failed to parse enclave public key")
-		return
-	}
-
-	sessionKey, err := crypto.DeriveSharedSecret(hostKey, enclavePub)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "key_error", "ECDH failed")
+	// Forward the encrypted KEK blob to the enclave. The server cannot
+	// decrypt this — it doesn't have the ECDH private key.
+	userID := claims.Subject
+	_, transmitErr := s.enclaveClient.TransmitKEK(r.Context(), enclave.TransmitKEKRequest{
+		UserID:       userID,
+		EncryptedKEK: req.EncryptedKek,
+	})
+	if transmitErr != nil {
+		writeError(w, http.StatusInternalServerError, "kek_error", "failed to transmit KEK to enclave: "+transmitErr.Error())
 		return
 	}
 
 	// Parse expiry.
 	expiresAt, _ := time.Parse(time.RFC3339, sessResp.ExpiresAt)
 
-	// Update state — store session key for KEK transit encryption.
+	// Track session existence per user (no session key stored).
 	s.teeState.mu.Lock()
-	zeroBytes(s.teeState.sessionKey)
-	s.teeState.sessionActive = true
-	s.teeState.sessionID = sessResp.SessionID
-	s.teeState.sessionKey = sessionKey
-	s.teeState.expiresAt = expiresAt
+	s.teeState.userSessions[userID] = expiresAt
 	s.teeState.mu.Unlock()
 
-	claimsMap := map[string]interface{}{
-		"image_digest": claims.ImageDigest,
-		"project_id":   claims.ProjectID,
-	}
+	// Auto-escrow active credentials now that the enclave holds the KEK.
+	escrowed := s.autoEscrowCredentials(r.Context(), userID)
 
-	writeJSON(w, http.StatusOK, api.TeeSessionResponse{
-		Verified:  true,
+	resp := api.TeeSessionResponse{
 		SessionId: sessResp.SessionID,
 		ExpiresAt: &expiresAt,
-		Claims:    &claimsMap,
-	})
+	}
+	if escrowed > 0 {
+		resp.EscrowedCount = &escrowed
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// autoEscrowCredentials escrows all active connected account credentials into
+// the TEE for autonomous execution. Returns the number of successfully
+// escrowed credentials.
+func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) int {
+	if s.connectedAccounts == nil {
+		return 0
+	}
+
+	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
+	if err != nil {
+		return 0
+	}
+
+	escrowed := 0
+	for _, acc := range accounts {
+		if acc.Status != model.ConnectedAccountStatusActive {
+			continue
+		}
+
+		secret, err := s.vault.Get(ctx, acc.VaultPath())
+		if err != nil {
+			continue
+		}
+
+		if !vault.IsEncrypted(secret.Metadata) {
+			continue
+		}
+
+		expiresAt := time.Now().Add(s.escrowTTL)
+		grantID := "auto-escrow-" + acc.ID
+
+		resp, err := s.enclaveClient.EscrowStore(ctx, enclave.EscrowStoreRequest{
+			UserID:              userID,
+			GrantID:             grantID,
+			EncryptedCredential: secret.Value,
+			CredentialType:      secret.Metadata.Type,
+			ExpiresAt:           expiresAt.Format(time.RFC3339),
+			ActionTypes:         actionTypesForProvider(acc.Provider),
+		})
+		if err != nil {
+			continue
+		}
+
+		s.escrowIndex.Store(acc.VaultPath(), resp.EscrowID)
+		escrowed++
+	}
+	return escrowed
+}
+
+// actionTypesForProvider returns the action types allowed for a connected
+// account provider.
+func actionTypesForProvider(provider model.ConnectedAccountProvider) []string {
+	switch provider {
+	case model.ConnectedAccountProviderGmail:
+		return []string{"email.send"}
+	case model.ConnectedAccountProviderGoogleCalendar:
+		return []string{"calendar.create"}
+	case model.ConnectedAccountProviderOutlook:
+		return []string{"email.send"}
+	case model.ConnectedAccountProviderMicrosoftCalendar:
+		return []string{"calendar.create"}
+	default:
+		return nil
+	}
 }

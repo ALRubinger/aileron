@@ -10,26 +10,43 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { isVaultLocked, onUnlocked, dismissUnlock, setSessionExpiresAt } from '$lib/vault.svelte.js';
-	import { verifyPassphrase } from '$lib/api';
+	import { unlockVault, type UnlockProgress } from '$lib/crypto/vault.svelte.js';
 
 	let passphrase = $state('');
 	let error = $state('');
 	let loading = $state(false);
+	let progressStep = $state<UnlockProgress | null>(null);
 
 	let open = $derived(isVaultLocked());
+
+	const progressLabels: Record<UnlockProgress, string> = {
+		deriving: 'Deriving key...',
+		verifying: 'Verifying passphrase...',
+		attesting: 'Verifying enclave...',
+		establishing: 'Establishing secure session...',
+		done: 'Done'
+	};
+
+	let statusText = $derived(
+		progressStep ? progressLabels[progressStep] : (loading ? 'Unlocking...' : 'Unlock')
+	);
 
 	async function handleSubmit(e: Event) {
 		e.preventDefault();
 		error = '';
 		loading = true;
+		progressStep = null;
 
 		try {
-			const resp = await verifyPassphrase(passphrase);
-			if (resp.valid) {
-				if (resp.session_expires_at) {
-					setSessionExpiresAt(new Date(resp.session_expires_at));
+			const result = await unlockVault(passphrase, (step) => {
+				progressStep = step;
+			});
+			if (result.valid) {
+				if (result.sessionExpiresAt) {
+					setSessionExpiresAt(result.sessionExpiresAt);
 				}
 				passphrase = '';
+				progressStep = null;
 				await onUnlocked();
 			} else {
 				error = 'Incorrect passphrase';
@@ -38,12 +55,14 @@
 			error = err instanceof Error ? err.message : 'Verification failed';
 		} finally {
 			loading = false;
+			progressStep = null;
 		}
 	}
 
 	function handleCancel() {
 		passphrase = '';
 		error = '';
+		progressStep = null;
 		dismissUnlock();
 	}
 
@@ -59,7 +78,7 @@
 		<DialogHeader>
 			<DialogTitle>Unlock Vault</DialogTitle>
 			<DialogDescription>
-				Enter your vault passphrase to unlock encrypted credentials.
+				Enter your vault passphrase to unlock encrypted credentials. Your passphrase never leaves this device.
 			</DialogDescription>
 		</DialogHeader>
 
@@ -81,7 +100,7 @@
 					Cancel
 				</Button>
 				<Button type="submit" disabled={loading || !passphrase}>
-					{loading ? 'Unlocking...' : 'Unlock'}
+					{statusText}
 				</Button>
 			</DialogFooter>
 		</form>
