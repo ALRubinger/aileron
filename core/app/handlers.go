@@ -14,6 +14,7 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/auth"
+	"github.com/ALRubinger/aileron/core/config"
 	connectorpkg "github.com/ALRubinger/aileron/core/connector"
 	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
@@ -24,6 +25,7 @@ import (
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/core/version"
+	"github.com/ALRubinger/aileron/enclave"
 )
 
 // apiServer implements the generated api.ServerInterface.
@@ -53,6 +55,10 @@ type apiServer struct {
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
 	userKeyMaterials   store.UserKeyMaterialStore  // nil when auth is disabled
 	kekCache           *auth.KEKSessionCache      // nil when auth is disabled
+	enclaveClient      enclave.Client             // nil when TEE is disabled
+	enclaveVerifier    enclave.Verifier           // nil when TEE is disabled
+	teeCfg             *config.TEEConfig          // nil when TEE is disabled
+	teeState           *teeState                  // nil when TEE is disabled
 	newID              func() string
 }
 
@@ -679,6 +685,15 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build execution parameters from intent action domain.
+	params := buildConnectorParams(intent.Action)
+	if grant.BoundedParameters != nil {
+		// Override with bounded params from approval modification.
+		for k, v := range *grant.BoundedParameters {
+			params[k] = v
+		}
+	}
+
 	// Resolve credential from vault.
 	vaultPath := fmt.Sprintf("connectors/%s/default", connProvider)
 	secret, err := s.vault.Get(ctx, vaultPath)
@@ -688,7 +703,39 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If the credential is encrypted with a user's KEK, decrypt it.
+	// TEE mode: delegate execution to enclave. The credential stays encrypted;
+	// only the enclave can decrypt it.
+	if s.enclaveClient != nil {
+		enclaveResp, enclaveErr := s.enclaveClient.Execute(ctx, enclave.ExecuteRequest{
+			RequestID:           execID,
+			GrantID:             grant.GrantId,
+			IntentID:            grant.IntentId,
+			ActionType:          intent.Action.Type,
+			ConnectorID:         connType + "/" + connProvider,
+			Parameters:          params,
+			EncryptedCredential: secret.Value,
+			CredentialType:      secret.Metadata.Type,
+		})
+		if enclaveErr != nil {
+			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", enclaveErr.Error())
+			writeError(w, http.StatusInternalServerError, "enclave_error", enclaveErr.Error())
+			return
+		}
+
+		enclaveStatus := api.ExecutionStatusSucceeded
+		if enclaveResp.Status == "failed" {
+			enclaveStatus = api.ExecutionStatusFailed
+		}
+		finishExecution(s, ctx, exec, intent, enclaveStatus, &enclaveResp.Output, enclaveResp.ReceiptRef, enclaveResp.Error)
+
+		writeJSON(w, http.StatusAccepted, api.ExecutionRunResponse{
+			ExecutionId: execID,
+			Status:      api.ExecutionRunResponseStatusAccepted,
+		})
+		return
+	}
+
+	// Direct mode: decrypt credential in-process and execute.
 	if vault.IsEncrypted(secret.Metadata) {
 		claims := auth.ClaimsFromContext(ctx)
 		if claims == nil || s.kekCache == nil {
@@ -711,15 +758,6 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		secret.Value = plaintext
-	}
-
-	// Build execution parameters from intent action domain.
-	params := buildConnectorParams(intent.Action)
-	if grant.BoundedParameters != nil {
-		// Override with bounded params from approval modification.
-		for k, v := range *grant.BoundedParameters {
-			params[k] = v
-		}
 	}
 
 	result, err := conn.Execute(ctx, connectorpkg.ExecutionRequest{

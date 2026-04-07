@@ -1,6 +1,6 @@
 # ADR-0010: Zero-Knowledge Vault with Hybrid TEE + Client-Side Key Custody
 
-**Status:** Accepted
+**Status:** Accepted — Stage 2 implementation refined by [ADR-0011](0011-tee-provider-spi-and-confidential-space.md)
 **Date:** 2026-04-06
 
 ## Context

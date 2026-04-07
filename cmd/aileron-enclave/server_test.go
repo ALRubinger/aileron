@@ -1,0 +1,503 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/ALRubinger/aileron/core/connector"
+	"github.com/ALRubinger/aileron/core/crypto"
+	"github.com/ALRubinger/aileron/enclave"
+)
+
+// stubConnector returns a fixed result for testing.
+type stubConnector struct{}
+
+func (s *stubConnector) Type() string     { return "test" }
+func (s *stubConnector) Provider() string { return "stub" }
+func (s *stubConnector) Execute(_ context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
+	return connector.ExecutionResult{
+		Status:     connector.ExecutionStatusSucceeded,
+		Output:     map[string]any{"credential_type": req.Credential.Type},
+		ReceiptRef: "test-receipt",
+	}, nil
+}
+
+func setupTestEnclaveServer(t *testing.T) (*httptest.Server, *enclaveServer) {
+	t.Helper()
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	registry := connector.NewRegistry()
+	registry.Register(context.Background(), &stubConnector{})
+	srv := newEnclaveServer(log, registry, "local")
+	mux := http.NewServeMux()
+	srv.registerRoutes(mux)
+	return httptest.NewServer(mux), srv
+}
+
+func postJSON(t *testing.T, server *httptest.Server, path string, body any) *http.Response {
+	t.Helper()
+	payload, _ := json.Marshal(body)
+	resp, err := http.Post(server.URL+path, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+func decodeResp[T any](t *testing.T, resp *http.Response) T {
+	t.Helper()
+	defer resp.Body.Close()
+	var v T
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	return v
+}
+
+// establishTestSession performs attest → session and returns the session key.
+func establishTestSession(t *testing.T, server *httptest.Server) []byte {
+	t.Helper()
+
+	// Attest.
+	attestResp := postJSON(t, server, "/attest", enclave.AttestationRequest{
+		Nonce: []byte("test"), Audience: "test",
+	})
+	attestResult := decodeResp[enclave.AttestationResponse](t, attestResp)
+	if attestResult.Token != "dev-ok" {
+		t.Fatalf("expected dev-ok, got %q", attestResult.Token)
+	}
+
+	// Host key.
+	hostKey, _ := ecdh.P256().GenerateKey(rand.Reader)
+
+	// Session.
+	sessResp := postJSON(t, server, "/session", enclave.SessionRequest{
+		PublicKey: hostKey.PublicKey().Bytes(),
+	})
+	sessResult := decodeResp[enclave.SessionResponse](t, sessResp)
+	if sessResult.SessionID == "" {
+		t.Fatal("empty session ID")
+	}
+
+	// Derive shared secret.
+	enclavePub, _ := ecdh.P256().NewPublicKey(attestResult.PublicKey)
+	raw, _ := hostKey.ECDH(enclavePub)
+	h := sha256.Sum256(raw)
+	return h[:]
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["status"] != "ok" {
+		t.Fatalf("expected ok status, got %v", result["status"])
+	}
+}
+
+func TestFullExecuteFlow(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+
+	// Encrypt a credential with the session key.
+	plainCred := []byte("test-api-key")
+	encrypted, err := crypto.Encrypt(plainCred, sessionKey)
+	if err != nil {
+		t.Fatalf("encrypting: %v", err)
+	}
+
+	// Execute.
+	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		RequestID:           "exec-1",
+		GrantID:             "grant-1",
+		ActionType:          "test.action",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+	})
+	execResult := decodeResp[enclave.ExecuteResponse](t, execResp)
+	if execResult.Status != "succeeded" {
+		t.Fatalf("expected succeeded, got %q (error: %s)", execResult.Status, execResult.Error)
+	}
+	if execResult.ReceiptRef != "test-receipt" {
+		t.Fatalf("expected test-receipt, got %q", execResult.ReceiptRef)
+	}
+}
+
+func TestExecuteWithoutSession(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{})
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestSessionWithoutAttest(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/session", enclave.SessionRequest{
+		PublicKey: make([]byte, 65),
+	})
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestExecuteUnknownConnector(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	encrypted, _ := crypto.Encrypt([]byte("cred"), sessionKey)
+
+	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		ConnectorID:         "unknown/provider",
+		EncryptedCredential: encrypted,
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestEscrowFlow(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	encrypted, _ := crypto.Encrypt([]byte("escrowed-cred"), sessionKey)
+
+	// Store.
+	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		GrantID:             "grant-1",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
+	})
+	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
+	if storeResult.EscrowID == "" {
+		t.Fatal("empty escrow ID")
+	}
+
+	// Execute with escrow.
+	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		RequestID:   "exec-escrow",
+		ConnectorID: "test/stub",
+		EscrowID:    storeResult.EscrowID,
+	})
+	execResult := decodeResp[enclave.ExecuteResponse](t, execResp)
+	if execResult.Status != "succeeded" {
+		t.Fatalf("expected succeeded, got %q", execResult.Status)
+	}
+
+	// Revoke.
+	revokeResp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{
+		EscrowID: storeResult.EscrowID,
+		GrantID:  "grant-1",
+	})
+	if revokeResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", revokeResp.StatusCode)
+	}
+	revokeResp.Body.Close()
+
+	// Execute after revoke should fail.
+	execResp2 := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		ConnectorID: "test/stub",
+		EscrowID:    storeResult.EscrowID,
+	})
+	if execResp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 after revoke, got %d", execResp2.StatusCode)
+	}
+	execResp2.Body.Close()
+}
+
+func TestAttestEndpoint(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/attest", enclave.AttestationRequest{
+		Nonce:    []byte("test-nonce"),
+		Audience: "test-audience",
+	})
+	result := decodeResp[enclave.AttestationResponse](t, resp)
+	if result.Token != "dev-ok" {
+		t.Fatalf("expected dev-ok, got %q", result.Token)
+	}
+	if len(result.PublicKey) == 0 {
+		t.Fatal("expected non-empty public key")
+	}
+}
+
+func TestSessionEndpoint(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	// Attest first.
+	postJSON(t, server, "/attest", enclave.AttestationRequest{Nonce: []byte("n"), Audience: "a"})
+
+	hostKey, _ := ecdh.P256().GenerateKey(rand.Reader)
+	resp := postJSON(t, server, "/session", enclave.SessionRequest{
+		PublicKey: hostKey.PublicKey().Bytes(),
+	})
+	result := decodeResp[enclave.SessionResponse](t, resp)
+	if result.SessionID == "" {
+		t.Fatal("empty session ID")
+	}
+	if result.ExpiresAt == "" {
+		t.Fatal("empty expires_at")
+	}
+}
+
+func TestSessionBadPublicKey(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	postJSON(t, server, "/attest", enclave.AttestationRequest{Nonce: []byte("n"), Audience: "a"})
+
+	resp := postJSON(t, server, "/session", enclave.SessionRequest{
+		PublicKey: []byte("not-a-valid-key"),
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestExecuteBadDecryption(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("not-encrypted"),
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestEscrowStoreWithoutSession(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{GrantID: "g1"})
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestEscrowStoreBadDecryption(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		GrantID:             "g1",
+		EncryptedCredential: []byte("bad"),
+		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestEscrowStoreBadExpiry(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	encrypted, _ := crypto.Encrypt([]byte("cred"), sessionKey)
+
+	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		GrantID:             "g1",
+		EncryptedCredential: encrypted,
+		ExpiresAt:           "not-a-date",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestEscrowRevokeNotFoundViaHTTP(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{
+		EscrowID: "nonexistent",
+		GrantID:  "g1",
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestHealthWithActiveSession(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	resp, err := http.Get(server.URL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	defer resp.Body.Close()
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result["session_active"] != true {
+		t.Fatalf("expected session_active true, got %v", result["session_active"])
+	}
+}
+
+func TestAttestBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/attest", "application/json", bytes.NewReader([]byte("not json")))
+	if err != nil {
+		t.Fatalf("POST /attest: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestSessionBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/session", "application/json", bytes.NewReader([]byte("{")))
+	if err != nil {
+		t.Fatalf("POST /session: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestExecuteBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/execute", "application/json", bytes.NewReader([]byte("bad")))
+	if err != nil {
+		t.Fatalf("POST /execute: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestEscrowStoreBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/escrow", "application/json", bytes.NewReader([]byte("[")))
+	if err != nil {
+		t.Fatalf("POST /escrow: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestEscrowRevokeBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/escrow/revoke", "application/json", bytes.NewReader([]byte("}")))
+	if err != nil {
+		t.Fatalf("POST /escrow/revoke: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestExecuteWithExpiredEscrow(t *testing.T) {
+	server, srv := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	encrypted, _ := crypto.Encrypt([]byte("cred"), sessionKey)
+
+	// Store with past expiry.
+	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		GrantID:             "g1",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+		ExpiresAt:           time.Now().Add(-time.Second).Format(time.RFC3339),
+	})
+	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
+
+	// Execute with expired escrow.
+	_ = srv // keep reference
+	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		ConnectorID: "test/stub",
+		EscrowID:    storeResult.EscrowID,
+	})
+	if execResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for expired escrow, got %d", execResp.StatusCode)
+	}
+	execResp.Body.Close()
+}
+
+func TestResolveConnectorID(t *testing.T) {
+	tests := []struct {
+		input      string
+		wantType   string
+		wantProv   string
+	}{
+		{"payments/stripe", "payments", "stripe"},
+		{"git/github", "git", "github"},
+		{"single", "single", ""},
+	}
+	for _, tt := range tests {
+		connType, connProv := resolveConnectorID(tt.input)
+		if connType != tt.wantType || connProv != tt.wantProv {
+			t.Errorf("resolveConnectorID(%q) = (%q, %q), want (%q, %q)",
+				tt.input, connType, connProv, tt.wantType, tt.wantProv)
+		}
+	}
+}

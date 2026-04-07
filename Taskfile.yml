@@ -26,11 +26,12 @@ tasks:
       - api/gen/server.gen.go
 
   build:
-    desc: Build everything (containers, server, MCP, UI)
+    desc: Build everything (containers, server, MCP, enclave, UI)
     cmds:
       - task: build:docker
       - task: build:server
       - task: build:mcp
+      - task: build:enclave
       - task: build:ui
 
   build:docker:
@@ -55,6 +56,15 @@ tasks:
         sh: git rev-parse --short HEAD
     cmds:
       - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
+
+  build:enclave:
+    desc: Build the enclave binary locally
+    vars:
+      VERSION: dev
+      COMMIT:
+        sh: git rev-parse --short HEAD
+    cmds:
+      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron-enclave ./cmd/aileron-enclave
 
   build:ui:
     desc: Install UI dependencies and build
@@ -112,7 +122,7 @@ tasks:
   lint:go:
     desc: Vet Go code
     cmds:
-      - go vet ./core/... ./sdk/go/... ./cmd/aileron-mcp/...
+      - go vet ./core/... ./enclave/... ./cmd/aileron-enclave/... ./sdk/go/... ./cmd/aileron-mcp/...
 
   lint:ui:
     desc: Check the UI for type errors
@@ -128,7 +138,7 @@ tasks:
   test:go:
     desc: Run Go tests
     cmds:
-      - go test ./core/... ./sdk/go/... ./cmd/aileron-mcp/...
+      - go test ./core/... ./enclave/... ./cmd/aileron-enclave/... ./sdk/go/... ./cmd/aileron-mcp/...
 
   test:integration:
     desc: Run integration tests against running services
