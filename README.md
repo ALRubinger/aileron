@@ -477,32 +477,193 @@ Set `AILERON_TEE_PROVIDER=local` on the **server** service. No enclave binary is
 
 #### Production (Google Confidential Space)
 
-Running the enclave in production requires:
+Google Confidential Space runs containers inside AMD SEV-SNP confidential VMs where memory is hardware-encrypted. The enclave binary runs as a container on this VM, and the GCE metadata service provides OIDC attestation tokens that prove the workload identity to the Aileron server.
 
-1. **A Confidential Space VM** on GCP — an AMD SEV-SNP confidential VM running the Confidential Space base image. Create one via `gcloud compute instances create` with `--confidential-compute` and the Confidential Space image family.
+##### Prerequisites
 
-2. **The enclave container image** — build and push to a container registry accessible from the Confidential Space VM:
+- A GCP project with billing enabled
+- `gcloud` CLI installed and authenticated
+- Docker (for building and pushing the enclave image)
+- A container registry (Artifact Registry or Container Registry)
+
+##### 1. Enable required GCP APIs
+
+```sh
+export GCP_PROJECT=your-project-id
+
+gcloud services enable \
+  compute.googleapis.com \
+  artifactregistry.googleapis.com \
+  confidentialcomputing.googleapis.com \
+  --project=$GCP_PROJECT
+```
+
+##### 2. Create an Artifact Registry repository
+
+```sh
+export REGION=us-central1
+
+gcloud artifacts repositories create aileron-enclave \
+  --repository-format=docker \
+  --location=$REGION \
+  --project=$GCP_PROJECT
+```
+
+##### 3. Build and push the enclave container image
+
+```sh
+export REGISTRY=$REGION-docker.pkg.dev/$GCP_PROJECT/aileron-enclave
+
+docker build -f cmd/aileron-enclave/Dockerfile -t $REGISTRY/aileron-enclave:latest .
+docker push $REGISTRY/aileron-enclave:latest
+```
+
+Record the image digest from the push output — you'll need it for attestation verification:
+
+```sh
+export IMAGE_DIGEST=$(gcloud artifacts docker images describe \
+  $REGISTRY/aileron-enclave:latest \
+  --format='value(image_summary.digest)' \
+  --project=$GCP_PROJECT)
+
+echo "Image digest: $IMAGE_DIGEST"
+```
+
+##### 4. Create a service account for the enclave VM
+
+The enclave VM needs a service account that can pull container images and access the GCE metadata service for attestation tokens.
+
+```sh
+gcloud iam service-accounts create aileron-enclave \
+  --display-name="Aileron Enclave" \
+  --project=$GCP_PROJECT
+
+export ENCLAVE_SA=aileron-enclave@$GCP_PROJECT.iam.gserviceaccount.com
+
+# Grant permission to pull images from Artifact Registry.
+gcloud artifacts repositories add-iam-policy-binding aileron-enclave \
+  --location=$REGION \
+  --member="serviceAccount:$ENCLAVE_SA" \
+  --role="roles/artifactregistry.reader" \
+  --project=$GCP_PROJECT
+
+# Grant permission to generate attestation tokens.
+gcloud projects add-iam-policy-binding $GCP_PROJECT \
+  --member="serviceAccount:$ENCLAVE_SA" \
+  --role="roles/confidentialcomputing.workloadUser"
+```
+
+##### 5. Create the Confidential Space VM
+
+```sh
+gcloud compute instances create aileron-enclave \
+  --project=$GCP_PROJECT \
+  --zone=$REGION-a \
+  --machine-type=n2d-standard-2 \
+  --confidential-compute \
+  --min-cpu-platform="AMD Milan" \
+  --image-family=confidential-space \
+  --image-project=confidential-space-images \
+  --service-account=$ENCLAVE_SA \
+  --scopes=cloud-platform \
+  --metadata="tee-image-reference=$REGISTRY/aileron-enclave:latest,tee-container-log-redirect=true,tee-env-AILERON_TEE_PROVIDER=confidential-space,tee-env-AILERON_ENCLAVE_PORT=8443" \
+  --tags=aileron-enclave
+```
+
+The `tee-image-reference` metadata tells Confidential Space which container to run. Environment variables are passed via `tee-env-*` metadata keys.
+
+##### 6. Configure firewall rules
+
+Allow the Aileron server to reach the enclave on port 8443:
+
+```sh
+gcloud compute firewall-rules create allow-aileron-enclave \
+  --project=$GCP_PROJECT \
+  --allow=tcp:8443 \
+  --target-tags=aileron-enclave \
+  --source-ranges=0.0.0.0/0 \
+  --description="Allow traffic to Aileron enclave"
+```
+
+For production, restrict `--source-ranges` to the IP range of your Aileron server.
+
+##### 7. Get the enclave VM's internal IP
+
+```sh
+export ENCLAVE_IP=$(gcloud compute instances describe aileron-enclave \
+  --zone=$REGION-a \
+  --format='value(networkInterfaces[0].networkIP)' \
+  --project=$GCP_PROJECT)
+
+echo "Enclave URL: http://$ENCLAVE_IP:8443"
+```
+
+If the Aileron server runs outside the same VPC, use the external IP or set up a load balancer with TLS.
+
+##### 8. Configure the Aileron server
+
+Set these environment variables on the Aileron server service:
+
+| Variable | Value |
+|----------|-------|
+| `AILERON_TEE_PROVIDER` | `confidential-space` |
+| `AILERON_ENCLAVE_URL` | `http://<ENCLAVE_IP>:8443` (or internal DNS) |
+| `AILERON_ENCLAVE_IMAGE_DIGEST` | The `sha256:...` digest from step 3 |
+| `AILERON_GCP_PROJECT_ID` | Your GCP project ID |
+
+##### 9. Verify
+
+Check the enclave health:
+
+```sh
+curl http://$ENCLAVE_IP:8443/health
+```
+
+Check TEE status from the Aileron server:
+
+```sh
+curl https://api.yourdomain.com/v1/tee/status
+```
+
+Expected response:
+
+```json
+{"enabled":true,"provider":"confidential-space","attested":false,"session_active":false}
+```
+
+##### Network requirements
+
+| From | To | Port | Purpose |
+|------|----|------|---------|
+| Aileron server | Enclave VM | 8443 | Attestation, session, execution requests |
+| Enclave VM | External APIs | 443 | Gmail, Stripe, Google Calendar, etc. |
+| Enclave VM | `metadata.google.internal` | 80 | GCE metadata service (attestation tokens) |
+| Aileron server | `accounts.google.com` | 443 | OIDC discovery + JWKS for attestation verification |
+
+The GCE metadata service is always accessible from within a GCP VM — no firewall rule needed.
+
+##### How attestation works
+
+1. The Aileron server calls `POST /v1/tee/attestation` which sends a random nonce to the enclave.
+2. The enclave fetches an OIDC JWT from the GCE metadata service at `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity`. This token is signed by Google and contains claims about the workload: container image digest, GCP project ID, and hardware model.
+3. The server verifies the JWT signature against Google's JWKS (fetched from the OIDC discovery document at `https://accounts.google.com/.well-known/openid-configuration`).
+4. The server validates: the issuer is `https://confidentialcomputing.googleapis.com`, the token is not expired, the nonce matches, and the image digest and project ID match the expected values.
+5. On success, the server and enclave perform an ECDH key exchange (`POST /v1/tee/session`) to establish an encrypted channel.
+6. Subsequent execution requests encrypt credentials with the session key before sending them to the enclave. The enclave decrypts inside its hardware-isolated memory, executes the connector, and returns only the structured result.
+
+##### Updating the enclave
+
+When you push a new enclave image:
+
+1. Build and push the new image.
+2. Record the new image digest.
+3. Update `AILERON_ENCLAVE_IMAGE_DIGEST` on the Aileron server.
+4. Restart the Confidential Space VM (it pulls the image reference from metadata on boot):
    ```sh
-   docker build -f cmd/aileron-enclave/Dockerfile -t your-registry/aileron-enclave .
-   docker push your-registry/aileron-enclave
+   gcloud compute instances stop aileron-enclave --zone=$REGION-a --project=$GCP_PROJECT
+   gcloud compute instances start aileron-enclave --zone=$REGION-a --project=$GCP_PROJECT
    ```
-
-3. **Note the image digest** — after pushing, record the `sha256:...` digest. This is used for attestation verification.
-
-4. **Configure the server service:**
-
-   | Variable | Value |
-   |----------|-------|
-   | `AILERON_TEE_PROVIDER` | `confidential-space` |
-   | `AILERON_ENCLAVE_URL` | URL of the enclave (e.g. `https://10.128.0.5:8443` or internal DNS) |
-   | `AILERON_ENCLAVE_IMAGE_DIGEST` | `sha256:...` (from the pushed image) |
-   | `AILERON_GCP_PROJECT_ID` | Your GCP project ID |
-
-5. **Configure the enclave VM** — the Confidential Space VM runs the container image directly. Set `AILERON_ENCLAVE_PORT` (default `8443`) and `AILERON_TEE_PROVIDER=confidential-space` as container environment variables.
-
-6. **Network access** — the server must be able to reach the enclave URL over HTTPS. The enclave must be able to reach external APIs (Gmail, Stripe, etc.) to execute connector actions. The GCE metadata service (`http://metadata.google.internal`) must be accessible from within the VM for attestation token retrieval.
-
-**How attestation works:** On startup, the server requests an attestation token from the enclave. The enclave fetches an OIDC JWT from the GCE metadata service, signed by Google. The server verifies the JWT signature against Google's JWKS, then checks that the container image digest and GCP project ID match the expected values. Only after successful verification does the server establish an ECDH session and begin delegating executions.
+5. The server will re-attest against the new image digest on its next attestation request.
 
 ### Railway
 
