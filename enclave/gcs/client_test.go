@@ -185,6 +185,90 @@ func TestClientOAuthExchange(t *testing.T) {
 	}
 }
 
+func TestClientExecuteError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("execute failed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.Execute(context.Background(), enclave.ExecuteRequest{RequestID: "exec-1"})
+	if err == nil {
+		t.Fatal("expected error for 500 response on Execute")
+	}
+}
+
+func TestClientEscrowStoreError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("escrow store failed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.EscrowStore(context.Background(), enclave.EscrowStoreRequest{GrantID: "grant-1"})
+	if err == nil {
+		t.Fatal("expected error for 500 response on EscrowStore")
+	}
+}
+
+func TestClientTransmitKEKError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("kek failed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.TransmitKEK(context.Background(), enclave.TransmitKEKRequest{UserID: "user-1"})
+	if err == nil {
+		t.Fatal("expected error for 500 response on TransmitKEK")
+	}
+}
+
+func TestClientOAuthExchangeError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("oauth exchange failed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.OAuthExchange(context.Background(), enclave.OAuthExchangeRequest{UserID: "user-1", Code: "bad"})
+	if err == nil {
+		t.Fatal("expected error for 500 response on OAuthExchange")
+	}
+}
+
+func TestClientEscrowRevokeError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("revoke failed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	err := c.EscrowRevoke(context.Background(), enclave.EscrowRevokeRequest{EscrowID: "esc-123"})
+	if err == nil {
+		t.Fatal("expected error for 500 response on EscrowRevoke")
+	}
+}
+
+func TestClientEstablishSessionError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("session failed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.EstablishSession(context.Background(), enclave.SessionRequest{PublicKey: []byte("key")})
+	if err == nil {
+		t.Fatal("expected error for 500 response on EstablishSession")
+	}
+}
+
 func TestClientEscrowRevoke(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/escrow/revoke" {

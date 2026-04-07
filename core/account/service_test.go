@@ -393,6 +393,96 @@ func TestGoogleService_WithVault(t *testing.T) {
 	}
 }
 
+func TestGoogleService_ClientID(t *testing.T) {
+	svc := NewGoogleService("my-client-id", "my-secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	if got := svc.ClientID(); got != "my-client-id" {
+		t.Errorf("expected my-client-id, got %s", got)
+	}
+}
+
+func TestGoogleService_ClientSecret(t *testing.T) {
+	svc := NewGoogleService("id", "my-client-secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	if got := svc.ClientSecret(); got != "my-client-secret" {
+		t.Errorf("expected my-client-secret, got %s", got)
+	}
+}
+
+func TestGoogleService_ScopesFor(t *testing.T) {
+	svc := NewGoogleService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+
+	// Gmail scopes.
+	gmailScopes := svc.ScopesFor(model.ConnectedAccountProviderGmail)
+	if len(gmailScopes) == 0 {
+		t.Fatal("expected non-empty scopes for Gmail")
+	}
+	found := false
+	for _, s := range gmailScopes {
+		if strings.Contains(s, "gmail") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected a gmail scope in Gmail scopes")
+	}
+
+	// Calendar scopes.
+	calScopes := svc.ScopesFor(model.ConnectedAccountProviderGoogleCalendar)
+	if len(calScopes) == 0 {
+		t.Fatal("expected non-empty scopes for Google Calendar")
+	}
+	foundCal := false
+	for _, s := range calScopes {
+		if strings.Contains(s, "calendar") {
+			foundCal = true
+			break
+		}
+	}
+	if !foundCal {
+		t.Error("expected a calendar scope in Google Calendar scopes")
+	}
+
+	// Unknown provider returns nil.
+	if scopes := svc.ScopesFor(model.ConnectedAccountProviderOutlook); scopes != nil {
+		t.Errorf("expected nil scopes for unsupported provider, got %v", scopes)
+	}
+}
+
+func TestGoogleService_TokenEndpointFor(t *testing.T) {
+	svc := NewGoogleService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+
+	// Gmail endpoint should be non-empty.
+	ep := svc.TokenEndpointFor(model.ConnectedAccountProviderGmail)
+	if ep == "" {
+		t.Fatal("expected non-empty token endpoint for Gmail")
+	}
+
+	// Calendar endpoint should be the same Google endpoint.
+	epCal := svc.TokenEndpointFor(model.ConnectedAccountProviderGoogleCalendar)
+	if epCal == "" {
+		t.Fatal("expected non-empty token endpoint for Google Calendar")
+	}
+	if ep != epCal {
+		t.Errorf("expected same Google endpoint for Gmail and Calendar, got %q vs %q", ep, epCal)
+	}
+
+	// Unknown provider returns empty string.
+	if got := svc.TokenEndpointFor(model.ConnectedAccountProviderOutlook); got != "" {
+		t.Errorf("expected empty token endpoint for unsupported provider, got %s", got)
+	}
+}
+
+func TestGoogleService_UserInfoEndpoint(t *testing.T) {
+	svc := NewGoogleService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	ep := svc.UserInfoEndpoint()
+	if ep == "" {
+		t.Fatal("expected non-empty userinfo endpoint")
+	}
+	if !strings.Contains(ep, "googleapis.com") {
+		t.Errorf("expected googleapis.com in endpoint, got %s", ep)
+	}
+}
+
 func mustParseURL(raw string) *net_url.URL {
 	u, err := net_url.Parse(raw)
 	if err != nil {
