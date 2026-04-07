@@ -4,7 +4,8 @@ import { requestUnlock } from '$lib/vault.svelte.js';
 
 const API_BASE = PUBLIC_API_BASE;
 
-async function apiFetch(path: string, options?: RequestInit) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function apiFetch(path: string, options?: RequestInit): Promise<any> {
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/json',
 		...Object.fromEntries(new Headers(options?.headers).entries())
