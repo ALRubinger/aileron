@@ -14,6 +14,7 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/config"
+	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/enclave"
@@ -494,7 +495,8 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 
 	connectedAccounts := mem.NewConnectedAccountStore()
 	v := vault.NewMemVault()
-	accountSvc := account.NewGoogleService("test-client-id", "test-client-secret", connectedAccounts, v)
+	accountSvc := account.NewGoogleService("test-client-id", "test-client-secret", connectedAccounts, v).
+		WithEndpoints(tokenServer.URL, userinfoServer.URL)
 
 	srv := &apiServer{
 		log:               slog.Default(),
@@ -572,18 +574,34 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 		State: state,
 	})
 
-	// The TEE branch was entered; the enclave tried to exchange the OAuth code
-	// but the token endpoint (accounts.google.com) is not reachable, so we
-	// get a 500. The important thing is that we hit the enclave path (not the
-	// direct-mode path) which is confirmed by the error mentioning OAuth exchange.
-	if w4.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 from failed OAuth exchange in TEE mode, got %d: %s", w4.Code, w4.Body.String())
+	// The TEE branch should succeed: enclave exchanges the code with our mock
+	// token server, encrypts the token with the user's KEK, and returns
+	// ciphertext. The handler stores it in the vault and creates the account.
+	if w4.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d: %s", w4.Code, w4.Body.String())
 	}
-	var errResp api.Error
-	json.NewDecoder(w4.Body).Decode(&errResp)
-	// The error should be about the OAuth exchange failing (enclave path),
-	// confirming we entered the TEE branch rather than the direct-mode branch.
-	if errResp.Error.Code != "callback_error" {
-		t.Fatalf("expected error code 'callback_error', got %q", errResp.Error.Code)
+
+	// Verify the connected account was created.
+	accounts, err := connectedAccounts.List(r4.Context(), store.ConnectedAccountFilter{UserID: "usr_cb_test"})
+	if err != nil {
+		t.Fatalf("listing accounts: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 connected account, got %d", len(accounts))
+	}
+	if accounts[0].Email != "testuser@gmail.com" {
+		t.Fatalf("expected email testuser@gmail.com, got %q", accounts[0].Email)
+	}
+
+	// Verify the encrypted token was stored in the vault.
+	secret, err := v.Get(r4.Context(), accounts[0].VaultPath())
+	if err != nil {
+		t.Fatalf("getting vault secret: %v", err)
+	}
+	if len(secret.Value) == 0 {
+		t.Fatal("expected non-empty encrypted token in vault")
+	}
+	if secret.Metadata.Labels["encrypted"] != "true" {
+		t.Fatal("expected encrypted=true label on vault secret")
 	}
 }

@@ -72,8 +72,10 @@ type GoogleService struct {
 	accounts     store.ConnectedAccountStore
 	vault        vault.Vault
 	// Testing hooks — nil means use defaults.
-	exchangeToken tokenExchanger
-	fetchEmail    emailFetcher
+	exchangeToken         tokenExchanger
+	fetchEmail            emailFetcher
+	tokenEndpointOverride string // overrides TokenEndpointFor (testing only)
+	userinfoOverride      string // overrides UserInfoEndpoint (testing only)
 }
 
 // NewGoogleService creates a service that handles Gmail and Google Calendar connections.
@@ -125,6 +127,9 @@ func (s *GoogleService) ScopesFor(provider model.ConnectedAccountProvider) []str
 
 // TokenEndpointFor returns the OAuth token exchange URL for a provider.
 func (s *GoogleService) TokenEndpointFor(provider model.ConnectedAccountProvider) string {
+	if s.tokenEndpointOverride != "" {
+		return s.tokenEndpointOverride
+	}
 	if pc, ok := googleProviders[provider]; ok {
 		return pc.endpoint.TokenURL
 	}
@@ -132,7 +137,22 @@ func (s *GoogleService) TokenEndpointFor(provider model.ConnectedAccountProvider
 }
 
 // UserInfoEndpoint returns the Google userinfo URL.
-func (s *GoogleService) UserInfoEndpoint() string { return userinfoURL }
+func (s *GoogleService) UserInfoEndpoint() string {
+	if s.userinfoOverride != "" {
+		return s.userinfoOverride
+	}
+	return userinfoURL
+}
+
+// WithEndpoints returns a shallow copy with overridden token and userinfo
+// endpoints. This is for testing only — production uses the hardcoded Google
+// endpoints.
+func (s *GoogleService) WithEndpoints(tokenEndpoint, userinfoEndpoint string) *GoogleService {
+	cp := *s
+	cp.tokenEndpointOverride = tokenEndpoint
+	cp.userinfoOverride = userinfoEndpoint
+	return &cp
+}
 
 func (s *GoogleService) Providers() []model.ConnectedAccountProvider {
 	return []model.ConnectedAccountProvider{
