@@ -5,13 +5,16 @@ WORKDIR /src
 # Copy module files first for layer caching.
 COPY go.work go.work.sum* ./
 COPY cmd/aileron-mcp/go.mod ./cmd/aileron-mcp/
+COPY cmd/aileron-enclave/go.mod ./cmd/aileron-enclave/
 COPY core/go.mod core/go.sum ./core/
+COPY enclave/go.mod ./enclave/
 COPY sdk/go/go.mod sdk/go/go.sum* ./sdk/go/
 COPY test/integration/go.mod ./test/integration/
 
 RUN cd core && go mod download
 
 COPY core/ ./core/
+COPY enclave/ ./enclave/
 COPY sdk/go/ ./sdk/go/
 
 # COVERAGE=true builds with Go -cover instrumentation for integration test coverage.
