@@ -39,9 +39,12 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	// Save original for cleanup.
 	origData, hadOriginal := readFileIfExists(configPath)
 
-	// Clear existing Bash permissions — Aileron's hook is the sole enforcer.
-	// Keep non-Bash permissions intact.
-	existing["permissions"] = map[string]any{}
+	// Set Bash(*) in permissions so Claude Code auto-approves Bash by default.
+	// The hook can still deny or ask for specific commands — deny/ask override
+	// allow in Claude Code's precedence (deny > ask > allow).
+	existing["permissions"] = map[string]any{
+		"allow": []string{"Bash(*)"},
+	}
 
 	// Register our hook.
 	existing["hooks"] = map[string]any{
