@@ -51,5 +51,5 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	}
 
 	cleanup := func() { os.RemoveAll(tmpDir) }
-	return []string{"--settings-file", configPath}, cleanup, nil
+	return []string{"--settings", configPath}, cleanup, nil
 }
