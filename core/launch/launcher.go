@@ -74,19 +74,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	env := buildEnv(config.ShellShim, config.Agent.Env())
 
-	// Set up agent-specific hooks for policy enforcement.
-	hookArgs, cleanup, err := config.Agent.SetupHooks(config.ShellShim)
-	if err != nil {
-		return LaunchResult{}, fmt.Errorf("setting up hooks for %s: %w", config.Agent.Name(), err)
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	// Prepend hook args, then append user args.
-	allArgs := append(hookArgs, config.Args...)
-
-	cmd := exec.CommandContext(ctx, agentPath, allArgs...)
+	cmd := exec.CommandContext(ctx, agentPath, config.Args...)
 	cmd.Env = env
 	if config.Dir != "" {
 		cmd.Dir = config.Dir
