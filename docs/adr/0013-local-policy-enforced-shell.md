@@ -35,7 +35,7 @@ Aileron pivots from a cloud execution plane to a **local-first CLI tool** center
 ## What stays
 
 - **Zero-knowledge vault** (ADR-0010): The Argon2id + AES-256-GCM architecture is reused for local secret storage. The passphrase-derived KEK model is unchanged.
-- **TEE support** (ADR-0011, ADR-0012): Parked for MVP. The provider SPI and Confidential Space implementation remain in the codebase for future use, but no new investment. Local credential brokering covers the immediate need.
+- **TEE support** (ADR-0011, ADR-0012): Parked for MVP but architecturally load-bearing for the post-MVP enterprise layer (see below). The provider SPI and Confidential Space implementation remain in the codebase.
 - **Policy engine** (`core/policy/`): The `RuleEngine` and condition evaluation logic are reused. The `aileron.yaml` schema translates to the existing `PolicyRule` types.
 - **Auth system** (ADR-0005, ADR-0007): The server-side auth, OAuth providers, and enterprise account model remain for the hosted control plane. They are not part of the `aileron launch` flow.
 - **Server and API**: The HTTP server, OpenAPI spec, and generated handlers remain. They serve the hosted control plane and may be used for team-level policy management in the future.
@@ -57,10 +57,22 @@ Aileron pivots from a cloud execution plane to a **local-first CLI tool** center
 
 - The primary developer experience is `aileron launch <agent>`, not a web dashboard.
 - The `aileron-sh` shell shim and `aileron.yaml` schema become the core product surfaces.
-- The existing server, UI, and database infrastructure are not removed but are deprioritized. They may serve a future team/enterprise layer.
 - The MCP server (`aileron-mcp`) is repurposed from intent submission to credential brokering and communication tools (`http_request`, `send_message`, `read_messages`).
 - Community policy profiles become a contribution surface — the `.gitignore` templates model.
 - First-experience target: under 10 minutes from install to a working `aileron launch claude` session with policy enforcement.
+
+## Post-MVP: remote execution and the enterprise layer
+
+The cloud execution plane from ADR-0009 is deferred, not discarded. Local credential brokering works for API keys and bot tokens, but a class of actions is better served by remote execution:
+
+- **OAuth-managed credentials** (Gmail, Google Calendar, Stripe) require refresh token flows that shouldn't live on a developer's laptop. Tokens should be housed in a secure enclave, not on disk.
+- **Enterprise policy** may demand that certain credentials never touch developer machines — the TEE provides hardware-enforced isolation.
+- **High-stakes irreversible actions** (send email on behalf of the org, issue a payment) benefit from organizational audit and approval workflows that survive a closed laptop.
+- **Uptime** — remote execution decouples action completion from the developer's session.
+
+The existing server, vault, TEE, connector SPI, and approval orchestrator are the foundation for this layer. The architecture is: `aileron launch` handles shell policy and local brokering (the developer UX); the hosted control plane handles remote execution and enterprise governance (the organization UX). The local tool is the on-ramp; the cloud layer is the upgrade path.
+
+This is a future phase — the MVP focuses entirely on the local-first experience.
 
 ## Implementation
 
