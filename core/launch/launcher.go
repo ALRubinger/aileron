@@ -122,7 +122,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("getting terminal size: %w", err)
 	}
 
-	bar := NewStatusBar(rows, cols, "Flying ✈️ withaileron.ai")
+	bar := NewStatusBar(rows, cols, "Flying ✈️ withaileron.ai ")
 	agentRows := ComputeAgentRows(rows, bar.BarHeight())
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
