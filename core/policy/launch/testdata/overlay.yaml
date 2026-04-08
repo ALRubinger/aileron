@@ -1,0 +1,22 @@
+version: 1
+default: allow
+
+settings:
+  timeout: 60
+
+env:
+  scrub:
+    - "OPENAI_*"
+  passthrough:
+    - "GOPATH"
+    - "HOME"
+
+allow:
+  - "docker build *"
+
+deny:
+  - command: "docker push *"
+    description: "no pushing images"
+
+ask:
+  - override: "go_test"

@@ -1,0 +1,32 @@
+version: 1
+default: ask
+
+settings:
+  ask_mode: terminal
+  audit_log: .aileron/audit.jsonl
+  timeout: 30
+
+env:
+  scrub:
+    - "AWS_*"
+    - "*_SECRET"
+  passthrough:
+    - "HOME"
+    - "PATH"
+
+allow:
+  - "go test ./..."
+  - "go build ./..."
+  - "git status"
+  - command: "git diff *"
+    description: "read-only git diffs"
+
+deny:
+  - command: "rm -rf *"
+    description: "block recursive force delete"
+  - command: "git push origin main"
+    description: "never push directly to main"
+
+ask:
+  - "git push *"
+  - "git commit *"
