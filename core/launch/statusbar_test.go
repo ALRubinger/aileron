@@ -69,6 +69,30 @@ func TestStatusBar_BarHeight(t *testing.T) {
 	}
 }
 
+func TestStatusBar_EmojiWidth(t *testing.T) {
+	// Use a supplementary plane emoji (U+1F6E9, small airplane) which should
+	// count as 2 columns wide in displayWidth.
+	bar := launch.NewStatusBar(24, 80, "Flying 🛩 test")
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	// Should render without issues
+	if !strings.Contains(buf.String(), "test") {
+		t.Error("expected status bar with emoji to render")
+	}
+}
+
+func TestStatusBar_NarrowTerminal(t *testing.T) {
+	// Text wider than terminal — should truncate
+	bar := launch.NewStatusBar(24, 5, "this text is way too long")
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+	// Should still render without panicking
+	if !strings.Contains(out, "\0337") {
+		t.Error("expected cursor save even with narrow terminal")
+	}
+}
+
 func TestSetScrollRegion(t *testing.T) {
 	var buf bytes.Buffer
 	launch.SetScrollRegion(&buf, 1, 22)

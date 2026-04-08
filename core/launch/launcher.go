@@ -117,19 +117,14 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	stdinFd := int(os.Stdin.Fd())
 
-	// Get terminal size.
 	cols, rows, err := term.GetSize(stdinFd)
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("getting terminal size: %w", err)
 	}
 
 	bar := NewStatusBar(rows, cols, "Flying ✈️ withaileron.ai")
-	agentRows := rows - bar.BarHeight()
-	if agentRows < 1 {
-		agentRows = 1
-	}
+	agentRows := ComputeAgentRows(rows, bar.BarHeight())
 
-	// Start agent in a pty sized to the agent area.
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Rows: uint16(agentRows),
 		Cols: uint16(cols),
@@ -139,40 +134,21 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	}
 	defer ptmx.Close()
 
-	// Put real terminal in raw mode.
 	oldState, err := term.MakeRaw(stdinFd)
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("setting raw mode: %w", err)
 	}
 	defer term.Restore(stdinFd, oldState)
 
-	// Clear screen, set scroll region to agent area, and render the status bar.
-	fmt.Fprintf(os.Stdout, "\033[2J\033[1;1H")
-	SetScrollRegion(os.Stdout, 1, agentRows)
-	fmt.Fprintf(os.Stdout, "\033[1;1H")
-	bar.Render(os.Stdout)
+	SetupTerminalScreen(os.Stdout, agentRows, bar)
 
-	// Handle signals: forward SIGINT/SIGTERM to child, handle SIGWINCH.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGWINCH)
 	go func() {
 		for sig := range sigCh {
 			switch sig {
 			case syscall.SIGWINCH:
-				newCols, newRows, err := term.GetSize(stdinFd)
-				if err != nil {
-					continue
-				}
-				newAgentRows := newRows - bar.BarHeight()
-				if newAgentRows < 1 {
-					newAgentRows = 1
-				}
-				_ = pty.Setsize(ptmx, &pty.Winsize{
-					Rows: uint16(newAgentRows),
-					Cols: uint16(newCols),
-				})
-				SetScrollRegion(os.Stdout, 1, newAgentRows)
-				bar.Resize(os.Stdout, newRows, newCols)
+				HandleResize(os.Stdout, stdinFd, ptmx, bar)
 			default:
 				if cmd.Process != nil {
 					_ = cmd.Process.Signal(sig)
@@ -181,25 +157,58 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 		}
 	}()
 
-	// Copy loops: stdin → pty, pty → stdout.
-	// These run until the pty closes (agent exits).
-	go func() {
-		io.Copy(ptmx, os.Stdin)
-	}()
-	go func() {
-		io.Copy(os.Stdout, ptmx)
-	}()
+	go func() { io.Copy(ptmx, os.Stdin) }()
+	go func() { io.Copy(os.Stdout, ptmx) }()
 
 	err = cmd.Wait()
 	signal.Stop(sigCh)
 	close(sigCh)
 
-	// Restore scroll region and clear status bar area before exiting.
-	ResetScrollRegion(os.Stdout)
-	// Move to the bar area and clear it.
-	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[J", rows-1)
+	CleanupTerminalScreen(os.Stdout, rows)
 
 	return exitResult(err)
+}
+
+// ComputeAgentRows returns the number of rows available for the agent,
+// reserving space for the status bar.
+func ComputeAgentRows(totalRows, barHeight int) int {
+	rows := totalRows - barHeight
+	if rows < 1 {
+		return 1
+	}
+	return rows
+}
+
+// SetupTerminalScreen clears the screen, sets the scroll region, and
+// renders the status bar.
+func SetupTerminalScreen(w io.Writer, agentRows int, bar *StatusBar) {
+	fmt.Fprintf(w, "\033[2J\033[1;1H")
+	SetScrollRegion(w, 1, agentRows)
+	fmt.Fprintf(w, "\033[1;1H")
+	bar.Render(w)
+}
+
+// CleanupTerminalScreen resets the scroll region and clears the status bar.
+func CleanupTerminalScreen(w io.Writer, totalRows int) {
+	ResetScrollRegion(w)
+	fmt.Fprintf(w, "\033[%d;1H\033[J", totalRows-1)
+}
+
+// HandleResize updates the pty size and re-renders the status bar after a
+// terminal resize. The fd parameter is the file descriptor to query for the
+// new terminal size.
+func HandleResize(w io.Writer, fd int, ptmx *os.File, bar *StatusBar) {
+	newCols, newRows, err := term.GetSize(fd)
+	if err != nil {
+		return
+	}
+	newAgentRows := ComputeAgentRows(newRows, bar.BarHeight())
+	_ = pty.Setsize(ptmx, &pty.Winsize{
+		Rows: uint16(newAgentRows),
+		Cols: uint16(newCols),
+	})
+	SetScrollRegion(w, 1, newAgentRows)
+	bar.Resize(w, newRows, newCols)
 }
 
 // exitResult extracts an exit code from a cmd.Wait error.
@@ -227,7 +236,6 @@ func buildEnv(shimPath string, agentEnv map[string]string) []string {
 	env := os.Environ()
 	filtered := make([]string, 0, len(env)+len(agentEnv)+2)
 	for _, e := range env {
-		// Remove existing SHELL and AILERON_REAL_SHELL entries
 		if len(e) >= 6 && e[:6] == "SHELL=" {
 			continue
 		}

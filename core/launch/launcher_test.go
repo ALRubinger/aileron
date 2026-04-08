@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/launch"
+	"github.com/creack/pty/v2"
 )
 
 func TestResolveBinary_Found(t *testing.T) {
@@ -165,6 +166,82 @@ func TestLaunch_BinaryNotFound(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for missing binary")
+	}
+}
+
+func TestComputeAgentRows(t *testing.T) {
+	tests := []struct {
+		totalRows, barHeight, want int
+	}{
+		{24, 2, 22},
+		{10, 2, 8},
+		{3, 2, 1},
+		{2, 2, 1}, // clamped to 1
+		{1, 2, 1}, // clamped to 1
+	}
+	for _, tt := range tests {
+		got := launch.ComputeAgentRows(tt.totalRows, tt.barHeight)
+		if got != tt.want {
+			t.Errorf("ComputeAgentRows(%d, %d) = %d, want %d", tt.totalRows, tt.barHeight, got, tt.want)
+		}
+	}
+}
+
+func TestSetupTerminalScreen(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "test")
+	var buf strings.Builder
+	launch.SetupTerminalScreen(&buf, 22, bar)
+	out := buf.String()
+
+	// Should clear screen
+	if !strings.Contains(out, "\033[2J") {
+		t.Error("expected clear screen escape")
+	}
+	// Should set scroll region
+	if !strings.Contains(out, "\033[1;22r") {
+		t.Error("expected scroll region escape")
+	}
+	// Should contain status bar content
+	if !strings.Contains(out, "test") {
+		t.Error("expected status bar text")
+	}
+}
+
+func TestHandleResize(t *testing.T) {
+	// Create a real pty pair so we have valid file descriptors.
+	ptmx, pts, err := pty.Open()
+	if err != nil {
+		t.Fatalf("failed to open pty: %v", err)
+	}
+	defer ptmx.Close()
+	defer pts.Close()
+
+	bar := launch.NewStatusBar(24, 80, "test")
+	var buf strings.Builder
+
+	// HandleResize reads the terminal size from the fd. Using the pty master
+	// fd, it will get the pty's current size and update accordingly.
+	launch.HandleResize(&buf, int(ptmx.Fd()), ptmx, bar)
+
+	out := buf.String()
+	// Should have written scroll region and bar resize output
+	if len(out) == 0 {
+		t.Error("expected HandleResize to produce output")
+	}
+}
+
+func TestCleanupTerminalScreen(t *testing.T) {
+	var buf strings.Builder
+	launch.CleanupTerminalScreen(&buf, 24)
+	out := buf.String()
+
+	// Should reset scroll region
+	if !strings.Contains(out, "\033[r") {
+		t.Error("expected reset scroll region")
+	}
+	// Should move to bar area and clear
+	if !strings.Contains(out, "\033[23;1H\033[J") {
+		t.Errorf("expected clear at row 23, got %q", out)
 	}
 }
 
