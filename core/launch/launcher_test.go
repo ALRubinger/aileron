@@ -78,6 +78,9 @@ func TestLaunch_EnvironmentSetup(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "env.txt")
 
+	// Isolate HOME so InstallWrapper doesn't touch the real home directory.
+	t.Setenv("HOME", dir)
+
 	// Create a wrapper script that runs env and writes to file
 	script := filepath.Join(dir, "capture-env.sh")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755); err != nil {
@@ -110,10 +113,23 @@ func TestLaunch_EnvironmentSetup(t *testing.T) {
 	if !strings.Contains(envStr, "AILERON_REAL_SHELL=") {
 		t.Error("AILERON_REAL_SHELL not set in child env")
 	}
+	if !strings.Contains(envStr, "CLAUDE_CODE_SHELL=") {
+		t.Error("CLAUDE_CODE_SHELL not set in child env")
+	}
+	// CLAUDE_CODE_SHELL path must contain "bash" for Claude Code to accept it
+	for _, line := range strings.Split(envStr, "\n") {
+		if strings.HasPrefix(line, "CLAUDE_CODE_SHELL=") {
+			val := strings.TrimPrefix(line, "CLAUDE_CODE_SHELL=")
+			if !strings.Contains(val, "bash") {
+				t.Errorf("CLAUDE_CODE_SHELL path must contain 'bash', got %q", val)
+			}
+		}
+	}
 }
 
 func TestLaunch_AgentSpecificEnv(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("HOME", dir)
 	outFile := filepath.Join(dir, "env.txt")
 
 	script := filepath.Join(dir, "capture-env.sh")
@@ -144,6 +160,7 @@ func TestLaunch_AgentSpecificEnv(t *testing.T) {
 }
 
 func TestLaunch_ExitCodePropagation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	agent := scriptAgent{script: "/bin/sh"}
 	result, err := launch.Launch(context.Background(), launch.LaunchConfig{
 		Agent:     agent,
