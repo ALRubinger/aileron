@@ -49,15 +49,13 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 		return 1
 	}
 
-	// Only evaluate Bash tool calls.
+	// Only evaluate Bash tool calls. Non-Bash tools pass through.
 	if input.ToolName != "Bash" {
-		writeHookOutput(stdout, "approve", "")
 		return 0
 	}
 
 	command := input.ToolInput.Command
 	if command == "" {
-		writeHookOutput(stdout, "approve", "")
 		return 0
 	}
 
@@ -65,7 +63,6 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 	policyPath := FindPolicyFile(input.CWD)
 	if policyPath == "" {
 		// No policy file — don't interfere.
-		writeHookOutput(stdout, "approve", "")
 		return 0
 	}
 
@@ -73,11 +70,11 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 
 	switch result.Disposition {
 	case model.DispositionAllow:
-		writeHookOutput(stdout, "approve", "")
+		// Exit 0 with no output — let Claude Code's normal flow proceed.
+		// With --allowedTools "Bash(*)", this auto-approves.
 	case model.DispositionDeny:
 		writeHookOutput(stdout, "deny", result.Reason)
 	case model.DispositionRequireApproval:
-		// "ask" defers to Claude Code's native approval prompt.
 		writeHookOutput(stdout, "ask", result.Reason)
 	default:
 		writeHookOutput(stdout, "ask", "")
