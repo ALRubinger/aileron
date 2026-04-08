@@ -1,10 +1,11 @@
 package agents
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
+
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 )
 
 // Claude is the agent definition for Claude Code.
@@ -14,77 +15,100 @@ func (c Claude) Name() string           { return "claude" }
 func (c Claude) BinaryNames() []string  { return []string{"claude"} }
 func (c Claude) Env() map[string]string { return nil }
 
-// SetupHooks writes Aileron's PreToolUse hook into the project's
-// .claude/settings.local.json so Claude Code trusts it without prompting.
-// The hook is removed on cleanup.
+// SetupHooks translates aileron.yaml rules into Claude Code's native
+// --allowedTools and --disallowedTools CLI flags. No hooks or settings
+// file modifications needed — Claude Code's permission system handles
+// enforcement directly.
+//
+// Mapping:
+//   - aileron.yaml allow rules → --allowedTools "Bash(pattern)"
+//   - aileron.yaml deny rules  → --disallowedTools "Bash(pattern)"
+//   - aileron.yaml ask rules   → default behavior (Claude Code prompts)
+//   - default: ask             → unmatched commands prompt
 func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, nil, fmt.Errorf("getting working directory: %w", err)
+		return nil, nil, nil
 	}
 
-	configDir := filepath.Join(cwd, ".claude")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("creating .claude dir: %w", err)
+	policyPath := findPolicyFile(cwd)
+	if policyPath == "" {
+		return nil, nil, nil
 	}
 
-	configPath := filepath.Join(configDir, "settings.local.json")
-
-	// Read existing settings if present.
-	existing := make(map[string]any)
-	if data, err := os.ReadFile(configPath); err == nil {
-		json.Unmarshal(data, &existing)
-	}
-
-	// Save original for cleanup.
-	origData, hadOriginal := readFileIfExists(configPath)
-
-	// Set Bash(*) in permissions so Claude Code auto-approves Bash by default.
-	// The hook can still deny or ask for specific commands — deny/ask override
-	// allow in Claude Code's precedence (deny > ask > allow).
-	existing["permissions"] = map[string]any{
-		"allow": []string{"Bash(*)"},
-	}
-
-	// Register our hook.
-	existing["hooks"] = map[string]any{
-		"PreToolUse": []map[string]any{
-			{
-				"matcher": "Bash",
-				"hooks": []map[string]any{
-					{
-						"type":    "command",
-						"command": shimPath + " --hook",
-					},
-				},
-			},
-		},
-	}
-
-	data, err := json.MarshalIndent(existing, "", "  ")
+	pf, err := launchpolicy.Load(policyPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshaling hook config: %w", err)
+		fmt.Fprintf(os.Stderr, "aileron: warning: failed to load %s: %v\n", policyPath, err)
+		return nil, nil, nil
 	}
 
-	if err := os.WriteFile(configPath, data, 0o644); err != nil {
-		return nil, nil, fmt.Errorf("writing hook config: %w", err)
-	}
+	var args []string
 
-	cleanup := func() {
-		if hadOriginal {
-			os.WriteFile(configPath, origData, 0o644)
-		} else {
-			os.Remove(configPath)
+	// Translate allow rules to --allowedTools.
+	var allowed []string
+	for _, r := range pf.Allow {
+		pattern := ruleToClaudePattern(r)
+		if pattern != "" {
+			allowed = append(allowed, "Bash("+pattern+")")
 		}
 	}
+	if len(allowed) > 0 {
+		args = append(args, "--allowedTools")
+		args = append(args, strings.Join(allowed, " "))
+	}
 
-	return nil, cleanup, nil
+	// Translate deny rules to --disallowedTools.
+	var denied []string
+	for _, r := range pf.Deny {
+		pattern := ruleToClaudePattern(r)
+		if pattern != "" {
+			denied = append(denied, "Bash("+pattern+")")
+		}
+	}
+	if len(denied) > 0 {
+		args = append(args, "--disallowedTools")
+		args = append(args, strings.Join(denied, " "))
+	}
+
+	return args, nil, nil
 }
 
-func readFileIfExists(path string) ([]byte, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, false
+// ruleToClaudePattern converts an aileron.yaml rule to a Claude Code
+// permission pattern. Claude Code uses "command:*" syntax where * is
+// a glob. Aileron uses full command globs like "git push *".
+func ruleToClaudePattern(r launchpolicy.Rule) string {
+	cmd := r.Command
+	if cmd == "" {
+		return ""
 	}
-	return data, true
+
+	// Claude Code patterns use ":" to separate command from args.
+	// "git push *" → "git push:*"
+	// "go test ./..." → "go test:*"
+	// Simple commands without wildcards pass through as-is.
+	//
+	// For commands ending in " *", convert to "prefix:*"
+	if strings.HasSuffix(cmd, " *") {
+		prefix := strings.TrimSuffix(cmd, " *")
+		return prefix + ":*"
+	}
+
+	// For exact commands, use as-is.
+	return cmd
+}
+
+// findPolicyFile searches for aileron.yaml walking up from startDir.
+func findPolicyFile(startDir string) string {
+	dir := startDir
+	for {
+		candidate := dir + "/aileron.yaml"
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := dir[:strings.LastIndex(dir, "/")]
+		if parent == dir || parent == "" {
+			return ""
+		}
+		dir = parent
+	}
 }
