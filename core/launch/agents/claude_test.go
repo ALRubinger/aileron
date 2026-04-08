@@ -18,7 +18,11 @@ func TestClaude(t *testing.T) {
 		t.Errorf("expected BinaryNames [\"claude\"], got %v", names)
 	}
 
-	if c.Env() != nil {
-		t.Errorf("expected nil Env, got %v", c.Env())
+	env := c.Env()
+	if env == nil {
+		t.Fatal("expected non-nil Env")
+	}
+	if env["AILERON_REAL_SHELL"] != "/bin/bash" {
+		t.Errorf("expected AILERON_REAL_SHELL=/bin/bash, got %q", env["AILERON_REAL_SHELL"])
 	}
 }
