@@ -1,8 +1,10 @@
 package agents
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
@@ -44,7 +46,7 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 
 	var args []string
 
-	// Translate allow rules to --allowedTools.
+	// Translate allow rules to --allowedTools (each as a separate arg).
 	var allowed []string
 	for _, r := range pf.Allow {
 		pattern := ruleToClaudePattern(r)
@@ -54,10 +56,10 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	}
 	if len(allowed) > 0 {
 		args = append(args, "--allowedTools")
-		args = append(args, strings.Join(allowed, " "))
+		args = append(args, allowed...)
 	}
 
-	// Translate deny rules to --disallowedTools.
+	// Translate deny rules to --disallowedTools (each as a separate arg).
 	var denied []string
 	for _, r := range pf.Deny {
 		pattern := ruleToClaudePattern(r)
@@ -67,10 +69,14 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	}
 	if len(denied) > 0 {
 		args = append(args, "--disallowedTools")
-		args = append(args, strings.Join(denied, " "))
+		args = append(args, denied...)
 	}
 
-	return args, nil, nil
+	// Clear existing Bash permissions from settings.local.json so
+	// accumulated allow-always rules don't bypass Aileron's policy.
+	cleanup := clearBashPermissions(cwd)
+
+	return args, cleanup, nil
 }
 
 // ruleToClaudePattern converts an aileron.yaml rule to a Claude Code
@@ -95,6 +101,64 @@ func ruleToClaudePattern(r launchpolicy.Rule) string {
 
 	// For exact commands, use as-is.
 	return cmd
+}
+
+// clearBashPermissions removes Bash(*) entries from .claude/settings.local.json
+// so accumulated allow-always rules don't bypass Aileron's policy. Returns a
+// cleanup function that restores the original file.
+func clearBashPermissions(cwd string) func() {
+	configPath := filepath.Join(cwd, ".claude", "settings.local.json")
+
+	origData, hadOriginal := readFileIfExists(configPath)
+	if !hadOriginal {
+		return nil
+	}
+
+	var settings map[string]any
+	if err := json.Unmarshal(origData, &settings); err != nil {
+		return nil
+	}
+
+	perms, ok := settings["permissions"].(map[string]any)
+	if !ok {
+		return nil
+	}
+
+	allowList, ok := perms["allow"].([]any)
+	if !ok {
+		return nil
+	}
+
+	// Filter out Bash(*) entries.
+	filtered := make([]any, 0, len(allowList))
+	for _, item := range allowList {
+		s, ok := item.(string)
+		if !ok || !strings.HasPrefix(s, "Bash(") {
+			filtered = append(filtered, item)
+		}
+	}
+
+	perms["allow"] = filtered
+	settings["permissions"] = perms
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return nil
+	}
+
+	os.WriteFile(configPath, data, 0o644)
+
+	return func() {
+		os.WriteFile(configPath, origData, 0o644)
+	}
+}
+
+func readFileIfExists(path string) ([]byte, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // findPolicyFile searches for aileron.yaml walking up from startDir.
