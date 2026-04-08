@@ -61,7 +61,7 @@ services:
       dockerfile: docs/Dockerfile
     restart: unless-stopped
     ports:
-      - "3001:80"
+      - "3001:3000"
 
 volumes:
   postgres_data:

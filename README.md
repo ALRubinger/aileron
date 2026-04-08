@@ -184,7 +184,7 @@ task build:sh        # → build/aileron-sh
 
 Both binaries must be available together — the CLI looks for `aileron-sh` next to itself, then on PATH.
 
-To build everything (including server, MCP, enclave, UI):
+To build everything (including server, MCP, enclave, UI, docs):
 
 ```sh
 task build
@@ -197,6 +197,7 @@ task build:server    # Go server binary
 task build:mcp       # MCP server binary
 task build:enclave   # TEE enclave binary
 task build:ui        # SvelteKit UI
+task build:docs      # Documentation site
 task build:docker    # Docker containers
 ```
 
@@ -239,13 +240,17 @@ AILERON_JWT_SIGNING_KEY=<any 32+ character string>
 task down
 ```
 
-## API Documentation
+## Documentation
 
-Interactive API documentation is available at:
+Project documentation is available at:
 
 - **Live:** [docs.withaileron.ai](https://docs.withaileron.ai)
-- **Local:** `http://localhost:3001` when running `task up`
+- **Local:** `http://localhost:3001` when running `task up`, or `task dev:docs` for the dev server
+- **API Reference:** at `/api` within the docs site
+- **Architecture Decision Records:** at `/adr` within the docs site
 - **Server-embedded:** `http://localhost:8080/docs` on the running API server
+
+The docs site is a SvelteKit app in `docs/`. Markdown content is rendered via mdsvex, and ADRs from `docs/adr/` are served dynamically.
 
 The OpenAPI spec at `core/api/openapi.yaml` is the source of truth. Go types and the server interface are generated from it using [oapi-codegen](https://github.com/oapi-codegen/oapi-codegen):
 
@@ -281,7 +286,7 @@ aileron/
 ├── sdk/
 │   └── go/              Go client SDK
 ├── ui/                  Management and approval UI (SvelteKit)
-├── docs/                API documentation site (Scalar)
+├── docs/                Documentation site (SvelteKit + mdsvex)
 ├── test/
 │   └── integration/     Integration tests with OpenAPI spec validation
 └── deploy/
