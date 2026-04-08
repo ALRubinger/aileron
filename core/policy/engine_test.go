@@ -278,3 +278,48 @@ func TestEngine_NoPoliciesDefaultsToAllow(t *testing.T) {
 		t.Errorf("Disposition = %q, want %q", decision.Disposition, model.DispositionAllow)
 	}
 }
+
+func TestGlobMatch(t *testing.T) {
+	tests := []struct {
+		pattern string
+		value   string
+		want    bool
+	}{
+		// Exact match
+		{"go test", "go test", true},
+		{"go test", "go tests", false},
+		// Single wildcard at end
+		{"git push *", "git push origin main", true},
+		{"git push *", "git push", false},  // no trailing space before *
+		{"git push*", "git push", true},    // no space: * matches empty
+		{"git push *", "git pull origin", false},
+		// Single wildcard at start
+		{"*.sh", "script.sh", true},
+		{"*.sh", "foo/bar.sh", true},
+		{"*.sh", "script.py", false},
+		// Wildcard in middle
+		{"git * --force", "git push --force", true},
+		{"git * --force", "git push origin main --force", true},
+		{"git * --force", "git push origin main", false},
+		// Multiple wildcards
+		{"*go*test*", "go test ./...", true},
+		{"*go*test*", "cargo test", true},   // "go" found in "cargo"
+		{"*go*test*", "car run", false},
+		// Universal wildcard
+		{"*", "anything at all", true},
+		{"*", "", true},
+		// Dot-star pattern (still works for action types)
+		{"git.*", "git.push", true},
+		{"git.*", "git.pull_request.create", true},
+		{"git.*", "deploy.create", false},
+		// No wildcard — exact match
+		{"echo hello", "echo hello", true},
+		{"echo hello", "echo hello world", false},
+	}
+	for _, tt := range tests {
+		got := globMatch(tt.pattern, tt.value)
+		if got != tt.want {
+			t.Errorf("globMatch(%q, %q) = %v, want %v", tt.pattern, tt.value, got, tt.want)
+		}
+	}
+}

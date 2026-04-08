@@ -238,18 +238,32 @@ func valueInList(val string, list any) bool {
 }
 
 func globMatch(pattern, value string) bool {
-	// Simple wildcard matching: * matches any substring.
-	if pattern == "*" {
-		return true
+	// Multi-wildcard glob: * matches any substring (including empty).
+	// Split the pattern on * and verify each segment appears in order.
+	parts := strings.Split(pattern, "*")
+
+	// No wildcards — exact match.
+	if len(parts) == 1 {
+		return pattern == value
 	}
-	if strings.HasSuffix(pattern, ".*") {
-		prefix := strings.TrimSuffix(pattern, ".*")
-		return strings.HasPrefix(value, prefix+".")
+
+	// First segment must be a prefix.
+	if !strings.HasPrefix(value, parts[0]) {
+		return false
 	}
-	if strings.HasPrefix(pattern, "*") {
-		return strings.HasSuffix(value, pattern[1:])
+	remainder := value[len(parts[0]):]
+
+	// Middle segments must appear in order.
+	for _, part := range parts[1 : len(parts)-1] {
+		idx := strings.Index(remainder, part)
+		if idx < 0 {
+			return false
+		}
+		remainder = remainder[idx+len(part):]
 	}
-	return pattern == value
+
+	// Last segment must be a suffix.
+	return strings.HasSuffix(remainder, parts[len(parts)-1])
 }
 
 func compareNumeric(op api.PolicyConditionOperator, fieldVal, condVal any) bool {

@@ -1,0 +1,12 @@
+version: 1
+
+allow:
+  - id: "go_test"
+    command: "go test *"
+    description: "go test commands"
+  - id: "go_build"
+    command: "go build *"
+    description: "go build commands"
+  - "go vet *"
+  - "go fmt *"
+  - "go mod tidy"
