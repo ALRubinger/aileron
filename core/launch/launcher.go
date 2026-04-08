@@ -72,7 +72,14 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
 	}
 
-	env := buildEnv(config.ShellShim, config.Agent.Env())
+	// Install a wrapper script at ~/.aileron/bash whose path contains "bash"
+	// so that Claude Code accepts it as a valid shell.
+	wrapperPath, err := InstallWrapper(config.ShellShim)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("installing shell wrapper: %w", err)
+	}
+
+	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Env())
 
 	cmd := exec.CommandContext(ctx, agentPath, config.Args...)
 	cmd.Env = env
@@ -223,16 +230,17 @@ func exitResult(err error) (LaunchResult, error) {
 // buildEnv creates the environment for the child process:
 //   - Copies the current environment
 //   - Replaces SHELL with the shim path
+//   - Sets CLAUDE_CODE_SHELL to the wrapper path (whose name contains "bash")
 //   - Sets AILERON_REAL_SHELL to the original SHELL value
 //   - Merges any agent-specific env vars
-func buildEnv(shimPath string, agentEnv map[string]string) []string {
+func buildEnv(shimPath, wrapperPath string, agentEnv map[string]string) []string {
 	origShell := os.Getenv("SHELL")
 	if origShell == "" {
 		origShell = "/bin/sh"
 	}
 
 	env := os.Environ()
-	filtered := make([]string, 0, len(env)+len(agentEnv)+2)
+	filtered := make([]string, 0, len(env)+len(agentEnv)+3)
 	for _, e := range env {
 		if len(e) >= 6 && e[:6] == "SHELL=" {
 			continue
@@ -240,11 +248,17 @@ func buildEnv(shimPath string, agentEnv map[string]string) []string {
 		if len(e) >= 19 && e[:19] == "AILERON_REAL_SHELL=" {
 			continue
 		}
+		if len(e) >= 17 && e[:17] == "CLAUDE_CODE_SHELL" {
+			continue
+		}
 		filtered = append(filtered, e)
 	}
 
 	filtered = append(filtered, "SHELL="+shimPath)
 	filtered = append(filtered, "AILERON_REAL_SHELL="+origShell)
+	if wrapperPath != "" {
+		filtered = append(filtered, "CLAUDE_CODE_SHELL="+wrapperPath)
+	}
 
 	for k, v := range agentEnv {
 		filtered = append(filtered, k+"="+v)
