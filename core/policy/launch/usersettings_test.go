@@ -62,6 +62,20 @@ settings:
 	}
 }
 
+func TestLoadUserSettings_NoHomeDir(t *testing.T) {
+	// When HOME is empty/unset, UserHomeDir may fail on some systems.
+	// LoadUserSettings should return an empty policy, not an error.
+	t.Setenv("HOME", "")
+
+	pf, err := launch.LoadUserSettings()
+	if err != nil {
+		t.Fatalf("expected no error when HOME is empty, got %v", err)
+	}
+	if pf.Version != 1 {
+		t.Errorf("Version = %d, want 1", pf.Version)
+	}
+}
+
 func TestLoadUserSettings_InvalidYAML(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
