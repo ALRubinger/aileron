@@ -2,7 +2,6 @@ package agents
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +39,6 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 
 	pf, err := launchpolicy.Load(policyPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aileron: warning: failed to load %s: %v\n", policyPath, err)
 		return nil, nil, nil
 	}
 
