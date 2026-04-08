@@ -116,6 +116,9 @@ func TestLaunch_EnvironmentSetup(t *testing.T) {
 	if !strings.Contains(envStr, "CLAUDE_CODE_SHELL=") {
 		t.Error("CLAUDE_CODE_SHELL not set in child env")
 	}
+	if !strings.Contains(envStr, "AILERON_AGENT=test-script") {
+		t.Error("AILERON_AGENT not set in child env")
+	}
 	// CLAUDE_CODE_SHELL path must contain "bash" for Claude Code to accept it
 	for _, line := range strings.Split(envStr, "\n") {
 		if strings.HasPrefix(line, "CLAUDE_CODE_SHELL=") {
