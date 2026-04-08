@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty/v2"
 	"golang.org/x/term"
@@ -140,7 +141,14 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	}
 	defer term.Restore(stdinFd, oldState)
 
-	SetupTerminalScreen(os.Stdout, agentRows, bar)
+	// Clear the screen but defer the status bar render — the agent's initial
+	// TUI render will clear the screen and overwrite anything we draw now.
+	// A short delay lets the agent initialize before we paint the bar.
+	fmt.Fprintf(os.Stdout, "\033[2J")
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		bar.Render(os.Stdout)
+	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGWINCH)
