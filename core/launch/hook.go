@@ -49,14 +49,6 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 		return 1
 	}
 
-	// Debug logging when AILERON_DEBUG is set.
-	if debugLog := os.Getenv("AILERON_DEBUG"); debugLog != "" {
-		if f, err := os.OpenFile(debugLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-			fmt.Fprintf(f, "hook: tool=%s command=%q cwd=%s\n", input.ToolName, input.ToolInput.Command, input.CWD)
-			f.Close()
-		}
-	}
-
 	// Only evaluate Bash tool calls. Non-Bash tools pass through silently.
 	if input.ToolName != "Bash" {
 		return 0
