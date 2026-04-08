@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,34 +16,38 @@ import (
 func main() {
 	registry := launch.NewRegistry()
 	registry.Register(agents.Claude{})
+	os.Exit(run(os.Args[1:], registry, os.Stdout, os.Stderr))
+}
 
-	args := os.Args[1:]
+// run executes the CLI and returns an exit code.
+func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		usage(registry)
-		os.Exit(1)
+		usage(stdout, registry)
+		return 1
 	}
 
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Printf("aileron %s (%s)\n", version.Version, version.Commit)
+		fmt.Fprintf(stdout, "aileron %s (%s)\n", version.Version, version.Commit)
+		return 0
 	case "launch":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: aileron launch <agent> [args...]")
-			fmt.Fprintf(os.Stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
-			os.Exit(1)
+			fmt.Fprintln(stderr, "usage: aileron launch <agent> [args...]")
+			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
+			return 1
 		}
 		agentName := args[1]
 		agent, ok := registry.Get(agentName)
 		if !ok {
-			fmt.Fprintf(os.Stderr, "unknown agent: %q\n", agentName)
-			fmt.Fprintf(os.Stderr, "available agents: %s\n", strings.Join(registry.Names(), ", "))
-			os.Exit(1)
+			fmt.Fprintf(stderr, "unknown agent: %q\n", agentName)
+			fmt.Fprintf(stderr, "available agents: %s\n", strings.Join(registry.Names(), ", "))
+			return 1
 		}
 
 		shimPath, err := resolveShim()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
 		}
 
 		result, err := launch.Launch(context.Background(), launch.LaunchConfig{
@@ -51,28 +56,29 @@ func main() {
 			Args:      args[2:],
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
 		}
-		os.Exit(result.ExitCode)
+		return result.ExitCode
 	case "help", "--help", "-h":
-		usage(registry)
+		usage(stdout, registry)
+		return 0
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %q\n", args[0])
-		usage(registry)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "unknown command: %q\n", args[0])
+		usage(stderr, registry)
+		return 1
 	}
 }
 
-func usage(registry *launch.Registry) {
-	fmt.Println("aileron — the execution layer for AI coding agents")
-	fmt.Println()
-	fmt.Println("usage:")
-	fmt.Println("  aileron launch <agent> [args...]   Launch an agent with policy-enforced shell")
-	fmt.Println("  aileron version                    Print version information")
-	fmt.Println("  aileron help                       Show this help")
-	fmt.Println()
-	fmt.Printf("agents: %s\n", strings.Join(registry.Names(), ", "))
+func usage(w io.Writer, registry *launch.Registry) {
+	fmt.Fprintln(w, "aileron — the execution layer for AI coding agents")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  aileron launch <agent> [args...]   Launch an agent with policy-enforced shell")
+	fmt.Fprintln(w, "  aileron version                    Print version information")
+	fmt.Fprintln(w, "  aileron help                       Show this help")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "agents: %s\n", strings.Join(registry.Names(), ", "))
 }
 
 // resolveShim finds the aileron-sh binary next to this executable, or on PATH.
