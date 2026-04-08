@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/creack/pty/v2"
 	"golang.org/x/term"
@@ -141,15 +140,6 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	}
 	defer term.Restore(stdinFd, oldState)
 
-	// Clear the screen but defer the status bar render — the agent's initial
-	// TUI render will clear the screen and overwrite anything we draw now.
-	// A short delay lets the agent initialize before we paint the bar.
-	fmt.Fprintf(os.Stdout, "\033[2J")
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		bar.Render(os.Stdout)
-	}()
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGWINCH)
 	go func() {
@@ -166,7 +156,23 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	}()
 
 	go func() { io.Copy(ptmx, os.Stdin) }()
-	go func() { io.Copy(os.Stdout, ptmx) }()
+
+	// Copy agent output to real terminal, re-rendering the status bar after
+	// each batch. This ensures the bar appears on top of whatever the agent
+	// just drew, surviving screen clears and TUI redraws.
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				os.Stdout.Write(buf[:n])
+				bar.Render(os.Stdout)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 
 	err = cmd.Wait()
 	signal.Stop(sigCh)
