@@ -161,6 +161,18 @@ func TestWriteDenyByUser(t *testing.T) {
 	}
 }
 
+func TestEvaluateCommand_InvalidPolicyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aileron.yaml")
+	os.WriteFile(path, []byte("{{invalid yaml"), 0o644)
+
+	// Invalid policy file → falls back to empty policy → default ask.
+	result := launch.EvaluateCommand(path, "echo hello", "/tmp")
+	if result.Disposition != model.DispositionRequireApproval {
+		t.Errorf("expected ask fallback for invalid policy, got %q", result.Disposition)
+	}
+}
+
 func TestWriteDeny_NoReason(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDeny(&buf, "bad command", "")
