@@ -2,12 +2,20 @@ package launch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	// userSettingsDir is the directory under $HOME where user settings live.
+	userSettingsDir = ".aileron"
+	// userSettingsFile is the filename for user-level policy settings.
+	userSettingsFile = "settings.yaml"
 )
 
 // Default priorities for each bucket.
@@ -39,28 +47,63 @@ func Parse(data []byte) (*PolicyFile, error) {
 	return &pf, nil
 }
 
-// LoadWithProfiles loads a project policy file and merges it with any
-// profiles listed in its `profiles` field. Profile paths are resolved
-// relative to profileDirs (searched in order). Returns the merged result.
+// LoadUserSettings loads the user's personal settings from
+// ~/.aileron/settings.yaml. If the file does not exist, an empty
+// PolicyFile is returned (the user hasn't created one yet). If the
+// file exists but contains invalid YAML, an error is returned so the
+// user knows their settings are broken.
+func LoadUserSettings() (*PolicyFile, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return &PolicyFile{Version: 1}, nil
+	}
+	path := filepath.Join(home, userSettingsDir, userSettingsFile)
+	pf, err := Load(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || isNotExist(err) {
+			return &PolicyFile{Version: 1}, nil
+		}
+		return nil, fmt.Errorf("loading user settings %s: %w", path, err)
+	}
+	return pf, nil
+}
+
+// isNotExist checks whether an error chain contains a file-not-found.
+// Load wraps os.ReadFile errors, so errors.Is(err, os.ErrNotExist) may
+// not match directly — we unwrap and check.
+func isNotExist(err error) bool {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return errors.Is(pathErr.Err, os.ErrNotExist) || os.IsNotExist(pathErr)
+	}
+	return false
+}
+
+// LoadWithProfiles loads a project policy file and merges it with user
+// settings and any profiles listed in its `profiles` field. Profile
+// paths are resolved relative to profileDirs (searched in order).
 //
-// The full composition order is:
+// Composition order (each layer wins over the previous):
 //
-//	Built-in structural deny rules (always active, injected by ToEngineRules)
+//	User settings (~/.aileron/settings.yaml)
 //	  → Profiles (in listed order)
 //	    → Project aileron.yaml
+//	      → Built-in structural deny rules (injected by ToEngineRules)
 //
 // Future layers not yet implemented:
 //   - OS profile auto-detection (runtime.GOOS → os/darwin.yaml)
 //   - Language profile auto-detection (go.mod → lang/go.yaml)
-//   - User settings (~/.aileron/settings.yaml) as personal overlay
 func LoadWithProfiles(path string, profileDirs []string) (*PolicyFile, error) {
 	project, err := Load(path)
 	if err != nil {
 		return nil, err
 	}
 
-	// Start with an empty base, then merge each profile in order.
-	base := &PolicyFile{Version: project.Version}
+	// Start from user settings as the base layer.
+	base, err := LoadUserSettings()
+	if err != nil {
+		return nil, err
+	}
 	for _, profileRef := range project.Profiles {
 		profilePath, err := resolveProfile(profileRef, profileDirs)
 		if err != nil {
