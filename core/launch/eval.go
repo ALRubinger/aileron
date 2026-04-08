@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ALRubinger/aileron/core/model"
@@ -67,13 +68,29 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 
 func loadPolicyFileFrom(path string) *launchpolicy.PolicyFile {
 	if path == "" {
-		return &launchpolicy.PolicyFile{Version: 1}
+		// No project policy file — still load user settings so personal
+		// rules apply even in repos without an aileron.yaml.
+		pf, err := launchpolicy.LoadUserSettings()
+		if err != nil {
+			return &launchpolicy.PolicyFile{Version: 1}
+		}
+		return pf
 	}
-	pf, err := launchpolicy.Load(path)
+	pf, err := launchpolicy.LoadWithProfiles(path, defaultProfileDirs())
 	if err != nil {
 		return &launchpolicy.PolicyFile{Version: 1}
 	}
 	return pf
+}
+
+// defaultProfileDirs returns the standard directories to search for
+// policy profiles.
+func defaultProfileDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	return []string{filepath.Join(home, ".aileron", "profiles")}
 }
 
 // FindPolicyFile searches for aileron.yaml in the given directory and parent
