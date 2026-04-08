@@ -58,25 +58,15 @@ func LoadUserSettings() (*PolicyFile, error) {
 		return &PolicyFile{Version: 1}, nil
 	}
 	path := filepath.Join(home, userSettingsDir, userSettingsFile)
+	_, err = os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return &PolicyFile{Version: 1}, nil
+	}
 	pf, err := Load(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || isNotExist(err) {
-			return &PolicyFile{Version: 1}, nil
-		}
 		return nil, fmt.Errorf("loading user settings %s: %w", path, err)
 	}
 	return pf, nil
-}
-
-// isNotExist checks whether an error chain contains a file-not-found.
-// Load wraps os.ReadFile errors, so errors.Is(err, os.ErrNotExist) may
-// not match directly — we unwrap and check.
-func isNotExist(err error) bool {
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
-		return errors.Is(pathErr.Err, os.ErrNotExist) || os.IsNotExist(pathErr)
-	}
-	return false
 }
 
 // LoadWithProfiles loads a project policy file and merges it with user

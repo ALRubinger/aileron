@@ -173,6 +173,96 @@ func TestEvaluateCommand_InvalidPolicyFile(t *testing.T) {
 	}
 }
 
+func TestEvaluateCommand_NoPolicyFileNoHome(t *testing.T) {
+	// When HOME is empty and no policy path, should fall back gracefully.
+	t.Setenv("HOME", "")
+	result := launch.EvaluateCommand("", "echo hello", "/tmp")
+	// Empty user settings + no project policy → default ask.
+	if result.Disposition != model.DispositionRequireApproval {
+		t.Errorf("expected ask fallback, got %q", result.Disposition)
+	}
+}
+
+func TestEvaluateCommand_InvalidUserSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	settingsDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(settingsDir, 0o755)
+	os.WriteFile(filepath.Join(settingsDir, "settings.yaml"), []byte("{{invalid"), 0o644)
+
+	// Invalid user settings with a project policy → should fall back.
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0o755)
+	policyPath := filepath.Join(projectDir, "aileron.yaml")
+	os.WriteFile(policyPath, []byte("version: 1\ndefault: allow\n"), 0o644)
+
+	result := launch.EvaluateCommand(policyPath, "echo hello", projectDir)
+	// LoadWithProfiles fails due to bad user settings → fallback to empty → default ask.
+	if result.Disposition != model.DispositionRequireApproval {
+		t.Errorf("expected ask fallback for invalid user settings, got %q", result.Disposition)
+	}
+}
+
+func TestEvaluateCommand_NoPolicyFileUsesUserSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Write user settings that deny "rm *".
+	settingsDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(settingsDir, 0o755)
+	os.WriteFile(filepath.Join(settingsDir, "settings.yaml"), []byte(`
+version: 1
+default: allow
+deny:
+  - command: "rm *"
+    description: "user denies rm"
+`), 0o644)
+
+	// Empty policy path → should still load user settings.
+	result := launch.EvaluateCommand("", "rm /tmp/foo", "/tmp")
+	if result.Disposition != model.DispositionDeny {
+		t.Errorf("expected deny from user settings, got %q", result.Disposition)
+	}
+}
+
+func TestEvaluateCommand_UserSettingsMergedWithProject(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// User settings allow cat.
+	settingsDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(settingsDir, 0o755)
+	os.WriteFile(filepath.Join(settingsDir, "settings.yaml"), []byte(`
+version: 1
+allow:
+  - "cat *"
+`), 0o644)
+
+	// Project denies everything by default but allows echo.
+	projectDir := filepath.Join(dir, "project")
+	os.MkdirAll(projectDir, 0o755)
+	policyPath := filepath.Join(projectDir, "aileron.yaml")
+	os.WriteFile(policyPath, []byte(`
+version: 1
+default: deny
+allow:
+  - "echo *"
+`), 0o644)
+
+	// "cat" should be allowed (from user settings).
+	result := launch.EvaluateCommand(policyPath, "cat /etc/hosts", projectDir)
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected allow from user settings for cat, got %q", result.Disposition)
+	}
+
+	// "echo" should be allowed (from project policy).
+	result = launch.EvaluateCommand(policyPath, "echo hello", projectDir)
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected allow from project for echo, got %q", result.Disposition)
+	}
+}
+
 func TestWriteDeny_NoReason(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDeny(&buf, "bad command", "")
