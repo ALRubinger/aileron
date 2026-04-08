@@ -68,9 +68,10 @@ type envAgent struct {
 	extraEnv map[string]string
 }
 
-func (a envAgent) Name() string           { return "test-env" }
-func (a envAgent) BinaryNames() []string  { return []string{"env"} }
-func (a envAgent) Env() map[string]string { return a.extraEnv }
+func (a envAgent) Name() string                                        { return "test-env" }
+func (a envAgent) BinaryNames() []string                                { return []string{"env"} }
+func (a envAgent) Env() map[string]string                               { return a.extraEnv }
+func (a envAgent) SetupHooks(shimPath string) ([]string, func(), error) { return nil, nil, nil }
 
 func TestLaunch_EnvironmentSetup(t *testing.T) {
 	// Capture the child's env by launching "env" and reading stdout.
@@ -247,6 +248,7 @@ type scriptAgent struct {
 	extraEnv map[string]string
 }
 
-func (a scriptAgent) Name() string           { return "test-script" }
-func (a scriptAgent) BinaryNames() []string  { return []string{a.script} }
-func (a scriptAgent) Env() map[string]string { return a.extraEnv }
+func (a scriptAgent) Name() string                                        { return "test-script" }
+func (a scriptAgent) BinaryNames() []string                                { return []string{a.script} }
+func (a scriptAgent) Env() map[string]string                               { return a.extraEnv }
+func (a scriptAgent) SetupHooks(shimPath string) ([]string, func(), error) { return nil, nil, nil }
