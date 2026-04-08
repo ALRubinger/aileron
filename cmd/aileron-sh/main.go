@@ -1,13 +1,10 @@
-// aileron-sh is a policy-enforced shell shim for AI coding agents.
-//
-// It is installed as the agent's SHELL, so every command the agent runs passes
-// through here. Commands in -c mode are evaluated against aileron.yaml policy.
-// Script and interactive modes pass through to the real shell.
+// aileron-sh is a policy-enforced shell shim and hook for AI coding agents.
 //
 // Invocation modes:
-//   - aileron-sh -c "command"   (policy-evaluated — how agents run commands)
-//   - aileron-sh script.sh      (passthrough)
-//   - aileron-sh                (passthrough — interactive shell)
+//   - aileron-sh --hook           (Claude Code PreToolUse hook — reads JSON from stdin)
+//   - aileron-sh -c "command"     (shell shim — policy-evaluated, for agents using $SHELL)
+//   - aileron-sh script.sh        (passthrough)
+//   - aileron-sh                  (passthrough — interactive shell)
 package main
 
 import (
@@ -23,6 +20,15 @@ import (
 )
 
 func main() {
+	args := os.Args[1:]
+
+	// Hook mode: act as a Claude Code PreToolUse hook.
+	// Reads JSON from stdin, evaluates policy, writes decision to stdout.
+	if len(args) >= 1 && args[0] == "--hook" {
+		os.Exit(launch.RunHook(os.Stdin, os.Stdout))
+	}
+
+	// Shell shim mode: intercept -c commands for agents that use $SHELL.
 	realShell := os.Getenv("AILERON_REAL_SHELL")
 	if realShell == "" {
 		realShell = "/bin/sh"
@@ -34,11 +40,7 @@ func main() {
 		os.Exit(127)
 	}
 
-	args := os.Args[1:]
-
-	// Only evaluate policy for -c mode (how agents invoke commands) and
-	// only when an aileron.yaml exists. Without a policy file, the developer
-	// hasn't opted into enforcement — passthrough to the real shell.
+	// Only evaluate policy for -c mode and only when an aileron.yaml exists.
 	cwd, _ := os.Getwd()
 	if len(args) >= 2 && args[0] == "-c" && launch.FindPolicyFile(cwd) != "" {
 		command := args[1]
@@ -73,8 +75,6 @@ func main() {
 }
 
 // promptApproval writes a prompt to /dev/tty and reads the response.
-// Returns true if the user approves. Falls back to deny if /dev/tty
-// is not available (e.g., in CI).
 func promptApproval(command, reason string) bool {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {

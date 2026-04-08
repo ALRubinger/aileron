@@ -15,6 +15,11 @@ type Agent interface {
 	// process, beyond the standard SHELL/AILERON_REAL_SHELL manipulation.
 	// Returns nil if no extra env is needed.
 	Env() map[string]string
+	// SetupHooks configures agent-specific hooks for policy enforcement.
+	// shimPath is the path to aileron-sh. Returns extra args to prepend
+	// to the agent command, and a cleanup function to call on exit.
+	// Returns nil args and nil cleanup if the agent uses $SHELL shim instead.
+	SetupHooks(shimPath string) (args []string, cleanup func(), err error)
 }
 
 // Registry maps agent names to their definitions.
