@@ -16,7 +16,7 @@ AI coding agents run shell commands on your behalf — but giving them unrestric
 
 - **Policy-as-code** — Allow, deny, or ask rules defined in `aileron.yaml`, checked into your repo, reviewable in PRs.
 - **Single approval layer** — Aileron replaces the agent's native permission prompts. One policy, one prompt.
-- **Zero-knowledge credential custody** — Your secrets are encrypted with a key only you hold. Aileron architecturally *cannot* see them.
+- **Credential isolation** — Locally, credential brokering keeps secrets out of the agent's context. With the cloud vault (coming), secrets are encrypted with a key only you hold — Aileron architecturally *cannot* see them.
 - **Complete audit trail** — Every decision is logged. The audit trail is the ground truth for what happened.
 - **Agent-aware** — Works with Claude Code today, extensible to other agents. Agent-specific quirks (command wrapping, shell validation) are handled transparently.
 
