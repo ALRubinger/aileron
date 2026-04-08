@@ -41,7 +41,52 @@ builds:
       - -X github.com/ALRubinger/aileron/core/version.Version={{.Version}}
       - -X github.com/ALRubinger/aileron/core/version.Commit={{.Commit}}
 
+  - id: aileron
+    binary: aileron
+    main: ./cmd/aileron
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/ALRubinger/aileron/core/version.Version={{.Version}}
+      - -X github.com/ALRubinger/aileron/core/version.Commit={{.Commit}}
+
+  - id: aileron-sh
+    binary: aileron-sh
+    main: ./cmd/aileron-sh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
 archives:
+  - id: aileron
+    builds:
+      - aileron
+    name_template: "aileron_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+  - id: aileron-sh
+    builds:
+      - aileron-sh
+    name_template: "aileron-sh_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
   - id: aileron-server
     builds:
       - aileron-server

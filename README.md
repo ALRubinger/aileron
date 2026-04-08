@@ -1,83 +1,127 @@
 # Aileron
-_Stay on course. The missing protection layer between your agents and the real world._
+_Let your agents fly._
 
 ![GitHub License](https://img.shields.io/github/license/ALRubinger/aileron?style=for-the-badge)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/ALRubinger/aileron/ci.yml?style=for-the-badge&logo=github)
 ![Codecov](https://img.shields.io/codecov/c/github/ALRubinger/aileron?style=for-the-badge)
 
-**Aileron is a deterministic execution plane for AI agents.** It owns your identity, enforces policy, and executes irreversible actions — so agents never hold your credentials or act without authorization.
-
-Agents decide what to do. Aileron decides whether to do it, and executes it safely.
+**Aileron is the execution layer between your AI coding agent and the real world.** It holds your credentials, enforces your policy, brokers access to external services, and logs every decision. `aileron launch claude` and the agent operates within your project's policy-as-code — less time blocking on permission prompts, more time with the agent working.
 
 ---
 
 ## The Problem
 
-AI agents are acting on our behalf: sending emails, booking meetings, paying invoices. The problem isn't capability. It's trust. An agent that's useful is an agent that's risky.
+We rely on our coding agents to write code and run tests, but they can't push a branch or call an API without us in the loop. We rubber-stamp access requests. Our agents wait on approval while we're in a meeting or getting coffee. We alt-tab to Slack to relay information the agent already has. We keep useful API keys out of reach because it's too dangerous.
 
-Existing "control planes" for agents (Fiddler, Galileo, Unleash) monitor and block — but they still rely on the agent holding credentials and executing actions. Prompt injection, context compression, or model errors can bypass safety rules because the enforcement layer is advisory, not structural.
-
-The result is a forced choice: give the agent enough permission to be powerful, or restrict it enough to feel safe. Neither is satisfying.
+Today's agent hosts give you two modes: approve every command individually (50 prompts per session — you stop reading) or auto-approve everything (no guardrails). Neither is satisfying. The developer trains themselves to approve on autopilot, which is worse than no security because it builds a false sense of oversight.
 
 ## The Solution
 
-Aileron separates **intent** from **execution**. Agents submit structured intents (send this email, schedule this meeting, make this purchase). Aileron owns the credentials, evaluates deterministic policy, and executes the action itself — returning only safe, structured results to the agent.
+`aileron launch claude` and the agent operates within your project's policy-as-code. Sane defaults mean safe commands auto-approve, dangerous ones are blocked, and ambiguous ones ask you once and learn your answer.
 
-The agent never holds your Gmail token, calendar credentials, or payment instruments. Aileron executes on your behalf, but your secrets are encrypted with a key only you know.
+- **Policy-enforced shell.** Every command the agent runs goes through `aileron-sh`. An `aileron.yaml` in your repo defines three buckets: allow (auto-approve), deny (hard block), ask (prompt the developer). The policy lives in version control, is reviewable in PRs, and is shared with the team.
+- **The policy learns from use.** `[a] allow always` teaches the policy. First session: 8 prompts. Allow-always on 5 patterns. Second session: 3 prompts. End of session, Aileron offers to persist learned patterns to `aileron.yaml`.
+- **Credential brokering.** Secrets stored in a local encrypted vault. The agent uses them but never sees them — no risk of leaking secrets into context.
+- **Bidirectional communication.** Slack and Discord messages arrive in your terminal. The agent drafts replies using its codebase context and you approve with one keypress.
+- **Audit trail.** Every decision is logged — what the agent did, what the policy decided, what you authorized. `aileron log` shows the complete record.
+- **Agent-portable.** Switch from Claude Code to OpenCode to Goose and your policy, credentials, and audit trail come with you.
 
 ```
-Agent Host (Claude Code, OpenClaw, etc.)
-  │
-  │  MCP (stdio)
-  │
-  ▼
-Aileron Execution Plane
-  ├── Intent Tools           list_inbox_briefs, send_email_intent, request_purchase, ...
-  ├── Policy Engine          deterministic rules per action (no LLM in enforcement)
-  ├── Approval Orchestrator  routes to humans when required
-  ├── Credential Vault       zero-knowledge encrypted storage (user-derived keys)
-  └── Audit Store            immutable record of every decision and execution
-  │
-  ├──► Gmail API         (Aileron sends the email)
-  ├──► Google Calendar   (Aileron creates the event)
-  └──► Stripe Issuing    (Aileron mints the virtual card)
+┌────────────────────────────────────────────────────────┐
+│  aileron launch claude                                 │
+│                                                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐  │
+│  │ aileron-sh   │  │ aileron-mcp  │  │ listeners   │  │
+│  │ (SHELL shim) │  │ (MCP server) │  │ (Slack/     │  │
+│  │              │  │              │  │  Discord)   │  │
+│  │ cmd string → │  │ http_request │  │             │  │
+│  │ policy eval  │  │ send_message │  │ inbound →   │  │
+│  │ exec | deny  │  │ read_messages│  │ /dev/tty    │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬──────┘  │
+│         │                 │                  │         │
+│         ▼                 ▼                  ▼         │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │              Policy Engine                      │   │
+│  │  OS profile + lang profile + aileron.yaml       │   │
+│  │  + built-in structural deny rules               │   │
+│  └─────────────────────┬───────────────────────────┘   │
+│                        │                               │
+│                        ▼                               │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │          Audit Trail (local JSONL)              │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                        │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │  Agent (claude, codex, goose, opencode, ...)    │   │
+│  │  Inherits: SHELL=aileron-sh, scrubbed env,      │   │
+│  │            aileron-mcp registered               │   │
+│  └─────────────────────────────────────────────────┘   │
+│                                                        │
+│  ┌─────────────────────────────────────────────────┐   │
+│  │          Local Vault (KEK-encrypted)            │   │
+│  │  Bot tokens, API keys, webhook URLs             │   │
+│  └─────────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────┘
 ```
 
 ## How It Works
 
-**1. Connect your accounts**
+**1. Launch your agent**
 
-Open the Protected Actions catalog and connect your Gmail, Google Calendar, or payment accounts via OAuth. Aileron stores refresh tokens in its zero-knowledge vault — encrypted with a key only you control. Agents never see them. Neither does Aileron.
+```sh
+aileron launch claude
+```
 
-**2. Agents submit intents**
+Aileron spawns the agent as a child process with `SHELL=aileron-sh`. Every command the agent runs flows through the policy engine. No per-command wrappers — one shim catches everything.
 
-The agent calls Aileron's intent tools: `list_inbox_briefs`, `draft_reply`, `send_email_intent`, `create_event_intent`, `request_purchase`. These are the only tools the agent sees.
+**2. Policy evaluates every command**
 
-**3. Policy evaluates every irreversible action**
+Safe commands (tests, builds, reads) auto-approve silently. Dangerous commands (force push, recursive delete) are hard-denied. Ambiguous commands (commit, push, deploy) prompt you once with context:
 
-Read-only operations (list inbox, check calendar) flow freely. Irreversible actions (send email, create invite, issue payment) are evaluated against deterministic policies. No LLM in the enforcement loop.
+```
+  ⏸ aileron: agent wants to run `git push origin feature/auth`
+    matched rule: ask (git push)
+    [y] allow  [n] deny  [a] allow always  [s] show details
+```
 
-**4. Humans approve high-risk actions**
+**3. The policy writes itself through use**
 
-If policy requires approval, Aileron holds the action and notifies approvers. Defaults: internal emails auto-send, external emails require review, payments above threshold require approval.
+Hit `[a] allow always` and the pattern is saved for the session. End of session, Aileron offers to persist learned patterns to `aileron.yaml`. Community-maintained profiles (`lang/go`, `lang/node`, `os/darwin`) provide sensible defaults per language and platform.
 
-**5. Aileron executes**
+**4. Teammates message you — the agent drafts a reply**
 
-Once approved (or auto-approved by policy), Aileron executes the action itself using the connected account's credentials. The agent receives a structured result — never raw credentials.
+Slack and Discord messages arrive in your terminal. On channels configured with `auto_draft: true`, the agent drafts a reply using its live codebase context. You approve with one keypress:
+
+```
+  📝 aileron: agent drafted a reply to Sarah in #backend
+    "No, the claims structure isn't changing. The refactor
+     only affects validation logic in middleware.go."
+    [y] send  [e] edit and send  [n] discard
+```
+
+**5. Credentials are brokered, never exposed**
+
+Secrets stored in a local encrypted vault. The agent provides a URL and headers; Aileron matches the URL to a configured secret, injects the credential, makes the call, and returns the response. The agent sees the result, never the secret.
 
 **6. Everything is logged**
 
-Every intent, policy decision, approval, and execution is recorded in an immutable audit trail. The execution graph becomes indispensable for compliance and trust.
+Every command, policy decision, approval, message sent, and credential used is recorded in an append-only local audit log.
 
-## For Organizations
+```sh
+aileron log
+```
 
-Aileron gives organizations centralized control over agent activity across teams.
+## Supported Agents
 
-- **Protected Actions catalog.** A curated set of irreversible actions (email, calendar, payments) that Aileron owns and executes. Connect once, and all agents benefit.
-- **Identity ownership.** OAuth tokens and payment instruments live in the zero-knowledge vault, encrypted with user-derived keys. Teams use agents without handling credentials — and Aileron can't access them either.
-- **Policy governance.** Define rules that apply across all agent activity — internal/external recipient controls, spend limits, vendor allowlists, time-of-day rules.
-- **Multi-agent hub.** Multiple agents share the same identity, policies, and audit trail. No per-agent credential management.
-- **Compliance.** An immutable execution graph records every action, policy decision, and approval for review and export.
+| Agent | Shell policy | MCP tools | Full experience |
+|-------|-------------|-----------|-----------------|
+| Claude Code | Yes | Yes | Yes |
+| OpenCode | Yes | Yes | Yes |
+| Goose | Yes | Yes | Yes |
+| Amp | Yes | Yes | Yes |
+| Aider | Yes | In progress | Shell policy now |
+| Codex CLI | Yes | Not yet | Shell policy only |
+| Cline (VS Code) | Yes | Yes | Yes |
 
 ## Zero-Knowledge Vault
 
@@ -99,111 +143,87 @@ Aileron's credential vault uses a zero-knowledge architecture: your secrets are 
 
 **Confidential computing (Stage 2):** Credential decryption and connector execution can run inside a hardware-isolated enclave, so plaintext credentials never exist on the host — even in memory. The TEE layer uses a provider SPI with pluggable backends. Set `AILERON_TEE_PROVIDER=local` for development (in-process, no hardware isolation) or `AILERON_TEE_PROVIDER=confidential-space` for production on Google Confidential Space (AMD SEV-SNP). See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md) for the trust model, [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md) for TEE provider decisions, and [ADR-0012](docs/adr/0012-auto-escrow-and-decoupled-session-lifetimes.md) for auto-escrow and session lifetime design.
 
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AILERON_ADDR` | `:8080` | Address the control plane server listens on |
-| `GITHUB_TOKEN` | | GitHub personal access token, seeded into the vault at startup |
-| `AILERON_URL` | | URL of the Aileron API server (used by the MCP server binary) |
-| `AILERON_TOKEN` | | Bearer token for authenticating with the Aileron API (used by the MCP server binary) |
-
 ## Current Status
 
-The execution plane architecture is being built incrementally:
+Aileron is pivoting from a cloud-hosted execution plane to a **local-first CLI tool** centered on `aileron launch`. The core infrastructure (policy engine, zero-knowledge vault, audit trail) is being reoriented to power the connected coding session.
 
-- **Connected accounts** — users can connect external services (Gmail, Google Calendar) via OAuth. Tokens stored in vault, agents never see them.
-- **Policy engine** evaluates deterministic rules per action (allow, deny, require approval, allow with modifications)
-- **Approval orchestrator** manages human-in-the-loop workflows with approve/deny/modify
-- **Zero-knowledge credential vault** — user secrets are encrypted with a passphrase-derived key (Argon2id + AES-256-GCM). Aileron operators and hosting providers cannot access plaintext credentials. Users unlock the vault per session; encrypted secrets are decrypted only at execution time. See [ADR-0010](docs/adr/0010-zero-knowledge-vault-trust-model.md).
-- **Audit store** records every event in an immutable trace
-- **Approval UI** provides a web interface for reviewing and acting on pending approvals
-- **Enterprise auth** with Google and GitHub OAuth, email/password signup, SSO enforcement
-- **Protected Actions catalog** (in progress) — a curated set of actions Aileron owns and executes on behalf of agents
+**Built:**
+- `aileron launch <agent>` CLI and `aileron-sh` shell shim — agents run with a policy-enforced shell
+- Policy engine with deterministic rule evaluation (allow, deny, require approval)
+- Zero-knowledge credential vault (Argon2id + AES-256-GCM, passphrase-derived keys)
+- Confidential computing / TEE support (Google Confidential Space, AMD SEV-SNP)
 
-- **Confidential computing (TEE)** — credential decryption and connector execution can run inside a hardware-isolated enclave ([#52](https://github.com/ALRubinger/aileron/issues/52)). Provider SPI with local dev and Google Confidential Space implementations. Remote attestation, ECDH session key exchange, and auto-escrow of credentials on passphrase verification for autonomous agent execution ([#55](https://github.com/ALRubinger/aileron/issues/55)). See [ADR-0011](docs/adr/0011-tee-provider-spi-and-confidential-space.md) and [ADR-0012](docs/adr/0012-auto-escrow-and-decoupled-session-lifetimes.md).
+**In progress:**
+- Policy schema and loader for `aileron.yaml` ([#64](https://github.com/ALRubinger/aileron/issues/64))
+- Terminal UX, pty proxy, and bidirectional communication ([#65](https://github.com/ALRubinger/aileron/issues/65))
+- Community policy profiles (`lang/go`, `lang/node`, `os/darwin`)
 
-Next up: Gmail connector and email intent tools.
+See the full roadmap in [#63](https://github.com/ALRubinger/aileron/issues/63) and product vision in [#66](https://github.com/ALRubinger/aileron/issues/66).
 
 ## Getting Started
 
 ### Prerequisites
 
 - [Go](https://go.dev/dl/) 1.24 or later
+- [go-task](https://taskfile.dev/) task runner
+- An AI coding agent installed (e.g., [Claude Code](https://claude.ai/code))
+
+For the full stack (server, UI, docs):
 - [Node.js](https://nodejs.org/) 24 (see `.nvmrc`)
 - [pnpm](https://pnpm.io/) package manager
-- [go-task](https://taskfile.dev/) task runner
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 
 ### Build
+
+Build the CLI and shell shim:
+
+```sh
+task build:cli       # → build/aileron
+task build:sh        # → build/aileron-sh
+```
+
+Both binaries must be available together — the CLI looks for `aileron-sh` next to itself, then on PATH.
+
+To build everything (including server, MCP, enclave, UI):
 
 ```sh
 task build
 ```
 
-This builds everything: Docker containers, Go server binary, MCP server binary, enclave binary, and the UI.
-
-To build individual components:
+Individual components:
 
 ```sh
-task build:docker    # Docker containers (server, UI, database)
 task build:server    # Go server binary
-task build:ui        # SvelteKit UI
 task build:mcp       # MCP server binary
 task build:enclave   # TEE enclave binary
+task build:ui        # SvelteKit UI
+task build:docker    # Docker containers
+```
+
+### Launch an agent
+
+```sh
+./build/aileron launch claude
+```
+
+This spawns Claude Code with `SHELL=aileron-sh`. Every command the agent runs flows through the shim. Currently a passthrough — policy evaluation is coming in [#64](https://github.com/ALRubinger/aileron/issues/64).
+
+### Run tests
+
+```sh
+task test:go          # Unit tests (all Go packages)
+task test:integration # Integration tests (requires running server)
 ```
 
 ### Run locally with Docker Compose
+
+For the full server/UI stack:
 
 ```sh
 task up
 ```
 
-To run in detached mode:
-
-```sh
-task up -- -d
-```
-
-This starts the control plane API server, the management UI, API documentation, and a PostgreSQL database. The API is available at `http://localhost:8080`, the UI at `http://localhost:3000`, and the API docs at `http://localhost:3001`.
-
-### Verify
-
-```sh
-task health
-```
-
-```json
-{"status":"ok","service":"aileron","version":"dev","timestamp":"2026-03-31T09:00:00Z"}
-```
-
-### Connect Claude Code via MCP
-
-Register Aileron as an MCP server for Claude Code:
-
-```sh
-task mcp:setup
-```
-
-This builds the MCP server binary and registers Aileron with Claude Code. The MCP server exposes a `submit_intent` tool that agents use to submit governed intents to the Aileron execution plane.
-
-To connect to a running Aileron server:
-
-```sh
-task build:mcp
-claude mcp add --scope project aileron \
-  -e AILERON_URL=http://localhost:8080 \
-  -e AILERON_TOKEN=<your-token> -- ./build/aileron-mcp
-```
-
-### Run tests
-
-```sh
-task test:go          # Unit tests
-task test:integration # Integration tests (requires running server)
-```
+This starts the API server, management UI, API documentation, and PostgreSQL. The API is available at `http://localhost:8080`, the UI at `http://localhost:3000`.
 
 #### Auth environment variables for Docker Compose
 
@@ -237,65 +257,53 @@ task generate:api
 
 ```
 aileron/
-├── core/               Execution plane — policy, approval, vault, audit, auth, connectors
-│   ├── api/            OpenAPI specification and generated code
-│   ├── account/        Connected accounts SPI and Google OAuth service
-│   ├── app/            Application wiring (handlers, middleware) — importable library
-│   ├── auth/           Auth SPI, enforcer, JWT, middleware, and provider implementations
-│   │   ├── google/     Google OAuth 2.0 provider (Aileron login)
-│   │   └── github/     GitHub OAuth 2.0 provider (Aileron login)
-│   ├── server/         HTTP server entry point and entrypoint script
-│   ├── schema/         Atlas declarative database schema (HCL)
-│   ├── policy/         Policy engine SPI, rule-based implementation, seed policies
-│   ├── approval/       Approval orchestrator SPI and implementation
-│   ├── config/         Configuration
-│   ├── connector/      Connector SPI and implementations (email, calendar, payments)
-│   ├── store/          Persistence interfaces
-│   │   ├── mem/        In-memory implementations (dev/test)
-│   │   └── postgres/   PostgreSQL implementations (production)
-│   ├── vault/          Credential vault SPI and in-memory implementation
-│   ├── notify/         Notification SPI (log, Slack, email)
-│   ├── audit/          Immutable audit store SPI
-│   └── model/          Shared domain types (Enterprise, User, ConnectedAccount, intents)
-├── enclave/            TEE provider SPI, protocol types, and provider implementations
-│   ├── local/          In-process provider for dev/test (no hardware isolation)
-│   └── gcs/            Google Confidential Space provider (HTTPS + OIDC attestation)
 ├── cmd/
-│   ├── aileron-mcp/    MCP server exposing intent tools to agent hosts
-│   └── aileron-enclave/ TEE enclave binary (runs inside confidential VM or locally)
+│   ├── aileron/         CLI entry point — `aileron launch`, `aileron version`
+│   ├── aileron-sh/      Shell shim — intercepts agent commands for policy evaluation
+│   ├── aileron-mcp/     MCP server exposing tools to agent hosts
+│   └── aileron-enclave/ TEE enclave binary (confidential computing)
+├── core/                Core library — policy, launch, vault, auth, connectors
+│   ├── launch/          Agent launcher (resolve binary, env setup, process management)
+│   │   └── agents/      Agent definitions (claude, codex, goose, etc.)
+│   ├── policy/          Policy engine SPI, rule-based implementation, seed policies
+│   ├── vault/           Zero-knowledge credential vault
+│   ├── api/             OpenAPI specification and generated code
+│   ├── app/             HTTP handler wiring and service composition
+│   ├── auth/            OAuth providers (Google, GitHub), JWT, session management
+│   ├── connector/       Connector SPI and implementations (git, calendar, payments)
+│   ├── store/           Persistence interfaces
+│   │   ├── mem/         In-memory implementations (dev/test)
+│   │   └── postgres/    PostgreSQL implementations (production)
+│   └── model/           Shared domain types
+├── enclave/             TEE provider SPI and implementations
+│   ├── local/           In-process provider for dev/test
+│   └── gcs/             Google Confidential Space provider
 ├── sdk/
-│   └── go/             Go client SDK
-├── ui/                 Management and approval UI (SvelteKit)
-│   └── src/routes/     Pages: approvals, traces, policies, settings
-├── docs/               API documentation site (Scalar)
+│   └── go/              Go client SDK
+├── ui/                  Management and approval UI (SvelteKit)
+├── docs/                API documentation site (Scalar)
 ├── test/
-│   └── integration/    Integration tests with OpenAPI spec validation
-├── deploy/
-│   └── docker-compose.yml  Self-hosted deployment
-└── saas/               Proprietary SaaS overlay (billing, multi-tenancy)
+│   └── integration/     Integration tests with OpenAPI spec validation
+└── deploy/
+    └── docker-compose.yml  Self-hosted deployment
 ```
 
 ## Installation
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/ALRubinger/aileron/releases).
 
-| Platform | Binary | Archive |
-|----------|--------|---------|
-| macOS (Apple Silicon) | `aileron-mcp` | `aileron-mcp_*_darwin_arm64.tar.gz` |
-| macOS (Intel) | `aileron-mcp` | `aileron-mcp_*_darwin_amd64.tar.gz` |
-| Linux (x86_64) | `aileron-mcp` | `aileron-mcp_*_linux_amd64.tar.gz` |
-| Windows (x86_64) | `aileron-mcp.exe` | `aileron-mcp_*_windows_amd64.zip` |
+| Platform | CLI | Shell shim | Archive |
+|----------|-----|-----------|---------|
+| macOS (Apple Silicon) | `aileron` | `aileron-sh` | `aileron_*_darwin_arm64.tar.gz` |
+| macOS (Intel) | `aileron` | `aileron-sh` | `aileron_*_darwin_amd64.tar.gz` |
+| Linux (x86_64) | `aileron` | `aileron-sh` | `aileron_*_linux_amd64.tar.gz` |
+| Windows (x86_64) | `aileron.exe` | — | `aileron_*_windows_amd64.zip` |
 
-Each release also includes `aileron-server` archives for running the control plane server standalone.
+Place both `aileron` and `aileron-sh` in the same directory on your PATH. The CLI looks for the shim next to itself first.
 
-```sh
-# Example: macOS Apple Silicon
-curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron-mcp_0.0.1_darwin_arm64.tar.gz
-tar xzf aileron-mcp_0.0.1_darwin_arm64.tar.gz
-./aileron-mcp --help
-```
+Each release also includes `aileron-server` and `aileron-mcp` archives.
 
-Verify the download against the `checksums.txt` file included in each release.
+Verify downloads against the `checksums.txt` file included in each release.
 
 ## Releasing
 
@@ -307,7 +315,7 @@ git push origin v0.0.3
 ```
 
 This produces:
-- Binaries for `aileron-server` and `aileron-mcp` across Linux, macOS (Intel + Apple Silicon), and Windows
+- Binaries for `aileron`, `aileron-sh`, `aileron-server`, and `aileron-mcp` across Linux and macOS (Intel + Apple Silicon). `aileron` and `aileron-server` also build for Windows.
 - `.tar.gz` archives (unix) and `.zip` archives (Windows)
 - SHA256 checksums (`checksums.txt`)
 - Release notes generated from conventional commits since the last tag
@@ -718,17 +726,17 @@ curl https://api.withaileron.ai/v1/health
 
 ## Architecture Principles
 
-**Agents decide; Aileron acts.** Agents handle planning and research. Aileron owns credentials, evaluates deterministic policy, and executes irreversible actions. The separation is structural, not advisory.
+**One shim catches everything.** `aileron-sh` is the agent's SHELL. Every command flows through it — no per-command wrappers, no agent-specific hooks. This works with any agent that respects `$SHELL`.
 
-**Identity ownership.** Aileron holds OAuth tokens and payment instruments in its vault. Agents submit intents and receive structured results — they never see raw credentials. This prevents prompt injection or context compression from bypassing safety rules.
+**Policy as code.** `aileron.yaml` lives in the repo, is reviewable in PRs, and is version-controlled. Three buckets (allow, deny, ask) eliminate both rubber-stamping and alert fatigue.
 
-**Deterministic enforcement.** No LLM in the policy enforcement loop. Rules are evaluated against structured intent fields. The policy engine is predictable and auditable.
+**Deterministic enforcement.** No LLM in the policy loop. Rules are evaluated against command patterns and structured fields. The policy engine is predictable and auditable.
 
-**SPIs throughout.** Every major subsystem — connectors, policy engine, approval orchestrator, vault, and notifiers — is defined as a Go interface. Built-in implementations cover the common cases. Alternative implementations can be swapped in without modifying the core.
+**Credential isolation.** Secrets live in a local encrypted vault. The agent uses them through a broker — it never sees raw credentials. Prompt injection can't leak what the agent doesn't have.
 
-**The audit trail is append-only.** Every event is written once and never modified. The execution graph is the ground truth for what happened, not a log that can be cleaned up.
+**The audit trail is append-only.** Every decision is written once and never modified. The log is the ground truth for what happened, not a narrative that can be cleaned up.
 
-**OSS core, SaaS overlay.** Everything in `core/`, `sdk/`, and `ui/` is open source. The `saas/` layer adds multi-tenancy and billing on top without forking the core.
+**Agent-portable.** Policy, credentials, and audit trail are agent-agnostic. Switch agents and everything carries over.
 
 ## License
 
