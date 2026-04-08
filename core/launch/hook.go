@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/ALRubinger/aileron/core/model"
 )
@@ -102,40 +101,3 @@ func writeHookOutput(w io.Writer, decision, reason string) {
 	json.NewEncoder(w).Encode(output)
 }
 
-// WriteHookConfig writes a Claude Code settings file that registers
-// aileron-sh as a PreToolUse hook for the Bash tool. Returns the path
-// to the settings file.
-func WriteHookConfig(shimPath, dir string) (string, error) {
-	config := map[string]any{
-		"hooks": map[string]any{
-			"PreToolUse": []map[string]any{
-				{
-					"matcher": "Bash",
-					"hooks": []map[string]any{
-						{
-							"type":    "command",
-							"command": shimPath + " --hook",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshaling hook config: %w", err)
-	}
-
-	configDir := filepath.Join(dir, ".aileron")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return "", fmt.Errorf("creating config dir: %w", err)
-	}
-
-	configPath := filepath.Join(configDir, "claude-hooks.json")
-	if err := os.WriteFile(configPath, data, 0o644); err != nil {
-		return "", fmt.Errorf("writing hook config: %w", err)
-	}
-
-	return configPath, nil
-}

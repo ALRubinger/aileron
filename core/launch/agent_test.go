@@ -53,7 +53,6 @@ type testAgent struct {
 	name string
 }
 
-func (a testAgent) SetupHooks(shimPath string) ([]string, func(), error) { return nil, nil, nil }
 
 func (a testAgent) Name() string           { return a.name }
 func (a testAgent) BinaryNames() []string  { return []string{a.name} }
