@@ -251,6 +251,67 @@ func TestShimNoPolicyFile(t *testing.T) {
 	}
 }
 
+// TestShimLoginFlag verifies that -c -l "command" works correctly.
+// Claude Code spawns: shell -c -l "command" (login flag between -c and
+// the command string).
+func TestShimLoginFlag(t *testing.T) {
+	binary := buildShim(t)
+
+	cmd := exec.Command(binary, "-c", "-l", "echo login-flag-works")
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("shim with -c -l failed: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "login-flag-works" {
+		t.Errorf("expected 'login-flag-works', got %q", got)
+	}
+}
+
+// TestShimLoginFlagPolicyAllow verifies that policy evaluation works
+// correctly when -l flag is present between -c and the command.
+func TestShimLoginFlagPolicyAllow(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: deny
+allow:
+  - "echo *"
+`)
+
+	cmd := exec.Command(binary, "-c", "-l", "echo allowed-with-login")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("expected allowed command with -l to succeed: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "allowed-with-login" {
+		t.Errorf("expected 'allowed-with-login', got %q", got)
+	}
+}
+
+// TestShimLoginFlagPolicyDeny verifies that deny rules still fire
+// when -l flag is present.
+func TestShimLoginFlagPolicyDeny(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: allow
+deny:
+  - command: "rm -rf *"
+    description: "no recursive delete"
+`)
+
+	cmd := exec.Command(binary, "-c", "-l", "rm -rf /something")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected denied command with -l to fail")
+	}
+}
+
 // writePolicyDir creates a temp directory with an aileron.yaml and returns
 // the directory path.
 func writePolicyDir(t *testing.T, yaml string) string {
