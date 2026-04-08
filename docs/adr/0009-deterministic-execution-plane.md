@@ -1,6 +1,6 @@
 # ADR-0009: Pivot from MCP Gateway to Deterministic Execution Plane
 
-**Status:** Accepted
+**Status:** Superseded by [ADR-0013](0013-local-policy-enforced-shell.md)
 **Date:** 2026-04-05
 **Supersedes:** ADR-0001, ADR-0002, ADR-0003, ADR-0008
 
