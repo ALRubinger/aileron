@@ -175,6 +175,26 @@ Each YAML rule becomes an `api.PolicyRule` with:
 
 The translated rules are loaded into the existing `RuleEngine` via an in-memory `PolicyStore`. No engine changes were needed beyond enhancing `globMatch` for multi-wildcard patterns.
 
+### Audit trail: single surface for all approval decisions
+
+Aileron is the single audit surface for a launch session. The audit trail captures decisions from **both** Aileron's policy layer and the agent host's native approval system.
+
+**Shell-level audit (universal):** Every command that reaches `aileron-sh` is logged with its disposition (allow, deny, ask) and the matched rule. This works with all agents since the shell shim is the universal interception point.
+
+**Agent-level audit (hook-dependent):** For agents with lifecycle hooks, `aileron launch` registers hooks to capture the agent's internal approval decisions — commands the agent approved or denied before they reached the shell, obfuscation detection events, and tool use decisions beyond shell commands.
+
+| Agent | Shell audit | Agent-level audit | Mechanism |
+|-------|-----------|------------------|-----------|
+| Claude Code | Yes | Yes | PreToolUse/PostToolUse hooks |
+| Codex CLI | Yes | Yes | PreToolUse/PostToolUse hooks |
+| Cline | Yes | Yes | PreToolUse/PostToolUse hooks |
+| OpenCode | Yes | Yes | Plugin hooks (tool.execute.before/after) |
+| Amp | Yes | Yes | tool:pre-execute/post-execute hooks |
+| Goose | Yes | **No** | No tool lifecycle hooks |
+| Aider | Yes | **No** | No hook system |
+
+For Goose and Aider, Aileron audits every command at the shell layer but cannot observe approval decisions the agent makes internally. This is a known limitation — the shell shim provides the baseline; agent hooks provide the bonus.
+
 ## Consequences
 
 - `aileron.yaml` is the primary user-facing artifact for the `aileron launch` experience.
