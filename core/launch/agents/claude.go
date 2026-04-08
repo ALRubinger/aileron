@@ -71,7 +71,10 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 		}
 	}
 
-	return []string{"--allowedTools", "Bash(*)"}, cleanup, nil
+	// Skip Claude Code's native permission prompts — Aileron's hook is the
+	// sole policy enforcement layer. The hook denies or asks as needed;
+	// everything else auto-approves.
+	return []string{"--dangerously-skip-permissions"}, cleanup, nil
 }
 
 func readFileIfExists(path string) ([]byte, bool) {
