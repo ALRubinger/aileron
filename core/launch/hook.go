@@ -51,11 +51,13 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 
 	// Only evaluate Bash tool calls. Non-Bash tools pass through.
 	if input.ToolName != "Bash" {
+		writeHookOutput(stdout, "allow", "")
 		return 0
 	}
 
 	command := input.ToolInput.Command
 	if command == "" {
+		writeHookOutput(stdout, "allow", "")
 		return 0
 	}
 
@@ -63,6 +65,7 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 	policyPath := FindPolicyFile(input.CWD)
 	if policyPath == "" {
 		// No policy file — don't interfere.
+		writeHookOutput(stdout, "allow", "")
 		return 0
 	}
 
@@ -70,11 +73,13 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 
 	switch result.Disposition {
 	case model.DispositionAllow:
-		// Exit 0 with no output — let Claude Code's normal flow proceed.
-		// With --allowedTools "Bash(*)", this auto-approves.
+		// "allow" combined with --allowedTools "Bash(*)" auto-approves.
+		writeHookOutput(stdout, "allow", "")
 	case model.DispositionDeny:
 		writeHookOutput(stdout, "deny", result.Reason)
 	case model.DispositionRequireApproval:
+		// "ask" takes precedence over --allowedTools (ask > allow in hook
+		// precedence), so this will prompt the user despite auto-approve.
 		writeHookOutput(stdout, "ask", result.Reason)
 	default:
 		writeHookOutput(stdout, "ask", "")

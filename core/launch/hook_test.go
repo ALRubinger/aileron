@@ -27,10 +27,7 @@ allow:
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
-	// Approve = no output (silent pass-through).
-	if stdout.Len() != 0 {
-		t.Errorf("expected no output for approve, got %q", stdout.String())
-	}
+	assertHookDecision(t, stdout.String(), "allow")
 }
 
 func TestRunHook_DeniedCommand(t *testing.T) {
@@ -73,10 +70,7 @@ func TestRunHook_NonBashTool(t *testing.T) {
 	var stdout bytes.Buffer
 	launch.RunHook(strings.NewReader(input), &stdout)
 
-	// Non-Bash = no output (pass-through).
-	if stdout.Len() != 0 {
-		t.Errorf("expected no output for non-Bash tool, got %q", stdout.String())
-	}
+	assertHookDecision(t, stdout.String(), "allow")
 }
 
 func TestRunHook_NoPolicyFile(t *testing.T) {
@@ -86,10 +80,8 @@ func TestRunHook_NoPolicyFile(t *testing.T) {
 	var stdout bytes.Buffer
 	launch.RunHook(strings.NewReader(input), &stdout)
 
-	// No policy = no output (pass-through).
-	if stdout.Len() != 0 {
-		t.Errorf("expected no output without policy, got %q", stdout.String())
-	}
+	// No policy = allow (don't interfere).
+	assertHookDecision(t, stdout.String(), "allow")
 }
 
 func TestRunHook_EmptyCommand(t *testing.T) {
@@ -97,9 +89,7 @@ func TestRunHook_EmptyCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	launch.RunHook(strings.NewReader(input), &stdout)
 
-	if stdout.Len() != 0 {
-		t.Errorf("expected no output for empty command, got %q", stdout.String())
-	}
+	assertHookDecision(t, stdout.String(), "allow")
 }
 
 func TestRunHook_InvalidJSON(t *testing.T) {
