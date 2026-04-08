@@ -323,3 +323,41 @@ func TestGlobMatch(t *testing.T) {
 		}
 	}
 }
+
+func TestFlattenIntent_Metadata(t *testing.T) {
+	action := model.ActionIntent{
+		Type:    "shell.exec",
+		Summary: "go test ./...",
+		Metadata: map[string]any{
+			"shell.command":     "go test ./...",
+			"shell.binary":      "go",
+			"shell.args":        "test ./...",
+			"shell.working_dir": "/home/user/project",
+		},
+	}
+	fields := flattenIntent(action, model.IntentContext{})
+
+	if fields["shell.command"] != "go test ./..." {
+		t.Errorf("shell.command = %v, want 'go test ./...'", fields["shell.command"])
+	}
+	if fields["shell.binary"] != "go" {
+		t.Errorf("shell.binary = %v, want 'go'", fields["shell.binary"])
+	}
+	if fields["shell.args"] != "test ./..." {
+		t.Errorf("shell.args = %v, want 'test ./...'", fields["shell.args"])
+	}
+	if fields["shell.working_dir"] != "/home/user/project" {
+		t.Errorf("shell.working_dir = %v", fields["shell.working_dir"])
+	}
+}
+
+func TestFlattenIntent_NilMetadata(t *testing.T) {
+	action := model.ActionIntent{
+		Type: "shell.exec",
+	}
+	fields := flattenIntent(action, model.IntentContext{})
+	// Should not panic with nil metadata.
+	if fields["action.type"] != "shell.exec" {
+		t.Errorf("action.type = %v", fields["action.type"])
+	}
+}
