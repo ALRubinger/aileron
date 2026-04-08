@@ -5,6 +5,7 @@ go 1.24
 require github.com/ALRubinger/aileron/enclave v0.0.0
 
 require (
+	github.com/creack/pty/v2 v2.0.1
 	github.com/getkin/kin-openapi v0.133.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
@@ -13,6 +14,7 @@ require (
 	github.com/oapi-codegen/runtime v1.3.1
 	golang.org/x/crypto v0.36.0
 	golang.org/x/oauth2 v0.28.0
+	golang.org/x/term v0.30.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

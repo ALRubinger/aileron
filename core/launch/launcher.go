@@ -3,11 +3,15 @@ package launch
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"github.com/creack/pty/v2"
+	"golang.org/x/term"
 )
 
 // LaunchConfig holds the configuration for launching an agent.
@@ -60,7 +64,8 @@ func ResolveShim(selfPath string) (string, error) {
 }
 
 // Launch starts the agent as a child process with the modified environment.
-// It blocks until the child exits, forwarding SIGINT and SIGTERM.
+// When stdin is a terminal, the agent runs inside a pty with a status bar
+// rendered in the bottom 2 rows. Otherwise, it falls back to direct I/O.
 func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
 	if err != nil {
@@ -71,12 +76,23 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	cmd := exec.CommandContext(ctx, agentPath, config.Args...)
 	cmd.Env = env
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	if config.Dir != "" {
 		cmd.Dir = config.Dir
 	}
+
+	// If stdin is a terminal, use the pty proxy with status bar.
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return launchWithPty(cmd, config)
+	}
+	return launchDirect(cmd, config)
+}
+
+// launchDirect runs the agent with direct stdin/stdout/stderr passthrough.
+// Used when stdin is not a terminal (piped input, CI, etc.).
+func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return LaunchResult{}, fmt.Errorf("failed to start %s: %w", config.Agent.Name(), err)
@@ -90,10 +106,104 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		}
 	}()
 
+	err := cmd.Wait()
+	signal.Stop(sigCh)
+	close(sigCh)
+
+	return exitResult(err)
+}
+
+// launchWithPty runs the agent inside a pty with a status bar at the bottom.
+func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
+	stdinFd := int(os.Stdin.Fd())
+
+	// Get terminal size.
+	cols, rows, err := term.GetSize(stdinFd)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("getting terminal size: %w", err)
+	}
+
+	bar := NewStatusBar(rows, cols, "Flying ✈️ withaileron.ai")
+	agentRows := rows - bar.BarHeight()
+	if agentRows < 1 {
+		agentRows = 1
+	}
+
+	// Start agent in a pty sized to the agent area.
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
+		Rows: uint16(agentRows),
+		Cols: uint16(cols),
+	})
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("failed to start %s in pty: %w", config.Agent.Name(), err)
+	}
+	defer ptmx.Close()
+
+	// Put real terminal in raw mode.
+	oldState, err := term.MakeRaw(stdinFd)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("setting raw mode: %w", err)
+	}
+	defer term.Restore(stdinFd, oldState)
+
+	// Clear screen, set scroll region to agent area, and render the status bar.
+	fmt.Fprintf(os.Stdout, "\033[2J\033[1;1H")
+	SetScrollRegion(os.Stdout, 1, agentRows)
+	fmt.Fprintf(os.Stdout, "\033[1;1H")
+	bar.Render(os.Stdout)
+
+	// Handle signals: forward SIGINT/SIGTERM to child, handle SIGWINCH.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGWINCH)
+	go func() {
+		for sig := range sigCh {
+			switch sig {
+			case syscall.SIGWINCH:
+				newCols, newRows, err := term.GetSize(stdinFd)
+				if err != nil {
+					continue
+				}
+				newAgentRows := newRows - bar.BarHeight()
+				if newAgentRows < 1 {
+					newAgentRows = 1
+				}
+				_ = pty.Setsize(ptmx, &pty.Winsize{
+					Rows: uint16(newAgentRows),
+					Cols: uint16(newCols),
+				})
+				SetScrollRegion(os.Stdout, 1, newAgentRows)
+				bar.Resize(os.Stdout, newRows, newCols)
+			default:
+				if cmd.Process != nil {
+					_ = cmd.Process.Signal(sig)
+				}
+			}
+		}
+	}()
+
+	// Copy loops: stdin → pty, pty → stdout.
+	// These run until the pty closes (agent exits).
+	go func() {
+		io.Copy(ptmx, os.Stdin)
+	}()
+	go func() {
+		io.Copy(os.Stdout, ptmx)
+	}()
+
 	err = cmd.Wait()
 	signal.Stop(sigCh)
 	close(sigCh)
 
+	// Restore scroll region and clear status bar area before exiting.
+	ResetScrollRegion(os.Stdout)
+	// Move to the bar area and clear it.
+	fmt.Fprintf(os.Stdout, "\033[%d;1H\033[J", rows-1)
+
+	return exitResult(err)
+}
+
+// exitResult extracts an exit code from a cmd.Wait error.
+func exitResult(err error) (LaunchResult, error) {
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			return LaunchResult{ExitCode: exitErr.ExitCode()}, nil
