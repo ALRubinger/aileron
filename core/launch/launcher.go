@@ -86,6 +86,11 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// Prepend hook args, then append user args.
 	allArgs := append(hookArgs, config.Args...)
 
+	// Debug: log the command being launched.
+	if os.Getenv("AILERON_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "aileron: launching %s %v\n", agentPath, allArgs)
+	}
+
 	cmd := exec.CommandContext(ctx, agentPath, allArgs...)
 	cmd.Env = env
 	if config.Dir != "" {
