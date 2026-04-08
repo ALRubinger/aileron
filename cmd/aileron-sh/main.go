@@ -45,7 +45,11 @@ func main() {
 	// command string). We extract the command by finding -c and skipping any
 	// intervening shell flags (-l, -i, etc.).
 	cwd, _ := os.Getwd()
-	command, hasCommand := extractCommand(args)
+	rawCommand, hasCommand := extractCommand(args)
+	// Claude Code wraps user commands in a template:
+	//   shopt -u extglob 2>/dev/null || true && eval '<command>' < /dev/null && pwd -P >| /tmp/...
+	// Extract the inner command so policy rules match what the user wrote.
+	command := unwrapEval(rawCommand)
 	if hasCommand && launch.FindPolicyFile(cwd) != "" {
 		policyPath := launch.FindPolicyFile(cwd)
 		result := launch.EvaluateCommand(policyPath, command, cwd)
@@ -100,6 +104,45 @@ func extractCommand(args []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// unwrapEval extracts the inner command from Claude Code's wrapper template.
+// Claude Code sends commands in the form:
+//
+//	shopt -u extglob 2>/dev/null || true && eval 'actual command' < /dev/null && pwd -P >| /tmp/...
+//
+// This function finds the eval '...' segment and returns the inner command.
+// If the input doesn't match the wrapper pattern, it is returned unchanged.
+func unwrapEval(command string) string {
+	// Look for: eval '...'
+	const evalPrefix = "eval '"
+	idx := strings.Index(command, evalPrefix)
+	if idx < 0 {
+		return command
+	}
+
+	inner := command[idx+len(evalPrefix):]
+
+	// Find the closing single quote. The inner command uses '\'' to escape
+	// literal single quotes (shell idiom: end quote, escaped quote, start quote).
+	var b strings.Builder
+	for i := 0; i < len(inner); {
+		if inner[i] == '\'' {
+			// Check for '\'' escape sequence (end-quote, backslash-quote, start-quote).
+			if i+3 < len(inner) && inner[i:i+4] == `'\''` {
+				b.WriteByte('\'')
+				i += 4
+				continue
+			}
+			// Unescaped closing quote — we're done.
+			return b.String()
+		}
+		b.WriteByte(inner[i])
+		i++
+	}
+
+	// No closing quote found — return original command unchanged.
+	return command
 }
 
 // promptApproval writes a prompt to /dev/tty and reads the response.

@@ -312,6 +312,80 @@ deny:
 	}
 }
 
+// TestShimUnwrapsClaudeCodeTemplate verifies that policy evaluation works
+// against the inner command when Claude Code wraps it in its template.
+func TestShimUnwrapsClaudeCodeTemplate(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: allow
+deny:
+  - command: "rm -rf *"
+    description: "no recursive delete"
+`)
+
+	// Simulate the exact wrapper Claude Code sends.
+	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'rm -rf /tmp/test' < /dev/null && pwd -P >| /tmp/claude-test-cwd"
+	cmd := exec.Command(binary, "-c", "-l", wrapped)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatal("expected deny for rm -rf inside Claude Code wrapper")
+	}
+	if !strings.Contains(string(out), "denied") {
+		t.Errorf("expected 'denied' in output, got %q", string(out))
+	}
+	if !strings.Contains(string(out), "no recursive delete") {
+		t.Errorf("expected deny reason in output, got %q", string(out))
+	}
+}
+
+// TestShimUnwrapsClaudeCodeTemplateAllow verifies allowed commands pass
+// through the Claude Code wrapper.
+func TestShimUnwrapsClaudeCodeTemplateAllow(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: deny
+allow:
+  - "echo *"
+`)
+
+	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'echo unwrapped-ok' < /dev/null && pwd -P >| /tmp/claude-test-cwd"
+	cmd := exec.Command(binary, "-c", "-l", wrapped)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("expected allowed command inside wrapper to succeed: %v", err)
+	}
+	if !strings.Contains(string(out), "unwrapped-ok") {
+		t.Errorf("expected 'unwrapped-ok' in output, got %q", string(out))
+	}
+}
+
+// TestShimUnwrapPreservesPlainCommands verifies that commands without the
+// Claude Code wrapper are evaluated as-is.
+func TestShimUnwrapPreservesPlainCommands(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: allow
+deny:
+  - command: "rm -rf *"
+    description: "no recursive delete"
+`)
+
+	cmd := exec.Command(binary, "-c", "rm -rf /something")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected deny for plain rm -rf command")
+	}
+}
+
 // writePolicyDir creates a temp directory with an aileron.yaml and returns
 // the directory path.
 func writePolicyDir(t *testing.T, yaml string) string {
