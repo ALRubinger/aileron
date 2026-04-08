@@ -328,7 +328,7 @@ deny:
 	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'rm -rf /tmp/test' < /dev/null && pwd -P >| /tmp/claude-test-cwd"
 	cmd := exec.Command(binary, "-c", "-l", wrapped)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash", "AILERON_AGENT=claude")
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatal("expected deny for rm -rf inside Claude Code wrapper")
@@ -355,13 +355,37 @@ allow:
 	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'echo unwrapped-ok' < /dev/null && pwd -P >| /tmp/claude-test-cwd"
 	cmd := exec.Command(binary, "-c", "-l", wrapped)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash")
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash", "AILERON_AGENT=claude")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("expected allowed command inside wrapper to succeed: %v", err)
 	}
 	if !strings.Contains(string(out), "unwrapped-ok") {
 		t.Errorf("expected 'unwrapped-ok' in output, got %q", string(out))
+	}
+}
+
+// TestShimNoUnwrapForOtherAgents verifies that the eval unwrap only
+// applies when AILERON_AGENT=claude, not for other agents.
+func TestShimNoUnwrapForOtherAgents(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: deny
+allow:
+  - "echo *"
+`)
+
+	// Same wrapped command, but agent is not claude — should NOT unwrap,
+	// so "echo unwrapped-ok" won't be extracted and the full command
+	// starting with "shopt" won't match "echo *" → denied.
+	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'echo unwrapped-ok' < /dev/null && pwd -P >| /tmp/claude-test-cwd"
+	cmd := exec.Command(binary, "-c", wrapped)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash", "AILERON_AGENT=other")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected non-claude agent to NOT unwrap eval — full command should be denied")
 	}
 }
 

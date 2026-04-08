@@ -46,10 +46,7 @@ func main() {
 	// intervening shell flags (-l, -i, etc.).
 	cwd, _ := os.Getwd()
 	rawCommand, hasCommand := extractCommand(args)
-	// Claude Code wraps user commands in a template:
-	//   shopt -u extglob 2>/dev/null || true && eval '<command>' < /dev/null && pwd -P >| /tmp/...
-	// Extract the inner command so policy rules match what the user wrote.
-	command := unwrapEval(rawCommand)
+	command := normalizeCommand(os.Getenv("AILERON_AGENT"), rawCommand)
 	if hasCommand && launch.FindPolicyFile(cwd) != "" {
 		policyPath := launch.FindPolicyFile(cwd)
 		result := launch.EvaluateCommand(policyPath, command, cwd)
@@ -106,14 +103,26 @@ func extractCommand(args []string) (string, bool) {
 	return "", false
 }
 
-// unwrapEval extracts the inner command from Claude Code's wrapper template.
+// normalizeCommand applies agent-specific command transformations before
+// policy evaluation. Each agent may wrap commands differently; this function
+// strips that wrapping so policy rules match the developer's intent.
+func normalizeCommand(agent, command string) string {
+	switch agent {
+	case "claude":
+		return unwrapClaudeEval(command)
+	default:
+		return command
+	}
+}
+
+// unwrapClaudeEval extracts the inner command from Claude Code's wrapper template.
 // Claude Code sends commands in the form:
 //
 //	shopt -u extglob 2>/dev/null || true && eval 'actual command' < /dev/null && pwd -P >| /tmp/...
 //
 // This function finds the eval '...' segment and returns the inner command.
 // If the input doesn't match the wrapper pattern, it is returned unchanged.
-func unwrapEval(command string) string {
+func unwrapClaudeEval(command string) string {
 	// Look for: eval '...'
 	const evalPrefix = "eval '"
 	idx := strings.Index(command, evalPrefix)

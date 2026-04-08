@@ -79,7 +79,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("installing shell wrapper: %w", err)
 	}
 
-	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Env())
+	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), config.Agent.Env())
 
 	cmd := exec.CommandContext(ctx, agentPath, config.Args...)
 	cmd.Env = env
@@ -233,7 +233,7 @@ func exitResult(err error) (LaunchResult, error) {
 //   - Sets CLAUDE_CODE_SHELL to the wrapper path (whose name contains "bash")
 //   - Sets AILERON_REAL_SHELL to the original SHELL value
 //   - Merges any agent-specific env vars
-func buildEnv(shimPath, wrapperPath string, agentEnv map[string]string) []string {
+func buildEnv(shimPath, wrapperPath, agentName string, agentEnv map[string]string) []string {
 	origShell := os.Getenv("SHELL")
 	if origShell == "" {
 		origShell = "/bin/sh"
@@ -249,8 +249,9 @@ func buildEnv(shimPath, wrapperPath string, agentEnv map[string]string) []string
 	// Build a set of keys managed by buildEnv + agent overrides so we can
 	// strip them from the inherited environment in a single pass.
 	managed := map[string]bool{
-		"SHELL":            true,
+		"SHELL":              true,
 		"AILERON_REAL_SHELL": true,
+		"AILERON_AGENT":      true,
 		"CLAUDE_CODE_SHELL":  true,
 	}
 	for k := range agentEnv {
@@ -273,6 +274,7 @@ func buildEnv(shimPath, wrapperPath string, agentEnv map[string]string) []string
 
 	filtered = append(filtered, "SHELL="+shimPath)
 	filtered = append(filtered, "AILERON_REAL_SHELL="+realShell)
+	filtered = append(filtered, "AILERON_AGENT="+agentName)
 	if wrapperPath != "" {
 		filtered = append(filtered, "CLAUDE_CODE_SHELL="+wrapperPath)
 	}
