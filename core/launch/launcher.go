@@ -179,18 +179,19 @@ func ComputeAgentRows(totalRows, barHeight int) int {
 	return rows
 }
 
-// SetupTerminalScreen clears the screen, sets the scroll region, and
-// renders the status bar.
+// SetupTerminalScreen clears the screen and renders the status bar.
+// No scroll region is set — the agent's pty is sized to agentRows, so its
+// cursor positioning stays within the agent area naturally. The status bar
+// sits below the agent's viewport. If the agent's scrolling output
+// overwrites the bar, it will be re-rendered on the next resize.
 func SetupTerminalScreen(w io.Writer, agentRows int, bar *StatusBar) {
-	fmt.Fprintf(w, "\033[2J\033[1;1H")
-	SetScrollRegion(w, 1, agentRows)
-	fmt.Fprintf(w, "\033[1;1H")
+	fmt.Fprintf(w, "\033[2J")
 	bar.Render(w)
+	fmt.Fprintf(w, "\033[%d;1H", agentRows)
 }
 
-// CleanupTerminalScreen resets the scroll region and clears the status bar.
+// CleanupTerminalScreen clears the status bar area.
 func CleanupTerminalScreen(w io.Writer, totalRows int) {
-	ResetScrollRegion(w)
 	fmt.Fprintf(w, "\033[%d;1H\033[J", totalRows-1)
 }
 
@@ -207,7 +208,6 @@ func HandleResize(w io.Writer, fd int, ptmx *os.File, bar *StatusBar) {
 		Rows: uint16(newAgentRows),
 		Cols: uint16(newCols),
 	})
-	SetScrollRegion(w, 1, newAgentRows)
 	bar.Resize(w, newRows, newCols)
 }
 
