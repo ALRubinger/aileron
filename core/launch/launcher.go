@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/creack/pty/v2"
@@ -263,7 +264,7 @@ func buildEnv(shimPath, wrapperPath, agentName string, agentEnv map[string]strin
 	env := os.Environ()
 	filtered := make([]string, 0, len(env)+len(agentEnv)+3)
 	for _, e := range env {
-		eqIdx := indexByte(e, '=')
+		eqIdx := strings.IndexByte(e, '=')
 		if eqIdx < 0 {
 			filtered = append(filtered, e)
 			continue
@@ -289,14 +290,4 @@ func buildEnv(shimPath, wrapperPath, agentName string, agentEnv map[string]strin
 	}
 
 	return filtered
-}
-
-// indexByte returns the index of the first instance of c in s, or -1.
-func indexByte(s string, c byte) int {
-	for i := range len(s) {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
 }

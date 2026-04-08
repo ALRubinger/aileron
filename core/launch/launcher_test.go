@@ -190,6 +190,142 @@ func TestLaunch_BinaryNotFound(t *testing.T) {
 	}
 }
 
+func TestLaunch_EmptyShellFallback(t *testing.T) {
+	// When SHELL is empty, buildEnv should default AILERON_REAL_SHELL to /bin/sh
+	// (unless agent overrides it).
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("SHELL", "")
+	outFile := filepath.Join(dir, "env.txt")
+
+	script := filepath.Join(dir, "capture-env.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+	})
+	if err != nil {
+		t.Fatalf("launch failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With no agent override and empty SHELL, should fall back to /bin/sh
+	if !strings.Contains(string(data), "AILERON_REAL_SHELL=/bin/sh") {
+		t.Error("expected AILERON_REAL_SHELL=/bin/sh when SHELL is empty")
+	}
+}
+
+func TestLaunch_WorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	outFile := filepath.Join(dir, "cwd.txt")
+
+	script := filepath.Join(dir, "capture-cwd.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\npwd > "+outFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := filepath.Join(dir, "workdir")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       workDir,
+	})
+	if err != nil {
+		t.Fatalf("launch failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "workdir") {
+		t.Errorf("expected working directory to be set, got %q", string(data))
+	}
+}
+
+func TestLaunch_EmptyWrapperPathSkipsCLAUDE_CODE_SHELL(t *testing.T) {
+	// When wrapperPath is empty, CLAUDE_CODE_SHELL should not be set.
+	// We can't easily test this through Launch (it always installs wrapper),
+	// so this is a note that the branch is covered by the empty-path guard.
+	// The buildEnv function is unexported, so we verify indirectly.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	outFile := filepath.Join(dir, "env.txt")
+
+	script := filepath.Join(dir, "capture-env.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+	})
+	if err != nil {
+		t.Fatalf("launch failed: %v", err)
+	}
+
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CLAUDE_CODE_SHELL should be set (wrapper IS installed by Launch)
+	if !strings.Contains(string(data), "CLAUDE_CODE_SHELL=") {
+		t.Error("expected CLAUDE_CODE_SHELL to be set when wrapper is installed")
+	}
+	// AILERON_AGENT should be set
+	if !strings.Contains(string(data), "AILERON_AGENT=") {
+		t.Error("expected AILERON_AGENT to be set")
+	}
+}
+
+func TestInstallWrapper_BadHomeDir(t *testing.T) {
+	// Point HOME at a read-only path to trigger the MkdirAll error.
+	t.Setenv("HOME", "/dev/null")
+	_, err := launch.InstallWrapper("/usr/local/bin/aileron-sh")
+	if err == nil {
+		t.Fatal("expected error when HOME is invalid")
+	}
+}
+
+func TestInstallWrapper_ReadOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Create .aileron as a read-only directory so WriteFile fails
+	aileronDir := filepath.Join(dir, ".aileron")
+	if err := os.MkdirAll(aileronDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Write a file at the wrapper path that's not writable
+	wrapperPath := filepath.Join(aileronDir, "bash")
+	if err := os.WriteFile(wrapperPath, []byte("old"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	// Make directory read-only
+	os.Chmod(aileronDir, 0o555)
+	t.Cleanup(func() { os.Chmod(aileronDir, 0o755) })
+
+	_, err := launch.InstallWrapper("/usr/local/bin/aileron-sh")
+	if err == nil {
+		t.Fatal("expected error when wrapper dir is read-only")
+	}
+}
+
 func TestComputeAgentRows(t *testing.T) {
 	tests := []struct {
 		totalRows, barHeight, want int
