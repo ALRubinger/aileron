@@ -48,8 +48,12 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 		"PreToolUse": []map[string]any{
 			{
 				"matcher": "Bash",
-				"type":    "command",
-				"command": shimPath + " --hook",
+				"hooks": []map[string]any{
+					{
+						"type":    "command",
+						"command": shimPath + " --hook",
+					},
+				},
 			},
 		},
 	}
