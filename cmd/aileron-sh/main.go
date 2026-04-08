@@ -41,9 +41,12 @@ func main() {
 	}
 
 	// Only evaluate policy for -c mode and only when an aileron.yaml exists.
+	// Claude Code spawns: shell -c -l "command" (login flag between -c and the
+	// command string). We extract the command by finding -c and skipping any
+	// intervening shell flags (-l, -i, etc.).
 	cwd, _ := os.Getwd()
-	if len(args) >= 2 && args[0] == "-c" && launch.FindPolicyFile(cwd) != "" {
-		command := args[1]
+	command, hasCommand := extractCommand(args)
+	if hasCommand && launch.FindPolicyFile(cwd) != "" {
 		policyPath := launch.FindPolicyFile(cwd)
 		result := launch.EvaluateCommand(policyPath, command, cwd)
 
@@ -72,6 +75,31 @@ func main() {
 		fmt.Fprintf(os.Stderr, "aileron-sh: exec %q failed: %v\n", binary, err)
 		os.Exit(126)
 	}
+}
+
+// extractCommand finds the command string in shell args of the form
+// [-l] [-i] -c [-l] [-i] "command" [arg0 ...]. Returns the command
+// string and true if -c mode is detected, or ("", false) otherwise.
+//
+// Shells accept flags in any order relative to -c, and Claude Code
+// specifically passes [-c, -l, command]. We scan for -c, then take the
+// first non-flag argument after it as the command string.
+func extractCommand(args []string) (string, bool) {
+	foundC := false
+	for _, a := range args {
+		if a == "-c" {
+			foundC = true
+			continue
+		}
+		if foundC {
+			// Skip single-character flags that may appear between -c and the command.
+			if len(a) > 0 && a[0] == '-' && len(a) == 2 {
+				continue
+			}
+			return a, true
+		}
+	}
+	return "", false
 }
 
 // promptApproval writes a prompt to /dev/tty and reads the response.
