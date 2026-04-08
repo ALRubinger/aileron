@@ -18,6 +18,20 @@ func TestClaude(t *testing.T) {
 		t.Errorf("expected BinaryNames [\"claude\"], got %v", names)
 	}
 
+	args := c.Args()
+	if len(args) < 2 {
+		t.Fatal("expected Args with --allowedTools")
+	}
+	found := false
+	for i, a := range args {
+		if a == "--allowedTools" && i+1 < len(args) && args[i+1] == "Bash(*)" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected --allowedTools Bash(*) in Args, got %v", args)
+	}
+
 	env := c.Env()
 	if env == nil {
 		t.Fatal("expected non-nil Env")
