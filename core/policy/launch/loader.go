@@ -12,10 +12,10 @@ import (
 
 // Default priorities for each bucket.
 const (
-	PriorityAllow   = 50
-	PriorityAsk     = 100
-	PriorityDeny    = 200
-	PriorityBuiltin = 300
+	PriorityAllow      = 50
+	PriorityAsk        = 100
+	PriorityBuiltinAsk = 150 // built-in ask rules sit between user ask and user deny
+	PriorityDeny       = 200
 )
 
 // Load parses a single aileron.yaml file.
@@ -233,7 +233,7 @@ func (pf *PolicyFile) ToEngineRules() []api.PolicyRule {
 	}
 
 	// Add built-in structural deny rules.
-	rules = append(rules, BuiltinDenyRules()...)
+	rules = append(rules, BuiltinAskRules()...)
 
 	// Add default catch-all rule.
 	rules = append(rules, defaultRule(pf.Default))
