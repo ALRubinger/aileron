@@ -26,12 +26,14 @@ tasks:
       - api/gen/server.gen.go
 
   build:
-    desc: Build everything (containers, server, MCP, enclave, UI)
+    desc: Build everything (containers, server, MCP, enclave, CLI, shell shim, UI)
     cmds:
       - task: build:docker
       - task: build:server
       - task: build:mcp
       - task: build:enclave
+      - task: build:cli
+      - task: build:sh
       - task: build:ui
 
   build:docker:
@@ -65,6 +67,20 @@ tasks:
         sh: git rev-parse --short HEAD
     cmds:
       - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron-enclave ./cmd/aileron-enclave
+
+  build:cli:
+    desc: Build the aileron CLI binary locally
+    vars:
+      VERSION: dev
+      COMMIT:
+        sh: git rev-parse --short HEAD
+    cmds:
+      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron ./cmd/aileron
+
+  build:sh:
+    desc: Build the aileron-sh shell shim binary locally
+    cmds:
+      - go build -o build/aileron-sh ./cmd/aileron-sh
 
   build:ui:
     desc: Install UI dependencies and build
@@ -122,7 +138,7 @@ tasks:
   lint:go:
     desc: Vet Go code
     cmds:
-      - go vet ./core/... ./enclave/... ./cmd/aileron-enclave/... ./sdk/go/... ./cmd/aileron-mcp/...
+      - go vet ./core/... ./enclave/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
 
   lint:ui:
     desc: Check the UI for type errors
@@ -138,7 +154,7 @@ tasks:
   test:go:
     desc: Run Go tests
     cmds:
-      - go test ./core/... ./enclave/... ./cmd/aileron-enclave/... ./sdk/go/... ./cmd/aileron-mcp/...
+      - go test ./core/... ./enclave/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
 
   test:integration:
     desc: Run integration tests against running services
