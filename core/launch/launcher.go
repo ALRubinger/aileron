@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/creack/pty/v2"
 	"golang.org/x/term"
@@ -157,41 +156,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	}()
 
 	go func() { io.Copy(ptmx, os.Stdin) }()
-
-	// Copy agent output to real terminal, signaling activity on each read.
-	activity := make(chan struct{}, 1)
-	go func() {
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := ptmx.Read(buf)
-			if n > 0 {
-				os.Stdout.Write(buf[:n])
-				select {
-				case activity <- struct{}{}:
-				default:
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	// Render the status bar when the agent goes idle (no output for 100ms).
-	// This avoids corrupting the agent's ANSI state by injecting escapes
-	// mid-render.
-	go func() {
-		idle := time.NewTimer(500 * time.Millisecond)
-		defer idle.Stop()
-		for {
-			select {
-			case <-activity:
-				idle.Reset(100 * time.Millisecond)
-			case <-idle.C:
-				bar.Render(os.Stdout)
-			}
-		}
-	}()
+	go func() { io.Copy(os.Stdout, ptmx) }()
 
 	err = cmd.Wait()
 	signal.Stop(sigCh)
