@@ -346,6 +346,13 @@ func flattenIntent(action model.ActionIntent, intentCtx model.IntentContext) map
 		}
 	}
 
+	// Metadata fields are copied through with their keys as-is.
+	// This allows callers to inject domain-specific fields (e.g.,
+	// shell.command, shell.binary) without modifying the model types.
+	for k, v := range action.Metadata {
+		fields[k] = v
+	}
+
 	return fields
 }
 
