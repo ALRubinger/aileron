@@ -2,10 +2,20 @@ package launch
 
 import api "github.com/ALRubinger/aileron/core/api/gen"
 
-// BuiltinDenyRules returns structural deny rules that are always active and
-// cannot be overridden by user policy. They catch dangerous command patterns
-// that indicate obfuscation or prompt injection.
-func BuiltinDenyRules() []api.PolicyRule {
+// BuiltinAskRules returns default rules for commands with dynamic or
+// obfuscated patterns. These default to "ask" (prompt the developer) rather
+// than hard-deny, because the agent host (e.g., Claude Code) is better
+// positioned to evaluate whether a dynamic command is suspicious — it has
+// conversation context that a static glob pattern cannot.
+//
+// These rules are overridable by user policy. A developer who routinely uses
+// `python -c` can add it to their allow list.
+//
+// Aileron's value is the predictable middle: auto-approving safe commands and
+// blocking obviously dangerous ones. Obfuscation detection is the agent
+// host's job. Aileron captures all approval decisions — from both layers —
+// in the audit trail.
+func BuiltinAskRules() []api.PolicyRule {
 	rules := []struct {
 		id      string
 		pattern string
@@ -75,7 +85,7 @@ func BuiltinDenyRules() []api.PolicyRule {
 
 	result := make([]api.PolicyRule, 0, len(rules))
 	for _, r := range rules {
-		priority := PriorityBuiltin
+		priority := PriorityBuiltinAsk
 		desc := r.desc
 		conditions := []api.PolicyCondition{
 			makeCondition("action.type", api.Eq, "shell.exec"),
@@ -84,7 +94,7 @@ func BuiltinDenyRules() []api.PolicyRule {
 		result = append(result, api.PolicyRule{
 			RuleId:      r.id,
 			Description: &desc,
-			Effect:      api.PolicyRuleEffectDeny,
+			Effect:      api.PolicyRuleEffectRequireApproval,
 			Priority:    &priority,
 			Conditions:  &conditions,
 		})

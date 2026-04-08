@@ -169,7 +169,7 @@ func TestToEngineRules_Count(t *testing.T) {
 	rules := pf.ToEngineRules()
 
 	// 4 allow + 2 deny + 2 ask + 12 builtin deny + 1 default = 21
-	builtinCount := len(launch.BuiltinDenyRules())
+	builtinCount := len(launch.BuiltinAskRules())
 	expected := 4 + 2 + 2 + builtinCount + 1
 	if len(rules) != expected {
 		t.Errorf("ToEngineRules produced %d rules, want %d", len(rules), expected)
@@ -191,12 +191,12 @@ func TestToEngineRules_Priorities(t *testing.T) {
 				t.Errorf("allow rule %q priority = %d, want %d", r.RuleId, *r.Priority, launch.PriorityAllow)
 			}
 		case api.PolicyRuleEffectRequireApproval:
-			if r.RuleId != "default" && *r.Priority != launch.PriorityAsk {
-				t.Errorf("ask rule %q priority = %d, want %d", r.RuleId, *r.Priority, launch.PriorityAsk)
+			if r.RuleId != "default" && *r.Priority != launch.PriorityAsk && *r.Priority != launch.PriorityBuiltinAsk {
+				t.Errorf("ask rule %q priority = %d, want %d or %d", r.RuleId, *r.Priority, launch.PriorityAsk, launch.PriorityBuiltinAsk)
 			}
 		case api.PolicyRuleEffectDeny:
-			if *r.Priority != launch.PriorityDeny && *r.Priority != launch.PriorityBuiltin {
-				t.Errorf("deny rule %q priority = %d, want %d or %d", r.RuleId, *r.Priority, launch.PriorityDeny, launch.PriorityBuiltin)
+			if *r.Priority != launch.PriorityDeny {
+				t.Errorf("deny rule %q priority = %d, want %d", r.RuleId, *r.Priority, launch.PriorityDeny)
 			}
 		}
 	}
@@ -265,23 +265,23 @@ func TestEngineRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBuiltinDenyRules_Count(t *testing.T) {
-	rules := launch.BuiltinDenyRules()
+func TestBuiltinAskRules_Count(t *testing.T) {
+	rules := launch.BuiltinAskRules()
 	if len(rules) < 10 {
-		t.Errorf("expected at least 10 builtin deny rules, got %d", len(rules))
+		t.Errorf("expected at least 10 builtin ask rules, got %d", len(rules))
 	}
 	for _, r := range rules {
-		if r.Effect != api.PolicyRuleEffectDeny {
-			t.Errorf("builtin rule %q effect = %v, want Deny", r.RuleId, r.Effect)
+		if r.Effect != api.PolicyRuleEffectRequireApproval {
+			t.Errorf("builtin rule %q effect = %v, want RequireApproval", r.RuleId, r.Effect)
 		}
-		if r.Priority == nil || *r.Priority != launch.PriorityBuiltin {
-			t.Errorf("builtin rule %q priority should be %d", r.RuleId, launch.PriorityBuiltin)
+		if r.Priority == nil || *r.Priority != launch.PriorityBuiltinAsk {
+			t.Errorf("builtin rule %q priority should be %d", r.RuleId, launch.PriorityBuiltinAsk)
 		}
 	}
 }
 
-func TestBuiltinDenyRules_AllHaveConditions(t *testing.T) {
-	for _, r := range launch.BuiltinDenyRules() {
+func TestBuiltinAskRules_AllHaveConditions(t *testing.T) {
+	for _, r := range launch.BuiltinAskRules() {
 		if r.Conditions == nil || len(*r.Conditions) < 2 {
 			t.Errorf("builtin rule %q should have at least 2 conditions (action.type + pattern)", r.RuleId)
 		}

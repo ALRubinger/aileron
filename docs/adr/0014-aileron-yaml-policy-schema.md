@@ -128,15 +128,29 @@ Merge semantics at each layer:
 - **Override mechanism:** A rule with `override: "rule-id"` cancels a specific rule from a lower layer. Only works on `allow` and `ask` rules — deny rules cannot be overridden (security invariant).
 - **User settings** (`~/.aileron/settings.yaml`): Same schema as `aileron.yaml`, personal to the developer, not checked into any repo. Users can add personal allow/ask rules and override notification preferences. Users cannot override project deny rules or built-in structural deny rules.
 
-### Built-in structural deny rules
+### Division of responsibility: Aileron vs. agent host
 
-Always active, non-overridable, priority 300 (above user deny). They catch dangerous structural patterns regardless of user policy:
+Aileron handles **predictable commands** — static patterns that glob matching evaluates reliably. This is where policy-as-code shines: `git push *`, `rm -rf *`, `go test *`.
+
+**Obfuscated and dynamic commands** — piped chains, command substitution, base64 payloads, inline scripts — are the agent host's domain. Claude Code (and similar hosts) have conversation context that lets them evaluate *why* the agent is running a dynamic command. A static glob pattern cannot meaningfully distinguish a safe `python -c "print('hello')"` from a malicious one.
+
+Aileron does **not** suppress the agent host's native obfuscation detection. Both layers run:
+- Aileron handles the predictable middle (auto-approve safe, block dangerous, prompt for ambiguous)
+- The agent host handles dynamic/obfuscated command evaluation with its conversation context
+
+**Aileron captures all approval decisions in the audit trail** — from both Aileron's policy layer and the agent host's native approval system. This makes Aileron the single audit surface regardless of which layer made the decision.
+
+### Built-in ask rules for dynamic patterns
+
+Built-in rules default to `ask` (priority 150, overridable) for commands with dynamic or obfuscated patterns. These are **not** hard denials — they prompt the developer, who can override them via policy if they routinely use these patterns:
 
 - Pipe to shell execution (`| bash`, `| sh`, `| exec`)
 - `eval` (arbitrary code execution)
 - Base64 decode piped to execution
 - Remote fetch into command substitution (`$(curl ...)`, `$(wget ...)`)
 - Inline script execution (`python -c`, `python3 -c`, `node -e`, `ruby -e`, `perl -e`)
+
+A developer who regularly uses `python -c` can add it to their allow list. The built-in rules are defaults, not mandates.
 
 ### Default disposition
 
