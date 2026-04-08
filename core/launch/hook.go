@@ -27,9 +27,16 @@ type ToolInput struct {
 }
 
 // HookOutput is the JSON structure returned to Claude Code.
+// Uses the hookSpecificOutput format so Claude Code displays custom messages.
 type HookOutput struct {
-	Decision string `json:"decision"`          // "approve", "deny", "ask"
-	Reason   string `json:"reason,omitempty"`   // shown to user on deny
+	HookSpecificOutput *HookDecision `json:"hookSpecificOutput,omitempty"`
+}
+
+// HookDecision is the Claude Code PreToolUse decision format.
+type HookDecision struct {
+	HookEventName            string `json:"hookEventName"`
+	PermissionDecision       string `json:"permissionDecision"`                 // "approve", "deny", "ask"
+	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"` // shown to user
 }
 
 // RunHook reads a Claude Code PreToolUse hook request from stdin,
@@ -80,7 +87,19 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 }
 
 func writeHookOutput(w io.Writer, decision, reason string) {
-	output := HookOutput{Decision: decision, Reason: reason}
+	if reason == "" && decision == "deny" {
+		reason = "aileron: blocked by policy"
+	}
+	if reason != "" {
+		reason = "aileron: " + reason
+	}
+	output := HookOutput{
+		HookSpecificOutput: &HookDecision{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       decision,
+			PermissionDecisionReason: reason,
+		},
+	}
 	json.NewEncoder(w).Encode(output)
 }
 
