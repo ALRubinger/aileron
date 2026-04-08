@@ -49,23 +49,27 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 		return 1
 	}
 
-	// Only evaluate Bash tool calls. Non-Bash tools pass through.
+	// Debug logging when AILERON_DEBUG is set.
+	if debugLog := os.Getenv("AILERON_DEBUG"); debugLog != "" {
+		if f, err := os.OpenFile(debugLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			fmt.Fprintf(f, "hook: tool=%s command=%q cwd=%s\n", input.ToolName, input.ToolInput.Command, input.CWD)
+			f.Close()
+		}
+	}
+
+	// Only evaluate Bash tool calls. Non-Bash tools pass through silently.
 	if input.ToolName != "Bash" {
-		writeHookOutput(stdout, "allow", "")
 		return 0
 	}
 
 	command := input.ToolInput.Command
 	if command == "" {
-		writeHookOutput(stdout, "allow", "")
 		return 0
 	}
 
 	// Find policy file from the working directory.
 	policyPath := FindPolicyFile(input.CWD)
 	if policyPath == "" {
-		// No policy file — don't interfere.
-		writeHookOutput(stdout, "allow", "")
 		return 0
 	}
 
@@ -73,8 +77,9 @@ func RunHook(stdin io.Reader, stdout io.Writer) int {
 
 	switch result.Disposition {
 	case model.DispositionAllow:
-		// "allow" combined with --allowedTools "Bash(*)" auto-approves.
-		writeHookOutput(stdout, "allow", "")
+		// Exit 0 with no output — defers to Claude Code's permission system.
+		// With --allowedTools "Bash(*)", this auto-approves.
+		return 0
 	case model.DispositionDeny:
 		writeHookOutput(stdout, "deny", result.Reason)
 	case model.DispositionRequireApproval:

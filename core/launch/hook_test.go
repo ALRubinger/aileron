@@ -27,7 +27,10 @@ allow:
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
-	assertHookDecision(t, stdout.String(), "allow")
+	// Allow = no output (silent, defers to --allowedTools).
+	if stdout.Len() != 0 {
+		t.Errorf("expected no output for allow, got %q", stdout.String())
+	}
 }
 
 func TestRunHook_DeniedCommand(t *testing.T) {
@@ -70,18 +73,21 @@ func TestRunHook_NonBashTool(t *testing.T) {
 	var stdout bytes.Buffer
 	launch.RunHook(strings.NewReader(input), &stdout)
 
-	assertHookDecision(t, stdout.String(), "allow")
+	if stdout.Len() != 0 {
+		t.Errorf("expected no output for non-Bash tool, got %q", stdout.String())
+	}
 }
 
 func TestRunHook_NoPolicyFile(t *testing.T) {
-	dir := t.TempDir() // no aileron.yaml
+	dir := t.TempDir()
 
 	input := hookInput("Bash", "rm -rf /", dir)
 	var stdout bytes.Buffer
 	launch.RunHook(strings.NewReader(input), &stdout)
 
-	// No policy = allow (don't interfere).
-	assertHookDecision(t, stdout.String(), "allow")
+	if stdout.Len() != 0 {
+		t.Errorf("expected no output without policy, got %q", stdout.String())
+	}
 }
 
 func TestRunHook_EmptyCommand(t *testing.T) {
@@ -89,7 +95,9 @@ func TestRunHook_EmptyCommand(t *testing.T) {
 	var stdout bytes.Buffer
 	launch.RunHook(strings.NewReader(input), &stdout)
 
-	assertHookDecision(t, stdout.String(), "allow")
+	if stdout.Len() != 0 {
+		t.Errorf("expected no output for empty command, got %q", stdout.String())
+	}
 }
 
 func TestRunHook_InvalidJSON(t *testing.T) {
