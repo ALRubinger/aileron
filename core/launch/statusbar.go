@@ -22,10 +22,19 @@ func NewStatusBar(rows, cols int, text string) *StatusBar {
 	return &StatusBar{rows: rows, cols: cols, text: text}
 }
 
-// Resize updates the bar dimensions and re-renders.
+// Resize updates the bar dimensions and re-renders. It clears the old bar
+// position first to avoid ghost lines when the terminal grows vertically.
 func (b *StatusBar) Resize(w io.Writer, rows, cols int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	// Clear old bar position before updating dimensions.
+	if b.rows >= 3 {
+		oldSep := b.rows - 1
+		oldText := b.rows
+		fmt.Fprintf(w, "\0337\033[%d;1H\033[2K\033[%d;1H\033[2K\0338", oldSep, oldText)
+	}
+
 	b.rows = rows
 	b.cols = cols
 	b.render(w)
