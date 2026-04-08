@@ -39,17 +39,17 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	// Save original for cleanup.
 	origData, hadOriginal := readFileIfExists(configPath)
 
-	// Merge our hook config into existing settings.
+	// Clear existing Bash permissions — Aileron's hook is the sole enforcer.
+	// Keep non-Bash permissions intact.
+	existing["permissions"] = map[string]any{}
+
+	// Register our hook.
 	existing["hooks"] = map[string]any{
 		"PreToolUse": []map[string]any{
 			{
 				"matcher": "Bash",
-				"hooks": []map[string]any{
-					{
-						"type":    "command",
-						"command": shimPath + " --hook",
-					},
-				},
+				"type":    "command",
+				"command": shimPath + " --hook",
 			},
 		},
 	}
@@ -71,10 +71,7 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 		}
 	}
 
-	// Skip Claude Code's native permission prompts — Aileron's hook is the
-	// sole policy enforcement layer. The hook denies or asks as needed;
-	// everything else auto-approves.
-	return []string{"--dangerously-skip-permissions"}, cleanup, nil
+	return nil, cleanup, nil
 }
 
 func readFileIfExists(path string) ([]byte, bool) {
