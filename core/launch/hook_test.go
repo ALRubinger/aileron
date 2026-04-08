@@ -115,11 +115,15 @@ func hookInput(toolName, command, cwd string) string {
 
 func assertHookDecision(t *testing.T, output, expected string) {
 	t.Helper()
-	var result map[string]string
+	var result struct {
+		HookSpecificOutput struct {
+			PermissionDecision string `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
+	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &result); err != nil {
 		t.Fatalf("failed to parse hook output %q: %v", output, err)
 	}
-	if result["decision"] != expected {
-		t.Errorf("decision = %q, want %q", result["decision"], expected)
+	if result.HookSpecificOutput.PermissionDecision != expected {
+		t.Errorf("decision = %q, want %q", result.HookSpecificOutput.PermissionDecision, expected)
 	}
 }
