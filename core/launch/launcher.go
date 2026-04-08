@@ -81,7 +81,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), config.Agent.Env())
 
-	cmd := exec.CommandContext(ctx, agentPath, config.Args...)
+	// Agent-required args come first, then user-supplied args.
+	allArgs := append(config.Agent.Args(), config.Args...)
+	cmd := exec.CommandContext(ctx, agentPath, allArgs...)
 	cmd.Env = env
 	if config.Dir != "" {
 		cmd.Dir = config.Dir

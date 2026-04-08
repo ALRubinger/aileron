@@ -11,6 +11,9 @@ type Agent interface {
 	// BinaryNames returns candidate binary names to search on PATH, in
 	// preference order. For example, ["claude"] or ["codex", "openai-codex"].
 	BinaryNames() []string
+	// Args returns CLI arguments the agent requires. These are prepended
+	// before any user-supplied arguments.
+	Args() []string
 	// Env returns additional environment variables to set for the agent
 	// process, beyond the standard SHELL/AILERON_REAL_SHELL manipulation.
 	// Returns nil if no extra env is needed.
