@@ -9,7 +9,7 @@ import (
 )
 
 func TestStatusBar_Render(t *testing.T) {
-	bar := launch.NewStatusBar(24, 80, "Flying ✈️ withaileron.ai")
+	bar := launch.NewStatusBar(24, 80, "Flying ✈️ withaileron.ai ")
 	var buf bytes.Buffer
 	bar.Render(&buf)
 	out := buf.String()
