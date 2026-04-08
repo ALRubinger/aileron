@@ -1,23 +1,23 @@
 # Aileron
 
-**The deterministic execution plane for AI agents.**
+**Policy-enforced shell for AI coding agents.**
 
 Aileron lets your agents fly. Security, privacy, and accountability keep you in control so you can put on the afterburner.
 
 ## The Problem
 
-AI agents are powerful — but giving them direct access to your credentials, APIs, and irreversible actions is dangerous. Today, every agent deployment faces the same question: *"How do we let agents act on our behalf without handing them the keys?"*
+AI coding agents run shell commands on your behalf — but giving them unrestricted access to your terminal is dangerous. Every team faces the same question: *"How do we let agents run commands without rubber-stamping everything or missing the dangerous ones?"*
 
 ## The Solution
 
-Aileron sits between your agents and the outside world. Agents propose **intents** — what they want to do. Aileron evaluates policy, enforces approvals, and **executes the action itself**. Agents never hold credentials. Every action is logged with a complete audit trail.
+`aileron launch claude` wraps your agent in a policy-enforced shell. Every command the agent runs flows through `aileron-sh`, which evaluates it against your `aileron.yaml` rules before allowing execution. Safe commands auto-approve. Dangerous commands are blocked. Ambiguous commands prompt you once.
 
 ### Key Principles
 
-- **Zero-knowledge credential custody** — Your secrets are encrypted with a key only you hold. Aileron architecturally *cannot* see them.
 - **Policy-as-code** — Allow, deny, or ask rules defined in `aileron.yaml`, checked into your repo, reviewable in PRs.
-- **Complete audit trail** — Every action flows through Aileron, so the audit log is complete by construction.
-- **Agent-agnostic** — Works with any agent framework or LLM provider.
+- **Single approval layer** — Aileron replaces the agent's native permission prompts. One policy, one prompt.
+- **Complete audit trail** — Every decision is logged. The audit trail is the ground truth for what happened.
+- **Agent-aware** — Works with Claude Code today, extensible to other agents. Agent-specific quirks (command wrapping, shell validation) are handled transparently.
 
 ## Documentation
 

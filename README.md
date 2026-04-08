@@ -72,7 +72,7 @@ Today's agent hosts give you two modes: approve every command individually (50 p
 aileron launch claude
 ```
 
-Aileron spawns the agent as a child process with `SHELL=aileron-sh`. Every command the agent runs flows through the policy engine. No per-command wrappers — one shim catches everything.
+Aileron spawns the agent as a child process with a policy-enforced shell. Every command the agent runs flows through `aileron-sh` and the policy engine before reaching the real shell. Aileron handles agent-specific quirks (shell validation, command wrapping) so the policy rules stay clean.
 
 **2. Policy evaluates every command**
 
@@ -207,7 +207,7 @@ task build:docker    # Docker containers
 ./build/aileron launch claude
 ```
 
-This spawns Claude Code with `SHELL=aileron-sh`. Every command the agent runs flows through the shim. Currently a passthrough — policy evaluation is coming in [#64](https://github.com/ALRubinger/aileron/issues/64).
+This spawns Claude Code with the policy-enforced shell. Every command the agent runs flows through `aileron-sh`, which evaluates it against your `aileron.yaml` rules before allowing execution. Aileron is the single approval layer — Claude Code's native Bash approval is suppressed.
 
 ### Run tests
 
@@ -731,7 +731,7 @@ curl https://api.withaileron.ai/v1/health
 
 ## Architecture Principles
 
-**One shim catches everything.** `aileron-sh` is the agent's SHELL. Every command flows through it — no per-command wrappers, no agent-specific hooks. This works with any agent that respects `$SHELL`.
+**One shim catches everything.** `aileron-sh` is the agent's shell. Every command flows through it — no per-command wrappers. For agents that don't respect `$SHELL` directly (e.g. Claude Code), Aileron installs a wrapper script that satisfies the agent's shell validation and delegates to `aileron-sh`. Agent-specific command normalization (like unwrapping Claude Code's `eval` template) is gated on `AILERON_AGENT`.
 
 **Policy as code.** `aileron.yaml` lives in the repo, is reviewable in PRs, and is version-controlled. Three buckets (allow, deny, ask) eliminate both rubber-stamping and alert fatigue.
 
