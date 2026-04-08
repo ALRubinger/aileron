@@ -1,0 +1,29 @@
+{
+  "name": "@aileron/docs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aileron documentation site",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+  },
+  "dependencies": {
+    "@sveltejs/adapter-node": "^5.5.0",
+    "@sveltejs/kit": "^2.55.0",
+    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "marked": "^15.0.0",
+    "svelte": "^5.55.0",
+    "vite": "^6.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "mdsvex": "^0.12.0",
+    "svelte-check": "^4.0.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.0.0"
+  }
+}

@@ -26,7 +26,7 @@ tasks:
       - api/gen/server.gen.go
 
   build:
-    desc: Build everything (containers, server, MCP, enclave, CLI, shell shim, UI)
+    desc: Build everything (containers, server, MCP, enclave, CLI, shell shim, UI, docs)
     cmds:
       - task: build:docker
       - task: build:server
@@ -35,6 +35,7 @@ tasks:
       - task: build:cli
       - task: build:sh
       - task: build:ui
+      - task: build:docs
 
   build:docker:
     desc: Build all Docker containers
@@ -89,6 +90,14 @@ tasks:
       - pnpm install
       - pnpm run build
 
+  build:docs:
+    desc: Install docs dependencies and build
+    dir: docs
+    cmds:
+      - pnpm install
+      - cp ../core/api/openapi.yaml static/openapi.yaml
+      - pnpm run build
+
   mcp:setup:
     desc: Build and register the Aileron MCP server with Claude Code
     cmds:
@@ -112,6 +121,7 @@ tasks:
       - docker compose -f {{.COMPOSE_FILE}} down -v --remove-orphans
       - rm -rf build
       - rm -rf ui/.svelte-kit ui/build ui/node_modules
+      - rm -rf docs/.svelte-kit docs/build docs/node_modules
 
   logs:
     desc: Tail service logs
@@ -129,11 +139,19 @@ tasks:
     cmds:
       - pnpm dev
 
+  dev:docs:
+    desc: Run the docs dev server locally
+    dir: docs
+    cmds:
+      - cp ../core/api/openapi.yaml static/openapi.yaml
+      - pnpm dev
+
   lint:
     desc: Run linters
     cmds:
       - task: lint:go
       - task: lint:ui
+      - task: lint:docs
 
   lint:go:
     desc: Vet Go code
@@ -143,6 +161,12 @@ tasks:
   lint:ui:
     desc: Check the UI for type errors
     dir: ui
+    cmds:
+      - pnpm check
+
+  lint:docs:
+    desc: Check the docs site for type errors
+    dir: docs
     cmds:
       - pnpm check
 
