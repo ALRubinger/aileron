@@ -19,6 +19,9 @@ func (c Claude) Env() map[string]string { return nil }
 // so Claude Code loads the hook config.
 func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	config := map[string]any{
+		"permissions": map[string]any{
+			"allow": []string{"Bash(*)"},
+		},
 		"hooks": map[string]any{
 			"PreToolUse": []map[string]any{
 				{
@@ -51,8 +54,5 @@ func (c Claude) SetupHooks(shimPath string) ([]string, func(), error) {
 	}
 
 	cleanup := func() { os.RemoveAll(tmpDir) }
-	return []string{
-		"--settings", configPath,
-		"--allowedTools", "Bash(*)",
-	}, cleanup, nil
+	return []string{"--settings", configPath}, cleanup, nil
 }
