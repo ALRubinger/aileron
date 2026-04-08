@@ -239,30 +239,60 @@ func buildEnv(shimPath, wrapperPath string, agentEnv map[string]string) []string
 		origShell = "/bin/sh"
 	}
 
+	// Agent can override AILERON_REAL_SHELL (e.g. Claude Code needs /bin/bash
+	// because its command templates use bash builtins like shopt).
+	realShell := origShell
+	if v, ok := agentEnv["AILERON_REAL_SHELL"]; ok {
+		realShell = v
+	}
+
+	// Build a set of keys managed by buildEnv + agent overrides so we can
+	// strip them from the inherited environment in a single pass.
+	managed := map[string]bool{
+		"SHELL":            true,
+		"AILERON_REAL_SHELL": true,
+		"CLAUDE_CODE_SHELL":  true,
+	}
+	for k := range agentEnv {
+		managed[k] = true
+	}
+
 	env := os.Environ()
 	filtered := make([]string, 0, len(env)+len(agentEnv)+3)
 	for _, e := range env {
-		if len(e) >= 6 && e[:6] == "SHELL=" {
+		eqIdx := indexByte(e, '=')
+		if eqIdx < 0 {
+			filtered = append(filtered, e)
 			continue
 		}
-		if len(e) >= 19 && e[:19] == "AILERON_REAL_SHELL=" {
-			continue
-		}
-		if len(e) >= 17 && e[:17] == "CLAUDE_CODE_SHELL" {
+		if managed[e[:eqIdx]] {
 			continue
 		}
 		filtered = append(filtered, e)
 	}
 
 	filtered = append(filtered, "SHELL="+shimPath)
-	filtered = append(filtered, "AILERON_REAL_SHELL="+origShell)
+	filtered = append(filtered, "AILERON_REAL_SHELL="+realShell)
 	if wrapperPath != "" {
 		filtered = append(filtered, "CLAUDE_CODE_SHELL="+wrapperPath)
 	}
 
 	for k, v := range agentEnv {
+		if k == "AILERON_REAL_SHELL" {
+			continue // already handled above
+		}
 		filtered = append(filtered, k+"="+v)
 	}
 
 	return filtered
+}
+
+// indexByte returns the index of the first instance of c in s, or -1.
+func indexByte(s string, c byte) int {
+	for i := range len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
