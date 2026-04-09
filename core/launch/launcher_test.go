@@ -743,6 +743,10 @@ func TestSetupTerminalScreen(t *testing.T) {
 	if !strings.Contains(out, "test") {
 		t.Error("expected status bar text")
 	}
+	// Should set scroll region to confine agent output.
+	if !strings.Contains(out, "\033[1;22r") {
+		t.Error("expected scroll region 1-22")
+	}
 	// Should position cursor at top of agent area so the agent starts there.
 	if !strings.Contains(out, "\033[1;1H") {
 		t.Error("expected cursor at row 1 (top of agent area)")
@@ -817,6 +821,10 @@ func TestCleanupTerminalScreen(t *testing.T) {
 	launch.CleanupTerminalScreen(&buf, 24)
 	out := buf.String()
 
+	// Should reset scroll region
+	if !strings.Contains(out, "\033[r") {
+		t.Error("expected scroll region reset")
+	}
 	// Should move to bar area and clear
 	if !strings.Contains(out, "\033[23;1H\033[J") {
 		t.Errorf("expected clear at row 23, got %q", out)
