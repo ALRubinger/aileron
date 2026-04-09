@@ -30,6 +30,10 @@ type OutputCopier struct {
 	// Used to re-render the status bar after agent output settles.
 	onIdle func()
 
+	// directWrite receives data that must be written to dst exclusively
+	// by the copier goroutine — no concurrent writes.
+	directWrite chan []byte
+
 	mu        sync.Mutex
 	buf       []byte
 	paused    bool
@@ -82,15 +86,26 @@ func (oc *OutputCopier) SetPaused(p bool) {
 // either the real terminal or a buffer depending on overlay state.
 func NewOutputCopier(src io.Reader, dst io.Writer, overlay OverlayController) *OutputCopier {
 	return &OutputCopier{
-		src:     src,
-		dst:     dst,
-		overlay: overlay,
+		src:         src,
+		dst:         dst,
+		overlay:     overlay,
+		directWrite: make(chan []byte, 1),
 	}
 }
 
 // Run reads from the pty master and writes to the appropriate
 // destination. Blocks until the source returns an error or EOF.
 // Call in a goroutine.
+// WriteExclusive sends data to be written to dst by the copier
+// goroutine. This is the only safe way to write to dst from another
+// goroutine — it guarantees no concurrent writes. Blocks until the
+// copier processes the write.
+func (oc *OutputCopier) WriteExclusive(data []byte) {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	oc.directWrite <- cp
+}
+
 func (oc *OutputCopier) Run() {
 	buf := make([]byte, 4096)
 	for {
@@ -99,12 +114,28 @@ func (oc *OutputCopier) Run() {
 			if oc.shouldPause() {
 				oc.bufferOutput(buf[:n])
 				oc.ackPause()
+				// Drain any pending direct writes while paused.
+				oc.drainDirectWrites()
 			} else {
+				// Check for direct writes before pty output.
+				oc.drainDirectWrites()
 				oc.dst.Write(buf[:n])
 				oc.resetIdleTimer()
 			}
 		}
 		if err != nil {
+			return
+		}
+	}
+}
+
+// drainDirectWrites processes all pending exclusive write requests.
+func (oc *OutputCopier) drainDirectWrites() {
+	for {
+		select {
+		case data := <-oc.directWrite:
+			oc.dst.Write(data)
+		default:
 			return
 		}
 	}
