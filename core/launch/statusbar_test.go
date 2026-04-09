@@ -93,6 +93,77 @@ func TestStatusBar_NarrowTerminal(t *testing.T) {
 	}
 }
 
+func TestStatusBar_WithQueue_NoUnread(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	// No unread → branding only, right-aligned.
+	if !strings.Contains(out, "branding") {
+		t.Error("expected branding text")
+	}
+	if strings.Contains(out, "unread") {
+		t.Error("should not show unread count when queue is empty")
+	}
+}
+
+func TestStatusBar_WithQueue_Unread(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	q.Push(launch.Message{ID: "1", Preview: "Hey, is the deploy blocked?"})
+	q.Push(launch.Message{ID: "2", Preview: "PR looks good"})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "2 unread") {
+		t.Errorf("expected '2 unread' in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "branding") {
+		t.Error("expected branding text on the right")
+	}
+}
+
+func TestStatusBar_WithQueue_PreviewShown(t *testing.T) {
+	bar := launch.NewStatusBar(24, 120, "brand")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	q.Push(launch.Message{ID: "1", Preview: "Latest message preview"})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "Latest message") {
+		t.Errorf("expected preview text, got:\n%s", out)
+	}
+}
+
+func TestStatusBar_WithQueue_AfterMarkAllRead(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	q.Push(launch.Message{ID: "1", Preview: "hello"})
+	q.MarkAllRead()
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if strings.Contains(out, "unread") {
+		t.Error("should not show unread count after MarkAllRead")
+	}
+}
+
 func TestSetScrollRegion(t *testing.T) {
 	var buf bytes.Buffer
 	launch.SetScrollRegion(&buf, 1, 22)
