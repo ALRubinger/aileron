@@ -174,6 +174,113 @@ func TestRunLog_MissingFile(t *testing.T) {
 	}
 }
 
+func TestRunPolicyTest_Allow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: deny
+allow:
+  - "echo *"
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "test", "echo hello"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0 for allowed command, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "allow") {
+		t.Errorf("expected 'allow' in output, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunPolicyTest_Deny(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+deny:
+  - command: "rm -rf *"
+    description: "no recursive delete"
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "test", "rm -rf /tmp"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 for denied command, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "deny") {
+		t.Errorf("expected 'deny' in output, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunPolicyTest_MultipleCommands(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: ask
+allow:
+  - "echo *"
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "test", "echo hello", "curl evil.com"}, newTestRegistry(), &stdout, &stderr)
+	_ = code // mixed results
+	out := stdout.String()
+	if !strings.Contains(out, "allow") {
+		t.Error("expected allow for echo")
+	}
+	if !strings.Contains(out, "ask") {
+		t.Error("expected ask for curl")
+	}
+}
+
+func TestRunPolicyTest_NoPolicyFile(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "test", "echo hello"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "no aileron.yaml") {
+		t.Errorf("expected 'no aileron.yaml' error, got: %s", stderr.String())
+	}
+}
+
+func TestRunPolicyTest_NoCommands(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "test"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 for no commands, got %d", code)
+	}
+}
+
+func TestRunPolicyTest_InHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
+	if !strings.Contains(stdout.String(), "aileron policy test") {
+		t.Error("expected 'aileron policy test' in help output")
+	}
+}
+
 func TestRunLog_HelpShownInUsage(t *testing.T) {
 	var stdout bytes.Buffer
 	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
