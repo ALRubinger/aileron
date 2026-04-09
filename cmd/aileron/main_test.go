@@ -104,6 +104,74 @@ func TestRun_LaunchUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestRunInit_CreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Detected go") {
+		t.Errorf("expected language detection message, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "aileron.yaml") {
+		t.Errorf("expected file creation message, got: %s", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "aileron.yaml")); err != nil {
+		t.Error("aileron.yaml was not created")
+	}
+}
+
+func TestRunInit_AlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "already exists") {
+		t.Errorf("expected 'already exists' error, got: %s", stderr.String())
+	}
+}
+
+func TestRunInit_NoLanguage(t *testing.T) {
+	dir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	// No language detected — should not print language line.
+	if strings.Contains(stdout.String(), "Detected") {
+		t.Error("should not print language detection when none found")
+	}
+}
+
+func TestRunInit_InHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
+	if !strings.Contains(stdout.String(), "aileron init") {
+		t.Error("expected 'aileron init' in help output")
+	}
+}
+
 func TestRunLog_WithEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")

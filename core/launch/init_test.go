@@ -110,6 +110,34 @@ func TestInitPolicy_NoLanguage(t *testing.T) {
 	}
 }
 
+func TestInitPolicy_RustProject(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "Cargo.toml"), nil, 0o644)
+
+	path, err := launch.InitPolicy(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "cargo") {
+		t.Error("expected Rust-specific allow rules")
+	}
+}
+
+func TestInitPolicy_PythonProject(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "pyproject.toml"), nil, 0o644)
+
+	path, err := launch.InitPolicy(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "pytest") {
+		t.Error("expected Python-specific allow rules")
+	}
+}
+
 func TestInitPolicy_NodeProject(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644)
