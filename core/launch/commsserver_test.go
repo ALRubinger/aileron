@@ -246,6 +246,22 @@ func TestCommsServer_UnknownMethod(t *testing.T) {
 	}
 }
 
+func TestCommsServer_SocketPath(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-path.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	queue := launch.NewNotifyQueue(10, nil)
+	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	if srv.SocketPath() != socketPath {
+		t.Errorf("SocketPath = %q, want %q", srv.SocketPath(), socketPath)
+	}
+}
+
 func TestRequestComms_NoSocket(t *testing.T) {
 	resp := launch.RequestComms("/nonexistent/comms.sock", launch.CommsRequest{Method: "read_messages"})
 	if resp.OK {
