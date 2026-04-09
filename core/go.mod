@@ -14,7 +14,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/oapi-codegen/oapi-codegen/v2 v2.6.0
 	github.com/oapi-codegen/runtime v1.3.1
-	github.com/slack-go/slack v0.21.1
+	github.com/slack-go/slack v0.15.0
 	golang.org/x/crypto v0.36.0
 	golang.org/x/oauth2 v0.28.0
 	golang.org/x/term v0.30.0
