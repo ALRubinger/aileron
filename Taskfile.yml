@@ -95,6 +95,7 @@ tasks:
     dir: docs
     cmds:
       - pnpm install
+      - mkdir -p static
       - cp ../core/api/openapi.yaml static/openapi.yaml
       - pnpm run build
 
