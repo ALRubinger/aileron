@@ -231,7 +231,7 @@ func ComputeAgentRows(totalRows, barHeight int) int {
 func SetupTerminalScreen(w io.Writer, agentRows int, bar *StatusBar) {
 	fmt.Fprintf(w, "\033[2J")
 	bar.Render(w)
-	fmt.Fprintf(w, "\033[%d;1H", agentRows)
+	fmt.Fprintf(w, "\033[1;1H")
 }
 
 // CleanupTerminalScreen clears the status bar area.
