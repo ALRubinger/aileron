@@ -69,7 +69,7 @@ func main() {
 			writeAuditEntry(command, "allow", result.RuleID)
 		case model.DispositionDeny:
 			writeAuditEntry(command, "deny", result.RuleID)
-			writeDenyMessage(command, result.Reason)
+			writeDenyMessage(command, result.Reason, result.RuleID, policyPath)
 			os.Exit(1)
 		case model.DispositionRequireApproval:
 			response := promptApproval(command, result.Reason)
@@ -101,8 +101,8 @@ func main() {
 
 // writeDenyMessage writes the deny message to stderr. The output
 // copier's idle re-render will restore the status bar after.
-func writeDenyMessage(command, reason string) {
-	launch.WriteDeny(os.Stderr, command, reason)
+func writeDenyMessage(command, reason, ruleID, policyPath string) {
+	launch.WriteDeny(os.Stderr, command, reason, ruleID, policyPath)
 }
 
 // writeDenyByUserMessage writes the user-denied message to stderr.

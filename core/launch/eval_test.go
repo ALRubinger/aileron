@@ -143,13 +143,16 @@ func TestFindPolicyFile_NotFound(t *testing.T) {
 
 func TestWriteDeny(t *testing.T) {
 	var buf bytes.Buffer
-	launch.WriteDeny(&buf, "rm -rf /", "no recursive delete")
+	launch.WriteDeny(&buf, "rm -rf /", "no recursive delete", "deny_0", "/project/aileron.yaml")
 	out := buf.String()
 	if !strings.Contains(out, "Denied") {
-		t.Error("expected 'denied' in output")
+		t.Error("expected 'Denied' in output")
 	}
 	if !strings.Contains(out, "no recursive delete") {
 		t.Error("expected reason in output")
+	}
+	if !strings.Contains(out, "/project/aileron.yaml") {
+		t.Errorf("expected policy path in output, got %q", out)
 	}
 }
 
@@ -279,12 +282,28 @@ allow:
 	}
 }
 
+func TestWriteDeny_BuiltinRule(t *testing.T) {
+	var buf bytes.Buffer
+	launch.WriteDeny(&buf, "eval bad", "", "builtin_eval", "")
+	if !strings.Contains(buf.String(), "built-in rule") {
+		t.Errorf("expected 'built-in rule' source, got %q", buf.String())
+	}
+}
+
+func TestWriteDeny_PersonalSettings(t *testing.T) {
+	var buf bytes.Buffer
+	launch.WriteDeny(&buf, "curl", "blocked", "deny_0", "/Users/me/.aileron/settings.yaml")
+	if !strings.Contains(buf.String(), "personal settings") {
+		t.Errorf("expected 'personal settings' source, got %q", buf.String())
+	}
+}
+
 func TestWriteDeny_NoReason(t *testing.T) {
 	var buf bytes.Buffer
-	launch.WriteDeny(&buf, "bad command", "")
+	launch.WriteDeny(&buf, "bad command", "", "", "")
 	out := buf.String()
 	if !strings.Contains(out, "Denied") {
-		t.Error("expected 'denied' in output")
+		t.Error("expected 'Denied' in output")
 	}
 	// Should not have an extra line for empty reason.
 	lines := strings.Split(strings.TrimSpace(out), "\n")
