@@ -104,20 +104,21 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	}()
 
 	bar := "\033[33m┃\033[0m"
+	cl := "\033[2K" // clear entire line
 	var prompt strings.Builder
-	fmt.Fprintf(&prompt, "\r\n  %s ✈️  \033[1mAileron\033[0m\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s agent wants to run: \033[1m%s\033[0m\r\n", bar, command)
+	fmt.Fprintf(&prompt, "\r\n%s  %s ✈️  \033[1mAileron\033[0m\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  %s agent wants to run: \033[1m%s\033[0m\r\n", cl, bar, command)
 	if reason != "" {
-		fmt.Fprintf(&prompt, "  %s \033[2m%s\033[0m\r\n", bar, reason)
+		fmt.Fprintf(&prompt, "%s  %s \033[2m%s\033[0m\r\n", cl, bar, reason)
 	}
-	fmt.Fprintf(&prompt, "  %s\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[n]\033[0m  No, not this time        Block this command; ask again next time\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s\r\n", bar)
-	prompt.WriteString("  > ")
+	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  %s \033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  %s \033[1m[n]\033[0m  No, not this time        Block this command; ask again next time\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  %s \033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  %s \033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
+	fmt.Fprintf(&prompt, "%s  > ", cl)
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))
