@@ -2,6 +2,7 @@ package launch
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/creack/pty/v2"
 	"golang.org/x/term"
 )
@@ -80,7 +82,10 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("installing shell wrapper: %w", err)
 	}
 
-	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), config.Agent.Env())
+	sessionID := generateSessionID()
+	auditLog := resolveAuditLog(config.Dir)
+
+	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), sessionID, auditLog, config.Agent.Env())
 
 	// Agent-required args come first, then user-supplied args.
 	allArgs := append(config.Agent.Args(), config.Args...)
@@ -91,10 +96,17 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 
 	// If stdin is a terminal, use the pty proxy with status bar.
+	var result LaunchResult
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		return launchWithPty(cmd, config)
+		result, err = launchWithPty(cmd, config)
+	} else {
+		result, err = launchDirect(cmd, config)
 	}
-	return launchDirect(cmd, config)
+
+	if auditLog != "" {
+		PrintSessionSummary(os.Stderr, auditLog, sessionID)
+	}
+	return result, err
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.
@@ -236,7 +248,7 @@ func exitResult(err error) (LaunchResult, error) {
 //   - Sets CLAUDE_CODE_SHELL to the wrapper path (whose name contains "bash")
 //   - Sets AILERON_REAL_SHELL to the original SHELL value
 //   - Merges any agent-specific env vars
-func buildEnv(shimPath, wrapperPath, agentName string, agentEnv map[string]string) []string {
+func buildEnv(shimPath, wrapperPath, agentName, sessionID, auditLog string, agentEnv map[string]string) []string {
 	origShell := os.Getenv("SHELL")
 	if origShell == "" {
 		origShell = "/bin/sh"
@@ -255,6 +267,8 @@ func buildEnv(shimPath, wrapperPath, agentName string, agentEnv map[string]strin
 		"SHELL":              true,
 		"AILERON_REAL_SHELL": true,
 		"AILERON_AGENT":      true,
+		"AILERON_SESSION_ID": true,
+		"AILERON_AUDIT_LOG":  true,
 		"CLAUDE_CODE_SHELL":  true,
 	}
 	for k := range agentEnv {
@@ -278,6 +292,10 @@ func buildEnv(shimPath, wrapperPath, agentName string, agentEnv map[string]strin
 	filtered = append(filtered, "SHELL="+shimPath)
 	filtered = append(filtered, "AILERON_REAL_SHELL="+realShell)
 	filtered = append(filtered, "AILERON_AGENT="+agentName)
+	filtered = append(filtered, "AILERON_SESSION_ID="+sessionID)
+	if auditLog != "" {
+		filtered = append(filtered, "AILERON_AUDIT_LOG="+auditLog)
+	}
 	if wrapperPath != "" {
 		filtered = append(filtered, "CLAUDE_CODE_SHELL="+wrapperPath)
 	}
@@ -290,4 +308,78 @@ func buildEnv(shimPath, wrapperPath, agentName string, agentEnv map[string]strin
 	}
 
 	return filtered
+}
+
+// generateSessionID returns a short random hex string for correlating
+// audit entries within a single aileron launch session.
+func generateSessionID() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return fmt.Sprintf("%x", b)
+}
+
+// resolveAuditLog determines the audit log path. It looks for
+// aileron.yaml in the given directory (or cwd) and reads its
+// Settings.AuditLog field. Falls back to .aileron/audit.jsonl
+// relative to the policy file's directory.
+func resolveAuditLog(dir string) string {
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	policyPath := FindPolicyFile(dir)
+	if policyPath == "" {
+		// No policy file — use cwd/.aileron/audit.jsonl.
+		return filepath.Join(dir, ".aileron", "audit.jsonl")
+	}
+
+	policyDir := filepath.Dir(policyPath)
+
+	pf := loadPolicyFileFrom(policyPath)
+	if pf.Settings != nil && pf.Settings.AuditLog != "" {
+		p := pf.Settings.AuditLog
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(policyDir, p)
+		}
+		return p
+	}
+	return filepath.Join(policyDir, ".aileron", "audit.jsonl")
+}
+
+// PrintSessionSummary reads the audit log for the given session and
+// prints a summary of what happened.
+func PrintSessionSummary(w io.Writer, auditPath, sessionID string) {
+	entries, err := audit.ReadShellEntriesFiltered(auditPath, audit.ShellFilter{
+		SessionID: sessionID,
+	})
+	if err != nil || len(entries) == 0 {
+		return
+	}
+
+	var allowed, denied, approved, userDenied int
+	for _, e := range entries {
+		switch e.Disposition {
+		case "allow":
+			allowed++
+		case "deny":
+			denied++
+		case "ask_approved":
+			approved++
+		case "ask_denied":
+			userDenied++
+		}
+	}
+
+	fmt.Fprintf(w, "\n\033[1maileron session summary:\033[0m\n")
+	if allowed > 0 {
+		fmt.Fprintf(w, "  %d command(s) allowed by policy\n", allowed)
+	}
+	if denied > 0 {
+		fmt.Fprintf(w, "  %d command(s) denied by policy\n", denied)
+	}
+	if approved > 0 {
+		fmt.Fprintf(w, "  %d command(s) approved by user\n", approved)
+	}
+	if userDenied > 0 {
+		fmt.Fprintf(w, "  %d command(s) denied by user\n", userDenied)
+	}
 }
