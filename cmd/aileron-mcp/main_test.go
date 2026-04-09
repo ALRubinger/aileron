@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 )
 
@@ -151,6 +153,159 @@ func TestDispatchTool_SendMessage(t *testing.T) {
 	if !result.IsError {
 		t.Fatal("expected error without comms socket")
 	}
+}
+
+// TestReadMessages_WithServer starts a real CommsServer to test the
+// full read_messages path through the Unix socket.
+func TestReadMessages_WithServer(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-mcp-test-read.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	// Start a minimal comms server that serves from a mock socket.
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Read request, respond with canned messages.
+			var req commsRequest
+			json.NewDecoder(conn).Decode(&req)
+			json.NewEncoder(conn).Encode(commsResponse{
+				OK: true,
+				Messages: []commsMessage{
+					{ID: "1", Service: "slack", Channel: "#backend", Author: "Alice", Body: "hello"},
+				},
+			})
+			conn.Close()
+		}
+	}()
+
+	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
+	result := s.readMessages(map[string]any{})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
+	}
+	// Result should contain the message data as JSON.
+	text := result.Content[0].Text
+	if !contains(text, "Alice") || !contains(text, "#backend") {
+		t.Errorf("expected Alice and #backend in result, got %s", text)
+	}
+}
+
+// TestSendMessage_WithServer tests the full send_message path.
+// The mock server auto-approves.
+func TestSendMessage_WithServer(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-mcp-test-send.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req commsRequest
+			json.NewDecoder(conn).Decode(&req)
+			json.NewEncoder(conn).Encode(commsResponse{OK: true})
+			conn.Close()
+		}
+	}()
+
+	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
+	result := s.sendMessage(map[string]any{"service": "slack", "channel": "#test", "body": "hello"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
+	}
+	if result.Content[0].Text != "Message sent successfully." {
+		t.Errorf("unexpected result: %s", result.Content[0].Text)
+	}
+}
+
+// TestSendMessage_WithServer_Denied tests the denial path.
+func TestSendMessage_WithServer_Denied(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-mcp-test-deny.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req commsRequest
+			json.NewDecoder(conn).Decode(&req)
+			json.NewEncoder(conn).Encode(commsResponse{Error: "message denied by user"})
+			conn.Close()
+		}
+	}()
+
+	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
+	result := s.sendMessage(map[string]any{"service": "slack", "channel": "#test", "body": "denied"})
+	if !result.IsError {
+		t.Fatal("expected error for denied message")
+	}
+}
+
+// TestReadMessages_FilterArgs tests that filter args are passed through.
+func TestReadMessages_FilterArgs(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-mcp-test-filter.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	var receivedReq commsRequest
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		json.NewDecoder(conn).Decode(&receivedReq)
+		json.NewEncoder(conn).Encode(commsResponse{OK: true})
+		conn.Close()
+	}()
+
+	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
+	s.readMessages(map[string]any{"service": "discord", "channel": "dev-chat"})
+
+	if receivedReq.Service != "discord" || receivedReq.Channel != "dev-chat" {
+		t.Errorf("expected filter args passed through, got service=%q channel=%q", receivedReq.Service, receivedReq.Channel)
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHandle_Ping(t *testing.T) {
