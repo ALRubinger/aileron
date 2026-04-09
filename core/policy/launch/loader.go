@@ -173,6 +173,9 @@ func Merge(base, overlay *PolicyFile) *PolicyFile {
 	// Merge env: union scrub, passthrough beats scrub.
 	result.Env = mergeEnv(base.Env, overlay.Env)
 
+	// Merge notifications: overlay wins (last-writer-wins for the whole block).
+	result.Notifications = mergeNotify(base.Notifications, overlay.Notifications)
+
 	// Process overrides: collect all override directives from overlay, then
 	// remove matching rules from allow and ask. Deny rules cannot be overridden.
 	allOverlaySources := append(append([]Rule{}, overlay.Allow...), overlay.Ask...)
@@ -212,6 +215,29 @@ func mergeEnv(base, overlay *EnvConfig) *EnvConfig {
 		result.Scrub = filtered
 	}
 	return result
+}
+
+// mergeNotify merges notification configs. The overlay wins for each
+// service block (Slack, Discord). If the overlay defines a service,
+// it replaces the base entirely for that service.
+func mergeNotify(base, overlay *NotifyConfig) *NotifyConfig {
+	if base == nil && overlay == nil {
+		return nil
+	}
+	if base == nil {
+		return overlay
+	}
+	if overlay == nil {
+		return base
+	}
+	result := *base
+	if overlay.Slack != nil {
+		result.Slack = overlay.Slack
+	}
+	if overlay.Discord != nil {
+		result.Discord = overlay.Discord
+	}
+	return &result
 }
 
 func appendUnique(base []string, items ...string) []string {

@@ -10,14 +10,15 @@ import (
 
 // PolicyFile is the top-level schema for aileron.yaml.
 type PolicyFile struct {
-	Version  int        `yaml:"version"`
-	Profiles []string   `yaml:"profiles,omitempty"`
-	Default  string     `yaml:"default,omitempty"` // "allow", "deny", "ask"
-	Settings *Settings  `yaml:"settings,omitempty"`
-	Env      *EnvConfig `yaml:"env,omitempty"`
-	Allow    []Rule     `yaml:"allow,omitempty"`
-	Deny     []Rule     `yaml:"deny,omitempty"`
-	Ask      []Rule     `yaml:"ask,omitempty"`
+	Version       int              `yaml:"version"`
+	Profiles      []string         `yaml:"profiles,omitempty"`
+	Default       string           `yaml:"default,omitempty"` // "allow", "deny", "ask"
+	Settings      *Settings        `yaml:"settings,omitempty"`
+	Env           *EnvConfig       `yaml:"env,omitempty"`
+	Notifications *NotifyConfig    `yaml:"notifications,omitempty"`
+	Allow         []Rule           `yaml:"allow,omitempty"`
+	Deny          []Rule           `yaml:"deny,omitempty"`
+	Ask           []Rule           `yaml:"ask,omitempty"`
 }
 
 // Settings holds launch session configuration.
@@ -25,6 +26,35 @@ type Settings struct {
 	AskMode  string `yaml:"ask_mode,omitempty"`  // "terminal" or "ui"
 	AuditLog string `yaml:"audit_log,omitempty"` // path to audit log file
 	Timeout  int    `yaml:"timeout,omitempty"`   // seconds to wait for human response
+}
+
+// NotifyConfig holds notification channel configuration for Slack and Discord.
+type NotifyConfig struct {
+	Slack   *SlackNotifyConfig   `yaml:"slack,omitempty"`
+	Discord *DiscordNotifyConfig `yaml:"discord,omitempty"`
+}
+
+// SlackNotifyConfig configures Slack integration.
+type SlackNotifyConfig struct {
+	AppToken string         `yaml:"app_token,omitempty"` // xapp-... Socket Mode token
+	BotToken string         `yaml:"bot_token,omitempty"` // xoxb-... Bot token
+	Channels []ChannelConfig `yaml:"channels,omitempty"`
+	Ignore   []string       `yaml:"ignore,omitempty"`
+}
+
+// DiscordNotifyConfig configures Discord integration.
+type DiscordNotifyConfig struct {
+	BotToken string         `yaml:"bot_token,omitempty"`
+	Channels []ChannelConfig `yaml:"channels,omitempty"`
+	Ignore   []string       `yaml:"ignore,omitempty"`
+}
+
+// ChannelConfig defines how a single channel is handled.
+type ChannelConfig struct {
+	Name      string `yaml:"name"`
+	Show      string `yaml:"show,omitempty"`       // "all", "mentions", "none"
+	AutoDraft bool   `yaml:"auto_draft,omitempty"` // route to agent for draft reply
+	Priority  string `yaml:"priority,omitempty"`   // "normal", "high"
 }
 
 // EnvConfig controls environment variable scrubbing.
