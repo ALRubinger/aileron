@@ -103,7 +103,10 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	}
 	defer tty.Close()
 
-	// Switch to alternate screen buffer.
+	// Ensure any pending stdout writes are flushed before switching screens.
+	os.Stdout.Sync()
+
+	// Switch to alternate screen buffer and clear it.
 	fmt.Fprint(tty, "\033[?1049h\033[2J\033[1;1H")
 	defer fmt.Fprint(tty, "\033[?1049l")
 

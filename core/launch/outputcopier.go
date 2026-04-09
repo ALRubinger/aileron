@@ -33,6 +33,7 @@ type OutputCopier struct {
 	mu        sync.Mutex
 	buf       []byte
 	paused    bool
+	pausedCh  chan struct{} // closed when copier acknowledges pause
 	idleTimer *time.Timer
 }
 
@@ -52,10 +53,24 @@ func (oc *OutputCopier) SetOnIdle(fn func()) {
 	oc.onIdle = fn
 }
 
-// SetPaused programmatically pauses or resumes output. When paused,
-// output is buffered. When unpaused, buffered output is flushed.
+// SetPaused programmatically pauses or resumes output. When pausing,
+// blocks until the copier's current write cycle completes so there's
+// no race with the caller switching terminal modes. When unpausing,
+// buffered output is flushed.
 func (oc *OutputCopier) SetPaused(p bool) {
 	oc.mu.Lock()
+	if p && !oc.paused {
+		oc.pausedCh = make(chan struct{})
+		oc.paused = true
+		oc.mu.Unlock()
+		// Wait for the copier to acknowledge, with a timeout in case
+		// no data is flowing (the Read blocks).
+		select {
+		case <-oc.pausedCh:
+		case <-time.After(100 * time.Millisecond):
+		}
+		return
+	}
 	oc.paused = p
 	oc.mu.Unlock()
 	if !p {
@@ -83,6 +98,7 @@ func (oc *OutputCopier) Run() {
 		if n > 0 {
 			if oc.shouldPause() {
 				oc.bufferOutput(buf[:n])
+				oc.ackPause()
 			} else {
 				oc.dst.Write(buf[:n])
 				oc.resetIdleTimer()
@@ -112,6 +128,16 @@ func (oc *OutputCopier) shouldPause() bool {
 		}
 	}
 	return false
+}
+
+// ackPause signals SetPaused that the copier is now buffering.
+func (oc *OutputCopier) ackPause() {
+	oc.mu.Lock()
+	if oc.pausedCh != nil {
+		close(oc.pausedCh)
+		oc.pausedCh = nil
+	}
+	oc.mu.Unlock()
 }
 
 func (oc *OutputCopier) resetIdleTimer() {
