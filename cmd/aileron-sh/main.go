@@ -59,9 +59,9 @@ func main() {
 	// intervening shell flags (-l, -i, etc.).
 	cwd, _ := os.Getwd()
 	rawCommand, hasCommand := extractCommand(args)
-	command := normalizeCommand(os.Getenv("AILERON_AGENT"), rawCommand)
+	command, shouldEval := normalizeCommand(os.Getenv("AILERON_AGENT"), rawCommand)
 	policyPath := launch.FindPolicyFile(cwd)
-	if hasCommand && policyPath != "" {
+	if hasCommand && shouldEval && policyPath != "" {
 		result := launch.EvaluateCommand(policyPath, command, cwd)
 
 		switch result.Disposition {
@@ -176,14 +176,22 @@ func extractCommand(args []string) (string, bool) {
 }
 
 // normalizeCommand applies agent-specific command transformations before
-// policy evaluation. Each agent may wrap commands differently; this function
-// strips that wrapping so policy rules match the developer's intent.
-func normalizeCommand(agent, command string) string {
+// policy evaluation. Returns the normalized command and whether policy
+// should be evaluated. For Claude Code, only eval-wrapped commands are
+// user commands — everything else is infrastructure (snapshot scripts,
+// etc.) and should pass through without policy evaluation.
+func normalizeCommand(agent, command string) (string, bool) {
 	switch agent {
 	case "claude":
-		return unwrapClaudeEval(command)
+		inner := unwrapClaudeEval(command)
+		if inner == command {
+			// No eval wrapper found — this is a Claude Code infrastructure
+			// command (snapshot creation, etc.), not a user command.
+			return command, false
+		}
+		return inner, true
 	default:
-		return command
+		return command, true
 	}
 }
 
@@ -195,34 +203,42 @@ func normalizeCommand(agent, command string) string {
 // This function finds the eval '...' segment and returns the inner command.
 // If the input doesn't match the wrapper pattern, it is returned unchanged.
 func unwrapClaudeEval(command string) string {
-	// Look for: eval '...'
-	const evalPrefix = "eval '"
-	idx := strings.Index(command, evalPrefix)
-	if idx < 0 {
-		return command
-	}
+	// Try quoted form first: eval '...'
+	const quotedPrefix = "eval '"
+	if idx := strings.Index(command, quotedPrefix); idx >= 0 {
+		inner := command[idx+len(quotedPrefix):]
 
-	inner := command[idx+len(evalPrefix):]
-
-	// Find the closing single quote. The inner command uses '\'' to escape
-	// literal single quotes (shell idiom: end quote, escaped quote, start quote).
-	var b strings.Builder
-	for i := 0; i < len(inner); {
-		if inner[i] == '\'' {
-			// Check for '\'' escape sequence (end-quote, backslash-quote, start-quote).
-			if i+3 < len(inner) && inner[i:i+4] == `'\''` {
-				b.WriteByte('\'')
-				i += 4
-				continue
+		var b strings.Builder
+		for i := 0; i < len(inner); {
+			if inner[i] == '\'' {
+				if i+3 < len(inner) && inner[i:i+4] == `'\''` {
+					b.WriteByte('\'')
+					i += 4
+					continue
+				}
+				return b.String()
 			}
-			// Unescaped closing quote — we're done.
-			return b.String()
+			b.WriteByte(inner[i])
+			i++
 		}
-		b.WriteByte(inner[i])
-		i++
 	}
 
-	// No closing quote found — return original command unchanged.
+	// Try unquoted form: eval <command> \< /dev/null
+	// Claude Code sometimes sends: shopt ... && eval ls \< /dev/null && pwd ...
+	const unquotedPrefix = "eval "
+	if idx := strings.Index(command, unquotedPrefix); idx >= 0 {
+		rest := command[idx+len(unquotedPrefix):]
+
+		// The user command is everything up to the first escaped redirect
+		// (\<) or && or the end of string.
+		for _, sep := range []string{` \<`, ` \>`, " &&", " ||"} {
+			if end := strings.Index(rest, sep); end >= 0 {
+				return strings.TrimSpace(rest[:end])
+			}
+		}
+		return strings.TrimSpace(rest)
+	}
+
 	return command
 }
 

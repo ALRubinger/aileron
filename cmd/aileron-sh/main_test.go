@@ -541,6 +541,51 @@ allow:
 	}
 }
 
+// TestShimClaudeInfrastructurePassthrough verifies that Claude Code
+// infrastructure commands (no eval wrapper) pass through without
+// policy evaluation, even with default: deny.
+func TestShimClaudeInfrastructurePassthrough(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: deny
+`)
+
+	// This simulates a Claude Code snapshot script — no eval wrapper.
+	infraCmd := `SNAPSHOT_FILE=/tmp/test.sh; echo "# snapshot" > "$SNAPSHOT_FILE"`
+	cmd := exec.Command(binary, "-c", infraCmd)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash", "AILERON_AGENT=claude")
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("infrastructure command should pass through even with default:deny, got: %v", err)
+	}
+}
+
+// TestShimClaudeUnquotedEval verifies that unquoted eval commands
+// (eval ls \< /dev/null) are unwrapped correctly.
+func TestShimClaudeUnquotedEval(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: deny
+allow:
+  - "echo *"
+`)
+
+	wrapped := `shopt -u extglob 2>/dev/null || true && eval echo hello-unquoted \< /dev/null && pwd -P >| /tmp/claude-test-cwd`
+	cmd := exec.Command(binary, "-c", "-l", wrapped)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash", "AILERON_AGENT=claude")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("expected allowed unquoted eval command to succeed: %v", err)
+	}
+	if !strings.Contains(string(out), "hello-unquoted") {
+		t.Errorf("expected 'hello-unquoted' in output, got %q", string(out))
+	}
+}
+
 // writePolicyDir creates a temp directory with an aileron.yaml and returns
 // the directory path.
 func writePolicyDir(t *testing.T, yaml string) string {
