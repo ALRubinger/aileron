@@ -209,6 +209,41 @@ task build:docker    # Docker containers
 
 This spawns Claude Code with the policy-enforced shell. Every command the agent runs flows through `aileron-sh`, which evaluates it against your `aileron.yaml` rules before allowing execution. Aileron is the single approval layer — Claude Code's native Bash approval is suppressed.
 
+### Slack notifications
+
+Aileron can receive Slack messages in your terminal while you work. Incoming messages appear in the status bar; press **Ctrl-A** to open the full notification overlay.
+
+**1. Create a Slack app** with [Socket Mode](https://api.slack.com/apis/socket-mode) enabled. You need:
+- An **App-Level Token** (`xapp-...`) with `connections:write` scope
+- A **Bot Token** (`xoxb-...`) with `channels:history`, `channels:read`, `chat:write`, `users:read` scopes
+- Subscribe to the `message.channels` event
+
+**2. Add the tokens to your `aileron.yaml`:**
+
+```yaml
+notifications:
+  slack:
+    app_token: xapp-1-A0123456789-...
+    bot_token: xoxb-...
+    channels:
+      - name: "#backend"
+        show: all
+        auto_draft: true
+      - name: "#incidents"
+        show: all
+        priority: high
+    ignore:
+      - "#random"
+```
+
+**3. Launch as usual** — Aileron starts the Slack listener automatically:
+
+```sh
+./build/aileron launch claude
+```
+
+Messages from configured channels appear in the notification bar. Press **Ctrl-A** to view the full queue, navigate with **j/k** or arrow keys, and **Escape** to return.
+
 ### Run tests
 
 ```sh
