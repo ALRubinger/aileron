@@ -180,6 +180,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, pause
 
 	outputCopier := NewOutputCopier(ptmx, os.Stdout, nil)
 	outputCopier.SetPauseFile(pauseFile)
+	outputCopier.SetOnIdle(func() { bar.Render(os.Stdout) })
 	overlay := NewOverlay(queue, outputCopier, os.Stdout, rows, cols, nil)
 	outputCopier.SetOverlay(overlay)
 	router := NewKeyRouter(os.Stdin, ptmx, overlay)
