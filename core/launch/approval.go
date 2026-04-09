@@ -110,21 +110,32 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	}()
 
 	// Switch to alternate screen buffer — preserves scrollback history.
-	bar := "\033[33m┃\033[0m"
+	w := 74 // inner width of the box
+	pad := func(content string) string {
+		// Pad content to fixed width for the right border.
+		display := len(content) // approximate — good enough for ASCII
+		if display >= w {
+			return content
+		}
+		return content + strings.Repeat(" ", w-display)
+	}
+
 	var prompt strings.Builder
 	prompt.WriteString("\033[?1049h\033[2J\033[1;1H")
-	fmt.Fprintf(&prompt, "  %s ✈️  \033[1mAileron\033[0m\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s agent wants to run: \033[1m%s\033[0m\r\n", bar, command)
+	fmt.Fprintf(&prompt, "  \033[33m┌─ ✈️ Aileron %s┐\033[0m\r\n", strings.Repeat("─", w-12))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  ⚠️  The agent wants to run:%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w-29))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  \033[1;36m%s\033[0m%s\033[33m│\033[0m\r\n", command, strings.Repeat(" ", w-2-len(command)))
 	if reason != "" {
-		fmt.Fprintf(&prompt, "  %s \033[2m%s\033[0m\r\n", bar, reason)
+		fmt.Fprintf(&prompt, "  \033[33m│\033[0m  \033[2m%s\033[0m%s\033[33m│\033[0m\r\n", reason, strings.Repeat(" ", w-2-len(reason)))
 	}
-	fmt.Fprintf(&prompt, "  %s\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[n]\033[0m  No, not this time        Block this command; ask again next time\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s \033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy\r\n", bar)
-	fmt.Fprintf(&prompt, "  %s\r\n", bar)
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time"))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[n]\033[0m  No, not this time        Block this command; ask again next time"))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy"))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy"))
+	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
+	fmt.Fprintf(&prompt, "  \033[33m└%s┘\033[0m\r\n", strings.Repeat("─", w))
 	prompt.WriteString("  > ")
 
 	if s.copier != nil {
