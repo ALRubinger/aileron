@@ -227,18 +227,15 @@ func ComputeAgentRows(totalRows, barHeight int) int {
 	return rows
 }
 
-// SetupTerminalScreen clears the screen, sets the scroll region to
-// confine agent output above the status bar, and renders the bar.
+// SetupTerminalScreen clears the screen and renders the status bar.
 func SetupTerminalScreen(w io.Writer, agentRows int, bar *StatusBar) {
-	fmt.Fprintf(w, "\033[2J")
-	SetScrollRegion(w, 1, agentRows)
+	fmt.Fprintf(w, "\033[2J\033[1;1H")
 	bar.Render(w)
 	fmt.Fprintf(w, "\033[1;1H")
 }
 
-// CleanupTerminalScreen resets the scroll region and clears the status bar.
+// CleanupTerminalScreen clears the status bar area.
 func CleanupTerminalScreen(w io.Writer, totalRows int) {
-	ResetScrollRegion(w)
 	fmt.Fprintf(w, "\033[%d;1H\033[J", totalRows-1)
 }
 
@@ -255,7 +252,6 @@ func HandleResize(w io.Writer, fd int, ptmx *os.File, bar *StatusBar) {
 		Rows: uint16(newAgentRows),
 		Cols: uint16(newCols),
 	})
-	SetScrollRegion(w, 1, newAgentRows)
 	bar.Resize(w, newRows, newCols)
 }
 
