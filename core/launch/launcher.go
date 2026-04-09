@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/ALRubinger/aileron/core/audit"
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 	"github.com/creack/pty/v2"
 	"golang.org/x/term"
 )
@@ -84,8 +85,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	sessionID := generateSessionID()
 	auditLog := resolveAuditLog(config.Dir)
+	envConfig := loadEnvConfig(config.Dir)
 
-	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), sessionID, auditLog, config.Agent.Env())
+	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), sessionID, auditLog, envConfig, config.Agent.Env())
 
 	// Agent-required args come first, then user-supplied args.
 	allArgs := append(config.Agent.Args(), config.Args...)
@@ -248,7 +250,7 @@ func exitResult(err error) (LaunchResult, error) {
 //   - Sets CLAUDE_CODE_SHELL to the wrapper path (whose name contains "bash")
 //   - Sets AILERON_REAL_SHELL to the original SHELL value
 //   - Merges any agent-specific env vars
-func buildEnv(shimPath, wrapperPath, agentName, sessionID, auditLog string, agentEnv map[string]string) []string {
+func buildEnv(shimPath, wrapperPath, agentName, sessionID, auditLog string, envConfig *launchpolicy.EnvConfig, agentEnv map[string]string) []string {
 	origShell := os.Getenv("SHELL")
 	if origShell == "" {
 		origShell = "/bin/sh"
@@ -283,7 +285,11 @@ func buildEnv(shimPath, wrapperPath, agentName, sessionID, auditLog string, agen
 			filtered = append(filtered, e)
 			continue
 		}
-		if managed[e[:eqIdx]] {
+		key := e[:eqIdx]
+		if managed[key] {
+			continue
+		}
+		if shouldScrub(key, envConfig) {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -388,4 +394,55 @@ func PrintSessionSummary(w io.Writer, auditPath, sessionID string) {
 	if userDenied > 0 {
 		fmt.Fprintf(w, "  %d command(s) denied by user\n", userDenied)
 	}
+}
+
+// loadEnvConfig loads the merged policy's EnvConfig for env scrubbing.
+func loadEnvConfig(dir string) *launchpolicy.EnvConfig {
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	policyPath := FindPolicyFile(dir)
+	if policyPath == "" {
+		return nil
+	}
+	pf := loadPolicyFileFrom(policyPath)
+	return pf.Env
+}
+
+// shouldScrub returns true if the env var key matches a scrub pattern
+// and is not in the passthrough list.
+func shouldScrub(key string, cfg *launchpolicy.EnvConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	// Passthrough beats scrub.
+	for _, p := range cfg.Passthrough {
+		if envGlobMatch(p, key) {
+			return false
+		}
+	}
+	for _, s := range cfg.Scrub {
+		if envGlobMatch(s, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// envGlobMatch matches an env var name against a pattern with * wildcards.
+// Supports prefix (AWS_*), suffix (*_SECRET), and exact match.
+func envGlobMatch(pattern, name string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") {
+		return strings.Contains(name, pattern[1:len(pattern)-1])
+	}
+	if strings.HasPrefix(pattern, "*") {
+		return strings.HasSuffix(name, pattern[1:])
+	}
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(name, pattern[:len(pattern)-1])
+	}
+	return pattern == name
 }
