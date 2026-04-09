@@ -18,6 +18,7 @@ import (
 type EvalResult struct {
 	Disposition model.Disposition
 	Reason      string
+	RuleID      string // which policy rule matched
 }
 
 // EvaluateCommand loads policy from the given file (or uses an empty default)
@@ -31,7 +32,7 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 
 	active := policy.ActiveStatus()
 	if err := store.Create(ctx, policy.MakePolicy("launch", "default", rules, active)); err != nil {
-		return EvalResult{model.DispositionRequireApproval, "policy load error"}
+		return EvalResult{model.DispositionRequireApproval, "policy load error", ""}
 	}
 
 	engine := policy.NewRuleEngine(store)
@@ -60,10 +61,15 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 		},
 	})
 	if err != nil {
-		return EvalResult{model.DispositionRequireApproval, "policy evaluation error"}
+		return EvalResult{model.DispositionRequireApproval, "policy evaluation error", ""}
 	}
 
-	return EvalResult{decision.Disposition, decision.DenialReason}
+	ruleID := ""
+	if len(decision.MatchedPolicies) > 0 {
+		ruleID = decision.MatchedPolicies[0].RuleID
+	}
+
+	return EvalResult{decision.Disposition, decision.DenialReason, ruleID}
 }
 
 func loadPolicyFileFrom(path string) *launchpolicy.PolicyFile {
