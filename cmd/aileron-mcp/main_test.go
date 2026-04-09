@@ -48,7 +48,7 @@ func TestHandle_NotificationsInitialized(t *testing.T) {
 	}
 }
 
-func TestHandle_ToolsList(t *testing.T) {
+func TestHandle_ToolsList_CloudOnly(t *testing.T) {
 	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -64,10 +64,92 @@ func TestHandle_ToolsList(t *testing.T) {
 	}
 	tools, ok := result["tools"].([]toolDef)
 	if !ok || len(tools) != 1 {
-		t.Fatal("expected exactly one tool")
+		t.Fatal("expected exactly one tool (submit_intent)")
 	}
 	if tools[0].Name != "submit_intent" {
-		t.Errorf("expected submit_intent tool, got %s", tools[0].Name)
+		t.Errorf("expected submit_intent, got %s", tools[0].Name)
+	}
+}
+
+func TestHandle_ToolsList_WithComms(t *testing.T) {
+	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`2`),
+		Method:  "tools/list",
+	})
+	result := resp.Result.(map[string]any)
+	tools := result["tools"].([]toolDef)
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools (read_messages, send_message), got %d", len(tools))
+	}
+	names := map[string]bool{}
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+	if !names["read_messages"] || !names["send_message"] {
+		t.Errorf("expected read_messages and send_message, got %v", names)
+	}
+}
+
+func TestHandle_ToolsList_Both(t *testing.T) {
+	s := &server{aileronURL: "http://localhost", commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`2`),
+		Method:  "tools/list",
+	})
+	result := resp.Result.(map[string]any)
+	tools := result["tools"].([]toolDef)
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(tools))
+	}
+}
+
+func TestReadMessages_NoSocket(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.readMessages(map[string]any{})
+	if !result.IsError {
+		t.Fatal("expected error without comms socket")
+	}
+}
+
+func TestSendMessage_NoSocket(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.sendMessage(map[string]any{"service": "slack", "channel": "#test", "body": "hi"})
+	if !result.IsError {
+		t.Fatal("expected error without comms socket")
+	}
+}
+
+func TestSendMessage_MissingFields(t *testing.T) {
+	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
+	result := s.sendMessage(map[string]any{})
+	if !result.IsError {
+		t.Fatal("expected error for missing fields")
+	}
+}
+
+func TestRequestComms_NoSocket(t *testing.T) {
+	resp := requestComms("/nonexistent/socket.sock", commsRequest{Method: "read_messages"})
+	if resp.Error == "" {
+		t.Fatal("expected error for missing socket")
+	}
+}
+
+func TestDispatchTool_ReadMessages(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.dispatchTool(context.Background(), "read_messages", nil)
+	if !result.IsError {
+		t.Fatal("expected error without comms socket")
+	}
+}
+
+func TestDispatchTool_SendMessage(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.dispatchTool(context.Background(), "send_message", map[string]any{"service": "slack", "channel": "#x", "body": "y"})
+	if !result.IsError {
+		t.Fatal("expected error without comms socket")
 	}
 }
 
