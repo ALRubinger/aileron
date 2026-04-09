@@ -1,6 +1,6 @@
 module github.com/ALRubinger/aileron/test/integration
 
-go 1.24
+go 1.25
 
 require github.com/getkin/kin-openapi v0.133.0
 
