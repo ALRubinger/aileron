@@ -2,6 +2,7 @@ package launch
 
 import (
 	"io"
+	"os"
 	"sync"
 )
 
@@ -16,6 +17,10 @@ type OutputCopier struct {
 	// overlay is set after construction when there's a circular dependency
 	// (overlay needs copier, copier needs overlay).
 	overlay OverlayController
+	// pauseFile is checked on each read iteration. When it exists, output
+	// is buffered. This allows aileron-sh (a separate process) to pause
+	// pty output while showing an approval prompt on /dev/tty.
+	pauseFile string
 
 	mu  sync.Mutex
 	buf []byte
@@ -24,6 +29,11 @@ type OutputCopier struct {
 // SetOverlay sets the overlay controller. Call before Run.
 func (oc *OutputCopier) SetOverlay(o OverlayController) {
 	oc.overlay = o
+}
+
+// SetPauseFile sets the path to check for pause signaling. Call before Run.
+func (oc *OutputCopier) SetPauseFile(path string) {
+	oc.pauseFile = path
 }
 
 // NewOutputCopier creates an output copier that routes pty output to
@@ -44,7 +54,7 @@ func (oc *OutputCopier) Run() {
 	for {
 		n, err := oc.src.Read(buf)
 		if n > 0 {
-			if oc.overlay != nil && oc.overlay.IsActive() {
+			if oc.shouldPause() {
 				oc.bufferOutput(buf[:n])
 			} else {
 				oc.dst.Write(buf[:n])
@@ -54,6 +64,20 @@ func (oc *OutputCopier) Run() {
 			return
 		}
 	}
+}
+
+// shouldPause returns true if output should be buffered — either
+// because the overlay is active or the pause file exists.
+func (oc *OutputCopier) shouldPause() bool {
+	if oc.overlay != nil && oc.overlay.IsActive() {
+		return true
+	}
+	if oc.pauseFile != "" {
+		if _, err := os.Stat(oc.pauseFile); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (oc *OutputCopier) bufferOutput(data []byte) {
