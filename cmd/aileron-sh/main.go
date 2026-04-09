@@ -105,13 +105,15 @@ func main() {
 // developer's terminal. A short message goes to stderr so the agent
 // sees the command failed.
 func writeDenyToTTY(command, reason string) {
+	pauseOutput()
+	defer resumeOutput()
+
 	// Short message for the agent (via stderr/pty).
 	fmt.Fprintf(os.Stderr, "aileron: denied\n")
 
 	// Detailed message for the developer (via tty).
 	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
 	if err != nil {
-		// Fallback to stderr if no tty.
 		launch.WriteDeny(os.Stderr, command, reason)
 		return
 	}
@@ -121,6 +123,9 @@ func writeDenyToTTY(command, reason string) {
 
 // writeDenyByUserToTTY writes the user-denied message to /dev/tty.
 func writeDenyByUserToTTY(command string) {
+	pauseOutput()
+	defer resumeOutput()
+
 	fmt.Fprintf(os.Stderr, "aileron: denied by user\n")
 
 	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
@@ -130,6 +135,24 @@ func writeDenyByUserToTTY(command string) {
 	}
 	defer tty.Close()
 	launch.WriteDenyByUser(tty, command)
+}
+
+// pauseOutput creates the AILERON_PAUSE_FILE to signal the output copier
+// to buffer pty output instead of rendering it.
+func pauseOutput() {
+	path := os.Getenv("AILERON_PAUSE_FILE")
+	if path != "" {
+		os.WriteFile(path, []byte("paused"), 0o644)
+	}
+}
+
+// resumeOutput removes the pause file so the output copier resumes
+// rendering. Buffered output is flushed by the copier automatically.
+func resumeOutput() {
+	path := os.Getenv("AILERON_PAUSE_FILE")
+	if path != "" {
+		os.Remove(path)
+	}
 }
 
 // writeAuditEntry appends an entry to the audit log if configured.
@@ -252,8 +275,11 @@ func unwrapClaudeEval(command string) string {
 // Uses the alternate screen buffer so the prompt renders cleanly,
 // independent of whatever the agent's pty is outputting.
 func promptApproval(command, reason string) approvalResponse {
+	pauseOutput()
+
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
+		resumeOutput()
 		return responseDeny
 	}
 	defer tty.Close()
@@ -272,8 +298,9 @@ func promptApproval(command, reason string) approvalResponse {
 	response, _ := reader.ReadString('\n')
 	response = strings.TrimSpace(strings.ToLower(response))
 
-	// Restore original screen buffer.
+	// Restore original screen buffer and resume pty output.
 	fmt.Fprint(tty, "\033[?1049l")
+	resumeOutput()
 
 	switch response {
 	case "y", "yes":

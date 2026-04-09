@@ -87,8 +87,10 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	sessionID := generateSessionID()
 	auditLog := resolveAuditLog(config.Dir)
 	envConfig := loadEnvConfig(config.Dir)
+	pauseFile := filepath.Join(os.TempDir(), "aileron-pause-"+sessionID)
 
 	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), sessionID, auditLog, envConfig, config.Agent.Env())
+	env = append(env, "AILERON_PAUSE_FILE="+pauseFile)
 
 	// Agent-required args come first, then user-supplied args.
 	allArgs := append(config.Agent.Args(), config.Args...)
@@ -106,11 +108,12 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// If stdin is a terminal, use the pty proxy with status bar.
 	var result LaunchResult
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		result, err = launchWithPty(cmd, config, queue)
+		result, err = launchWithPty(cmd, config, queue, pauseFile)
 	} else {
 		result, err = launchDirect(cmd, config)
 	}
 
+	os.Remove(pauseFile) // clean up
 	if auditLog != "" {
 		PrintSessionSummary(os.Stderr, auditLog, sessionID)
 	}
@@ -144,7 +147,7 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 }
 
 // launchWithPty runs the agent inside a pty with a status bar at the bottom.
-func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue) (LaunchResult, error) {
+func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, pauseFile string) (LaunchResult, error) {
 	stdinFd := int(os.Stdin.Fd())
 
 	cols, rows, err := term.GetSize(stdinFd)
@@ -176,6 +179,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue) (Laun
 	bar.SetQueue(queue)
 
 	outputCopier := NewOutputCopier(ptmx, os.Stdout, nil)
+	outputCopier.SetPauseFile(pauseFile)
 	overlay := NewOverlay(queue, outputCopier, os.Stdout, rows, cols, nil)
 	outputCopier.SetOverlay(overlay)
 	router := NewKeyRouter(os.Stdin, ptmx, overlay)
