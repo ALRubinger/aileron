@@ -12,6 +12,7 @@ import (
 	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/ALRubinger/aileron/core/launch/agents"
+	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/version"
 )
 
@@ -62,6 +63,12 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 			return 1
 		}
 		return result.ExitCode
+	case "policy":
+		if len(args) >= 2 && args[1] == "test" {
+			return runPolicyTest(args[2:], stdout, stderr)
+		}
+		fmt.Fprintln(stderr, "usage: aileron policy test <command> [command...]")
+		return 1
 	case "log":
 		return runLog(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
@@ -79,11 +86,56 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  aileron launch <agent> [args...]   Launch an agent with policy-enforced shell")
+	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "agents: %s\n", strings.Join(registry.Names(), ", "))
+}
+
+// runPolicyTest evaluates commands against the loaded policy without executing them.
+func runPolicyTest(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: aileron policy test <command> [command...]")
+		return 1
+	}
+
+	dir, _ := os.Getwd()
+	policyPath := launch.FindPolicyFile(dir)
+
+	if policyPath == "" {
+		fmt.Fprintln(stderr, "no aileron.yaml found (run 'aileron init' to create one)")
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Policy: %s\n\n", policyPath)
+
+	exitCode := 0
+	for _, cmd := range args {
+		result := launch.EvaluateCommand(policyPath, cmd, dir)
+
+		var icon, label string
+		switch result.Disposition {
+		case model.DispositionAllow:
+			icon, label = "\033[32m✓\033[0m", "allow"
+		case model.DispositionDeny:
+			icon, label = "\033[31m✗\033[0m", "deny"
+			exitCode = 1
+		default:
+			icon, label = "\033[33m?\033[0m", "ask"
+		}
+
+		fmt.Fprintf(stdout, "  %s %-5s  %s", icon, label, cmd)
+		if result.Reason != "" {
+			fmt.Fprintf(stdout, "  (%s)", result.Reason)
+		}
+		if result.RuleID != "" {
+			fmt.Fprintf(stdout, "  [%s]", result.RuleID)
+		}
+		fmt.Fprintln(stdout)
+	}
+	return exitCode
 }
 
 // runLog reads and displays the audit trail.
