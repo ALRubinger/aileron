@@ -97,27 +97,31 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		}
 	}()
 
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	// Write prompt to os.Stdout (same fd the copier uses) so writes
+	// are ordered. Only open /dev/tty for reading keyboard input.
+	w := os.Stdout
+
+	// Clear the screen for a clean prompt.
+	fmt.Fprint(w, "\033[2J\033[1;1H")
+
+	fmt.Fprintf(w, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
+	fmt.Fprintf(w, "    %s\n", command)
+	if reason != "" {
+		fmt.Fprintf(w, "\n    \033[2m%s\033[0m\n", reason)
+	}
+	fmt.Fprintf(w, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
+
+	// Read input from /dev/tty (the real terminal's keyboard).
+	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
 	if err != nil {
 		return "deny"
 	}
 	defer tty.Close()
 
-	// Clear the screen for a clean prompt. The agent will redraw when
-	// output resumes.
-	fmt.Fprint(tty, "\033[2J\033[1;1H")
-
-	fmt.Fprintf(tty, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
-	fmt.Fprintf(tty, "    %s\n", command)
-	if reason != "" {
-		fmt.Fprintf(tty, "\n    \033[2m%s\033[0m\n", reason)
-	}
-	fmt.Fprintf(tty, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
-
 	response := readSingleKey(tty)
 
 	// Clear screen before resuming so the agent gets a clean redraw.
-	fmt.Fprint(tty, "\033[2J\033[1;1H")
+	fmt.Fprint(w, "\033[2J\033[1;1H")
 
 	switch response {
 	case 'y', 'Y':
