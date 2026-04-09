@@ -63,6 +63,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 			return 1
 		}
 		return result.ExitCode
+	case "init":
+		return runInit(stdout, stderr)
 	case "policy":
 		if len(args) >= 2 && args[1] == "test" {
 			return runPolicyTest(args[2:], stdout, stderr)
@@ -85,6 +87,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "aileron — the execution layer for AI coding agents")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  aileron init                       Scaffold aileron.yaml for this project")
 	fmt.Fprintln(w, "  aileron launch <agent> [args...]   Launch an agent with policy-enforced shell")
 	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
@@ -92,6 +95,28 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron help                       Show this help")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "agents: %s\n", strings.Join(registry.Names(), ", "))
+}
+
+// runInit scaffolds an aileron.yaml in the current directory.
+func runInit(stdout, stderr io.Writer) int {
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	path, err := launch.InitPolicy(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	lang := launch.DetectLanguage(dir)
+	if lang != "" {
+		fmt.Fprintf(stdout, "Detected %s project.\n", lang)
+	}
+	fmt.Fprintf(stdout, "Created %s\n", filepath.Base(path))
+	return 0
 }
 
 // runPolicyTest evaluates commands against the loaded policy without executing them.
