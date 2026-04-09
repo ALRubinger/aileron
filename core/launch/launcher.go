@@ -190,7 +190,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, pause
 
 	// Start the approval server so aileron-sh can request user approvals
 	// on the real terminal (not the pty).
-	approvalSrv, err := NewApprovalServer(approvalSocket, bar, outputCopier, router)
+	approvalSrv, err := NewApprovalServer(approvalSocket, bar, outputCopier, router, ptmx)
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("starting approval server: %w", err)
 	}

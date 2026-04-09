@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	ptyPkg "github.com/creack/pty/v2"
 )
 
 // ApprovalRequest is sent by aileron-sh when a command needs user approval.
@@ -29,13 +31,14 @@ type ApprovalServer struct {
 	bar        *StatusBar
 	copier     *OutputCopier
 	router     *KeyRouter
+	ptmx       *os.File // pty master — for triggering resize after prompt
 
 	mu   sync.Mutex
 	done bool
 }
 
 // NewApprovalServer creates a server that listens for approval requests.
-func NewApprovalServer(socketPath string, bar *StatusBar, copier *OutputCopier, router *KeyRouter) (*ApprovalServer, error) {
+func NewApprovalServer(socketPath string, bar *StatusBar, copier *OutputCopier, router *KeyRouter, ptmx *os.File) (*ApprovalServer, error) {
 	// Remove stale socket file.
 	os.Remove(socketPath)
 
@@ -50,6 +53,7 @@ func NewApprovalServer(socketPath string, bar *StatusBar, copier *OutputCopier, 
 		bar:        bar,
 		copier:     copier,
 		router:     router,
+		ptmx:       ptmx,
 	}, nil
 }
 
@@ -101,77 +105,67 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		if s.copier != nil {
 			s.copier.SetPaused(false)
 		}
+		// Trigger a pty resize so Claude Code redraws its full TUI.
+		s.triggerRedraw()
 	}()
 
+	// Clear screen and render the prompt.
 	bar := "\033[33m┃\033[0m"
-	cl := "\033[2K" // clear entire line
-	lines := 0      // track how many lines we render
 	var prompt strings.Builder
-	prompt.WriteString("\r\n")
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s ✈️  \033[1mAileron\033[0m\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s agent wants to run: \033[1m%s\033[0m\r\n", cl, bar, command)
-	lines++
+	prompt.WriteString("\033[2J\033[1;1H") // clear screen, cursor to top
+	fmt.Fprintf(&prompt, "  %s ✈️  \033[1mAileron\033[0m\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s agent wants to run: \033[1m%s\033[0m\r\n", bar, command)
 	if reason != "" {
-		fmt.Fprintf(&prompt, "%s  %s \033[2m%s\033[0m\r\n", cl, bar, reason)
-		lines++
+		fmt.Fprintf(&prompt, "  %s \033[2m%s\033[0m\r\n", bar, reason)
 	}
-	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s \033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s \033[1m[n]\033[0m  No, not this time        Block this command; ask again next time\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s \033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s \033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
-	lines++
-	fmt.Fprintf(&prompt, "%s  > ", cl)
-	// Don't increment lines for the > line — cursor is already on it.
+	fmt.Fprintf(&prompt, "  %s\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[n]\033[0m  No, not this time        Block this command; ask again next time\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s\r\n", bar)
+	prompt.WriteString("  > ")
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))
 	}
 
 	// Read keypresses until we get a valid response.
-	var decision string
 	if inputCh == nil {
-		decision = "deny"
-	} else {
-		for {
-			b := <-inputCh
-			switch b {
-			case 'y', 'Y':
-				decision = "allow_once"
-			case 'n', 'N':
-				decision = "deny"
-			case 'a', 'A':
-				decision = "allow_project"
-			case 'm', 'M':
-				decision = "allow_user"
-			default:
-				continue
-			}
-			break
+		return "deny"
+	}
+	for {
+		b := <-inputCh
+		switch b {
+		case 'y', 'Y':
+			return "allow_once"
+		case 'n', 'N':
+			return "deny"
+		case 'a', 'A':
+			return "allow_project"
+		case 'm', 'M':
+			return "allow_user"
+		default:
+			continue
 		}
 	}
+}
 
-	// Erase the prompt: move cursor up and clear each line.
-	var erase strings.Builder
-	for i := 0; i < lines; i++ {
-		erase.WriteString("\033[A\033[2K") // move up + clear line
-	}
-	erase.WriteString("\r") // return to start of line
+// triggerRedraw clears the screen and sends a SIGWINCH to the agent's
+// pty so it redraws its entire TUI. The status bar re-renders via the
+// idle timer.
+func (s *ApprovalServer) triggerRedraw() {
 	if s.copier != nil {
-		s.copier.WriteExclusive([]byte(erase.String()))
+		s.copier.WriteExclusive([]byte("\033[2J\033[1;1H"))
 	}
-
-	return decision
+	if s.ptmx != nil {
+		// Re-set the pty to its current size — this triggers SIGWINCH
+		// in the agent, causing it to redraw.
+		if ws, err := ptyPkg.GetsizeFull(s.ptmx); err == nil {
+			ptyPkg.Setsize(s.ptmx, ws)
+		}
+	}
 }
 
 // Close shuts down the approval server and removes the socket file.
