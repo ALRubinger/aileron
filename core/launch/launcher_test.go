@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/creack/pty/v2"
 )
@@ -323,6 +324,108 @@ func TestInstallWrapper_ReadOnlyDir(t *testing.T) {
 	_, err := launch.InstallWrapper("/usr/local/bin/aileron-sh")
 	if err == nil {
 		t.Fatal("expected error when wrapper dir is read-only")
+	}
+}
+
+func TestResolveAuditLogFromCwd(t *testing.T) {
+	dir := t.TempDir()
+	// No aileron.yaml → falls back to cwd/.aileron/audit.jsonl.
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	path := launch.ResolveAuditLogFromCwd()
+	if !strings.HasSuffix(path, filepath.Join(".aileron", "audit.jsonl")) {
+		t.Errorf("expected .aileron/audit.jsonl suffix, got %q", path)
+	}
+}
+
+func TestResolveAuditLogFromCwd_WithPolicy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+settings:
+  audit_log: custom/audit.log
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	path := launch.ResolveAuditLogFromCwd()
+	if !strings.HasSuffix(path, filepath.Join("custom", "audit.log")) {
+		t.Errorf("expected custom/audit.log, got %q", path)
+	}
+}
+
+func TestResolveAuditLogFromCwd_DefaultWithPolicy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	path := launch.ResolveAuditLogFromCwd()
+	if !strings.HasSuffix(path, filepath.Join(".aileron", "audit.jsonl")) {
+		t.Errorf("expected .aileron/audit.jsonl, got %q", path)
+	}
+}
+
+func TestPrintSessionSummary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	// Write some entries.
+	for _, e := range []struct{ cmd, disp string }{
+		{"echo 1", "allow"},
+		{"echo 2", "allow"},
+		{"rm -rf /", "deny"},
+		{"git push", "ask_approved"},
+		{"curl bad", "ask_denied"},
+	} {
+		audit.AppendShellEntry(path, audit.ShellEntry{
+			SessionID:   "test-session",
+			Command:     e.cmd,
+			Disposition: e.disp,
+		})
+	}
+
+	var buf strings.Builder
+	launch.PrintSessionSummary(&buf, path, "test-session")
+	out := buf.String()
+
+	if !strings.Contains(out, "2 command(s) allowed") {
+		t.Errorf("expected 2 allowed, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 command(s) denied by policy") {
+		t.Errorf("expected 1 denied, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 command(s) approved") {
+		t.Errorf("expected 1 approved, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1 command(s) denied by user") {
+		t.Errorf("expected 1 user denied, got:\n%s", out)
+	}
+}
+
+func TestPrintSessionSummary_NoEntries(t *testing.T) {
+	var buf strings.Builder
+	launch.PrintSessionSummary(&buf, "/nonexistent/audit.jsonl", "nope")
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for missing log, got %q", buf.String())
+	}
+}
+
+func TestPrintSessionSummary_EmptySession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	audit.AppendShellEntry(path, audit.ShellEntry{SessionID: "other", Command: "echo", Disposition: "allow"})
+
+	var buf strings.Builder
+	launch.PrintSessionSummary(&buf, path, "nonexistent-session")
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for unmatched session, got %q", buf.String())
 	}
 }
 
