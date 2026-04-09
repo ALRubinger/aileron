@@ -1,4 +1,4 @@
-FROM golang:1.24 AS builder
+FROM golang:1.25 AS builder
 WORKDIR /build
 COPY go.work go.work.sum ./
 COPY cmd/aileron/go.mod cmd/aileron/go.mod
