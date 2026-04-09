@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -102,27 +103,33 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		}
 	}()
 
-	// Write to os.Stdout (same fd the copier uses) for ordering.
-	w := os.Stdout
-	fmt.Fprint(w, "\033[2J\033[1;1H")
-
-	fmt.Fprintf(w, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
-	fmt.Fprintf(w, "    %s\n", command)
+	// Build the prompt and send it to the copier as an exclusive write.
+	// The copier is the sole writer to stdout — no concurrent writes.
+	var prompt strings.Builder
+	prompt.WriteString("\033[2J\033[1;1H")
+	fmt.Fprintf(&prompt, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
+	fmt.Fprintf(&prompt, "    %s\n", command)
 	if reason != "" {
-		fmt.Fprintf(w, "\n    \033[2m%s\033[0m\n", reason)
+		fmt.Fprintf(&prompt, "\n    \033[2m%s\033[0m\n", reason)
 	}
-	fmt.Fprintf(w, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
+	fmt.Fprintf(&prompt, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
+
+	if s.copier != nil {
+		s.copier.WriteExclusive([]byte(prompt.String()))
+	}
 
 	// Read a keypress from the stolen input channel.
 	var response byte
 	if inputCh != nil {
 		response = <-inputCh
 	} else {
-		response = 'n' // no router = no input = deny
+		response = 'n'
 	}
 
-	// Clear screen before resuming so the agent gets a clean redraw.
-	fmt.Fprint(w, "\033[2J\033[1;1H")
+	// Clear screen via the copier before resuming.
+	if s.copier != nil {
+		s.copier.WriteExclusive([]byte("\033[2J\033[1;1H"))
+	}
 
 	switch response {
 	case 'y', 'Y':
