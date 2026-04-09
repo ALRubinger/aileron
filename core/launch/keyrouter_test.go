@@ -1,7 +1,6 @@
 package launch_test
 
 import (
-	"bytes"
 	"io"
 	"sync"
 	"testing"
@@ -61,10 +60,10 @@ func (m *mockOverlay) getKeys() []byte {
 
 func TestKeyRouter_NormalBytesPassThrough(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
-	var ptmxBuf bytes.Buffer
+	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
 
-	kr := launch.NewKeyRouter(stdinR, &ptmxBuf, overlay)
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
 	stdinW.Write([]byte("hello"))
@@ -83,10 +82,10 @@ func TestKeyRouter_NormalBytesPassThrough(t *testing.T) {
 
 func TestKeyRouter_CtrlA_ActivatesOverlay(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
-	var ptmxBuf bytes.Buffer
+	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
 
-	kr := launch.NewKeyRouter(stdinR, &ptmxBuf, overlay)
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
 	// Send Ctrl-A then wait for the timeout to fire.
@@ -104,10 +103,10 @@ func TestKeyRouter_CtrlA_ActivatesOverlay(t *testing.T) {
 
 func TestKeyRouter_DoubleCtrlA_PassesThrough(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
-	var ptmxBuf bytes.Buffer
+	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
 
-	kr := launch.NewKeyRouter(stdinR, &ptmxBuf, overlay)
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
 	// Double Ctrl-A within the timeout window.
@@ -129,10 +128,10 @@ func TestKeyRouter_DoubleCtrlA_PassesThrough(t *testing.T) {
 
 func TestKeyRouter_CtrlAThenKey_ActivatesAndForwards(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
-	var ptmxBuf bytes.Buffer
+	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
 
-	kr := launch.NewKeyRouter(stdinR, &ptmxBuf, overlay)
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
 	// Ctrl-A followed by a regular key before timeout — activates overlay
@@ -159,10 +158,10 @@ func TestKeyRouter_CtrlAThenKey_ActivatesAndForwards(t *testing.T) {
 
 func TestKeyRouter_OverlayMode_KeysGoToOverlay(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
-	var ptmxBuf bytes.Buffer
+	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
 
-	kr := launch.NewKeyRouter(stdinR, &ptmxBuf, overlay)
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
 	// Activate overlay via Ctrl-A + timeout.
@@ -187,10 +186,10 @@ func TestKeyRouter_OverlayMode_KeysGoToOverlay(t *testing.T) {
 
 func TestKeyRouter_DeactivateOverlay(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
-	var ptmxBuf bytes.Buffer
+	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
 
-	kr := launch.NewKeyRouter(stdinR, &ptmxBuf, overlay)
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
 	// Activate overlay.
