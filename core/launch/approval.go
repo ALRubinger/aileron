@@ -109,10 +109,10 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		s.triggerRedraw()
 	}()
 
-	// Clear screen and render the prompt.
+	// Switch to alternate screen buffer — preserves scrollback history.
 	bar := "\033[33m┃\033[0m"
 	var prompt strings.Builder
-	prompt.WriteString("\033[2J\033[1;1H") // clear screen, cursor to top
+	prompt.WriteString("\033[?1049h\033[2J\033[1;1H")
 	fmt.Fprintf(&prompt, "  %s ✈️  \033[1mAileron\033[0m\r\n", bar)
 	fmt.Fprintf(&prompt, "  %s\r\n", bar)
 	fmt.Fprintf(&prompt, "  %s agent wants to run: \033[1m%s\033[0m\r\n", bar, command)
@@ -156,8 +156,9 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 // pty so it redraws its entire TUI. The status bar re-renders via the
 // idle timer.
 func (s *ApprovalServer) triggerRedraw() {
+	// Restore normal screen buffer — scrollback history is preserved.
 	if s.copier != nil {
-		s.copier.WriteExclusive([]byte("\033[2J\033[1;1H"))
+		s.copier.WriteExclusive([]byte("\033[?1049l"))
 	}
 	if s.ptmx != nil {
 		// Re-set the pty to its current size — this triggers SIGWINCH
