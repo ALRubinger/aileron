@@ -12,9 +12,10 @@ const maxAgentBuffer = 1 << 20 // 1 MB
 // OutputCopier reads from the pty master and writes to stdout. When an
 // overlay is active, output is buffered instead of displayed. The
 // buffer is flushed when the overlay is dismissed.
-// idleTimeout is how long output must be quiet before re-rendering
-// the status bar. Matches the behavior of Claude Code's own footer.
-const idleTimeout = 150 * time.Millisecond
+// DefaultIdleTimeout is how long output must be quiet before
+// re-rendering the status bar. Needs to be long enough that normal
+// output bursts (like ls listings) don't trigger mid-render redraws.
+const DefaultIdleTimeout = 2 * time.Second
 
 type OutputCopier struct {
 	src io.Reader
@@ -28,7 +29,8 @@ type OutputCopier struct {
 	pauseFile string
 	// onIdle is called when output has been quiet for idleTimeout.
 	// Used to re-render the status bar after agent output settles.
-	onIdle func()
+	onIdle      func()
+	idleTimeout time.Duration
 
 	// directWrite receives data that must be written to dst exclusively
 	// by the copier goroutine — no concurrent writes.
@@ -52,9 +54,14 @@ func (oc *OutputCopier) SetPauseFile(path string) {
 }
 
 // SetOnIdle sets a callback that fires when output has been quiet for
-// idleTimeout. Used to re-render the status bar after scrolling stops.
+// the idle timeout. Used to re-render the status bar after scrolling stops.
 func (oc *OutputCopier) SetOnIdle(fn func()) {
 	oc.onIdle = fn
+}
+
+// SetIdleTimeout overrides the idle timeout duration. For testing.
+func (oc *OutputCopier) SetIdleTimeout(d time.Duration) {
+	oc.idleTimeout = d
 }
 
 // SetPaused programmatically pauses or resumes output. When pausing,
@@ -90,6 +97,7 @@ func NewOutputCopier(src io.Reader, dst io.Writer, overlay OverlayController) *O
 		dst:         dst,
 		overlay:     overlay,
 		directWrite: make(chan []byte, 1),
+		idleTimeout: DefaultIdleTimeout,
 	}
 }
 
@@ -188,7 +196,7 @@ func (oc *OutputCopier) resetIdleTimer() {
 	if oc.idleTimer != nil {
 		oc.idleTimer.Stop()
 	}
-	oc.idleTimer = time.AfterFunc(idleTimeout, oc.onIdle)
+	oc.idleTimer = time.AfterFunc(oc.idleTimeout, oc.onIdle)
 	oc.mu.Unlock()
 }
 
