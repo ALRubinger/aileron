@@ -499,7 +499,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []
 				fmt.Fprintf(os.Stderr, "aileron: slack listen failed: %v\n", err)
 			} else {
 				listeners = append(listeners, sl)
-				go bridgeMessages(msgs, queue)
+				go BridgeMessages(msgs, queue)
 			}
 		}
 	}
@@ -507,9 +507,9 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []
 	return listeners
 }
 
-// bridgeMessages reads from a comms listener channel and pushes messages
-// into the NotifyQueue.
-func bridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue) {
+// BridgeMessages reads from a comms listener channel and pushes messages
+// into the NotifyQueue. Exported for testing.
+func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue) {
 	for msg := range msgs {
 		preview := msg.Body
 		if len(preview) > 80 {
