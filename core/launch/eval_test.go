@@ -183,6 +183,22 @@ func TestEvaluateCommand_NoPolicyFileNoHome(t *testing.T) {
 	}
 }
 
+func TestEvaluateCommand_NoPolicyFileInvalidUserSettings(t *testing.T) {
+	// Covers line 74: LoadUserSettings returns error → fallback.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	settingsDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(settingsDir, 0o755)
+	os.WriteFile(filepath.Join(settingsDir, "settings.yaml"), []byte("{{invalid"), 0o644)
+
+	// No project policy path + invalid user settings → fallback to empty → default ask.
+	result := launch.EvaluateCommand("", "echo hello", "/tmp")
+	if result.Disposition != model.DispositionRequireApproval {
+		t.Errorf("expected ask fallback for invalid user settings with no project, got %q", result.Disposition)
+	}
+}
+
 func TestEvaluateCommand_InvalidUserSettings(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
