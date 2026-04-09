@@ -1,7 +1,6 @@
 package launch
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,18 +25,16 @@ type ApprovalResponse struct {
 type ApprovalServer struct {
 	socketPath string
 	listener   net.Listener
-	tty        *os.File
 	bar        *StatusBar
 	copier     *OutputCopier
+	router     *KeyRouter
 
 	mu   sync.Mutex
 	done bool
 }
 
 // NewApprovalServer creates a server that listens for approval requests.
-// The tty should be the real terminal (os.Stdin or opened /dev/tty from
-// the launcher's context).
-func NewApprovalServer(socketPath string, bar *StatusBar, copier *OutputCopier) (*ApprovalServer, error) {
+func NewApprovalServer(socketPath string, bar *StatusBar, copier *OutputCopier, router *KeyRouter) (*ApprovalServer, error) {
 	// Remove stale socket file.
 	os.Remove(socketPath)
 
@@ -51,6 +48,7 @@ func NewApprovalServer(socketPath string, bar *StatusBar, copier *OutputCopier) 
 		listener:   ln,
 		bar:        bar,
 		copier:     copier,
+		router:     router,
 	}, nil
 }
 
@@ -87,6 +85,13 @@ func (s *ApprovalServer) handleConn(conn net.Conn) {
 // promptOnTerminal pauses pty output, switches to the alternate screen
 // buffer, prompts the developer, and restores everything.
 func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
+	// Steal keyboard input from the key router so keypresses come to us.
+	var inputCh <-chan byte
+	if s.router != nil {
+		inputCh = s.router.StealInput()
+		defer s.router.ReleaseInput()
+	}
+
 	// Pause pty output so the prompt renders cleanly.
 	if s.copier != nil {
 		s.copier.SetPaused(true)
@@ -97,11 +102,8 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		}
 	}()
 
-	// Write prompt to os.Stdout (same fd the copier uses) so writes
-	// are ordered. Only open /dev/tty for reading keyboard input.
+	// Write to os.Stdout (same fd the copier uses) for ordering.
 	w := os.Stdout
-
-	// Clear the screen for a clean prompt.
 	fmt.Fprint(w, "\033[2J\033[1;1H")
 
 	fmt.Fprintf(w, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
@@ -111,14 +113,13 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	}
 	fmt.Fprintf(w, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
 
-	// Read input from /dev/tty (the real terminal's keyboard).
-	tty, err := os.OpenFile("/dev/tty", os.O_RDONLY, 0)
-	if err != nil {
-		return "deny"
+	// Read a keypress from the stolen input channel.
+	var response byte
+	if inputCh != nil {
+		response = <-inputCh
+	} else {
+		response = 'n' // no router = no input = deny
 	}
-	defer tty.Close()
-
-	response := readSingleKey(tty)
 
 	// Clear screen before resuming so the agent gets a clean redraw.
 	fmt.Fprint(w, "\033[2J\033[1;1H")
@@ -133,20 +134,6 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	default:
 		return "deny"
 	}
-}
-
-// readSingleKey reads a single keypress from the terminal in raw mode.
-func readSingleKey(tty *os.File) byte {
-	// Put the tty fd into raw mode for single-keypress reading.
-	buf := make([]byte, 1)
-	// Use a buffered reader in case raw mode isn't set on this fd.
-	reader := bufio.NewReader(tty)
-	b, err := reader.ReadByte()
-	if err != nil {
-		return 'n'
-	}
-	_ = buf
-	return b
 }
 
 // Close shuts down the approval server and removes the socket file.
