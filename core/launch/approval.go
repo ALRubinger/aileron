@@ -103,16 +103,16 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		}
 	}()
 
-	// Build the prompt and send it to the copier as an exclusive write.
-	// The copier is the sole writer to stdout — no concurrent writes.
+	// Build an inline prompt — visually distinct, no screen clearing.
 	var prompt strings.Builder
-	prompt.WriteString("\033[2J\033[1;1H")
-	fmt.Fprintf(&prompt, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
-	fmt.Fprintf(&prompt, "    %s\n", command)
+	prompt.WriteString("\n\033[33m╭─ aileron ─────────────────────────────────────────╮\033[0m\n")
+	fmt.Fprintf(&prompt, "\033[33m│\033[0m  agent wants to run: \033[1m%s\033[0m\n", command)
 	if reason != "" {
-		fmt.Fprintf(&prompt, "\n    \033[2m%s\033[0m\n", reason)
+		fmt.Fprintf(&prompt, "\033[33m│\033[0m  \033[2m%s\033[0m\n", reason)
 	}
-	fmt.Fprintf(&prompt, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
+	prompt.WriteString("\033[33m│\033[0m\n")
+	prompt.WriteString("\033[33m│\033[0m  \033[1m[y]\033[0m allow  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)\n")
+	prompt.WriteString("\033[33m╰──────────────────────────────────────────────────╯\033[0m\n")
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))
@@ -124,11 +124,6 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		response = <-inputCh
 	} else {
 		response = 'n'
-	}
-
-	// Clear screen via the copier before resuming.
-	if s.copier != nil {
-		s.copier.WriteExclusive([]byte("\033[2J\033[1;1H"))
 	}
 
 	switch response {
