@@ -1,6 +1,6 @@
 module github.com/ALRubinger/aileron/cmd/aileron-sh
 
-go 1.24
+go 1.25
 
 require github.com/ALRubinger/aileron/core v0.0.0
 
