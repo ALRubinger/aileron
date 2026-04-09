@@ -256,6 +256,34 @@ func TestMerge_Notifications(t *testing.T) {
 	}
 }
 
+func TestMerge_NotificationsBaseNil(t *testing.T) {
+	base := &launch.PolicyFile{Version: 1}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{AppToken: "tok"},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+	if merged.Notifications == nil || merged.Notifications.Slack == nil {
+		t.Error("expected overlay notifications when base has none")
+	}
+}
+
+func TestMerge_NotificationsOverlayNil(t *testing.T) {
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{AppToken: "tok"},
+		},
+	}
+	overlay := &launch.PolicyFile{Version: 1}
+	merged := launch.Merge(base, overlay)
+	if merged.Notifications == nil || merged.Notifications.Slack == nil {
+		t.Error("expected base notifications when overlay has none")
+	}
+}
+
 func TestMerge_NotificationsOverlayWins(t *testing.T) {
 	base := &launch.PolicyFile{
 		Version: 1,

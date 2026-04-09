@@ -132,41 +132,50 @@ func (s *SlackListener) ProcessMessageEvent(evt *slackevents.MessageEvent) (Inco
 		return IncomingMessage{}, false
 	}
 
-	// Resolve channel name if API is available.
-	channelName := channel
+	channelName := s.resolveChannelName(channel)
+	author := s.resolveAuthor(evt.User)
+
+	return BuildIncomingMessage(evt.TimeStamp, channelName, author, evt.Text), true
+}
+
+func (s *SlackListener) resolveChannelName(id string) string {
 	if s.api != nil {
 		if info, err := s.api.GetConversationInfo(&slack.GetConversationInfoInput{
-			ChannelID: channel,
+			ChannelID: id,
 		}); err == nil && info != nil {
-			channelName = "#" + info.Name
+			return "#" + info.Name
 		}
 	}
+	return id
+}
 
-	// Resolve user name if API is available.
-	author := evt.User
+func (s *SlackListener) resolveAuthor(userID string) string {
 	if s.api != nil {
-		if user, err := s.api.GetUserInfo(evt.User); err == nil {
-			author = user.RealName
-			if author == "" {
-				author = user.Name
+		if user, err := s.api.GetUserInfo(userID); err == nil {
+			if user.RealName != "" {
+				return user.RealName
 			}
+			return user.Name
 		}
 	}
+	return userID
+}
 
-	body := evt.Text
-	preview := body
+// BuildIncomingMessage constructs an IncomingMessage from raw fields.
+// Exported for testing the message construction independent of API calls.
+func BuildIncomingMessage(ts, channel, author, text string) IncomingMessage {
+	preview := text
 	if len(preview) > 80 {
 		preview = preview[:77] + "..."
 	}
-
 	return IncomingMessage{
-		ID:        evt.TimeStamp,
+		ID:        ts,
 		Service:   "slack",
-		Channel:   channelName,
+		Channel:   channel,
 		Author:    author,
-		Body:      body,
+		Body:      text,
 		Timestamp: time.Now(),
-	}, true
+	}
 }
 
 // Send posts a message to the given Slack channel.

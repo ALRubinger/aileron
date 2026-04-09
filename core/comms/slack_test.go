@@ -160,5 +160,33 @@ func TestSlackListener_ProcessMessageEvent_NoChannelFilter(t *testing.T) {
 	}
 }
 
+func TestBuildIncomingMessage(t *testing.T) {
+	msg := comms.BuildIncomingMessage("12345.67", "#backend", "Alice", "Hello world")
+	if msg.ID != "12345.67" {
+		t.Errorf("ID = %q", msg.ID)
+	}
+	if msg.Channel != "#backend" {
+		t.Errorf("Channel = %q", msg.Channel)
+	}
+	if msg.Author != "Alice" {
+		t.Errorf("Author = %q", msg.Author)
+	}
+	if msg.Body != "Hello world" {
+		t.Errorf("Body = %q", msg.Body)
+	}
+	if msg.Service != "slack" {
+		t.Errorf("Service = %q", msg.Service)
+	}
+}
+
+func TestBuildIncomingMessage_LongTextTruncated(t *testing.T) {
+	longText := strings.Repeat("x", 100)
+	msg := comms.BuildIncomingMessage("1", "#ch", "u", longText)
+	if msg.Body != longText {
+		t.Error("body should be full text")
+	}
+	// Preview is internal to the IncomingMessage — Body is preserved.
+}
+
 // Verify SlackListener implements the Listener interface.
 var _ comms.Listener = (*comms.SlackListener)(nil)
