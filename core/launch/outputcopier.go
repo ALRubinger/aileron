@@ -106,37 +106,46 @@ func (oc *OutputCopier) WriteExclusive(data []byte) {
 	oc.directWrite <- cp
 }
 
-func (oc *OutputCopier) Run() {
-	buf := make([]byte, 4096)
-	for {
-		n, err := oc.src.Read(buf)
-		if n > 0 {
-			if oc.shouldPause() {
-				oc.bufferOutput(buf[:n])
-				oc.ackPause()
-				// Drain any pending direct writes while paused.
-				oc.drainDirectWrites()
-			} else {
-				// Check for direct writes before pty output.
-				oc.drainDirectWrites()
-				oc.dst.Write(buf[:n])
-				oc.resetIdleTimer()
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
+type readResult struct {
+	data []byte
+	err  error
 }
 
-// drainDirectWrites processes all pending exclusive write requests.
-func (oc *OutputCopier) drainDirectWrites() {
+func (oc *OutputCopier) Run() {
+	// Read from pty in a separate goroutine so we can select between
+	// pty data and direct writes without blocking.
+	ptyCh := make(chan readResult, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := oc.src.Read(buf)
+			if n > 0 {
+				cp := make([]byte, n)
+				copy(cp, buf[:n])
+				ptyCh <- readResult{data: cp}
+			}
+			if err != nil {
+				ptyCh <- readResult{err: err}
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
+		case r := <-ptyCh:
+			if r.err != nil {
+				return
+			}
+			if oc.shouldPause() {
+				oc.bufferOutput(r.data)
+				oc.ackPause()
+			} else {
+				oc.dst.Write(r.data)
+				oc.resetIdleTimer()
+			}
 		case data := <-oc.directWrite:
 			oc.dst.Write(data)
-		default:
-			return
 		}
 	}
 }
