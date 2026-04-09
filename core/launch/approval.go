@@ -103,16 +103,14 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		}
 	}()
 
-	// Build an inline prompt — visually distinct, no screen clearing.
+	// Compact inline prompt — no box drawing to avoid conflicts with
+	// Claude Code's own TUI rendering.
 	var prompt strings.Builder
-	prompt.WriteString("\n\033[33m╭─ aileron ─────────────────────────────────────────╮\033[0m\n")
-	fmt.Fprintf(&prompt, "\033[33m│\033[0m  agent wants to run: \033[1m%s\033[0m\n", command)
+	fmt.Fprintf(&prompt, "\r\n\033[33;1m  ⏸ aileron:\033[0m %s", command)
 	if reason != "" {
-		fmt.Fprintf(&prompt, "\033[33m│\033[0m  \033[2m%s\033[0m\n", reason)
+		fmt.Fprintf(&prompt, " \033[2m(%s)\033[0m", reason)
 	}
-	prompt.WriteString("\033[33m│\033[0m\n")
-	prompt.WriteString("\033[33m│\033[0m  \033[1m[y]\033[0m allow  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)\n")
-	prompt.WriteString("\033[33m╰──────────────────────────────────────────────────╯\033[0m\n")
+	prompt.WriteString("\r\n  \033[1my\033[0m/\033[1mn\033[0m/\033[1mp\033[0mroject/\033[1mu\033[0mser? ")
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))
