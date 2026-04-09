@@ -2,7 +2,6 @@ package launch
 
 import (
 	"io"
-	"os"
 	"sync"
 	"time"
 )
@@ -23,10 +22,6 @@ type OutputCopier struct {
 	// overlay is set after construction when there's a circular dependency
 	// (overlay needs copier, copier needs overlay).
 	overlay OverlayController
-	// pauseFile is checked on each read iteration. When it exists, output
-	// is buffered. This allows aileron-sh (a separate process) to pause
-	// pty output while showing an approval prompt on /dev/tty.
-	pauseFile string
 	// onIdle is called when output has been quiet for idleTimeout.
 	// Used to re-render the status bar after agent output settles.
 	onIdle      func()
@@ -46,11 +41,6 @@ type OutputCopier struct {
 // SetOverlay sets the overlay controller. Call before Run.
 func (oc *OutputCopier) SetOverlay(o OverlayController) {
 	oc.overlay = o
-}
-
-// SetPauseFile sets the path to check for pause signaling. Call before Run.
-func (oc *OutputCopier) SetPauseFile(path string) {
-	oc.pauseFile = path
 }
 
 // SetOnIdle sets a callback that fires when output has been quiet for
@@ -167,15 +157,7 @@ func (oc *OutputCopier) shouldPause() bool {
 	oc.mu.Lock()
 	paused := oc.paused
 	oc.mu.Unlock()
-	if paused {
-		return true
-	}
-	if oc.pauseFile != "" {
-		if _, err := os.Stat(oc.pauseFile); err == nil {
-			return true
-		}
-	}
-	return false
+	return paused
 }
 
 // ackPause signals SetPaused that the copier is now buffering.

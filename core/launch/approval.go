@@ -3,7 +3,6 @@ package launch
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"strings"
@@ -258,16 +257,3 @@ func RequestApproval(socketPath, command, reason string) string {
 	return resp.Decision
 }
 
-// WriteDenyToTTY writes a deny message to the real terminal via the
-// approval server's pause mechanism.
-func WriteDenyToTTY(w io.Writer, command, reason string) {
-	fmt.Fprintf(w, "\033[31m  ✗ aileron: denied\033[0m %s\n", command)
-	if reason != "" {
-		fmt.Fprintf(w, "    %s\n", reason)
-	}
-}
-
-// WriteDenyByUserToTTY writes a user-denied message.
-func WriteDenyByUserToTTY(w io.Writer, command string) {
-	fmt.Fprintf(w, "\033[33m  ✗ aileron: denied by user\033[0m %s\n", command)
-}

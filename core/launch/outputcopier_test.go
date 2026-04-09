@@ -2,8 +2,6 @@ package launch_test
 
 import (
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -147,46 +145,6 @@ func TestOutputCopier_BufferBounded(t *testing.T) {
 	}
 }
 
-func TestOutputCopier_PauseFile(t *testing.T) {
-	srcR, srcW := io.Pipe()
-	dst := &safeBuf{}
-	overlay := &simpleOverlay{}
-
-	pauseFile := filepath.Join(t.TempDir(), "pause")
-
-	oc := launch.NewOutputCopier(srcR, dst, overlay)
-	oc.SetPauseFile(pauseFile)
-	go oc.Run()
-
-	// Normal output — no pause file.
-	srcW.Write([]byte("visible"))
-	time.Sleep(50 * time.Millisecond)
-
-	if !strings.Contains(dst.String(), "visible") {
-		t.Error("expected 'visible' without pause file")
-	}
-
-	// Create pause file — output should be buffered.
-	os.WriteFile(pauseFile, []byte("paused"), 0o644)
-	time.Sleep(10 * time.Millisecond)
-	srcW.Write([]byte("hidden"))
-	time.Sleep(50 * time.Millisecond)
-
-	if strings.Contains(dst.String(), "hidden") {
-		t.Error("'hidden' should be buffered while pause file exists")
-	}
-
-	// Remove pause file — flush should deliver buffered output.
-	os.Remove(pauseFile)
-	oc.Flush()
-
-	if !strings.Contains(dst.String(), "hidden") {
-		t.Error("expected 'hidden' after flush")
-	}
-
-	srcW.Close()
-}
-
 func TestOutputCopier_OnIdleFires(t *testing.T) {
 	srcR, srcW := io.Pipe()
 	dst := &safeBuf{}
@@ -250,24 +208,6 @@ func TestOutputCopier_OnIdleResetsOnNewOutput(t *testing.T) {
 	}
 
 	srcW.Close()
-}
-
-func TestOutputCopier_PauseFileNotSet(t *testing.T) {
-	srcR, srcW := io.Pipe()
-	dst := &safeBuf{}
-	overlay := &simpleOverlay{}
-
-	// No pause file set — should pass through normally.
-	oc := launch.NewOutputCopier(srcR, dst, overlay)
-	go oc.Run()
-
-	srcW.Write([]byte("normal"))
-	srcW.Close()
-	time.Sleep(50 * time.Millisecond)
-
-	if dst.String() != "normal" {
-		t.Errorf("expected 'normal', got %q", dst.String())
-	}
 }
 
 func TestOutputCopier_TransitionToOverlay(t *testing.T) {
