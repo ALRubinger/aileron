@@ -39,6 +39,10 @@ type KeyRouter struct {
 	mu           sync.Mutex
 	pendingCtrlA bool
 	ctrlATimer   *time.Timer
+
+	// inputSink, when set, receives all stdin bytes instead of routing
+	// them to the pty or overlay. Used by the approval server.
+	inputSink chan byte
 }
 
 // NewKeyRouter creates a key router that reads from stdin and writes
@@ -53,6 +57,26 @@ func NewKeyRouter(stdin io.Reader, ptmx io.Writer, overlay OverlayController) *K
 
 // Run reads from stdin and routes each byte. This blocks until stdin
 // returns an error or EOF. Call in a goroutine.
+// StealInput redirects all stdin bytes to the returned channel.
+// Call ReleaseInput to restore normal routing.
+func (kr *KeyRouter) StealInput() <-chan byte {
+	kr.mu.Lock()
+	defer kr.mu.Unlock()
+	ch := make(chan byte, 16)
+	kr.inputSink = ch
+	return ch
+}
+
+// ReleaseInput restores normal key routing after StealInput.
+func (kr *KeyRouter) ReleaseInput() {
+	kr.mu.Lock()
+	defer kr.mu.Unlock()
+	if kr.inputSink != nil {
+		close(kr.inputSink)
+		kr.inputSink = nil
+	}
+}
+
 func (kr *KeyRouter) Run() {
 	buf := make([]byte, 1)
 	for {
@@ -61,6 +85,15 @@ func (kr *KeyRouter) Run() {
 			return
 		}
 		b := buf[0]
+
+		// If input is being stolen (approval prompt), send there.
+		kr.mu.Lock()
+		sink := kr.inputSink
+		kr.mu.Unlock()
+		if sink != nil {
+			sink <- b
+			continue
+		}
 
 		if kr.overlayActive.Load() {
 			kr.overlay.HandleKey(b)

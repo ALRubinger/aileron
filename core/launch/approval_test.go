@@ -19,7 +19,7 @@ func TestRequestApproval_NoSocket(t *testing.T) {
 func TestApprovalServer_StartAndClose(t *testing.T) {
 	socketPath := filepath.Join(os.TempDir(), "aileron-test-approval.sock")
 	t.Cleanup(func() { os.Remove(socketPath) })
-	srv, err := launch.NewApprovalServer(socketPath, nil, nil)
+	srv, err := launch.NewApprovalServer(socketPath, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
