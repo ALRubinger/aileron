@@ -124,23 +124,26 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		s.copier.WriteExclusive([]byte(prompt.String()))
 	}
 
-	// Read a keypress from the stolen input channel.
-	var response byte
-	if inputCh != nil {
-		response = <-inputCh
-	} else {
-		response = 'n'
-	}
-
-	switch response {
-	case 'y', 'Y':
-		return "allow_once"
-	case 'a', 'A':
-		return "allow_project"
-	case 'm', 'M':
-		return "allow_user"
-	default:
+	// Read keypresses until we get a valid response. Ignore unknown keys
+	// (e.g. terminal focus events, escape sequences, accidental presses).
+	if inputCh == nil {
 		return "deny"
+	}
+	for {
+		b := <-inputCh
+		switch b {
+		case 'y', 'Y':
+			return "allow_once"
+		case 'n', 'N':
+			return "deny"
+		case 'a', 'A':
+			return "allow_project"
+		case 'm', 'M':
+			return "allow_user"
+		default:
+			// Ignore unknown keys — keep waiting.
+			continue
+		}
 	}
 }
 
