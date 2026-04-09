@@ -103,12 +103,9 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	}
 	defer tty.Close()
 
-	// Ensure any pending stdout writes are flushed before switching screens.
-	os.Stdout.Sync()
-
-	// Switch to alternate screen buffer and clear it.
-	fmt.Fprint(tty, "\033[?1049h\033[2J\033[1;1H")
-	defer fmt.Fprint(tty, "\033[?1049l")
+	// Clear the screen for a clean prompt. The agent will redraw when
+	// output resumes.
+	fmt.Fprint(tty, "\033[2J\033[1;1H")
 
 	fmt.Fprintf(tty, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
 	fmt.Fprintf(tty, "    %s\n", command)
@@ -118,6 +115,9 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	fmt.Fprintf(tty, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
 
 	response := readSingleKey(tty)
+
+	// Clear screen before resuming so the agent gets a clean redraw.
+	fmt.Fprint(tty, "\033[2J\033[1;1H")
 
 	switch response {
 	case 'y', 'Y':
