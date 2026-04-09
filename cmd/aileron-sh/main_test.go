@@ -1,6 +1,7 @@
 package main_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -407,6 +408,136 @@ deny:
 	err := cmd.Run()
 	if err == nil {
 		t.Fatal("expected deny for plain rm -rf command")
+	}
+}
+
+// TestShimDenyStderrShortMessage verifies that the deny writes a short
+// "aileron: denied" to stderr for the agent, plus the detailed message
+// (which falls back to stderr when no tty is available).
+func TestShimDenyStderrShortMessage(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: allow
+deny:
+  - command: "rm -rf *"
+    description: "no recursive delete"
+`)
+
+	cmd := exec.Command(binary, "-c", "rm -rf /something")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/sh")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected denied command to fail")
+	}
+	out := stderr.String()
+
+	// Short message for the agent.
+	if !strings.Contains(out, "aileron: denied") {
+		t.Errorf("expected short 'aileron: denied' in stderr, got %q", out)
+	}
+	// Detailed message falls back to stderr when no tty (test environment).
+	if !strings.Contains(out, "no recursive delete") {
+		t.Errorf("expected deny reason in stderr fallback, got %q", out)
+	}
+}
+
+// TestShimDenyAuditEntry verifies that a deny writes an audit entry.
+func TestShimDenyAuditEntry(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: allow
+deny:
+  - command: "rm -rf *"
+    description: "no recursive delete"
+`)
+
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	cmd := exec.Command(binary, "-c", "rm -rf /something")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"AILERON_REAL_SHELL=/bin/sh",
+		"AILERON_AUDIT_LOG="+auditPath,
+		"AILERON_SESSION_ID=test-session",
+		"AILERON_AGENT=test",
+	)
+	cmd.Run() // ignore error (expected deny)
+
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("expected audit log at %s: %v", auditPath, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `"disposition":"deny"`) {
+		t.Errorf("expected deny disposition in audit, got %q", content)
+	}
+	if !strings.Contains(content, `"session_id":"test-session"`) {
+		t.Errorf("expected session ID in audit, got %q", content)
+	}
+}
+
+// TestShimAskDeniesWithoutTTYAudit verifies that ask commands that
+// auto-deny (no tty) write an audit entry.
+func TestShimAskDeniesWithoutTTYAudit(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: ask
+`)
+
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	cmd := exec.Command(binary, "-c", "git push origin main")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"AILERON_REAL_SHELL=/bin/sh",
+		"AILERON_AUDIT_LOG="+auditPath,
+		"AILERON_SESSION_ID=test-session",
+	)
+	cmd.Run()
+
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("expected audit log: %v", err)
+	}
+	if !strings.Contains(string(data), `"disposition":"ask_denied"`) {
+		t.Errorf("expected ask_denied in audit, got %q", string(data))
+	}
+}
+
+// TestShimAllowAuditEntry verifies that allowed commands write an audit entry.
+func TestShimAllowAuditEntry(t *testing.T) {
+	binary := buildShim(t)
+	dir := writePolicyDir(t, `
+version: 1
+default: deny
+allow:
+  - "echo *"
+`)
+
+	auditPath := filepath.Join(dir, "audit.jsonl")
+	cmd := exec.Command(binary, "-c", "echo audit-test")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"AILERON_REAL_SHELL=/bin/sh",
+		"AILERON_AUDIT_LOG="+auditPath,
+		"AILERON_SESSION_ID=test-session",
+		"AILERON_AGENT=test",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("expected allowed command to succeed: %v", err)
+	}
+	if !strings.Contains(string(out), "audit-test") {
+		t.Errorf("expected 'audit-test' in output, got %q", out)
+	}
+
+	data, _ := os.ReadFile(auditPath)
+	if !strings.Contains(string(data), `"disposition":"allow"`) {
+		t.Errorf("expected allow disposition in audit, got %q", string(data))
 	}
 }
 
