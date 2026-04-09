@@ -318,6 +318,12 @@ func generateSessionID() string {
 	return fmt.Sprintf("%x", b)
 }
 
+// ResolveAuditLogFromCwd resolves the audit log path from the current
+// working directory.
+func ResolveAuditLogFromCwd() string {
+	return resolveAuditLog("")
+}
+
 // resolveAuditLog determines the audit log path. It looks for
 // aileron.yaml in the given directory (or cwd) and reads its
 // Settings.AuditLog field. Falls back to .aileron/audit.jsonl
