@@ -298,6 +298,27 @@ func TestWriteDeny_PersonalSettings(t *testing.T) {
 	}
 }
 
+func TestWriteDeny_ProjectPath(t *testing.T) {
+	var buf bytes.Buffer
+	launch.WriteDeny(&buf, "rm -rf /", "dangerous", "deny_0", "/repo/aileron.yaml")
+	out := buf.String()
+	if !strings.Contains(out, "/repo/aileron.yaml") {
+		t.Errorf("expected project path in output, got %q", out)
+	}
+	if !strings.Contains(out, "Policy:") {
+		t.Error("expected 'Policy:' label")
+	}
+}
+
+func TestWriteDeny_NoSource(t *testing.T) {
+	var buf bytes.Buffer
+	launch.WriteDeny(&buf, "echo", "", "", "")
+	out := buf.String()
+	if strings.Contains(out, "Policy:") {
+		t.Error("should not show 'Policy:' when no source")
+	}
+}
+
 func TestWriteDeny_NoReason(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDeny(&buf, "bad command", "", "", "")
