@@ -103,17 +103,21 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		}
 	}()
 
+	bar := "\033[33m┃\033[0m"
 	var prompt strings.Builder
-	fmt.Fprintf(&prompt, "\r\n\033[33;1m  ⏸ aileron\033[0m  agent wants to run: \033[1m%s\033[0m\r\n", command)
+	fmt.Fprintf(&prompt, "\r\n  %s ✈️  \033[1mAileron\033[0m\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s agent wants to run: \033[1m%s\033[0m\r\n", bar, command)
 	if reason != "" {
-		fmt.Fprintf(&prompt, "             \033[2m%s\033[0m\r\n", reason)
+		fmt.Fprintf(&prompt, "  %s \033[2m%s\033[0m\r\n", bar, reason)
 	}
-	prompt.WriteString("\r\n")
-	prompt.WriteString("    \033[1my\033[0m  allow once           run this command, ask again next time\r\n")
-	prompt.WriteString("    \033[1mn\033[0m  deny                 block this command\r\n")
-	prompt.WriteString("    \033[1mp\033[0m  always (project)     add to aileron.yaml for the whole team\r\n")
-	prompt.WriteString("    \033[1mu\033[0m  always (user)        add to ~/.aileron/settings.yaml for you\r\n")
-	prompt.WriteString("\r\n  > ")
+	fmt.Fprintf(&prompt, "  %s\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[n]\033[0m  No, not this time        Block this command; ask again next time\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s \033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy\r\n", bar)
+	fmt.Fprintf(&prompt, "  %s\r\n", bar)
+	prompt.WriteString("  > ")
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))
@@ -130,9 +134,9 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	switch response {
 	case 'y', 'Y':
 		return "allow_once"
-	case 'p', 'P':
+	case 'a', 'A':
 		return "allow_project"
-	case 'u', 'U':
+	case 'm', 'M':
 		return "allow_user"
 	default:
 		return "deny"
