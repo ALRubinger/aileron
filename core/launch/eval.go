@@ -116,14 +116,33 @@ func FindPolicyFile(startDir string) string {
 }
 
 // WriteDeny writes a deny message to the writer.
-func WriteDeny(w io.Writer, command, reason string) {
+func WriteDeny(w io.Writer, command, reason, ruleID, policyPath string) {
 	fmt.Fprintf(w, "[✈️ Aileron] Denied ⛔: %s\n", command)
 	if reason != "" {
 		fmt.Fprintf(w, "Reason: %s\n", reason)
+	}
+	if source := describeRuleSource(ruleID, policyPath); source != "" {
+		fmt.Fprintf(w, "Policy: %s\n", source)
 	}
 }
 
 // WriteDenyByUser writes a user-denied message to the writer.
 func WriteDenyByUser(w io.Writer, command string) {
 	fmt.Fprintf(w, "[✈️ Aileron] Denied ⛔: %s\n", command)
+}
+
+// describeRuleSource returns a human-readable description of where a
+// policy rule came from.
+func describeRuleSource(ruleID, policyPath string) string {
+	if strings.HasPrefix(ruleID, "builtin_") {
+		return "built-in rule"
+	}
+	if policyPath == "" {
+		return ""
+	}
+	// Shorten the path for display.
+	if strings.Contains(policyPath, "/.aileron/settings.yaml") {
+		return "personal settings (~/.aileron/settings.yaml)"
+	}
+	return policyPath
 }
