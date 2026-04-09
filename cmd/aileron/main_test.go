@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/ALRubinger/aileron/core/launch/agents"
 )
@@ -98,5 +101,83 @@ func TestRun_LaunchUnknownAgent(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "claude") {
 		t.Error("expected available agents list in stderr")
+	}
+}
+
+func TestRunLog_WithEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(path, audit.ShellEntry{
+		SessionID: "s1", Command: "echo hello", Disposition: "allow", RuleID: "allow_0",
+	})
+	audit.AppendShellEntry(path, audit.ShellEntry{
+		SessionID: "s1", Command: "rm -rf /", Disposition: "deny", RuleID: "deny_0",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"log", "--path", path}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "echo hello") {
+		t.Errorf("expected 'echo hello' in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "deny") {
+		t.Errorf("expected 'deny' in output, got:\n%s", out)
+	}
+}
+
+func TestRunLog_FilterByDisposition(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(path, audit.ShellEntry{
+		SessionID: "s1", Command: "echo hello", Disposition: "allow",
+	})
+	audit.AppendShellEntry(path, audit.ShellEntry{
+		SessionID: "s1", Command: "rm -rf /", Disposition: "deny",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"log", "--path", path, "--disposition", "deny"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if strings.Contains(out, "echo hello") {
+		t.Error("should not show allow entries when filtering by deny")
+	}
+	if !strings.Contains(out, "rm -rf") {
+		t.Error("expected denied entry in output")
+	}
+}
+
+func TestRunLog_NoEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.jsonl")
+	os.WriteFile(path, nil, 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"log", "--path", path}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "No audit entries") {
+		t.Error("expected 'No audit entries' message")
+	}
+}
+
+func TestRunLog_MissingFile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"log", "--path", "/nonexistent/audit.jsonl"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+}
+
+func TestRunLog_HelpShownInUsage(t *testing.T) {
+	var stdout bytes.Buffer
+	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
+	if !strings.Contains(stdout.String(), "aileron log") {
+		t.Error("expected 'aileron log' in help output")
 	}
 }
