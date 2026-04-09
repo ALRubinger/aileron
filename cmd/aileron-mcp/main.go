@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -86,10 +87,37 @@ type toolContent struct {
 type server struct {
 	aileronURL   string
 	aileronToken string
+	commsSocket  string
 	httpClient   *http.Client
 }
 
-// submitIntentTool is the single tool exposed by the Aileron MCP server.
+var readMessagesTool = toolDef{
+	Name:        "read_messages",
+	Description: "Read pending messages from communication channels (Slack, Discord). Returns unread messages from the notification queue.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"service": {Type: "string", Description: "Filter by service: 'slack', 'discord', or empty for all"},
+			"channel": {Type: "string", Description: "Filter by channel name, or empty for all channels"},
+		},
+	},
+}
+
+var sendMessageTool = toolDef{
+	Name:        "send_message",
+	Description: "Send a message to a communication channel (Slack, Discord). Requires human approval.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"service": {Type: "string", Description: "Target service: 'slack' or 'discord'"},
+			"channel": {Type: "string", Description: "Channel name or ID to send to"},
+			"body":    {Type: "string", Description: "Message text to send"},
+		},
+		Required: []string{"service", "channel", "body"},
+	},
+}
+
+// submitIntentTool is the legacy cloud tool.
 var submitIntentTool = toolDef{
 	Name:        "submit_intent",
 	Description: "Submit a governed intent to Aileron for execution",
@@ -106,17 +134,10 @@ var submitIntentTool = toolDef{
 }
 
 func main() {
-	aileronURL := os.Getenv("AILERON_URL")
-	aileronToken := os.Getenv("AILERON_TOKEN")
-
-	if aileronURL == "" {
-		fmt.Fprintln(os.Stderr, "aileron-mcp: AILERON_URL is required")
-		os.Exit(1)
-	}
-
 	s := &server{
-		aileronURL:   aileronURL,
-		aileronToken: aileronToken,
+		aileronURL:   os.Getenv("AILERON_URL"),
+		aileronToken: os.Getenv("AILERON_TOKEN"),
+		commsSocket:  os.Getenv("AILERON_COMMS_SOCKET"),
 		httpClient:   &http.Client{},
 	}
 
@@ -172,11 +193,12 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 		return nil // no response for notifications
 
 	case "tools/list":
+		tools := s.availableTools()
 		return &jsonrpcResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: map[string]any{
-				"tools": []toolDef{submitIntentTool},
+				"tools": tools,
 			},
 		}
 
@@ -205,13 +227,116 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 	}
 }
 
+func (s *server) availableTools() []toolDef {
+	var tools []toolDef
+	if s.commsSocket != "" {
+		tools = append(tools, readMessagesTool, sendMessageTool)
+	}
+	if s.aileronURL != "" {
+		tools = append(tools, submitIntentTool)
+	}
+	return tools
+}
+
 func (s *server) dispatchTool(ctx context.Context, name string, args map[string]any) toolResult {
 	switch name {
 	case "submit_intent":
 		return s.submitIntent(ctx, args)
+	case "read_messages":
+		return s.readMessages(args)
+	case "send_message":
+		return s.sendMessage(args)
 	default:
 		return errorResult("unknown tool: " + name)
 	}
+}
+
+func (s *server) readMessages(args map[string]any) toolResult {
+	if s.commsSocket == "" {
+		return errorResult("comms not available (not launched via aileron)")
+	}
+
+	service, _ := args["service"].(string)
+	channel, _ := args["channel"].(string)
+
+	resp := requestComms(s.commsSocket, commsRequest{
+		Method:  "read_messages",
+		Service: service,
+		Channel: channel,
+	})
+	if resp.Error != "" {
+		return errorResult(resp.Error)
+	}
+	return jsonResult(resp.Messages)
+}
+
+func (s *server) sendMessage(args map[string]any) toolResult {
+	if s.commsSocket == "" {
+		return errorResult("comms not available (not launched via aileron)")
+	}
+
+	service, _ := args["service"].(string)
+	channel, _ := args["channel"].(string)
+	body, _ := args["body"].(string)
+
+	if service == "" || channel == "" || body == "" {
+		return errorResult("service, channel, and body are required")
+	}
+
+	resp := requestComms(s.commsSocket, commsRequest{
+		Method:  "send_message",
+		Service: service,
+		Channel: channel,
+		Body:    body,
+	})
+	if resp.Error != "" {
+		return errorResult(resp.Error)
+	}
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: "Message sent successfully."}},
+	}
+}
+
+// --- Comms IPC types (mirrors core/launch/commsserver.go) ---
+
+type commsRequest struct {
+	Method  string `json:"method"`
+	Service string `json:"service,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	Body    string `json:"body,omitempty"`
+}
+
+type commsResponse struct {
+	OK       bool           `json:"ok"`
+	Error    string         `json:"error,omitempty"`
+	Messages []commsMessage `json:"messages,omitempty"`
+}
+
+type commsMessage struct {
+	ID        string `json:"id"`
+	Service   string `json:"service"`
+	Channel   string `json:"channel"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	Timestamp string `json:"timestamp"`
+}
+
+func requestComms(socketPath string, req commsRequest) commsResponse {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return commsResponse{Error: "connection failed: " + err.Error()}
+	}
+	defer conn.Close()
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return commsResponse{Error: "encode failed: " + err.Error()}
+	}
+
+	var resp commsResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return commsResponse{Error: "decode failed: " + err.Error()}
+	}
+	return resp
 }
 
 func (s *server) submitIntent(ctx context.Context, args map[string]any) toolResult {
