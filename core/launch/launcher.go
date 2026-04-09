@@ -88,9 +88,11 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	auditLog := resolveAuditLog(config.Dir)
 	envConfig := loadEnvConfig(config.Dir)
 	approvalSocket := filepath.Join(os.TempDir(), "ai-"+sessionID+".sock")
+	commsSocket := filepath.Join(os.TempDir(), "ai-comms-"+sessionID+".sock")
 
 	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), sessionID, auditLog, envConfig, config.Agent.Env())
 	env = append(env, "AILERON_APPROVAL_SOCKET="+approvalSocket)
+	env = append(env, "AILERON_COMMS_SOCKET="+commsSocket)
 
 	// Agent-required args come first, then user-supplied args.
 	allArgs := append(config.Agent.Args(), config.Args...)
@@ -108,7 +110,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// If stdin is a terminal, use the pty proxy with status bar.
 	var result LaunchResult
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		result, err = launchWithPty(cmd, config, queue, approvalSocket)
+		result, err = launchWithPty(cmd, config, queue, listeners, approvalSocket, commsSocket)
 	} else {
 		result, err = launchDirect(cmd, config)
 	}
@@ -146,7 +148,7 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 }
 
 // launchWithPty runs the agent inside a pty with a status bar at the bottom.
-func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, approvalSocket string) (LaunchResult, error) {
+func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, listeners []comms.Listener, approvalSocket, commsSocket string) (LaunchResult, error) {
 	stdinFd := int(os.Stdin.Fd())
 
 	cols, rows, err := term.GetSize(stdinFd)
@@ -192,6 +194,14 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, appro
 	}
 	defer approvalSrv.Close()
 	go approvalSrv.Serve()
+
+	// Start the comms server so aileron-mcp can read/send messages.
+	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, bar, outputCopier, router)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("starting comms server: %w", err)
+	}
+	defer commsSrv.Close()
+	go commsSrv.Serve()
 
 	// Wire onChange to re-render the status bar when notifications arrive.
 	queue.onChange = func() { bar.Render(os.Stdout) }
