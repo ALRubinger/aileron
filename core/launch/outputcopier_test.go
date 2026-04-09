@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,6 +182,70 @@ func TestOutputCopier_PauseFile(t *testing.T) {
 
 	if !strings.Contains(dst.String(), "hidden") {
 		t.Error("expected 'hidden' after flush")
+	}
+
+	srcW.Close()
+}
+
+func TestOutputCopier_OnIdleFires(t *testing.T) {
+	srcR, srcW := io.Pipe()
+	dst := &safeBuf{}
+	overlay := &simpleOverlay{}
+
+	var idleCalled sync.WaitGroup
+	idleCalled.Add(1)
+	called := false
+
+	oc := launch.NewOutputCopier(srcR, dst, overlay)
+	oc.SetOnIdle(func() {
+		if !called {
+			called = true
+			idleCalled.Done()
+		}
+	})
+	go oc.Run()
+
+	// Write some data, then stop.
+	srcW.Write([]byte("output"))
+	time.Sleep(10 * time.Millisecond)
+
+	// Wait for idle callback (should fire after ~150ms of quiet).
+	idleCalled.Wait()
+
+	if !called {
+		t.Error("onIdle should have been called after output stopped")
+	}
+
+	srcW.Close()
+}
+
+func TestOutputCopier_OnIdleResetsOnNewOutput(t *testing.T) {
+	srcR, srcW := io.Pipe()
+	dst := &safeBuf{}
+	overlay := &simpleOverlay{}
+
+	callCount := int32(0)
+	oc := launch.NewOutputCopier(srcR, dst, overlay)
+	oc.SetOnIdle(func() {
+		sync.OnceFunc(func() {})
+		atomic.AddInt32(&callCount, 1)
+	})
+	go oc.Run()
+
+	// Write, wait a bit (but less than idle timeout), write again.
+	srcW.Write([]byte("a"))
+	time.Sleep(50 * time.Millisecond)
+	srcW.Write([]byte("b"))
+	time.Sleep(50 * time.Millisecond)
+	srcW.Write([]byte("c"))
+
+	// Wait for idle to fire once.
+	time.Sleep(300 * time.Millisecond)
+
+	// Should have fired exactly once (timer reset on each write).
+	got := atomic.LoadInt32(&callCount)
+	if got != 1 {
+		t.Errorf("onIdle called %d times, want 1 (timer should reset)", got)
 	}
 
 	srcW.Close()
