@@ -104,59 +104,69 @@ func (s *SlackListener) handleEvent(evt socketmode.Event, msgs chan<- IncomingMe
 		}
 		s.socket.Ack(*evt.Request)
 
-		switch innerEvt := eventsAPIEvent.InnerEvent.Data.(type) {
-		case *slackevents.MessageEvent:
-			// Skip bot messages to avoid feedback loops.
-			if innerEvt.BotID != "" {
-				return
-			}
-			channel := innerEvt.Channel
-			if s.ignore[channel] {
-				return
-			}
-			// If specific channels are configured, only listen on those.
-			if len(s.channels) > 0 && !s.channels[channel] {
-				return
-			}
-
-			// Resolve channel name (the event gives us an ID).
-			channelName := channel
-			if info, err := s.api.GetConversationInfo(&slack.GetConversationInfoInput{
-				ChannelID: channel,
-			}); err == nil && info != nil {
-				channelName = "#" + info.Name
-			}
-
-			// Resolve user name.
-			author := innerEvt.User
-			if user, err := s.api.GetUserInfo(innerEvt.User); err == nil {
-				author = user.RealName
-				if author == "" {
-					author = user.Name
-				}
-			}
-
-			body := innerEvt.Text
-			preview := body
-			if len(preview) > 80 {
-				preview = preview[:77] + "..."
-			}
-
-			msgs <- IncomingMessage{
-				ID:        innerEvt.TimeStamp,
-				Service:   "slack",
-				Channel:   channelName,
-				Author:    author,
-				Body:      body,
-				Timestamp: time.Now(),
+		if innerEvt, ok := eventsAPIEvent.InnerEvent.Data.(*slackevents.MessageEvent); ok {
+			if msg, deliver := s.ProcessMessageEvent(innerEvt); deliver {
+				msgs <- msg
 			}
 		}
 	default:
-		// Acknowledge other event types we don't handle.
 		if evt.Request != nil {
 			s.socket.Ack(*evt.Request)
 		}
 	}
+}
+
+// ProcessMessageEvent converts a Slack message event into an
+// IncomingMessage. Exported for testing. Returns the message and true
+// if the event should be delivered, or false if it should be skipped
+// (bot message, ignored channel, etc.).
+func (s *SlackListener) ProcessMessageEvent(evt *slackevents.MessageEvent) (IncomingMessage, bool) {
+	if evt.BotID != "" {
+		return IncomingMessage{}, false
+	}
+	channel := evt.Channel
+	if s.ignore[channel] {
+		return IncomingMessage{}, false
+	}
+	if len(s.channels) > 0 && !s.channels[channel] {
+		return IncomingMessage{}, false
+	}
+
+	// Resolve channel name if API is available.
+	channelName := channel
+	if s.api != nil {
+		if info, err := s.api.GetConversationInfo(&slack.GetConversationInfoInput{
+			ChannelID: channel,
+		}); err == nil && info != nil {
+			channelName = "#" + info.Name
+		}
+	}
+
+	// Resolve user name if API is available.
+	author := evt.User
+	if s.api != nil {
+		if user, err := s.api.GetUserInfo(evt.User); err == nil {
+			author = user.RealName
+			if author == "" {
+				author = user.Name
+			}
+		}
+	}
+
+	body := evt.Text
+	preview := body
+	if len(preview) > 80 {
+		preview = preview[:77] + "..."
+	}
+
+	return IncomingMessage{
+		ID:        evt.TimeStamp,
+		Service:   "slack",
+		Channel:   channelName,
+		Author:    author,
+		Body:      body,
+		Timestamp: time.Now(),
+	}, true
 }
 
 // Send posts a message to the given Slack channel.

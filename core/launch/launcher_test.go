@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/audit"
+	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/creack/pty/v2"
 )
@@ -512,6 +514,93 @@ func TestPrintSessionSummary_EmptySession(t *testing.T) {
 	launch.PrintSessionSummary(&buf, path, "nonexistent-session")
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for unmatched session, got %q", buf.String())
+	}
+}
+
+func TestBridgeMessages(t *testing.T) {
+	queue := launch.NewNotifyQueue(10, nil)
+	msgs := make(chan comms.IncomingMessage, 5)
+
+	go launch.BridgeMessages(msgs, queue)
+
+	msgs <- comms.IncomingMessage{
+		ID:        "msg-1",
+		Service:   "slack",
+		Channel:   "#backend",
+		Author:    "Alice",
+		Body:      "Is the deploy blocked?",
+		Timestamp: time.Now(),
+	}
+	msgs <- comms.IncomingMessage{
+		ID:      "msg-2",
+		Service: "slack",
+		Channel: "#backend",
+		Author:  "Bob",
+		Body:    "No, it went through.",
+	}
+	close(msgs)
+	time.Sleep(50 * time.Millisecond)
+
+	if queue.Len() != 2 {
+		t.Fatalf("expected 2 messages in queue, got %d", queue.Len())
+	}
+	latest, ok := queue.Latest()
+	if !ok || latest.Author != "Bob" {
+		t.Errorf("expected latest from Bob, got %+v", latest)
+	}
+	if latest.Source != "slack" {
+		t.Errorf("Source = %q, want 'slack'", latest.Source)
+	}
+}
+
+func TestBridgeMessages_LongPreviewTruncated(t *testing.T) {
+	queue := launch.NewNotifyQueue(10, nil)
+	msgs := make(chan comms.IncomingMessage, 1)
+
+	go launch.BridgeMessages(msgs, queue)
+
+	longBody := strings.Repeat("x", 100)
+	msgs <- comms.IncomingMessage{
+		ID:   "msg-1",
+		Body: longBody,
+	}
+	close(msgs)
+	time.Sleep(50 * time.Millisecond)
+
+	all := queue.Messages()
+	if len(all) != 1 {
+		t.Fatal("expected 1 message")
+	}
+	if len(all[0].Preview) > 80 {
+		t.Errorf("preview should be truncated, got %d chars", len(all[0].Preview))
+	}
+	if all[0].Body != longBody {
+		t.Error("full body should be preserved")
+	}
+}
+
+func TestLaunch_CommsListenersStartWithConfig(t *testing.T) {
+	// Verify that startCommsListeners doesn't panic when no config exists.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// No aileron.yaml → no listeners, no panic.
+	queue := launch.NewNotifyQueue(10, nil)
+	_ = queue // listeners would push to this
+
+	// Just verify Launch doesn't crash when there's no notifications config.
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\ndefault: allow\n"), 0o644)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch with no comms config should succeed: %v", err)
 	}
 }
 

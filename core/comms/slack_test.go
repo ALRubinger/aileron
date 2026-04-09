@@ -2,9 +2,11 @@ package comms_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/comms"
+	"github.com/slack-go/slack/slackevents"
 )
 
 func TestNewSlackListener(t *testing.T) {
@@ -60,6 +62,101 @@ func TestSlackListener_Close(t *testing.T) {
 	// Close without connect should not panic.
 	if err := sl.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestSlackListener_ProcessMessageEvent(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test",
+		[]string{"C123"}, []string{"C999"})
+
+	msg, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User:      "U123",
+		Channel:   "C123",
+		Text:      "Is the deploy blocked?",
+		TimeStamp: "1234567890.123456",
+	})
+	if !ok {
+		t.Fatal("expected message to be delivered")
+	}
+	if msg.Service != "slack" {
+		t.Errorf("Service = %q, want 'slack'", msg.Service)
+	}
+	if msg.Body != "Is the deploy blocked?" {
+		t.Errorf("Body = %q", msg.Body)
+	}
+	if msg.Author != "U123" {
+		t.Errorf("Author = %q, want 'U123' (no API to resolve)", msg.Author)
+	}
+}
+
+func TestSlackListener_ProcessMessageEvent_BotSkipped(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil)
+
+	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User:    "U123",
+		Channel: "C123",
+		BotID:   "B456",
+		Text:    "bot message",
+	})
+	if ok {
+		t.Error("bot messages should be skipped")
+	}
+}
+
+func TestSlackListener_ProcessMessageEvent_IgnoredChannel(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, []string{"C999"})
+
+	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User:    "U123",
+		Channel: "C999",
+		Text:    "ignored",
+	})
+	if ok {
+		t.Error("messages from ignored channels should be skipped")
+	}
+}
+
+func TestSlackListener_ProcessMessageEvent_UnlistedChannel(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test",
+		[]string{"C123"}, nil) // only listen on C123
+
+	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User:    "U123",
+		Channel: "C456", // not in the listen list
+		Text:    "wrong channel",
+	})
+	if ok {
+		t.Error("messages from unlisted channels should be skipped")
+	}
+}
+
+func TestSlackListener_ProcessMessageEvent_LongPreview(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil)
+
+	longText := strings.Repeat("x", 100)
+	msg, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User:    "U123",
+		Channel: "C123",
+		Text:    longText,
+	})
+	if !ok {
+		t.Fatal("expected delivery")
+	}
+	if msg.Body != longText {
+		t.Error("full body should be preserved")
+	}
+}
+
+func TestSlackListener_ProcessMessageEvent_NoChannelFilter(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil) // no channel filter
+
+	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User:    "U123",
+		Channel: "C_ANY",
+		Text:    "any channel",
+	})
+	if !ok {
+		t.Error("with no channel filter, all channels should be accepted")
 	}
 }
 
