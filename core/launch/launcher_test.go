@@ -327,6 +327,92 @@ func TestInstallWrapper_ReadOnlyDir(t *testing.T) {
 	}
 }
 
+func TestLaunch_EnvScrubbing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Set env vars that should be scrubbed.
+	t.Setenv("AWS_SECRET_KEY", "supersecret")
+	t.Setenv("MY_TOKEN", "tok123")
+	t.Setenv("SAFE_VAR", "keepme")
+
+	// Write an aileron.yaml with scrub config.
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+env:
+  scrub:
+    - "AWS_*"
+    - "*_TOKEN"
+  passthrough:
+    - "SAFE_VAR"
+`), 0o644)
+
+	outFile := filepath.Join(dir, "env.txt")
+	script := filepath.Join(dir, "capture-env.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(outFile)
+	envStr := string(data)
+
+	if strings.Contains(envStr, "AWS_SECRET_KEY") {
+		t.Error("AWS_SECRET_KEY should have been scrubbed")
+	}
+	if strings.Contains(envStr, "MY_TOKEN") {
+		t.Error("MY_TOKEN should have been scrubbed")
+	}
+	if !strings.Contains(envStr, "SAFE_VAR=keepme") {
+		t.Error("SAFE_VAR should have been preserved (passthrough)")
+	}
+}
+
+func TestLaunch_EnvScrubPassthroughBeatsScrub(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("HOME_DIR", "/home/user")
+
+	// HOME_DIR matches HOME* scrub pattern but HOME is in passthrough.
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+env:
+  scrub:
+    - "HOME*"
+  passthrough:
+    - "HOME"
+    - "HOME_DIR"
+`), 0o644)
+
+	outFile := filepath.Join(dir, "env.txt")
+	script := filepath.Join(dir, "capture-env.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+
+	data, _ := os.ReadFile(outFile)
+	envStr := string(data)
+
+	// HOME_DIR is in passthrough, so passthrough beats scrub.
+	if !strings.Contains(envStr, "HOME_DIR=/home/user") {
+		t.Error("HOME_DIR should be preserved (passthrough beats scrub)")
+	}
+}
+
 func TestResolveAuditLogFromCwd(t *testing.T) {
 	dir := t.TempDir()
 	// No aileron.yaml → falls back to cwd/.aileron/audit.jsonl.
