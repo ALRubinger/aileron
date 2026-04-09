@@ -132,7 +132,7 @@ deny:
 	if exitErr.ExitCode() != 1 {
 		t.Errorf("expected exit code 1, got %d", exitErr.ExitCode())
 	}
-	if !strings.Contains(string(out), "denied") {
+	if !strings.Contains(string(out), "Denied") {
 		t.Errorf("expected 'denied' in output, got %q", string(out))
 	}
 	if !strings.Contains(string(out), "no recursive delete") {
@@ -334,7 +334,7 @@ deny:
 	if err == nil {
 		t.Fatal("expected deny for rm -rf inside Claude Code wrapper")
 	}
-	if !strings.Contains(string(out), "denied") {
+	if !strings.Contains(string(out), "Denied") {
 		t.Errorf("expected 'denied' in output, got %q", string(out))
 	}
 	if !strings.Contains(string(out), "no recursive delete") {
@@ -435,13 +435,11 @@ deny:
 	}
 	out := stderr.String()
 
-	// Short message for the agent.
-	if !strings.Contains(out, "aileron: denied") {
-		t.Errorf("expected short 'aileron: denied' in stderr, got %q", out)
+	if !strings.Contains(out, "Aileron] Denied") {
+		t.Errorf("expected denial message in stderr, got %q", out)
 	}
-	// Detailed message falls back to stderr when no tty (test environment).
 	if !strings.Contains(out, "no recursive delete") {
-		t.Errorf("expected deny reason in stderr fallback, got %q", out)
+		t.Errorf("expected deny reason in stderr, got %q", out)
 	}
 }
 

@@ -115,15 +115,15 @@ func FindPolicyFile(startDir string) string {
 	}
 }
 
-// WriteDeny writes a deny message to the writer with ANSI color.
+// WriteDeny writes a deny message to the writer.
 func WriteDeny(w io.Writer, command, reason string) {
-	fmt.Fprintf(w, "\033[31m  ✗ aileron: denied\033[0m %s\n", command)
+	fmt.Fprintf(w, "[✈️ Aileron] Denied ⛔: %s\n", command)
 	if reason != "" {
-		fmt.Fprintf(w, "    %s\n", reason)
+		fmt.Fprintf(w, "Reason: %s\n", reason)
 	}
 }
 
 // WriteDenyByUser writes a user-denied message to the writer.
 func WriteDenyByUser(w io.Writer, command string) {
-	fmt.Fprintf(w, "\033[33m  ✗ aileron: denied by user\033[0m %s\n", command)
+	fmt.Fprintf(w, "[✈️ Aileron] Denied ⛔: %s\n", command)
 }

@@ -145,7 +145,7 @@ func TestWriteDeny(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDeny(&buf, "rm -rf /", "no recursive delete")
 	out := buf.String()
-	if !strings.Contains(out, "denied") {
+	if !strings.Contains(out, "Denied") {
 		t.Error("expected 'denied' in output")
 	}
 	if !strings.Contains(out, "no recursive delete") {
@@ -156,8 +156,8 @@ func TestWriteDeny(t *testing.T) {
 func TestWriteDenyByUser(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDenyByUser(&buf, "git push")
-	if !strings.Contains(buf.String(), "denied by user") {
-		t.Error("expected 'denied by user' in output")
+	if !strings.Contains(buf.String(), "Denied") {
+		t.Error("expected 'Denied' in output")
 	}
 }
 
@@ -283,7 +283,7 @@ func TestWriteDeny_NoReason(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDeny(&buf, "bad command", "")
 	out := buf.String()
-	if !strings.Contains(out, "denied") {
+	if !strings.Contains(out, "Denied") {
 		t.Error("expected 'denied' in output")
 	}
 	// Should not have an extra line for empty reason.
