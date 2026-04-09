@@ -2,6 +2,7 @@ package launch_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -576,6 +577,112 @@ func TestBridgeMessages_LongPreviewTruncated(t *testing.T) {
 	}
 	if all[0].Body != longBody {
 		t.Error("full body should be preserved")
+	}
+}
+
+// testListener is a mock comms.Listener for testing StartListeners.
+type testListener struct {
+	service      string
+	connectErr   error
+	listenErr    error
+	msgs         chan comms.IncomingMessage
+	closed       bool
+}
+
+func (l *testListener) Service() string { return l.service }
+func (l *testListener) Connect(ctx context.Context) error { return l.connectErr }
+func (l *testListener) Listen(ctx context.Context) (<-chan comms.IncomingMessage, error) {
+	if l.listenErr != nil {
+		return nil, l.listenErr
+	}
+	return l.msgs, nil
+}
+func (l *testListener) Send(ctx context.Context, msg comms.OutgoingMessage) error { return nil }
+func (l *testListener) Close() error { l.closed = true; return nil }
+
+func TestStartListeners_Success(t *testing.T) {
+	msgs := make(chan comms.IncomingMessage, 10)
+	l := &testListener{service: "test", msgs: msgs}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	var stderr strings.Builder
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr)
+
+	if len(started) != 1 {
+		t.Fatalf("expected 1 started listener, got %d", len(started))
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no errors, got %q", stderr.String())
+	}
+
+	// Send a message and verify it reaches the queue.
+	msgs <- comms.IncomingMessage{ID: "1", Service: "test", Author: "Alice", Body: "hello"}
+	close(msgs)
+	time.Sleep(50 * time.Millisecond)
+
+	if queue.Len() != 1 {
+		t.Errorf("expected 1 message in queue, got %d", queue.Len())
+	}
+}
+
+func TestStartListeners_ConnectError(t *testing.T) {
+	l := &testListener{
+		service:    "bad",
+		connectErr: fmt.Errorf("connection refused"),
+	}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	var stderr strings.Builder
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr)
+
+	if len(started) != 0 {
+		t.Error("expected 0 started listeners on connect error")
+	}
+	if !strings.Contains(stderr.String(), "connect failed") {
+		t.Errorf("expected connect error in stderr, got %q", stderr.String())
+	}
+}
+
+func TestStartListeners_ListenError(t *testing.T) {
+	l := &testListener{
+		service:   "bad",
+		listenErr: fmt.Errorf("listen failed"),
+	}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	var stderr strings.Builder
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr)
+
+	if len(started) != 0 {
+		t.Error("expected 0 started listeners on listen error")
+	}
+	if !strings.Contains(stderr.String(), "listen failed") {
+		t.Errorf("expected listen error in stderr, got %q", stderr.String())
+	}
+}
+
+func TestStartListeners_Empty(t *testing.T) {
+	queue := launch.NewNotifyQueue(10, nil)
+	var stderr strings.Builder
+	started := launch.StartListeners(context.Background(), nil, queue, &stderr)
+	if len(started) != 0 {
+		t.Error("expected 0 listeners for nil input")
+	}
+}
+
+func TestStartListeners_Mixed(t *testing.T) {
+	good := &testListener{service: "good", msgs: make(chan comms.IncomingMessage, 1)}
+	bad := &testListener{service: "bad", connectErr: fmt.Errorf("nope")}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	var stderr strings.Builder
+	started := launch.StartListeners(context.Background(), []comms.Listener{bad, good}, queue, &stderr)
+
+	if len(started) != 1 {
+		t.Fatalf("expected 1 started, got %d", len(started))
+	}
+	if started[0].Service() != "good" {
+		t.Errorf("expected 'good' listener, got %q", started[0].Service())
 	}
 }
 

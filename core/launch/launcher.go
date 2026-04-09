@@ -467,9 +467,8 @@ func envGlobMatch(pattern, name string) bool {
 	return pattern == name
 }
 
-// startCommsListeners reads the notification config from the policy file
-// and starts any configured listeners (Slack, Discord). Each listener
-// pushes incoming messages to the NotifyQueue.
+// startCommsListeners reads the notification config from the policy file,
+// creates listeners, and starts them.
 func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []comms.Listener {
 	if dir == "" {
 		dir, _ = os.Getwd()
@@ -483,28 +482,37 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []
 		return nil
 	}
 
-	var listeners []comms.Listener
-
+	var created []comms.Listener
 	if cfg := pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
 		channels := make([]string, 0, len(cfg.Channels))
 		for _, ch := range cfg.Channels {
 			channels = append(channels, ch.Name)
 		}
-		sl := comms.NewSlackListener(cfg.AppToken, cfg.BotToken, channels, cfg.Ignore)
-		if err := sl.Connect(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "aileron: slack connect failed: %v\n", err)
-		} else {
-			msgs, err := sl.Listen(ctx)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "aileron: slack listen failed: %v\n", err)
-			} else {
-				listeners = append(listeners, sl)
-				go BridgeMessages(msgs, queue)
-			}
-		}
+		created = append(created, comms.NewSlackListener(cfg.AppToken, cfg.BotToken, channels, cfg.Ignore))
 	}
 
-	return listeners
+	return StartListeners(ctx, created, queue, os.Stderr)
+}
+
+// StartListeners connects and starts each listener, bridging incoming
+// messages to the NotifyQueue. Returns the successfully started
+// listeners. Errors are written to w.
+func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer) []comms.Listener {
+	var started []comms.Listener
+	for _, l := range listeners {
+		if err := l.Connect(ctx); err != nil {
+			fmt.Fprintf(w, "aileron: %s connect failed: %v\n", l.Service(), err)
+			continue
+		}
+		msgs, err := l.Listen(ctx)
+		if err != nil {
+			fmt.Fprintf(w, "aileron: %s listen failed: %v\n", l.Service(), err)
+			continue
+		}
+		started = append(started, l)
+		go BridgeMessages(msgs, queue)
+	}
+	return started
 }
 
 // BridgeMessages reads from a comms listener channel and pushes messages
