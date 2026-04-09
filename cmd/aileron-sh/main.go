@@ -12,11 +12,25 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/ALRubinger/aileron/core/model"
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
+)
+
+// approvalResponse represents the user's choice at the approval prompt.
+type approvalResponse int
+
+const (
+	responseDeny approvalResponse = iota
+	responseAllowOnce
+	responseAllowProject
+	responseAllowUser
 )
 
 func main() {
@@ -47,24 +61,32 @@ func main() {
 	cwd, _ := os.Getwd()
 	rawCommand, hasCommand := extractCommand(args)
 	command := normalizeCommand(os.Getenv("AILERON_AGENT"), rawCommand)
-	if hasCommand && launch.FindPolicyFile(cwd) != "" {
-		policyPath := launch.FindPolicyFile(cwd)
+	policyPath := launch.FindPolicyFile(cwd)
+	if hasCommand && policyPath != "" {
 		result := launch.EvaluateCommand(policyPath, command, cwd)
 
 		switch result.Disposition {
 		case model.DispositionAllow:
-			// Fall through to exec.
+			writeAuditEntry(command, "allow", result.RuleID)
 		case model.DispositionDeny:
+			writeAuditEntry(command, "deny", result.RuleID)
 			launch.WriteDeny(os.Stderr, command, result.Reason)
 			os.Exit(1)
 		case model.DispositionRequireApproval:
-			if !promptApproval(command, result.Reason) {
+			response := promptApproval(command, result.Reason)
+			switch response {
+			case responseDeny:
+				writeAuditEntry(command, "ask_denied", result.RuleID)
 				launch.WriteDenyByUser(os.Stderr, command)
 				os.Exit(1)
-			}
-		default:
-			if !promptApproval(command, result.Reason) {
-				os.Exit(1)
+			case responseAllowOnce:
+				writeAuditEntry(command, "ask_approved", result.RuleID)
+			case responseAllowProject:
+				writeAuditEntry(command, "ask_approved", result.RuleID)
+				persistAllowRule(policyPath, command, "project aileron.yaml")
+			case responseAllowUser:
+				writeAuditEntry(command, "ask_approved", result.RuleID)
+				persistAllowRule(userSettingsPath(), command, "user settings")
 			}
 		}
 	}
@@ -76,6 +98,46 @@ func main() {
 		fmt.Fprintf(os.Stderr, "aileron-sh: exec %q failed: %v\n", binary, err)
 		os.Exit(126)
 	}
+}
+
+// writeAuditEntry appends an entry to the audit log if configured.
+func writeAuditEntry(command, disposition, ruleID string) {
+	path := os.Getenv("AILERON_AUDIT_LOG")
+	if path == "" {
+		return
+	}
+	audit.AppendShellEntry(path, audit.ShellEntry{
+		Timestamp:   time.Now(),
+		SessionID:   os.Getenv("AILERON_SESSION_ID"),
+		Command:     command,
+		Disposition: disposition,
+		RuleID:      ruleID,
+		Agent:       os.Getenv("AILERON_AGENT"),
+	})
+}
+
+// persistAllowRule writes a command pattern to the given policy file
+// and notifies the user via /dev/tty.
+func persistAllowRule(path, command, label string) {
+	if err := launchpolicy.AppendAllowRule(path, command); err != nil {
+		fmt.Fprintf(os.Stderr, "aileron-sh: warning: could not save rule: %v\n", err)
+		return
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+	fmt.Fprintf(tty, "    \033[32m✓ saved to %s\033[0m\n", label)
+}
+
+// userSettingsPath returns the path to ~/.aileron/settings.yaml.
+func userSettingsPath() string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".aileron", "settings.yaml")
 }
 
 // extractCommand finds the command string in shell args of the form
@@ -155,10 +217,10 @@ func unwrapClaudeEval(command string) string {
 }
 
 // promptApproval writes a prompt to /dev/tty and reads the response.
-func promptApproval(command, reason string) bool {
+func promptApproval(command, reason string) approvalResponse {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return false
+		return responseDeny
 	}
 	defer tty.Close()
 
@@ -166,11 +228,20 @@ func promptApproval(command, reason string) bool {
 	if reason != "" {
 		fmt.Fprintf(tty, "    %s\n", reason)
 	}
-	fmt.Fprintf(tty, "    \033[1m[y]\033[0m allow  \033[1m[n]\033[0m deny  ")
+	fmt.Fprintf(tty, "    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
 
 	reader := bufio.NewReader(tty)
 	response, _ := reader.ReadString('\n')
 	response = strings.TrimSpace(strings.ToLower(response))
 
-	return response == "y" || response == "yes"
+	switch response {
+	case "y", "yes":
+		return responseAllowOnce
+	case "p":
+		return responseAllowProject
+	case "u":
+		return responseAllowUser
+	default:
+		return responseDeny
+	}
 }
