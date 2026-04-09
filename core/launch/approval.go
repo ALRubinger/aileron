@@ -111,14 +111,6 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 
 	// Switch to alternate screen buffer — preserves scrollback history.
 	w := 74 // inner width of the box
-	pad := func(content string) string {
-		// Pad content to fixed width for the right border.
-		display := len(content) // approximate — good enough for ASCII
-		if display >= w {
-			return content
-		}
-		return content + strings.Repeat(" ", w-display)
-	}
 
 	var prompt strings.Builder
 	prompt.WriteString("\033[?1049h\033[2J\033[1;1H")
@@ -130,10 +122,26 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		fmt.Fprintf(&prompt, "  \033[33m│\033[0m  \033[2m%s\033[0m%s\033[33m│\033[0m\r\n", reason, strings.Repeat(" ", w-2-len(reason)))
 	}
 	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time"))
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[n]\033[0m  No, not this time        Block this command; ask again next time"))
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy"))
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  %s\033[33m│\033[0m\r\n", pad("\033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy"))
+	// Option lines: visible text is measured without ANSI codes.
+	// w=74, 2 chars indent = 72 usable. Each line format: "  [x]  Label  Description"
+	type opt struct {
+		key, label, desc string
+	}
+	opts := []opt{
+		{"y", "Yes, this time          ", "Run this command; ask again next time"},
+		{"n", "No, not this time       ", "Block this command; ask again next time"},
+		{"a", "Allow for this project  ", "Add a rule to the project policy"},
+		{"m", "Allow for me            ", "Add a rule in my personal policy"},
+	}
+	for _, o := range opts {
+		visible := fmt.Sprintf("[%s]  %s%s", o.key, o.label, o.desc)
+		gap := w - 2 - len(visible)
+		if gap < 0 {
+			gap = 0
+		}
+		fmt.Fprintf(&prompt, "  \033[33m│\033[0m  \033[1m[%s]\033[0m  %s%s%s\033[33m│\033[0m\r\n",
+			o.key, o.label, o.desc, strings.Repeat(" ", gap))
+	}
 	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
 	fmt.Fprintf(&prompt, "  \033[33m└%s┘\033[0m\r\n", strings.Repeat("─", w))
 	prompt.WriteString("  > ")
