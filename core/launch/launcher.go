@@ -164,6 +164,19 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	}
 	defer term.Restore(stdinFd, oldState)
 
+	// Set up the notification queue, overlay, and intelligent I/O routing.
+	queue := NewNotifyQueue(100, nil)
+	bar.SetQueue(queue)
+
+	outputCopier := NewOutputCopier(ptmx, os.Stdout, nil)
+	overlay := NewOverlay(queue, outputCopier, os.Stdout, rows, cols, nil)
+	outputCopier.SetOverlay(overlay)
+	router := NewKeyRouter(os.Stdin, ptmx, overlay)
+	overlay.onDismiss = router.DeactivateOverlay
+
+	// Wire onChange to re-render the status bar when notifications arrive.
+	queue.onChange = func() { bar.Render(os.Stdout) }
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGWINCH)
 	go func() {
@@ -171,6 +184,8 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 			switch sig {
 			case syscall.SIGWINCH:
 				HandleResize(os.Stdout, stdinFd, ptmx, bar)
+				newCols, newRows, _ := term.GetSize(stdinFd)
+				overlay.Resize(newRows, newCols)
 			default:
 				if cmd.Process != nil {
 					_ = cmd.Process.Signal(sig)
@@ -179,8 +194,8 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 		}
 	}()
 
-	go func() { io.Copy(ptmx, os.Stdin) }()
-	go func() { io.Copy(os.Stdout, ptmx) }()
+	go router.Run()
+	go outputCopier.Run()
 
 	err = cmd.Wait()
 	signal.Stop(sigCh)
