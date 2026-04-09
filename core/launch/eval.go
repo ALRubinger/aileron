@@ -76,18 +76,17 @@ func loadPolicyFileFrom(path string) *launchpolicy.PolicyFile {
 		}
 		return pf
 	}
-	pf, err := launchpolicy.LoadWithProfiles(path, defaultProfileDirs())
+	pf, err := launchpolicy.LoadWithProfiles(path, profileDirs())
 	if err != nil {
 		return &launchpolicy.PolicyFile{Version: 1}
 	}
 	return pf
 }
 
-// defaultProfileDirs returns the standard directories to search for
-// policy profiles.
-func defaultProfileDirs() []string {
-	home, err := os.UserHomeDir()
-	if err != nil {
+// profileDirs returns the standard directories to search for policy profiles.
+func profileDirs() []string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
 		return nil
 	}
 	return []string{filepath.Join(home, ".aileron", "profiles")}
