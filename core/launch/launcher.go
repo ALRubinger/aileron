@@ -170,6 +170,8 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue) (Laun
 	}
 	defer term.Restore(stdinFd, oldState)
 
+	SetupTerminalScreen(os.Stdout, agentRows, bar)
+
 	// Set up the overlay and intelligent I/O routing.
 	bar.SetQueue(queue)
 
