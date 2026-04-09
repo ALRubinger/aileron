@@ -20,8 +20,17 @@ type SlackListener struct {
 	channels map[string]bool // channel names to listen on
 	ignore   map[string]bool // channel names to ignore
 
+	// apiURL overrides the Slack API base URL for testing.
+	apiURL string
+
 	api    *slack.Client
 	socket *socketmode.Client
+}
+
+// SetAPIURL overrides the Slack API base URL. Call before Connect.
+// Used in integration tests with a mock HTTP server.
+func (s *SlackListener) SetAPIURL(url string) {
+	s.apiURL = url
 }
 
 // NewSlackListener creates a Slack listener with the given tokens and
@@ -51,10 +60,13 @@ func (s *SlackListener) Connect(ctx context.Context) error {
 		return fmt.Errorf("slack: app_token and bot_token are required")
 	}
 
-	s.api = slack.New(
-		s.botToken,
+	opts := []slack.Option{
 		slack.OptionAppLevelToken(s.appToken),
-	)
+	}
+	if s.apiURL != "" {
+		opts = append(opts, slack.OptionAPIURL(s.apiURL))
+	}
+	s.api = slack.New(s.botToken, opts...)
 	s.socket = socketmode.New(
 		s.api,
 		socketmode.OptionLog(log.New(log.Writer(), "slack-socket: ", log.LstdFlags)),
