@@ -4,6 +4,8 @@ go 1.24
 
 require github.com/ALRubinger/aileron/enclave v0.0.0
 
+replace github.com/ALRubinger/aileron/enclave => ../enclave
+
 require (
 	github.com/creack/pty/v2 v2.0.1
 	github.com/getkin/kin-openapi v0.133.0
@@ -12,6 +14,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/oapi-codegen/oapi-codegen/v2 v2.6.0
 	github.com/oapi-codegen/runtime v1.3.1
+	github.com/slack-go/slack v0.21.1
 	golang.org/x/crypto v0.36.0
 	golang.org/x/oauth2 v0.28.0
 	golang.org/x/term v0.30.0
@@ -24,6 +27,7 @@ require (
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
