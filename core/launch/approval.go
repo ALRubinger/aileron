@@ -103,14 +103,17 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		}
 	}()
 
-	// Compact inline prompt — no box drawing to avoid conflicts with
-	// Claude Code's own TUI rendering.
 	var prompt strings.Builder
-	fmt.Fprintf(&prompt, "\r\n\033[33;1m  ⏸ aileron:\033[0m %s", command)
+	fmt.Fprintf(&prompt, "\r\n\033[33;1m  ⏸ aileron\033[0m  agent wants to run: \033[1m%s\033[0m\r\n", command)
 	if reason != "" {
-		fmt.Fprintf(&prompt, " \033[2m(%s)\033[0m", reason)
+		fmt.Fprintf(&prompt, "             \033[2m%s\033[0m\r\n", reason)
 	}
-	prompt.WriteString("\r\n  \033[1my\033[0m/\033[1mn\033[0m/\033[1mp\033[0mroject/\033[1mu\033[0mser? ")
+	prompt.WriteString("\r\n")
+	prompt.WriteString("    \033[1my\033[0m  allow once           run this command, ask again next time\r\n")
+	prompt.WriteString("    \033[1mn\033[0m  deny                 block this command\r\n")
+	prompt.WriteString("    \033[1mp\033[0m  always (project)     add to aileron.yaml for the whole team\r\n")
+	prompt.WriteString("    \033[1mu\033[0m  always (user)        add to ~/.aileron/settings.yaml for you\r\n")
+	prompt.WriteString("\r\n  > ")
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))
