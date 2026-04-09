@@ -105,46 +105,73 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 
 	bar := "\033[33m┃\033[0m"
 	cl := "\033[2K" // clear entire line
+	lines := 0      // track how many lines we render
 	var prompt strings.Builder
-	fmt.Fprintf(&prompt, "\r\n%s  %s ✈️  \033[1mAileron\033[0m\r\n", cl, bar)
+	prompt.WriteString("\r\n")
+	lines++
+	fmt.Fprintf(&prompt, "%s  %s ✈️  \033[1mAileron\033[0m\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  %s agent wants to run: \033[1m%s\033[0m\r\n", cl, bar, command)
+	lines++
 	if reason != "" {
 		fmt.Fprintf(&prompt, "%s  %s \033[2m%s\033[0m\r\n", cl, bar, reason)
+		lines++
 	}
 	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  %s \033[1m[y]\033[0m  Yes, this time           Run this command; ask again next time\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  %s \033[1m[n]\033[0m  No, not this time        Block this command; ask again next time\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  %s \033[1m[a]\033[0m  Allow for this project   Add a rule to the project policy\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  %s \033[1m[m]\033[0m  Allow for me             Add a rule in my personal policy\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  %s\r\n", cl, bar)
+	lines++
 	fmt.Fprintf(&prompt, "%s  > ", cl)
+	// Don't increment lines for the > line — cursor is already on it.
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))
 	}
 
-	// Read keypresses until we get a valid response. Ignore unknown keys
-	// (e.g. terminal focus events, escape sequences, accidental presses).
+	// Read keypresses until we get a valid response.
+	var decision string
 	if inputCh == nil {
-		return "deny"
-	}
-	for {
-		b := <-inputCh
-		switch b {
-		case 'y', 'Y':
-			return "allow_once"
-		case 'n', 'N':
-			return "deny"
-		case 'a', 'A':
-			return "allow_project"
-		case 'm', 'M':
-			return "allow_user"
-		default:
-			// Ignore unknown keys — keep waiting.
-			continue
+		decision = "deny"
+	} else {
+		for {
+			b := <-inputCh
+			switch b {
+			case 'y', 'Y':
+				decision = "allow_once"
+			case 'n', 'N':
+				decision = "deny"
+			case 'a', 'A':
+				decision = "allow_project"
+			case 'm', 'M':
+				decision = "allow_user"
+			default:
+				continue
+			}
+			break
 		}
 	}
+
+	// Erase the prompt: move cursor up and clear each line.
+	var erase strings.Builder
+	for i := 0; i < lines; i++ {
+		erase.WriteString("\033[A\033[2K") // move up + clear line
+	}
+	erase.WriteString("\r") // return to start of line
+	if s.copier != nil {
+		s.copier.WriteExclusive([]byte(erase.String()))
+	}
+
+	return decision
 }
 
 // Close shuts down the approval server and removes the socket file.
