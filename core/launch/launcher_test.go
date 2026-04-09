@@ -743,9 +743,9 @@ func TestSetupTerminalScreen(t *testing.T) {
 	if !strings.Contains(out, "test") {
 		t.Error("expected status bar text")
 	}
-	// Should position cursor at bottom of agent area
-	if !strings.Contains(out, "\033[22;1H") {
-		t.Error("expected cursor at agent row 22")
+	// Should position cursor at top of agent area so the agent starts there.
+	if !strings.Contains(out, "\033[1;1H") {
+		t.Error("expected cursor at row 1 (top of agent area)")
 	}
 }
 
