@@ -164,7 +164,7 @@ See the full roadmap in [#63](https://github.com/ALRubinger/aileron/issues/63) a
 
 ### Prerequisites
 
-- [Go](https://go.dev/dl/) 1.24 or later
+- [Go](https://go.dev/dl/) 1.25 or later
 - [go-task](https://taskfile.dev/) task runner
 - An AI coding agent installed (e.g., [Claude Code](https://claude.ai/code))
 
