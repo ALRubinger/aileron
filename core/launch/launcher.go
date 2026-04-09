@@ -510,6 +510,13 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []
 		}
 		created = append(created, comms.NewSlackListener(cfg.AppToken, cfg.BotToken, channels, cfg.Ignore))
 	}
+	if cfg := pf.Notifications.Discord; cfg != nil && cfg.BotToken != "" {
+		channels := make([]string, 0, len(cfg.Channels))
+		for _, ch := range cfg.Channels {
+			channels = append(channels, ch.Name)
+		}
+		created = append(created, comms.NewDiscordListener(cfg.BotToken, channels, cfg.Ignore))
+	}
 
 	return StartListeners(ctx, created, queue, os.Stderr)
 }
