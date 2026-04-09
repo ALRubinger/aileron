@@ -112,18 +112,7 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	// Switch to alternate screen buffer — preserves scrollback history.
 	w := 74 // inner width of the box
 
-	var prompt strings.Builder
-	prompt.WriteString("\033[?1049h\033[2J\033[1;1H")
-	fmt.Fprintf(&prompt, "  \033[33m┌─ ✈️ Aileron %s┐\033[0m\r\n", strings.Repeat("─", w-12))
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  ⚠️  The agent wants to run:%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w-29))
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m  \033[1;36m%s\033[0m%s\033[33m│\033[0m\r\n", command, strings.Repeat(" ", w-2-len(command)))
-	if reason != "" {
-		fmt.Fprintf(&prompt, "  \033[33m│\033[0m  \033[2m%s\033[0m%s\033[33m│\033[0m\r\n", reason, strings.Repeat(" ", w-2-len(reason)))
-	}
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
-	// Option lines: visible text is measured without ANSI codes.
-	// w=74, 2 chars indent = 72 usable. Each line format: "  [x]  Label  Description"
+	// Build the box lines first so we can count them for vertical centering.
 	type opt struct {
 		key, label, desc string
 	}
@@ -133,18 +122,64 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		{"a", "Allow for this project  ", "Add a rule to the project policy"},
 		{"m", "Allow for me            ", "Add a rule in my personal policy"},
 	}
+
+	var lines []string
+	lines = append(lines, fmt.Sprintf("\033[33m┌─ ✈️ Aileron %s┐\033[0m", strings.Repeat("─", w-12)))
+	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m%s\033[33m│\033[0m", strings.Repeat(" ", w)))
+	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  ⚠️  The agent wants to run:%s\033[33m│\033[0m", strings.Repeat(" ", w-29)))
+	cmdPad := w - 2 - len(command)
+	if cmdPad < 0 {
+		cmdPad = 0
+	}
+	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  \033[1;36m%s\033[0m%s\033[33m│\033[0m", command, strings.Repeat(" ", cmdPad)))
+	if reason != "" {
+		rPad := w - 2 - len(reason)
+		if rPad < 0 {
+			rPad = 0
+		}
+		lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  \033[2m%s\033[0m%s\033[33m│\033[0m", reason, strings.Repeat(" ", rPad)))
+	}
+	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m%s\033[33m│\033[0m", strings.Repeat(" ", w)))
 	for _, o := range opts {
 		visible := fmt.Sprintf("[%s]  %s%s", o.key, o.label, o.desc)
 		gap := w - 2 - len(visible)
 		if gap < 0 {
 			gap = 0
 		}
-		fmt.Fprintf(&prompt, "  \033[33m│\033[0m  \033[1m[%s]\033[0m  %s%s%s\033[33m│\033[0m\r\n",
-			o.key, o.label, o.desc, strings.Repeat(" ", gap))
+		lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  \033[1m[%s]\033[0m  %s%s%s\033[33m│\033[0m",
+			o.key, o.label, o.desc, strings.Repeat(" ", gap)))
 	}
-	fmt.Fprintf(&prompt, "  \033[33m│\033[0m%s\033[33m│\033[0m\r\n", strings.Repeat(" ", w))
-	fmt.Fprintf(&prompt, "  \033[33m└%s┘\033[0m\r\n", strings.Repeat("─", w))
-	prompt.WriteString("  > ")
+	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m%s\033[33m│\033[0m", strings.Repeat(" ", w)))
+	lines = append(lines, fmt.Sprintf("\033[33m└%s┘\033[0m", strings.Repeat("─", w)))
+
+	// Calculate centering offsets.
+	termRows, termCols := 24, 80
+	if s.bar != nil {
+		termRows, termCols = s.bar.Dims()
+	}
+	boxWidth := w + 2 // inner + left/right border chars
+	leftPad := (termCols - boxWidth) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	topPad := (termRows - len(lines) - 2) / 2 // -2 for the > line
+	if topPad < 0 {
+		topPad = 0
+	}
+	margin := strings.Repeat(" ", leftPad)
+
+	var prompt strings.Builder
+	prompt.WriteString("\033[?1049h\033[2J\033[1;1H")
+	// Vertical padding.
+	for i := 0; i < topPad; i++ {
+		prompt.WriteString("\r\n")
+	}
+	// Box lines with horizontal centering.
+	for _, line := range lines {
+		fmt.Fprintf(&prompt, "%s%s\r\n", margin, line)
+	}
+	prompt.WriteString("\r\n")
+	fmt.Fprintf(&prompt, "%s  > ", margin)
 
 	if s.copier != nil {
 		s.copier.WriteExclusive([]byte(prompt.String()))

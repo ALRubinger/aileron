@@ -140,6 +140,13 @@ func (b *StatusBar) buildContent() string {
 	return left + strings.Repeat(" ", gap) + b.text
 }
 
+// Dims returns the current terminal dimensions (rows, cols).
+func (b *StatusBar) Dims() (int, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.rows, b.cols
+}
+
 // BarHeight returns the number of terminal rows the bar occupies.
 func (b *StatusBar) BarHeight() int {
 	return 2
