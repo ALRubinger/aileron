@@ -197,6 +197,7 @@ func TestOutputCopier_OnIdleFires(t *testing.T) {
 	called := false
 
 	oc := launch.NewOutputCopier(srcR, dst, overlay)
+	oc.SetIdleTimeout(100 * time.Millisecond)
 	oc.SetOnIdle(func() {
 		if !called {
 			called = true
@@ -209,7 +210,7 @@ func TestOutputCopier_OnIdleFires(t *testing.T) {
 	srcW.Write([]byte("output"))
 	time.Sleep(10 * time.Millisecond)
 
-	// Wait for idle callback (should fire after ~150ms of quiet).
+	// Wait for idle callback (should fire after ~100ms of quiet).
 	idleCalled.Wait()
 
 	if !called {
@@ -226,21 +227,21 @@ func TestOutputCopier_OnIdleResetsOnNewOutput(t *testing.T) {
 
 	callCount := int32(0)
 	oc := launch.NewOutputCopier(srcR, dst, overlay)
+	oc.SetIdleTimeout(100 * time.Millisecond)
 	oc.SetOnIdle(func() {
-		sync.OnceFunc(func() {})
 		atomic.AddInt32(&callCount, 1)
 	})
 	go oc.Run()
 
 	// Write, wait a bit (but less than idle timeout), write again.
 	srcW.Write([]byte("a"))
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 	srcW.Write([]byte("b"))
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(30 * time.Millisecond)
 	srcW.Write([]byte("c"))
 
 	// Wait for idle to fire once.
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(250 * time.Millisecond)
 
 	// Should have fired exactly once (timer reset on each write).
 	got := atomic.LoadInt32(&callCount)
