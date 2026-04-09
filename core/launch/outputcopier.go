@@ -11,12 +11,19 @@ const maxAgentBuffer = 1 << 20 // 1 MB
 // overlay is active, output is buffered instead of displayed. The
 // buffer is flushed when the overlay is dismissed.
 type OutputCopier struct {
-	src     io.Reader
-	dst     io.Writer
+	src io.Reader
+	dst io.Writer
+	// overlay is set after construction when there's a circular dependency
+	// (overlay needs copier, copier needs overlay).
 	overlay OverlayController
 
 	mu  sync.Mutex
 	buf []byte
+}
+
+// SetOverlay sets the overlay controller. Call before Run.
+func (oc *OutputCopier) SetOverlay(o OverlayController) {
+	oc.overlay = o
 }
 
 // NewOutputCopier creates an output copier that routes pty output to
@@ -37,7 +44,7 @@ func (oc *OutputCopier) Run() {
 	for {
 		n, err := oc.src.Read(buf)
 		if n > 0 {
-			if oc.overlay.IsActive() {
+			if oc.overlay != nil && oc.overlay.IsActive() {
 				oc.bufferOutput(buf[:n])
 			} else {
 				oc.dst.Write(buf[:n])
