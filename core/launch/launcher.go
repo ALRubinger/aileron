@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/ALRubinger/aileron/core/audit"
+	"github.com/ALRubinger/aileron/core/comms"
 	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 	"github.com/creack/pty/v2"
 	"golang.org/x/term"
@@ -97,10 +98,15 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		cmd.Dir = config.Dir
 	}
 
+	// Create the notification queue and start any comms listeners.
+	queue := NewNotifyQueue(100, nil)
+	listeners := startCommsListeners(ctx, config.Dir, queue)
+	defer stopCommsListeners(listeners)
+
 	// If stdin is a terminal, use the pty proxy with status bar.
 	var result LaunchResult
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		result, err = launchWithPty(cmd, config)
+		result, err = launchWithPty(cmd, config, queue)
 	} else {
 		result, err = launchDirect(cmd, config)
 	}
@@ -138,7 +144,7 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 }
 
 // launchWithPty runs the agent inside a pty with a status bar at the bottom.
-func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
+func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue) (LaunchResult, error) {
 	stdinFd := int(os.Stdin.Fd())
 
 	cols, rows, err := term.GetSize(stdinFd)
@@ -164,8 +170,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	}
 	defer term.Restore(stdinFd, oldState)
 
-	// Set up the notification queue, overlay, and intelligent I/O routing.
-	queue := NewNotifyQueue(100, nil)
+	// Set up the overlay and intelligent I/O routing.
 	bar.SetQueue(queue)
 
 	outputCopier := NewOutputCopier(ptmx, os.Stdout, nil)
@@ -460,4 +465,71 @@ func envGlobMatch(pattern, name string) bool {
 		return strings.HasPrefix(name, pattern[:len(pattern)-1])
 	}
 	return pattern == name
+}
+
+// startCommsListeners reads the notification config from the policy file
+// and starts any configured listeners (Slack, Discord). Each listener
+// pushes incoming messages to the NotifyQueue.
+func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []comms.Listener {
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	policyPath := FindPolicyFile(dir)
+	if policyPath == "" {
+		return nil
+	}
+	pf := loadPolicyFileFrom(policyPath)
+	if pf.Notifications == nil {
+		return nil
+	}
+
+	var listeners []comms.Listener
+
+	if cfg := pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
+		channels := make([]string, 0, len(cfg.Channels))
+		for _, ch := range cfg.Channels {
+			channels = append(channels, ch.Name)
+		}
+		sl := comms.NewSlackListener(cfg.AppToken, cfg.BotToken, channels, cfg.Ignore)
+		if err := sl.Connect(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: slack connect failed: %v\n", err)
+		} else {
+			msgs, err := sl.Listen(ctx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "aileron: slack listen failed: %v\n", err)
+			} else {
+				listeners = append(listeners, sl)
+				go bridgeMessages(msgs, queue)
+			}
+		}
+	}
+
+	return listeners
+}
+
+// bridgeMessages reads from a comms listener channel and pushes messages
+// into the NotifyQueue.
+func bridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue) {
+	for msg := range msgs {
+		preview := msg.Body
+		if len(preview) > 80 {
+			preview = preview[:77] + "..."
+		}
+		queue.Push(Message{
+			ID:        msg.ID,
+			Source:    msg.Service,
+			Channel:   msg.Channel,
+			Author:    msg.Author,
+			Preview:   preview,
+			Body:      msg.Body,
+			Timestamp: msg.Timestamp,
+		})
+	}
+}
+
+// stopCommsListeners shuts down all running listeners.
+func stopCommsListeners(listeners []comms.Listener) {
+	for _, l := range listeners {
+		l.Close()
+	}
 }
