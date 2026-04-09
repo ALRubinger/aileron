@@ -168,6 +168,124 @@ default: deny
 	}
 }
 
+func TestParse_NotificationsConfig(t *testing.T) {
+	yaml := `
+version: 1
+notifications:
+  slack:
+    app_token: xapp-test
+    bot_token: xoxb-test
+    channels:
+      - name: "#backend"
+        show: all
+        auto_draft: true
+      - name: "#incidents"
+        show: all
+        priority: high
+    ignore:
+      - "#random"
+  discord:
+    bot_token: discord-test
+    channels:
+      - name: "dev-chat"
+        show: all
+        auto_draft: true
+`
+	pf, err := launch.Parse([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.Notifications == nil {
+		t.Fatal("expected notifications config")
+	}
+	if pf.Notifications.Slack == nil {
+		t.Fatal("expected slack config")
+	}
+	if pf.Notifications.Slack.AppToken != "xapp-test" {
+		t.Errorf("AppToken = %q, want 'xapp-test'", pf.Notifications.Slack.AppToken)
+	}
+	if len(pf.Notifications.Slack.Channels) != 2 {
+		t.Fatalf("Slack channels = %d, want 2", len(pf.Notifications.Slack.Channels))
+	}
+	ch := pf.Notifications.Slack.Channels[0]
+	if ch.Name != "#backend" || ch.Show != "all" || !ch.AutoDraft {
+		t.Errorf("channel 0 = %+v, want #backend/all/auto_draft", ch)
+	}
+	if len(pf.Notifications.Slack.Ignore) != 1 || pf.Notifications.Slack.Ignore[0] != "#random" {
+		t.Errorf("Ignore = %v, want [#random]", pf.Notifications.Slack.Ignore)
+	}
+	if pf.Notifications.Discord == nil {
+		t.Fatal("expected discord config")
+	}
+	if len(pf.Notifications.Discord.Channels) != 1 {
+		t.Errorf("Discord channels = %d, want 1", len(pf.Notifications.Discord.Channels))
+	}
+}
+
+func TestMerge_Notifications(t *testing.T) {
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				AppToken: "base-token",
+				Channels: []launch.ChannelConfig{{Name: "#general", Show: "all"}},
+			},
+		},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Discord: &launch.DiscordNotifyConfig{
+				BotToken: "discord-token",
+				Channels: []launch.ChannelConfig{{Name: "dev-chat", Show: "all"}},
+			},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+
+	if merged.Notifications == nil {
+		t.Fatal("expected merged notifications")
+	}
+	// Slack from base should survive since overlay doesn't define it.
+	if merged.Notifications.Slack == nil || merged.Notifications.Slack.AppToken != "base-token" {
+		t.Error("expected Slack config from base to survive")
+	}
+	// Discord from overlay.
+	if merged.Notifications.Discord == nil || merged.Notifications.Discord.BotToken != "discord-token" {
+		t.Error("expected Discord config from overlay")
+	}
+}
+
+func TestMerge_NotificationsOverlayWins(t *testing.T) {
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				AppToken: "base-token",
+				Channels: []launch.ChannelConfig{{Name: "#general"}},
+			},
+		},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				AppToken: "overlay-token",
+				Channels: []launch.ChannelConfig{{Name: "#backend"}},
+			},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+
+	// Overlay's Slack replaces base's Slack entirely.
+	if merged.Notifications.Slack.AppToken != "overlay-token" {
+		t.Errorf("AppToken = %q, want 'overlay-token'", merged.Notifications.Slack.AppToken)
+	}
+	if len(merged.Notifications.Slack.Channels) != 1 || merged.Notifications.Slack.Channels[0].Name != "#backend" {
+		t.Error("expected overlay's channels to replace base's")
+	}
+}
+
 func TestLoadWithProfiles_NoUserSettings(t *testing.T) {
 	// With no ~/.aileron/settings.yaml, LoadWithProfiles should still work.
 	t.Setenv("HOME", t.TempDir())
