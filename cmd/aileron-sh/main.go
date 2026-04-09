@@ -8,7 +8,6 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,14 +69,14 @@ func main() {
 			writeAuditEntry(command, "allow", result.RuleID)
 		case model.DispositionDeny:
 			writeAuditEntry(command, "deny", result.RuleID)
-			writeDenyToTTY(command, result.Reason)
+			writeDenyMessage(command, result.Reason)
 			os.Exit(1)
 		case model.DispositionRequireApproval:
 			response := promptApproval(command, result.Reason)
 			switch response {
 			case responseDeny:
 				writeAuditEntry(command, "ask_denied", result.RuleID)
-				writeDenyByUserToTTY(command)
+				writeDenyByUserMessage(command)
 				os.Exit(1)
 			case responseAllowOnce:
 				writeAuditEntry(command, "ask_approved", result.RuleID)
@@ -100,59 +99,15 @@ func main() {
 	}
 }
 
-// writeDenyToTTY writes the deny message directly to /dev/tty so it
-// bypasses Claude Code's pty capture and appears cleanly on the
-// developer's terminal. A short message goes to stderr so the agent
-// sees the command failed.
-func writeDenyToTTY(command, reason string) {
-	pauseOutput()
-	defer resumeOutput()
-
-	// Short message for the agent (via stderr/pty).
-	fmt.Fprintf(os.Stderr, "aileron: denied\n")
-
-	// Detailed message for the developer (via tty).
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
-		launch.WriteDeny(os.Stderr, command, reason)
-		return
-	}
-	defer tty.Close()
-	launch.WriteDeny(tty, command, reason)
+// writeDenyMessage writes the deny message to stderr. The output
+// copier's idle re-render will restore the status bar after.
+func writeDenyMessage(command, reason string) {
+	launch.WriteDeny(os.Stderr, command, reason)
 }
 
-// writeDenyByUserToTTY writes the user-denied message to /dev/tty.
-func writeDenyByUserToTTY(command string) {
-	pauseOutput()
-	defer resumeOutput()
-
-	fmt.Fprintf(os.Stderr, "aileron: denied by user\n")
-
-	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
-	if err != nil {
-		launch.WriteDenyByUser(os.Stderr, command)
-		return
-	}
-	defer tty.Close()
-	launch.WriteDenyByUser(tty, command)
-}
-
-// pauseOutput creates the AILERON_PAUSE_FILE to signal the output copier
-// to buffer pty output instead of rendering it.
-func pauseOutput() {
-	path := os.Getenv("AILERON_PAUSE_FILE")
-	if path != "" {
-		os.WriteFile(path, []byte("paused"), 0o644)
-	}
-}
-
-// resumeOutput removes the pause file so the output copier resumes
-// rendering. Buffered output is flushed by the copier automatically.
-func resumeOutput() {
-	path := os.Getenv("AILERON_PAUSE_FILE")
-	if path != "" {
-		os.Remove(path)
-	}
+// writeDenyByUserMessage writes the user-denied message to stderr.
+func writeDenyByUserMessage(command string) {
+	launch.WriteDenyByUser(os.Stderr, command)
 }
 
 // writeAuditEntry appends an entry to the audit log if configured.
@@ -271,43 +226,22 @@ func unwrapClaudeEval(command string) string {
 	return command
 }
 
-// promptApproval writes a prompt to /dev/tty and reads the response.
-// Uses the alternate screen buffer so the prompt renders cleanly,
-// independent of whatever the agent's pty is outputting.
+// promptApproval requests user approval via the launcher's approval
+// server. The launcher owns the real terminal and handles the prompt.
 func promptApproval(command, reason string) approvalResponse {
-	pauseOutput()
-
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		resumeOutput()
+	socketPath := os.Getenv("AILERON_APPROVAL_SOCKET")
+	if socketPath == "" {
 		return responseDeny
 	}
-	defer tty.Close()
 
-	// Switch to alternate screen buffer for a clean prompt.
-	fmt.Fprint(tty, "\033[?1049h\033[2J\033[1;1H")
+	decision := launch.RequestApproval(socketPath, command, reason)
 
-	fmt.Fprintf(tty, "\033[33m  ⏸ aileron: agent wants to run\033[0m\n\n")
-	fmt.Fprintf(tty, "    %s\n", command)
-	if reason != "" {
-		fmt.Fprintf(tty, "\n    \033[2m%s\033[0m\n", reason)
-	}
-	fmt.Fprintf(tty, "\n    \033[1m[y]\033[0m allow once  \033[1m[n]\033[0m deny  \033[1m[p]\033[0m always (project)  \033[1m[u]\033[0m always (user)  ")
-
-	reader := bufio.NewReader(tty)
-	response, _ := reader.ReadString('\n')
-	response = strings.TrimSpace(strings.ToLower(response))
-
-	// Restore original screen buffer and resume pty output.
-	fmt.Fprint(tty, "\033[?1049l")
-	resumeOutput()
-
-	switch response {
-	case "y", "yes":
+	switch decision {
+	case "allow_once":
 		return responseAllowOnce
-	case "p":
+	case "allow_project":
 		return responseAllowProject
-	case "u":
+	case "allow_user":
 		return responseAllowUser
 	default:
 		return responseDeny

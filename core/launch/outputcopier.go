@@ -32,6 +32,7 @@ type OutputCopier struct {
 
 	mu        sync.Mutex
 	buf       []byte
+	paused    bool
 	idleTimer *time.Timer
 }
 
@@ -49,6 +50,17 @@ func (oc *OutputCopier) SetPauseFile(path string) {
 // idleTimeout. Used to re-render the status bar after scrolling stops.
 func (oc *OutputCopier) SetOnIdle(fn func()) {
 	oc.onIdle = fn
+}
+
+// SetPaused programmatically pauses or resumes output. When paused,
+// output is buffered. When unpaused, buffered output is flushed.
+func (oc *OutputCopier) SetPaused(p bool) {
+	oc.mu.Lock()
+	oc.paused = p
+	oc.mu.Unlock()
+	if !p {
+		oc.Flush()
+	}
 }
 
 // NewOutputCopier creates an output copier that routes pty output to
@@ -86,6 +98,12 @@ func (oc *OutputCopier) Run() {
 // because the overlay is active or the pause file exists.
 func (oc *OutputCopier) shouldPause() bool {
 	if oc.overlay != nil && oc.overlay.IsActive() {
+		return true
+	}
+	oc.mu.Lock()
+	paused := oc.paused
+	oc.mu.Unlock()
+	if paused {
 		return true
 	}
 	if oc.pauseFile != "" {
