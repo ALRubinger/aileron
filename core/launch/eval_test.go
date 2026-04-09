@@ -282,6 +282,63 @@ allow:
 	}
 }
 
+func TestEvaluateCommand_NormalizesAbsoluteBinaryPath(t *testing.T) {
+	path := writePolicyFile(t, `
+version: 1
+default: deny
+allow:
+  - "ls *"
+`)
+	// Agent calls "/bin/ls -la /tmp" — should still match "ls *".
+	result := launch.EvaluateCommand(path, "/bin/ls -la /tmp", "/tmp")
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected allow after path normalization, got %q", result.Disposition)
+	}
+}
+
+func TestEvaluateCommand_NormalizesBinaryForDenyRule(t *testing.T) {
+	path := writePolicyFile(t, `
+version: 1
+default: allow
+deny:
+  - command: "rm -rf *"
+    description: "no recursive delete"
+`)
+	// Agent calls "/usr/bin/rm -rf /important" — should still be denied.
+	result := launch.EvaluateCommand(path, "/usr/bin/rm -rf /important", "/tmp")
+	if result.Disposition != model.DispositionDeny {
+		t.Errorf("expected deny after path normalization, got %q", result.Disposition)
+	}
+}
+
+func TestEvaluateCommand_NormalizesBinaryField(t *testing.T) {
+	path := writePolicyFile(t, `
+version: 1
+default: deny
+allow:
+  - binary: "go"
+`)
+	// Agent calls "/usr/local/go/bin/go test ./..." — binary should normalize to "go".
+	result := launch.EvaluateCommand(path, "/usr/local/go/bin/go test ./...", "/tmp")
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected allow by normalized binary match, got %q", result.Disposition)
+	}
+}
+
+func TestEvaluateCommand_BareBinaryUnchanged(t *testing.T) {
+	path := writePolicyFile(t, `
+version: 1
+default: deny
+allow:
+  - "echo *"
+`)
+	// Bare binary (no path prefix) should still work as before.
+	result := launch.EvaluateCommand(path, "echo hello", "/tmp")
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected allow for bare binary, got %q", result.Disposition)
+	}
+}
+
 func TestWriteDeny_BuiltinRule(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDeny(&buf, "eval bad", "", "builtin_eval", "")

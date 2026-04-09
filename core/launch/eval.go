@@ -41,10 +41,20 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 	binaryName := ""
 	argsStr := ""
 	if len(parts) > 0 {
-		binaryName = parts[0]
+		binaryName = filepath.Base(parts[0])
 	}
 	if len(parts) > 1 {
 		argsStr = strings.Join(parts[1:], " ")
+	}
+
+	// Rebuild the command with the normalized binary name so that
+	// rules like "ls *" match even when the agent calls "/bin/ls -la ...".
+	normalizedCommand := command
+	if binaryName != "" && len(parts) > 0 && parts[0] != binaryName {
+		normalizedCommand = binaryName
+		if argsStr != "" {
+			normalizedCommand += " " + argsStr
+		}
 	}
 
 	decision, err := engine.Evaluate(ctx, policy.EvaluationRequest{
@@ -53,7 +63,7 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 			Type:    "shell.exec",
 			Summary: command,
 			Metadata: map[string]any{
-				"shell.command":     command,
+				"shell.command":     normalizedCommand,
 				"shell.binary":      binaryName,
 				"shell.args":        argsStr,
 				"shell.working_dir": workingDir,
