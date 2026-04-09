@@ -749,6 +749,46 @@ func TestSetupTerminalScreen(t *testing.T) {
 	}
 }
 
+func TestSetupTerminalScreen_WithQueue(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	// Push a message before setup — the initial render should show it.
+	q.Push(launch.Message{ID: "1", Preview: "hey there"})
+
+	var buf strings.Builder
+	launch.SetupTerminalScreen(&buf, 22, bar)
+	out := buf.String()
+
+	// Should clear screen.
+	if !strings.Contains(out, "\033[2J") {
+		t.Error("expected clear screen escape")
+	}
+	// Should show unread count from the queue.
+	if !strings.Contains(out, "1 unread") {
+		t.Errorf("expected '1 unread' in initial setup, got %q", out)
+	}
+	// Should still show branding.
+	if !strings.Contains(out, "branding") {
+		t.Error("expected branding text")
+	}
+}
+
+func TestSetupTerminalScreen_ClearsBeforeBar(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "test")
+	var buf strings.Builder
+	launch.SetupTerminalScreen(&buf, 22, bar)
+	out := buf.String()
+
+	// Clear screen should come before the status bar content.
+	clearIdx := strings.Index(out, "\033[2J")
+	barIdx := strings.Index(out, "test")
+	if clearIdx < 0 || barIdx < 0 || clearIdx >= barIdx {
+		t.Error("expected clear screen before status bar render")
+	}
+}
+
 func TestHandleResize(t *testing.T) {
 	// Create a real pty pair so we have valid file descriptors.
 	ptmx, pts, err := pty.Open()
