@@ -48,3 +48,9 @@ type errNotFound struct {
 func (e *errNotFound) Error() string {
 	return "vault: secret not found: " + e.path
 }
+
+// IsNotFound returns true if the error indicates a secret was not found.
+func IsNotFound(err error) bool {
+	_, ok := err.(*errNotFound)
+	return ok
+}

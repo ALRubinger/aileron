@@ -528,9 +528,50 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		return nil
 	}
 
+	// Collect all token values that might be vault references.
+	var tokenRefs []string
+	if cfg := pf.Notifications.Slack; cfg != nil {
+		tokenRefs = append(tokenRefs, cfg.AppToken, cfg.BotToken)
+	}
+	if cfg := pf.Notifications.Discord; cfg != nil {
+		tokenRefs = append(tokenRefs, cfg.BotToken)
+	}
+
+	// If any token is a vault reference, resolve them.
+	var vaultResolver func(string) (string, error)
+	needsVault := false
+	for _, ref := range tokenRefs {
+		if IsVaultRef(ref) {
+			needsVault = true
+			break
+		}
+	}
+	if needsVault {
+		v, err := promptAndOpenVault(os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: vault: %v\n", err)
+			return nil
+		}
+		vaultResolver = func(val string) (string, error) {
+			return ResolveVaultRef(val, v)
+		}
+	} else {
+		vaultResolver = func(val string) (string, error) { return val, nil }
+	}
+
 	autoDraft := make(map[string]bool)
 	var created []comms.Listener
 	if cfg := pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
+		appToken, err := vaultResolver(cfg.AppToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+			return nil
+		}
+		botToken, err := vaultResolver(cfg.BotToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+			return nil
+		}
 		channels := make([]string, 0, len(cfg.Channels))
 		for _, ch := range cfg.Channels {
 			channels = append(channels, ch.Name)
@@ -538,14 +579,19 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 				autoDraft[ch.Name] = true
 			}
 		}
-		created = append(created, comms.NewSlackListener(cfg.AppToken, cfg.BotToken, channels, cfg.Ignore))
+		created = append(created, comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore))
 	}
 	if cfg := pf.Notifications.Discord; cfg != nil && cfg.BotToken != "" {
+		botToken, err := vaultResolver(cfg.BotToken)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+			return nil
+		}
 		channels := make([]string, 0, len(cfg.Channels))
 		for _, ch := range cfg.Channels {
 			channels = append(channels, ch.Name)
 		}
-		created = append(created, comms.NewDiscordListener(cfg.BotToken, channels, cfg.Ignore))
+		created = append(created, comms.NewDiscordListener(botToken, channels, cfg.Ignore))
 	}
 
 	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, auditLog, sessionID)

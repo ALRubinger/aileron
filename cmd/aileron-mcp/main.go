@@ -117,6 +117,21 @@ var sendMessageTool = toolDef{
 	},
 }
 
+var httpRequestTool = toolDef{
+	Name:        "http_request",
+	Description: "Make an authenticated HTTP request. Aileron matches the URL against configured secrets and injects credentials. Requires human approval.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"method":  {Type: "string", Description: "HTTP method (GET, POST, PUT, DELETE, PATCH)"},
+			"url":     {Type: "string", Description: "Target URL"},
+			"headers": {Type: "string", Description: "JSON object of request headers (optional)"},
+			"body":    {Type: "string", Description: "Request body string (optional)"},
+		},
+		Required: []string{"method", "url"},
+	},
+}
+
 // submitIntentTool is the legacy cloud tool.
 var submitIntentTool = toolDef{
 	Name:        "submit_intent",
@@ -230,7 +245,7 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 func (s *server) availableTools() []toolDef {
 	var tools []toolDef
 	if s.commsSocket != "" {
-		tools = append(tools, readMessagesTool, sendMessageTool)
+		tools = append(tools, readMessagesTool, sendMessageTool, httpRequestTool)
 	}
 	if s.aileronURL != "" {
 		tools = append(tools, submitIntentTool)
@@ -246,6 +261,8 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 		return s.readMessages(args)
 	case "send_message":
 		return s.sendMessage(args)
+	case "http_request":
+		return s.httpRequest(args)
 	default:
 		return errorResult("unknown tool: " + name)
 	}
@@ -297,6 +314,41 @@ func (s *server) sendMessage(args map[string]any) toolResult {
 	}
 }
 
+func (s *server) httpRequest(args map[string]any) toolResult {
+	if s.commsSocket == "" {
+		return errorResult("comms not available (not launched via aileron)")
+	}
+
+	method, _ := args["method"].(string)
+	url, _ := args["url"].(string)
+	headers, _ := args["headers"].(string)
+	body, _ := args["body"].(string)
+
+	if method == "" || url == "" {
+		return errorResult("method and url are required")
+	}
+
+	resp := requestComms(s.commsSocket, commsRequest{
+		Method:  "http_request",
+		Service: method,  // repurpose Service field for HTTP method
+		Channel: url,     // repurpose Channel field for URL
+		Body:    body,
+		ReplyTo: headers, // repurpose ReplyTo field for headers JSON
+	})
+	if resp.Error != "" {
+		return errorResult(resp.Error)
+	}
+	// Response body is in the first message's Body field.
+	if len(resp.Messages) > 0 {
+		return toolResult{
+			Content: []toolContent{{Type: "text", Text: resp.Messages[0].Body}},
+		}
+	}
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: "Request completed (no response body)."}},
+	}
+}
+
 // --- Comms IPC types (mirrors core/launch/commsserver.go) ---
 
 type commsRequest struct {
@@ -304,6 +356,7 @@ type commsRequest struct {
 	Service string `json:"service,omitempty"`
 	Channel string `json:"channel,omitempty"`
 	Body    string `json:"body,omitempty"`
+	ReplyTo string `json:"reply_to,omitempty"`
 }
 
 type commsResponse struct {
