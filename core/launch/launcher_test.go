@@ -9,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"io"
+
 	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/launch"
+	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/creack/pty/v2"
 )
 
@@ -637,6 +640,114 @@ func TestBridgeMessages_AutoDraft(t *testing.T) {
 	}
 	if all[1].AutoDraft {
 		t.Error("expected AutoDraft=false for #general message")
+	}
+}
+
+func TestLaunch_VaultRefsResolved(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  slack:
+    app_token: vault:slack_app
+    bot_token: vault:slack_bot
+    channels:
+      - name: "#test"
+`), 0o644)
+
+	// Mock the vault opener to return a vault with the tokens.
+	v := vault.NewMemVault()
+	v.Put(nil, "slack_app", []byte("xapp-resolved"), vault.Metadata{})
+	v.Put(nil, "slack_bot", []byte("xoxb-resolved"), vault.Metadata{})
+
+	old := launch.OpenVaultFunc
+	launch.OpenVaultFunc = func(w io.Writer) (vault.Vault, error) { return v, nil }
+	defer func() { launch.OpenVaultFunc = old }()
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch with vault refs should succeed: %v", err)
+	}
+}
+
+func TestLaunch_VaultRefsWithDiscord(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  discord:
+    bot_token: vault:discord_bot
+    channels:
+      - name: "123456"
+`), 0o644)
+
+	v := vault.NewMemVault()
+	v.Put(nil, "discord_bot", []byte("discord-token-resolved"), vault.Metadata{})
+
+	old := launch.OpenVaultFunc
+	launch.OpenVaultFunc = func(w io.Writer) (vault.Vault, error) { return v, nil }
+	defer func() { launch.OpenVaultFunc = old }()
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch with discord vault ref should succeed: %v", err)
+	}
+}
+
+func TestLaunch_VaultOpenError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  slack:
+    app_token: vault:slack_app
+    bot_token: vault:slack_bot
+    channels:
+      - name: "#test"
+`), 0o644)
+
+	old := launch.OpenVaultFunc
+	launch.OpenVaultFunc = func(w io.Writer) (vault.Vault, error) {
+		return nil, fmt.Errorf("vault locked")
+	}
+	defer func() { launch.OpenVaultFunc = old }()
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch should succeed even if vault fails: %v", err)
 	}
 }
 

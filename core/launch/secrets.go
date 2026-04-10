@@ -65,14 +65,10 @@ func ValidateTokenRef(field, value string) error {
 	return fmt.Errorf("%s contains a plaintext token — use 'aileron secret set <name>' and reference it as 'vault:<name>' instead", field)
 }
 
-// promptAndOpenVault prompts the user for a vault passphrase on /dev/tty
-// and opens the local encrypted vault. The readPass function is injectable
-// for testing.
-var readPass = defaultReadPass
-
-func defaultReadPass(fd int) ([]byte, error) {
-	return term.ReadPassword(fd)
-}
+// OpenVaultFunc is the function used to open the vault when vault
+// references are found in token fields. Defaults to prompting for a
+// passphrase on /dev/tty. Replaceable in tests.
+var OpenVaultFunc = promptAndOpenVault
 
 func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
@@ -82,7 +78,7 @@ func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
 	defer tty.Close()
 
 	fmt.Fprint(w, "aileron: vault passphrase: ")
-	passphrase, err := readPass(int(tty.Fd()))
+	passphrase, err := term.ReadPassword(int(tty.Fd()))
 	fmt.Fprintln(w) // newline after hidden input
 	if err != nil {
 		return nil, fmt.Errorf("reading passphrase: %w", err)
