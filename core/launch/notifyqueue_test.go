@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/core/launch"
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 )
 
 func TestNotifyQueue_PushAndMessages(t *testing.T) {
@@ -198,6 +199,121 @@ func TestNotifyQueue_AutoDraftRoundtrip(t *testing.T) {
 	}
 	if msgs[1].AutoDraft {
 		t.Error("expected AutoDraft=false on second message")
+	}
+}
+
+func TestNotifyQueue_QuietHoursSuppressesOnChange(t *testing.T) {
+	var count atomic.Int32
+	q := launch.NewNotifyQueue(10, func() {
+		count.Add(1)
+	})
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "20:00",
+		End:   "08:00",
+	})
+	// Simulate 23:00 — inside quiet hours.
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 23, 0, 0, 0, time.Local)
+	})
+
+	q.Push(launch.Message{ID: "1", Priority: "normal"})
+
+	if count.Load() != 0 {
+		t.Errorf("onChange should be suppressed during quiet hours, called %d times", count.Load())
+	}
+	// Message should still be queued.
+	if q.Len() != 1 {
+		t.Errorf("expected 1 message in queue, got %d", q.Len())
+	}
+}
+
+func TestNotifyQueue_QuietHoursHighPriorityBypasses(t *testing.T) {
+	var count atomic.Int32
+	q := launch.NewNotifyQueue(10, func() {
+		count.Add(1)
+	})
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "20:00",
+		End:   "08:00",
+	})
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 23, 0, 0, 0, time.Local)
+	})
+
+	q.Push(launch.Message{ID: "1", Priority: "high"})
+
+	if count.Load() != 1 {
+		t.Errorf("onChange should fire for high-priority during quiet hours, called %d times", count.Load())
+	}
+}
+
+func TestNotifyQueue_OutsideQuietHoursNotSuppressed(t *testing.T) {
+	var count atomic.Int32
+	q := launch.NewNotifyQueue(10, func() {
+		count.Add(1)
+	})
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "22:00",
+		End:   "06:00",
+	})
+	// Simulate 12:00 — outside quiet hours.
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 12, 0, 0, 0, time.Local)
+	})
+
+	q.Push(launch.Message{ID: "1", Priority: "normal"})
+
+	if count.Load() != 1 {
+		t.Errorf("onChange should fire outside quiet hours, called %d times", count.Load())
+	}
+}
+
+func TestNotifyQueue_NoQuietHoursNotSuppressed(t *testing.T) {
+	var count atomic.Int32
+	q := launch.NewNotifyQueue(10, func() {
+		count.Add(1)
+	})
+	// No quiet hours configured.
+	q.Push(launch.Message{ID: "1", Priority: "normal"})
+
+	if count.Load() != 1 {
+		t.Errorf("onChange should fire when no quiet hours configured, called %d times", count.Load())
+	}
+}
+
+func TestNotifyQueue_IsQuietHours(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "22:00",
+		End:   "06:00",
+	})
+
+	// Inside quiet hours (23:00).
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 23, 0, 0, 0, time.Local)
+	})
+	if !q.IsQuietHours() {
+		t.Error("expected IsQuietHours=true at 23:00")
+	}
+
+	// Outside quiet hours (12:00).
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 12, 0, 0, 0, time.Local)
+	})
+	if q.IsQuietHours() {
+		t.Error("expected IsQuietHours=false at 12:00")
+	}
+}
+
+func TestNotifyQueue_HighPriorityUnreadCount(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Priority: "normal"})
+	q.Push(launch.Message{ID: "2", Priority: "high"})
+	q.Push(launch.Message{ID: "3", Priority: "high", Read: true})
+	q.Push(launch.Message{ID: "4", Priority: "high"})
+
+	if got := q.HighPriorityUnreadCount(); got != 2 {
+		t.Errorf("HighPriorityUnreadCount = %d, want 2", got)
 	}
 }
 

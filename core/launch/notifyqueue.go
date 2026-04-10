@@ -3,6 +3,8 @@ package launch
 import (
 	"sync"
 	"time"
+
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 )
 
 // Message represents an incoming notification from a comms channel.
@@ -15,19 +17,26 @@ type Message struct {
 	Body      string // full text for overlay
 	Timestamp time.Time
 	Read      bool
-	AutoDraft bool // channel is configured for automatic draft replies
+	AutoDraft bool   // channel is configured for automatic draft replies
+	Priority  string // "normal" or "high"; high-priority messages bypass quiet hours
 }
 
 // NotifyQueue is a bounded, thread-safe FIFO of incoming messages.
 // The onChange callback fires (outside the lock) whenever the queue
 // state changes, so the status bar can re-render. The onAutoDraft
 // callback fires for messages with AutoDraft set.
+//
+// When QuietHours is configured, non-high-priority messages are still
+// queued but the onChange callback is suppressed so the status bar does
+// not surface them until quiet hours end.
 type NotifyQueue struct {
 	mu          sync.Mutex
 	messages    []Message
 	maxSize     int
 	onChange    func()
 	onAutoDraft func(Message)
+	quietHours  *launchpolicy.QuietHoursConfig
+	nowFunc     func() time.Time // injectable clock for testing; defaults to time.Now
 }
 
 // NewNotifyQueue creates a queue with the given capacity. The onChange
@@ -40,7 +49,9 @@ func NewNotifyQueue(maxSize int, onChange func()) *NotifyQueue {
 }
 
 // Push appends a message to the queue. If the queue exceeds maxSize,
-// the oldest message is dropped.
+// the oldest message is dropped. During quiet hours, the onChange
+// callback is suppressed for non-high-priority messages so the status
+// bar stays quiet.
 func (q *NotifyQueue) Push(msg Message) {
 	q.mu.Lock()
 	q.messages = append(q.messages, msg)
@@ -49,7 +60,9 @@ func (q *NotifyQueue) Push(msg Message) {
 	}
 	q.mu.Unlock()
 
-	if q.onChange != nil {
+	suppressed := q.isQuiet() && msg.Priority != "high"
+
+	if q.onChange != nil && !suppressed {
 		q.onChange()
 	}
 	if msg.AutoDraft && q.onAutoDraft != nil {
@@ -94,6 +107,19 @@ func (q *NotifyQueue) UnreadCount() int {
 	return count
 }
 
+// HighPriorityUnreadCount returns the number of unread high-priority messages.
+func (q *NotifyQueue) HighPriorityUnreadCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	count := 0
+	for _, m := range q.messages {
+		if !m.Read && m.Priority == "high" {
+			count++
+		}
+	}
+	return count
+}
+
 // Latest returns the most recent message, or false if empty.
 func (q *NotifyQueue) Latest() (Message, bool) {
 	q.mu.Lock()
@@ -131,4 +157,93 @@ func (q *NotifyQueue) MarkAllRead() {
 	if q.onChange != nil {
 		q.onChange()
 	}
+}
+
+// SetQuietHours configures the quiet hours window. Pass nil to disable.
+func (q *NotifyQueue) SetQuietHours(cfg *launchpolicy.QuietHoursConfig) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.quietHours = cfg
+}
+
+// SetNowFunc overrides the clock used for quiet-hours evaluation.
+// Intended for testing.
+func (q *NotifyQueue) SetNowFunc(fn func() time.Time) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.nowFunc = fn
+}
+
+// IsQuietHours reports whether the current time falls within the
+// configured quiet hours window. Returns false if no quiet hours are
+// configured or if the configuration is invalid.
+func (q *NotifyQueue) IsQuietHours() bool {
+	return q.isQuiet()
+}
+
+// isQuiet is the internal quiet-hours check that reads the config under
+// the lock.
+func (q *NotifyQueue) isQuiet() bool {
+	q.mu.Lock()
+	cfg := q.quietHours
+	now := q.nowFunc
+	q.mu.Unlock()
+
+	return IsQuietHours(cfg, now)
+}
+
+// IsQuietHours determines whether the given time (from nowFunc, or
+// time.Now if nil) falls within the quiet hours window defined by cfg.
+// Returns false if cfg is nil or the start/end times are unparseable.
+func IsQuietHours(cfg *launchpolicy.QuietHoursConfig, nowFunc func() time.Time) bool {
+	if cfg == nil {
+		return false
+	}
+	if nowFunc == nil {
+		nowFunc = time.Now
+	}
+
+	loc := time.Local
+	if cfg.Timezone != "" {
+		var err error
+		loc, err = time.LoadLocation(cfg.Timezone)
+		if err != nil {
+			return false
+		}
+	}
+
+	now := nowFunc().In(loc)
+	startH, startM, ok := parseHHMM(cfg.Start)
+	if !ok {
+		return false
+	}
+	endH, endM, ok := parseHHMM(cfg.End)
+	if !ok {
+		return false
+	}
+
+	// Convert current time to minutes since midnight.
+	nowMin := now.Hour()*60 + now.Minute()
+	startMin := startH*60 + startM
+	endMin := endH*60 + endM
+
+	if startMin <= endMin {
+		// Same-day window: e.g. 09:00–17:00
+		return nowMin >= startMin && nowMin < endMin
+	}
+	// Overnight window: e.g. 22:00–08:00
+	return nowMin >= startMin || nowMin < endMin
+}
+
+// parseHHMM parses a "HH:MM" string into hours and minutes.
+func parseHHMM(s string) (int, int, bool) {
+	if len(s) != 5 || s[2] != ':' {
+		return 0, 0, false
+	}
+	h := int(s[0]-'0')*10 + int(s[1]-'0')
+	m := int(s[3]-'0')*10 + int(s[4]-'0')
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
 }

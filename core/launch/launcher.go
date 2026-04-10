@@ -105,6 +105,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	// Create the notification queue and start any comms listeners.
 	queue := NewNotifyQueue(100, nil)
+	wireQuietHours(config.Dir, queue)
 	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID)
 	defer stopCommsListeners(listeners)
 
@@ -463,6 +464,22 @@ func PrintSessionSummary(w io.Writer, auditPath, sessionID string) {
 	}
 }
 
+// wireQuietHours reads the QuietHours config from the policy file and
+// attaches it to the notification queue.
+func wireQuietHours(dir string, queue *NotifyQueue) {
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	policyPath := FindPolicyFile(dir)
+	if policyPath == "" {
+		return
+	}
+	pf := loadPolicyFileFrom(policyPath)
+	if pf.Notifications != nil && pf.Notifications.QuietHours != nil {
+		queue.SetQuietHours(pf.Notifications.QuietHours)
+	}
+}
+
 // loadEnvConfig loads the merged policy's EnvConfig for env scrubbing.
 func loadEnvConfig(dir string) *launchpolicy.EnvConfig {
 	if dir == "" {
@@ -578,6 +595,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	// Map resolved tokens back to config positions.
 	idx := 0
 	autoDraft := make(map[string]bool)
+	priority := make(map[string]string)
 	var created []comms.Listener
 	if cfg := pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
 		appToken, botToken := resolved[idx], resolved[idx+1]
@@ -588,6 +606,9 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 			if ch.AutoDraft {
 				autoDraft[ch.Name] = true
 			}
+			if ch.Priority != "" {
+				priority[ch.Name] = ch.Priority
+			}
 		}
 		created = append(created, comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore))
 	}
@@ -596,18 +617,22 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		channels := make([]string, 0, len(cfg.Channels))
 		for _, ch := range cfg.Channels {
 			channels = append(channels, ch.Name)
+			if ch.Priority != "" {
+				priority[ch.Name] = ch.Priority
+			}
 		}
 		created = append(created, comms.NewDiscordListener(botToken, channels, cfg.Ignore))
 	}
 
-	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, auditLog, sessionID)
+	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, priority, auditLog, sessionID)
 }
 
 // StartListeners connects and starts each listener, bridging incoming
 // messages to the NotifyQueue. The autoDraft map controls which channels
-// trigger automatic draft replies. Returns the successfully started
-// listeners. Errors are written to w.
-func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool, auditLog, sessionID string) []comms.Listener {
+// trigger automatic draft replies. The priority map controls the
+// priority level ("normal", "high") per channel. Returns the
+// successfully started listeners. Errors are written to w.
+func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string) []comms.Listener {
 	var started []comms.Listener
 	for _, l := range listeners {
 		if err := l.Connect(ctx); err != nil {
@@ -620,19 +645,24 @@ func StartListeners(ctx context.Context, listeners []comms.Listener, queue *Noti
 			continue
 		}
 		started = append(started, l)
-		go BridgeMessages(msgs, queue, autoDraft, auditLog, sessionID)
+		go BridgeMessages(msgs, queue, autoDraft, priority, auditLog, sessionID)
 	}
 	return started
 }
 
 // BridgeMessages reads from a comms listener channel and pushes messages
 // into the NotifyQueue. The autoDraft map controls which channels trigger
-// automatic draft replies. Exported for testing.
-func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool, auditLog, sessionID string) {
+// automatic draft replies. The priority map sets the priority level per
+// channel. Exported for testing.
+func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string) {
 	for msg := range msgs {
 		preview := msg.Body
 		if len(preview) > 80 {
 			preview = preview[:77] + "..."
+		}
+		pri := priority[msg.Channel]
+		if pri == "" {
+			pri = "normal"
 		}
 		queue.Push(Message{
 			ID:        msg.ID,
@@ -643,6 +673,7 @@ func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoD
 			Body:      msg.Body,
 			Timestamp: msg.Timestamp,
 			AutoDraft: autoDraft[msg.Channel],
+			Priority:  pri,
 		})
 		if auditLog != "" {
 			audit.AppendMessageEntry(auditLog, audit.MessageEntry{

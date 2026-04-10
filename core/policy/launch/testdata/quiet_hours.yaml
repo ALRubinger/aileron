@@ -1,0 +1,19 @@
+version: 1
+default: ask
+
+notifications:
+  quiet_hours:
+    start: "22:00"
+    end: "08:00"
+    timezone: "America/New_York"
+  slack:
+    app_token: "vault:slack_app"
+    bot_token: "vault:slack_bot"
+    channels:
+      - name: "#alerts"
+        priority: high
+      - name: "#general"
+        priority: normal
+
+allow:
+  - "go test ./..."
