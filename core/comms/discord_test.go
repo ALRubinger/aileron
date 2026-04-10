@@ -221,5 +221,92 @@ func TestDiscordListener_ProcessMessageCreate_FallbackToUsername(t *testing.T) {
 	}
 }
 
+func TestDiscordListener_ListenSuccess(t *testing.T) {
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	if err := dl.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Skip real gateway — inject a no-op opener.
+	dl.SetOpenGateway(func() error { return nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msgs, err := dl.Listen(ctx)
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	if msgs == nil {
+		t.Fatal("expected non-nil message channel")
+	}
+
+	// Cancel context to trigger cleanup goroutine.
+	cancel()
+	// Drain the channel to confirm it closes.
+	for range msgs {
+	}
+}
+
+func TestDiscordListener_ListenOpenFails(t *testing.T) {
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	if err := dl.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Listen will try to open the gateway with a fake token, which should fail.
+	_, err := dl.Listen(context.Background())
+	if err == nil {
+		t.Fatal("expected error when gateway open fails with invalid token")
+	}
+}
+
+func TestDiscordListener_ServiceName(t *testing.T) {
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	if got := dl.Service(); got != "discord" {
+		t.Errorf("Service() = %q, want 'discord'", got)
+	}
+}
+
+func TestDiscordListener_SetEndpointURL_NilSession(t *testing.T) {
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	// Should not panic when session is nil.
+	dl.SetEndpointURL("http://localhost:1234/")
+}
+
+func TestDiscordListener_CloseAfterConnect(t *testing.T) {
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	if err := dl.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Close with an active session (not opened to gateway, but non-nil).
+	if err := dl.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+}
+
+func TestDiscordListener_ProcessMessageCreate_NilAuthorEmptyResult(t *testing.T) {
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+
+	// Message with a non-bot author but nil Member — exercises the
+	// resolveAuthor path where Author is non-nil but Member is nil
+	// and GlobalName is empty, falling through to return "".
+	msg, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ChannelID: "C123",
+			Content:   "test",
+			Author: &discordgo.User{
+				ID: "U1",
+				// Username, GlobalName both empty.
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("expected delivery")
+	}
+	// With empty Username and GlobalName and nil Member, author should be "".
+	if msg.Author != "" {
+		t.Errorf("Author = %q, want empty string", msg.Author)
+	}
+}
+
 // Verify DiscordListener implements the Listener interface.
 var _ comms.Listener = (*comms.DiscordListener)(nil)
