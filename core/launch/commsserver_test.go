@@ -515,6 +515,61 @@ func TestCommsServer_HttpRequest_WithApproval(t *testing.T) {
 	}
 }
 
+func TestCommsServer_HttpRequest_WithHeadersAndBody(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-http-headers.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	mockAPI := &mockHTTPServer{
+		handler: func(w http.ResponseWriter, r *http.Request) {
+			ct := r.Header.Get("Content-Type")
+			w.Write([]byte("ct:" + ct))
+		},
+	}
+	ts := mockAPI.start()
+	defer ts.Close()
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	queue := launch.NewNotifyQueue(10, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, copier, router, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "http_request",
+			Service: "POST",
+			Channel: ts.URL + "/api",
+			Body:    `{"key":"value"}`,
+			ReplyTo: `{"Content-Type":"application/json"}`,
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	stdinW.Write([]byte("y"))
+
+	select {
+	case resp := <-done:
+		if !resp.OK {
+			t.Fatalf("expected OK, got error: %s", resp.Error)
+		}
+		if !strings.Contains(resp.Messages[0].Body, "application/json") {
+			t.Errorf("expected Content-Type header passed through, got %q", resp.Messages[0].Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
 func TestCommsServer_HttpRequest_Denied(t *testing.T) {
 	socketPath := os.TempDir() + "/aileron-test-comms-http-deny.sock"
 	t.Cleanup(func() { os.Remove(socketPath) })

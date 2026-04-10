@@ -122,6 +122,21 @@ func TestValidateTokenRef_Plaintext(t *testing.T) {
 	}
 }
 
+func TestOpenLocalVault_EmptyPassphrase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	_, err := launch.OpenLocalVault(path, "")
+	if err == nil {
+		t.Error("expected error for empty passphrase")
+	}
+}
+
+func TestOpenLocalVault_BadPath(t *testing.T) {
+	_, err := launch.OpenLocalVault("/dev/null/impossible/secrets.json", "pass")
+	if err == nil {
+		t.Error("expected error for bad path")
+	}
+}
+
 func TestDefaultVaultPath(t *testing.T) {
 	path := launch.DefaultVaultPath()
 	if path == "" {
