@@ -4,9 +4,11 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/launch"
 )
@@ -231,6 +233,103 @@ func TestCommsServer_SendMessage_Denied(t *testing.T) {
 	}
 }
 
+func TestCommsServer_SendMessage_AuditApproved(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-audit-approve.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router, auditPath, "s1")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method: "send_message", Service: "slack", Channel: "#backend", Body: "approved msg",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	stdinW.Write([]byte("y"))
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	entries, _ := audit.ReadMessageEntries(auditPath)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Event != "message_sent" {
+		t.Errorf("expected 'message_sent', got %q", entries[0].Event)
+	}
+	if entries[0].SessionID != "s1" {
+		t.Errorf("expected session 's1', got %q", entries[0].SessionID)
+	}
+}
+
+func TestCommsServer_SendMessage_AuditDenied(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-audit-deny.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router, auditPath, "s1")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method: "send_message", Service: "slack", Channel: "#backend", Body: "denied msg",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	stdinW.Write([]byte("n"))
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	entries, _ := audit.ReadMessageEntries(auditPath)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Event != "message_denied" {
+		t.Errorf("expected 'message_denied', got %q", entries[0].Event)
+	}
+}
+
 func TestCommsServer_UnknownMethod(t *testing.T) {
 	socketPath := os.TempDir() + "/aileron-test-comms-unknown.sock"
 	t.Cleanup(func() { os.Remove(socketPath) })
@@ -338,6 +437,40 @@ func TestCommsServer_DirectSend_Success(t *testing.T) {
 	}
 	if sender.lastMsg.Body != "my reply" {
 		t.Errorf("expected body 'my reply', got %q", sender.lastMsg.Body)
+	}
+}
+
+func TestCommsServer_DirectSend_AuditLog(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-direct-audit.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, auditPath, "test-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	srv.DirectSend("slack", "#backend", "my reply")
+
+	entries, err := audit.ReadMessageEntries(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 audit entry, got %d", len(entries))
+	}
+	if entries[0].Event != "reply_sent" {
+		t.Errorf("expected event 'reply_sent', got %q", entries[0].Event)
+	}
+	if entries[0].SessionID != "test-session" {
+		t.Errorf("expected session 'test-session', got %q", entries[0].SessionID)
+	}
+	if entries[0].Channel != "#backend" {
+		t.Errorf("expected channel '#backend', got %q", entries[0].Channel)
 	}
 }
 
