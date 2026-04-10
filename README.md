@@ -218,13 +218,21 @@ Aileron can receive Slack messages in your terminal while you work. Incoming mes
 - A **Bot Token** (`xoxb-...`) with `channels:history`, `channels:read`, `chat:write`, `users:read` scopes
 - Subscribe to the `message.channels` event
 
-**2. Add the tokens to your `aileron.yaml`:**
+**2. Store tokens in the encrypted vault** (instead of plaintext in YAML):
+
+```sh
+./build/aileron secret set slack_app_token    # prompts for passphrase + token
+./build/aileron secret set slack_bot_token
+./build/aileron secret list                   # shows stored names
+```
+
+**3. Reference them in `aileron.yaml`:**
 
 ```yaml
 notifications:
   slack:
-    app_token: xapp-1-A0123456789-...
-    bot_token: xoxb-...
+    app_token: vault:slack_app_token
+    bot_token: vault:slack_bot_token
     channels:
       - name: "#backend"
         show: all
@@ -236,7 +244,9 @@ notifications:
       - "#random"
 ```
 
-**3. Launch as usual** — Aileron starts the Slack listener automatically:
+Plaintext tokens (`xapp-...`, `xoxb-...`) also work directly in the YAML fields if you prefer.
+
+**4. Launch as usual** — Aileron prompts for the vault passphrase if needed, then starts the Slack listener:
 
 ```sh
 ./build/aileron launch claude

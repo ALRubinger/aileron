@@ -16,9 +16,20 @@ type PolicyFile struct {
 	Settings      *Settings        `yaml:"settings,omitempty"`
 	Env           *EnvConfig       `yaml:"env,omitempty"`
 	Notifications *NotifyConfig    `yaml:"notifications,omitempty"`
+	Secrets       SecretsConfig    `yaml:"secrets,omitempty"`
 	Allow         []Rule           `yaml:"allow,omitempty"`
 	Deny          []Rule           `yaml:"deny,omitempty"`
 	Ask           []Rule           `yaml:"ask,omitempty"`
+}
+
+// SecretsConfig maps secret names to their target URL patterns. When an
+// http_request matches a target pattern, the corresponding secret is
+// injected into the request's Authorization header.
+type SecretsConfig map[string]SecretDef
+
+// SecretDef defines which URL targets a secret can be injected into.
+type SecretDef struct {
+	Targets []string `yaml:"targets"` // URL patterns (e.g. "slack.com/api/*")
 }
 
 // Settings holds launch session configuration.

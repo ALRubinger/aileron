@@ -13,7 +13,9 @@ import (
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/ALRubinger/aileron/core/launch/agents"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/core/version"
+	"golang.org/x/term"
 )
 
 func main() {
@@ -71,6 +73,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		}
 		fmt.Fprintln(stderr, "usage: aileron policy test <command> [command...]")
 		return 1
+	case "secret":
+		return runSecret(args[1:], stdout, stderr)
 	case "log":
 		return runLog(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
@@ -90,6 +94,8 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron init                       Scaffold aileron.yaml for this project")
 	fmt.Fprintln(w, "  aileron launch <agent> [args...]   Launch an agent with policy-enforced shell")
 	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
+	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
+	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
@@ -201,6 +207,112 @@ func runLog(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "%s  %-13s  %-12s  %s\n", ts, e.Disposition, e.RuleID, e.Command)
 	}
 	return 0
+}
+
+// runSecret handles the "aileron secret" subcommands.
+func runSecret(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: aileron secret <set|list>")
+		return 1
+	}
+
+	switch args[0] {
+	case "set":
+		return runSecretSet(args[1:], stdout, stderr)
+	case "list":
+		return runSecretList(stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown secret command: %q\n", args[0])
+		fmt.Fprintln(stderr, "usage: aileron secret <set|list>")
+		return 1
+	}
+}
+
+// runSecretSet stores a secret in the local vault.
+func runSecretSet(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "usage: aileron secret set <name>")
+		return 1
+	}
+	name := args[0]
+
+	passphrase, err := promptPassphrase("Vault passphrase: ", stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprint(stderr, "Secret value: ")
+	value, err := promptPassphrase("", nil) // already printed prompt
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stderr) // newline after hidden input
+
+	v, err := launch.OpenLocalVault(launch.DefaultVaultPath(), passphrase)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if err := v.Put(context.Background(), name, []byte(value), vault.Metadata{Type: "secret"}); err != nil {
+		fmt.Fprintf(stderr, "error storing secret: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Stored secret %q\n", name)
+	fmt.Fprintf(stdout, "Use vault:%s in aileron.yaml to reference it.\n", name)
+	return 0
+}
+
+// runSecretList lists secret names in the vault.
+func runSecretList(stdout, stderr io.Writer) int {
+	vaultPath := launch.DefaultVaultPath()
+	fv, err := vault.NewFileVault(vaultPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	names := fv.Names()
+	if len(names) == 0 {
+		fmt.Fprintln(stdout, "No secrets stored.")
+		return 0
+	}
+
+	for _, name := range names {
+		fmt.Fprintln(stdout, name)
+	}
+	return 0
+}
+
+// promptPassphrase reads a password from the terminal without echoing.
+func promptPassphrase(prompt string, w io.Writer) (string, error) {
+	if w != nil && prompt != "" {
+		fmt.Fprint(w, prompt)
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", fmt.Errorf("cannot open terminal: %w", err)
+	}
+	defer tty.Close()
+
+	pass, err := readPassword(int(tty.Fd()))
+	if err != nil {
+		return "", fmt.Errorf("reading input: %w", err)
+	}
+	if w != nil {
+		fmt.Fprintln(w) // newline after hidden input
+	}
+	return string(pass), nil
+}
+
+// readPassword reads a password from a file descriptor. Extracted for testing.
+var readPassword = defaultReadPassword
+
+func defaultReadPassword(fd int) ([]byte, error) {
+	return term.ReadPassword(fd)
 }
 
 // resolveShim finds the aileron-sh binary next to this executable, or on PATH.

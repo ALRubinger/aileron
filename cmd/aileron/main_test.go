@@ -356,3 +356,84 @@ func TestRunLog_HelpShownInUsage(t *testing.T) {
 		t.Error("expected 'aileron log' in help output")
 	}
 }
+
+func TestRunSecret_NoSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"secret"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron secret") {
+		t.Errorf("expected usage message, got: %s", stderr.String())
+	}
+}
+
+func TestRunSecret_UnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"secret", "bogus"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), `unknown secret command: "bogus"`) {
+		t.Errorf("expected unknown command error, got: %s", stderr.String())
+	}
+}
+
+func TestRunSecret_SetNoName(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"secret", "set"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron secret set") {
+		t.Errorf("expected usage message, got: %s", stderr.String())
+	}
+}
+
+func TestRunSecret_ListEmpty(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"secret", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No secrets stored") {
+		t.Errorf("expected 'No secrets stored', got: %s", stdout.String())
+	}
+}
+
+func TestRunSecret_ListWithSecrets(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Pre-populate the vault file directly (skip encryption for test).
+	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
+	os.MkdirAll(filepath.Dir(vaultPath), 0o700)
+	os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"slack_bot_token":{"value":"ZW5j","metadata":{"type":"secret"}},"discord_token":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"secret", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "slack_bot_token") {
+		t.Errorf("expected 'slack_bot_token' in output, got: %s", out)
+	}
+	if !strings.Contains(out, "discord_token") {
+		t.Errorf("expected 'discord_token' in output, got: %s", out)
+	}
+}
+
+func TestRunSecret_InHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
+	if !strings.Contains(stdout.String(), "aileron secret set") {
+		t.Error("expected 'aileron secret set' in help output")
+	}
+	if !strings.Contains(stdout.String(), "aileron secret list") {
+		t.Error("expected 'aileron secret list' in help output")
+	}
+}

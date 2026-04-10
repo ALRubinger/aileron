@@ -3,15 +3,38 @@ package launch_test
 import (
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/launch"
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
+	"github.com/ALRubinger/aileron/core/vault"
 )
+
+type mockHTTPServer struct {
+	responseBody string
+	statusCode   int
+	handler      func(http.ResponseWriter, *http.Request)
+}
+
+func (m *mockHTTPServer) start() *httptest.Server {
+	if m.handler != nil {
+		return httptest.NewServer(http.HandlerFunc(m.handler))
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.statusCode != 0 {
+			w.WriteHeader(m.statusCode)
+		}
+		w.Write([]byte(m.responseBody))
+	}))
+}
 
 type mockSender struct {
 	service string
@@ -437,6 +460,203 @@ func TestCommsServer_DirectSend_Success(t *testing.T) {
 	}
 	if sender.lastMsg.Body != "my reply" {
 		t.Errorf("expected body 'my reply', got %q", sender.lastMsg.Body)
+	}
+}
+
+func TestCommsServer_HttpRequest_WithApproval(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-http.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	// Set up a mock HTTP server.
+	mockAPI := &mockHTTPServer{responseBody: `{"ok": true}`, statusCode: 200}
+	ts := mockAPI.start()
+	defer ts.Close()
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	queue := launch.NewNotifyQueue(10, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, copier, router, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "http_request",
+			Service: "GET",
+			Channel: ts.URL + "/test",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	stdinW.Write([]byte("y"))
+
+	select {
+	case resp := <-done:
+		if !resp.OK {
+			t.Errorf("expected OK, got error: %s", resp.Error)
+		}
+		if len(resp.Messages) == 0 {
+			t.Fatal("expected response body in messages")
+		}
+		if !strings.Contains(resp.Messages[0].Body, "ok") {
+			t.Errorf("expected response body containing 'ok', got %q", resp.Messages[0].Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestCommsServer_HttpRequest_Denied(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-http-deny.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	queue := launch.NewNotifyQueue(10, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, copier, router, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "http_request",
+			Service: "GET",
+			Channel: "https://example.com/api",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	stdinW.Write([]byte("n"))
+
+	select {
+	case resp := <-done:
+		if resp.OK {
+			t.Error("expected denial")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestCommsServer_HttpRequest_MissingFields(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-http-missing.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	queue := launch.NewNotifyQueue(10, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	resp := launch.RequestComms(socketPath, launch.CommsRequest{
+		Method: "http_request",
+		// Missing Service (method) and Channel (url)
+	})
+	if resp.OK {
+		t.Error("expected error for missing fields")
+	}
+}
+
+func TestCommsServer_HttpRequest_WithSecretInjection(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-http-secret.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	// Mock HTTP server that echoes the Authorization header.
+	mockAPI := &mockHTTPServer{
+		handler: func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("auth:" + r.Header.Get("Authorization")))
+		},
+	}
+	ts := mockAPI.start()
+	defer ts.Close()
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	queue := launch.NewNotifyQueue(10, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, copier, router, "", "")
+
+	// Set up secrets with a vault.
+	v := vault.NewMemVault()
+	v.Put(nil, "SLACK_TOKEN", []byte("xoxb-secret-123"), vault.Metadata{})
+	secrets := map[string]launchpolicy.SecretDef{
+		"SLACK_TOKEN": {Targets: []string{"slack.com/api/*"}},
+	}
+	// The mock server URL won't match slack.com, so use a pattern that matches.
+	secrets["SLACK_TOKEN"] = launchpolicy.SecretDef{Targets: []string{ts.URL[7:]}} // strip "http://"
+	srv.SetSecrets(secrets, v)
+
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "http_request",
+			Service: "GET",
+			Channel: ts.URL + "/api/test",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	stdinW.Write([]byte("y"))
+
+	select {
+	case resp := <-done:
+		if !resp.OK {
+			t.Fatalf("expected OK, got error: %s", resp.Error)
+		}
+		if len(resp.Messages) == 0 {
+			t.Fatal("expected response")
+		}
+		if !strings.Contains(resp.Messages[0].Body, "Bearer xoxb-secret-123") {
+			t.Errorf("expected injected Bearer token, got %q", resp.Messages[0].Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestURLMatchesPattern(t *testing.T) {
+	tests := []struct {
+		url, pattern string
+		want         bool
+	}{
+		{"https://slack.com/api/chat.postMessage", "slack.com/api/*", true},
+		{"https://discord.com/api/channels", "discord.com/api/*", true},
+		{"https://example.com/other", "slack.com/api/*", false},
+		{"https://slack.com/api/users", "slack.com/api/users", true},
+		{"https://example.com", "example.com", true},
+	}
+	for _, tt := range tests {
+		got := launch.URLMatchesPattern(tt.url, tt.pattern)
+		if got != tt.want {
+			t.Errorf("URLMatchesPattern(%q, %q) = %v, want %v", tt.url, tt.pattern, got, tt.want)
+		}
 	}
 }
 

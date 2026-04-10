@@ -3,7 +3,9 @@ package launch
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/comms"
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
+	"github.com/ALRubinger/aileron/core/vault"
 )
 
 // CommsRequest is sent by aileron-mcp to read or send messages.
@@ -52,6 +56,9 @@ type CommsServer struct {
 	router     *KeyRouter
 	auditLog   string
 	sessionID  string
+	secrets    launchpolicy.SecretsConfig
+	vault      vault.Vault
+	httpClient *http.Client
 
 	mu   sync.Mutex
 	done bool
@@ -117,6 +124,8 @@ func (cs *CommsServer) handleConn(conn net.Conn) {
 		resp = cs.readMessages(req)
 	case "send_message":
 		resp = cs.sendMessage(req)
+	case "http_request":
+		resp = cs.httpRequest(req)
 	default:
 		resp = CommsResponse{Error: "unknown method: " + req.Method}
 	}
@@ -300,6 +309,113 @@ func (cs *CommsServer) DirectSend(service, channel, body string) error {
 		cs.logMessage("reply_sent", service, channel, "", body, "")
 	}
 	return err
+}
+
+// SetSecrets configures the secrets mapping and vault for http_request
+// credential injection. Called after vault is opened at launch time.
+func (cs *CommsServer) SetSecrets(secrets launchpolicy.SecretsConfig, v vault.Vault) {
+	cs.secrets = secrets
+	cs.vault = v
+	cs.httpClient = &http.Client{}
+}
+
+func (cs *CommsServer) httpRequest(req CommsRequest) CommsResponse {
+	// Fields are repurposed: Service=HTTP method, Channel=URL, Body=body, ReplyTo=headers JSON.
+	method := req.Service
+	url := req.Channel
+	body := req.Body
+	headersJSON := req.ReplyTo
+
+	if method == "" || url == "" {
+		return CommsResponse{Error: "method and url are required"}
+	}
+
+	// Match URL against secrets config to find credential.
+	secretName, _ := cs.matchSecret(url)
+
+	// Prompt user approval.
+	detail := fmt.Sprintf("%s %s", method, url)
+	if secretName != "" {
+		detail += fmt.Sprintf(" (credential: %s)", secretName)
+	}
+	decision := cs.promptSendApproval("http", detail, body)
+	if decision != "approve" {
+		cs.logMessage("http_request_denied", method, url, "", body, "")
+		return CommsResponse{Error: "request denied by user"}
+	}
+
+	// Build HTTP request.
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	httpReq, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return CommsResponse{Error: "invalid request: " + err.Error()}
+	}
+
+	// Parse and set headers.
+	if headersJSON != "" {
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err == nil {
+			for k, v := range headers {
+				httpReq.Header.Set(k, v)
+			}
+		}
+	}
+
+	// Inject credential if matched.
+	if secretName != "" && cs.vault != nil {
+		secret, err := cs.vault.Get(nil, secretName)
+		if err == nil {
+			httpReq.Header.Set("Authorization", "Bearer "+string(secret.Value))
+		}
+	}
+
+	// Execute request.
+	client := cs.httpClient
+	if client == nil {
+		client = &http.Client{}
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return CommsResponse{Error: "request failed: " + err.Error()}
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
+	cs.logMessage("http_request_sent", method, url, "", string(respBody), "")
+
+	return CommsResponse{
+		OK: true,
+		Messages: []CommsMessageDTO{{
+			ID:   fmt.Sprintf("%d", resp.StatusCode),
+			Body: string(respBody),
+		}},
+	}
+}
+
+// matchSecret finds the first secret whose target patterns match the URL.
+func (cs *CommsServer) matchSecret(url string) (string, bool) {
+	for name, def := range cs.secrets {
+		for _, pattern := range def.Targets {
+			if URLMatchesPattern(url, pattern) {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// URLMatchesPattern checks if a URL matches a target pattern.
+// Patterns use simple prefix matching with optional trailing wildcard.
+// Examples: "slack.com/api/*" matches "https://slack.com/api/chat.postMessage"
+func URLMatchesPattern(url, pattern string) bool {
+	if strings.HasSuffix(pattern, "*") {
+		prefix := strings.TrimSuffix(pattern, "*")
+		return strings.Contains(url, prefix)
+	}
+	return strings.Contains(url, pattern)
 }
 
 func (cs *CommsServer) logMessage(event, service, channel, author, body, inReplyTo string) {
