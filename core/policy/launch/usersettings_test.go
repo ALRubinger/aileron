@@ -120,7 +120,7 @@ settings:
   timeout: 30
 `), 0o644)
 
-	pf, err := launch.LoadWithProfiles(filepath.Join(projectDir, "aileron.yaml"), nil)
+	pf, err := launch.LoadWithProfiles(filepath.Join(projectDir, "aileron.yaml"))
 	if err != nil {
 		t.Fatalf("LoadWithProfiles failed: %v", err)
 	}
@@ -162,7 +162,7 @@ version: 1
 default: deny
 `), 0o644)
 
-	pf, err := launch.LoadWithProfiles(filepath.Join(projectDir, "aileron.yaml"), nil)
+	pf, err := launch.LoadWithProfiles(filepath.Join(projectDir, "aileron.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestLoadWithProfiles_NoUserSettings(t *testing.T) {
 	// With no ~/.aileron/settings.yaml, LoadWithProfiles should still work.
 	t.Setenv("HOME", t.TempDir())
 
-	pf, err := launch.LoadWithProfiles(testdataPath("basic.yaml"), nil)
+	pf, err := launch.LoadWithProfiles(testdataPath("basic.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

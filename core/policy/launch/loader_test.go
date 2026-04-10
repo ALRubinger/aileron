@@ -384,7 +384,7 @@ allow:
 }
 
 func TestLoadWithProfiles(t *testing.T) {
-	pf, err := launch.LoadWithProfiles(testdataPath("basic.yaml"), nil)
+	pf, err := launch.LoadWithProfiles(testdataPath("basic.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ allow:
 	policyPath := filepath.Join(dir, "aileron.yaml")
 	os.WriteFile(policyPath, []byte(policy), 0o644)
 
-	pf, err := launch.LoadWithProfiles(policyPath, nil)
+	pf, err := launch.LoadWithProfiles(policyPath)
 	if err != nil {
 		t.Fatalf("profiles field should be ignored, got error: %v", err)
 	}

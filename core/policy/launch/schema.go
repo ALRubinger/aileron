@@ -11,7 +11,6 @@ import (
 // PolicyFile is the top-level schema for aileron.yaml.
 type PolicyFile struct {
 	Version       int              `yaml:"version"`
-	Profiles      []string         `yaml:"profiles,omitempty"`
 	Default       string           `yaml:"default,omitempty"` // "allow", "deny", "ask"
 	Settings      *Settings        `yaml:"settings,omitempty"`
 	Env           *EnvConfig       `yaml:"env,omitempty"`
