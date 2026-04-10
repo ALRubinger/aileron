@@ -146,3 +146,111 @@ func TestReadShellEntriesFiltered_Combined(t *testing.T) {
 		t.Errorf("expected 1 entry matching s1+deny, got %v", got)
 	}
 }
+
+func TestAppendMessageEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	err := audit.AppendMessageEntry(path, audit.MessageEntry{
+		SessionID: "s1",
+		Event:     "message_received",
+		Service:   "slack",
+		Channel:   "#backend",
+		Author:    "Sarah",
+		Body:      "Does the auth change JWT claims?",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = audit.AppendMessageEntry(path, audit.MessageEntry{
+		SessionID: "s1",
+		Event:     "message_sent",
+		Service:   "slack",
+		Channel:   "#backend",
+		Body:      "No, the claims are unchanged.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := audit.ReadMessageEntries(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 message entries, got %d", len(entries))
+	}
+	if entries[0].Event != "message_received" {
+		t.Errorf("expected message_received, got %q", entries[0].Event)
+	}
+	if entries[0].Author != "Sarah" {
+		t.Errorf("expected author Sarah, got %q", entries[0].Author)
+	}
+	if entries[1].Event != "message_sent" {
+		t.Errorf("expected message_sent, got %q", entries[1].Event)
+	}
+}
+
+func TestReadMessageEntries_SkipsShellEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	// Write a mix of shell and message entries.
+	audit.AppendShellEntry(path, audit.ShellEntry{SessionID: "s1", Command: "echo hi", Disposition: "allow"})
+	audit.AppendMessageEntry(path, audit.MessageEntry{SessionID: "s1", Event: "message_received", Service: "slack"})
+	audit.AppendShellEntry(path, audit.ShellEntry{SessionID: "s1", Command: "ls", Disposition: "allow"})
+
+	entries, err := audit.ReadMessageEntries(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 message entry (shell entries skipped), got %d", len(entries))
+	}
+	if entries[0].Event != "message_received" {
+		t.Errorf("expected message_received, got %q", entries[0].Event)
+	}
+}
+
+func TestReadMessageEntries_EmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	os.WriteFile(path, []byte(""), 0o644)
+
+	entries, err := audit.ReadMessageEntries(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
+	}
+}
+
+func TestReadMessageEntries_NoFile(t *testing.T) {
+	_, err := audit.ReadMessageEntries("/nonexistent/audit.jsonl")
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestAppendMessageEntry_InReplyTo(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+
+	audit.AppendMessageEntry(path, audit.MessageEntry{
+		SessionID: "s1",
+		Event:     "reply_sent",
+		Service:   "slack",
+		Channel:   "#backend",
+		Body:      "my reply",
+		InReplyTo: "msg-123",
+	})
+
+	entries, err := audit.ReadMessageEntries(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatal("expected 1 entry")
+	}
+	if entries[0].InReplyTo != "msg-123" {
+		t.Errorf("expected InReplyTo 'msg-123', got %q", entries[0].InReplyTo)
+	}
+}

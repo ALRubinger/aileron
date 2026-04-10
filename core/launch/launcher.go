@@ -104,13 +104,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	// Create the notification queue and start any comms listeners.
 	queue := NewNotifyQueue(100, nil)
-	listeners := startCommsListeners(ctx, config.Dir, queue)
+	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID)
 	defer stopCommsListeners(listeners)
 
 	// If stdin is a terminal, use the pty proxy with status bar.
 	var result LaunchResult
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		result, err = launchWithPty(cmd, config, queue, listeners, approvalSocket, commsSocket)
+		result, err = launchWithPty(cmd, config, queue, listeners, approvalSocket, commsSocket, auditLog, sessionID)
 	} else {
 		result, err = launchDirect(cmd, config)
 	}
@@ -148,7 +148,7 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 }
 
 // launchWithPty runs the agent inside a pty with a status bar at the bottom.
-func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, listeners []comms.Listener, approvalSocket, commsSocket string) (LaunchResult, error) {
+func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, listeners []comms.Listener, approvalSocket, commsSocket, auditLog, sessionID string) (LaunchResult, error) {
 	stdinFd := int(os.Stdin.Fd())
 
 	cols, rows, err := term.GetSize(stdinFd)
@@ -198,7 +198,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	go approvalSrv.Serve()
 
 	// Start the comms server so aileron-mcp can read/send messages.
-	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, bar, outputCopier, router)
+	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, bar, outputCopier, router, auditLog, sessionID)
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("starting comms server: %w", err)
 	}
@@ -515,7 +515,7 @@ func envGlobMatch(pattern, name string) bool {
 
 // startCommsListeners reads the notification config from the policy file,
 // creates listeners, and starts them.
-func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []comms.Listener {
+func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string) []comms.Listener {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
@@ -548,14 +548,14 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []
 		created = append(created, comms.NewDiscordListener(cfg.BotToken, channels, cfg.Ignore))
 	}
 
-	return StartListeners(ctx, created, queue, os.Stderr, autoDraft)
+	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, auditLog, sessionID)
 }
 
 // StartListeners connects and starts each listener, bridging incoming
 // messages to the NotifyQueue. The autoDraft map controls which channels
 // trigger automatic draft replies. Returns the successfully started
 // listeners. Errors are written to w.
-func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool) []comms.Listener {
+func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool, auditLog, sessionID string) []comms.Listener {
 	var started []comms.Listener
 	for _, l := range listeners {
 		if err := l.Connect(ctx); err != nil {
@@ -568,7 +568,7 @@ func StartListeners(ctx context.Context, listeners []comms.Listener, queue *Noti
 			continue
 		}
 		started = append(started, l)
-		go BridgeMessages(msgs, queue, autoDraft)
+		go BridgeMessages(msgs, queue, autoDraft, auditLog, sessionID)
 	}
 	return started
 }
@@ -576,7 +576,7 @@ func StartListeners(ctx context.Context, listeners []comms.Listener, queue *Noti
 // BridgeMessages reads from a comms listener channel and pushes messages
 // into the NotifyQueue. The autoDraft map controls which channels trigger
 // automatic draft replies. Exported for testing.
-func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool) {
+func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool, auditLog, sessionID string) {
 	for msg := range msgs {
 		preview := msg.Body
 		if len(preview) > 80 {
@@ -592,6 +592,17 @@ func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoD
 			Timestamp: msg.Timestamp,
 			AutoDraft: autoDraft[msg.Channel],
 		})
+		if auditLog != "" {
+			audit.AppendMessageEntry(auditLog, audit.MessageEntry{
+				Timestamp: msg.Timestamp,
+				SessionID: sessionID,
+				Event:     "message_received",
+				Service:   msg.Service,
+				Channel:   msg.Channel,
+				Author:    msg.Author,
+				Body:      msg.Body,
+			})
+		}
 	}
 }
 
