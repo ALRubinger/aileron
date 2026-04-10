@@ -118,6 +118,19 @@ func TestIsQuietHours_InvalidTimezone(t *testing.T) {
 	}
 }
 
+func TestIsQuietHours_NilNowFunc(t *testing.T) {
+	// When nowFunc is nil, IsQuietHours should use time.Now and not panic.
+	// We use a wide window (00:00–23:59) to guarantee the result is true
+	// regardless of when the test runs.
+	cfg := &launchpolicy.QuietHoursConfig{
+		Start: "00:00",
+		End:   "23:59",
+	}
+	if !launch.IsQuietHours(cfg, nil) {
+		t.Error("expected true for all-day window with nil nowFunc")
+	}
+}
+
 func TestIsQuietHours_InvalidTimeFormat(t *testing.T) {
 	tests := []struct {
 		name  string

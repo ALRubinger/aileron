@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/launch"
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 )
 
 func TestStatusBar_Render(t *testing.T) {
@@ -177,5 +179,151 @@ func TestResetScrollRegion(t *testing.T) {
 	launch.ResetScrollRegion(&buf)
 	if buf.String() != "\033[r" {
 		t.Errorf("expected reset scroll region escape, got %q", buf.String())
+	}
+}
+
+func TestStatusBar_QuietHoursIndicator(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "20:00",
+		End:   "08:00",
+	})
+	// Simulate 23:00 — inside quiet hours.
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 23, 0, 0, 0, time.Local)
+	})
+	bar.SetQueue(q)
+
+	// Push a normal-priority message (no high-priority unread).
+	q.Push(launch.Message{ID: "1", Priority: "normal"})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "[quiet]") {
+		t.Errorf("expected [quiet] indicator during quiet hours, got:\n%s", out)
+	}
+	if !strings.Contains(out, "branding") {
+		t.Error("expected branding text alongside quiet indicator")
+	}
+	if strings.Contains(out, "unread") {
+		t.Error("should not show unread count during quiet hours with no high-priority messages")
+	}
+}
+
+func TestStatusBar_QuietHoursHighPriorityShowsUnread(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "20:00",
+		End:   "08:00",
+	})
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 23, 0, 0, 0, time.Local)
+	})
+	bar.SetQueue(q)
+
+	// Push a high-priority message — should bypass quiet indicator.
+	q.Push(launch.Message{ID: "1", Priority: "high", Preview: "urgent"})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if strings.Contains(out, "[quiet]") {
+		t.Error("should not show [quiet] when high-priority unread messages exist")
+	}
+	if !strings.Contains(out, "1 unread") {
+		t.Errorf("expected '1 unread' for high-priority message during quiet hours, got:\n%s", out)
+	}
+}
+
+func TestStatusBar_QuietHoursNarrowTerminal(t *testing.T) {
+	// Narrow terminal where gap would be < 1.
+	bar := launch.NewStatusBar(24, 10, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "20:00",
+		End:   "08:00",
+	})
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 23, 0, 0, 0, time.Local)
+	})
+	bar.SetQueue(q)
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	// Should render without panicking; [quiet] and branding both present.
+	if !strings.Contains(out, "[quiet]") {
+		t.Errorf("expected [quiet] even in narrow terminal, got:\n%s", out)
+	}
+}
+
+func TestStatusBar_WithQueue_LongPreviewTruncated(t *testing.T) {
+	// Use a terminal width where preview is shown but needs truncation.
+	bar := launch.NewStatusBar(24, 50, "brand")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	q.Push(launch.Message{ID: "1", Preview: "This is a very long preview message that exceeds available space"})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "1 unread") {
+		t.Errorf("expected '1 unread', got:\n%s", out)
+	}
+	// Should contain truncated preview with "..."
+	if !strings.Contains(out, "...") {
+		t.Errorf("expected truncated preview with '...', got:\n%s", out)
+	}
+}
+
+func TestStatusBar_WithQueue_NarrowNoPreview(t *testing.T) {
+	// Terminal too narrow for preview (previewSpace <= 10).
+	bar := launch.NewStatusBar(24, 25, "brand")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	q.Push(launch.Message{ID: "1", Preview: "hello"})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "1 unread") {
+		t.Errorf("expected '1 unread' even in narrow terminal, got:\n%s", out)
+	}
+}
+
+func TestStatusBar_OutsideQuietHoursShowsNormal(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "branding")
+	q := launch.NewNotifyQueue(10, nil)
+	q.SetQuietHours(&launchpolicy.QuietHoursConfig{
+		Start: "22:00",
+		End:   "06:00",
+	})
+	// Simulate 12:00 — outside quiet hours.
+	q.SetNowFunc(func() time.Time {
+		return time.Date(2026, 1, 15, 12, 0, 0, 0, time.Local)
+	})
+	bar.SetQueue(q)
+
+	q.Push(launch.Message{ID: "1", Preview: "hello"})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if strings.Contains(out, "[quiet]") {
+		t.Error("should not show [quiet] outside quiet hours")
+	}
+	if !strings.Contains(out, "1 unread") {
+		t.Errorf("expected '1 unread' outside quiet hours, got:\n%s", out)
 	}
 }
