@@ -276,6 +276,20 @@ func wrapText(text string, maxWidth int) []string {
 	return lines
 }
 
+// DirectSend sends a message without an approval prompt. Used for
+// user-authored replies from the overlay (the user typed it, so no
+// approval is needed).
+func (cs *CommsServer) DirectSend(service, channel, body string) error {
+	sender, ok := cs.senders[service]
+	if !ok {
+		return fmt.Errorf("no listener for service: %s", service)
+	}
+	return sender.Send(nil, comms.OutgoingMessage{
+		Channel: channel,
+		Body:    body,
+	})
+}
+
 // SocketPath returns the socket path.
 func (cs *CommsServer) SocketPath() string {
 	return cs.socketPath

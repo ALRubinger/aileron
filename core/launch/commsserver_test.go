@@ -312,3 +312,49 @@ func TestCommsServer_WrapText(t *testing.T) {
 		t.Error("full body should be sent regardless of wrapping")
 	}
 }
+
+func TestCommsServer_DirectSend_Success(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-direct.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	err = srv.DirectSend("slack", "#backend", "my reply")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !sender.sent {
+		t.Error("expected sender.Send to be called")
+	}
+	if sender.lastMsg.Channel != "#backend" {
+		t.Errorf("expected channel '#backend', got %q", sender.lastMsg.Channel)
+	}
+	if sender.lastMsg.Body != "my reply" {
+		t.Errorf("expected body 'my reply', got %q", sender.lastMsg.Body)
+	}
+}
+
+func TestCommsServer_DirectSend_UnknownService(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-direct-unknown.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	err = srv.DirectSend("nonexistent", "#test", "hello")
+	if err == nil {
+		t.Fatal("expected error for unknown service")
+	}
+}

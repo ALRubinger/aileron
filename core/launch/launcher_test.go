@@ -593,6 +593,29 @@ func TestWireDraftInjection_AutoDraftCallback(t *testing.T) {
 	}
 }
 
+func TestWireReply(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "comms.sock")
+	sender := &testListener{service: "slack", msgs: make(chan comms.IncomingMessage, 1)}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	var buf strings.Builder
+	o := launch.NewOverlay(queue, nil, &buf, 24, 80, nil)
+
+	launch.WireReply(o, srv)
+
+	msg := launch.Message{Source: "slack", Channel: "#backend", Author: "Sarah", Body: "question?"}
+	o.OnReply(msg, "my reply")
+
+	// The sender should have received the message (Send returns nil for testListener).
+	// Just verify no panic and the callback is wired.
+}
+
 func TestBridgeMessages_AutoDraft(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 3)
