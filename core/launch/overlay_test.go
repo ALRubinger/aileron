@@ -1,6 +1,7 @@
 package launch_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -659,6 +660,454 @@ func TestOverlay_FooterShowsReplyAction(t *testing.T) {
 	if !strings.Contains(out, "r reply") {
 		t.Error("expected 'r reply' in footer")
 	}
+}
+
+func TestOverlay_DraftMessage_RendersTag(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "original question", Body: "What about the deploy?",
+		Draft: "Looks good to me!", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	out := w.String()
+
+	if !strings.Contains(out, "[draft]") {
+		t.Error("expected [draft] tag in message list")
+	}
+	if !strings.Contains(out, "Draft Reply") {
+		t.Error("expected 'Draft Reply' section in detail pane")
+	}
+	if !strings.Contains(out, "Looks good to me!") {
+		t.Error("expected draft text in detail pane")
+	}
+}
+
+func TestOverlay_DraftMessage_FooterShowsYEN(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	out := w.String()
+
+	if !strings.Contains(out, "y send") {
+		t.Error("expected 'y send' in footer for draft")
+	}
+	if !strings.Contains(out, "e edit") {
+		t.Error("expected 'e edit' in footer for draft")
+	}
+	if !strings.Contains(out, "n discard") {
+		t.Error("expected 'n discard' in footer for draft")
+	}
+}
+
+func TestOverlay_DraftMessage_NonDraftShowsNormalFooter(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Author: "Alice", Preview: "normal msg", Body: "normal"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	out := w.String()
+
+	if !strings.Contains(out, "r reply") {
+		t.Error("expected normal footer for non-draft message")
+	}
+	if strings.Contains(out, "y send") {
+		t.Error("should not show draft footer for non-draft message")
+	}
+}
+
+func TestOverlay_DraftApprove_YKey(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var approvedMsg launch.Message
+	approveCalled := false
+	o.OnDraftApprove = func(msg launch.Message) {
+		approveCalled = true
+		approvedMsg = msg
+	}
+
+	o.Show()
+	o.HandleKey('y')
+
+	if !approveCalled {
+		t.Fatal("expected OnDraftApprove to be called")
+	}
+	if approvedMsg.ID != "1" {
+		t.Errorf("expected message ID '1', got %q", approvedMsg.ID)
+	}
+	if approvedMsg.Draft != "my draft" {
+		t.Errorf("expected draft text 'my draft', got %q", approvedMsg.Draft)
+	}
+	// Message should be marked read.
+	if q.UnreadCount() != 0 {
+		t.Errorf("expected 0 unread, got %d", q.UnreadCount())
+	}
+}
+
+func TestOverlay_DraftApprove_YKey_NonDraftNoOp(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Author: "Alice", Preview: "normal", Body: "normal"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	approveCalled := false
+	o.OnDraftApprove = func(msg launch.Message) {
+		approveCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('y')
+
+	if approveCalled {
+		t.Error("OnDraftApprove should not be called for non-draft message")
+	}
+}
+
+func TestOverlay_DraftDiscard_NKey(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var discardedMsg launch.Message
+	discardCalled := false
+	o.OnDraftDiscard = func(msg launch.Message) {
+		discardCalled = true
+		discardedMsg = msg
+	}
+
+	o.Show()
+	o.HandleKey('n')
+
+	if !discardCalled {
+		t.Fatal("expected OnDraftDiscard to be called")
+	}
+	if discardedMsg.ID != "1" {
+		t.Errorf("expected message ID '1', got %q", discardedMsg.ID)
+	}
+	if q.UnreadCount() != 0 {
+		t.Errorf("expected 0 unread, got %d", q.UnreadCount())
+	}
+}
+
+func TestOverlay_DraftDiscard_NKey_NonDraftNoOp(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Author: "Alice", Preview: "normal", Body: "normal"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	discardCalled := false
+	o.OnDraftDiscard = func(msg launch.Message) {
+		discardCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('n')
+
+	if discardCalled {
+		t.Error("OnDraftDiscard should not be called for non-draft message")
+	}
+}
+
+func TestOverlay_DraftEdit_EKey(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	o.Show()
+	w.Reset()
+	o.HandleKey('e')
+	out := w.String()
+
+	// Should enter reply mode pre-filled with draft text.
+	if !strings.Contains(out, "my draft") {
+		t.Error("expected draft text pre-filled in reply input")
+	}
+	if !strings.Contains(out, "Enter send") {
+		t.Error("expected reply mode footer")
+	}
+	if !o.IsActive() {
+		t.Error("overlay should still be active in edit mode")
+	}
+}
+
+func TestOverlay_DraftEdit_EKey_NonDraftNoOp(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Author: "Alice", Preview: "normal", Body: "normal"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	o.Show()
+	w.Reset()
+	o.HandleKey('e')
+	out := w.String()
+
+	// Should not enter reply mode for non-draft.
+	if strings.Contains(out, "Enter send") {
+		t.Error("should not enter reply mode for non-draft message")
+	}
+}
+
+func TestOverlay_DraftEdit_SubmitCallsDraftEdit(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	copier := launch.NewOutputCopier(strings.NewReader(""), &w, nil)
+	dismissed := false
+	o := launch.NewOverlay(q, copier, &w, 30, 80, func() {
+		dismissed = true
+	})
+
+	var editedMsg launch.Message
+	var editedText string
+	o.OnDraftEdit = func(msg launch.Message, edited string) {
+		editedMsg = msg
+		editedText = edited
+	}
+
+	// Ensure OnReply is NOT called for draft edits.
+	replyCalled := false
+	o.OnReply = func(msg launch.Message, reply string) {
+		replyCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('e')
+
+	// Append text to the pre-filled draft.
+	o.HandleKey('!')
+	o.HandleKey('\r')
+
+	if editedText != "my draft!" {
+		t.Errorf("expected edited text 'my draft!', got %q", editedText)
+	}
+	if editedMsg.ID != "1" {
+		t.Errorf("expected message ID '1', got %q", editedMsg.ID)
+	}
+	if replyCalled {
+		t.Error("OnReply should not be called for draft edit submission")
+	}
+	if !dismissed {
+		t.Error("onDismiss should have been called")
+	}
+	if o.IsActive() {
+		t.Error("overlay should be dismissed after submitting edit")
+	}
+}
+
+func TestOverlay_DraftApprove_EmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	approveCalled := false
+	o.OnDraftApprove = func(msg launch.Message) {
+		approveCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('y') // should not panic
+
+	if approveCalled {
+		t.Error("OnDraftApprove should not be called on empty queue")
+	}
+}
+
+func TestOverlay_DraftDiscard_EmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	discardCalled := false
+	o.OnDraftDiscard = func(msg launch.Message) {
+		discardCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('n') // should not panic
+
+	if discardCalled {
+		t.Error("OnDraftDiscard should not be called on empty queue")
+	}
+}
+
+func TestOverlay_DraftEdit_EmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	o.Show()
+	o.HandleKey('e') // should not panic
+}
+
+func TestOverlay_ScrollAdjustment(t *testing.T) {
+	q := launch.NewNotifyQueue(20, nil)
+	// Push enough messages to require scrolling with a small terminal.
+	for i := 0; i < 15; i++ {
+		q.Push(launch.Message{
+			ID:      fmt.Sprintf("%d", i),
+			Source:  "slack",
+			Author:  fmt.Sprintf("User%d", i),
+			Preview: fmt.Sprintf("message %d", i),
+			Body:    fmt.Sprintf("body %d", i),
+		})
+	}
+
+	var w testWriter
+	// Use a very small terminal (10 rows) so the visible area is tiny.
+	o := launch.NewOverlay(q, nil, &w, 10, 80, nil)
+	o.Show()
+
+	// Navigate all the way down to force scroll adjustment.
+	for i := 0; i < 14; i++ {
+		o.HandleKey('j')
+	}
+
+	// Navigate back up to the top.
+	for i := 0; i < 14; i++ {
+		o.HandleKey('k')
+	}
+
+	// The overlay should still be active and not panicked.
+	if !o.IsActive() {
+		t.Error("overlay should still be active after scrolling")
+	}
+}
+
+func TestOverlay_EscNonBracket_Dismisses(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Preview: "msg"})
+	var w testWriter
+	dismissed := false
+	o := launch.NewOverlay(q, nil, &w, 24, 80, func() {
+		dismissed = true
+	})
+
+	o.Show()
+	// Send ESC followed by a non-'[' byte — should dismiss.
+	o.HandleKey(0x1B)
+	o.HandleKey('x')
+
+	if o.IsActive() {
+		t.Error("overlay should be dismissed after ESC + non-bracket")
+	}
+	if !dismissed {
+		t.Error("onDismiss should have been called")
+	}
+}
+
+func TestOverlay_HideWithCopier(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	copier := launch.NewOutputCopier(strings.NewReader(""), &w, nil)
+	o := launch.NewOverlay(q, copier, &w, 24, 80, nil)
+
+	o.Show()
+	o.Hide()
+
+	if o.IsActive() {
+		t.Error("should not be active after Hide")
+	}
+	out := w.String()
+	if !strings.Contains(out, "\033[?1049l") {
+		t.Error("expected screen restore sequence")
+	}
+}
+
+func TestOverlay_DismissWithQAndCopier(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Preview: "msg"})
+	var w testWriter
+	copier := launch.NewOutputCopier(strings.NewReader(""), &w, nil)
+	dismissed := false
+	o := launch.NewOverlay(q, copier, &w, 24, 80, func() {
+		dismissed = true
+	})
+
+	o.Show()
+	o.HandleKey('q')
+
+	if o.IsActive() {
+		t.Error("overlay should be dismissed")
+	}
+	if !dismissed {
+		t.Error("onDismiss should have been called")
+	}
+}
+
+func TestOverlay_ResizeInactive(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Preview: "msg"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 24, 80, nil)
+
+	// Resize without showing — should not render.
+	w.Reset()
+	o.Resize(30, 120)
+	out := w.String()
+	if strings.Contains(out, "aileron notifications") {
+		t.Error("should not render when inactive")
+	}
+}
+
+func TestOverlay_MoveCursorEmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 24, 80, nil)
+	o.Show()
+
+	// Navigate on empty queue — should not panic.
+	o.HandleKey('j')
+	o.HandleKey('k')
+}
+
+func TestOverlay_DismissSelectedEmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 24, 80, nil)
+	o.Show()
+
+	// Dismiss on empty queue — should not panic.
+	o.HandleKey('d')
 }
 
 func TestOverlay_Resize(t *testing.T) {

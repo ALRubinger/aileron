@@ -2,6 +2,7 @@ package launch_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -749,6 +750,164 @@ func TestCommsServer_DirectSend_AuditLog(t *testing.T) {
 	}
 }
 
+func TestCommsServer_SendMessage_DraftDetection(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draft-detect.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	// Push an auto-draft message to the queue.
+	queue.Push(launch.Message{
+		ID: "orig-1", Source: "slack", Channel: "#backend",
+		Author: "Alice", Body: "Is the deploy done?",
+		AutoDraft: true, Timestamp: time.Now(),
+	})
+
+	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	defer srv.Close()
+
+	// Send a message to the same channel — should trigger draft detection.
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "send_message",
+			Service: "slack",
+			Channel: "#backend",
+			Body:    "Yes, the deploy is complete.",
+		})
+	}()
+
+	// Give time for the draft to be queued.
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify the draft was attached to the original message.
+	msg, found := queue.FindByID("orig-1")
+	if !found {
+		t.Fatal("expected to find original message")
+	}
+	if msg.Draft != "Yes, the deploy is complete." {
+		t.Errorf("Draft = %q, want 'Yes, the deploy is complete.'", msg.Draft)
+	}
+
+	// Approve the draft by setting the sentinel.
+	queue.ApproveDraft("orig-1")
+
+	select {
+	case resp := <-done:
+		if !resp.OK {
+			t.Errorf("expected OK after approval, got error: %s", resp.Error)
+		}
+		if !sender.sent {
+			t.Error("expected message to be sent")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestCommsServer_SendMessage_DraftDiscard(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draft-discard.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	queue.Push(launch.Message{
+		ID: "orig-1", Source: "slack", Channel: "#backend",
+		Author: "Alice", Body: "Is the deploy done?",
+		AutoDraft: true, Timestamp: time.Now(),
+	})
+
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "send_message",
+			Service: "slack",
+			Channel: "#backend",
+			Body:    "draft reply",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+
+	// Discard the draft by clearing it.
+	queue.ClearDraft("orig-1")
+
+	select {
+	case resp := <-done:
+		if resp.OK {
+			t.Error("expected error after discard")
+		}
+		if sender.sent {
+			t.Error("message should not have been sent")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestCommsServer_SendMessage_NoDraftForNonAutoDraft(t *testing.T) {
+	// When no auto-draft message exists for the channel, the normal
+	// approval prompt path should be used (which requires a router).
+	socketPath := os.TempDir() + "/aileron-test-comms-nodraft.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	// Push a NON-auto-draft message — should not trigger draft detection.
+	queue.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend",
+		AutoDraft: false, Timestamp: time.Now(),
+	})
+
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "send_message",
+			Service: "slack",
+			Channel: "#backend",
+			Body:    "reply",
+		})
+	}()
+
+	// Should go through normal approval prompt.
+	time.Sleep(300 * time.Millisecond)
+	stdinW.Write([]byte("y"))
+
+	select {
+	case resp := <-done:
+		if !resp.OK {
+			t.Errorf("expected OK after normal approval, got error: %s", resp.Error)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
 func TestCommsServer_DirectSend_UnknownService(t *testing.T) {
 	socketPath := os.TempDir() + "/aileron-test-comms-direct-unknown.sock"
 	t.Cleanup(func() { os.Remove(socketPath) })
@@ -764,5 +923,176 @@ func TestCommsServer_DirectSend_UnknownService(t *testing.T) {
 	err = srv.DirectSend("nonexistent", "#test", "hello")
 	if err == nil {
 		t.Fatal("expected error for unknown service")
+	}
+}
+
+func TestResolveDraft_NotFound(t *testing.T) {
+	decision := launch.ResolveDraft(launch.Message{}, false, "original")
+	if decision != launch.DraftDiscard {
+		t.Errorf("expected DraftDiscard, got %q", decision)
+	}
+}
+
+func TestResolveDraft_DraftCleared(t *testing.T) {
+	msg := launch.Message{ID: "1", Draft: "", DraftFor: ""}
+	decision := launch.ResolveDraft(msg, true, "original")
+	if decision != launch.DraftDiscard {
+		t.Errorf("expected DraftDiscard, got %q", decision)
+	}
+}
+
+func TestResolveDraft_Approved(t *testing.T) {
+	msg := launch.Message{ID: "1", Draft: "\x00approved", DraftFor: "1"}
+	decision := launch.ResolveDraft(msg, true, "original")
+	if decision != launch.DraftApprove {
+		t.Errorf("expected DraftApprove, got %q", decision)
+	}
+}
+
+func TestResolveDraft_Edited(t *testing.T) {
+	msg := launch.Message{ID: "1", Draft: "edited text", DraftFor: "1"}
+	decision := launch.ResolveDraft(msg, true, "original")
+	if decision != launch.DraftEdited {
+		t.Errorf("expected DraftEdited, got %q", decision)
+	}
+}
+
+func TestResolveDraft_Pending(t *testing.T) {
+	msg := launch.Message{ID: "1", Draft: "original", DraftFor: "1"}
+	decision := launch.ResolveDraft(msg, true, "original")
+	if decision != launch.DraftPending {
+		t.Errorf("expected DraftPending, got %q", decision)
+	}
+}
+
+type failSender struct {
+	service string
+	err     error
+}
+
+func (f *failSender) Service() string                                              { return f.service }
+func (f *failSender) Connect(ctx context.Context) error                            { return nil }
+func (f *failSender) Listen(ctx context.Context) (<-chan comms.IncomingMessage, error) { return nil, nil }
+func (f *failSender) Send(ctx context.Context, msg comms.OutgoingMessage) error    { return f.err }
+func (f *failSender) Close() error                                                 { return nil }
+
+func TestCommsServer_SendMessage_DraftApprove_SendFailure(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draft-sendfail.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	sender := &failSender{service: "slack", err: fmt.Errorf("network error")}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	queue.Push(launch.Message{
+		ID: "orig-1", Source: "slack", Channel: "#backend",
+		Author: "Alice", Body: "question?",
+		AutoDraft: true, Timestamp: time.Now(),
+	})
+
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "send_message",
+			Service: "slack",
+			Channel: "#backend",
+			Body:    "draft reply",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+
+	// Approve the draft.
+	queue.ApproveDraft("orig-1")
+
+	select {
+	case resp := <-done:
+		if resp.OK {
+			t.Error("expected error when send fails")
+		}
+		if !strings.Contains(resp.Error, "send failed") {
+			t.Errorf("expected 'send failed' error, got %q", resp.Error)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+}
+
+func TestCommsServer_SendMessage_DraftEdited(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draft-edited.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	sender := &mockSender{service: "slack"}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	queue.Push(launch.Message{
+		ID: "orig-1", Source: "slack", Channel: "#backend",
+		Author: "Alice", Body: "question?",
+		AutoDraft: true, Timestamp: time.Now(),
+	})
+
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, auditPath, "s1")
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan launch.CommsResponse, 1)
+	go func() {
+		done <- launch.RequestComms(socketPath, launch.CommsRequest{
+			Method:  "send_message",
+			Service: "slack",
+			Channel: "#backend",
+			Body:    "original draft",
+		})
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+
+	// Simulate the user editing the draft to different text.
+	queue.SetDraft("orig-1", "edited draft text")
+
+	select {
+	case resp := <-done:
+		if !resp.OK {
+			t.Errorf("expected OK after edit, got error: %s", resp.Error)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	// Verify audit log.
+	entries, _ := audit.ReadMessageEntries(auditPath)
+	foundEdited := false
+	for _, e := range entries {
+		if e.Event == "draft_edited" {
+			foundEdited = true
+		}
+	}
+	if !foundEdited {
+		t.Error("expected 'draft_edited' audit entry")
+	}
+}
+
+func TestCommsServer_ReadMessages_FilterByChannel(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-filter-channel.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	queue := launch.NewNotifyQueue(10, nil)
+	queue.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Body: "msg1"})
+	queue.Push(launch.Message{ID: "2", Source: "slack", Channel: "#frontend", Body: "msg2"})
+
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
+	go srv.Serve()
+	defer srv.Close()
+
+	resp := launch.RequestComms(socketPath, launch.CommsRequest{
+		Method:  "read_messages",
+		Channel: "#frontend",
+	})
+	if len(resp.Messages) != 1 || resp.Messages[0].Channel != "#frontend" {
+		t.Errorf("expected 1 #frontend message, got %v", resp.Messages)
 	}
 }

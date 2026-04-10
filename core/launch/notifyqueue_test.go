@@ -202,6 +202,231 @@ func TestNotifyQueue_AutoDraftRoundtrip(t *testing.T) {
 	}
 }
 
+func TestNotifyQueue_FindByID(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Author: "Alice"})
+	q.Push(launch.Message{ID: "2", Author: "Bob"})
+
+	msg, found := q.FindByID("2")
+	if !found {
+		t.Fatal("expected to find message with ID '2'")
+	}
+	if msg.Author != "Bob" {
+		t.Errorf("Author = %q, want Bob", msg.Author)
+	}
+
+	_, found = q.FindByID("nonexistent")
+	if found {
+		t.Error("expected false for nonexistent ID")
+	}
+}
+
+func TestNotifyQueue_SetDraft(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Author: "Alice", Read: true})
+
+	ok := q.SetDraft("1", "Here is my draft reply")
+	if !ok {
+		t.Fatal("SetDraft should return true for existing message")
+	}
+
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "Here is my draft reply" {
+		t.Errorf("Draft = %q, want 'Here is my draft reply'", msg.Draft)
+	}
+	if msg.DraftFor != "1" {
+		t.Errorf("DraftFor = %q, want '1'", msg.DraftFor)
+	}
+	if msg.Read {
+		t.Error("message should be marked unread after SetDraft")
+	}
+}
+
+func TestNotifyQueue_SetDraft_Nonexistent(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	ok := q.SetDraft("nonexistent", "draft")
+	if ok {
+		t.Error("SetDraft should return false for nonexistent message")
+	}
+}
+
+func TestNotifyQueue_SetDraft_OnChangeCallback(t *testing.T) {
+	var called int
+	q := launch.NewNotifyQueue(10, func() { called++ })
+	q.Push(launch.Message{ID: "1"})
+	called = 0 // reset after Push
+
+	q.SetDraft("1", "draft")
+	if called != 1 {
+		t.Errorf("onChange called %d times, want 1", called)
+	}
+
+	// SetDraft on nonexistent should not call onChange.
+	called = 0
+	q.SetDraft("nonexistent", "draft")
+	if called != 0 {
+		t.Errorf("onChange called %d times for nonexistent, want 0", called)
+	}
+}
+
+func TestNotifyQueue_ApproveDraft(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1"})
+	q.SetDraft("1", "my draft")
+
+	q.ApproveDraft("1")
+
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "\x00approved" {
+		t.Errorf("Draft = %q, want approved sentinel", msg.Draft)
+	}
+}
+
+func TestNotifyQueue_ClearDraft(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1"})
+	q.SetDraft("1", "my draft")
+
+	q.ClearDraft("1")
+
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "" {
+		t.Errorf("Draft = %q, want empty", msg.Draft)
+	}
+	if msg.DraftFor != "" {
+		t.Errorf("DraftFor = %q, want empty", msg.DraftFor)
+	}
+}
+
+func TestNotifyQueue_RecentByChannel(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", AutoDraft: true, Timestamp: time.Now()})
+	q.Push(launch.Message{ID: "2", Source: "slack", Channel: "#frontend", AutoDraft: true, Timestamp: time.Now()})
+	q.Push(launch.Message{ID: "3", Source: "discord", Channel: "#backend", AutoDraft: true, Timestamp: time.Now()})
+
+	msg, found := q.RecentByChannel("slack", "#backend", 5*time.Minute)
+	if !found {
+		t.Fatal("expected to find recent message")
+	}
+	if msg.ID != "1" {
+		t.Errorf("ID = %q, want '1'", msg.ID)
+	}
+
+	// Non-auto-draft message should not match.
+	q2 := launch.NewNotifyQueue(10, nil)
+	q2.Push(launch.Message{ID: "4", Source: "slack", Channel: "#backend", AutoDraft: false, Timestamp: time.Now()})
+	_, found = q2.RecentByChannel("slack", "#backend", 5*time.Minute)
+	if found {
+		t.Error("should not match non-auto-draft message")
+	}
+}
+
+func TestNotifyQueue_RecentByChannel_Expired(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend",
+		AutoDraft: true, Timestamp: time.Now().Add(-10 * time.Minute),
+	})
+
+	_, found := q.RecentByChannel("slack", "#backend", 5*time.Minute)
+	if found {
+		t.Error("should not match expired message")
+	}
+}
+
+func TestNotifyQueue_RecentByChannel_ReturnsNewest(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "old", Source: "slack", Channel: "#backend", AutoDraft: true, Timestamp: time.Now().Add(-1 * time.Minute)})
+	q.Push(launch.Message{ID: "new", Source: "slack", Channel: "#backend", AutoDraft: true, Timestamp: time.Now()})
+
+	msg, found := q.RecentByChannel("slack", "#backend", 5*time.Minute)
+	if !found {
+		t.Fatal("expected to find message")
+	}
+	if msg.ID != "new" {
+		t.Errorf("expected newest message, got ID %q", msg.ID)
+	}
+}
+
+func TestNotifyQueue_DraftFieldsRoundtrip(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Draft: "pre-set draft", DraftFor: "orig-1"})
+
+	msgs := q.Messages()
+	if msgs[0].Draft != "pre-set draft" {
+		t.Errorf("Draft = %q, want 'pre-set draft'", msgs[0].Draft)
+	}
+	if msgs[0].DraftFor != "orig-1" {
+		t.Errorf("DraftFor = %q, want 'orig-1'", msgs[0].DraftFor)
+	}
+}
+
+func TestNotifyQueue_ApproveDraft_Nonexistent(t *testing.T) {
+	var called int
+	q := launch.NewNotifyQueue(10, func() { called++ })
+	q.Push(launch.Message{ID: "1"})
+	called = 0
+
+	// ApproveDraft on a nonexistent ID should still call onChange
+	// (it iterates but finds nothing, then calls onChange).
+	q.ApproveDraft("nonexistent")
+	if called != 1 {
+		t.Errorf("onChange called %d times, want 1", called)
+	}
+
+	// Verify no message was modified.
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "" {
+		t.Errorf("Draft = %q, want empty", msg.Draft)
+	}
+}
+
+func TestNotifyQueue_ClearDraft_Nonexistent(t *testing.T) {
+	var called int
+	q := launch.NewNotifyQueue(10, func() { called++ })
+	q.Push(launch.Message{ID: "1"})
+	q.SetDraft("1", "my draft")
+	called = 0
+
+	// ClearDraft on a nonexistent ID should still call onChange.
+	q.ClearDraft("nonexistent")
+	if called != 1 {
+		t.Errorf("onChange called %d times, want 1", called)
+	}
+
+	// Verify the existing draft was not affected.
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "my draft" {
+		t.Errorf("Draft = %q, want 'my draft'", msg.Draft)
+	}
+}
+
+func TestNotifyQueue_ApproveDraft_NilOnChange(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1"})
+	q.SetDraft("1", "draft")
+
+	// Should not panic with nil onChange.
+	q.ApproveDraft("1")
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "\x00approved" {
+		t.Errorf("Draft = %q, want approved sentinel", msg.Draft)
+	}
+}
+
+func TestNotifyQueue_ClearDraft_NilOnChange(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1"})
+	q.SetDraft("1", "draft")
+
+	// Should not panic with nil onChange.
+	q.ClearDraft("1")
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "" {
+		t.Errorf("Draft = %q, want empty", msg.Draft)
+	}
+}
+
 func TestNotifyQueue_QuietHoursSuppressesOnChange(t *testing.T) {
 	var count atomic.Int32
 	q := launch.NewNotifyQueue(10, func() {
