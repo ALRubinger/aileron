@@ -122,6 +122,68 @@ func TestValidateTokenRef_Plaintext(t *testing.T) {
 	}
 }
 
+func TestResolveTokens_PlainValues(t *testing.T) {
+	resolved, err := launch.ResolveTokens([]string{"token-a", "token-b"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved[0] != "token-a" || resolved[1] != "token-b" {
+		t.Errorf("expected plain values unchanged, got %v", resolved)
+	}
+}
+
+func TestResolveTokens_VaultRefs(t *testing.T) {
+	v := vault.NewMemVault()
+	v.Put(context.Background(), "slack_app", []byte("xapp-resolved"), vault.Metadata{})
+	v.Put(context.Background(), "slack_bot", []byte("xoxb-resolved"), vault.Metadata{})
+
+	resolved, err := launch.ResolveTokens([]string{"vault:slack_app", "vault:slack_bot"}, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved[0] != "xapp-resolved" || resolved[1] != "xoxb-resolved" {
+		t.Errorf("expected resolved values, got %v", resolved)
+	}
+}
+
+func TestResolveTokens_MixedRefs(t *testing.T) {
+	v := vault.NewMemVault()
+	v.Put(context.Background(), "my_token", []byte("secret"), vault.Metadata{})
+
+	resolved, err := launch.ResolveTokens([]string{"", "vault:my_token"}, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved[0] != "" || resolved[1] != "secret" {
+		t.Errorf("expected ['', 'secret'], got %v", resolved)
+	}
+}
+
+func TestResolveTokens_VaultRefWithNilVault(t *testing.T) {
+	_, err := launch.ResolveTokens([]string{"vault:missing"}, nil)
+	if err == nil {
+		t.Error("expected error when vault is nil but ref exists")
+	}
+}
+
+func TestResolveTokens_VaultRefNotFound(t *testing.T) {
+	v := vault.NewMemVault()
+	_, err := launch.ResolveTokens([]string{"vault:nonexistent"}, v)
+	if err == nil {
+		t.Error("expected error for missing vault secret")
+	}
+}
+
+func TestResolveTokens_Empty(t *testing.T) {
+	resolved, err := launch.ResolveTokens(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resolved) != 0 {
+		t.Errorf("expected empty, got %v", resolved)
+	}
+}
+
 func TestOpenLocalVault_EmptyPassphrase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secrets.json")
 	_, err := launch.OpenLocalVault(path, "")
