@@ -3,6 +3,7 @@ package launch_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/launch"
@@ -91,6 +92,33 @@ func TestOpenLocalVault_WrongPassphrase(t *testing.T) {
 	_, err := v2.Get(context.Background(), "token")
 	if err == nil {
 		t.Error("expected error with wrong passphrase")
+	}
+}
+
+func TestValidateTokenRef_VaultRef(t *testing.T) {
+	err := launch.ValidateTokenRef("slack.bot_token", "vault:my_token")
+	if err != nil {
+		t.Errorf("vault ref should be valid, got %v", err)
+	}
+}
+
+func TestValidateTokenRef_Empty(t *testing.T) {
+	err := launch.ValidateTokenRef("slack.bot_token", "")
+	if err != nil {
+		t.Errorf("empty should be valid, got %v", err)
+	}
+}
+
+func TestValidateTokenRef_Plaintext(t *testing.T) {
+	err := launch.ValidateTokenRef("slack.bot_token", "xoxb-real-token-here")
+	if err == nil {
+		t.Fatal("expected error for plaintext token")
+	}
+	if !strings.Contains(err.Error(), "plaintext token") {
+		t.Errorf("expected 'plaintext token' in error, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "slack.bot_token") {
+		t.Errorf("expected field name in error, got %q", err.Error())
 	}
 }
 

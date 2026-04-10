@@ -528,6 +528,24 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		return nil
 	}
 
+	// Validate that token fields use vault references, not plaintext.
+	if cfg := pf.Notifications.Slack; cfg != nil {
+		if err := ValidateTokenRef("slack.app_token", cfg.AppToken); err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+			return nil
+		}
+		if err := ValidateTokenRef("slack.bot_token", cfg.BotToken); err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+			return nil
+		}
+	}
+	if cfg := pf.Notifications.Discord; cfg != nil {
+		if err := ValidateTokenRef("discord.bot_token", cfg.BotToken); err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+			return nil
+		}
+	}
+
 	// Collect all token values that might be vault references.
 	var tokenRefs []string
 	if cfg := pf.Notifications.Slack; cfg != nil {

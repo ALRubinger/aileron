@@ -244,9 +244,9 @@ notifications:
       - "#random"
 ```
 
-Plaintext tokens (`xapp-...`, `xoxb-...`) also work directly in the YAML fields if you prefer.
+Token fields in `aileron.yaml` **must** use `vault:` references. Aileron rejects plaintext tokens to prevent secrets from being committed to version control. The `aileron.yaml` policy file is designed to be checked in and reviewed in PRs — credentials don't belong there.
 
-**4. Launch as usual** — Aileron prompts for the vault passphrase if needed, then starts the Slack listener:
+**4. Launch as usual** — Aileron prompts for the vault passphrase, then starts the Slack listener:
 
 ```sh
 ./build/aileron launch claude
