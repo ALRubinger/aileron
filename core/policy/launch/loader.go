@@ -70,9 +70,7 @@ func LoadUserSettings() (*PolicyFile, error) {
 }
 
 // LoadWithProfiles loads a project policy file and merges it with built-in
-// defaults and user settings. The profileDirs parameter is retained for
-// backwards compatibility but profiles are no longer loaded — built-in
-// defaults (see DefaultPolicy) replace the profile system per ADR-0015.
+// defaults and user settings per ADR-0015.
 //
 // Composition order (each layer wins over the previous):
 //
@@ -80,7 +78,7 @@ func LoadUserSettings() (*PolicyFile, error) {
 //	  → User settings (~/.aileron/settings.yaml)
 //	    → Project aileron.yaml
 //	      → Built-in structural deny rules (injected by ToEngineRules)
-func LoadWithProfiles(path string, profileDirs []string) (*PolicyFile, error) {
+func LoadWithProfiles(path string) (*PolicyFile, error) {
 	project, err := Load(path)
 	if err != nil {
 		return nil, err
@@ -100,32 +98,13 @@ func LoadWithProfiles(path string, profileDirs []string) (*PolicyFile, error) {
 	return Merge(base, project), nil
 }
 
-// resolveProfile finds a profile YAML file. If the ref starts with "./" or
-// "/" it's treated as a direct path. Otherwise it's searched in profileDirs.
-func resolveProfile(ref string, dirs []string) (string, error) {
-	if len(ref) > 0 && (ref[0] == '/' || ref[0] == '.') {
-		if _, err := os.Stat(ref); err != nil {
-			return "", fmt.Errorf("profile not found: %s", ref)
-		}
-		return ref, nil
-	}
-	for _, dir := range dirs {
-		candidate := filepath.Join(dir, ref+".yaml")
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("profile %q not found in %v", ref, dirs)
-}
-
 // Merge composes two policy files. The overlay's rules are appended to the
 // base's rules. Scalar settings use last-writer-wins (overlay wins). Env
 // scrub lists are unioned; passthrough at any layer beats scrub.
 func Merge(base, overlay *PolicyFile) *PolicyFile {
 	result := &PolicyFile{
-		Version:  overlay.Version,
-		Profiles: append(append([]string{}, base.Profiles...), overlay.Profiles...),
-		Default:  base.Default,
+		Version: overlay.Version,
+		Default: base.Default,
 		Allow:    append(append([]Rule{}, base.Allow...), overlay.Allow...),
 		Deny:     append(append([]Rule{}, base.Deny...), overlay.Deny...),
 		Ask:      append(append([]Rule{}, base.Ask...), overlay.Ask...),
