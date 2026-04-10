@@ -66,7 +66,14 @@ func ValidateTokenRef(field, value string) error {
 }
 
 // promptAndOpenVault prompts the user for a vault passphrase on /dev/tty
-// and opens the local encrypted vault.
+// and opens the local encrypted vault. The readPass function is injectable
+// for testing.
+var readPass = defaultReadPass
+
+func defaultReadPass(fd int) ([]byte, error) {
+	return term.ReadPassword(fd)
+}
+
 func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
@@ -75,7 +82,7 @@ func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
 	defer tty.Close()
 
 	fmt.Fprint(w, "aileron: vault passphrase: ")
-	passphrase, err := term.ReadPassword(int(tty.Fd()))
+	passphrase, err := readPass(int(tty.Fd()))
 	fmt.Fprintln(w) // newline after hidden input
 	if err != nil {
 		return nil, fmt.Errorf("reading passphrase: %w", err)
@@ -85,6 +92,29 @@ func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
 	}
 
 	return OpenLocalVault(DefaultVaultPath(), string(passphrase))
+}
+
+// ResolveTokens resolves a slice of token values that may contain vault
+// references. Returns the resolved values in the same order. If any token
+// is a vault reference, the provided vault is used for lookups. If v is
+// nil and vault references exist, an error is returned.
+func ResolveTokens(tokens []string, v vault.Vault) ([]string, error) {
+	resolved := make([]string, len(tokens))
+	for i, tok := range tokens {
+		if !IsVaultRef(tok) {
+			resolved[i] = tok
+			continue
+		}
+		if v == nil {
+			return nil, fmt.Errorf("vault reference %q requires a vault", tok)
+		}
+		val, err := ResolveVaultRef(tok, v)
+		if err != nil {
+			return nil, err
+		}
+		resolved[i] = val
+	}
+	return resolved, nil
 }
 
 // ResolveVaultRef resolves a value that may be a vault reference. If it
