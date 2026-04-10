@@ -308,12 +308,213 @@ func TestMerge_NotificationsOverlayWins(t *testing.T) {
 	}
 	merged := launch.Merge(base, overlay)
 
-	// Overlay's Slack replaces base's Slack entirely.
+	// Overlay token wins (last-writer-wins for tokens).
 	if merged.Notifications.Slack.AppToken != "overlay-token" {
 		t.Errorf("AppToken = %q, want 'overlay-token'", merged.Notifications.Slack.AppToken)
 	}
-	if len(merged.Notifications.Slack.Channels) != 1 || merged.Notifications.Slack.Channels[0].Name != "#backend" {
-		t.Error("expected overlay's channels to replace base's")
+	// Channels are unioned: base #general + overlay #backend = 2.
+	if len(merged.Notifications.Slack.Channels) != 2 {
+		t.Errorf("Channels = %d, want 2 (union of base and overlay)", len(merged.Notifications.Slack.Channels))
+	}
+}
+
+func TestMerge_NotificationsPerChannelOverride(t *testing.T) {
+	// Project sets #backend to show:all, auto_draft:true.
+	// User overrides to show:mentions, auto_draft:false.
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				AppToken: "project-token",
+				BotToken: "project-bot",
+				Channels: []launch.ChannelConfig{
+					{Name: "#backend", Show: "all", AutoDraft: true, Priority: "normal"},
+				},
+			},
+		},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				Channels: []launch.ChannelConfig{
+					{Name: "#backend", Show: "mentions", AutoDraft: false},
+				},
+			},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+
+	if merged.Notifications.Slack == nil {
+		t.Fatal("expected merged slack config")
+	}
+	if len(merged.Notifications.Slack.Channels) != 1 {
+		t.Fatalf("Channels = %d, want 1", len(merged.Notifications.Slack.Channels))
+	}
+	ch := merged.Notifications.Slack.Channels[0]
+	if ch.Show != "mentions" {
+		t.Errorf("Show = %q, want 'mentions' (user override)", ch.Show)
+	}
+	if ch.AutoDraft {
+		t.Error("AutoDraft = true, want false (user override)")
+	}
+	// Priority not set in overlay, should keep base value.
+	if ch.Priority != "normal" {
+		t.Errorf("Priority = %q, want 'normal' (base preserved)", ch.Priority)
+	}
+	// Token should survive from base since overlay doesn't set it.
+	if merged.Notifications.Slack.AppToken != "project-token" {
+		t.Errorf("AppToken = %q, want 'project-token' (base preserved)", merged.Notifications.Slack.AppToken)
+	}
+}
+
+func TestMerge_NotificationsChannelUnion(t *testing.T) {
+	// Project has channels A, B; user adds channel C.
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				Channels: []launch.ChannelConfig{
+					{Name: "#chanA", Show: "all"},
+					{Name: "#chanB", Show: "mentions"},
+				},
+			},
+		},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				Channels: []launch.ChannelConfig{
+					{Name: "#chanC", Show: "all", AutoDraft: true},
+				},
+			},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+
+	channels := merged.Notifications.Slack.Channels
+	if len(channels) != 3 {
+		t.Fatalf("Channels = %d, want 3 (union of A, B, C)", len(channels))
+	}
+	names := make(map[string]bool)
+	for _, ch := range channels {
+		names[ch.Name] = true
+	}
+	for _, want := range []string{"#chanA", "#chanB", "#chanC"} {
+		if !names[want] {
+			t.Errorf("missing channel %s in merged result", want)
+		}
+	}
+}
+
+func TestMerge_NotificationsTokenOverride(t *testing.T) {
+	// User can provide their own token (last-writer-wins).
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				AppToken: "project-app-token",
+				BotToken: "project-bot-token",
+			},
+		},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				BotToken: "user-bot-token",
+			},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+
+	// AppToken not set in overlay => base survives.
+	if merged.Notifications.Slack.AppToken != "project-app-token" {
+		t.Errorf("AppToken = %q, want 'project-app-token'", merged.Notifications.Slack.AppToken)
+	}
+	// BotToken set in overlay => overlay wins.
+	if merged.Notifications.Slack.BotToken != "user-bot-token" {
+		t.Errorf("BotToken = %q, want 'user-bot-token'", merged.Notifications.Slack.BotToken)
+	}
+}
+
+func TestMerge_NotificationsIgnoreUnion(t *testing.T) {
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				Ignore: []string{"#random", "#spam"},
+			},
+		},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Slack: &launch.SlackNotifyConfig{
+				Ignore: []string{"#spam", "#offtopic"},
+			},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+
+	// Union with dedup: #random, #spam, #offtopic = 3.
+	if len(merged.Notifications.Slack.Ignore) != 3 {
+		t.Errorf("Ignore = %d, want 3 (union with dedup)", len(merged.Notifications.Slack.Ignore))
+	}
+}
+
+func TestMerge_NotificationsDiscordPerChannel(t *testing.T) {
+	base := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Discord: &launch.DiscordNotifyConfig{
+				BotToken: "base-discord",
+				Channels: []launch.ChannelConfig{
+					{Name: "dev-chat", Show: "all", AutoDraft: true},
+				},
+				Ignore: []string{"memes"},
+			},
+		},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Notifications: &launch.NotifyConfig{
+			Discord: &launch.DiscordNotifyConfig{
+				BotToken: "user-discord",
+				Channels: []launch.ChannelConfig{
+					{Name: "dev-chat", Show: "mentions"},
+					{Name: "alerts", Show: "all", Priority: "high"},
+				},
+				Ignore: []string{"memes", "off-topic"},
+			},
+		},
+	}
+	merged := launch.Merge(base, overlay)
+
+	dc := merged.Notifications.Discord
+	if dc == nil {
+		t.Fatal("expected discord config")
+	}
+	if dc.BotToken != "user-discord" {
+		t.Errorf("BotToken = %q, want 'user-discord'", dc.BotToken)
+	}
+	if len(dc.Channels) != 2 {
+		t.Fatalf("Channels = %d, want 2", len(dc.Channels))
+	}
+	// dev-chat should have overlay's Show, overlay's AutoDraft (false).
+	for _, ch := range dc.Channels {
+		if ch.Name == "dev-chat" {
+			if ch.Show != "mentions" {
+				t.Errorf("dev-chat Show = %q, want 'mentions'", ch.Show)
+			}
+			if ch.AutoDraft {
+				t.Error("dev-chat AutoDraft = true, want false")
+			}
+		}
+	}
+	if len(dc.Ignore) != 2 {
+		t.Errorf("Ignore = %d, want 2 (union with dedup)", len(dc.Ignore))
 	}
 }
 
