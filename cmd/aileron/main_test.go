@@ -532,6 +532,114 @@ func TestRunStatus_InHelp(t *testing.T) {
 	}
 }
 
+func TestRunStatus_NotificationsWithDiscord(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+notifications:
+  discord:
+    bot_token: vault:discord_bot
+    channels:
+      - name: "123456789"
+        show: all
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "notifications"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Discord") {
+		t.Error("expected Discord section")
+	}
+	if !strings.Contains(out, "vault:discord_bot") {
+		t.Error("expected vault reference for discord token")
+	}
+	if !strings.Contains(out, "123456789") {
+		t.Error("expected channel ID")
+	}
+}
+
+func TestRunStatus_PolicyWithUserSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Create user settings with a rule.
+	settingsDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(settingsDir, 0o755)
+	os.WriteFile(filepath.Join(settingsDir, "settings.yaml"), []byte(`
+version: 1
+allow:
+  - "my-custom-tool *"
+`), 0o644)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: deny
+deny:
+  - command: "deploy --force *"
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "policy"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "1 allow") {
+		t.Error("expected user settings allow count")
+	}
+	if !strings.Contains(out, "deny") {
+		t.Error("expected default disposition 'deny'")
+	}
+}
+
+func TestRunStatus_EnvNoPolicy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "env"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "No env scrubbing") {
+		t.Error("expected no env scrubbing message when no policy")
+	}
+}
+
+func TestRunStatus_NotificationsNoPolicy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "notifications"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "No notifications") {
+		t.Error("expected no notifications message")
+	}
+}
+
 func TestRunLog_HelpShownInUsage(t *testing.T) {
 	var stdout bytes.Buffer
 	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
@@ -607,6 +715,403 @@ func TestRunSecret_ListWithSecrets(t *testing.T) {
 	}
 	if !strings.Contains(out, "discord_token") {
 		t.Errorf("expected 'discord_token' in output, got: %s", out)
+	}
+}
+
+func TestRunPolicySave_NoEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	os.WriteFile(path, nil, 0o644)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", path}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No user-approved commands") {
+		t.Errorf("expected 'No user-approved' message, got: %s", stdout.String())
+	}
+}
+
+func TestRunPolicySave_WithApprovedCommands(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	// Create audit log with ask_approved entries.
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
+	})
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "npm install", Disposition: "ask_approved",
+	})
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "echo hello", Disposition: "allow",
+	})
+
+	// Create a project policy file.
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "2 approved command(s)") {
+		t.Errorf("expected '2 approved command(s)', got:\n%s", out)
+	}
+	if !strings.Contains(out, "Saved 2 rule(s)") {
+		t.Errorf("expected 'Saved 2 rule(s)', got:\n%s", out)
+	}
+
+	// Verify the rules were written to the policy file.
+	data, _ := os.ReadFile(filepath.Join(dir, "aileron.yaml"))
+	content := string(data)
+	if !strings.Contains(content, "git push") {
+		t.Errorf("expected 'git push' in policy file, got:\n%s", content)
+	}
+	if !strings.Contains(content, "npm install") {
+		t.Errorf("expected 'npm install' in policy file, got:\n%s", content)
+	}
+}
+
+func TestRunPolicySave_DryRun(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
+	})
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--dry-run"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "dry run") {
+		t.Errorf("expected 'dry run' message, got: %s", stdout.String())
+	}
+
+	// Verify nothing was written.
+	data, _ := os.ReadFile(filepath.Join(dir, "aileron.yaml"))
+	if strings.Contains(string(data), "git push") {
+		t.Error("dry run should not modify the policy file")
+	}
+}
+
+func TestRunPolicySave_DeduplicatesCommands(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
+	})
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s2", Command: "git push", Disposition: "ask_approved",
+	})
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1 approved command(s)") {
+		t.Errorf("expected deduplication to 1 command, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunPolicySave_SkipsAlreadyAllowed(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
+	})
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\nallow:\n  - \"git push\"\n"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already in the policy") {
+		t.Errorf("expected 'already in the policy' message, got: %s", stdout.String())
+	}
+}
+
+func TestRunPolicySave_UserScope(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "curl api.com", Disposition: "ask_approved",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--scope", "user"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "user settings") {
+		t.Errorf("expected 'user settings' label, got: %s", stdout.String())
+	}
+
+	// Verify written to user settings.
+	data, _ := os.ReadFile(filepath.Join(dir, ".aileron", "settings.yaml"))
+	if !strings.Contains(string(data), "curl api.com") {
+		t.Errorf("expected 'curl api.com' in user settings, got:\n%s", string(data))
+	}
+}
+
+func TestRunPolicySave_FilterBySession(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
+	})
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s2", Command: "npm install", Disposition: "ask_approved",
+	})
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--session", "s1", "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "1 approved command(s)") {
+		t.Errorf("expected 1 command for session s1, got:\n%s", stdout.String())
+	}
+}
+
+func TestRunPolicySave_InvalidScope(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--scope", "bogus"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 for invalid scope, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid scope") {
+		t.Errorf("expected 'invalid scope' error, got: %s", stderr.String())
+	}
+}
+
+func TestRunPolicySave_MissingAuditFile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", "/nonexistent/audit.jsonl"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+}
+
+func TestRunPolicySave_NoSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron policy") {
+		t.Errorf("expected usage message, got: %s", stderr.String())
+	}
+}
+
+func TestRunPolicySave_InHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
+	if !strings.Contains(stdout.String(), "aileron policy save") {
+		t.Error("expected 'aileron policy save' in help output")
+	}
+}
+
+func TestRunPolicySave_NoPolicyForProject(t *testing.T) {
+	dir := t.TempDir()
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 when no aileron.yaml, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "no aileron.yaml") {
+		t.Errorf("expected 'no aileron.yaml' error, got: %s", stderr.String())
+	}
+}
+
+func TestRunPolicySave_DefaultScopeIsProject(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "make build", Disposition: "ask_approved",
+	})
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	// No --scope flag: should default to "project".
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "project policy") {
+		t.Errorf("expected 'project policy' label when no scope given, got:\n%s", out)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(dir, "aileron.yaml"))
+	if !strings.Contains(string(data), "make build") {
+		t.Errorf("expected 'make build' in policy file, got:\n%s", string(data))
+	}
+}
+
+func TestRunPolicySave_AppendRuleError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
+	})
+
+	// Create aileron.yaml as a directory to trigger a write error.
+	os.MkdirAll(filepath.Join(dir, "aileron.yaml"), 0o755)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	_ = run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
+	// Should still exit 0 since it reports partial saves.
+	out := stdout.String()
+	if !strings.Contains(out, "Saved 0 rule(s)") {
+		t.Errorf("expected 'Saved 0 rule(s)' when write fails, got:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "error saving rule") {
+		t.Errorf("expected error saving rule in stderr, got: %s", stderr.String())
+	}
+}
+
+func TestRunPolicySave_UserScopeNoHome(t *testing.T) {
+	dir := t.TempDir()
+	// Set HOME to empty so UserHomeDir returns empty.
+	t.Setenv("HOME", "")
+
+	logPath := filepath.Join(dir, "audit.jsonl")
+	audit.AppendShellEntry(logPath, audit.ShellEntry{
+		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--path", logPath, "--scope", "user"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 when HOME is empty, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot determine home directory") {
+		t.Errorf("expected home directory error, got: %s", stderr.String())
+	}
+}
+
+func TestRunPolicySave_InvalidFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--bogus-flag"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1 for invalid flag, got %d", code)
+	}
+}
+
+func TestRunPolicySave_DefaultAuditLogPath(t *testing.T) {
+	// When --path is not given, runPolicySave uses ResolveAuditLogFromCwd.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	// Create an audit file at the default location.
+	auditDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(auditDir, 0o755)
+	auditPath := filepath.Join(auditDir, "audit.jsonl")
+	audit.AppendShellEntry(auditPath, audit.ShellEntry{
+		SessionID: "s1", Command: "docker push myimage", Disposition: "ask_approved",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"policy", "save", "--dry-run"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "docker push myimage") {
+		t.Errorf("expected command in dry-run output, got: %s", stdout.String())
+	}
+}
+
+func TestTokenStatus(t *testing.T) {
+	tests := []struct {
+		value string
+		want  string
+	}{
+		{"", "(not set)"},
+		{"vault:my_secret", "vault:my_secret"},
+		{"xoxb-plaintext-token", "(plaintext"},
+	}
+	for _, tt := range tests {
+		got := tokenStatus(tt.value)
+		if !strings.Contains(got, tt.want) {
+			t.Errorf("tokenStatus(%q) = %q, want substring %q", tt.value, got, tt.want)
+		}
 	}
 }
 

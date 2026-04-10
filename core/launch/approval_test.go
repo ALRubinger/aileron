@@ -149,6 +149,18 @@ func TestApprovalServer_ProjectKey(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out")
 	}
+
+	// Verify the learned rule was recorded.
+	rules := srv.LearnedRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 learned rule, got %d", len(rules))
+	}
+	if rules[0].Scope != "project" {
+		t.Errorf("expected scope 'project', got %q", rules[0].Scope)
+	}
+	if rules[0].Pattern != "git push" {
+		t.Errorf("expected pattern 'git push', got %q", rules[0].Pattern)
+	}
 }
 
 func TestApprovalServer_UserKey(t *testing.T) {
@@ -184,6 +196,14 @@ func TestApprovalServer_UserKey(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out")
+	}
+
+	rules := srv.LearnedRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 learned rule, got %d", len(rules))
+	}
+	if rules[0].Scope != "user" {
+		t.Errorf("expected scope 'user', got %q", rules[0].Scope)
 	}
 }
 
@@ -346,6 +366,171 @@ func TestKeyRouter_StealAndRelease(t *testing.T) {
 	}
 
 	stdinW.Close()
+}
+
+func TestApprovalServer_LearnedRules_Empty(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "aileron-test-lr-empty.sock")
+	t.Cleanup(func() { os.Remove(socketPath) })
+	srv, err := launch.NewApprovalServer(socketPath, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	rules := srv.LearnedRules()
+	if len(rules) != 0 {
+		t.Errorf("expected 0 learned rules, got %d", len(rules))
+	}
+}
+
+func TestApprovalServer_LearnedRules_RecordAndRetrieve(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "aileron-test-lr-record.sock")
+	t.Cleanup(func() { os.Remove(socketPath) })
+	srv, err := launch.NewApprovalServer(socketPath, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	srv.RecordLearnedRule("git push", "project", "aileron.yaml")
+	srv.RecordLearnedRule("npm install", "user", "~/.aileron/settings.yaml")
+
+	rules := srv.LearnedRules()
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 learned rules, got %d", len(rules))
+	}
+	if rules[0].Pattern != "git push" || rules[0].Scope != "project" {
+		t.Errorf("rule[0] = %+v, want pattern=git push scope=project", rules[0])
+	}
+	if rules[1].Pattern != "npm install" || rules[1].Scope != "user" {
+		t.Errorf("rule[1] = %+v, want pattern=npm install scope=user", rules[1])
+	}
+}
+
+func TestApprovalServer_LearnedRules_ReturnsCopy(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "aileron-test-lr-copy.sock")
+	t.Cleanup(func() { os.Remove(socketPath) })
+	srv, err := launch.NewApprovalServer(socketPath, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	srv.RecordLearnedRule("echo hello", "project", "aileron.yaml")
+
+	rules1 := srv.LearnedRules()
+	rules2 := srv.LearnedRules()
+
+	// Modifying rules1 should not affect rules2.
+	rules1[0].Pattern = "modified"
+	if rules2[0].Pattern == "modified" {
+		t.Error("LearnedRules should return a copy, not a reference")
+	}
+}
+
+func TestApprovalServer_ProjectKeyTracksRule(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "aileron-test-lr-proj.sock")
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	srv, _ := launch.NewApprovalServer(socketPath, nil, copier, router, nil)
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan string, 1)
+	go func() {
+		done <- launch.RequestApproval(socketPath, "git push", "")
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	stdinW.Write([]byte("a")) // allow for project
+	<-done
+
+	rules := srv.LearnedRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 learned rule, got %d", len(rules))
+	}
+	if rules[0].Pattern != "git push" || rules[0].Scope != "project" {
+		t.Errorf("learned rule = %+v, want pattern=git push scope=project", rules[0])
+	}
+}
+
+func TestApprovalServer_UserKeyTracksRule(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "aileron-test-lr-user.sock")
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	srv, _ := launch.NewApprovalServer(socketPath, nil, copier, router, nil)
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan string, 1)
+	go func() {
+		done <- launch.RequestApproval(socketPath, "curl api.com", "")
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	stdinW.Write([]byte("m")) // allow for me/user
+	<-done
+
+	rules := srv.LearnedRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected 1 learned rule, got %d", len(rules))
+	}
+	if rules[0].Scope != "user" {
+		t.Errorf("learned rule scope = %q, want user", rules[0].Scope)
+	}
+}
+
+func TestApprovalServer_AllowOnceDoesNotTrack(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), "aileron-test-lr-once.sock")
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	stdinR, stdinW := io.Pipe()
+	defer stdinW.Close()
+	router := launch.NewKeyRouter(stdinR, &safeBuf{}, &simpleOverlay{})
+	go router.Run()
+
+	srv, _ := launch.NewApprovalServer(socketPath, nil, copier, router, nil)
+	go srv.Serve()
+	defer srv.Close()
+
+	done := make(chan string, 1)
+	go func() {
+		done <- launch.RequestApproval(socketPath, "ls", "")
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	stdinW.Write([]byte("y")) // allow once
+	<-done
+
+	rules := srv.LearnedRules()
+	if len(rules) != 0 {
+		t.Errorf("allow_once should not track rules, got %d", len(rules))
+	}
 }
 
 func TestStatusBar_Dims(t *testing.T) {

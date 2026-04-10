@@ -236,6 +236,11 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	signal.Stop(sigCh)
 	close(sigCh)
 
+	// Print learned rules before the deferred Close clears the server.
+	if learned := approvalSrv.LearnedRules(); len(learned) > 0 {
+		PrintLearnedRulesSummary(os.Stderr, learned)
+	}
+
 	CleanupTerminalScreen(os.Stdout, rows)
 
 	return exitResult(err)
@@ -480,6 +485,15 @@ func wireQuietHours(dir string, queue *NotifyQueue) {
 	}
 }
 
+// PrintLearnedRulesSummary prints the rules the user chose to persist
+// during the session (via "allow for project" or "allow for me").
+func PrintLearnedRulesSummary(w io.Writer, rules []LearnedRule) {
+	fmt.Fprintf(w, "  %d rule(s) learned this session:\n", len(rules))
+	for _, r := range rules {
+		fmt.Fprintf(w, "    %s  -> %s (%s)\n", r.Pattern, r.File, r.Scope)
+	}
+}
+
 // loadEnvConfig loads the merged policy's EnvConfig for env scrubbing.
 func loadEnvConfig(dir string) *launchpolicy.EnvConfig {
 	if dir == "" {
@@ -501,21 +515,22 @@ func shouldScrub(key string, cfg *launchpolicy.EnvConfig) bool {
 	}
 	// Passthrough beats scrub.
 	for _, p := range cfg.Passthrough {
-		if envGlobMatch(p, key) {
+		if EnvGlobMatch(p, key) {
 			return false
 		}
 	}
 	for _, s := range cfg.Scrub {
-		if envGlobMatch(s, key) {
+		if EnvGlobMatch(s, key) {
 			return true
 		}
 	}
 	return false
 }
 
-// envGlobMatch matches an env var name against a pattern with * wildcards.
-// Supports prefix (AWS_*), suffix (*_SECRET), and exact match.
-func envGlobMatch(pattern, name string) bool {
+// EnvGlobMatch matches an env var name against a pattern with * wildcards.
+// Supports prefix (AWS_*), suffix (*_SECRET), contains (*TOKEN*), wildcard
+// (*), and exact match.
+func EnvGlobMatch(pattern, name string) bool {
 	if pattern == "*" {
 		return true
 	}

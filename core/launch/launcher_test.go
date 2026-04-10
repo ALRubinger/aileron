@@ -1139,6 +1139,83 @@ func TestCleanupTerminalScreen(t *testing.T) {
 	}
 }
 
+func TestPrintLearnedRulesSummary(t *testing.T) {
+	rules := []launch.LearnedRule{
+		{Pattern: "git push", Scope: "project", File: "aileron.yaml"},
+		{Pattern: "npm install", Scope: "user", File: "~/.aileron/settings.yaml"},
+	}
+
+	var buf strings.Builder
+	launch.PrintLearnedRulesSummary(&buf, rules)
+	out := buf.String()
+
+	if !strings.Contains(out, "2 rule(s) learned") {
+		t.Errorf("expected '2 rule(s) learned', got:\n%s", out)
+	}
+	if !strings.Contains(out, "git push") {
+		t.Errorf("expected 'git push' in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "npm install") {
+		t.Errorf("expected 'npm install' in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "project") {
+		t.Errorf("expected 'project' scope in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "user") {
+		t.Errorf("expected 'user' scope in output, got:\n%s", out)
+	}
+}
+
+func TestPrintLearnedRulesSummary_SingleRule(t *testing.T) {
+	rules := []launch.LearnedRule{
+		{Pattern: "echo hello", Scope: "project", File: "aileron.yaml"},
+	}
+
+	var buf strings.Builder
+	launch.PrintLearnedRulesSummary(&buf, rules)
+	out := buf.String()
+
+	if !strings.Contains(out, "1 rule(s) learned") {
+		t.Errorf("expected '1 rule(s) learned', got:\n%s", out)
+	}
+	if !strings.Contains(out, "echo hello") {
+		t.Errorf("expected 'echo hello' in output, got:\n%s", out)
+	}
+}
+
+func TestEnvGlobMatch(t *testing.T) {
+	tests := []struct {
+		pattern string
+		name    string
+		want    bool
+	}{
+		// Exact match.
+		{"HOME", "HOME", true},
+		{"HOME", "HOME_DIR", false},
+		// Wildcard * matches everything.
+		{"*", "ANYTHING", true},
+		{"*", "", true},
+		// Prefix match (AWS_*).
+		{"AWS_*", "AWS_SECRET_KEY", true},
+		{"AWS_*", "HOME", false},
+		// Suffix match (*_SECRET).
+		{"*_SECRET", "MY_SECRET", true},
+		{"*_SECRET", "SECRET_KEY", false},
+		// Contains match (*TOKEN*).
+		{"*TOKEN*", "MY_TOKEN_VALUE", true},
+		{"*TOKEN*", "TOKEN", true},
+		{"*TOKEN*", "NOTOK", false},
+		// No match.
+		{"SHELL", "HOME", false},
+	}
+	for _, tt := range tests {
+		got := launch.EnvGlobMatch(tt.pattern, tt.name)
+		if got != tt.want {
+			t.Errorf("EnvGlobMatch(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		}
+	}
+}
+
 // scriptAgent launches a specific script/binary directly.
 type scriptAgent struct {
 	script   string

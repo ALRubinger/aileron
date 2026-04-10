@@ -22,6 +22,14 @@ type ApprovalResponse struct {
 	Decision string `json:"decision"` // "allow_once", "deny", "allow_project", "allow_user"
 }
 
+// LearnedRule records a command pattern that the user chose to persist
+// during the session (via "allow for project" or "allow for me").
+type LearnedRule struct {
+	Pattern string // the command pattern saved
+	Scope   string // "project" or "user"
+	File    string // the file the rule was written to
+}
+
 // ApprovalServer listens on a Unix socket for approval requests from
 // aileron-sh and prompts the developer on the real terminal.
 type ApprovalServer struct {
@@ -32,8 +40,9 @@ type ApprovalServer struct {
 	router     *KeyRouter
 	ptmx       *os.File // pty master — for triggering resize after prompt
 
-	mu   sync.Mutex
-	done bool
+	mu           sync.Mutex
+	done         bool
+	learnedRules []LearnedRule
 }
 
 // NewApprovalServer creates a server that listens for approval requests.
@@ -83,6 +92,15 @@ func (s *ApprovalServer) handleConn(conn net.Conn) {
 	}
 
 	decision := s.promptOnTerminal(req.Command, req.Reason)
+
+	// Track commands the user chose to persist as policy rules.
+	switch decision {
+	case "allow_project":
+		s.RecordLearnedRule(req.Command, "project", "aileron.yaml")
+	case "allow_user":
+		s.RecordLearnedRule(req.Command, "user", "~/.aileron/settings.yaml")
+	}
+
 	json.NewEncoder(conn).Encode(ApprovalResponse{Decision: decision})
 }
 
@@ -220,6 +238,28 @@ func (s *ApprovalServer) triggerRedraw() {
 			ptyPkg.Setsize(s.ptmx, ws)
 		}
 	}
+}
+
+// RecordLearnedRule records a command pattern that the user chose to
+// persist during the session. Thread-safe.
+func (s *ApprovalServer) RecordLearnedRule(pattern, scope, file string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.learnedRules = append(s.learnedRules, LearnedRule{
+		Pattern: pattern,
+		Scope:   scope,
+		File:    file,
+	})
+}
+
+// LearnedRules returns a copy of the rules learned during the session.
+// Thread-safe.
+func (s *ApprovalServer) LearnedRules() []LearnedRule {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]LearnedRule, len(s.learnedRules))
+	copy(out, s.learnedRules)
+	return out
 }
 
 // Close shuts down the approval server and removes the socket file.
