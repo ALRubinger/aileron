@@ -39,11 +39,11 @@ func TestRunHook_DeniedCommand(t *testing.T) {
 version: 1
 default: allow
 deny:
-  - command: "rm -rf *"
-    description: "no recursive delete"
+  - command: "deploy --force *"
+    description: "no force deploys"
 `), 0o644)
 
-	input := hookInput("Bash", "rm -rf /important", dir)
+	input := hookInput("Bash", "deploy --force production", dir)
 	var stdout bytes.Buffer
 	code := launch.RunHook(strings.NewReader(input), &stdout)
 
@@ -51,7 +51,7 @@ deny:
 		t.Fatalf("expected exit code 0, got %d", code)
 	}
 	assertHookDecision(t, stdout.String(), "deny")
-	assertHookReason(t, stdout.String(), "aileron: no recursive delete")
+	assertHookReason(t, stdout.String(), "aileron: no force deploys")
 }
 
 func TestRunHook_AskCommand(t *testing.T) {
@@ -61,7 +61,8 @@ version: 1
 default: ask
 `), 0o644)
 
-	input := hookInput("Bash", "git push origin main", dir)
+	// Use a command not in any built-in allow or deny list.
+	input := hookInput("Bash", "docker run myimage", dir)
 	var stdout bytes.Buffer
 	launch.RunHook(strings.NewReader(input), &stdout)
 

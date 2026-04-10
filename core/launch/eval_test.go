@@ -53,7 +53,8 @@ func TestEvaluateCommand_Ask(t *testing.T) {
 version: 1
 default: ask
 `)
-	result := launch.EvaluateCommand(path, "git push origin main", "/tmp")
+	// Use a command not in any built-in allow or deny list.
+	result := launch.EvaluateCommand(path, "docker run myimage", "/tmp")
 	if result.Disposition != model.DispositionRequireApproval {
 		t.Errorf("expected require_approval, got %q", result.Disposition)
 	}

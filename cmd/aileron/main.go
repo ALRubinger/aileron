@@ -117,11 +117,8 @@ func runInit(stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	lang := launch.DetectLanguage(dir)
-	if lang != "" {
-		fmt.Fprintf(stdout, "Detected %s project.\n", lang)
-	}
 	fmt.Fprintf(stdout, "Created %s\n", filepath.Base(path))
+	fmt.Fprintln(stdout, "Language toolchain and OS rules are built in — no configuration needed.")
 	return 0
 }
 

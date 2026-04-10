@@ -84,9 +84,9 @@ Safe commands (tests, builds, reads) auto-approve silently. Dangerous commands (
     [y] allow  [n] deny  [a] allow always  [s] show details
 ```
 
-**3. The policy writes itself through use**
+**3. Zero config — sensible defaults built in**
 
-Hit `[a] allow always` and the pattern is saved for the session. End of session, Aileron offers to persist learned patterns to `aileron.yaml`. Community-maintained profiles (`lang/go`, `lang/node`, `os/darwin`) provide sensible defaults per language and platform.
+Aileron works out of the box. Language toolchain rules (Go, Node, Python, Rust, Ruby, Elixir, Java) and OS-specific protections (macOS Keychain, Linux `/etc`) are compiled into the binary. No profiles to install, no detection needed. Your `aileron.yaml` only needs project-specific rules. Hit `[a] allow always` and the pattern is saved for the session.
 
 **4. Teammates message you — the agent drafts a reply**
 
@@ -156,7 +156,6 @@ Aileron is pivoting from a cloud-hosted execution plane to a **local-first CLI t
 **In progress:**
 - Policy schema and loader for `aileron.yaml` ([#64](https://github.com/ALRubinger/aileron/issues/64))
 - Terminal UX, pty proxy, and bidirectional communication ([#65](https://github.com/ALRubinger/aileron/issues/65))
-- Community policy profiles (`lang/go`, `lang/node`, `os/darwin`)
 
 See the full roadmap in [#63](https://github.com/ALRubinger/aileron/issues/63) and product vision in [#66](https://github.com/ALRubinger/aileron/issues/66).
 
@@ -207,7 +206,17 @@ task build:docker    # Docker containers
 ./build/aileron launch claude
 ```
 
-This spawns Claude Code with the policy-enforced shell. Every command the agent runs flows through `aileron-sh`, which evaluates it against your `aileron.yaml` rules before allowing execution. Aileron is the single approval layer — Claude Code's native Bash approval is suppressed.
+This works with zero configuration. Built-in defaults allow common toolchain commands (go, npm, cargo, etc.) and deny dangerous operations (recursive delete, push to main). Every command flows through `aileron-sh` and the policy engine. Aileron is the single approval layer — Claude Code's native Bash approval is suppressed.
+
+Optionally, scaffold a project-specific policy:
+
+```sh
+./build/aileron init
+```
+
+This creates a minimal `aileron.yaml` with project-specific deny rules and env scrubbing. Language toolchain and OS rules are built in — you don't need to list them.
+
+**Three-layer policy merge:** Built-in defaults → project `aileron.yaml` → user `~/.aileron/settings.yaml`. Each layer overrides the previous. Your project file only needs what's specific to this repo.
 
 ### Slack notifications
 

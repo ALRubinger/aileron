@@ -9,48 +9,8 @@ import (
 	"github.com/ALRubinger/aileron/core/launch"
 )
 
-func TestDetectLanguage_Go(t *testing.T) {
+func TestInitPolicy_CreatesMinimalFile(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test"), 0o644)
-	if got := launch.DetectLanguage(dir); got != "go" {
-		t.Errorf("expected 'go', got %q", got)
-	}
-}
-
-func TestDetectLanguage_Node(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644)
-	if got := launch.DetectLanguage(dir); got != "node" {
-		t.Errorf("expected 'node', got %q", got)
-	}
-}
-
-func TestDetectLanguage_Python(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "pyproject.toml"), nil, 0o644)
-	if got := launch.DetectLanguage(dir); got != "python" {
-		t.Errorf("expected 'python', got %q", got)
-	}
-}
-
-func TestDetectLanguage_Rust(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "Cargo.toml"), nil, 0o644)
-	if got := launch.DetectLanguage(dir); got != "rust" {
-		t.Errorf("expected 'rust', got %q", got)
-	}
-}
-
-func TestDetectLanguage_None(t *testing.T) {
-	dir := t.TempDir()
-	if got := launch.DetectLanguage(dir); got != "" {
-		t.Errorf("expected empty, got %q", got)
-	}
-}
-
-func TestInitPolicy_CreatesFile(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test"), 0o644)
 
 	path, err := launch.InitPolicy(dir)
 	if err != nil {
@@ -66,14 +26,24 @@ func TestInitPolicy_CreatesFile(t *testing.T) {
 	if !strings.Contains(content, "version: 1") {
 		t.Error("expected version header")
 	}
-	if !strings.Contains(content, "go test") {
-		t.Error("expected Go-specific allow rules")
+	if !strings.Contains(content, "default: ask") {
+		t.Error("expected default disposition")
 	}
-	if !strings.Contains(content, "rm -rf") {
-		t.Error("expected deny rules")
+	if !strings.Contains(content, "git push origin main") {
+		t.Error("expected deny rule for push to main")
 	}
 	if !strings.Contains(content, "AWS_*") {
 		t.Error("expected env scrub rules")
+	}
+	if !strings.Contains(content, "built into Aileron") {
+		t.Error("expected comment explaining built-in defaults")
+	}
+	// Should NOT contain language-specific allow rules — those are built-in.
+	if strings.Contains(content, "go test") {
+		t.Error("should not contain language-specific rules (they're built-in)")
+	}
+	if strings.Contains(content, "npm") {
+		t.Error("should not contain language-specific rules (they're built-in)")
 	}
 }
 
@@ -90,7 +60,7 @@ func TestInitPolicy_AlreadyExists(t *testing.T) {
 	}
 }
 
-func TestInitPolicy_NoLanguage(t *testing.T) {
+func TestInitPolicy_FileContent(t *testing.T) {
 	dir := t.TempDir()
 
 	path, err := launch.InitPolicy(dir)
@@ -101,54 +71,15 @@ func TestInitPolicy_NoLanguage(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	content := string(data)
 
-	// Should still have git commands but not language-specific ones.
-	if !strings.Contains(content, "git status") {
-		t.Error("expected git allow rules")
+	// Verify the three-layer merge comment is present.
+	if !strings.Contains(content, "Three-layer") || !strings.Contains(content, "settings.yaml") {
+		t.Error("expected three-layer merge documentation comment")
 	}
-	if strings.Contains(content, "go test") {
-		t.Error("should not have Go rules without go.mod")
+	// Verify ask rules present.
+	if !strings.Contains(content, "git push *") {
+		t.Error("expected ask rule for git push")
 	}
-}
-
-func TestInitPolicy_RustProject(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "Cargo.toml"), nil, 0o644)
-
-	path, err := launch.InitPolicy(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), "cargo") {
-		t.Error("expected Rust-specific allow rules")
-	}
-}
-
-func TestInitPolicy_PythonProject(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "pyproject.toml"), nil, 0o644)
-
-	path, err := launch.InitPolicy(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), "pytest") {
-		t.Error("expected Python-specific allow rules")
-	}
-}
-
-func TestInitPolicy_NodeProject(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644)
-
-	path, err := launch.InitPolicy(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	data, _ := os.ReadFile(path)
-	if !strings.Contains(string(data), "npm") {
-		t.Error("expected Node-specific allow rules")
+	if !strings.Contains(content, "git commit *") {
+		t.Error("expected ask rule for git commit")
 	}
 }

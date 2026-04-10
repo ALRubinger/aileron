@@ -69,42 +69,32 @@ func LoadUserSettings() (*PolicyFile, error) {
 	return pf, nil
 }
 
-// LoadWithProfiles loads a project policy file and merges it with user
-// settings and any profiles listed in its `profiles` field. Profile
-// paths are resolved relative to profileDirs (searched in order).
+// LoadWithProfiles loads a project policy file and merges it with built-in
+// defaults and user settings. The profileDirs parameter is retained for
+// backwards compatibility but profiles are no longer loaded — built-in
+// defaults (see DefaultPolicy) replace the profile system per ADR-0015.
 //
 // Composition order (each layer wins over the previous):
 //
-//	User settings (~/.aileron/settings.yaml)
-//	  → Profiles (in listed order)
+//	Built-in defaults (DefaultPolicy — all languages, OS-specific rules)
+//	  → User settings (~/.aileron/settings.yaml)
 //	    → Project aileron.yaml
 //	      → Built-in structural deny rules (injected by ToEngineRules)
-//
-// Future layers not yet implemented:
-//   - OS profile auto-detection (runtime.GOOS → os/darwin.yaml)
-//   - Language profile auto-detection (go.mod → lang/go.yaml)
 func LoadWithProfiles(path string, profileDirs []string) (*PolicyFile, error) {
 	project, err := Load(path)
 	if err != nil {
 		return nil, err
 	}
 
-	// Start from user settings as the base layer.
-	base, err := LoadUserSettings()
+	// Start from built-in defaults.
+	base := DefaultPolicy()
+
+	// Layer user settings on top of defaults.
+	userSettings, err := LoadUserSettings()
 	if err != nil {
 		return nil, err
 	}
-	for _, profileRef := range project.Profiles {
-		profilePath, err := resolveProfile(profileRef, profileDirs)
-		if err != nil {
-			return nil, fmt.Errorf("profile %q: %w", profileRef, err)
-		}
-		profile, err := Load(profilePath)
-		if err != nil {
-			return nil, fmt.Errorf("loading profile %q: %w", profileRef, err)
-		}
-		base = Merge(base, profile)
-	}
+	base = Merge(base, userSettings)
 
 	// Project policy is the final overlay.
 	return Merge(base, project), nil
