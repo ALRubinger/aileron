@@ -186,6 +186,16 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	router := NewKeyRouter(os.Stdin, ptmx, overlay)
 	overlay.onDismiss = router.DeactivateOverlay
 
+	// Wire draft injection: overlay 'a' key and auto-draft messages both
+	// inject a prompt into the agent's pty stdin.
+	injector := NewDraftInjector(ptmx)
+	overlay.OnDraftRequest = func(msg Message) {
+		injector.Inject(msg)
+	}
+	queue.SetOnAutoDraft(func(msg Message) {
+		injector.Inject(msg)
+	})
+
 	// Start the approval server so aileron-sh can request user approvals
 	// on the real terminal (not the pty).
 	approvalSrv, err := NewApprovalServer(approvalSocket, bar, outputCopier, router, ptmx)
@@ -502,22 +512,27 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue) []
 		return nil
 	}
 
+	autoDraft := make(map[string]bool)
 	var created []comms.Listener
 	if cfg := pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
 		channels := make([]string, 0, len(cfg.Channels))
 		for _, ch := range cfg.Channels {
 			channels = append(channels, ch.Name)
+			if ch.AutoDraft {
+				autoDraft[ch.Name] = true
+			}
 		}
 		created = append(created, comms.NewSlackListener(cfg.AppToken, cfg.BotToken, channels, cfg.Ignore))
 	}
 
-	return StartListeners(ctx, created, queue, os.Stderr)
+	return StartListeners(ctx, created, queue, os.Stderr, autoDraft)
 }
 
 // StartListeners connects and starts each listener, bridging incoming
-// messages to the NotifyQueue. Returns the successfully started
+// messages to the NotifyQueue. The autoDraft map controls which channels
+// trigger automatic draft replies. Returns the successfully started
 // listeners. Errors are written to w.
-func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer) []comms.Listener {
+func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool) []comms.Listener {
 	var started []comms.Listener
 	for _, l := range listeners {
 		if err := l.Connect(ctx); err != nil {
@@ -530,14 +545,15 @@ func StartListeners(ctx context.Context, listeners []comms.Listener, queue *Noti
 			continue
 		}
 		started = append(started, l)
-		go BridgeMessages(msgs, queue)
+		go BridgeMessages(msgs, queue, autoDraft)
 	}
 	return started
 }
 
 // BridgeMessages reads from a comms listener channel and pushes messages
-// into the NotifyQueue. Exported for testing.
-func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue) {
+// into the NotifyQueue. The autoDraft map controls which channels trigger
+// automatic draft replies. Exported for testing.
+func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool) {
 	for msg := range msgs {
 		preview := msg.Body
 		if len(preview) > 80 {
@@ -551,6 +567,7 @@ func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue) {
 			Preview:   preview,
 			Body:      msg.Body,
 			Timestamp: msg.Timestamp,
+			AutoDraft: autoDraft[msg.Channel],
 		})
 	}
 }

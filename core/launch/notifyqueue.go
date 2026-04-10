@@ -15,16 +15,19 @@ type Message struct {
 	Body      string // full text for overlay
 	Timestamp time.Time
 	Read      bool
+	AutoDraft bool // channel is configured for automatic draft replies
 }
 
 // NotifyQueue is a bounded, thread-safe FIFO of incoming messages.
 // The onChange callback fires (outside the lock) whenever the queue
-// state changes, so the status bar can re-render.
+// state changes, so the status bar can re-render. The onAutoDraft
+// callback fires for messages with AutoDraft set.
 type NotifyQueue struct {
-	mu       sync.Mutex
-	messages []Message
-	maxSize  int
-	onChange func()
+	mu          sync.Mutex
+	messages    []Message
+	maxSize     int
+	onChange    func()
+	onAutoDraft func(Message)
 }
 
 // NewNotifyQueue creates a queue with the given capacity. The onChange
@@ -49,6 +52,17 @@ func (q *NotifyQueue) Push(msg Message) {
 	if q.onChange != nil {
 		q.onChange()
 	}
+	if msg.AutoDraft && q.onAutoDraft != nil {
+		q.onAutoDraft(msg)
+	}
+}
+
+// SetOnAutoDraft sets a callback that fires when an AutoDraft message
+// is pushed. The callback runs outside the lock.
+func (q *NotifyQueue) SetOnAutoDraft(fn func(Message)) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.onAutoDraft = fn
 }
 
 // Messages returns a snapshot (copy) of all messages.

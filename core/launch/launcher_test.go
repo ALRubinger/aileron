@@ -522,7 +522,7 @@ func TestBridgeMessages(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 5)
 
-	go launch.BridgeMessages(msgs, queue)
+	go launch.BridgeMessages(msgs, queue, nil)
 
 	msgs <- comms.IncomingMessage{
 		ID:        "msg-1",
@@ -554,11 +554,35 @@ func TestBridgeMessages(t *testing.T) {
 	}
 }
 
+func TestBridgeMessages_AutoDraft(t *testing.T) {
+	queue := launch.NewNotifyQueue(10, nil)
+	msgs := make(chan comms.IncomingMessage, 3)
+
+	autoDraft := map[string]bool{"#backend": true}
+	go launch.BridgeMessages(msgs, queue, autoDraft)
+
+	msgs <- comms.IncomingMessage{ID: "1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "question"}
+	msgs <- comms.IncomingMessage{ID: "2", Service: "slack", Channel: "#general", Author: "Bob", Body: "chat"}
+	close(msgs)
+	time.Sleep(50 * time.Millisecond)
+
+	all := queue.Messages()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(all))
+	}
+	if !all[0].AutoDraft {
+		t.Error("expected AutoDraft=true for #backend message")
+	}
+	if all[1].AutoDraft {
+		t.Error("expected AutoDraft=false for #general message")
+	}
+}
+
 func TestBridgeMessages_LongPreviewTruncated(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 1)
 
-	go launch.BridgeMessages(msgs, queue)
+	go launch.BridgeMessages(msgs, queue, nil)
 
 	longBody := strings.Repeat("x", 100)
 	msgs <- comms.IncomingMessage{
@@ -606,7 +630,7 @@ func TestStartListeners_Success(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr)
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil)
 
 	if len(started) != 1 {
 		t.Fatalf("expected 1 started listener, got %d", len(started))
@@ -633,7 +657,7 @@ func TestStartListeners_ConnectError(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr)
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil)
 
 	if len(started) != 0 {
 		t.Error("expected 0 started listeners on connect error")
@@ -651,7 +675,7 @@ func TestStartListeners_ListenError(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr)
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil)
 
 	if len(started) != 0 {
 		t.Error("expected 0 started listeners on listen error")
@@ -664,7 +688,7 @@ func TestStartListeners_ListenError(t *testing.T) {
 func TestStartListeners_Empty(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), nil, queue, &stderr)
+	started := launch.StartListeners(context.Background(), nil, queue, &stderr, nil)
 	if len(started) != 0 {
 		t.Error("expected 0 listeners for nil input")
 	}
@@ -676,7 +700,7 @@ func TestStartListeners_Mixed(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{bad, good}, queue, &stderr)
+	started := launch.StartListeners(context.Background(), []comms.Listener{bad, good}, queue, &stderr, nil)
 
 	if len(started) != 1 {
 		t.Fatalf("expected 1 started, got %d", len(started))

@@ -211,6 +211,102 @@ func TestOverlay_DismissSelected(t *testing.T) {
 	}
 }
 
+func TestOverlay_DraftRequestKey(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "Does the auth change JWT claims?"})
+
+	var w testWriter
+	dismissed := false
+	o := launch.NewOverlay(q, nil, &w, 24, 80, func() {
+		dismissed = true
+	})
+
+	var draftMsg launch.Message
+	draftCalled := false
+	o.OnDraftRequest = func(msg launch.Message) {
+		draftCalled = true
+		draftMsg = msg
+	}
+
+	o.Show()
+	o.HandleKey('a')
+
+	if !draftCalled {
+		t.Fatal("expected onDraftRequest to be called")
+	}
+	if draftMsg.ID != "1" {
+		t.Errorf("expected message ID '1', got %q", draftMsg.ID)
+	}
+	if draftMsg.Author != "Sarah" {
+		t.Errorf("expected author 'Sarah', got %q", draftMsg.Author)
+	}
+	if o.IsActive() {
+		t.Error("overlay should be dismissed after draft request")
+	}
+	if !dismissed {
+		t.Error("onDismiss should have been called")
+	}
+	// Message should be marked read.
+	if q.UnreadCount() != 0 {
+		t.Errorf("expected 0 unread, got %d", q.UnreadCount())
+	}
+}
+
+func TestOverlay_DraftRequestEmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 24, 80, nil)
+
+	draftCalled := false
+	o.OnDraftRequest = func(msg launch.Message) {
+		draftCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('a') // should not panic
+
+	if draftCalled {
+		t.Error("onDraftRequest should not be called on empty queue")
+	}
+}
+
+func TestOverlay_ExpandedBodyRendered(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID:      "1",
+		Source:  "slack",
+		Channel: "#backend",
+		Author:  "Sarah",
+		Preview: "Does the auth...",
+		Body:    "Does the new auth middleware change the JWT claims? I need to know before updating the mobile client.",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	out := w.String()
+
+	// Should show the full body text (not just the preview).
+	if !strings.Contains(out, "JWT claims") {
+		t.Error("expected full message body in detail pane")
+	}
+	if !strings.Contains(out, "#backend") {
+		t.Error("expected channel in detail pane header")
+	}
+}
+
+func TestOverlay_FooterShowsDraftAction(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 24, 80, nil)
+	o.Show()
+	out := w.String()
+
+	if !strings.Contains(out, "a draft reply") {
+		t.Error("expected 'a draft reply' in footer")
+	}
+}
+
 func TestOverlay_Resize(t *testing.T) {
 	q := launch.NewNotifyQueue(10, nil)
 	q.Push(launch.Message{ID: "1", Preview: "msg"})
