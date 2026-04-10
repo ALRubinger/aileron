@@ -333,6 +333,334 @@ func TestOverlay_FooterShowsDraftAction(t *testing.T) {
 	}
 }
 
+func TestOverlay_ReplyKey_EntersReplyMode(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "question?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	w.Reset()
+
+	o.HandleKey('r')
+	out := w.String()
+
+	// Should show reply input prompt.
+	if !strings.Contains(out, ">") {
+		t.Error("expected reply input prompt")
+	}
+	// Footer should show Enter/Esc.
+	if !strings.Contains(out, "Enter send") {
+		t.Error("expected 'Enter send' in footer")
+	}
+	if !strings.Contains(out, "Esc cancel") {
+		t.Error("expected 'Esc cancel' in footer")
+	}
+	// Should still be active (not dismissed).
+	if !o.IsActive() {
+		t.Error("overlay should still be active in reply mode")
+	}
+}
+
+func TestOverlay_ReplyKey_TypeAndSubmit(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "question?"})
+
+	var w testWriter
+	copier := launch.NewOutputCopier(strings.NewReader(""), &w, nil)
+	dismissed := false
+	o := launch.NewOverlay(q, copier, &w, 30, 80, func() {
+		dismissed = true
+	})
+
+	var repliedMsg launch.Message
+	var repliedText string
+	o.OnReply = func(msg launch.Message, reply string) {
+		repliedMsg = msg
+		repliedText = reply
+	}
+
+	o.Show()
+	o.HandleKey('r')
+
+	// Type "hello"
+	for _, c := range "hello" {
+		o.HandleKey(byte(c))
+	}
+	// Submit with Enter
+	o.HandleKey('\r')
+
+	if repliedText != "hello" {
+		t.Errorf("expected reply 'hello', got %q", repliedText)
+	}
+	if repliedMsg.ID != "1" {
+		t.Errorf("expected message ID '1', got %q", repliedMsg.ID)
+	}
+	if repliedMsg.Author != "Sarah" {
+		t.Errorf("expected author 'Sarah', got %q", repliedMsg.Author)
+	}
+	if o.IsActive() {
+		t.Error("overlay should be dismissed after reply submit")
+	}
+	if !dismissed {
+		t.Error("onDismiss should have been called")
+	}
+	if q.UnreadCount() != 0 {
+		t.Errorf("expected 0 unread, got %d", q.UnreadCount())
+	}
+}
+
+func TestOverlay_ReplyKey_EscCancels(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "question?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	replyCalled := false
+	o.OnReply = func(msg launch.Message, reply string) {
+		replyCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('r')
+
+	// Type some text
+	o.HandleKey('h')
+	o.HandleKey('i')
+
+	// Cancel with standalone ESC
+	o.HandleKey(0x1B)
+	time.Sleep(200 * time.Millisecond)
+
+	if replyCalled {
+		t.Error("OnReply should not be called on cancel")
+	}
+	if !o.IsActive() {
+		t.Error("overlay should still be active after cancel (back to normal mode)")
+	}
+	// Should be back to normal footer.
+	w.Reset()
+	o.HandleKey('j') // trigger re-render via navigation
+	out := w.String()
+	if !strings.Contains(out, "r reply") {
+		t.Error("expected normal footer after cancel")
+	}
+}
+
+func TestOverlay_ReplyKey_Backspace(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var repliedText string
+	o.OnReply = func(msg launch.Message, reply string) {
+		repliedText = reply
+	}
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey('a')
+	o.HandleKey('b')
+	o.HandleKey('c')
+	o.HandleKey(0x7f) // backspace — delete 'c'
+	o.HandleKey('\r')
+
+	if repliedText != "ab" {
+		t.Errorf("expected 'ab' after backspace, got %q", repliedText)
+	}
+}
+
+func TestOverlay_ReplyKey_EmptySubmitNoCallback(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	replyCalled := false
+	o.OnReply = func(msg launch.Message, reply string) {
+		replyCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey('\r') // submit with empty text
+
+	if replyCalled {
+		t.Error("OnReply should not be called for empty reply")
+	}
+}
+
+func TestOverlay_ReplyKey_BackspaceCtrlH(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var repliedText string
+	o.OnReply = func(msg launch.Message, reply string) {
+		repliedText = reply
+	}
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey('x')
+	o.HandleKey('y')
+	o.HandleKey(0x08) // Ctrl-H backspace
+	o.HandleKey('\r')
+
+	if repliedText != "x" {
+		t.Errorf("expected 'x' after Ctrl-H backspace, got %q", repliedText)
+	}
+}
+
+func TestOverlay_ReplyKey_BackspaceOnEmpty(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey(0x7f) // backspace on empty — should not panic
+}
+
+func TestOverlay_ReplyKey_ArrowKeysIgnored(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var repliedText string
+	o.OnReply = func(msg launch.Message, reply string) {
+		repliedText = reply
+	}
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey('h')
+	o.HandleKey('i')
+	// Arrow down (ESC [ B) — should be ignored in reply mode
+	o.HandleKey(0x1B)
+	o.HandleKey('[')
+	o.HandleKey('B')
+	o.HandleKey('\r')
+
+	if repliedText != "hi" {
+		t.Errorf("expected 'hi' (arrow keys ignored), got %q", repliedText)
+	}
+}
+
+func TestOverlay_ReplyKey_EscBracketCancels(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	replyCalled := false
+	o.OnReply = func(msg launch.Message, reply string) {
+		replyCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey('x')
+	// ESC followed by non-'[' — should cancel reply
+	o.HandleKey(0x1B)
+	o.HandleKey('x')
+
+	if replyCalled {
+		t.Error("OnReply should not be called after ESC cancel")
+	}
+	if !o.IsActive() {
+		t.Error("overlay should still be active after cancel")
+	}
+}
+
+func TestOverlay_ReplyKey_NonPrintableIgnored(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var repliedText string
+	o.OnReply = func(msg launch.Message, reply string) {
+		repliedText = reply
+	}
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey('a')
+	o.HandleKey(0x01) // Ctrl-A — non-printable, should be ignored
+	o.HandleKey('b')
+	o.HandleKey('\r')
+
+	if repliedText != "ab" {
+		t.Errorf("expected 'ab' (control chars ignored), got %q", repliedText)
+	}
+}
+
+func TestOverlay_ReplyKey_NewlineSubmits(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "q?"})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var repliedText string
+	o.OnReply = func(msg launch.Message, reply string) {
+		repliedText = reply
+	}
+
+	o.Show()
+	o.HandleKey('r')
+	o.HandleKey('o')
+	o.HandleKey('k')
+	o.HandleKey('\n') // newline also submits
+
+	if repliedText != "ok" {
+		t.Errorf("expected 'ok', got %q", repliedText)
+	}
+}
+
+func TestOverlay_ReplyKey_EmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	replyCalled := false
+	o.OnReply = func(msg launch.Message, reply string) {
+		replyCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('r') // should not enter reply mode on empty queue
+
+	if replyCalled {
+		t.Error("OnReply should not be called on empty queue")
+	}
+}
+
+func TestOverlay_FooterShowsReplyAction(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 24, 80, nil)
+	o.Show()
+	out := w.String()
+
+	if !strings.Contains(out, "r reply") {
+		t.Error("expected 'r reply' in footer")
+	}
+}
+
 func TestOverlay_Resize(t *testing.T) {
 	q := launch.NewNotifyQueue(10, nil)
 	q.Push(launch.Message{ID: "1", Preview: "msg"})

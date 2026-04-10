@@ -205,6 +205,8 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	defer commsSrv.Close()
 	go commsSrv.Serve()
 
+	WireReply(overlay, commsSrv)
+
 	// Wire onChange to re-render the status bar when notifications arrive.
 	queue.onChange = func() { bar.Render(os.Stdout) }
 
@@ -248,6 +250,15 @@ func WireDraftInjection(ptmx io.Writer, overlay *Overlay, queue *NotifyQueue) {
 	queue.SetOnAutoDraft(func(msg Message) {
 		injector.Inject(msg)
 	})
+}
+
+// WireReply connects the overlay's reply callback to the CommsServer's
+// DirectSend method. No approval prompt is shown since the user authored
+// the reply text themselves. Exported for testing.
+func WireReply(overlay *Overlay, commsSrv *CommsServer) {
+	overlay.OnReply = func(msg Message, reply string) {
+		commsSrv.DirectSend(msg.Source, msg.Channel, reply)
+	}
 }
 
 // ComputeAgentRows returns the number of rows available for the agent,
