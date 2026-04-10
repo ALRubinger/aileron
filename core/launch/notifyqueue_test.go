@@ -162,6 +162,45 @@ func TestNotifyQueue_MessagesReturnsSnapshot(t *testing.T) {
 	}
 }
 
+func TestNotifyQueue_AutoDraftCallbackFires(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var got []string
+	q.SetOnAutoDraft(func(msg launch.Message) {
+		got = append(got, msg.ID)
+	})
+
+	q.Push(launch.Message{ID: "1", AutoDraft: true})
+	q.Push(launch.Message{ID: "2", AutoDraft: false})
+	q.Push(launch.Message{ID: "3", AutoDraft: true})
+
+	if len(got) != 2 {
+		t.Fatalf("expected onAutoDraft called 2 times, got %d", len(got))
+	}
+	if got[0] != "1" || got[1] != "3" {
+		t.Errorf("expected IDs [1, 3], got %v", got)
+	}
+}
+
+func TestNotifyQueue_AutoDraftNilCallback(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	// Should not panic when onAutoDraft is nil.
+	q.Push(launch.Message{ID: "1", AutoDraft: true})
+}
+
+func TestNotifyQueue_AutoDraftRoundtrip(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{ID: "1", AutoDraft: true})
+	q.Push(launch.Message{ID: "2", AutoDraft: false})
+
+	msgs := q.Messages()
+	if !msgs[0].AutoDraft {
+		t.Error("expected AutoDraft=true on first message")
+	}
+	if msgs[1].AutoDraft {
+		t.Error("expected AutoDraft=false on second message")
+	}
+}
+
 func TestNotifyQueue_ConcurrentAccess(t *testing.T) {
 	q := launch.NewNotifyQueue(100, nil)
 	var wg sync.WaitGroup

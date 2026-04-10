@@ -20,8 +20,9 @@ type Overlay struct {
 	cols      int
 	scrollPos int // index of top visible message
 	cursorPos int // index of selected message
-	active    bool
-	onDismiss func()
+	active         bool
+	onDismiss      func()
+	OnDraftRequest func(msg Message)
 
 	// Escape sequence state machine for arrow keys.
 	escState int // 0=normal, 1=got ESC, 2=got ESC+[
@@ -128,6 +129,8 @@ func (o *Overlay) HandleKey(b byte) {
 		o.moveCursor(1)
 	case 'd':
 		o.dismissSelected()
+	case 'a':
+		o.draftSelected()
 	}
 }
 
@@ -193,6 +196,36 @@ func (o *Overlay) dismissSelected() {
 	}
 }
 
+func (o *Overlay) draftSelected() {
+	msgs := o.queue.Messages()
+	if o.cursorPos >= len(msgs) {
+		return
+	}
+	msg := msgs[o.cursorPos]
+	o.queue.MarkRead(msg.ID)
+
+	// Dismiss the overlay first, then fire the draft callback.
+	o.active = false
+	fmt.Fprint(o.stdout, "\033[?25h\033[?1049l")
+	if o.copier != nil {
+		o.mu.Unlock()
+		o.copier.Flush()
+		o.mu.Lock()
+	}
+	if o.onDismiss != nil {
+		cb := o.onDismiss
+		o.mu.Unlock()
+		cb()
+		o.mu.Lock()
+	}
+	if o.OnDraftRequest != nil {
+		cb := o.OnDraftRequest
+		o.mu.Unlock()
+		cb(msg)
+		o.mu.Lock()
+	}
+}
+
 func (o *Overlay) render() {
 	msgs := o.queue.Messages()
 
@@ -208,8 +241,10 @@ func (o *Overlay) render() {
 	fmt.Fprintf(&buf, "\033[1m%s\033[0m\n", header)
 	buf.WriteString(strings.Repeat("─", o.cols) + "\n")
 
+	// Reserve rows for the detail pane (separator + channel/author + up to 5 body lines).
+	detailRows := 8
 	// Message list.
-	visible := o.rows - 4
+	visible := o.rows - 4 - detailRows
 	if visible < 1 {
 		visible = 1
 	}
@@ -241,11 +276,27 @@ func (o *Overlay) render() {
 			}
 			buf.WriteString(line + "\n")
 		}
+
+		// Detail pane for selected message.
+		if o.cursorPos < len(msgs) {
+			selected := msgs[o.cursorPos]
+			buf.WriteString("\n" + strings.Repeat("─", o.cols) + "\n")
+			buf.WriteString(fmt.Sprintf(" \033[1m%s · %s\033[0m\n", selected.Channel, selected.Author))
+			bodyLines := wrapText(selected.Body, o.cols-2)
+			maxBodyLines := 5
+			for i, line := range bodyLines {
+				if i >= maxBodyLines {
+					buf.WriteString("  ...\n")
+					break
+				}
+				buf.WriteString(" " + line + "\n")
+			}
+		}
 	}
 
 	// Footer.
 	footer := "\n" + strings.Repeat("─", o.cols) + "\n"
-	footer += " j/k or ↑/↓ navigate  d dismiss  q return"
+	footer += " j/k or ↑/↓ navigate  a draft reply  d dismiss  q return"
 	buf.WriteString(footer)
 
 	fmt.Fprint(o.stdout, buf.String())

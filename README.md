@@ -242,7 +242,7 @@ notifications:
 ./build/aileron launch claude
 ```
 
-Messages from configured channels appear in the notification bar. Press **Ctrl-A** to view the full queue, navigate with **j/k** or arrow keys, and **Escape** to return.
+Messages from configured channels appear in the notification bar. Press **Ctrl-A** to view the full queue, navigate with **j/k** or arrow keys, press **a** to ask the agent to draft a reply, **d** to dismiss, and **Escape** to return. On channels with `auto_draft: true`, the agent drafts replies automatically when messages arrive.
 
 ### Discord notifications
 
