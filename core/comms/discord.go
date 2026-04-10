@@ -15,6 +15,10 @@ type DiscordListener struct {
 	channels map[string]bool // channel IDs to listen on
 	ignore   map[string]bool // channel IDs to ignore
 
+	// openGateway opens the Discord WebSocket connection. Defaults to
+	// session.Open but can be overridden for testing.
+	openGateway func() error
+
 	session *discordgo.Session
 	msgs    chan IncomingMessage
 }
@@ -38,6 +42,12 @@ func NewDiscordListener(botToken string, channels, ignore []string) *DiscordList
 }
 
 func (d *DiscordListener) Service() string { return "discord" }
+
+// SetOpenGateway overrides the function used to open the Discord Gateway
+// connection. Call after Connect. Used in tests to skip the real WebSocket.
+func (d *DiscordListener) SetOpenGateway(fn func() error) {
+	d.openGateway = fn
+}
 
 // SetEndpointURL overrides the Discord REST API base URL. Call after
 // Connect but before using the session. Used in integration tests with
@@ -68,6 +78,7 @@ func (d *DiscordListener) Connect(ctx context.Context) error {
 	}
 	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent
 	d.session = session
+	d.openGateway = session.Open
 	return nil
 }
 
@@ -86,7 +97,7 @@ func (d *DiscordListener) Listen(ctx context.Context) (<-chan IncomingMessage, e
 		}
 	})
 
-	if err := d.session.Open(); err != nil {
+	if err := d.openGateway(); err != nil {
 		return nil, fmt.Errorf("discord: failed to open gateway: %w", err)
 	}
 
