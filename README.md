@@ -42,8 +42,7 @@ Today's agent hosts give you two modes: approve every command individually (50 p
 │         ▼                 ▼                  ▼         │
 │  ┌─────────────────────────────────────────────────┐   │
 │  │              Policy Engine                      │   │
-│  │  OS profile + lang profile + aileron.yaml       │   │
-│  │  + built-in structural deny rules               │   │
+│  │  Built-in defaults + aileron.yaml + user prefs  │   │
 │  └─────────────────────┬───────────────────────────┘   │
 │                        │                               │
 │                        ▼                               │
