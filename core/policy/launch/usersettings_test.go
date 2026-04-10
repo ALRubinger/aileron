@@ -125,14 +125,17 @@ settings:
 		t.Fatalf("LoadWithProfiles failed: %v", err)
 	}
 
-	// User has 1 allow + project has 1 allow = 2.
-	if len(pf.Allow) != 2 {
-		t.Errorf("Allow = %d, want 2 (1 user + 1 project)", len(pf.Allow))
+	// Should contain user allow + project allow + defaults.
+	defaults := launch.DefaultPolicy()
+	minAllow := len(defaults.Allow) + 2 // 1 user + 1 project
+	if len(pf.Allow) < minAllow {
+		t.Errorf("Allow = %d, want at least %d (defaults + user + project)", len(pf.Allow), minAllow)
 	}
 
-	// Deny comes from project only.
-	if len(pf.Deny) != 1 {
-		t.Errorf("Deny = %d, want 1", len(pf.Deny))
+	// Deny includes defaults + project.
+	minDeny := len(defaults.Deny) + 1
+	if len(pf.Deny) < minDeny {
+		t.Errorf("Deny = %d, want at least %d (defaults + project)", len(pf.Deny), minDeny)
 	}
 
 	// Project timeout (30) should override user timeout (120).
@@ -322,7 +325,10 @@ func TestLoadWithProfiles_NoUserSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.Allow) != 4 {
-		t.Errorf("Allow = %d, want 4 (from basic.yaml only)", len(pf.Allow))
+	// Should have defaults + basic.yaml's 4 allow rules.
+	defaults := launch.DefaultPolicy()
+	minExpected := len(defaults.Allow) + 4
+	if len(pf.Allow) < minExpected {
+		t.Errorf("Allow = %d, want at least %d (defaults + basic.yaml)", len(pf.Allow), minExpected)
 	}
 }

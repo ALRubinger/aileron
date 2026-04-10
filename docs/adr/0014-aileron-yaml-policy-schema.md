@@ -1,6 +1,6 @@
 # ADR-0014: aileron.yaml Policy Schema for Launch Sessions
 
-**Status:** Accepted
+**Status:** Partially superseded by [ADR-0015](0015-built-in-policy-defaults.md) (profile composition model replaced; rule syntax and schema remain in effect)
 **Date:** 2026-04-08
 **Relates to:** [ADR-0013](0013-local-policy-enforced-shell.md) (Local Policy-Enforced Shell)
 

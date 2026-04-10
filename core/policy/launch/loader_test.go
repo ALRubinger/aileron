@@ -2,7 +2,6 @@ package launch_test
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -385,76 +384,46 @@ allow:
 }
 
 func TestLoadWithProfiles(t *testing.T) {
-	// basic.yaml doesn't list profiles, so it should load as-is.
 	pf, err := launch.LoadWithProfiles(testdataPath("basic.yaml"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.Allow) != 4 {
-		t.Errorf("Allow = %d, want 4", len(pf.Allow))
+	// Should include built-in defaults + project rules.
+	defaults := launch.DefaultPolicy()
+	minExpected := len(defaults.Allow) + 4 // basic.yaml has 4 allow rules
+	if len(pf.Allow) < minExpected {
+		t.Errorf("Allow = %d, want at least %d (defaults + project)", len(pf.Allow), minExpected)
 	}
 }
 
-func TestLoadWithProfiles_WithProfile(t *testing.T) {
-	// Create a temp policy that references profile_go via relative path.
-	dir := t.TempDir()
-	policy := `
-version: 1
-profiles:
-  - "./testdata_profile"
-default: ask
-allow:
-  - "cat *"
-`
-	policyPath := filepath.Join(dir, "aileron.yaml")
-	os.WriteFile(policyPath, []byte(policy), 0o644)
-
-	// Create the profile it references.
-	os.MkdirAll(filepath.Join(dir, "testdata_profile"), 0o755)
-	// Actually, profiles with ./ are direct paths. Let's use a file.
-	profileContent := `
-version: 1
-allow:
-  - "go test *"
-  - "go build *"
-`
-	profilePath := filepath.Join(dir, "testdata_profile.yaml")
-	os.WriteFile(profilePath, []byte(profileContent), 0o644)
-
-	// Fix: update policy to reference the file directly.
-	policy2 := fmt.Sprintf(`
-version: 1
-profiles:
-  - "%s"
-default: ask
-allow:
-  - "cat *"
-`, profilePath)
-	os.WriteFile(policyPath, []byte(policy2), 0o644)
-
-	pf, err := launch.LoadWithProfiles(policyPath, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Profile has 2 allow + policy has 1 allow = 3.
-	if len(pf.Allow) != 3 {
-		t.Errorf("Allow = %d, want 3 (2 from profile + 1 from policy)", len(pf.Allow))
-	}
-}
-
-func TestLoadWithProfiles_ProfileNotFound(t *testing.T) {
+func TestLoadWithProfiles_ProfilesFieldIgnored(t *testing.T) {
+	// Profiles field is deprecated (ADR-0015). It should be ignored,
+	// not cause an error.
 	dir := t.TempDir()
 	policy := `
 version: 1
 profiles:
   - "nonexistent/profile"
+default: ask
+allow:
+  - "cat *"
 `
 	policyPath := filepath.Join(dir, "aileron.yaml")
 	os.WriteFile(policyPath, []byte(policy), 0o644)
 
-	_, err := launch.LoadWithProfiles(policyPath, []string{dir})
-	if err == nil {
-		t.Fatal("expected error for missing profile")
+	pf, err := launch.LoadWithProfiles(policyPath, nil)
+	if err != nil {
+		t.Fatalf("profiles field should be ignored, got error: %v", err)
+	}
+	// Should still have the project rule + defaults.
+	found := false
+	for _, r := range pf.Allow {
+		if r.Command == "cat *" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected project allow rule 'cat *' in merged result")
 	}
 }
 

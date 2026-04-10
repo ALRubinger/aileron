@@ -106,7 +106,6 @@ func TestRun_LaunchUnknownAgent(t *testing.T) {
 
 func TestRunInit_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test"), 0o644)
 
 	oldWd, _ := os.Getwd()
 	os.Chdir(dir)
@@ -117,11 +116,11 @@ func TestRunInit_CreatesFile(t *testing.T) {
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Detected go") {
-		t.Errorf("expected language detection message, got: %s", stdout.String())
-	}
 	if !strings.Contains(stdout.String(), "aileron.yaml") {
 		t.Errorf("expected file creation message, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "built in") {
+		t.Errorf("expected built-in defaults message, got: %s", stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(dir, "aileron.yaml")); err != nil {
 		t.Error("aileron.yaml was not created")
@@ -146,7 +145,7 @@ func TestRunInit_AlreadyExists(t *testing.T) {
 	}
 }
 
-func TestRunInit_NoLanguage(t *testing.T) {
+func TestRunInit_OutputMessage(t *testing.T) {
 	dir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -158,9 +157,9 @@ func TestRunInit_NoLanguage(t *testing.T) {
 	if code != 0 {
 		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
 	}
-	// No language detected — should not print language line.
-	if strings.Contains(stdout.String(), "Detected") {
-		t.Error("should not print language detection when none found")
+	// Should explain that defaults are built in.
+	if !strings.Contains(stdout.String(), "built in") {
+		t.Errorf("expected built-in message, got: %s", stdout.String())
 	}
 }
 
