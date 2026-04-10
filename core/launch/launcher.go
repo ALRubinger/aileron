@@ -560,7 +560,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	for _, ref := range tokenRefs {
 		if IsVaultRef(ref) {
 			var err error
-			v, err = promptAndOpenVault(os.Stderr)
+			v, err = OpenVaultFunc(os.Stderr)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "aileron: vault: %v\n", err)
 				return nil
