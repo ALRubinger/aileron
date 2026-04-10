@@ -186,15 +186,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	router := NewKeyRouter(os.Stdin, ptmx, overlay)
 	overlay.onDismiss = router.DeactivateOverlay
 
-	// Wire draft injection: overlay 'a' key and auto-draft messages both
-	// inject a prompt into the agent's pty stdin.
-	injector := NewDraftInjector(ptmx)
-	overlay.OnDraftRequest = func(msg Message) {
-		injector.Inject(msg)
-	}
-	queue.SetOnAutoDraft(func(msg Message) {
-		injector.Inject(msg)
-	})
+	WireDraftInjection(ptmx, overlay, queue)
 
 	// Start the approval server so aileron-sh can request user approvals
 	// on the real terminal (not the pty).
@@ -243,6 +235,19 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	CleanupTerminalScreen(os.Stdout, rows)
 
 	return exitResult(err)
+}
+
+// WireDraftInjection connects the overlay's draft-request action and the
+// queue's auto-draft callback to a DraftInjector that writes prompts into
+// the agent's pty stdin. Exported for testing.
+func WireDraftInjection(ptmx io.Writer, overlay *Overlay, queue *NotifyQueue) {
+	injector := NewDraftInjector(ptmx)
+	overlay.OnDraftRequest = func(msg Message) {
+		injector.Inject(msg)
+	}
+	queue.SetOnAutoDraft(func(msg Message) {
+		injector.Inject(msg)
+	})
 }
 
 // ComputeAgentRows returns the number of rows available for the agent,
