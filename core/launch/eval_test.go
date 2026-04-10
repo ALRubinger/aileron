@@ -60,6 +60,29 @@ default: ask
 	}
 }
 
+func TestEvaluateCommand_BuiltinDenyRepoDelete(t *testing.T) {
+	// gh repo delete is denied by built-in defaults even without a project policy.
+	path := writePolicyFile(t, `
+version: 1
+default: allow
+`)
+	result := launch.EvaluateCommand(path, "gh repo delete my-org/my-repo", "/tmp")
+	if result.Disposition != model.DispositionDeny {
+		t.Errorf("expected deny for gh repo delete, got %q", result.Disposition)
+	}
+}
+
+func TestEvaluateCommand_BuiltinDenyRmRfRoot(t *testing.T) {
+	path := writePolicyFile(t, `
+version: 1
+default: allow
+`)
+	result := launch.EvaluateCommand(path, "rm -rf /", "/tmp")
+	if result.Disposition != model.DispositionDeny {
+		t.Errorf("expected deny for rm -rf /, got %q", result.Disposition)
+	}
+}
+
 func TestEvaluateCommand_DenyOverridesAllow(t *testing.T) {
 	path := writePolicyFile(t, `
 version: 1
