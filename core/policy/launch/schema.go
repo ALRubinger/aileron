@@ -40,8 +40,18 @@ type Settings struct {
 
 // NotifyConfig holds notification channel configuration for Slack and Discord.
 type NotifyConfig struct {
-	Slack   *SlackNotifyConfig   `yaml:"slack,omitempty"`
-	Discord *DiscordNotifyConfig `yaml:"discord,omitempty"`
+	Slack      *SlackNotifyConfig   `yaml:"slack,omitempty"`
+	Discord    *DiscordNotifyConfig `yaml:"discord,omitempty"`
+	QuietHours *QuietHoursConfig    `yaml:"quiet_hours,omitempty"`
+}
+
+// QuietHoursConfig defines a daily window during which non-high-priority
+// notifications are suppressed. Messages are still queued but the status
+// bar and onChange callback are not triggered.
+type QuietHoursConfig struct {
+	Start    string `yaml:"start"`              // "HH:MM" in 24-hour format, e.g. "22:00"
+	End      string `yaml:"end"`                // "HH:MM" in 24-hour format, e.g. "08:00"
+	Timezone string `yaml:"timezone,omitempty"` // IANA timezone, e.g. "America/New_York"; defaults to local
 }
 
 // SlackNotifyConfig configures Slack integration.

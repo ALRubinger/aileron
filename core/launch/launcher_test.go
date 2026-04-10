@@ -525,7 +525,7 @@ func TestBridgeMessages(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 5)
 
-	go launch.BridgeMessages(msgs, queue, nil, "", "")
+	go launch.BridgeMessages(msgs, queue, nil, nil, "", "")
 
 	msgs <- comms.IncomingMessage{
 		ID:        "msg-1",
@@ -624,7 +624,7 @@ func TestBridgeMessages_AutoDraft(t *testing.T) {
 	msgs := make(chan comms.IncomingMessage, 3)
 
 	autoDraft := map[string]bool{"#backend": true}
-	go launch.BridgeMessages(msgs, queue, autoDraft, "", "")
+	go launch.BridgeMessages(msgs, queue, autoDraft, nil, "", "")
 
 	msgs <- comms.IncomingMessage{ID: "1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "question"}
 	msgs <- comms.IncomingMessage{ID: "2", Service: "slack", Channel: "#general", Author: "Bob", Body: "chat"}
@@ -842,7 +842,7 @@ func TestBridgeMessages_AuditLog(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 2)
 
-	go launch.BridgeMessages(msgs, queue, nil, auditPath, "test-session")
+	go launch.BridgeMessages(msgs, queue, nil, nil, auditPath, "test-session")
 
 	msgs <- comms.IncomingMessage{ID: "1", Service: "slack", Channel: "#backend", Author: "Alice", Body: "hello", Timestamp: time.Now()}
 	msgs <- comms.IncomingMessage{ID: "2", Service: "discord", Channel: "dev-chat", Author: "Bob", Body: "hi", Timestamp: time.Now()}
@@ -874,7 +874,7 @@ func TestBridgeMessages_LongPreviewTruncated(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 1)
 
-	go launch.BridgeMessages(msgs, queue, nil, "", "")
+	go launch.BridgeMessages(msgs, queue, nil, nil, "", "")
 
 	longBody := strings.Repeat("x", 100)
 	msgs <- comms.IncomingMessage{
@@ -922,7 +922,7 @@ func TestStartListeners_Success(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil, "", "")
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil, nil, "", "")
 
 	if len(started) != 1 {
 		t.Fatalf("expected 1 started listener, got %d", len(started))
@@ -949,7 +949,7 @@ func TestStartListeners_ConnectError(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil, "", "")
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil, nil, "", "")
 
 	if len(started) != 0 {
 		t.Error("expected 0 started listeners on connect error")
@@ -967,7 +967,7 @@ func TestStartListeners_ListenError(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil, "", "")
+	started := launch.StartListeners(context.Background(), []comms.Listener{l}, queue, &stderr, nil, nil, "", "")
 
 	if len(started) != 0 {
 		t.Error("expected 0 started listeners on listen error")
@@ -980,7 +980,7 @@ func TestStartListeners_ListenError(t *testing.T) {
 func TestStartListeners_Empty(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), nil, queue, &stderr, nil, "", "")
+	started := launch.StartListeners(context.Background(), nil, queue, &stderr, nil, nil, "", "")
 	if len(started) != 0 {
 		t.Error("expected 0 listeners for nil input")
 	}
@@ -992,7 +992,7 @@ func TestStartListeners_Mixed(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 
 	var stderr strings.Builder
-	started := launch.StartListeners(context.Background(), []comms.Listener{bad, good}, queue, &stderr, nil, "", "")
+	started := launch.StartListeners(context.Background(), []comms.Listener{bad, good}, queue, &stderr, nil, nil, "", "")
 
 	if len(started) != 1 {
 		t.Fatalf("expected 1 started, got %d", len(started))

@@ -95,6 +95,21 @@ func (b *StatusBar) render(w io.Writer) {
 func (b *StatusBar) buildContent() string {
 	brandWidth := displayWidth(b.text)
 
+	// During quiet hours with no high-priority unread messages, show a
+	// quiet indicator instead of the unread count.
+	if b.queue != nil && b.queue.IsQuietHours() {
+		highUnread := b.queue.HighPriorityUnreadCount()
+		if highUnread == 0 {
+			left := "\033[2m[quiet]\033[0m"
+			leftDisplay := len("[quiet]")
+			gap := b.cols - leftDisplay - brandWidth
+			if gap < 1 {
+				gap = 1
+			}
+			return left + strings.Repeat(" ", gap) + b.text
+		}
+	}
+
 	// No queue or no unread messages — right-align branding only.
 	if b.queue == nil || b.queue.UnreadCount() == 0 {
 		padding := b.cols - brandWidth
