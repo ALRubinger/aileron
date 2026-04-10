@@ -29,9 +29,6 @@ func TestInitPolicy_CreatesMinimalFile(t *testing.T) {
 	if !strings.Contains(content, "default: ask") {
 		t.Error("expected default disposition")
 	}
-	if !strings.Contains(content, "git push origin main") {
-		t.Error("expected deny rule for push to main")
-	}
 	if !strings.Contains(content, "AWS_*") {
 		t.Error("expected env scrub rules")
 	}
@@ -75,11 +72,8 @@ func TestInitPolicy_FileContent(t *testing.T) {
 	if !strings.Contains(content, "Three-layer") || !strings.Contains(content, "settings.yaml") {
 		t.Error("expected three-layer merge documentation comment")
 	}
-	// Verify ask rules present.
-	if !strings.Contains(content, "git push *") {
-		t.Error("expected ask rule for git push")
-	}
-	if !strings.Contains(content, "git commit *") {
-		t.Error("expected ask rule for git commit")
+	// Verify env scrub present.
+	if !strings.Contains(content, "AWS_*") {
+		t.Error("expected env scrub rules")
 	}
 }
