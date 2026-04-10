@@ -348,6 +348,190 @@ func TestRunPolicyTest_InHelp(t *testing.T) {
 	}
 }
 
+func TestRunStatus_All(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Policy") {
+		t.Error("expected Policy section")
+	}
+	if !strings.Contains(out, "Environment") {
+		t.Error("expected Environment section")
+	}
+	if !strings.Contains(out, "Notifications") {
+		t.Error("expected Notifications section")
+	}
+	if !strings.Contains(out, "Vault") {
+		t.Error("expected Vault section")
+	}
+	if !strings.Contains(out, "Built-in defaults") {
+		t.Error("expected built-in defaults count")
+	}
+}
+
+func TestRunStatus_Policy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: ask
+deny:
+  - command: "deploy --force *"
+    description: "no force deploy"
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "policy"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "aileron.yaml") {
+		t.Error("expected project policy path")
+	}
+	if !strings.Contains(out, "1 deny") {
+		t.Error("expected project deny count")
+	}
+}
+
+func TestRunStatus_Env(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+env:
+  scrub:
+    - "AWS_*"
+  passthrough:
+    - "HOME"
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "env"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "AWS_*") {
+		t.Error("expected scrub pattern")
+	}
+	if !strings.Contains(out, "HOME") {
+		t.Error("expected passthrough pattern")
+	}
+}
+
+func TestRunStatus_Notifications(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+notifications:
+  slack:
+    app_token: vault:slack_app
+    bot_token: vault:slack_bot
+    channels:
+      - name: "#backend"
+        show: all
+        auto_draft: true
+`), 0o644)
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "notifications"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Slack") {
+		t.Error("expected Slack section")
+	}
+	if !strings.Contains(out, "vault:slack_bot") {
+		t.Error("expected vault reference for bot token")
+	}
+	if !strings.Contains(out, "#backend") {
+		t.Error("expected channel name")
+	}
+	if !strings.Contains(out, "auto-draft") {
+		t.Error("expected auto-draft indicator")
+	}
+}
+
+func TestRunStatus_Vault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "vault"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "not created") {
+		t.Error("expected 'not created' for missing vault")
+	}
+}
+
+func TestRunStatus_VaultWithSecrets(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
+	os.MkdirAll(filepath.Dir(vaultPath), 0o700)
+	os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"slack_bot":{"value":"ZW5j","metadata":{"type":"secret"}}}}`), 0o600)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "vault"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "1 stored") {
+		t.Error("expected '1 stored'")
+	}
+	if !strings.Contains(out, "slack_bot") {
+		t.Error("expected secret name")
+	}
+}
+
+func TestRunStatus_UnknownSection(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "bogus"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown status section") {
+		t.Error("expected unknown section error")
+	}
+}
+
+func TestRunStatus_InHelp(t *testing.T) {
+	var stdout bytes.Buffer
+	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
+	if !strings.Contains(stdout.String(), "aileron status") {
+		t.Error("expected 'aileron status' in help output")
+	}
+}
+
 func TestRunLog_HelpShownInUsage(t *testing.T) {
 	var stdout bytes.Buffer
 	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})

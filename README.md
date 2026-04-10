@@ -110,6 +110,16 @@ Every command, policy decision, approval, message sent, and credential used is r
 aileron log
 ```
 
+**7. See your full config at a glance**
+
+```sh
+aileron status              # show everything
+aileron status policy       # merged policy — defaults + project + user
+aileron status env          # scrubbed and passthrough vars
+aileron status notifications # Slack/Discord channels and token status
+aileron status vault        # stored secrets (names only)
+```
+
 ## Supported Agents
 
 | Agent | Shell policy | MCP tools | Full experience |
