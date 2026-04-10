@@ -7,7 +7,9 @@
 /aileron
 /aileron-mcp
 /aileron-sh
+cmd/aileron/aileron
 cmd/aileron-mcp/aileron-mcp
+cmd/aileron-sh/aileron-sh
 
 # UI build output
 ui/.svelte-kit/
