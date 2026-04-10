@@ -186,9 +186,10 @@ func mergeEnv(base, overlay *EnvConfig) *EnvConfig {
 	return result
 }
 
-// mergeNotify merges notification configs. The overlay wins for each
-// service block (Slack, Discord). If the overlay defines a service,
-// it replaces the base entirely for that service.
+// mergeNotify merges notification configs with per-channel granularity.
+// Tokens use last-writer-wins. Channels are unioned by name; for channels
+// present in both layers the overlay's non-zero fields override the base's.
+// Ignore lists are unioned.
 func mergeNotify(base, overlay *NotifyConfig) *NotifyConfig {
 	if base == nil && overlay == nil {
 		return nil
@@ -201,12 +202,79 @@ func mergeNotify(base, overlay *NotifyConfig) *NotifyConfig {
 	}
 	result := *base
 	if overlay.Slack != nil {
-		result.Slack = overlay.Slack
+		result.Slack = mergeSlack(base.Slack, overlay.Slack)
 	}
 	if overlay.Discord != nil {
-		result.Discord = overlay.Discord
+		result.Discord = mergeDiscord(base.Discord, overlay.Discord)
 	}
 	return &result
+}
+
+// mergeSlack merges two SlackNotifyConfigs with per-channel granularity.
+func mergeSlack(base, overlay *SlackNotifyConfig) *SlackNotifyConfig {
+	if base == nil {
+		return overlay
+	}
+	result := *base
+	// Tokens: last-writer-wins.
+	if overlay.AppToken != "" {
+		result.AppToken = overlay.AppToken
+	}
+	if overlay.BotToken != "" {
+		result.BotToken = overlay.BotToken
+	}
+	// Channels: union by name, overlay fields override per channel.
+	result.Channels = mergeChannels(base.Channels, overlay.Channels)
+	// Ignore: union.
+	result.Ignore = appendUnique(append([]string{}, base.Ignore...), overlay.Ignore...)
+	return &result
+}
+
+// mergeDiscord merges two DiscordNotifyConfigs with per-channel granularity.
+func mergeDiscord(base, overlay *DiscordNotifyConfig) *DiscordNotifyConfig {
+	if base == nil {
+		return overlay
+	}
+	result := *base
+	// Token: last-writer-wins.
+	if overlay.BotToken != "" {
+		result.BotToken = overlay.BotToken
+	}
+	// Channels: union by name, overlay fields override per channel.
+	result.Channels = mergeChannels(base.Channels, overlay.Channels)
+	// Ignore: union.
+	result.Ignore = appendUnique(append([]string{}, base.Ignore...), overlay.Ignore...)
+	return &result
+}
+
+// mergeChannels unions two channel lists by name. For channels present in
+// both, the overlay's non-zero fields override the base's values.
+func mergeChannels(base, overlay []ChannelConfig) []ChannelConfig {
+	index := make(map[string]int, len(base))
+	result := make([]ChannelConfig, len(base))
+	copy(result, base)
+	for i, ch := range result {
+		index[ch.Name] = i
+	}
+	for _, ch := range overlay {
+		if i, ok := index[ch.Name]; ok {
+			// Merge: overlay fields win. When a user defines a channel
+			// in their settings, all specified fields take effect.
+			if ch.Show != "" {
+				result[i].Show = ch.Show
+			}
+			// AutoDraft is always applied from overlay because the user
+			// explicitly listing a channel means they intend to control it.
+			result[i].AutoDraft = ch.AutoDraft
+			if ch.Priority != "" {
+				result[i].Priority = ch.Priority
+			}
+		} else {
+			index[ch.Name] = len(result)
+			result = append(result, ch)
+		}
+	}
+	return result
 }
 
 func appendUnique(base []string, items ...string) []string {
