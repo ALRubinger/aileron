@@ -640,6 +640,39 @@ func TestBridgeMessages_AutoDraft(t *testing.T) {
 	}
 }
 
+func TestBridgeMessages_AuditLog(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	queue := launch.NewNotifyQueue(10, nil)
+	msgs := make(chan comms.IncomingMessage, 2)
+
+	go launch.BridgeMessages(msgs, queue, nil, auditPath, "test-session")
+
+	msgs <- comms.IncomingMessage{ID: "1", Service: "slack", Channel: "#backend", Author: "Alice", Body: "hello", Timestamp: time.Now()}
+	msgs <- comms.IncomingMessage{ID: "2", Service: "discord", Channel: "dev-chat", Author: "Bob", Body: "hi", Timestamp: time.Now()}
+	close(msgs)
+	time.Sleep(50 * time.Millisecond)
+
+	entries, err := audit.ReadMessageEntries(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 audit entries, got %d", len(entries))
+	}
+	if entries[0].Event != "message_received" {
+		t.Errorf("expected 'message_received', got %q", entries[0].Event)
+	}
+	if entries[0].Author != "Alice" {
+		t.Errorf("expected author 'Alice', got %q", entries[0].Author)
+	}
+	if entries[0].SessionID != "test-session" {
+		t.Errorf("expected session 'test-session', got %q", entries[0].SessionID)
+	}
+	if entries[1].Service != "discord" {
+		t.Errorf("expected service 'discord', got %q", entries[1].Service)
+	}
+}
+
 func TestBridgeMessages_LongPreviewTruncated(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 1)
