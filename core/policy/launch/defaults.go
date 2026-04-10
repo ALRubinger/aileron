@@ -58,13 +58,10 @@ func defaultAllowRules() []Rule {
 		{Command: "java *"},
 		{Command: "javac *"},
 
+		// Git — branch protection is the repo provider's responsibility
+		{Command: "git *"},
+
 		// Common tools
-		{Command: "git status"},
-		{Command: "git diff *"},
-		{Command: "git log *"},
-		{Command: "git branch *"},
-		{Command: "git stash *"},
-		{Command: "git show *"},
 		{Command: "ls *"},
 		{Command: "cat *"},
 		{Command: "head *"},
@@ -99,8 +96,6 @@ func defaultAllowRules() []Rule {
 func universalDenyRules() []Rule {
 	return []Rule{
 		{Command: "rm -rf /*", Description: "block recursive delete at filesystem root"},
-		{Command: "git push origin main", Description: "no direct push to main"},
-		{Command: "git push origin master", Description: "no direct push to master"},
 		{Command: "gh repo delete *", Description: "never delete repos"},
 	}
 }

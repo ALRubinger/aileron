@@ -35,7 +35,7 @@ func TestDefaultPolicy_HasLanguageRules(t *testing.T) {
 func TestDefaultPolicy_HasCommonTools(t *testing.T) {
 	pf := DefaultPolicy()
 
-	tools := []string{"git status", "ls *", "cat *", "grep *", "make *", "gh pr *"}
+	tools := []string{"git *", "ls *", "cat *", "grep *", "make *", "gh pr *"}
 	for _, cmd := range tools {
 		found := false
 		for _, r := range pf.Allow {
@@ -53,7 +53,7 @@ func TestDefaultPolicy_HasCommonTools(t *testing.T) {
 func TestDefaultPolicy_HasUniversalDenyRules(t *testing.T) {
 	pf := DefaultPolicy()
 
-	denies := []string{"rm -rf /*", "git push origin main", "gh repo delete *"}
+	denies := []string{"rm -rf /*", "gh repo delete *"}
 	for _, cmd := range denies {
 		found := false
 		for _, r := range pf.Deny {

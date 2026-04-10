@@ -37,16 +37,6 @@ func generatePolicyYAML() string {
 version: 1
 default: ask
 
-deny:
-  - command: "git push origin main"
-    description: "no direct push to main"
-  - command: "git push origin master"
-    description: "no direct push to master"
-
-ask:
-  - "git push *"
-  - "git commit *"
-
 env:
   scrub:
     - "AWS_*"
