@@ -216,8 +216,10 @@ func TestOverlay_DraftRequestKey(t *testing.T) {
 	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "Does the auth change JWT claims?"})
 
 	var w testWriter
+	// Use a real OutputCopier so the copier branch in draftSelected is exercised.
+	copier := launch.NewOutputCopier(strings.NewReader(""), &w, nil)
 	dismissed := false
-	o := launch.NewOverlay(q, nil, &w, 24, 80, func() {
+	o := launch.NewOverlay(q, copier, &w, 24, 80, func() {
 		dismissed = true
 	})
 
