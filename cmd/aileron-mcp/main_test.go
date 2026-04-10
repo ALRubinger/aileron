@@ -82,15 +82,15 @@ func TestHandle_ToolsList_WithComms(t *testing.T) {
 	})
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]toolDef)
-	if len(tools) != 2 {
-		t.Fatalf("expected 2 tools (read_messages, send_message), got %d", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools (read_messages, send_message, http_request), got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tool := range tools {
 		names[tool.Name] = true
 	}
-	if !names["read_messages"] || !names["send_message"] {
-		t.Errorf("expected read_messages and send_message, got %v", names)
+	if !names["read_messages"] || !names["send_message"] || !names["http_request"] {
+		t.Errorf("expected read_messages, send_message, and http_request, got %v", names)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestHandle_ToolsList_Both(t *testing.T) {
 	})
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]toolDef)
-	if len(tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("expected 4 tools, got %d", len(tools))
 	}
 }
 
@@ -306,6 +306,101 @@ func containsStr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestHttpRequest_NoSocket(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.httpRequest(map[string]any{"method": "GET", "url": "https://example.com"})
+	if !result.IsError {
+		t.Fatal("expected error without comms socket")
+	}
+}
+
+func TestHttpRequest_MissingFields(t *testing.T) {
+	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
+	result := s.httpRequest(map[string]any{})
+	if !result.IsError {
+		t.Fatal("expected error for missing fields")
+	}
+}
+
+func TestHttpRequest_WithServer(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-mcp-test-http.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req commsRequest
+			json.NewDecoder(conn).Decode(&req)
+			json.NewEncoder(conn).Encode(commsResponse{
+				OK: true,
+				Messages: []commsMessage{
+					{ID: "200", Body: `{"result": "ok"}`},
+				},
+			})
+			conn.Close()
+		}
+	}()
+
+	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
+	result := s.httpRequest(map[string]any{"method": "GET", "url": "https://api.example.com/test"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
+	}
+	if !contains(result.Content[0].Text, "ok") {
+		t.Errorf("expected response body, got %s", result.Content[0].Text)
+	}
+}
+
+func TestHttpRequest_WithServer_NoBody(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-mcp-test-http-nobody.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req commsRequest
+			json.NewDecoder(conn).Decode(&req)
+			json.NewEncoder(conn).Encode(commsResponse{OK: true})
+			conn.Close()
+		}
+	}()
+
+	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
+	result := s.httpRequest(map[string]any{"method": "GET", "url": "https://example.com"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
+	}
+	if !contains(result.Content[0].Text, "no response body") {
+		t.Errorf("expected 'no response body' message, got %s", result.Content[0].Text)
+	}
+}
+
+func TestDispatchTool_HttpRequest(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.dispatchTool(context.Background(), "http_request", map[string]any{"method": "GET", "url": "https://example.com"})
+	if !result.IsError {
+		t.Fatal("expected error without comms socket")
+	}
 }
 
 func TestHandle_Ping(t *testing.T) {
