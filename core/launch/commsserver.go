@@ -166,6 +166,38 @@ func (cs *CommsServer) sendMessage(req CommsRequest) CommsResponse {
 		return CommsResponse{Error: "no listener for service: " + req.Service}
 	}
 
+	// Check if this is a reply to an auto-drafted message. If so,
+	// present the draft in the overlay for review instead of the
+	// generic approval prompt.
+	if orig, found := cs.queue.RecentByChannel(req.Service, req.Channel, 5*time.Minute); found {
+		cs.queue.SetDraft(orig.ID, req.Body)
+		cs.logMessage("draft_queued", req.Service, req.Channel, "", req.Body, orig.ID)
+
+		// Wait for the user to approve or discard via the overlay.
+		// The overlay sets the Draft field to "" on discard or sends
+		// directly on approve. We poll for the draft to be resolved.
+		decision := cs.waitForDraftDecision(orig.ID, req.Body)
+		switch decision {
+		case "approve":
+			if err := sender.Send(nil, comms.OutgoingMessage{
+				Channel: req.Channel,
+				Body:    req.Body,
+			}); err != nil {
+				return CommsResponse{Error: "send failed: " + err.Error()}
+			}
+			cs.logMessage("message_sent", req.Service, req.Channel, "", req.Body, orig.ID)
+			return CommsResponse{OK: true}
+		case "edited":
+			// The user edited and sent directly from the overlay.
+			// The overlay already called DirectSend, so just return OK.
+			cs.logMessage("draft_edited", req.Service, req.Channel, "", req.Body, orig.ID)
+			return CommsResponse{OK: true}
+		default:
+			cs.logMessage("draft_discarded", req.Service, req.Channel, "", req.Body, orig.ID)
+			return CommsResponse{Error: "draft discarded by user"}
+		}
+	}
+
 	// Prompt the developer for approval before sending.
 	decision := cs.promptSendApproval(req.Service, req.Channel, req.Body)
 	if decision != "approve" {
@@ -182,6 +214,72 @@ func (cs *CommsServer) sendMessage(req CommsRequest) CommsResponse {
 
 	cs.logMessage("message_sent", req.Service, req.Channel, "", req.Body, "")
 	return CommsResponse{OK: true}
+}
+
+// waitForDraftDecision polls the queue until the user resolves the draft
+// in the overlay. Returns "approve", "edited", or "discard".
+func (cs *CommsServer) waitForDraftDecision(msgID, originalDraft string) string {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(10 * time.Minute)
+
+	for {
+		select {
+		case <-ticker.C:
+			msg, found := cs.queue.FindByID(msgID)
+			decision := ResolveDraft(msg, found, originalDraft)
+			switch decision {
+			case DraftApprove:
+				cs.queue.ClearDraft(msgID)
+				return "approve"
+			case DraftEdited:
+				cs.queue.ClearDraft(msgID)
+				return "edited"
+			case DraftDiscard:
+				return "discard"
+			default:
+				// DraftPending — keep polling.
+			}
+		case <-timeout:
+			cs.queue.ClearDraft(msgID)
+			return "discard"
+		}
+	}
+}
+
+// draftApproved is a sentinel value set on the Draft field when the
+// user approves the draft as-is from the overlay.
+const draftApproved = "\x00approved"
+
+// DraftDecision represents the outcome of draft resolution.
+// Possible values: "pending", "approve", "edited", "discard".
+type DraftDecision string
+
+const (
+	DraftPending  DraftDecision = "pending"
+	DraftApprove  DraftDecision = "approve"
+	DraftEdited   DraftDecision = "edited"
+	DraftDiscard  DraftDecision = "discard"
+)
+
+// ResolveDraft examines a message's current draft state and returns the
+// decision. If the message has not been found (pass found=false), the
+// result is DraftDiscard. If the draft is still the original text, the
+// result is DraftPending — the caller should keep polling.
+func ResolveDraft(msg Message, found bool, originalDraft string) DraftDecision {
+	if !found {
+		return DraftDiscard
+	}
+	if msg.Draft == "" && msg.DraftFor == "" {
+		return DraftDiscard
+	}
+	if msg.Draft == draftApproved {
+		return DraftApprove
+	}
+	if msg.Draft != originalDraft && msg.Draft != "" && msg.Draft != draftApproved {
+		return DraftEdited
+	}
+	return DraftPending
 }
 
 // promptSendApproval shows the developer a draft message for approval

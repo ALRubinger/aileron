@@ -19,6 +19,10 @@ type Message struct {
 	Read      bool
 	AutoDraft bool   // channel is configured for automatic draft replies
 	Priority  string // "normal" or "high"; high-priority messages bypass quiet hours
+
+	// Draft fields: set when the agent drafts a reply to a message.
+	Draft    string // agent's drafted reply text (empty for regular messages)
+	DraftFor string // ID of the original message this draft replies to
 }
 
 // NotifyQueue is a bounded, thread-safe FIFO of incoming messages.
@@ -144,6 +148,94 @@ func (q *NotifyQueue) MarkRead(id string) {
 	if q.onChange != nil {
 		q.onChange()
 	}
+}
+
+// FindByID returns the message with the given ID, or false if not found.
+func (q *NotifyQueue) FindByID(id string) (Message, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, m := range q.messages {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return Message{}, false
+}
+
+// SetDraft attaches a draft reply to the message with the given ID.
+// It sets the Draft and DraftFor fields and marks the message as unread
+// so it reappears as a draft notification. Returns false if the target
+// message was not found.
+func (q *NotifyQueue) SetDraft(targetID, draftText string) bool {
+	q.mu.Lock()
+	found := false
+	for i := range q.messages {
+		if q.messages[i].ID == targetID {
+			q.messages[i].Draft = draftText
+			q.messages[i].DraftFor = targetID
+			q.messages[i].Read = false
+			found = true
+			break
+		}
+	}
+	q.mu.Unlock()
+
+	if found && q.onChange != nil {
+		q.onChange()
+	}
+	return found
+}
+
+// ApproveDraft sets the draft to the approved sentinel so the
+// commsserver knows to send the message as-is.
+func (q *NotifyQueue) ApproveDraft(targetID string) {
+	q.mu.Lock()
+	for i := range q.messages {
+		if q.messages[i].ID == targetID {
+			q.messages[i].Draft = "\x00approved"
+			break
+		}
+	}
+	q.mu.Unlock()
+
+	if q.onChange != nil {
+		q.onChange()
+	}
+}
+
+// ClearDraft removes the draft from the message with the given ID.
+func (q *NotifyQueue) ClearDraft(targetID string) {
+	q.mu.Lock()
+	for i := range q.messages {
+		if q.messages[i].ID == targetID {
+			q.messages[i].Draft = ""
+			q.messages[i].DraftFor = ""
+			break
+		}
+	}
+	q.mu.Unlock()
+
+	if q.onChange != nil {
+		q.onChange()
+	}
+}
+
+// RecentByChannel returns the most recent message on the given service
+// and channel that was auto-drafted (within the given duration). This is
+// used to detect when a send_message call is replying to an auto-drafted
+// message.
+func (q *NotifyQueue) RecentByChannel(service, channel string, within time.Duration) (Message, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	cutoff := time.Now().Add(-within)
+	// Search from newest to oldest.
+	for i := len(q.messages) - 1; i >= 0; i-- {
+		m := q.messages[i]
+		if m.Source == service && m.Channel == channel && m.AutoDraft && m.Timestamp.After(cutoff) {
+			return m, true
+		}
+	}
+	return Message{}, false
 }
 
 // MarkAllRead marks all messages as read.

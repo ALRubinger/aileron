@@ -24,6 +24,9 @@ type Overlay struct {
 	onDismiss      func()
 	OnDraftRequest func(msg Message)
 	OnReply        func(msg Message, reply string)
+	OnDraftApprove func(msg Message)         // called when user presses 'y' on a draft
+	OnDraftDiscard func(msg Message)         // called when user presses 'n' on a draft
+	OnDraftEdit    func(msg Message, edited string) // called when user edits and sends a draft
 
 	// Reply mode state.
 	replyMode bool
@@ -144,6 +147,12 @@ func (o *Overlay) HandleKey(b byte) {
 		o.draftSelected()
 	case 'r':
 		o.startReply()
+	case 'y':
+		o.approveDraft()
+	case 'e':
+		o.editDraft()
+	case 'n':
+		o.discardDraft()
 	}
 }
 
@@ -239,6 +248,71 @@ func (o *Overlay) draftSelected() {
 	}
 }
 
+func (o *Overlay) selectedIsDraft() bool {
+	msgs := o.queue.Messages()
+	if o.cursorPos >= len(msgs) {
+		return false
+	}
+	return msgs[o.cursorPos].Draft != ""
+}
+
+func (o *Overlay) approveDraft() {
+	msgs := o.queue.Messages()
+	if o.cursorPos >= len(msgs) {
+		return
+	}
+	msg := msgs[o.cursorPos]
+	if msg.Draft == "" {
+		return
+	}
+	o.queue.MarkRead(msg.ID)
+
+	if o.OnDraftApprove != nil {
+		cb := o.OnDraftApprove
+		o.mu.Unlock()
+		cb(msg)
+		o.mu.Lock()
+	}
+	o.render()
+}
+
+func (o *Overlay) discardDraft() {
+	msgs := o.queue.Messages()
+	if o.cursorPos >= len(msgs) {
+		return
+	}
+	msg := msgs[o.cursorPos]
+	if msg.Draft == "" {
+		return
+	}
+	o.queue.MarkRead(msg.ID)
+
+	if o.OnDraftDiscard != nil {
+		cb := o.OnDraftDiscard
+		o.mu.Unlock()
+		cb(msg)
+		o.mu.Lock()
+	}
+	o.render()
+}
+
+func (o *Overlay) editDraft() {
+	msgs := o.queue.Messages()
+	if o.cursorPos >= len(msgs) {
+		return
+	}
+	msg := msgs[o.cursorPos]
+	if msg.Draft == "" {
+		return
+	}
+	// Enter reply mode pre-filled with the draft text.
+	o.replyMode = true
+	o.replyMsg = msg
+	o.replyBuf.Reset()
+	o.replyBuf.WriteString(msg.Draft)
+	o.render()
+}
+
 func (o *Overlay) startReply() {
 	msgs := o.queue.Messages()
 	if o.cursorPos >= len(msgs) {
@@ -301,6 +375,7 @@ func (o *Overlay) handleReplyKey(b byte) {
 func (o *Overlay) submitReply() {
 	reply := o.replyBuf.String()
 	msg := o.replyMsg
+	isDraftEdit := msg.Draft != ""
 	o.replyMode = false
 	o.replyBuf.Reset()
 	o.queue.MarkRead(msg.ID)
@@ -319,11 +394,18 @@ func (o *Overlay) submitReply() {
 		cb()
 		o.mu.Lock()
 	}
-	if reply != "" && o.OnReply != nil {
-		cb := o.OnReply
-		o.mu.Unlock()
-		cb(msg, reply)
-		o.mu.Lock()
+	if reply != "" {
+		if isDraftEdit && o.OnDraftEdit != nil {
+			cb := o.OnDraftEdit
+			o.mu.Unlock()
+			cb(msg, reply)
+			o.mu.Lock()
+		} else if o.OnReply != nil {
+			cb := o.OnReply
+			o.mu.Unlock()
+			cb(msg, reply)
+			o.mu.Lock()
+		}
 	}
 }
 
@@ -374,8 +456,14 @@ func (o *Overlay) render() {
 				readMark = " "
 			}
 
-			line := fmt.Sprintf("%s%s %s · %s: %s",
-				cursor, readMark, m.Source, m.Author, m.Preview)
+			var line string
+			if m.Draft != "" {
+				line = fmt.Sprintf("%s%s \033[36m[draft]\033[0m %s · %s: %s",
+					cursor, readMark, m.Source, m.Author, m.Preview)
+			} else {
+				line = fmt.Sprintf("%s%s %s · %s: %s",
+					cursor, readMark, m.Source, m.Author, m.Preview)
+			}
 
 			// Truncate to terminal width.
 			if displayWidth(line) > o.cols {
@@ -399,6 +487,20 @@ func (o *Overlay) render() {
 				buf.WriteString(" " + line + "\n")
 			}
 
+			// Show draft text below the original message.
+			if selected.Draft != "" {
+				buf.WriteString("\n")
+				buf.WriteString(" \033[36m── Draft Reply ──\033[0m\n")
+				draftLines := wrapText(selected.Draft, o.cols-2)
+				for i, line := range draftLines {
+					if i >= maxBodyLines {
+						buf.WriteString("  ...\n")
+						break
+					}
+					buf.WriteString(" " + line + "\n")
+				}
+			}
+
 			// Reply input box.
 			if o.replyMode {
 				buf.WriteString("\n")
@@ -412,6 +514,9 @@ func (o *Overlay) render() {
 	if o.replyMode {
 		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
 		footer += " Enter send  Esc cancel"
+	} else if o.selectedIsDraft() {
+		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
+		footer += " j/k or ↑/↓ navigate  y send  e edit  n discard  q return"
 	} else {
 		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
 		footer += " j/k or ↑/↓ navigate  r reply  a draft reply  d dismiss  q return"
