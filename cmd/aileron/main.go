@@ -13,6 +13,7 @@ import (
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/ALRubinger/aileron/core/launch/agents"
 	"github.com/ALRubinger/aileron/core/model"
+	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/core/version"
 	"golang.org/x/term"
@@ -75,6 +76,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return 1
 	case "secret":
 		return runSecret(args[1:], stdout, stderr)
+	case "status":
+		return runStatus(args[1:], stdout, stderr)
 	case "log":
 		return runLog(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
@@ -96,6 +99,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
+	fmt.Fprintln(w, "  aileron status [section]           Show merged config (policy, env, notifications, vault)")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
@@ -310,6 +314,195 @@ var readPassword = defaultReadPassword
 
 func defaultReadPassword(fd int) ([]byte, error) {
 	return term.ReadPassword(fd)
+}
+
+// runStatus shows the current configuration state.
+func runStatus(args []string, stdout, stderr io.Writer) int {
+	dir, _ := os.Getwd()
+	section := ""
+	if len(args) > 0 {
+		section = args[0]
+	}
+
+	switch section {
+	case "":
+		showStatusPolicy(dir, stdout)
+		fmt.Fprintln(stdout)
+		showStatusEnv(dir, stdout)
+		fmt.Fprintln(stdout)
+		showStatusNotifications(dir, stdout)
+		fmt.Fprintln(stdout)
+		showStatusVault(dir, stdout)
+		return 0
+	case "policy":
+		showStatusPolicy(dir, stdout)
+		return 0
+	case "env":
+		showStatusEnv(dir, stdout)
+		return 0
+	case "notifications":
+		showStatusNotifications(dir, stdout)
+		return 0
+	case "vault":
+		showStatusVault(dir, stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown status section: %q\n", section)
+		fmt.Fprintln(stderr, "usage: aileron status [policy|env|notifications|vault]")
+		return 1
+	}
+}
+
+func showStatusPolicy(dir string, w io.Writer) {
+	fmt.Fprintln(w, "\033[1mPolicy\033[0m")
+
+	defaults := launchpolicy.DefaultPolicy()
+	fmt.Fprintf(w, "  Built-in defaults: %d allow, %d deny\n",
+		len(defaults.Allow), len(defaults.Deny))
+
+	userSettings, err := launchpolicy.LoadUserSettings()
+	if err != nil {
+		fmt.Fprintf(w, "  User settings:     error: %v\n", err)
+	} else {
+		total := len(userSettings.Allow) + len(userSettings.Deny) + len(userSettings.Ask)
+		if total == 0 {
+			fmt.Fprintln(w, "  User settings:     (none)")
+		} else {
+			fmt.Fprintf(w, "  User settings:     %d allow, %d deny, %d ask\n",
+				len(userSettings.Allow), len(userSettings.Deny), len(userSettings.Ask))
+		}
+	}
+
+	policyPath := launch.FindPolicyFile(dir)
+	if policyPath == "" {
+		fmt.Fprintln(w, "  Project policy:    (no aileron.yaml found)")
+	} else {
+		project, err := launchpolicy.Load(policyPath)
+		if err != nil {
+			fmt.Fprintf(w, "  Project policy:    error: %v\n", err)
+		} else {
+			fmt.Fprintf(w, "  Project policy:    %s\n", policyPath)
+			total := len(project.Allow) + len(project.Deny) + len(project.Ask)
+			if total > 0 {
+				fmt.Fprintf(w, "                     %d allow, %d deny, %d ask\n",
+					len(project.Allow), len(project.Deny), len(project.Ask))
+			}
+			if project.Default != "" {
+				fmt.Fprintf(w, "  Default:           %s\n", project.Default)
+			}
+		}
+	}
+}
+
+func showStatusEnv(dir string, w io.Writer) {
+	fmt.Fprintln(w, "\033[1mEnvironment\033[0m")
+
+	policyPath := launch.FindPolicyFile(dir)
+	var merged *launchpolicy.PolicyFile
+	if policyPath != "" {
+		var err error
+		merged, err = launchpolicy.LoadWithProfiles(policyPath)
+		if err != nil {
+			fmt.Fprintf(w, "  error: %v\n", err)
+			return
+		}
+	} else {
+		merged = launchpolicy.DefaultPolicy()
+	}
+
+	if merged.Env == nil {
+		fmt.Fprintln(w, "  No env scrubbing configured.")
+		return
+	}
+	if len(merged.Env.Scrub) > 0 {
+		fmt.Fprintln(w, "  Scrub:")
+		for _, p := range merged.Env.Scrub {
+			fmt.Fprintf(w, "    - %s\n", p)
+		}
+	}
+	if len(merged.Env.Passthrough) > 0 {
+		fmt.Fprintln(w, "  Passthrough:")
+		for _, p := range merged.Env.Passthrough {
+			fmt.Fprintf(w, "    - %s\n", p)
+		}
+	}
+}
+
+func showStatusNotifications(dir string, w io.Writer) {
+	fmt.Fprintln(w, "\033[1mNotifications\033[0m")
+
+	policyPath := launch.FindPolicyFile(dir)
+	var merged *launchpolicy.PolicyFile
+	if policyPath != "" {
+		var err error
+		merged, err = launchpolicy.LoadWithProfiles(policyPath)
+		if err != nil {
+			fmt.Fprintf(w, "  error: %v\n", err)
+			return
+		}
+	} else {
+		merged = launchpolicy.DefaultPolicy()
+	}
+
+	if merged.Notifications == nil {
+		fmt.Fprintln(w, "  No notifications configured.")
+		return
+	}
+
+	if cfg := merged.Notifications.Slack; cfg != nil {
+		fmt.Fprintln(w, "  Slack:")
+		fmt.Fprintf(w, "    app_token: %s\n", tokenStatus(cfg.AppToken))
+		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(cfg.BotToken))
+		for _, ch := range cfg.Channels {
+			draft := ""
+			if ch.AutoDraft {
+				draft = " (auto-draft)"
+			}
+			fmt.Fprintf(w, "    channel: %s [show=%s]%s\n", ch.Name, ch.Show, draft)
+		}
+	}
+
+	if cfg := merged.Notifications.Discord; cfg != nil {
+		fmt.Fprintln(w, "  Discord:")
+		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(cfg.BotToken))
+		for _, ch := range cfg.Channels {
+			fmt.Fprintf(w, "    channel: %s [show=%s]\n", ch.Name, ch.Show)
+		}
+	}
+}
+
+func showStatusVault(dir string, w io.Writer) {
+	fmt.Fprintln(w, "\033[1mVault\033[0m")
+
+	vaultPath := launch.DefaultVaultPath()
+	if _, err := os.Stat(vaultPath); err != nil {
+		fmt.Fprintf(w, "  Vault file: %s (not created)\n", vaultPath)
+		fmt.Fprintln(w, "  Run 'aileron secret set <name>' to create it.")
+		return
+	}
+
+	fv, err := vault.NewFileVault(vaultPath)
+	if err != nil {
+		fmt.Fprintf(w, "  Vault file: %s (error: %v)\n", vaultPath, err)
+		return
+	}
+
+	names := fv.Names()
+	fmt.Fprintf(w, "  Vault file: %s\n", vaultPath)
+	fmt.Fprintf(w, "  Secrets:    %d stored\n", len(names))
+	for _, name := range names {
+		fmt.Fprintf(w, "    - %s\n", name)
+	}
+}
+
+func tokenStatus(value string) string {
+	if value == "" {
+		return "(not set)"
+	}
+	if launch.IsVaultRef(value) {
+		return value
+	}
+	return "(plaintext — use vault: reference)"
 }
 
 // resolveShim finds the aileron-sh binary next to this executable, or on PATH.
