@@ -554,6 +554,45 @@ func TestBridgeMessages(t *testing.T) {
 	}
 }
 
+func TestWireDraftInjection_OverlayCallback(t *testing.T) {
+	var buf strings.Builder
+	q := launch.NewNotifyQueue(10, nil)
+	o := launch.NewOverlay(q, nil, &buf, 24, 80, nil)
+
+	launch.WireDraftInjection(&buf, o, q)
+
+	// Simulate overlay draft request.
+	msg := launch.Message{Source: "slack", Channel: "#backend", Author: "Sarah", Body: "question?"}
+	o.OnDraftRequest(msg)
+
+	out := buf.String()
+	if !strings.Contains(out, "send_message") {
+		t.Error("expected send_message in injected prompt from overlay callback")
+	}
+	if !strings.Contains(out, "Sarah") {
+		t.Error("expected author in injected prompt")
+	}
+}
+
+func TestWireDraftInjection_AutoDraftCallback(t *testing.T) {
+	var buf strings.Builder
+	q := launch.NewNotifyQueue(10, nil)
+	o := launch.NewOverlay(q, nil, &buf, 24, 80, nil)
+
+	launch.WireDraftInjection(&buf, o, q)
+
+	// Push an auto-draft message — should trigger injection.
+	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Bob", Body: "help?", AutoDraft: true})
+
+	out := buf.String()
+	if !strings.Contains(out, "send_message") {
+		t.Error("expected send_message in injected prompt from auto-draft callback")
+	}
+	if !strings.Contains(out, "Bob") {
+		t.Error("expected author in injected prompt")
+	}
+}
+
 func TestBridgeMessages_AutoDraft(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 3)

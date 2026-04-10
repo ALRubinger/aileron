@@ -297,6 +297,30 @@ func TestOverlay_ExpandedBodyRendered(t *testing.T) {
 	}
 }
 
+func TestOverlay_ExpandedBodyLongTruncated(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	// Create a message with a very long body that exceeds 5 lines at 80 cols.
+	longBody := strings.Repeat("This is a very long sentence that should wrap across multiple lines. ", 10)
+	q.Push(launch.Message{
+		ID:      "1",
+		Source:  "slack",
+		Channel: "#backend",
+		Author:  "Sarah",
+		Preview: "Long msg...",
+		Body:    longBody,
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	out := w.String()
+
+	// Body is long enough to exceed 5 lines, so truncation indicator should appear.
+	if !strings.Contains(out, "...") {
+		t.Error("expected '...' truncation indicator for long body")
+	}
+}
+
 func TestOverlay_FooterShowsDraftAction(t *testing.T) {
 	q := launch.NewNotifyQueue(10, nil)
 	var w testWriter
