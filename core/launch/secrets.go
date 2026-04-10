@@ -55,6 +55,16 @@ func IsVaultRef(value string) bool {
 	return strings.HasPrefix(value, vaultPrefix)
 }
 
+// ValidateTokenRef checks that a token value is either empty or a vault
+// reference. Plaintext tokens are rejected to prevent secrets from being
+// committed to version control in aileron.yaml.
+func ValidateTokenRef(field, value string) error {
+	if value == "" || IsVaultRef(value) {
+		return nil
+	}
+	return fmt.Errorf("%s contains a plaintext token — use 'aileron secret set <name>' and reference it as 'vault:<name>' instead", field)
+}
+
 // promptAndOpenVault prompts the user for a vault passphrase on /dev/tty
 // and opens the local encrypted vault.
 func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
