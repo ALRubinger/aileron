@@ -154,19 +154,31 @@ Aileron's credential vault uses a zero-knowledge architecture: your secrets are 
 
 ## Current Status
 
-Aileron is pivoting from a cloud-hosted execution plane to a **local-first CLI tool** centered on `aileron launch`. The core infrastructure (policy engine, zero-knowledge vault, audit trail) is being reoriented to power the connected coding session.
+Aileron is a **local-first CLI tool** centered on `aileron launch` — the connected coding session.
 
-**Built:**
-- `aileron launch <agent>` CLI and `aileron-sh` shell shim — agents run with a policy-enforced shell
-- Policy engine with deterministic rule evaluation (allow, deny, require approval)
-- Zero-knowledge credential vault (Argon2id + AES-256-GCM, passphrase-derived keys)
-- Confidential computing / TEE support (Google Confidential Space, AMD SEV-SNP)
+**Core:**
+- `aileron launch <agent>` with policy-enforced shell (`aileron-sh`)
+- Built-in policy defaults for all language toolchains and OS-specific protections (ADR-0015)
+- Three-layer policy merge: built-in defaults → project `aileron.yaml` → user `~/.aileron/settings.yaml`
+- Zero-config experience — works without any `aileron.yaml`
 
-**In progress:**
-- Policy schema and loader for `aileron.yaml` ([#64](https://github.com/ALRubinger/aileron/issues/64))
-- Terminal UX, pty proxy, and bidirectional communication ([#65](https://github.com/ALRubinger/aileron/issues/65))
+**Communication:**
+- Bidirectional Slack and Discord messaging in the terminal
+- Auto-draft replies using the agent's codebase context
+- Manual reply, draft request, and dismiss from the notification overlay
 
-See the full roadmap in [#63](https://github.com/ALRubinger/aileron/issues/63) and product vision in [#66](https://github.com/ALRubinger/aileron/issues/66).
+**Security:**
+- Encrypted credential vault (Argon2id + AES-256-GCM, passphrase-derived keys)
+- `http_request` MCP tool with credential injection — agent never sees raw tokens
+- Plaintext tokens rejected in config — `vault:` references required
+
+**Observability:**
+- Append-only audit trail for commands, messages, and credential usage
+- `aileron status` for config inspection (policy, env, notifications, vault)
+- `aileron policy test` for dry-run command evaluation
+- `aileron log` for audit trail viewing
+
+See the full implementation in [#63](https://github.com/ALRubinger/aileron/issues/63) and product vision in [#66](https://github.com/ALRubinger/aileron/issues/66).
 
 ## Getting Started
 
