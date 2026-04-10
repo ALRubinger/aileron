@@ -85,7 +85,8 @@ func BuiltinAskRules() []api.PolicyRule {
 
 	result := make([]api.PolicyRule, 0, len(rules))
 	for _, r := range rules {
-		priority := PriorityBuiltinAsk
+		// Compute specificity from pattern; ask offset (+1) for tie-breaking.
+		priority := PatternSpecificity(r.pattern)*3 + effectOffset(api.PolicyRuleEffectRequireApproval)
 		desc := r.desc
 		conditions := []api.PolicyCondition{
 			makeCondition("action.type", api.Eq, "shell.exec"),

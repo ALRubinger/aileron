@@ -103,7 +103,6 @@ type Rule struct {
 	ArgsContain string `yaml:"args_contain,omitempty"`
 	WorkingDir  string `yaml:"working_dir,omitempty"`
 	Description string `yaml:"description,omitempty"`
-	Priority    *int   `yaml:"priority,omitempty"`
 	Override    string `yaml:"override,omitempty"`
 }
 

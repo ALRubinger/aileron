@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"gopkg.in/yaml.v3"
@@ -18,12 +19,11 @@ const (
 	userSettingsFile = "settings.yaml"
 )
 
-// Default priorities for each bucket.
+// Layer names tag rule IDs for auditability.
 const (
-	PriorityAllow      = 50
-	PriorityAsk        = 100
-	PriorityBuiltinAsk = 150 // built-in ask rules sit between user ask and user deny
-	PriorityDeny       = 200
+	LayerDefault = "default"
+	LayerUser    = "user"
+	LayerProject = "project"
 )
 
 // Load parses a single aileron.yaml file.
@@ -70,44 +70,72 @@ func LoadUserSettings() (*PolicyFile, error) {
 }
 
 // LoadWithProfiles loads a project policy file and merges it with built-in
-// defaults and user settings per ADR-0015.
+// defaults and user settings per ADR-0015 and ADR-0016.
 //
-// Composition order (each layer wins over the previous):
+// Composition order (each layer wins over the previous for same-pattern rules):
 //
 //	Built-in defaults (DefaultPolicy — all languages, OS-specific rules)
 //	  → User settings (~/.aileron/settings.yaml)
 //	    → Project aileron.yaml
-//	      → Built-in structural deny rules (injected by ToEngineRules)
+//	      → Built-in structural ask rules (injected by ToEngineRules)
+//
+// When two layers define a rule with the same command pattern, the later
+// layer replaces the earlier one. When patterns differ, the engine picks
+// the most specific match at eval time (specificity = non-wildcard chars).
 func LoadWithProfiles(path string) (*PolicyFile, error) {
 	project, err := Load(path)
 	if err != nil {
 		return nil, err
 	}
 
-	// Start from built-in defaults.
+	// Start from built-in defaults, tagged as "default" layer.
 	base := DefaultPolicy()
+	tagRules(base, LayerDefault)
 
 	// Layer user settings on top of defaults.
 	userSettings, err := LoadUserSettings()
 	if err != nil {
 		return nil, err
 	}
+	tagRules(userSettings, LayerUser)
 	base = Merge(base, userSettings)
 
 	// Project policy is the final overlay.
+	tagRules(project, LayerProject)
 	return Merge(base, project), nil
 }
 
-// Merge composes two policy files. The overlay's rules are appended to the
-// base's rules. Scalar settings use last-writer-wins (overlay wins). Env
-// scrub lists are unioned; passthrough at any layer beats scrub.
+// tagRules prefixes rule IDs with a layer name for auditability.
+// Rules that already have a layer prefix (contain ":") are skipped.
+func tagRules(pf *PolicyFile, layer string) {
+	tagBucket := func(rules []Rule, bucket string) {
+		for i := range rules {
+			if rules[i].ID == "" {
+				rules[i].ID = fmt.Sprintf("%s:%s_%d", layer, bucket, i)
+			} else if !strings.Contains(rules[i].ID, ":") {
+				rules[i].ID = fmt.Sprintf("%s:%s", layer, rules[i].ID)
+			}
+		}
+	}
+	tagBucket(pf.Allow, "allow")
+	tagBucket(pf.Deny, "deny")
+	tagBucket(pf.Ask, "ask")
+}
+
+// Merge composes two policy files. For rules with the same command
+// pattern, the overlay rule replaces the base rule (later layer wins).
+// Rules with different patterns coexist. Scalar settings use
+// last-writer-wins (overlay wins). Env scrub lists are unioned;
+// passthrough at any layer beats scrub.
 func Merge(base, overlay *PolicyFile) *PolicyFile {
+	// Merge rules with pattern-based replacement: overlay replaces base
+	// rules that have the same command pattern.
 	result := &PolicyFile{
 		Version: overlay.Version,
 		Default: base.Default,
-		Allow:    append(append([]Rule{}, base.Allow...), overlay.Allow...),
-		Deny:     append(append([]Rule{}, base.Deny...), overlay.Deny...),
-		Ask:      append(append([]Rule{}, base.Ask...), overlay.Ask...),
+		Allow:   mergeRuleBuckets(base.Allow, overlay.Allow, collectAllPatterns(overlay)),
+		Deny:    mergeRuleBuckets(base.Deny, overlay.Deny, collectAllPatterns(overlay)),
+		Ask:     mergeRuleBuckets(base.Ask, overlay.Ask, collectAllPatterns(overlay)),
 	}
 
 	// Last-writer-wins for default and settings.
@@ -152,6 +180,35 @@ func Merge(base, overlay *PolicyFile) *PolicyFile {
 	result.Allow = applyOverrides(result.Allow, allOverlaySources)
 	result.Ask = applyOverrides(result.Ask, allOverlaySources)
 
+	return result
+}
+
+// collectAllPatterns returns the set of command patterns from all buckets
+// of a policy file. Used to identify which base rules should be replaced.
+func collectAllPatterns(pf *PolicyFile) map[string]bool {
+	patterns := make(map[string]bool)
+	for _, buckets := range [][]Rule{pf.Allow, pf.Deny, pf.Ask} {
+		for _, r := range buckets {
+			if r.Command != "" {
+				patterns[r.Command] = true
+			}
+		}
+	}
+	return patterns
+}
+
+// mergeRuleBuckets merges a base and overlay bucket. Base rules whose
+// command pattern appears in the overlay's pattern set are dropped
+// (the overlay rule in whatever bucket replaces them).
+func mergeRuleBuckets(base, overlay []Rule, overlayPatterns map[string]bool) []Rule {
+	var result []Rule
+	for _, r := range base {
+		if r.Command != "" && overlayPatterns[r.Command] {
+			continue // overlay replaces this pattern
+		}
+		result = append(result, r)
+	}
+	result = append(result, overlay...)
 	return result
 }
 
@@ -313,22 +370,27 @@ func applyOverrides(rules []Rule, overrideSource []Rule) []Rule {
 }
 
 // ToEngineRules translates the policy file into api.PolicyRule types
-// suitable for the RuleEngine. It includes built-in structural deny rules
+// suitable for the RuleEngine. It includes built-in structural ask rules
 // and a catch-all default rule.
+//
+// Priority is computed from pattern specificity: count of non-wildcard
+// characters in the command pattern. The engine sorts by priority
+// descending, so more specific patterns win. For equal specificity,
+// a small offset biases toward safety: deny+2, ask+1, allow+0.
 func (pf *PolicyFile) ToEngineRules() []api.PolicyRule {
 	var rules []api.PolicyRule
 
 	for i, r := range pf.Allow {
-		rules = append(rules, ruleToEngine(r, api.PolicyRuleEffectAllow, PriorityAllow, "allow", i))
+		rules = append(rules, ruleToEngine(r, api.PolicyRuleEffectAllow, "allow", i))
 	}
 	for i, r := range pf.Ask {
-		rules = append(rules, ruleToEngine(r, api.PolicyRuleEffectRequireApproval, PriorityAsk, "ask", i))
+		rules = append(rules, ruleToEngine(r, api.PolicyRuleEffectRequireApproval, "ask", i))
 	}
 	for i, r := range pf.Deny {
-		rules = append(rules, ruleToEngine(r, api.PolicyRuleEffectDeny, PriorityDeny, "deny", i))
+		rules = append(rules, ruleToEngine(r, api.PolicyRuleEffectDeny, "deny", i))
 	}
 
-	// Add built-in structural deny rules.
+	// Add built-in structural ask rules.
 	rules = append(rules, BuiltinAskRules()...)
 
 	// Add default catch-all rule.
@@ -337,16 +399,44 @@ func (pf *PolicyFile) ToEngineRules() []api.PolicyRule {
 	return rules
 }
 
-func ruleToEngine(r Rule, effect api.PolicyRuleEffect, defaultPriority int, bucket string, index int) api.PolicyRule {
+// PatternSpecificity returns the number of non-wildcard characters in
+// a pattern. More literal characters means a more specific match.
+// Exported for testing.
+func PatternSpecificity(pattern string) int {
+	count := 0
+	for _, ch := range pattern {
+		if ch != '*' {
+			count++
+		}
+	}
+	return count
+}
+
+// effectOffset returns a small tie-breaker offset for equal-specificity
+// rules: deny > ask > allow (safety bias).
+func effectOffset(effect api.PolicyRuleEffect) int {
+	switch effect {
+	case api.PolicyRuleEffectDeny:
+		return 2
+	case api.PolicyRuleEffectRequireApproval:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func ruleToEngine(r Rule, effect api.PolicyRuleEffect, bucket string, index int) api.PolicyRule {
 	id := r.ID
 	if id == "" {
 		id = fmt.Sprintf("%s_%d", bucket, index)
 	}
 
-	priority := defaultPriority
-	if r.Priority != nil {
-		priority = *r.Priority
+	// Compute specificity-based priority from the command pattern.
+	pattern := r.Command
+	if pattern == "" {
+		pattern = r.Binary
 	}
+	priority := PatternSpecificity(pattern)*3 + effectOffset(effect)
 
 	var conditions []api.PolicyCondition
 

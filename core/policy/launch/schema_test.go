@@ -99,7 +99,7 @@ func TestRule_UnmarshalYAML_InvalidMappingField(t *testing.T) {
 	// A mapping with an invalid type for a known field should produce
 	// a decode error (the "decoding rule:" path).
 	input := `
-- priority: [1, 2, 3]
+- command: [1, 2, 3]
 `
 	var rules []launch.Rule
 	err := yaml.Unmarshal([]byte(input), &rules)

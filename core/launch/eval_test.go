@@ -83,8 +83,9 @@ default: allow
 	}
 }
 
-func TestEvaluateCommand_ProjectCannotOverrideBuiltinDeny(t *testing.T) {
-	// A project policy cannot whitelist a built-in deny rule.
+func TestEvaluateCommand_ProjectOverridesBuiltinDeny(t *testing.T) {
+	// Per ADR-0016, the project layer can override built-in default deny
+	// rules by defining the same command pattern. Later layer wins.
 	path := writePolicyFile(t, `
 version: 1
 default: allow
@@ -93,12 +94,12 @@ allow:
   - "rm -rf /*"
 `)
 	result := launch.EvaluateCommand(path, "gh repo delete my-org/repo", "/tmp")
-	if result.Disposition != model.DispositionDeny {
-		t.Errorf("expected built-in deny to win over project allow, got %q", result.Disposition)
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected project allow to override built-in deny, got %q", result.Disposition)
 	}
 	result = launch.EvaluateCommand(path, "rm -rf /", "/tmp")
-	if result.Disposition != model.DispositionDeny {
-		t.Errorf("expected built-in deny to win over project allow for rm -rf, got %q", result.Disposition)
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected project allow to override built-in deny for rm -rf, got %q", result.Disposition)
 	}
 }
 
@@ -220,17 +221,22 @@ func TestEvaluateCommand_InvalidPolicyFile(t *testing.T) {
 }
 
 func TestEvaluateCommand_NoPolicyFileNoHome(t *testing.T) {
-	// When HOME is empty and no policy path, should fall back gracefully.
+	// When HOME is empty and no policy path, built-in defaults still apply.
 	t.Setenv("HOME", "")
+	// "echo *" is in the built-in allow list.
 	result := launch.EvaluateCommand("", "echo hello", "/tmp")
-	// Empty user settings + no project policy → default ask.
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected allow from built-in defaults, got %q", result.Disposition)
+	}
+	// An unknown command should get default ask.
+	result = launch.EvaluateCommand("", "docker run myimage", "/tmp")
 	if result.Disposition != model.DispositionRequireApproval {
-		t.Errorf("expected ask fallback, got %q", result.Disposition)
+		t.Errorf("expected ask for unknown command, got %q", result.Disposition)
 	}
 }
 
 func TestEvaluateCommand_NoPolicyFileInvalidUserSettings(t *testing.T) {
-	// Covers line 74: LoadUserSettings returns error → fallback.
+	// Invalid user settings → falls back to defaults only.
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
@@ -238,10 +244,11 @@ func TestEvaluateCommand_NoPolicyFileInvalidUserSettings(t *testing.T) {
 	os.MkdirAll(settingsDir, 0o755)
 	os.WriteFile(filepath.Join(settingsDir, "settings.yaml"), []byte("{{invalid"), 0o644)
 
-	// No project policy path + invalid user settings → fallback to empty → default ask.
+	// No project policy path + invalid user settings → built-in defaults apply.
+	// "echo *" is in the built-in allow list.
 	result := launch.EvaluateCommand("", "echo hello", "/tmp")
-	if result.Disposition != model.DispositionRequireApproval {
-		t.Errorf("expected ask fallback for invalid user settings with no project, got %q", result.Disposition)
+	if result.Disposition != model.DispositionAllow {
+		t.Errorf("expected allow from built-in defaults, got %q", result.Disposition)
 	}
 }
 
@@ -385,8 +392,8 @@ allow:
 func TestWriteDeny_BuiltinRule(t *testing.T) {
 	var buf bytes.Buffer
 	launch.WriteDeny(&buf, "eval bad", "", "builtin_eval", "")
-	if !strings.Contains(buf.String(), "built-in rule") {
-		t.Errorf("expected 'built-in rule' source, got %q", buf.String())
+	if !strings.Contains(buf.String(), "built-in defaults") {
+		t.Errorf("expected 'built-in defaults' source, got %q", buf.String())
 	}
 }
 
@@ -430,5 +437,74 @@ func TestWriteDeny_NoReason(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	if len(lines) != 1 {
 		t.Errorf("expected 1 line with no reason, got %d", len(lines))
+	}
+}
+
+// --- Layer extraction and override hint tests (ADR-0016) ---
+
+func TestEvalResult_LayerFromRuleID(t *testing.T) {
+	path := writePolicyFile(t, `
+version: 1
+default: deny
+allow:
+  - "echo *"
+`)
+	result := launch.EvaluateCommand(path, "echo hello", "/tmp")
+	if result.Disposition != model.DispositionAllow {
+		t.Fatalf("expected allow, got %q", result.Disposition)
+	}
+	// Rule ID should have a layer prefix from LoadWithProfiles.
+	if result.Layer == "" {
+		t.Error("expected non-empty layer in EvalResult")
+	}
+}
+
+func TestWriteDeny_DefaultLayerOverrideHint(t *testing.T) {
+	var buf bytes.Buffer
+	launch.WriteDeny(&buf, "security dump", "blocked", "default:deny_0", "")
+	out := buf.String()
+	if !strings.Contains(out, "built-in defaults") {
+		t.Errorf("expected 'built-in defaults' source, got %q", out)
+	}
+	if !strings.Contains(out, "override in aileron.yaml") {
+		t.Errorf("expected override hint, got %q", out)
+	}
+}
+
+func TestWriteDeny_ProjectLayerOverrideHint(t *testing.T) {
+	var buf bytes.Buffer
+	launch.WriteDeny(&buf, "deploy", "blocked", "project:deny_0", "/repo/aileron.yaml")
+	out := buf.String()
+	if !strings.Contains(out, "/repo/aileron.yaml") {
+		t.Errorf("expected project path, got %q", out)
+	}
+	if !strings.Contains(out, "override in ~/.aileron/settings.yaml") {
+		t.Errorf("expected user override hint, got %q", out)
+	}
+}
+
+func TestWriteDeny_UserLayerNoOverrideHint(t *testing.T) {
+	var buf bytes.Buffer
+	launch.WriteDeny(&buf, "deploy", "blocked", "user:deny_0", "")
+	out := buf.String()
+	if strings.Contains(out, "Hint:") {
+		t.Errorf("user layer should not have override hint, got %q", out)
+	}
+}
+
+func TestEvaluateCommand_SpecificDenyBeatsGeneralAllow(t *testing.T) {
+	// "rm -rf /" (deny, 8 literal chars) should beat "rm *" (allow, 3 literal chars).
+	path := writePolicyFile(t, `
+version: 1
+default: ask
+allow:
+  - "rm *"
+deny:
+  - command: "rm -rf /"
+    description: "block rm -rf root"
+`)
+	result := launch.EvaluateCommand(path, "rm -rf /", "/tmp")
+	if result.Disposition != model.DispositionDeny {
+		t.Errorf("expected specific deny to beat general allow, got %q", result.Disposition)
 	}
 }

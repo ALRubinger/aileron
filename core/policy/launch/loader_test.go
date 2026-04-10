@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	api "github.com/ALRubinger/aileron/core/api/gen"
@@ -175,7 +176,7 @@ func TestToEngineRules_Count(t *testing.T) {
 	}
 }
 
-func TestToEngineRules_Priorities(t *testing.T) {
+func TestToEngineRules_SpecificityPriorities(t *testing.T) {
 	pf, _ := launch.Load(testdataPath("basic.yaml"))
 	rules := pf.ToEngineRules()
 
@@ -184,19 +185,31 @@ func TestToEngineRules_Priorities(t *testing.T) {
 			t.Errorf("rule %q has nil priority", r.RuleId)
 			continue
 		}
-		switch r.Effect {
-		case api.PolicyRuleEffectAllow:
-			if r.RuleId != "default" && *r.Priority != launch.PriorityAllow {
-				t.Errorf("allow rule %q priority = %d, want %d", r.RuleId, *r.Priority, launch.PriorityAllow)
+		// Every rule should have a non-negative specificity-based priority.
+		if *r.Priority < 0 {
+			t.Errorf("rule %q has negative priority %d", r.RuleId, *r.Priority)
+		}
+	}
+
+	// Verify that more specific patterns get higher priority.
+	// "git push origin main" (19 literal chars) should beat "git *" (4 literal chars).
+	findPriority := func(id string) int {
+		for _, r := range rules {
+			if r.RuleId == id {
+				return *r.Priority
 			}
-		case api.PolicyRuleEffectRequireApproval:
-			if r.RuleId != "default" && *r.Priority != launch.PriorityAsk && *r.Priority != launch.PriorityBuiltinAsk {
-				t.Errorf("ask rule %q priority = %d, want %d or %d", r.RuleId, *r.Priority, launch.PriorityAsk, launch.PriorityBuiltinAsk)
-			}
-		case api.PolicyRuleEffectDeny:
-			if *r.Priority != launch.PriorityDeny {
-				t.Errorf("deny rule %q priority = %d, want %d", r.RuleId, *r.Priority, launch.PriorityDeny)
-			}
+		}
+		return -1
+	}
+	// The default catch-all should have the lowest priority.
+	defaultPri := findPriority("default")
+	if defaultPri < 0 {
+		t.Fatal("default rule not found")
+	}
+	// Any rule with a pattern should have higher priority than the default.
+	for _, r := range rules {
+		if r.RuleId != "default" && *r.Priority <= defaultPri {
+			t.Errorf("rule %q (priority %d) should beat default (priority %d)", r.RuleId, *r.Priority, defaultPri)
 		}
 	}
 }
@@ -273,8 +286,8 @@ func TestBuiltinAskRules_Count(t *testing.T) {
 		if r.Effect != api.PolicyRuleEffectRequireApproval {
 			t.Errorf("builtin rule %q effect = %v, want RequireApproval", r.RuleId, r.Effect)
 		}
-		if r.Priority == nil || *r.Priority != launch.PriorityBuiltinAsk {
-			t.Errorf("builtin rule %q priority should be %d", r.RuleId, launch.PriorityBuiltinAsk)
+		if r.Priority == nil || *r.Priority <= 0 {
+			t.Errorf("builtin rule %q should have a positive specificity-based priority", r.RuleId)
 		}
 	}
 }
@@ -342,7 +355,6 @@ deny:
   - id: deny-rm
     command: "rm -rf *"
     description: "no recursive delete"
-    priority: 250
 `
 	pf, err := launch.Parse([]byte(yaml))
 	if err != nil {
@@ -355,8 +367,8 @@ deny:
 	if r.ID != "deny-rm" {
 		t.Errorf("ID = %q, want 'deny-rm'", r.ID)
 	}
-	if r.Priority == nil || *r.Priority != 250 {
-		t.Errorf("Priority = %v, want 250", r.Priority)
+	if r.Description != "no recursive delete" {
+		t.Errorf("Description = %q, want 'no recursive delete'", r.Description)
 	}
 }
 
@@ -434,5 +446,267 @@ func TestMerge_NilInputs(t *testing.T) {
 	merged := launch.Merge(base, overlay)
 	if merged.Default != "ask" {
 		t.Errorf("Default = %q, want 'ask' (base preserved when overlay empty)", merged.Default)
+	}
+}
+
+// --- Layer override and specificity tests (ADR-0016) ---
+
+func TestMerge_OverlayReplacesMatchingPattern(t *testing.T) {
+	// When the overlay has a rule with the same command pattern as the base,
+	// the base rule is replaced (later layer wins).
+	base := &launch.PolicyFile{
+		Version: 1,
+		Deny:    []launch.Rule{{Command: "security *", Description: "default deny"}},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Allow:   []launch.Rule{{Command: "security *", Description: "project allows"}},
+	}
+
+	merged := launch.Merge(base, overlay)
+
+	// The deny rule for "security *" should be gone (replaced by overlay).
+	for _, r := range merged.Deny {
+		if r.Command == "security *" {
+			t.Error("expected default deny 'security *' to be replaced by overlay")
+		}
+	}
+	// The allow rule for "security *" should be present.
+	found := false
+	for _, r := range merged.Allow {
+		if r.Command == "security *" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected overlay allow 'security *' to be present")
+	}
+}
+
+func TestMerge_DifferentPatternsCoexist(t *testing.T) {
+	// Rules with different patterns from different layers coexist.
+	base := &launch.PolicyFile{
+		Version: 1,
+		Allow:   []launch.Rule{{Command: "git *"}},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Deny:    []launch.Rule{{Command: "git push origin main"}},
+	}
+
+	merged := launch.Merge(base, overlay)
+
+	// Both should survive since they have different patterns.
+	foundAllow := false
+	for _, r := range merged.Allow {
+		if r.Command == "git *" {
+			foundAllow = true
+		}
+	}
+	if !foundAllow {
+		t.Error("expected base allow 'git *' to survive")
+	}
+	foundDeny := false
+	for _, r := range merged.Deny {
+		if r.Command == "git push origin main" {
+			foundDeny = true
+		}
+	}
+	if !foundDeny {
+		t.Error("expected overlay deny 'git push origin main' to be present")
+	}
+}
+
+func TestSpecificity_ExactBeatsWildcard(t *testing.T) {
+	// An exact match should have higher specificity than a wildcard.
+	exact := launch.PatternSpecificity("git status")
+	wildcard := launch.PatternSpecificity("git *")
+	if exact <= wildcard {
+		t.Errorf("exact (%d) should beat wildcard (%d)", exact, wildcard)
+	}
+}
+
+func TestSpecificity_PartialBeatsGeneral(t *testing.T) {
+	// "git push *" should be more specific than "git *".
+	partial := launch.PatternSpecificity("git push *")
+	general := launch.PatternSpecificity("git *")
+	if partial <= general {
+		t.Errorf("partial (%d) should beat general (%d)", partial, general)
+	}
+}
+
+func TestSpecificity_PureWildcardIsLeast(t *testing.T) {
+	pure := launch.PatternSpecificity("*")
+	if pure != 0 {
+		t.Errorf("pure wildcard should have specificity 0, got %d", pure)
+	}
+}
+
+func TestProjectOverridesBuiltinDeny(t *testing.T) {
+	// Project allow "security *" should override default deny "security *".
+	pf := &launch.PolicyFile{
+		Version: 1,
+		Default: "ask",
+		Deny:    []launch.Rule{{Command: "security *", Description: "default deny"}},
+	}
+	overlay := &launch.PolicyFile{
+		Version: 1,
+		Allow:   []launch.Rule{{Command: "security *", Description: "project allows"}},
+	}
+
+	merged := launch.Merge(pf, overlay)
+
+	// The deny should be gone.
+	for _, r := range merged.Deny {
+		if r.Command == "security *" {
+			t.Error("expected project allow to replace default deny for 'security *'")
+		}
+	}
+}
+
+func TestUserOverridesProjectDeny(t *testing.T) {
+	// User allow should override project deny for the same pattern.
+	project := &launch.PolicyFile{
+		Version: 1,
+		Deny:    []launch.Rule{{Command: "docker push *"}},
+	}
+	user := &launch.PolicyFile{
+		Version: 1,
+		Allow:   []launch.Rule{{Command: "docker push *"}},
+	}
+
+	merged := launch.Merge(project, user)
+
+	for _, r := range merged.Deny {
+		if r.Command == "docker push *" {
+			t.Error("expected user allow to replace project deny for 'docker push *'")
+		}
+	}
+	found := false
+	for _, r := range merged.Allow {
+		if r.Command == "docker push *" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected user allow 'docker push *' to be present")
+	}
+}
+
+func TestSpecificDenyBeatsGeneralAllow(t *testing.T) {
+	// A specific deny should beat a general allow via specificity in the engine.
+	pf := &launch.PolicyFile{
+		Version: 1,
+		Default: "ask",
+		Allow:   []launch.Rule{{Command: "rm *"}},
+		Deny:    []launch.Rule{{Command: "rm -rf /"}},
+	}
+
+	rules := pf.ToEngineRules()
+
+	var allowPri, denyPri int
+	for _, r := range rules {
+		if r.RuleId == "allow_0" {
+			allowPri = *r.Priority
+		}
+		if r.RuleId == "deny_0" {
+			denyPri = *r.Priority
+		}
+	}
+
+	if denyPri <= allowPri {
+		t.Errorf("deny 'rm -rf /' (priority %d) should beat allow 'rm *' (priority %d)", denyPri, allowPri)
+	}
+}
+
+func TestTagRules_LayerPrefix(t *testing.T) {
+	// Verify LoadWithProfiles tags rules with layer prefixes.
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "aileron.yaml")
+	os.WriteFile(policyPath, []byte(`
+version: 1
+default: ask
+allow:
+  - "echo *"
+deny:
+  - command: "rm *"
+    description: "test deny"
+`), 0o644)
+
+	pf, err := launch.LoadWithProfiles(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check that project rules have "project:" prefix.
+	foundProjectAllow := false
+	for _, r := range pf.Allow {
+		if r.Command == "echo *" && strings.HasPrefix(r.ID, "project:") {
+			foundProjectAllow = true
+		}
+	}
+	if !foundProjectAllow {
+		t.Error("expected project allow rule to have 'project:' prefix")
+	}
+
+	// Check that default rules have "default:" prefix.
+	foundDefaultAllow := false
+	for _, r := range pf.Allow {
+		if strings.HasPrefix(r.ID, "default:") {
+			foundDefaultAllow = true
+		}
+	}
+	if !foundDefaultAllow {
+		t.Error("expected default allow rules to have 'default:' prefix")
+	}
+}
+
+func TestSpecificityTieBreaker_DenyBeatsAllow(t *testing.T) {
+	// For same-specificity patterns, deny should beat allow.
+	pf := &launch.PolicyFile{
+		Version: 1,
+		Allow:   []launch.Rule{{Command: "foo bar"}},
+		Deny:    []launch.Rule{{Command: "foo bar"}},
+	}
+
+	rules := pf.ToEngineRules()
+
+	var allowPri, denyPri int
+	for _, r := range rules {
+		if r.RuleId == "allow_0" {
+			allowPri = *r.Priority
+		}
+		if r.RuleId == "deny_0" {
+			denyPri = *r.Priority
+		}
+	}
+
+	if denyPri <= allowPri {
+		t.Errorf("deny (priority %d) should beat allow (priority %d) for same pattern", denyPri, allowPri)
+	}
+}
+
+func TestSpecificityTieBreaker_AskBeatsAllow(t *testing.T) {
+	// For same-specificity patterns, ask should beat allow.
+	pf := &launch.PolicyFile{
+		Version: 1,
+		Allow: []launch.Rule{{Command: "foo bar"}},
+		Ask:   []launch.Rule{{Command: "foo bar"}},
+	}
+
+	rules := pf.ToEngineRules()
+
+	var allowPri, askPri int
+	for _, r := range rules {
+		if r.RuleId == "allow_0" {
+			allowPri = *r.Priority
+		}
+		if r.RuleId == "ask_0" {
+			askPri = *r.Priority
+		}
+	}
+
+	if askPri <= allowPri {
+		t.Errorf("ask (priority %d) should beat allow (priority %d) for same pattern", askPri, allowPri)
 	}
 }

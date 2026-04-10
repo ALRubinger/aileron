@@ -169,7 +169,11 @@ func runPolicyTest(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "  (%s)", result.Reason)
 		}
 		if result.RuleID != "" {
-			fmt.Fprintf(stdout, "  [%s]", result.RuleID)
+			if result.Layer != "" {
+				fmt.Fprintf(stdout, "  [%s] (%s)", result.RuleID, result.Layer)
+			} else {
+				fmt.Fprintf(stdout, "  [%s]", result.RuleID)
+			}
 		}
 		fmt.Fprintln(stdout)
 	}
