@@ -35,7 +35,7 @@ func TestCommsServer_ReadMessages(t *testing.T) {
 	queue.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Alice", Body: "Is the deploy done?", Timestamp: time.Now()})
 	queue.Push(launch.Message{ID: "2", Source: "discord", Channel: "dev-chat", Author: "Bob", Body: "PR looks good", Timestamp: time.Now()})
 
-	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestCommsServer_ReadMessages_FilterByService(t *testing.T) {
 	queue.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Body: "slack msg"})
 	queue.Push(launch.Message{ID: "2", Source: "discord", Channel: "dev", Body: "discord msg"})
 
-	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -82,7 +82,7 @@ func TestCommsServer_ReadMessages_MarksRead(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	queue.Push(launch.Message{ID: "1", Source: "slack", Body: "hello"})
 
-	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -98,7 +98,7 @@ func TestCommsServer_SendMessage_NoSender(t *testing.T) {
 	t.Cleanup(func() { os.Remove(socketPath) })
 
 	queue := launch.NewNotifyQueue(10, nil)
-	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -121,7 +121,7 @@ func TestCommsServer_SendMessage_MissingFields(t *testing.T) {
 	t.Cleanup(func() { os.Remove(socketPath) })
 
 	queue := launch.NewNotifyQueue(10, nil)
-	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -150,7 +150,7 @@ func TestCommsServer_SendMessage_WithApproval(t *testing.T) {
 	sender := &mockSender{service: "slack"}
 	queue := launch.NewNotifyQueue(10, nil)
 
-	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router)
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -201,7 +201,7 @@ func TestCommsServer_SendMessage_Denied(t *testing.T) {
 	sender := &mockSender{service: "slack"}
 	queue := launch.NewNotifyQueue(10, nil)
 
-	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router)
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -236,7 +236,7 @@ func TestCommsServer_UnknownMethod(t *testing.T) {
 	t.Cleanup(func() { os.Remove(socketPath) })
 
 	queue := launch.NewNotifyQueue(10, nil)
-	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, _ := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -251,7 +251,7 @@ func TestCommsServer_SocketPath(t *testing.T) {
 	t.Cleanup(func() { os.Remove(socketPath) })
 
 	queue := launch.NewNotifyQueue(10, nil)
-	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestCommsServer_WrapText(t *testing.T) {
 	sender := &mockSender{service: "slack"}
 	queue := launch.NewNotifyQueue(10, nil)
 
-	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router)
+	srv, _ := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, copier, router, "", "")
 	go srv.Serve()
 	defer srv.Close()
 
@@ -320,7 +320,7 @@ func TestCommsServer_DirectSend_Success(t *testing.T) {
 	sender := &mockSender{service: "slack"}
 	queue := launch.NewNotifyQueue(10, nil)
 
-	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil)
+	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestCommsServer_DirectSend_UnknownService(t *testing.T) {
 
 	queue := launch.NewNotifyQueue(10, nil)
 
-	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil)
+	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, nil, nil, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

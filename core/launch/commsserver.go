@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/comms"
 )
 
@@ -49,13 +50,16 @@ type CommsServer struct {
 	bar        *StatusBar
 	copier     *OutputCopier
 	router     *KeyRouter
+	auditLog   string
+	sessionID  string
 
 	mu   sync.Mutex
 	done bool
 }
 
-// NewCommsServer creates a comms IPC server.
-func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, bar *StatusBar, copier *OutputCopier, router *KeyRouter) (*CommsServer, error) {
+// NewCommsServer creates a comms IPC server. The auditLog and sessionID
+// parameters are used to log message events to the audit trail.
+func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, bar *StatusBar, copier *OutputCopier, router *KeyRouter, auditLog, sessionID string) (*CommsServer, error) {
 	os.Remove(socketPath)
 
 	ln, err := net.Listen("unix", socketPath)
@@ -76,6 +80,8 @@ func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Liste
 		bar:        bar,
 		copier:     copier,
 		router:     router,
+		auditLog:   auditLog,
+		sessionID:  sessionID,
 	}, nil
 }
 
@@ -154,6 +160,7 @@ func (cs *CommsServer) sendMessage(req CommsRequest) CommsResponse {
 	// Prompt the developer for approval before sending.
 	decision := cs.promptSendApproval(req.Service, req.Channel, req.Body)
 	if decision != "approve" {
+		cs.logMessage("message_denied", req.Service, req.Channel, "", req.Body, "")
 		return CommsResponse{Error: "message denied by user"}
 	}
 
@@ -164,6 +171,7 @@ func (cs *CommsServer) sendMessage(req CommsRequest) CommsResponse {
 		return CommsResponse{Error: "send failed: " + err.Error()}
 	}
 
+	cs.logMessage("message_sent", req.Service, req.Channel, "", req.Body, "")
 	return CommsResponse{OK: true}
 }
 
@@ -284,9 +292,29 @@ func (cs *CommsServer) DirectSend(service, channel, body string) error {
 	if !ok {
 		return fmt.Errorf("no listener for service: %s", service)
 	}
-	return sender.Send(nil, comms.OutgoingMessage{
+	err := sender.Send(nil, comms.OutgoingMessage{
 		Channel: channel,
 		Body:    body,
+	})
+	if err == nil {
+		cs.logMessage("reply_sent", service, channel, "", body, "")
+	}
+	return err
+}
+
+func (cs *CommsServer) logMessage(event, service, channel, author, body, inReplyTo string) {
+	if cs.auditLog == "" {
+		return
+	}
+	audit.AppendMessageEntry(cs.auditLog, audit.MessageEntry{
+		Timestamp: time.Now(),
+		SessionID: cs.sessionID,
+		Event:     event,
+		Service:   service,
+		Channel:   channel,
+		Author:    author,
+		Body:      body,
+		InReplyTo: inReplyTo,
 	})
 }
 

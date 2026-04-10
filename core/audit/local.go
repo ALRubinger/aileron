@@ -77,6 +77,68 @@ type ShellFilter struct {
 	CommandPattern string // substring match
 }
 
+// MessageEntry is a single audit record for a message event.
+type MessageEntry struct {
+	Timestamp   time.Time `json:"timestamp"`
+	SessionID   string    `json:"session_id"`
+	Event       string    `json:"event"`                 // message_received, message_sent, message_denied, message_dismissed, draft_requested, reply_sent
+	Service     string    `json:"service"`               // slack, discord
+	Channel     string    `json:"channel"`
+	Author      string    `json:"author,omitempty"`      // sender for inbound messages
+	Body        string    `json:"body,omitempty"`        // message content
+	InReplyTo   string    `json:"in_reply_to,omitempty"` // original message ID
+}
+
+// AppendMessageEntry appends one message audit entry to the JSONL log file.
+func AppendMessageEntry(path string, entry MessageEntry) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating audit log directory: %w", err)
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening audit log: %w", err)
+	}
+	defer f.Close()
+
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("encoding audit entry: %w", err)
+	}
+	data = append(data, '\n')
+
+	_, err = f.Write(data)
+	return err
+}
+
+// ReadMessageEntries reads all message JSONL entries from the audit log.
+// Only entries with an "event" field are returned (shell entries are skipped).
+func ReadMessageEntries(path string) ([]MessageEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []MessageEntry
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		var entry MessageEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if entry.Event == "" {
+			continue // skip shell entries
+		}
+		entries = append(entries, entry)
+	}
+	return entries, scanner.Err()
+}
+
 // ReadShellEntriesFiltered reads entries matching the given filter.
 func ReadShellEntriesFiltered(path string, filter ShellFilter) ([]ShellEntry, error) {
 	all, err := ReadShellEntries(path)
