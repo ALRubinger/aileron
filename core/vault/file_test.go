@@ -180,6 +180,32 @@ func TestFileVault_MalformedFile(t *testing.T) {
 	}
 }
 
+func TestFileVault_FlushErrorReadOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "readonly", "secrets.json")
+	os.MkdirAll(filepath.Join(dir, "readonly"), 0o555)
+	t.Cleanup(func() { os.Chmod(filepath.Join(dir, "readonly"), 0o755) })
+
+	fv, _ := NewFileVault(path)
+	// Put should fail because the directory is read-only.
+	err := fv.Put(context.Background(), "test", []byte("val"), Metadata{})
+	if err == nil {
+		t.Error("expected error writing to read-only directory")
+	}
+}
+
+func TestErrNotFound_ErrorMessage(t *testing.T) {
+	v := NewMemVault()
+	_, err := v.Get(context.Background(), "my/secret/path")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if msg != "vault: secret not found: my/secret/path" {
+		t.Errorf("unexpected error message: %q", msg)
+	}
+}
+
 func TestIsNotFound(t *testing.T) {
 	if IsNotFound(nil) {
 		t.Error("nil should not be NotFound")

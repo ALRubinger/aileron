@@ -640,6 +640,92 @@ func TestBridgeMessages_AutoDraft(t *testing.T) {
 	}
 }
 
+func TestLaunch_RejectsPlaintextTokens(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  slack:
+    app_token: xapp-plaintext-token
+    bot_token: xoxb-plaintext-token
+    channels:
+      - name: "#test"
+`), 0o644)
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch should succeed even if token validation fails: %v", err)
+	}
+}
+
+func TestLaunch_VaultRefsNoTTY(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  slack:
+    app_token: vault:slack_app_token
+    bot_token: vault:slack_bot_token
+    channels:
+      - name: "#test"
+`), 0o644)
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch should succeed even if vault prompt fails: %v", err)
+	}
+}
+
+func TestLaunch_DiscordPlaintextRejected(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  discord:
+    bot_token: plaintext-discord-token
+    channels:
+      - name: "123456"
+`), 0o644)
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch should succeed: %v", err)
+	}
+}
+
 func TestBridgeMessages_AuditLog(t *testing.T) {
 	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 	queue := launch.NewNotifyQueue(10, nil)
