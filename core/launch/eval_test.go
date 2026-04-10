@@ -83,6 +83,25 @@ default: allow
 	}
 }
 
+func TestEvaluateCommand_ProjectCannotOverrideBuiltinDeny(t *testing.T) {
+	// A project policy cannot whitelist a built-in deny rule.
+	path := writePolicyFile(t, `
+version: 1
+default: allow
+allow:
+  - "gh repo delete *"
+  - "rm -rf /*"
+`)
+	result := launch.EvaluateCommand(path, "gh repo delete my-org/repo", "/tmp")
+	if result.Disposition != model.DispositionDeny {
+		t.Errorf("expected built-in deny to win over project allow, got %q", result.Disposition)
+	}
+	result = launch.EvaluateCommand(path, "rm -rf /", "/tmp")
+	if result.Disposition != model.DispositionDeny {
+		t.Errorf("expected built-in deny to win over project allow for rm -rf, got %q", result.Disposition)
+	}
+}
+
 func TestEvaluateCommand_DenyOverridesAllow(t *testing.T) {
 	path := writePolicyFile(t, `
 version: 1
