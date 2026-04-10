@@ -69,10 +69,15 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "init":
 		return runInit(stdout, stderr)
 	case "policy":
-		if len(args) >= 2 && args[1] == "test" {
-			return runPolicyTest(args[2:], stdout, stderr)
+		if len(args) >= 2 {
+			switch args[1] {
+			case "test":
+				return runPolicyTest(args[2:], stdout, stderr)
+			case "save":
+				return runPolicySave(args[2:], stdout, stderr)
+			}
 		}
-		fmt.Fprintln(stderr, "usage: aileron policy test <command> [command...]")
+		fmt.Fprintln(stderr, "usage: aileron policy <test|save>")
 		return 1
 	case "secret":
 		return runSecret(args[1:], stdout, stderr)
@@ -97,6 +102,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron init                       Scaffold aileron.yaml for this project")
 	fmt.Fprintln(w, "  aileron launch <agent> [args...]   Launch an agent with policy-enforced shell")
 	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
+	fmt.Fprintln(w, "  aileron policy save [flags]        Save user-approved commands as policy rules")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
 	fmt.Fprintln(w, "  aileron status [section]           Show merged config (policy, env, notifications, vault)")
@@ -168,6 +174,147 @@ func runPolicyTest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout)
 	}
 	return exitCode
+}
+
+// runPolicySave reads the audit log for user-approved commands and offers to
+// save them as persistent policy rules. Commands already present in the
+// allow list are skipped.
+func runPolicySave(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("policy save", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	session := fs.String("session", "", "Filter by session ID (default: all sessions)")
+	path := fs.String("path", "", "Audit log file path (default: auto-detect)")
+	scope := fs.String("scope", "", "Save scope: project or user (default: prompt)")
+	dryRun := fs.Bool("dry-run", false, "Show what would be saved without writing")
+
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+
+	logPath := *path
+	if logPath == "" {
+		logPath = launch.ResolveAuditLogFromCwd()
+	}
+
+	entries, err := audit.ReadShellEntriesFiltered(logPath, audit.ShellFilter{
+		SessionID:   *session,
+		Disposition: "ask_approved",
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "error reading audit log %s: %v\n", logPath, err)
+		return 1
+	}
+
+	if len(entries) == 0 {
+		fmt.Fprintln(stdout, "No user-approved commands found in the audit log.")
+		return 0
+	}
+
+	// Deduplicate commands.
+	seen := make(map[string]bool)
+	var commands []string
+	for _, e := range entries {
+		if !seen[e.Command] {
+			seen[e.Command] = true
+			commands = append(commands, e.Command)
+		}
+	}
+
+	// Resolve policy paths.
+	dir, _ := os.Getwd()
+	policyPath := launch.FindPolicyFile(dir)
+	home, _ := os.UserHomeDir()
+	userPath := ""
+	if home != "" {
+		userPath = filepath.Join(home, ".aileron", "settings.yaml")
+	}
+
+	// Filter out commands already in the allow list.
+	commands = filterAlreadyAllowed(commands, policyPath, userPath)
+	if len(commands) == 0 {
+		fmt.Fprintln(stdout, "All approved commands are already in the policy. Nothing to save.")
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "Found %d approved command(s) not yet in policy:\n\n", len(commands))
+	for i, cmd := range commands {
+		fmt.Fprintf(stdout, "  %d. %s\n", i+1, cmd)
+	}
+	fmt.Fprintln(stdout)
+
+	if *dryRun {
+		fmt.Fprintln(stdout, "(dry run — no changes written)")
+		return 0
+	}
+
+	// Determine target scope.
+	saveScope := *scope
+	if saveScope == "" {
+		saveScope = "project"
+	}
+
+	var targetPath, label string
+	switch saveScope {
+	case "project":
+		if policyPath == "" {
+			fmt.Fprintln(stderr, "no aileron.yaml found (run 'aileron init' to create one)")
+			return 1
+		}
+		targetPath = policyPath
+		label = "project policy"
+	case "user":
+		if userPath == "" {
+			fmt.Fprintln(stderr, "cannot determine home directory for user settings")
+			return 1
+		}
+		targetPath = userPath
+		label = "user settings"
+	default:
+		fmt.Fprintf(stderr, "invalid scope %q (must be 'project' or 'user')\n", saveScope)
+		return 1
+	}
+
+	saved := 0
+	for _, cmd := range commands {
+		if err := launchpolicy.AppendAllowRule(targetPath, cmd); err != nil {
+			fmt.Fprintf(stderr, "error saving rule %q: %v\n", cmd, err)
+			continue
+		}
+		saved++
+	}
+
+	fmt.Fprintf(stdout, "Saved %d rule(s) to %s (%s)\n", saved, targetPath, label)
+	return 0
+}
+
+// filterAlreadyAllowed removes commands that are already in the allow lists
+// of the project or user policy files.
+func filterAlreadyAllowed(commands []string, projectPath, userPath string) []string {
+	allowed := make(map[string]bool)
+
+	loadAllowed := func(path string) {
+		if path == "" {
+			return
+		}
+		pf, err := launchpolicy.Load(path)
+		if err != nil {
+			return
+		}
+		for _, rule := range pf.Allow {
+			allowed[rule.Command] = true
+		}
+	}
+
+	loadAllowed(projectPath)
+	loadAllowed(userPath)
+
+	var filtered []string
+	for _, cmd := range commands {
+		if !allowed[cmd] {
+			filtered = append(filtered, cmd)
+		}
+	}
+	return filtered
 }
 
 // runLog reads and displays the audit trail.
