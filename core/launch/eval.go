@@ -19,6 +19,7 @@ type EvalResult struct {
 	Disposition model.Disposition
 	Reason      string
 	RuleID      string // which policy rule matched
+	Layer       string // "default", "project", "user", or "" if unknown
 }
 
 // EvaluateCommand loads policy from the given file (or uses an empty default)
@@ -32,7 +33,7 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 
 	active := policy.ActiveStatus()
 	if err := store.Create(ctx, policy.MakePolicy("launch", "default", rules, active)); err != nil {
-		return EvalResult{model.DispositionRequireApproval, "policy load error", ""}
+		return EvalResult{Disposition: model.DispositionRequireApproval, Reason: "policy load error"}
 	}
 
 	engine := policy.NewRuleEngine(store)
@@ -71,7 +72,7 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 		},
 	})
 	if err != nil {
-		return EvalResult{model.DispositionRequireApproval, "policy evaluation error", ""}
+		return EvalResult{Disposition: model.DispositionRequireApproval, Reason: "policy evaluation error"}
 	}
 
 	ruleID := ""
@@ -79,18 +80,24 @@ func EvaluateCommand(policyPath, command, workingDir string) EvalResult {
 		ruleID = decision.MatchedPolicies[0].RuleID
 	}
 
-	return EvalResult{decision.Disposition, decision.DenialReason, ruleID}
+	return EvalResult{
+		Disposition: decision.Disposition,
+		Reason:      decision.DenialReason,
+		RuleID:      ruleID,
+		Layer:       extractLayer(ruleID),
+	}
 }
 
 func loadPolicyFileFrom(path string) *launchpolicy.PolicyFile {
 	if path == "" {
-		// No project policy file — still load user settings so personal
-		// rules apply even in repos without an aileron.yaml.
-		pf, err := launchpolicy.LoadUserSettings()
+		// No project policy file — load defaults + user settings so
+		// personal rules and built-in defaults apply even without aileron.yaml.
+		base := launchpolicy.DefaultPolicy()
+		userSettings, err := launchpolicy.LoadUserSettings()
 		if err != nil {
-			return &launchpolicy.PolicyFile{Version: 1}
+			return base
 		}
-		return pf
+		return launchpolicy.Merge(base, userSettings)
 	}
 	pf, err := launchpolicy.LoadWithProfiles(path)
 	if err != nil {
@@ -125,6 +132,9 @@ func WriteDeny(w io.Writer, command, reason, ruleID, policyPath string) {
 	if source := describeRuleSource(ruleID, policyPath); source != "" {
 		fmt.Fprintf(w, "Policy: %s\n", source)
 	}
+	if hint := overrideHint(ruleID); hint != "" {
+		fmt.Fprintf(w, "Hint: %s\n", hint)
+	}
 }
 
 // WriteDenyByUser writes a user-denied message to the writer.
@@ -132,18 +142,56 @@ func WriteDenyByUser(w io.Writer, command string) {
 	fmt.Fprintf(w, "[✈️ Aileron] Denied ⛔: %s\n", command)
 }
 
+// extractLayer parses a layer prefix from a rule ID (e.g. "project:deny_0" → "project").
+// Returns empty string if no layer prefix is present.
+func extractLayer(ruleID string) string {
+	if strings.HasPrefix(ruleID, "builtin_") {
+		return "default"
+	}
+	if idx := strings.Index(ruleID, ":"); idx > 0 {
+		return ruleID[:idx]
+	}
+	return ""
+}
+
 // describeRuleSource returns a human-readable description of where a
 // policy rule came from.
 func describeRuleSource(ruleID, policyPath string) string {
+	layer := extractLayer(ruleID)
+	switch layer {
+	case "default":
+		return "built-in defaults"
+	case "user":
+		return "personal settings (~/.aileron/settings.yaml)"
+	case "project":
+		if policyPath != "" {
+			return policyPath
+		}
+		return "project policy (aileron.yaml)"
+	}
+
+	// Legacy fallback for untagged rule IDs.
 	if strings.HasPrefix(ruleID, "builtin_") {
 		return "built-in rule"
 	}
 	if policyPath == "" {
 		return ""
 	}
-	// Shorten the path for display.
 	if strings.Contains(policyPath, "/.aileron/settings.yaml") {
 		return "personal settings (~/.aileron/settings.yaml)"
 	}
 	return policyPath
+}
+
+// overrideHint returns a hint about how to override a deny rule.
+func overrideHint(ruleID string) string {
+	layer := extractLayer(ruleID)
+	switch layer {
+	case "default":
+		return "override in aileron.yaml or ~/.aileron/settings.yaml to allow"
+	case "project":
+		return "override in ~/.aileron/settings.yaml to allow"
+	default:
+		return ""
+	}
 }

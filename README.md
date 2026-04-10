@@ -159,7 +159,7 @@ Aileron is a **local-first CLI tool** centered on `aileron launch` — the conne
 **Core:**
 - `aileron launch <agent>` with policy-enforced shell (`aileron-sh`)
 - Built-in policy defaults for all language toolchains and OS-specific protections (ADR-0015)
-- Three-layer policy merge: built-in defaults → project `aileron.yaml` → user `~/.aileron/settings.yaml`
+- Three-layer policy merge: built-in defaults → user `~/.aileron/settings.yaml` → project `aileron.yaml`. Later layer wins for same pattern; more specific patterns win regardless of layer (ADR-0016)
 - Zero-config experience — works without any `aileron.yaml`
 
 **Communication:**
@@ -237,7 +237,7 @@ Optionally, scaffold a project-specific policy:
 
 This creates a minimal `aileron.yaml` with project-specific deny rules and env scrubbing. Language toolchain and OS rules are built in — you don't need to list them.
 
-**Three-layer policy merge:** Built-in defaults → project `aileron.yaml` → user `~/.aileron/settings.yaml`. Each layer overrides the previous. Your project file only needs what's specific to this repo.
+**Three-layer policy merge:** Built-in defaults → user `~/.aileron/settings.yaml` → project `aileron.yaml`. Later layer wins for the same command pattern; more specific patterns win regardless of layer. Your project file only needs what's specific to this repo. See [ADR-0016](docs/adr/0016-layer-overrides-and-specificity.md) for details.
 
 ### Slack notifications
 

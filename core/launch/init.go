@@ -32,7 +32,9 @@ func generatePolicyYAML() string {
 # rules are built into Aileron. You only need to add project-specific
 # rules here.
 #
-# Three-layer merge: built-in defaults → this file → ~/.aileron/settings.yaml
+# Three-layer merge: built-in defaults → user ~/.aileron/settings.yaml → this file.
+# Later layer wins for the same pattern. More specific patterns win regardless
+# of layer. See ADR-0016 for details.
 # Docs: https://github.com/ALRubinger/aileron
 version: 1
 default: ask
