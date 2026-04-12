@@ -3,6 +3,7 @@ package comms
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -14,6 +15,7 @@ type DiscordListener struct {
 	botToken string
 	channels map[string]bool // channel IDs to listen on
 	ignore   map[string]bool // channel IDs to ignore
+	log      *slog.Logger
 
 	// openGateway opens the Discord WebSocket connection. Defaults to
 	// session.Open but can be overridden for testing.
@@ -42,6 +44,15 @@ func NewDiscordListener(botToken string, channels, ignore []string) *DiscordList
 }
 
 func (d *DiscordListener) Service() string { return "discord" }
+
+// SetLogger sets an optional logger for verbose diagnostics.
+func (d *DiscordListener) SetLogger(l *slog.Logger) { d.log = l }
+
+func (d *DiscordListener) debug(msg string, args ...any) {
+	if d.log != nil {
+		d.log.Debug(msg, args...)
+	}
+}
 
 // SetOpenGateway overrides the function used to open the Discord Gateway
 // connection. Call after Connect. Used in tests to skip the real WebSocket.
@@ -79,6 +90,7 @@ func (d *DiscordListener) Connect(ctx context.Context) error {
 	session.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent
 	d.session = session
 	d.openGateway = session.Open
+	d.debug("discord: connected", "channels", len(d.channels))
 	return nil
 }
 
@@ -101,6 +113,8 @@ func (d *DiscordListener) Listen(ctx context.Context) (<-chan IncomingMessage, e
 		return nil, fmt.Errorf("discord: failed to open gateway: %w", err)
 	}
 
+	d.debug("discord: listening via Gateway WebSocket")
+
 	// Close the message channel when the context is cancelled.
 	go func() {
 		<-ctx.Done()
@@ -116,20 +130,24 @@ func (d *DiscordListener) Listen(ctx context.Context) (<-chan IncomingMessage, e
 func (d *DiscordListener) processMessage(m *discordgo.MessageCreate) (IncomingMessage, bool) {
 	// Skip bot messages (including our own).
 	if m.Author == nil || m.Author.Bot {
+		d.debug("discord: skipping bot message", "channel", m.ChannelID)
 		return IncomingMessage{}, false
 	}
 
 	channelID := m.ChannelID
 	if d.ignore[channelID] {
+		d.debug("discord: skipping ignored channel", "channel", channelID)
 		return IncomingMessage{}, false
 	}
 	if len(d.channels) > 0 && !d.channels[channelID] {
+		d.debug("discord: skipping unconfigured channel", "channel", channelID)
 		return IncomingMessage{}, false
 	}
 
 	channelName := d.resolveChannelName(channelID)
 	author := d.resolveAuthor(m)
 
+	d.debug("discord: delivering message", "channel", channelName, "author", author)
 	return IncomingMessage{
 		ID:        m.ID,
 		Service:   "discord",
@@ -147,7 +165,10 @@ func (d *DiscordListener) ProcessMessageCreate(m *discordgo.MessageCreate) (Inco
 
 func (d *DiscordListener) resolveChannelName(id string) string {
 	if d.session != nil {
-		if ch, err := d.session.Channel(id); err == nil && ch.Name != "" {
+		ch, err := d.session.Channel(id)
+		if err != nil {
+			d.debug("discord: failed to resolve channel name", "channel_id", id, "error", err)
+		} else if ch.Name != "" {
 			return "#" + ch.Name
 		}
 	}

@@ -38,12 +38,21 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		fmt.Fprintf(stdout, "aileron %s (%s)\n", version.Version, version.Commit)
 		return 0
 	case "launch":
-		if len(args) < 2 {
-			fmt.Fprintln(stderr, "usage: aileron launch <agent> [args...]")
+		// Parse aileron-level flags before the agent name.
+		launchFlags := flag.NewFlagSet("launch", flag.ContinueOnError)
+		launchFlags.SetOutput(stderr)
+		verbose := launchFlags.Bool("verbose", false, "Enable verbose logging for comms listeners")
+		if err := launchFlags.Parse(args[1:]); err != nil {
+			return 1
+		}
+		launchArgs := launchFlags.Args()
+
+		if len(launchArgs) < 1 {
+			fmt.Fprintln(stderr, "usage: aileron launch [--verbose] <agent> [args...]")
 			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
 			return 1
 		}
-		agentName := args[1]
+		agentName := launchArgs[0]
 		agent, ok := registry.Get(agentName)
 		if !ok {
 			fmt.Fprintf(stderr, "unknown agent: %q\n", agentName)
@@ -60,7 +69,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		result, err := launch.Launch(context.Background(), launch.LaunchConfig{
 			Agent:     agent,
 			ShellShim: shimPath,
-			Args:      args[2:],
+			Args:      launchArgs[1:],
+			Verbose:   *verbose,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
@@ -101,7 +111,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  aileron init                       Scaffold aileron.yaml for this project")
-	fmt.Fprintln(w, "  aileron launch <agent> [args...]   Launch an agent with policy-enforced shell")
+	fmt.Fprintln(w, "  aileron launch [--verbose] <agent>  Launch an agent with policy-enforced shell")
 	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
 	fmt.Fprintln(w, "  aileron policy save [flags]        Save user-approved commands as policy rules")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
