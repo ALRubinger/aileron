@@ -1,6 +1,12 @@
 package agents
 
-import "strings"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/ALRubinger/aileron/core/launch"
+)
 
 // Claude is the agent definition for Claude Code.
 // Claude Code sends bash-specific commands (shopt, etc.), so the real
@@ -16,15 +22,26 @@ func (c Claude) Args() []string {
 	return []string{"--allowedTools", "Bash(*)"}
 }
 
+// Env returns Claude-specific environment variables. CLAUDE_CODE_SHELL
+// is set to ~/.aileron/bash (installed by ConfigureShell) because Claude
+// Code validates that the shell path contains "bash".
 func (c Claude) Env() map[string]string {
-	return map[string]string{
+	env := map[string]string{
 		"AILERON_REAL_SHELL": "/bin/bash",
 	}
+	if home, err := os.UserHomeDir(); err == nil {
+		env["CLAUDE_CODE_SHELL"] = filepath.Join(home, ".aileron", "bash")
+	}
+	return env
 }
 
-// ConfigureShell is a no-op for Claude Code. Claude respects the $SHELL
-// env var and CLAUDE_CODE_SHELL, both set by the launcher.
-func (c Claude) ConfigureShell(_, _ string) error { return nil }
+// ConfigureShell installs a wrapper script at ~/.aileron/bash whose path
+// contains "bash" so Claude Code accepts it as a valid shell. The wrapper
+// delegates to aileron-sh for policy enforcement.
+func (c Claude) ConfigureShell(shimPath, _ string) error {
+	_, err := launch.InstallWrapper(shimPath)
+	return err
+}
 
 // NormalizeCommand extracts the user command from Claude Code's eval
 // wrapper. Claude Code sends commands as:

@@ -78,16 +78,8 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
 	}
 
-	// Install a wrapper script at ~/.aileron/bash whose path contains "bash"
-	// so that Claude Code accepts it as a valid shell.
-	wrapperPath, err := InstallWrapper(config.ShellShim)
-	if err != nil {
-		return LaunchResult{}, fmt.Errorf("installing shell wrapper: %w", err)
-	}
-
 	// Let the agent perform any agent-specific shell configuration.
-	// For example, Pi writes .pi/settings.json with shellPath pointing
-	// at aileron-sh because it doesn't respect $SHELL.
+	// Claude installs a wrapper script; Pi writes .pi/settings.json.
 	if err := config.Agent.ConfigureShell(config.ShellShim, config.Dir); err != nil {
 		return LaunchResult{}, fmt.Errorf("configuring shell for %s: %w", config.Agent.Name(), err)
 	}
@@ -98,7 +90,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	approvalSocket := filepath.Join(os.TempDir(), "ai-"+sessionID+".sock")
 	commsSocket := filepath.Join(os.TempDir(), "ai-comms-"+sessionID+".sock")
 
-	env := buildEnv(config.ShellShim, wrapperPath, config.Agent.Name(), sessionID, auditLog, envConfig, config.Agent.Env())
+	env := buildEnv(config.ShellShim, config.Agent.Name(), sessionID, auditLog, envConfig, config.Agent.Env())
 	env = append(env, "AILERON_APPROVAL_SOCKET="+approvalSocket)
 	env = append(env, "AILERON_COMMS_SOCKET="+commsSocket)
 
@@ -327,10 +319,9 @@ func exitResult(err error) (LaunchResult, error) {
 // buildEnv creates the environment for the child process:
 //   - Copies the current environment
 //   - Replaces SHELL with the shim path
-//   - Sets CLAUDE_CODE_SHELL to the wrapper path (whose name contains "bash")
 //   - Sets AILERON_REAL_SHELL to the original SHELL value
-//   - Merges any agent-specific env vars
-func buildEnv(shimPath, wrapperPath, agentName, sessionID, auditLog string, envConfig *launchpolicy.EnvConfig, agentEnv map[string]string) []string {
+//   - Merges any agent-specific env vars (including agent-specific vars like CLAUDE_CODE_SHELL)
+func buildEnv(shimPath, agentName, sessionID, auditLog string, envConfig *launchpolicy.EnvConfig, agentEnv map[string]string) []string {
 	origShell := os.Getenv("SHELL")
 	if origShell == "" {
 		origShell = "/bin/sh"
@@ -351,7 +342,6 @@ func buildEnv(shimPath, wrapperPath, agentName, sessionID, auditLog string, envC
 		"AILERON_AGENT":      true,
 		"AILERON_SESSION_ID": true,
 		"AILERON_AUDIT_LOG":  true,
-		"CLAUDE_CODE_SHELL":  true,
 	}
 	for k := range agentEnv {
 		managed[k] = true
@@ -382,10 +372,6 @@ func buildEnv(shimPath, wrapperPath, agentName, sessionID, auditLog string, envC
 	if auditLog != "" {
 		filtered = append(filtered, "AILERON_AUDIT_LOG="+auditLog)
 	}
-	if wrapperPath != "" {
-		filtered = append(filtered, "CLAUDE_CODE_SHELL="+wrapperPath)
-	}
-
 	for k, v := range agentEnv {
 		if k == "AILERON_REAL_SHELL" {
 			continue // already handled above

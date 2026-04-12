@@ -1,6 +1,9 @@
 package agents_test
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/launch/agents"
@@ -38,6 +41,12 @@ func TestClaude(t *testing.T) {
 	}
 	if env["AILERON_REAL_SHELL"] != "/bin/bash" {
 		t.Errorf("expected AILERON_REAL_SHELL=/bin/bash, got %q", env["AILERON_REAL_SHELL"])
+	}
+	if env["CLAUDE_CODE_SHELL"] == "" {
+		t.Error("expected CLAUDE_CODE_SHELL to be set")
+	}
+	if !strings.Contains(env["CLAUDE_CODE_SHELL"], "bash") {
+		t.Errorf("CLAUDE_CODE_SHELL path must contain 'bash', got %q", env["CLAUDE_CODE_SHELL"])
 	}
 }
 
@@ -77,6 +86,39 @@ func TestClaude_NormalizeCommand_Infrastructure(t *testing.T) {
 	}
 	if cmd != infra {
 		t.Errorf("expected command unchanged, got %q", cmd)
+	}
+}
+
+func TestClaude_ConfigureShell_InstallsWrapper(t *testing.T) {
+	c := agents.Claude{}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	if err := c.ConfigureShell("/usr/local/bin/aileron-sh", t.TempDir()); err != nil {
+		t.Fatalf("ConfigureShell failed: %v", err)
+	}
+
+	wrapperPath := filepath.Join(dir, ".aileron", "bash")
+	info, err := os.Stat(wrapperPath)
+	if err != nil {
+		t.Fatalf("expected wrapper at %s: %v", wrapperPath, err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Error("wrapper should be executable")
+	}
+}
+
+func TestClaude_NormalizeCommand_UnquotedEvalNoSeparator(t *testing.T) {
+	c := agents.Claude{}
+
+	// Unquoted eval with no separator — the entire rest is the command.
+	wrapped := "shopt -u extglob 2>/dev/null || true && eval ls"
+	cmd, eval := c.NormalizeCommand(wrapped)
+	if !eval {
+		t.Fatal("expected evaluate=true")
+	}
+	if cmd != "ls" {
+		t.Errorf("expected 'ls', got %q", cmd)
 	}
 }
 

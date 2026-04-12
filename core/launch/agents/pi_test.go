@@ -88,6 +88,35 @@ func TestPi_ConfigureShell_WritesSettings(t *testing.T) {
 	}
 }
 
+func TestPi_ConfigureShell_DefaultsToWorkingDir(t *testing.T) {
+	p := agents.Pi{}
+	// Empty dir should fall back to os.Getwd(). Since we can't predict
+	// the cwd in tests reliably, just verify it doesn't error.
+	// The settings file will be written relative to cwd.
+	origDir, _ := os.Getwd()
+	dir := t.TempDir()
+	os.Chdir(dir)
+	defer os.Chdir(origDir)
+
+	if err := p.ConfigureShell("/usr/local/bin/aileron-sh", ""); err != nil {
+		t.Fatalf("ConfigureShell with empty dir failed: %v", err)
+	}
+
+	settingsPath := filepath.Join(dir, ".pi", "settings.json")
+	if _, err := os.Stat(settingsPath); err != nil {
+		t.Fatalf("expected settings file at %s: %v", settingsPath, err)
+	}
+}
+
+func TestPi_ConfigureShell_UnwritableDir(t *testing.T) {
+	p := agents.Pi{}
+	// Point at a path that can't be created.
+	err := p.ConfigureShell("/usr/local/bin/aileron-sh", "/dev/null/impossible")
+	if err == nil {
+		t.Fatal("expected error for unwritable directory")
+	}
+}
+
 func TestPi_ConfigureShell_PreservesExistingSettings(t *testing.T) {
 	p := agents.Pi{}
 	dir := t.TempDir()
