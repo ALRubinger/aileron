@@ -22,6 +22,7 @@ import (
 func main() {
 	registry := launch.NewRegistry()
 	registry.Register(agents.Claude{})
+	registry.Register(agents.Pi{})
 	os.Exit(run(os.Args[1:], registry, os.Stdout, os.Stderr))
 }
 

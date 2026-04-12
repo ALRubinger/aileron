@@ -85,6 +85,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("installing shell wrapper: %w", err)
 	}
 
+	// Let the agent perform any agent-specific shell configuration.
+	// For example, Pi writes .pi/settings.json with shellPath pointing
+	// at aileron-sh because it doesn't respect $SHELL.
+	if err := config.Agent.ConfigureShell(config.ShellShim, config.Dir); err != nil {
+		return LaunchResult{}, fmt.Errorf("configuring shell for %s: %w", config.Agent.Name(), err)
+	}
+
 	sessionID := generateSessionID()
 	auditLog := resolveAuditLog(config.Dir)
 	envConfig := loadEnvConfig(config.Dir)

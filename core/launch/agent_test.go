@@ -54,7 +54,9 @@ type testAgent struct {
 }
 
 
-func (a testAgent) Name() string           { return a.name }
-func (a testAgent) BinaryNames() []string  { return []string{a.name} }
-func (a testAgent) Args() []string         { return nil }
-func (a testAgent) Env() map[string]string { return nil }
+func (a testAgent) Name() string                              { return a.name }
+func (a testAgent) BinaryNames() []string                     { return []string{a.name} }
+func (a testAgent) Args() []string                            { return nil }
+func (a testAgent) Env() map[string]string                    { return nil }
+func (a testAgent) NormalizeCommand(raw string) (string, bool) { return raw, true }
+func (a testAgent) ConfigureShell(_, _ string) error           { return nil }

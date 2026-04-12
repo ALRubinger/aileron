@@ -1,5 +1,7 @@
 package agents
 
+import "strings"
+
 // Claude is the agent definition for Claude Code.
 // Claude Code sends bash-specific commands (shopt, etc.), so the real
 // shell must be bash regardless of the user's login shell.
@@ -18,4 +20,61 @@ func (c Claude) Env() map[string]string {
 	return map[string]string{
 		"AILERON_REAL_SHELL": "/bin/bash",
 	}
+}
+
+// ConfigureShell is a no-op for Claude Code. Claude respects the $SHELL
+// env var and CLAUDE_CODE_SHELL, both set by the launcher.
+func (c Claude) ConfigureShell(_, _ string) error { return nil }
+
+// NormalizeCommand extracts the user command from Claude Code's eval
+// wrapper. Claude Code sends commands as:
+//
+//	shopt -u extglob 2>/dev/null || true && eval 'actual command' < /dev/null && pwd -P >| /tmp/...
+//
+// Commands without the eval wrapper are Claude Code infrastructure
+// (snapshot scripts, etc.) and should pass through without policy.
+func (c Claude) NormalizeCommand(raw string) (string, bool) {
+	inner := unwrapClaudeEval(raw)
+	if inner == raw {
+		return raw, false
+	}
+	return inner, true
+}
+
+// unwrapClaudeEval extracts the inner command from Claude Code's wrapper template.
+func unwrapClaudeEval(command string) string {
+	// Try quoted form first: eval '...'
+	const quotedPrefix = "eval '"
+	if idx := strings.Index(command, quotedPrefix); idx >= 0 {
+		inner := command[idx+len(quotedPrefix):]
+
+		var b strings.Builder
+		for i := 0; i < len(inner); {
+			if inner[i] == '\'' {
+				if i+3 < len(inner) && inner[i:i+4] == `'\''` {
+					b.WriteByte('\'')
+					i += 4
+					continue
+				}
+				return b.String()
+			}
+			b.WriteByte(inner[i])
+			i++
+		}
+	}
+
+	// Try unquoted form: eval <command> \< /dev/null
+	const unquotedPrefix = "eval "
+	if idx := strings.Index(command, unquotedPrefix); idx >= 0 {
+		rest := command[idx+len(unquotedPrefix):]
+
+		for _, sep := range []string{` \<`, ` \>`, " &&", " ||"} {
+			if end := strings.Index(rest, sep); end >= 0 {
+				return strings.TrimSpace(rest[:end])
+			}
+		}
+		return strings.TrimSpace(rest)
+	}
+
+	return command
 }

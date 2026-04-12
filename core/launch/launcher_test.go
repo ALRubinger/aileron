@@ -1222,7 +1222,9 @@ type scriptAgent struct {
 	extraEnv map[string]string
 }
 
-func (a scriptAgent) Name() string           { return "test-script" }
-func (a scriptAgent) BinaryNames() []string  { return []string{a.script} }
-func (a scriptAgent) Args() []string         { return nil }
-func (a scriptAgent) Env() map[string]string { return a.extraEnv }
+func (a scriptAgent) Name() string                              { return "test-script" }
+func (a scriptAgent) BinaryNames() []string                     { return []string{a.script} }
+func (a scriptAgent) Args() []string                            { return nil }
+func (a scriptAgent) Env() map[string]string                    { return a.extraEnv }
+func (a scriptAgent) NormalizeCommand(raw string) (string, bool) { return raw, true }
+func (a scriptAgent) ConfigureShell(_, _ string) error           { return nil }

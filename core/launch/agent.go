@@ -18,6 +18,18 @@ type Agent interface {
 	// process, beyond the standard SHELL/AILERON_REAL_SHELL manipulation.
 	// Returns nil if no extra env is needed.
 	Env() map[string]string
+	// NormalizeCommand extracts the user command from the agent's shell
+	// wrapper before policy evaluation. Returns the normalized command and
+	// whether policy should evaluate it. Agents that don't wrap commands
+	// return (raw, true).
+	NormalizeCommand(raw string) (command string, evaluate bool)
+	// ConfigureShell performs any agent-specific setup needed to make the
+	// agent use the aileron-sh shim for shell execution. shimPath is the
+	// absolute path to aileron-sh. dir is the working directory where the
+	// agent will run. Agents that respect $SHELL can return nil. Agents
+	// that use their own shell resolution (e.g. a config file) should
+	// write the necessary configuration here.
+	ConfigureShell(shimPath, dir string) error
 }
 
 // Registry maps agent names to their definitions.

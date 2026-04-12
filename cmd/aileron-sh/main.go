@@ -12,12 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/launch"
+	"github.com/ALRubinger/aileron/core/launch/agents"
 	"github.com/ALRubinger/aileron/core/model"
 	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
 )
@@ -59,7 +59,7 @@ func main() {
 	// intervening shell flags (-l, -i, etc.).
 	cwd, _ := os.Getwd()
 	rawCommand, hasCommand := extractCommand(args)
-	command, shouldEval := normalizeCommand(os.Getenv("AILERON_AGENT"), rawCommand)
+	command, shouldEval := agents.NormalizeCommand(os.Getenv("AILERON_AGENT"), rawCommand)
 	policyPath := launch.FindPolicyFile(cwd)
 	if hasCommand && shouldEval && policyPath != "" {
 		result := launch.EvaluateCommand(policyPath, command, cwd)
@@ -175,72 +175,6 @@ func extractCommand(args []string) (string, bool) {
 	return "", false
 }
 
-// normalizeCommand applies agent-specific command transformations before
-// policy evaluation. Returns the normalized command and whether policy
-// should be evaluated. For Claude Code, only eval-wrapped commands are
-// user commands — everything else is infrastructure (snapshot scripts,
-// etc.) and should pass through without policy evaluation.
-func normalizeCommand(agent, command string) (string, bool) {
-	switch agent {
-	case "claude":
-		inner := unwrapClaudeEval(command)
-		if inner == command {
-			// No eval wrapper found — this is a Claude Code infrastructure
-			// command (snapshot creation, etc.), not a user command.
-			return command, false
-		}
-		return inner, true
-	default:
-		return command, true
-	}
-}
-
-// unwrapClaudeEval extracts the inner command from Claude Code's wrapper template.
-// Claude Code sends commands in the form:
-//
-//	shopt -u extglob 2>/dev/null || true && eval 'actual command' < /dev/null && pwd -P >| /tmp/...
-//
-// This function finds the eval '...' segment and returns the inner command.
-// If the input doesn't match the wrapper pattern, it is returned unchanged.
-func unwrapClaudeEval(command string) string {
-	// Try quoted form first: eval '...'
-	const quotedPrefix = "eval '"
-	if idx := strings.Index(command, quotedPrefix); idx >= 0 {
-		inner := command[idx+len(quotedPrefix):]
-
-		var b strings.Builder
-		for i := 0; i < len(inner); {
-			if inner[i] == '\'' {
-				if i+3 < len(inner) && inner[i:i+4] == `'\''` {
-					b.WriteByte('\'')
-					i += 4
-					continue
-				}
-				return b.String()
-			}
-			b.WriteByte(inner[i])
-			i++
-		}
-	}
-
-	// Try unquoted form: eval <command> \< /dev/null
-	// Claude Code sometimes sends: shopt ... && eval ls \< /dev/null && pwd ...
-	const unquotedPrefix = "eval "
-	if idx := strings.Index(command, unquotedPrefix); idx >= 0 {
-		rest := command[idx+len(unquotedPrefix):]
-
-		// The user command is everything up to the first escaped redirect
-		// (\<) or && or the end of string.
-		for _, sep := range []string{` \<`, ` \>`, " &&", " ||"} {
-			if end := strings.Index(rest, sep); end >= 0 {
-				return strings.TrimSpace(rest[:end])
-			}
-		}
-		return strings.TrimSpace(rest)
-	}
-
-	return command
-}
 
 // promptApproval requests user approval via the launcher's approval
 // server. The launcher owns the real terminal and handles the prompt.
