@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"time"
 
 	"github.com/slack-go/slack"
@@ -19,6 +20,7 @@ type SlackListener struct {
 	botToken string
 	channels map[string]bool // channel names to listen on
 	ignore   map[string]bool // channel names to ignore
+	log      *slog.Logger
 
 	// apiURL overrides the Slack API base URL for testing.
 	apiURL string
@@ -54,6 +56,15 @@ func NewSlackListener(appToken, botToken string, channels, ignore []string) *Sla
 
 func (s *SlackListener) Service() string { return "slack" }
 
+// SetLogger sets an optional logger for verbose diagnostics.
+func (s *SlackListener) SetLogger(l *slog.Logger) { s.log = l }
+
+func (s *SlackListener) debug(msg string, args ...any) {
+	if s.log != nil {
+		s.log.Debug(msg, args...)
+	}
+}
+
 // Connect initializes the Slack API and Socket Mode clients.
 func (s *SlackListener) Connect(ctx context.Context) error {
 	if s.appToken == "" || s.botToken == "" {
@@ -71,6 +82,8 @@ func (s *SlackListener) Connect(ctx context.Context) error {
 		s.api,
 		socketmode.OptionLog(log.New(log.Writer(), "slack-socket: ", log.LstdFlags)),
 	)
+
+	s.debug("slack: connected", "channels", len(s.channels))
 	return nil
 }
 
@@ -104,6 +117,7 @@ func (s *SlackListener) Listen(ctx context.Context) (<-chan IncomingMessage, err
 		close(msgs)
 	}()
 
+	s.debug("slack: listening via Socket Mode")
 	return msgs, nil
 }
 
@@ -112,16 +126,31 @@ func (s *SlackListener) handleEvent(evt socketmode.Event, msgs chan<- IncomingMe
 	case socketmode.EventTypeEventsAPI:
 		eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
 		if !ok {
+			s.debug("slack: received EventsAPI event with unexpected data type")
 			return
 		}
 		s.socket.Ack(*evt.Request)
 
 		if innerEvt, ok := eventsAPIEvent.InnerEvent.Data.(*slackevents.MessageEvent); ok {
+			s.debug("slack: received message event", "channel", innerEvt.Channel, "user", innerEvt.User)
 			if msg, deliver := s.ProcessMessageEvent(innerEvt); deliver {
 				msgs <- msg
 			}
+		} else {
+			s.debug("slack: received non-message event", "type", eventsAPIEvent.InnerEvent.Type)
 		}
+	case socketmode.EventTypeConnectionError:
+		s.debug("slack: connection error", "event", fmt.Sprintf("%+v", evt.Data))
+	case socketmode.EventTypeConnecting:
+		s.debug("slack: connecting to Socket Mode")
+	case socketmode.EventTypeConnected:
+		s.debug("slack: Socket Mode connection established")
+	case socketmode.EventTypeDisconnect:
+		s.debug("slack: disconnected from Socket Mode")
+	case socketmode.EventTypeHello:
+		s.debug("slack: received hello from Socket Mode")
 	default:
+		s.debug("slack: unhandled event", "type", evt.Type)
 		if evt.Request != nil {
 			s.socket.Ack(*evt.Request)
 		}
@@ -134,27 +163,44 @@ func (s *SlackListener) handleEvent(evt socketmode.Event, msgs chan<- IncomingMe
 // (bot message, ignored channel, etc.).
 func (s *SlackListener) ProcessMessageEvent(evt *slackevents.MessageEvent) (IncomingMessage, bool) {
 	if evt.BotID != "" {
-		return IncomingMessage{}, false
-	}
-	channel := evt.Channel
-	if s.ignore[channel] {
-		return IncomingMessage{}, false
-	}
-	if len(s.channels) > 0 && !s.channels[channel] {
+		s.debug("slack: skipping bot message", "bot_id", evt.BotID, "channel", evt.Channel)
 		return IncomingMessage{}, false
 	}
 
-	channelName := s.resolveChannelName(channel)
+	// Slack delivers channel IDs (C07ABC...) but aileron.yaml configures
+	// channel names (#backend). Resolve the ID to a name before filtering
+	// so both forms work in the config.
+	channelID := evt.Channel
+	channelName := s.resolveChannelName(channelID)
+
+	if s.matchChannel(channelID, channelName, s.ignore) {
+		s.debug("slack: skipping ignored channel", "channel", channelName, "id", channelID)
+		return IncomingMessage{}, false
+	}
+	if len(s.channels) > 0 && !s.matchChannel(channelID, channelName, s.channels) {
+		s.debug("slack: skipping unconfigured channel", "channel", channelName, "id", channelID)
+		return IncomingMessage{}, false
+	}
+
 	author := s.resolveAuthor(evt.User)
 
+	s.debug("slack: delivering message", "channel", channelName, "author", author)
 	return BuildIncomingMessage(evt.TimeStamp, channelName, author, evt.Text), true
+}
+
+// matchChannel checks if a channel matches any entry in the map by ID or name.
+func (s *SlackListener) matchChannel(id, name string, m map[string]bool) bool {
+	return m[id] || m[name]
 }
 
 func (s *SlackListener) resolveChannelName(id string) string {
 	if s.api != nil {
-		if info, err := s.api.GetConversationInfo(&slack.GetConversationInfoInput{
+		info, err := s.api.GetConversationInfo(&slack.GetConversationInfoInput{
 			ChannelID: id,
-		}); err == nil && info != nil {
+		})
+		if err != nil {
+			s.debug("slack: failed to resolve channel name", "channel_id", id, "error", err)
+		} else if info != nil {
 			return "#" + info.Name
 		}
 	}
@@ -163,7 +209,10 @@ func (s *SlackListener) resolveChannelName(id string) string {
 
 func (s *SlackListener) resolveAuthor(userID string) string {
 	if s.api != nil {
-		if user, err := s.api.GetUserInfo(userID); err == nil {
+		user, err := s.api.GetUserInfo(userID)
+		if err != nil {
+			s.debug("slack: failed to resolve user", "user_id", userID, "error", err)
+		} else {
 			if user.RealName != "" {
 				return user.RealName
 			}

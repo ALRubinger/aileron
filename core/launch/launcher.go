@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,6 +32,8 @@ type LaunchConfig struct {
 	// Dir is the working directory for the agent. If empty, the current
 	// directory is used.
 	Dir string
+	// Verbose enables debug logging for comms listeners (Slack, Discord).
+	Verbose bool
 }
 
 // LaunchResult holds the outcome of a launched agent process.
@@ -105,7 +108,18 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// Create the notification queue and start any comms listeners.
 	queue := NewNotifyQueue(100, nil)
 	wireQuietHours(config.Dir, queue)
-	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID)
+	var commsLog *slog.Logger
+	var closeCommsLog func()
+	if config.Verbose {
+		commsLog, closeCommsLog = openCommsLogger(config.Dir)
+		if commsLog != nil {
+			fmt.Fprintf(os.Stderr, "aileron: verbose comms log → %s\n", commsLogPath(config.Dir))
+		}
+	}
+	if closeCommsLog != nil {
+		defer closeCommsLog()
+	}
+	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, commsLog)
 	defer stopCommsListeners(listeners)
 
 	// If stdin is a terminal, use the pty proxy with status bar.
@@ -541,7 +555,7 @@ func EnvGlobMatch(pattern, name string) bool {
 
 // startCommsListeners reads the notification config from the policy file,
 // creates listeners, and starts them.
-func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string) []comms.Listener {
+func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string, commsLog *slog.Logger) []comms.Listener {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
@@ -597,6 +611,11 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	resolved, err := ResolveTokens(tokenRefs, v)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+		if strings.Contains(err.Error(), "decryption failed") {
+			fmt.Fprintln(os.Stderr, "aileron: wrong vault passphrase — notifications will not be available this session")
+		} else {
+			fmt.Fprintln(os.Stderr, "aileron: notifications will not be available this session")
+		}
 		return nil
 	}
 
@@ -618,7 +637,11 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 				priority[ch.Name] = ch.Priority
 			}
 		}
-		created = append(created, comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore))
+		sl := comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore)
+		if commsLog != nil {
+			sl.SetLogger(commsLog)
+		}
+		created = append(created, sl)
 	}
 	if cfg := pf.Notifications.Discord; cfg != nil && cfg.BotToken != "" {
 		botToken := resolved[idx]
@@ -629,7 +652,11 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 				priority[ch.Name] = ch.Priority
 			}
 		}
-		created = append(created, comms.NewDiscordListener(botToken, channels, cfg.Ignore))
+		dl := comms.NewDiscordListener(botToken, channels, cfg.Ignore)
+		if commsLog != nil {
+			dl.SetLogger(commsLog)
+		}
+		created = append(created, dl)
 	}
 
 	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, priority, auditLog, sessionID)
@@ -702,4 +729,35 @@ func stopCommsListeners(listeners []comms.Listener) {
 	for _, l := range listeners {
 		l.Close()
 	}
+}
+
+// commsLogPath returns the path to the comms debug log file,
+// located alongside the audit log in .aileron/.
+func commsLogPath(dir string) string {
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	policyPath := FindPolicyFile(dir)
+	if policyPath != "" {
+		return filepath.Join(filepath.Dir(policyPath), ".aileron", "comms.log")
+	}
+	return filepath.Join(dir, ".aileron", "comms.log")
+}
+
+// openCommsLogger creates an slog.Logger that writes debug-level messages
+// to .aileron/comms.log. Returns the logger and a cleanup function to
+// close the file. Used when --verbose is passed to aileron launch.
+func openCommsLogger(dir string) (*slog.Logger, func()) {
+	path := commsLogPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, func() {}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return nil, func() {}
+	}
+	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+	return logger, func() { f.Close() }
 }

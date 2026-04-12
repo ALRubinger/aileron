@@ -2,6 +2,8 @@ package comms_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/comms"
@@ -305,6 +307,54 @@ func TestDiscordListener_ProcessMessageCreate_NilAuthorEmptyResult(t *testing.T)
 	// With empty Username and GlobalName and nil Member, author should be "".
 	if msg.Author != "" {
 		t.Errorf("Author = %q, want empty string", msg.Author)
+	}
+}
+
+func TestDiscordListener_VerboseLogging(t *testing.T) {
+	dl := comms.NewDiscordListener("bot-token-test",
+		[]string{"C123"}, []string{"C999"})
+	dl.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
+
+	// Connect — exercises the "connected" log line.
+	if err := dl.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// Bot message.
+	dl.ProcessMessageCreate(&discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ChannelID: "C123", Content: "bot",
+			Author: &discordgo.User{ID: "U1", Bot: true},
+		},
+	})
+	// Ignored channel.
+	dl.ProcessMessageCreate(&discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ChannelID: "C999", Content: "ignored",
+			Author: &discordgo.User{ID: "U1", Username: "u"},
+		},
+	})
+	// Unconfigured channel.
+	dl.ProcessMessageCreate(&discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ChannelID: "C_OTHER", Content: "other",
+			Author: &discordgo.User{ID: "U1", Username: "u"},
+		},
+	})
+	// Delivered message.
+	msg, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID: "msg-1", ChannelID: "C123", Content: "hello",
+			Author: &discordgo.User{ID: "U1", Username: "alice"},
+		},
+	})
+	if !ok {
+		t.Fatal("expected message to be delivered")
+	}
+	if msg.Body != "hello" {
+		t.Errorf("Body = %q", msg.Body)
 	}
 }
 

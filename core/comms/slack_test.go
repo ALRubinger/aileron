@@ -2,6 +2,8 @@ package comms_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -186,6 +188,42 @@ func TestBuildIncomingMessage_LongTextTruncated(t *testing.T) {
 		t.Error("body should be full text")
 	}
 	// Preview is internal to the IncomingMessage — Body is preserved.
+}
+
+func TestSlackListener_VerboseLogging(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test",
+		[]string{"C123"}, []string{"C999"})
+	sl.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
+
+	// Connect — exercises the "connected" log line.
+	if err := sl.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	// Bot message — exercises "skipping bot message" log.
+	sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		BotID: "B1", Channel: "C123", Text: "bot",
+	})
+	// Ignored channel — exercises "skipping ignored channel" log.
+	sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User: "U1", Channel: "C999", Text: "ignored",
+	})
+	// Unconfigured channel — exercises "skipping unconfigured channel" log.
+	sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User: "U1", Channel: "C_OTHER", Text: "other",
+	})
+	// Delivered message — exercises "delivering message" log.
+	msg, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
+		User: "U1", Channel: "C123", Text: "hello", TimeStamp: "123.456",
+	})
+	if !ok {
+		t.Fatal("expected message to be delivered")
+	}
+	if msg.Body != "hello" {
+		t.Errorf("Body = %q", msg.Body)
+	}
 }
 
 // Verify SlackListener implements the Listener interface.
