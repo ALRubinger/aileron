@@ -121,20 +121,13 @@ func TestLaunch_EnvironmentSetup(t *testing.T) {
 	if !strings.Contains(envStr, "AILERON_REAL_SHELL=") {
 		t.Error("AILERON_REAL_SHELL not set in child env")
 	}
-	if !strings.Contains(envStr, "CLAUDE_CODE_SHELL=") {
-		t.Error("CLAUDE_CODE_SHELL not set in child env")
-	}
 	if !strings.Contains(envStr, "AILERON_AGENT=test-script") {
 		t.Error("AILERON_AGENT not set in child env")
 	}
-	// CLAUDE_CODE_SHELL path must contain "bash" for Claude Code to accept it
-	for _, line := range strings.Split(envStr, "\n") {
-		if strings.HasPrefix(line, "CLAUDE_CODE_SHELL=") {
-			val := strings.TrimPrefix(line, "CLAUDE_CODE_SHELL=")
-			if !strings.Contains(val, "bash") {
-				t.Errorf("CLAUDE_CODE_SHELL path must contain 'bash', got %q", val)
-			}
-		}
+	// CLAUDE_CODE_SHELL should NOT be set for non-Claude agents.
+	// Only Claude sets it via its Env() method.
+	if strings.Contains(envStr, "CLAUDE_CODE_SHELL=") {
+		t.Error("CLAUDE_CODE_SHELL should not be set for non-Claude agents")
 	}
 }
 
@@ -263,11 +256,10 @@ func TestLaunch_WorkingDirectory(t *testing.T) {
 	}
 }
 
-func TestLaunch_EmptyWrapperPathSkipsCLAUDE_CODE_SHELL(t *testing.T) {
-	// When wrapperPath is empty, CLAUDE_CODE_SHELL should not be set.
-	// We can't easily test this through Launch (it always installs wrapper),
-	// so this is a note that the branch is covered by the empty-path guard.
-	// The buildEnv function is unexported, so we verify indirectly.
+func TestLaunch_AgentEnvVarsFlowThrough(t *testing.T) {
+	// Agent-specific env vars (from Env()) should appear in the child
+	// process environment. This covers vars like CLAUDE_CODE_SHELL
+	// which are now set by the agent, not the launcher.
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	outFile := filepath.Join(dir, "env.txt")
@@ -277,7 +269,10 @@ func TestLaunch_EmptyWrapperPathSkipsCLAUDE_CODE_SHELL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	agent := scriptAgent{script: script}
+	agent := scriptAgent{
+		script:   script,
+		extraEnv: map[string]string{"MY_AGENT_VAR": "test-value"},
+	}
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
 		Agent:     agent,
 		ShellShim: "/tmp/fake-shim",
@@ -290,11 +285,9 @@ func TestLaunch_EmptyWrapperPathSkipsCLAUDE_CODE_SHELL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// CLAUDE_CODE_SHELL should be set (wrapper IS installed by Launch)
-	if !strings.Contains(string(data), "CLAUDE_CODE_SHELL=") {
-		t.Error("expected CLAUDE_CODE_SHELL to be set when wrapper is installed")
+	if !strings.Contains(string(data), "MY_AGENT_VAR=test-value") {
+		t.Error("expected agent-specific env var to flow through to child process")
 	}
-	// AILERON_AGENT should be set
 	if !strings.Contains(string(data), "AILERON_AGENT=") {
 		t.Error("expected AILERON_AGENT to be set")
 	}

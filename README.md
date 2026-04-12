@@ -51,7 +51,7 @@ Today's agent hosts give you two modes: approve every command individually (50 p
 │  └─────────────────────────────────────────────────┘   │
 │                                                        │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │  Agent (claude, codex, goose, opencode, ...)    │   │
+│  │  Agent (claude, pi, codex, goose, opencode, ...) │   │
 │  │  Inherits: SHELL=aileron-sh, scrubbed env,      │   │
 │  │            aileron-mcp registered               │   │
 │  └─────────────────────────────────────────────────┘   │
@@ -125,6 +125,7 @@ aileron status vault        # stored secrets (names only)
 | Agent | Shell policy | MCP tools | Full experience |
 |-------|-------------|-----------|-----------------|
 | Claude Code | Yes | Yes | Yes |
+| [pi.dev](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) | Yes | Not yet | Shell policy now |
 | OpenCode | Yes | Yes | Yes |
 | Goose | Yes | Yes | Yes |
 | Amp | Yes | Yes | Yes |
@@ -225,9 +226,11 @@ task build:docker    # Docker containers
 
 ```sh
 ./build/aileron launch claude
+# or
+./build/aileron launch pi
 ```
 
-This works with zero configuration. Built-in defaults allow common toolchain commands (go, npm, cargo, etc.) and deny dangerous operations (recursive delete, push to main). Every command flows through `aileron-sh` and the policy engine. Aileron is the single approval layer — Claude Code's native Bash approval is suppressed.
+This works with zero configuration. Built-in defaults allow common toolchain commands (go, npm, cargo, etc.) and deny dangerous operations (recursive delete, push to main). Every command flows through `aileron-sh` and the policy engine. Aileron is the single approval layer — the agent's native tool approval is suppressed.
 
 Optionally, scaffold a project-specific policy:
 
