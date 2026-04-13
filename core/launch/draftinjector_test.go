@@ -25,11 +25,14 @@ func TestDraftInjector_Inject(t *testing.T) {
 	if !strings.Contains(out, "msg-1") {
 		t.Error("expected message ID in injected prompt")
 	}
-	if !strings.Contains(out, "read_messages") {
-		t.Error("expected read_messages tool reference in injected prompt")
-	}
 	if !strings.Contains(out, "draft_reply") {
 		t.Error("expected draft_reply tool reference in injected prompt")
+	}
+	if !strings.Contains(out, "Sarah") {
+		t.Error("expected author in injected prompt")
+	}
+	if !strings.Contains(out, "#backend") {
+		t.Error("expected channel in injected prompt")
 	}
 	if !strings.HasSuffix(out, "\n") {
 		t.Error("expected trailing newline to submit as user input")
