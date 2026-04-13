@@ -270,14 +270,28 @@ func (o *Overlay) approveDraft() {
 		return
 	}
 	o.queue.MarkRead(msg.ID)
+	o.queue.ClearDraft(msg.ID)
 
+	// Dismiss the overlay, then fire the approve callback.
+	o.active = false
+	fmt.Fprint(o.stdout, "\033[?25h\033[?1049l")
+	if o.copier != nil {
+		o.mu.Unlock()
+		o.copier.Flush()
+		o.mu.Lock()
+	}
+	if o.onDismiss != nil {
+		cb := o.onDismiss
+		o.mu.Unlock()
+		cb()
+		o.mu.Lock()
+	}
 	if o.OnDraftApprove != nil {
 		cb := o.OnDraftApprove
 		o.mu.Unlock()
 		cb(msg)
 		o.mu.Lock()
 	}
-	o.render()
 }
 
 func (o *Overlay) discardDraft() {
@@ -290,14 +304,28 @@ func (o *Overlay) discardDraft() {
 		return
 	}
 	o.queue.MarkRead(msg.ID)
+	o.queue.ClearDraft(msg.ID)
 
+	// Dismiss the overlay, then fire the discard callback.
+	o.active = false
+	fmt.Fprint(o.stdout, "\033[?25h\033[?1049l")
+	if o.copier != nil {
+		o.mu.Unlock()
+		o.copier.Flush()
+		o.mu.Lock()
+	}
+	if o.onDismiss != nil {
+		cb := o.onDismiss
+		o.mu.Unlock()
+		cb()
+		o.mu.Lock()
+	}
 	if o.OnDraftDiscard != nil {
 		cb := o.OnDraftDiscard
 		o.mu.Unlock()
 		cb(msg)
 		o.mu.Lock()
 	}
-	o.render()
 }
 
 func (o *Overlay) editDraft() {
