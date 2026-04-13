@@ -32,8 +32,8 @@ type LaunchConfig struct {
 	// Dir is the working directory for the agent. If empty, the current
 	// directory is used.
 	Dir string
-	// Verbose enables debug logging for comms listeners (Slack, Discord).
-	Verbose bool
+	// LogLevel sets the session log verbosity (e.g. slog.LevelDebug).
+	LogLevel slog.Level
 }
 
 // LaunchResult holds the outcome of a launched agent process.
@@ -108,18 +108,10 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// Create the notification queue and start any comms listeners.
 	queue := NewNotifyQueue(100, nil)
 	wireQuietHours(config.Dir, queue)
-	var commsLog *slog.Logger
-	var closeCommsLog func()
-	if config.Verbose {
-		commsLog, closeCommsLog = openCommsLogger(config.Dir)
-		if commsLog != nil {
-			fmt.Fprintf(os.Stderr, "aileron: verbose comms log → %s\n", commsLogPath(config.Dir))
-		}
-	}
-	if closeCommsLog != nil {
-		defer closeCommsLog()
-	}
-	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, commsLog)
+	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)
+	defer closeSessionLog()
+	fmt.Fprintf(os.Stderr, "aileron: session log → %s\n", sessionLogPath(config.Dir))
+	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
 	defer stopCommsListeners(listeners)
 
 	// If stdin is a terminal, use the pty proxy with status bar.
@@ -555,7 +547,7 @@ func EnvGlobMatch(pattern, name string) bool {
 
 // startCommsListeners reads the notification config from the policy file,
 // creates listeners, and starts them.
-func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string, commsLog *slog.Logger) []comms.Listener {
+func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string, sessionLog *slog.Logger) []comms.Listener {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
@@ -637,10 +629,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 				priority[ch.Name] = ch.Priority
 			}
 		}
-		sl := comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore)
-		if commsLog != nil {
-			sl.SetLogger(commsLog)
-		}
+		sl := comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore, sessionLog.With("component", "slack"))
 		created = append(created, sl)
 	}
 	if cfg := pf.Notifications.Discord; cfg != nil && cfg.BotToken != "" {
@@ -652,10 +641,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 				priority[ch.Name] = ch.Priority
 			}
 		}
-		dl := comms.NewDiscordListener(botToken, channels, cfg.Ignore)
-		if commsLog != nil {
-			dl.SetLogger(commsLog)
-		}
+		dl := comms.NewDiscordListener(botToken, channels, cfg.Ignore, sessionLog.With("component", "discord"))
 		created = append(created, dl)
 	}
 
@@ -731,33 +717,34 @@ func stopCommsListeners(listeners []comms.Listener) {
 	}
 }
 
-// commsLogPath returns the path to the comms debug log file,
+// sessionLogPath returns the path to the session log file,
 // located alongside the audit log in .aileron/.
-func commsLogPath(dir string) string {
+func sessionLogPath(dir string) string {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
 	policyPath := FindPolicyFile(dir)
 	if policyPath != "" {
-		return filepath.Join(filepath.Dir(policyPath), ".aileron", "comms.log")
+		return filepath.Join(filepath.Dir(policyPath), ".aileron", "session.log")
 	}
-	return filepath.Join(dir, ".aileron", "comms.log")
+	return filepath.Join(dir, ".aileron", "session.log")
 }
 
-// openCommsLogger creates an slog.Logger that writes debug-level messages
-// to .aileron/comms.log. Returns the logger and a cleanup function to
-// close the file. Used when --verbose is passed to aileron launch.
-func openCommsLogger(dir string) (*slog.Logger, func()) {
-	path := commsLogPath(dir)
+// openSessionLogger creates an slog.Logger that writes to
+// .aileron/session.log at the given level. Returns the logger and a
+// cleanup function to close the file. If the file cannot be created,
+// returns a discard logger so callers never receive nil.
+func openSessionLogger(dir string, level slog.Level) (*slog.Logger, func()) {
+	path := sessionLogPath(dir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, func() {}
+		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() {}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		return nil, func() {}
+		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() {}
 	}
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: level,
 	}))
 	return logger, func() { f.Close() }
 }

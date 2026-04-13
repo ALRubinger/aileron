@@ -104,6 +104,30 @@ func TestRun_LaunchUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestRun_LaunchLogLevelFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	// --log-level is parsed before the agent name; exercises the flag path.
+	code := run([]string{"launch", "--log-level=debug", "claude"}, newTestRegistry(), &stdout, &stderr)
+	// Will fail at shim resolution, but the flag parsing should succeed.
+	if code != 1 {
+		t.Errorf("expected exit code 1 (shim not found), got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "error:") {
+		t.Errorf("expected shim error, got %q", stderr.String())
+	}
+}
+
+func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"launch", "--log-level=debug"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron launch") {
+		t.Error("expected launch usage in stderr")
+	}
+}
+
 func TestRunInit_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
 

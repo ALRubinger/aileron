@@ -3,13 +3,13 @@ package launch_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"io"
 
 	"github.com/ALRubinger/aileron/core/audit"
 	"github.com/ALRubinger/aileron/core/comms"
@@ -1221,3 +1221,98 @@ func (a scriptAgent) Args() []string                            { return nil }
 func (a scriptAgent) Env() map[string]string                    { return a.extraEnv }
 func (a scriptAgent) NormalizeCommand(raw string) (string, bool) { return raw, true }
 func (a scriptAgent) ConfigureShell(_, _ string) error           { return nil }
+
+func TestOpenSessionLogger_Success(t *testing.T) {
+	dir := t.TempDir()
+	logger, cleanup := launch.OpenSessionLogger(dir, slog.LevelDebug)
+	defer cleanup()
+
+	if logger == nil {
+		t.Fatal("expected non-nil logger")
+	}
+
+	// Verify the log file was created.
+	logPath := launch.SessionLogPath(dir)
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("session log file not created at %s: %v", logPath, err)
+	}
+
+	// Write a message and verify it appears in the file.
+	logger.Info("test message", "key", "value")
+	cleanup() // flush and close
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "test message") {
+		t.Errorf("log file should contain 'test message', got: %s", content)
+	}
+	if !strings.Contains(content, "key=value") {
+		t.Errorf("log file should contain 'key=value', got: %s", content)
+	}
+}
+
+func TestOpenSessionLogger_LevelFiltering(t *testing.T) {
+	dir := t.TempDir()
+	logger, cleanup := launch.OpenSessionLogger(dir, slog.LevelWarn)
+	defer cleanup()
+
+	// Debug message should be filtered out at warn level.
+	logger.Debug("should not appear")
+	logger.Warn("should appear")
+	cleanup()
+
+	data, err := os.ReadFile(launch.SessionLogPath(dir))
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "should not appear") {
+		t.Error("debug message should be filtered at warn level")
+	}
+	if !strings.Contains(content, "should appear") {
+		t.Error("warn message should be present")
+	}
+}
+
+func TestOpenSessionLogger_ReadOnlyDir(t *testing.T) {
+	dir := t.TempDir()
+	readOnly := filepath.Join(dir, "readonly")
+	if err := os.MkdirAll(readOnly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	// Use a subpath under the read-only dir so MkdirAll fails.
+	badDir := filepath.Join(readOnly, "sub", "deep")
+	logger, cleanup := launch.OpenSessionLogger(badDir, slog.LevelDebug)
+	defer cleanup()
+
+	if logger == nil {
+		t.Fatal("expected non-nil discard logger, got nil")
+	}
+	// Logger should still be usable (writes to discard).
+	logger.Info("this should not panic")
+}
+
+func TestSessionLogPath_WithPolicyFile(t *testing.T) {
+	dir := t.TempDir()
+	// Create an aileron.yaml to simulate a policy file.
+	if err := os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := launch.SessionLogPath(dir)
+	want := filepath.Join(dir, ".aileron", "session.log")
+	if got != want {
+		t.Errorf("SessionLogPath = %q, want %q", got, want)
+	}
+}
+
+func TestSessionLogPath_WithoutPolicyFile(t *testing.T) {
+	dir := t.TempDir()
+	got := launch.SessionLogPath(dir)
+	want := filepath.Join(dir, ".aileron", "session.log")
+	if got != want {
+		t.Errorf("SessionLogPath = %q, want %q", got, want)
+	}
+}

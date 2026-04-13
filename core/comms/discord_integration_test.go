@@ -57,7 +57,7 @@ func newMockDiscordServer() *httptest.Server {
 // endpoints to point at the mock server.
 func connectWithMockAPI(t *testing.T, srv *httptest.Server, channels, ignore []string) *comms.DiscordListener {
 	t.Helper()
-	dl := comms.NewDiscordListener("bot-token-test", channels, ignore)
+	dl := comms.NewDiscordListener("bot-token-test", channels, ignore, nopLogger())
 	if err := dl.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
