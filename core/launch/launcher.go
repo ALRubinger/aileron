@@ -574,16 +574,19 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	// Validate that token fields use vault references, not plaintext.
 	if cfg := pf.Notifications.Slack; cfg != nil {
 		if err := ValidateTokenRef("slack.app_token", cfg.AppToken); err != nil {
+			sessionLog.Warn("slack token validation failed", "error", err)
 			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
 			return nil
 		}
 		if err := ValidateTokenRef("slack.bot_token", cfg.BotToken); err != nil {
+			sessionLog.Warn("slack token validation failed", "error", err)
 			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
 			return nil
 		}
 	}
 	if cfg := pf.Notifications.Discord; cfg != nil {
 		if err := ValidateTokenRef("discord.bot_token", cfg.BotToken); err != nil {
+			sessionLog.Warn("discord token validation failed", "error", err)
 			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
 			return nil
 		}
@@ -604,6 +607,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 			var err error
 			v, err = OpenVaultFunc(os.Stderr)
 			if err != nil {
+				sessionLog.Warn("vault open failed", "error", err)
 				fmt.Fprintf(os.Stderr, "aileron: vault: %v\n", err)
 				return nil
 			}
@@ -613,6 +617,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 
 	resolved, err := ResolveTokens(tokenRefs, v)
 	if err != nil {
+		sessionLog.Warn("token resolution failed", "error", err)
 		fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
 		if strings.Contains(err.Error(), "decryption failed") {
 			fmt.Fprintln(os.Stderr, "aileron: wrong vault passphrase — notifications will not be available this session")
