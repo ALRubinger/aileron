@@ -22,8 +22,8 @@ func NewDraftInjector(ptmx io.Writer) *DraftInjector {
 // agent's pty. The trailing newline submits it as user input.
 func (di *DraftInjector) Inject(msg Message) {
 	prompt := fmt.Sprintf(
-		"You have a new message to draft a reply to. Use the read_messages tool to see it, then use the draft_reply tool with message_id=%q and your suggested reply. Do not use send_message.\n",
-		msg.ID,
+		"I got this message from %s in %s: %q — draft a reply for me using draft_reply with message_id=%q\n",
+		msg.Author, msg.Channel, msg.Body, msg.ID,
 	)
 	di.ptmx.Write([]byte(prompt))
 }
@@ -32,7 +32,7 @@ func (di *DraftInjector) Inject(msg Message) {
 // feedback so the agent can produce an improved draft.
 func (di *DraftInjector) InjectRevision(msg Message, feedback string) {
 	prompt := fmt.Sprintf(
-		"The user wants you to revise your draft reply to message %q. Feedback: %q Use the draft_reply tool with your revised text. Do not use send_message.\n",
+		"Revise the draft reply to message %q — %s. Use draft_reply with your revised text.\n",
 		msg.ID, feedback,
 	)
 	di.ptmx.Write([]byte(prompt))
