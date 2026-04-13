@@ -218,7 +218,7 @@ func launchWithPty(ctx context.Context, cmd *exec.Cmd, config LaunchConfig, queu
 	if commsConf != nil {
 		var v vault.Vault
 		if commsConf.needsVault {
-			v = PromptVaultWithPanel(outputCopier, router, bar)
+			v = PromptVaultWithPanel(outputCopier, router, bar, ptmx)
 		}
 		listeners = startCommsWithVault(ctx, commsConf, v, queue, auditLog, sessionID)
 	}

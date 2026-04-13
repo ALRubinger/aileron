@@ -230,7 +230,7 @@ func TestPromptVaultWithPanel_EscSkips(t *testing.T) {
 
 	done := make(chan vault.Vault, 1)
 	go func() {
-		done <- launch.PromptVaultWithPanel(copier, router, bar)
+		done <- launch.PromptVaultWithPanel(copier, router, bar, nil)
 	}()
 
 	// Give the prompt time to render and steal input.
