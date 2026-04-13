@@ -31,11 +31,15 @@ func TestStatusBar_Render(t *testing.T) {
 	if !strings.Contains(out, "─") {
 		t.Error("expected separator line")
 	}
-	// Should position at row 23 (rows-1) for separator
+	// Should position at row 22 (rows-2) for separator
+	if !strings.Contains(out, "\033[22;1H") {
+		t.Errorf("expected cursor move to row 22, got %q", out)
+	}
+	// Should position at row 23 (rows-1) for content
 	if !strings.Contains(out, "\033[23;1H") {
 		t.Errorf("expected cursor move to row 23, got %q", out)
 	}
-	// Should position at row 24 (rows) for text
+	// Should position at row 24 (rows) for hint
 	if !strings.Contains(out, "\033[24;1H") {
 		t.Errorf("expected cursor move to row 24, got %q", out)
 	}
@@ -48,26 +52,26 @@ func TestStatusBar_Resize(t *testing.T) {
 	bar.Resize(&buf, 30, 120)
 	out := buf.String()
 
-	// After resize to 30 rows, separator should be at row 29
-	if !strings.Contains(out, "\033[29;1H") {
-		t.Errorf("expected cursor move to row 29 after resize, got %q", out)
+	// After resize to 30 rows, separator should be at row 28 (rows-2)
+	if !strings.Contains(out, "\033[28;1H") {
+		t.Errorf("expected cursor move to row 28 after resize, got %q", out)
 	}
 }
 
 func TestStatusBar_TooSmallTerminal(t *testing.T) {
-	bar := launch.NewStatusBar(2, 80, "test")
+	bar := launch.NewStatusBar(3, 80, "test")
 	var buf bytes.Buffer
 	bar.Render(&buf)
-	// With only 2 rows, bar should not render (needs at least 3)
+	// With only 3 rows, bar should not render (needs at least 4)
 	if buf.Len() != 0 {
-		t.Errorf("expected no output for 2-row terminal, got %q", buf.String())
+		t.Errorf("expected no output for 3-row terminal, got %q", buf.String())
 	}
 }
 
 func TestStatusBar_BarHeight(t *testing.T) {
 	bar := launch.NewStatusBar(24, 80, "test")
-	if bar.BarHeight() != 2 {
-		t.Errorf("expected bar height 2, got %d", bar.BarHeight())
+	if bar.BarHeight() != 3 {
+		t.Errorf("expected bar height 3, got %d", bar.BarHeight())
 	}
 }
 
@@ -325,5 +329,53 @@ func TestStatusBar_OutsideQuietHoursShowsNormal(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 unread") {
 		t.Errorf("expected '1 unread' outside quiet hours, got:\n%s", out)
+	}
+}
+
+func TestStatusBar_DraftPendingIndicator(t *testing.T) {
+	bar := launch.NewStatusBar(24, 120, "brand")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	// Auto-draft message without a draft yet.
+	q.Push(launch.Message{ID: "1", Preview: "hello", AutoDraft: true})
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "1 awaiting draft") {
+		t.Errorf("expected '1 awaiting draft' indicator, got:\n%s", out)
+	}
+}
+
+func TestStatusBar_DraftPendingDisappearsAfterDraft(t *testing.T) {
+	bar := launch.NewStatusBar(24, 120, "brand")
+	q := launch.NewNotifyQueue(10, nil)
+	bar.SetQueue(q)
+
+	q.Push(launch.Message{ID: "1", Preview: "hello", AutoDraft: true})
+	q.SetDraft("1", "my reply")
+
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if strings.Contains(out, "awaiting draft") {
+		t.Errorf("should not show 'awaiting draft' after draft is set, got:\n%s", out)
+	}
+}
+
+func TestStatusBar_HintLineShown(t *testing.T) {
+	bar := launch.NewStatusBar(24, 80, "brand")
+	var buf bytes.Buffer
+	bar.Render(&buf)
+	out := buf.String()
+
+	if !strings.Contains(out, "Ctrl-]") {
+		t.Error("expected 'Ctrl-]' in hint line")
+	}
+	if !strings.Contains(out, "notifications") {
+		t.Error("expected 'notifications' in hint line")
 	}
 }

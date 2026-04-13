@@ -62,3 +62,43 @@ func TestDraftInjector_InjectMultiple(t *testing.T) {
 		t.Error("expected second author")
 	}
 }
+
+func TestDraftInjector_InjectRevision(t *testing.T) {
+	var buf bytes.Buffer
+	di := launch.NewDraftInjector(&buf)
+
+	di.InjectRevision(launch.Message{
+		Source:  "slack",
+		Channel: "#backend",
+		Author:  "Sarah",
+		Body:    "Does the new auth middleware change the JWT claims?",
+		Draft:   "Yes, we added a role claim.",
+	}, "make it more casual and mention the PR number")
+
+	out := buf.String()
+
+	if !strings.Contains(out, "#backend") {
+		t.Error("expected channel in revision prompt")
+	}
+	if !strings.Contains(out, "Sarah") {
+		t.Error("expected author in revision prompt")
+	}
+	if !strings.Contains(out, "JWT claims") {
+		t.Error("expected original message body in revision prompt")
+	}
+	if !strings.Contains(out, "Yes, we added a role claim.") {
+		t.Error("expected previous draft in revision prompt")
+	}
+	if !strings.Contains(out, "make it more casual") {
+		t.Error("expected user feedback in revision prompt")
+	}
+	if !strings.Contains(out, "send_message") {
+		t.Error("expected send_message tool reference in revision prompt")
+	}
+	if !strings.Contains(out, `service="slack"`) {
+		t.Error("expected service parameter in revision prompt")
+	}
+	if !strings.HasSuffix(out, "\n") {
+		t.Error("expected trailing newline to submit as user input")
+	}
+}

@@ -1127,3 +1127,178 @@ func TestOverlay_Resize(t *testing.T) {
 		t.Error("expected re-render after resize")
 	}
 }
+
+func TestOverlay_ConverseKey_EntersReplyMode(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	w.Reset()
+
+	// Press 'c' to enter converse mode.
+	o.HandleKey('c')
+	out := w.String()
+
+	// Should show the feedback prompt label.
+	if !strings.Contains(out, "feedback>") {
+		t.Error("expected 'feedback>' prompt in converse mode")
+	}
+}
+
+func TestOverlay_ConverseKey_NonDraftNoOp(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Author: "Alice",
+		Preview: "normal msg", Body: "normal",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	w.Reset()
+
+	// Press 'c' on non-draft message — should do nothing.
+	o.HandleKey('c')
+	out := w.String()
+
+	if strings.Contains(out, "feedback>") {
+		t.Error("converse should not activate on non-draft message")
+	}
+}
+
+func TestOverlay_ConverseKey_EmptyQueue(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+
+	// Should not panic.
+	o.HandleKey('c')
+}
+
+func TestOverlay_Converse_SubmitCallsConverse(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	var gotMsg launch.Message
+	var gotFeedback string
+	converseCalled := false
+	o.OnDraftConverse = func(msg launch.Message, feedback string) {
+		converseCalled = true
+		gotMsg = msg
+		gotFeedback = feedback
+	}
+
+	o.Show()
+	o.HandleKey('c')                  // enter converse mode
+	for _, b := range "be shorter" { // type feedback
+		o.HandleKey(byte(b))
+	}
+	o.HandleKey('\r') // submit
+
+	if !converseCalled {
+		t.Fatal("expected OnDraftConverse to be called")
+	}
+	if gotMsg.ID != "1" {
+		t.Errorf("expected message ID '1', got %q", gotMsg.ID)
+	}
+	if gotFeedback != "be shorter" {
+		t.Errorf("expected feedback 'be shorter', got %q", gotFeedback)
+	}
+	// Should have dismissed the overlay.
+	if o.IsActive() {
+		t.Error("overlay should be dismissed after converse submit")
+	}
+}
+
+func TestOverlay_Converse_EscCancels(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+
+	converseCalled := false
+	o.OnDraftConverse = func(msg launch.Message, feedback string) {
+		converseCalled = true
+	}
+
+	o.Show()
+	o.HandleKey('c')                  // enter converse mode
+	for _, b := range "some text" {
+		o.HandleKey(byte(b))
+	}
+	o.HandleKey(0x1B)                  // ESC
+	time.Sleep(150 * time.Millisecond) // wait for ESC timer
+
+	if converseCalled {
+		t.Error("OnDraftConverse should not be called after cancel")
+	}
+	// Should still be active (cancel returns to overlay, doesn't dismiss).
+	// Actually, standalone ESC in reply mode cancels reply, returning to overlay.
+	// The overlay is still showing.
+}
+
+func TestOverlay_FooterShowsConverseAction(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.Show()
+	out := w.String()
+
+	if !strings.Contains(out, "c revise") {
+		t.Error("expected 'c revise' in footer for draft message")
+	}
+}
+
+func TestOverlay_Converse_ClearsDraftForCycle(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.OnDraftConverse = func(msg launch.Message, feedback string) {}
+
+	o.Show()
+	o.HandleKey('c')
+	for _, b := range "revise it" {
+		o.HandleKey(byte(b))
+	}
+	o.HandleKey('\r')
+
+	// Draft should be cleared so the revision cycle can restart.
+	msg, ok := q.FindByID("1")
+	if !ok {
+		t.Fatal("message should still be in queue")
+	}
+	if msg.Draft != "" {
+		t.Errorf("expected draft to be cleared after converse, got %q", msg.Draft)
+	}
+}

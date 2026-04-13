@@ -574,3 +574,24 @@ func TestNotifyQueue_ConcurrentAccess(t *testing.T) {
 		t.Errorf("Len = %d, should be <= 100", q.Len())
 	}
 }
+
+func TestNotifyQueue_DraftPendingCount(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+
+	// Auto-draft without a draft yet — counts as pending.
+	q.Push(launch.Message{ID: "1", AutoDraft: true})
+	// Non-auto-draft — not counted.
+	q.Push(launch.Message{ID: "2", AutoDraft: false})
+	// Auto-draft with a draft already — not pending.
+	q.Push(launch.Message{ID: "3", AutoDraft: true, Draft: "reply", DraftFor: "3"})
+
+	if got := q.DraftPendingCount(); got != 1 {
+		t.Errorf("DraftPendingCount = %d, want 1", got)
+	}
+
+	// Mark the pending message as read — no longer counted.
+	q.MarkRead("1")
+	if got := q.DraftPendingCount(); got != 0 {
+		t.Errorf("DraftPendingCount after MarkRead = %d, want 0", got)
+	}
+}

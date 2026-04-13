@@ -244,7 +244,7 @@ This creates a minimal `aileron.yaml` with project-specific deny rules and env s
 
 ### Slack notifications
 
-Aileron can receive Slack messages in your terminal while you work. Incoming messages appear in the status bar; press **Ctrl-A** to open the full notification overlay.
+Aileron can receive Slack messages in your terminal while you work. Incoming messages appear in the status bar; press **Ctrl-]** to open the full notification overlay.
 
 **1. Create a Slack app** with [Socket Mode](https://api.slack.com/apis/socket-mode) enabled. You need:
 - An **App-Level Token** (`xapp-...`) with `connections:write` scope
@@ -285,7 +285,7 @@ Token fields in `aileron.yaml` **must** use `vault:` references. Aileron rejects
 ./build/aileron launch claude
 ```
 
-Messages from configured channels appear in the notification bar. Press **Ctrl-A** to view the full queue, navigate with **j/k** or arrow keys, press **r** to type a reply directly, **a** to ask the agent to draft a reply, **d** to dismiss, and **Escape** to return. On channels with `auto_draft: true`, the agent drafts replies automatically when messages arrive.
+Messages from configured channels appear in the notification bar. Press **Ctrl-]** to view the full queue, navigate with **j/k** or arrow keys, press **r** to type a reply directly, **a** to ask the agent to draft a reply, **d** to dismiss, and **Escape** to return. When a draft is ready, press **y** to send, **e** to edit, **c** to revise with feedback, or **n** to discard. On channels with `auto_draft: true`, messages are flagged for drafting — open the overlay and press **a** to trigger the agent.
 
 ### Discord notifications
 
