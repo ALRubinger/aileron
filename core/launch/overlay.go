@@ -449,29 +449,22 @@ func (o *Overlay) cancelReply() {
 func (o *Overlay) render() {
 	msgs := o.queue.Messages()
 
-	// Left accent bar: yellow │ prefix on every content line.
-	accent := "\033[33m│\033[0m "
-	// Content width: terminal minus the 2-char accent prefix.
-	w := o.cols - 2
-
 	// Determine footer hints based on current mode.
-	var footer string
+	var hints []string
 	if o.replyMode {
-		footer = "Enter send  Esc cancel"
+		hints = []string{"Enter send", "Esc cancel"}
 	} else if o.selectedIsDraft() {
-		footer = "j/k navigate  y send  e edit  c revise  n discard  q return"
+		hints = []string{"j/k navigate", "y send", "e edit", "c revise", "n discard", "q return"}
 	} else {
-		footer = "j/k navigate  r reply  a draft reply  d dismiss  q return"
+		hints = []string{"j/k navigate", "r reply", "a draft reply", "d dismiss", "q return"}
 	}
 
-	var buf strings.Builder
-	buf.WriteString("\033[2J\033[1;1H")
+	panel := NewPanel(PanelConfig{
+		Title:       fmt.Sprintf("aileron notifications (%d messages)", len(msgs)),
+		FooterHints: hints,
+	}, o.rows, o.cols)
 
-	// Header.
-	buf.WriteString(accent)
-	fmt.Fprintf(&buf, "\033[1maileron notifications (%d messages)\033[0m\n", len(msgs))
-	buf.WriteString(accent)
-	buf.WriteString("\033[2m" + strings.Repeat("─", w) + "\033[0m\n")
+	w := panel.ContentWidth()
 
 	// Reserve rows for detail pane.
 	detailRows := 8
@@ -480,10 +473,12 @@ func (o *Overlay) render() {
 		visible = 1
 	}
 
+	var content []string
+
 	if len(msgs) == 0 {
-		buf.WriteString(accent + "\n")
-		buf.WriteString(accent + "  No notifications.\n")
-		buf.WriteString(accent + "\n")
+		content = append(content, "")
+		content = append(content, "  No notifications.")
+		content = append(content, "")
 	} else {
 		end := o.scrollPos + visible
 		if end > len(msgs) {
@@ -508,56 +503,54 @@ func (o *Overlay) render() {
 				line = fmt.Sprintf("%s%s %s · %s: %s",
 					cursor, readMark, m.Source, m.Author, m.Preview)
 			}
-
-			buf.WriteString(accent + line + "\n")
+			content = append(content, line)
 		}
 
 		// Detail pane for selected message.
 		if o.cursorPos < len(msgs) {
 			selected := msgs[o.cursorPos]
-			buf.WriteString(accent + "\n")
-			buf.WriteString(accent + "\033[2m" + strings.Repeat("─", w) + "\033[0m\n")
-			fmt.Fprintf(&buf, "%s \033[1m%s · %s\033[0m\n", accent, selected.Channel, selected.Author)
+			content = append(content, "")
+			content = append(content, panel.SeparatorLine())
+			content = append(content, fmt.Sprintf(" \033[1m%s · %s\033[0m", selected.Channel, selected.Author))
 			bodyLines := wrapText(selected.Body, w-1)
 			maxBodyLines := 5
 			for i, line := range bodyLines {
 				if i >= maxBodyLines {
-					buf.WriteString(accent + "  ...\n")
+					content = append(content, "  ...")
 					break
 				}
-				buf.WriteString(accent + " " + line + "\n")
+				content = append(content, " "+line)
 			}
 
 			// Draft reply section.
 			if selected.Draft != "" {
-				buf.WriteString(accent + "\n")
-				buf.WriteString(accent + " \033[36m── Draft Reply ──\033[0m\n")
+				content = append(content, "")
+				content = append(content, " \033[36m── Draft Reply ──\033[0m")
 				draftLines := wrapText(selected.Draft, w-1)
 				for i, line := range draftLines {
 					if i >= maxBodyLines {
-						buf.WriteString(accent + "  ...\n")
+						content = append(content, "  ...")
 						break
 					}
-					buf.WriteString(accent + " " + line + "\n")
+					content = append(content, " "+line)
 				}
 			}
 
 			// Reply input box.
 			if o.replyMode {
-				buf.WriteString(accent + "\n")
+				content = append(content, "")
 				label := "\033[33m>\033[0m"
 				if o.converseMode {
 					label = "\033[33mfeedback>\033[0m"
 				}
-				fmt.Fprintf(&buf, "%s %s %s\033[7m \033[0m\n", accent, label, o.replyBuf.String())
+				content = append(content, fmt.Sprintf(" %s %s\033[7m \033[0m", label, o.replyBuf.String()))
 			}
 		}
 	}
 
-	// Footer.
-	buf.WriteString(accent + "\n")
-	buf.WriteString(accent + "\033[2m" + strings.Repeat("─", w) + "\033[0m\n")
-	buf.WriteString(accent + "\033[2m" + footer + "\033[0m")
-
+	// Clear screen and render.
+	var buf strings.Builder
+	buf.WriteString("\033[2J\033[1;1H")
+	buf.WriteString(panel.Render(content))
 	fmt.Fprint(o.stdout, buf.String())
 }

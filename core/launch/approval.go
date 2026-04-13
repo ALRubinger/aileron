@@ -131,9 +131,7 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 		termRows, termCols = s.bar.Dims()
 	}
 	panel := NewPanel(PanelConfig{
-		Title:      "✈️ Aileron",
-		InnerWidth: 74,
-		Centered:   true,
+		Title: "✈️ Aileron",
 	}, termRows, termCols)
 
 	type opt struct {
@@ -147,17 +145,17 @@ func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
 	}
 
 	var content []string
-	content = append(content, panel.BlankLine())
-	content = append(content, panel.PadLine("  ⚠️  The agent wants to run:"))
-	content = append(content, panel.PadLine("  \033[1;36m"+command+"\033[0m"))
+	content = append(content, "")
+	content = append(content, "  ⚠️  The agent wants to run:")
+	content = append(content, "  \033[1;36m"+command+"\033[0m")
 	if reason != "" {
-		content = append(content, panel.PadLine("  \033[2m"+reason+"\033[0m"))
+		content = append(content, "  \033[2m"+reason+"\033[0m")
 	}
-	content = append(content, panel.BlankLine())
+	content = append(content, "")
 	for _, o := range opts {
-		content = append(content, panel.PadLine(fmt.Sprintf("  \033[1m[%s]\033[0m  %s%s", o.key, o.label, o.desc)))
+		content = append(content, fmt.Sprintf("  \033[1m[%s]\033[0m  %s%s", o.key, o.label, o.desc))
 	}
-	content = append(content, panel.BlankLine())
+	content = append(content, "")
 
 	prompt := panel.RenderToAltScreen(content) + "\r\n  > "
 

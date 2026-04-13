@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -10,148 +11,82 @@ var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x1b]*\x1b\\`)
 
 // PanelConfig configures the visual chrome of a panel.
 type PanelConfig struct {
-	Title       string   // e.g. "✈️ Aileron" or "✈️ Aileron ─ Send Message"
-	InnerWidth  int      // 0 = auto (termCols - 4, capped at 80)
-	Centered    bool     // vertically and horizontally center the box
-	FooterHints []string // e.g. ["y send", "n discard"] rendered in └─ ... ─┘
+	Title       string   // e.g. "✈️ Aileron" or "✈️ Aileron ─ Vault"
+	FooterHints []string // e.g. ["y send", "n discard"] rendered in footer
 }
 
-// Panel renders a bordered box with caller-supplied content lines.
+// Panel renders content with a yellow left accent bar. All Aileron UI
+// uses this style for a consistent look: a colored │ prefix on every
+// line, with a title header and optional footer hints.
 type Panel struct {
 	config   PanelConfig
 	termRows int
 	termCols int
-	inner    int // effective inner width
 }
 
 // NewPanel creates a panel with the given config and terminal dimensions.
 func NewPanel(cfg PanelConfig, termRows, termCols int) *Panel {
-	inner := cfg.InnerWidth
-	if inner <= 0 {
-		inner = termCols - 4
-		if inner > 80 {
-			inner = 80
-		}
+	return &Panel{config: cfg, termRows: termRows, termCols: termCols}
+}
+
+// ContentWidth returns the usable width for content (terminal width
+// minus the 2-char accent prefix "│ ").
+func (p *Panel) ContentWidth() int {
+	w := p.termCols - 2
+	if w < 10 {
+		w = 10
 	}
-	if inner < 10 {
-		inner = 10
-	}
-	return &Panel{config: cfg, termRows: termRows, termCols: termCols, inner: inner}
+	return w
 }
 
-// InnerWidth returns the effective inner width of the box content area.
-func (p *Panel) InnerWidth() int {
-	return p.inner
+// accent returns the yellow left-border prefix.
+func accent() string {
+	return "\033[33m│\033[0m "
 }
 
-// borderColor wraps s in the yellow border color.
-func borderColor(s string) string {
-	return "\033[33m" + s + "\033[0m"
-}
-
-// Render builds the complete bordered box as a string. contentLines are
-// pre-formatted lines to display inside the box. Each line is padded to
-// InnerWidth visible characters. Lines longer than InnerWidth are truncated.
+// Render builds the complete panel as a string. contentLines are
+// pre-formatted lines displayed between the header and footer.
 func (p *Panel) Render(contentLines []string) string {
-	w := p.inner
+	w := p.ContentWidth()
+	a := accent()
+
 	var buf strings.Builder
 
-	// Top border: ┌─ Title ─────┐
-	titleStr := " " + p.config.Title + " "
-	titleWidth := visibleWidth(titleStr)
-	dashesAfterTitle := w - titleWidth - 1 // -1 for the leading ─
-	if dashesAfterTitle < 1 {
-		dashesAfterTitle = 1
-	}
-	buf.WriteString(borderColor("┌─"+titleStr+strings.Repeat("─", dashesAfterTitle)+"┐") + "\r\n")
+	// Header: accent + bold title.
+	buf.WriteString(a)
+	fmt.Fprintf(&buf, "\033[1m%s\033[0m\r\n", p.config.Title)
+	// Header separator.
+	buf.WriteString(a)
+	buf.WriteString("\033[2m" + strings.Repeat("─", w) + "\033[0m\r\n")
 
-	// Content lines: │ content padded │
+	// Content lines.
 	for _, line := range contentLines {
-		vw := visibleWidth(line)
-		pad := w - vw
-		if pad < 0 {
-			pad = 0
-		}
-		buf.WriteString(borderColor("│") + line + strings.Repeat(" ", pad) + borderColor("│") + "\r\n")
+		buf.WriteString(a)
+		buf.WriteString(line)
+		buf.WriteString("\r\n")
 	}
 
-	// Bottom border: └─ footer ─────┘  or  └─────────┘
+	// Footer.
+	buf.WriteString(a + "\r\n")
+	buf.WriteString(a)
+	buf.WriteString("\033[2m" + strings.Repeat("─", w) + "\033[0m\r\n")
 	if len(p.config.FooterHints) > 0 {
-		footer := " " + strings.Join(p.config.FooterHints, "  ") + " "
-		footerWidth := len(footer)
-		dashesAfterFooter := w - footerWidth - 1
-		if dashesAfterFooter < 1 {
-			dashesAfterFooter = 1
-		}
-		buf.WriteString(borderColor("└─"+footer+strings.Repeat("─", dashesAfterFooter)+"┘") + "\r\n")
-	} else {
-		buf.WriteString(borderColor("└" + strings.Repeat("─", w) + "┘") + "\r\n")
+		buf.WriteString(a)
+		buf.WriteString("\033[2m" + strings.Join(p.config.FooterHints, "  ") + "\033[0m")
 	}
 
 	return buf.String()
 }
 
 // RenderToAltScreen wraps Render() output with alternate screen buffer
-// enter, clear screen, and centering. Does NOT include alt-screen exit.
+// enter and clear screen. Does NOT include alt-screen exit.
 func (p *Panel) RenderToAltScreen(contentLines []string) string {
-	rendered := p.Render(contentLines)
-
-	if !p.config.Centered {
-		return "\033[?1049h\033[2J\033[1;1H" + rendered
-	}
-
-	// Count rendered lines for vertical centering.
-	lines := strings.Split(rendered, "\r\n")
-	// Remove trailing empty element from split.
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	boxHeight := len(lines)
-	boxWidth := p.inner + 2 // inner + left/right border chars
-
-	topPad := (p.termRows - boxHeight) / 2
-	if topPad < 0 {
-		topPad = 0
-	}
-	leftPad := (p.termCols - boxWidth) / 2
-	if leftPad < 0 {
-		leftPad = 0
-	}
-	margin := strings.Repeat(" ", leftPad)
-
-	var buf strings.Builder
-	buf.WriteString("\033[?1049h\033[2J\033[1;1H")
-	for i := 0; i < topPad; i++ {
-		buf.WriteString("\r\n")
-	}
-	for _, line := range lines {
-		buf.WriteString(margin)
-		buf.WriteString(line)
-		buf.WriteString("\r\n")
-	}
-	return buf.String()
+	return "\033[?1049h\033[2J\033[1;1H" + p.Render(contentLines)
 }
 
-// SeparatorLine returns a horizontal separator that spans the inner width
-// of the panel, using ├ and ┤ side connectors.
+// SeparatorLine returns a dim horizontal rule for in-panel dividers.
 func (p *Panel) SeparatorLine() string {
-	return borderColor("├") + borderColor(strings.Repeat("─", p.inner)) + borderColor("┤")
-}
-
-// PadLine returns a line padded with spaces to the panel's inner width.
-// Useful for building content lines with left-aligned text.
-func (p *Panel) PadLine(text string) string {
-	vw := visibleWidth(text)
-	pad := p.inner - vw
-	if pad < 0 {
-		pad = 0
-	}
-	return text + strings.Repeat(" ", pad)
-}
-
-// BlankLine returns an empty content line (all spaces, inner width).
-func (p *Panel) BlankLine() string {
-	return strings.Repeat(" ", p.inner)
+	return "\033[2m" + strings.Repeat("─", p.ContentWidth()) + "\033[0m"
 }
 
 // visibleWidth returns the display width of a string, excluding ANSI
