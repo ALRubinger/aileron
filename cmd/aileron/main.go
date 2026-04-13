@@ -399,10 +399,45 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 	}
 	name := args[0]
 
+	// Check if this is a brand-new vault (no existing secrets).
+	vaultPath := launch.DefaultVaultPath()
+	isNewVault := true
+	if fv, err := vault.NewFileVault(vaultPath); err == nil {
+		isNewVault = len(fv.Names()) == 0
+	}
+
+	if isNewVault {
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "  Creating a new Aileron vault.")
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "  The passphrase you choose protects all secrets in this vault.")
+		fmt.Fprintln(stderr, "  It is never stored, transmitted, or recoverable. No one can")
+		fmt.Fprintln(stderr, "  read it, tell you what it is, or help you retrieve it.")
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "  If you lose this passphrase, you must delete the vault file")
+		fmt.Fprintf(stderr, "  (%s) and re-add all secrets.\n", vaultPath)
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "  Store this passphrase securely. Do not share it.")
+		fmt.Fprintln(stderr, "")
+	}
+
 	passphrase, err := promptPassphrase("Vault passphrase: ", stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
+	}
+
+	// For a new vault, require confirmation.
+	if isNewVault {
+		confirm, err := promptPassphrase("Confirm passphrase: ", stderr)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		if passphrase != confirm {
+			fmt.Fprintln(stderr, "error: passphrases do not match")
+			return 1
+		}
 	}
 
 	fmt.Fprint(stderr, "Secret value: ")
@@ -413,7 +448,7 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stderr) // newline after hidden input
 
-	v, err := launch.OpenLocalVault(launch.DefaultVaultPath(), passphrase)
+	v, err := launch.OpenLocalVault(vaultPath, passphrase)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
