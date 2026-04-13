@@ -41,14 +41,14 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		// Parse aileron-level flags before the agent name.
 		launchFlags := flag.NewFlagSet("launch", flag.ContinueOnError)
 		launchFlags.SetOutput(stderr)
-		verbose := launchFlags.Bool("verbose", false, "Enable verbose logging for comms listeners")
+		logLevel := launchFlags.String("log-level", "warn", "Log level: trace, debug, info, warn, error")
 		if err := launchFlags.Parse(args[1:]); err != nil {
 			return 1
 		}
 		launchArgs := launchFlags.Args()
 
 		if len(launchArgs) < 1 {
-			fmt.Fprintln(stderr, "usage: aileron launch [--verbose] <agent> [args...]")
+			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] <agent> [args...]")
 			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
 			return 1
 		}
@@ -70,7 +70,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 			Agent:     agent,
 			ShellShim: shimPath,
 			Args:      launchArgs[1:],
-			Verbose:   *verbose,
+			LogLevel:  launch.ParseLogLevel(*logLevel),
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)

@@ -15,6 +15,7 @@ func TestNewDiscordListener(t *testing.T) {
 		"bot-token-test",
 		[]string{"123456", "789012"},
 		[]string{"999999"},
+		nopLogger(),
 	)
 	if dl.Service() != "discord" {
 		t.Errorf("Service() = %q, want 'discord'", dl.Service())
@@ -22,7 +23,7 @@ func TestNewDiscordListener(t *testing.T) {
 }
 
 func TestDiscordListener_ConnectMissingToken(t *testing.T) {
-	dl := comms.NewDiscordListener("", nil, nil)
+	dl := comms.NewDiscordListener("", nil, nil, nopLogger())
 	err := dl.Connect(context.Background())
 	if err == nil {
 		t.Fatal("expected error for missing token")
@@ -30,7 +31,7 @@ func TestDiscordListener_ConnectMissingToken(t *testing.T) {
 }
 
 func TestDiscordListener_ConnectValidToken(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	err := dl.Connect(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -38,7 +39,7 @@ func TestDiscordListener_ConnectValidToken(t *testing.T) {
 }
 
 func TestDiscordListener_ListenWithoutConnect(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	_, err := dl.Listen(context.Background())
 	if err == nil {
 		t.Fatal("expected error when listening without connect")
@@ -46,7 +47,7 @@ func TestDiscordListener_ListenWithoutConnect(t *testing.T) {
 }
 
 func TestDiscordListener_SendWithoutConnect(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	err := dl.Send(context.Background(), comms.OutgoingMessage{
 		Channel: "123456",
 		Body:    "hello",
@@ -57,7 +58,7 @@ func TestDiscordListener_SendWithoutConnect(t *testing.T) {
 }
 
 func TestDiscordListener_Close(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	// Close without connect should not panic.
 	if err := dl.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
@@ -66,7 +67,7 @@ func TestDiscordListener_Close(t *testing.T) {
 
 func TestDiscordListener_ProcessMessageCreate(t *testing.T) {
 	dl := comms.NewDiscordListener("bot-token-test",
-		[]string{"C123"}, []string{"C999"})
+		[]string{"C123"}, []string{"C999"}, nopLogger())
 
 	msg, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -99,7 +100,7 @@ func TestDiscordListener_ProcessMessageCreate(t *testing.T) {
 }
 
 func TestDiscordListener_ProcessMessageCreate_BotSkipped(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 
 	_, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -117,7 +118,7 @@ func TestDiscordListener_ProcessMessageCreate_BotSkipped(t *testing.T) {
 }
 
 func TestDiscordListener_ProcessMessageCreate_NilAuthor(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 
 	_, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -132,7 +133,7 @@ func TestDiscordListener_ProcessMessageCreate_NilAuthor(t *testing.T) {
 }
 
 func TestDiscordListener_ProcessMessageCreate_IgnoredChannel(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, []string{"C999"})
+	dl := comms.NewDiscordListener("bot-token-test", nil, []string{"C999"}, nopLogger())
 
 	_, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -148,7 +149,7 @@ func TestDiscordListener_ProcessMessageCreate_IgnoredChannel(t *testing.T) {
 
 func TestDiscordListener_ProcessMessageCreate_UnlistedChannel(t *testing.T) {
 	dl := comms.NewDiscordListener("bot-token-test",
-		[]string{"C123"}, nil) // only listen on C123
+		[]string{"C123"}, nil, nopLogger()) // only listen on C123
 
 	_, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -163,7 +164,7 @@ func TestDiscordListener_ProcessMessageCreate_UnlistedChannel(t *testing.T) {
 }
 
 func TestDiscordListener_ProcessMessageCreate_NoChannelFilter(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 
 	_, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -178,7 +179,7 @@ func TestDiscordListener_ProcessMessageCreate_NoChannelFilter(t *testing.T) {
 }
 
 func TestDiscordListener_ProcessMessageCreate_NicknamePriority(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 
 	msg, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -203,7 +204,7 @@ func TestDiscordListener_ProcessMessageCreate_NicknamePriority(t *testing.T) {
 }
 
 func TestDiscordListener_ProcessMessageCreate_FallbackToUsername(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 
 	msg, ok := dl.ProcessMessageCreate(&discordgo.MessageCreate{
 		Message: &discordgo.Message{
@@ -224,7 +225,7 @@ func TestDiscordListener_ProcessMessageCreate_FallbackToUsername(t *testing.T) {
 }
 
 func TestDiscordListener_ListenSuccess(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	if err := dl.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +251,7 @@ func TestDiscordListener_ListenSuccess(t *testing.T) {
 }
 
 func TestDiscordListener_ListenOpenFails(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	if err := dl.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -262,20 +263,20 @@ func TestDiscordListener_ListenOpenFails(t *testing.T) {
 }
 
 func TestDiscordListener_ServiceName(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	if got := dl.Service(); got != "discord" {
 		t.Errorf("Service() = %q, want 'discord'", got)
 	}
 }
 
 func TestDiscordListener_SetEndpointURL_NilSession(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	// Should not panic when session is nil.
 	dl.SetEndpointURL("http://localhost:1234/")
 }
 
 func TestDiscordListener_CloseAfterConnect(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 	if err := dl.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +287,7 @@ func TestDiscordListener_CloseAfterConnect(t *testing.T) {
 }
 
 func TestDiscordListener_ProcessMessageCreate_NilAuthorEmptyResult(t *testing.T) {
-	dl := comms.NewDiscordListener("bot-token-test", nil, nil)
+	dl := comms.NewDiscordListener("bot-token-test", nil, nil, nopLogger())
 
 	// Message with a non-bot author but nil Member — exercises the
 	// resolveAuthor path where Author is non-nil but Member is nil
@@ -310,12 +311,12 @@ func TestDiscordListener_ProcessMessageCreate_NilAuthorEmptyResult(t *testing.T)
 	}
 }
 
-func TestDiscordListener_VerboseLogging(t *testing.T) {
+func TestDiscordListener_DebugLogging(t *testing.T) {
 	dl := comms.NewDiscordListener("bot-token-test",
-		[]string{"C123"}, []string{"C999"})
-	dl.SetLogger(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})))
+		[]string{"C123"}, []string{"C999"},
+		slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})))
 
 	// Connect — exercises the "connected" log line.
 	if err := dl.Connect(context.Background()); err != nil {
