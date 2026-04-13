@@ -658,9 +658,20 @@ func prepareCommsConfig(dir string, sessionLog *slog.Logger) *commsSetup {
 		}
 	}
 
+	if cfg := pf.Notifications.Slack; cfg != nil && cfg.UserToken != "" {
+		if err := ValidateTokenRef("slack.user_token", cfg.UserToken); err != nil {
+			sessionLog.Warn("slack token validation failed", "error", err)
+			fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
+			return nil
+		}
+	}
+
 	var tokenRefs []string
 	if cfg := pf.Notifications.Slack; cfg != nil {
 		tokenRefs = append(tokenRefs, cfg.AppToken, cfg.BotToken)
+		if cfg.UserToken != "" {
+			tokenRefs = append(tokenRefs, cfg.UserToken)
+		}
 	}
 	if cfg := pf.Notifications.Discord; cfg != nil {
 		tokenRefs = append(tokenRefs, cfg.BotToken)
@@ -710,6 +721,11 @@ func startCommsWithVault(ctx context.Context, setup *commsSetup, v vault.Vault, 
 	if cfg := setup.pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
 		appToken, botToken := resolved[idx], resolved[idx+1]
 		idx += 2
+		var userToken string
+		if cfg.UserToken != "" {
+			userToken = resolved[idx]
+			idx++
+		}
 		channels := make([]string, 0, len(cfg.Channels))
 		for _, ch := range cfg.Channels {
 			channels = append(channels, ch.Name)
@@ -723,8 +739,9 @@ func startCommsWithVault(ctx context.Context, setup *commsSetup, v vault.Vault, 
 		sessionLog.Info("slack listener configured",
 			"channels", channels,
 			"ignore", cfg.Ignore,
+			"user_token", userToken != "",
 		)
-		sl := comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore, sessionLog.With("component", "slack"))
+		sl := comms.NewSlackListener(appToken, botToken, userToken, channels, cfg.Ignore, sessionLog.With("component", "slack"))
 		created = append(created, sl)
 	}
 	if cfg := setup.pf.Notifications.Discord; cfg != nil && cfg.BotToken != "" {

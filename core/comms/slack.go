@@ -16,17 +16,19 @@ import (
 // It connects via WebSocket (no public URL required) and delivers
 // incoming messages to a channel.
 type SlackListener struct {
-	appToken string
-	botToken string
-	channels map[string]bool // channel names to listen on
-	ignore   map[string]bool // channel names to ignore
-	log      *slog.Logger
+	appToken  string
+	botToken  string
+	userToken string // optional; when set, Send() uses this token (messages come from the user)
+	channels  map[string]bool // channel names to listen on
+	ignore    map[string]bool // channel names to ignore
+	log       *slog.Logger
 
 	// apiURL overrides the Slack API base URL for testing.
 	apiURL string
 
-	api    *slack.Client
-	socket *socketmode.Client
+	api     *slack.Client // bot client — used for receiving, channel/user lookups
+	sendAPI *slack.Client // client used for Send(); user client if userToken set, else bot client
+	socket  *socketmode.Client
 }
 
 // SetAPIURL overrides the Slack API base URL. Call before Connect.
@@ -36,8 +38,9 @@ func (s *SlackListener) SetAPIURL(url string) {
 }
 
 // NewSlackListener creates a Slack listener with the given tokens and
-// channel configuration.
-func NewSlackListener(appToken, botToken string, channels, ignore []string, log *slog.Logger) *SlackListener {
+// channel configuration. The userToken is optional — when provided,
+// Send() uses it so messages appear from the user instead of the bot.
+func NewSlackListener(appToken, botToken, userToken string, channels, ignore []string, log *slog.Logger) *SlackListener {
 	chMap := make(map[string]bool, len(channels))
 	for _, ch := range channels {
 		chMap[ch] = true
@@ -47,11 +50,12 @@ func NewSlackListener(appToken, botToken string, channels, ignore []string, log 
 		igMap[ch] = true
 	}
 	return &SlackListener{
-		appToken: appToken,
-		botToken: botToken,
-		channels: chMap,
-		ignore:   igMap,
-		log:      log,
+		appToken:  appToken,
+		botToken:  botToken,
+		userToken: userToken,
+		channels:  chMap,
+		ignore:    igMap,
+		log:       log,
 	}
 }
 
@@ -75,7 +79,19 @@ func (s *SlackListener) Connect(ctx context.Context) error {
 		socketmode.OptionLog(log.New(log.Writer(), "slack-socket: ", log.LstdFlags)),
 	)
 
-	s.log.Debug("slack: connected", "channels", len(s.channels))
+	// Use the user token for sending if provided, so messages come from
+	// the user's identity instead of the bot.
+	if s.userToken != "" {
+		var sendOpts []slack.Option
+		if s.apiURL != "" {
+			sendOpts = append(sendOpts, slack.OptionAPIURL(s.apiURL))
+		}
+		s.sendAPI = slack.New(s.userToken, sendOpts...)
+	} else {
+		s.sendAPI = s.api
+	}
+
+	s.log.Debug("slack: connected", "channels", len(s.channels), "user_token", s.userToken != "")
 	return nil
 }
 
@@ -231,12 +247,13 @@ func BuildIncomingMessage(ts, channel, author, text string) IncomingMessage {
 	}
 }
 
-// Send posts a message to the given Slack channel.
+// Send posts a message to the given Slack channel. If a user token was
+// provided, messages are sent as the user; otherwise as the bot.
 func (s *SlackListener) Send(ctx context.Context, msg OutgoingMessage) error {
-	if s.api == nil {
+	if s.sendAPI == nil {
 		return fmt.Errorf("slack: not connected")
 	}
-	_, _, err := s.api.PostMessageContext(ctx, msg.Channel,
+	_, _, err := s.sendAPI.PostMessageContext(ctx, msg.Channel,
 		slack.MsgOptionText(msg.Body, false),
 	)
 	return err

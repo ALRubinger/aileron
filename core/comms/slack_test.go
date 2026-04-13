@@ -26,6 +26,7 @@ func TestNewSlackListener(t *testing.T) {
 	sl := comms.NewSlackListener(
 		"xapp-test",
 		"xoxb-test",
+		"",
 		[]string{"#backend", "#incidents"},
 		[]string{"#random"},
 		nopLogger(),
@@ -36,7 +37,7 @@ func TestNewSlackListener(t *testing.T) {
 }
 
 func TestSlackListener_ConnectMissingTokens(t *testing.T) {
-	sl := comms.NewSlackListener("", "", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("", "", "", nil, nil, nopLogger())
 	err := sl.Connect(context.Background())
 	if err == nil {
 		t.Fatal("expected error for missing tokens")
@@ -44,7 +45,7 @@ func TestSlackListener_ConnectMissingTokens(t *testing.T) {
 }
 
 func TestSlackListener_ConnectValidTokens(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	err := sl.Connect(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -52,7 +53,7 @@ func TestSlackListener_ConnectValidTokens(t *testing.T) {
 }
 
 func TestSlackListener_ListenWithoutConnect(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	// Don't call Connect.
 	_, err := sl.Listen(context.Background())
 	if err == nil {
@@ -61,7 +62,7 @@ func TestSlackListener_ListenWithoutConnect(t *testing.T) {
 }
 
 func TestSlackListener_SendWithoutConnect(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	err := sl.Send(context.Background(), comms.OutgoingMessage{
 		Channel: "#test",
 		Body:    "hello",
@@ -72,7 +73,7 @@ func TestSlackListener_SendWithoutConnect(t *testing.T) {
 }
 
 func TestSlackListener_Close(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	// Close without connect should not panic.
 	if err := sl.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
@@ -80,7 +81,7 @@ func TestSlackListener_Close(t *testing.T) {
 }
 
 func TestSlackListener_ProcessMessageEvent(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test",
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "",
 		[]string{"C123"}, []string{"C999"}, nopLogger())
 
 	msg, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
@@ -104,7 +105,7 @@ func TestSlackListener_ProcessMessageEvent(t *testing.T) {
 }
 
 func TestSlackListener_ProcessMessageEvent_BotSkipped(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 
 	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
 		User:    "U123",
@@ -118,7 +119,7 @@ func TestSlackListener_ProcessMessageEvent_BotSkipped(t *testing.T) {
 }
 
 func TestSlackListener_ProcessMessageEvent_IgnoredChannel(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, []string{"C999"}, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, []string{"C999"}, nopLogger())
 
 	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
 		User:    "U123",
@@ -131,7 +132,7 @@ func TestSlackListener_ProcessMessageEvent_IgnoredChannel(t *testing.T) {
 }
 
 func TestSlackListener_ProcessMessageEvent_UnlistedChannel(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test",
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "",
 		[]string{"C123"}, nil, nopLogger()) // only listen on C123
 
 	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
@@ -145,7 +146,7 @@ func TestSlackListener_ProcessMessageEvent_UnlistedChannel(t *testing.T) {
 }
 
 func TestSlackListener_ProcessMessageEvent_LongPreview(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 
 	longText := strings.Repeat("x", 100)
 	msg, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
@@ -162,7 +163,7 @@ func TestSlackListener_ProcessMessageEvent_LongPreview(t *testing.T) {
 }
 
 func TestSlackListener_ProcessMessageEvent_NoChannelFilter(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger()) // no channel filter
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger()) // no channel filter
 
 	_, ok := sl.ProcessMessageEvent(&slackevents.MessageEvent{
 		User:    "U123",
@@ -203,7 +204,7 @@ func TestBuildIncomingMessage_LongTextTruncated(t *testing.T) {
 }
 
 func TestSlackListener_DebugLogging(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test",
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "",
 		[]string{"C123"}, []string{"C999"}, debugLogger())
 
 	// Connect — exercises the "connected" log line.
@@ -236,7 +237,7 @@ func TestSlackListener_DebugLogging(t *testing.T) {
 }
 
 func TestSlackListener_HandleEvent_NonMessageTypes(t *testing.T) {
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, debugLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, debugLogger())
 	if err := sl.Connect(context.Background()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
@@ -272,7 +273,7 @@ func TestSlackListener_ChannelNameMatching(t *testing.T) {
 	// Config uses channel name "#backend" but Slack sends channel ID "C123".
 	// Without API connection, resolveChannelName returns raw ID, so the
 	// channel filter uses both ID and name for matching.
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test",
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "",
 		[]string{"#backend"}, nil, nopLogger())
 
 	// Channel ID "C123" doesn't match "#backend" by ID, and without
