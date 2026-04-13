@@ -449,28 +449,38 @@ func (o *Overlay) cancelReply() {
 func (o *Overlay) render() {
 	msgs := o.queue.Messages()
 
-	var buf strings.Builder
-	// Clear screen and move to top.
-	buf.WriteString("\033[2J\033[1;1H")
-
-	// Header.
-	header := fmt.Sprintf(" aileron notifications (%d messages) — Esc/q to return", len(msgs))
-	if len(header) > o.cols {
-		header = header[:o.cols]
+	// Determine footer hints based on current mode.
+	var hints []string
+	if o.replyMode {
+		hints = []string{"Enter send", "Esc cancel"}
+	} else if o.selectedIsDraft() {
+		hints = []string{"j/k navigate", "y send", "e edit", "c revise", "n discard", "q return"}
+	} else {
+		hints = []string{"j/k navigate", "r reply", "a draft reply", "d dismiss", "q return"}
 	}
-	fmt.Fprintf(&buf, "\033[1m%s\033[0m\n", header)
-	buf.WriteString(strings.Repeat("─", o.cols) + "\n")
 
-	// Reserve rows for the detail pane (separator + channel/author + up to 5 body lines).
+	panel := NewPanel(PanelConfig{
+		Title:       fmt.Sprintf("aileron notifications (%d messages)", len(msgs)),
+		InnerWidth:  0, // auto
+		Centered:    false,
+		FooterHints: hints,
+	}, o.rows, o.cols)
+
+	w := panel.InnerWidth()
+
+	// Reserve rows for detail pane.
 	detailRows := 8
-	// Message list.
 	visible := o.rows - 4 - detailRows
 	if visible < 1 {
 		visible = 1
 	}
 
+	var content []string
+
 	if len(msgs) == 0 {
-		buf.WriteString("\n  No notifications.\n")
+		content = append(content, panel.BlankLine())
+		content = append(content, panel.PadLine("  No notifications."))
+		content = append(content, panel.BlankLine())
 	} else {
 		end := o.scrollPos + visible
 		if end > len(msgs) {
@@ -496,67 +506,58 @@ func (o *Overlay) render() {
 					cursor, readMark, m.Source, m.Author, m.Preview)
 			}
 
-			// Truncate to terminal width.
-			if displayWidth(line) > o.cols {
-				line = line[:o.cols]
+			// Truncate to inner width.
+			if visibleWidth(line) > w {
+				line = line[:w]
 			}
-			buf.WriteString(line + "\n")
+			content = append(content, panel.PadLine(line))
 		}
 
 		// Detail pane for selected message.
 		if o.cursorPos < len(msgs) {
 			selected := msgs[o.cursorPos]
-			buf.WriteString("\n" + strings.Repeat("─", o.cols) + "\n")
-			buf.WriteString(fmt.Sprintf(" \033[1m%s · %s\033[0m\n", selected.Channel, selected.Author))
-			bodyLines := wrapText(selected.Body, o.cols-2)
+			content = append(content, panel.BlankLine())
+			content = append(content, panel.SeparatorLine())
+			content = append(content, panel.PadLine(fmt.Sprintf(" \033[1m%s · %s\033[0m", selected.Channel, selected.Author)))
+			bodyLines := wrapText(selected.Body, w-2)
 			maxBodyLines := 5
 			for i, line := range bodyLines {
 				if i >= maxBodyLines {
-					buf.WriteString("  ...\n")
+					content = append(content, panel.PadLine("  ..."))
 					break
 				}
-				buf.WriteString(" " + line + "\n")
+				content = append(content, panel.PadLine(" "+line))
 			}
 
-			// Show draft text below the original message.
+			// Draft reply section.
 			if selected.Draft != "" {
-				buf.WriteString("\n")
-				buf.WriteString(" \033[36m── Draft Reply ──\033[0m\n")
-				draftLines := wrapText(selected.Draft, o.cols-2)
+				content = append(content, panel.BlankLine())
+				content = append(content, panel.PadLine(" \033[36m── Draft Reply ──\033[0m"))
+				draftLines := wrapText(selected.Draft, w-2)
 				for i, line := range draftLines {
 					if i >= maxBodyLines {
-						buf.WriteString("  ...\n")
+						content = append(content, panel.PadLine("  ..."))
 						break
 					}
-					buf.WriteString(" " + line + "\n")
+					content = append(content, panel.PadLine(" "+line))
 				}
 			}
 
 			// Reply input box.
 			if o.replyMode {
-				buf.WriteString("\n")
+				content = append(content, panel.BlankLine())
 				label := "\033[33m>\033[0m"
 				if o.converseMode {
 					label = "\033[33mfeedback>\033[0m"
 				}
-				buf.WriteString(fmt.Sprintf(" %s %s\033[7m \033[0m\n", label, o.replyBuf.String()))
+				content = append(content, panel.PadLine(fmt.Sprintf(" %s %s\033[7m \033[0m", label, o.replyBuf.String())))
 			}
 		}
 	}
 
-	// Footer.
-	var footer string
-	if o.replyMode {
-		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
-		footer += " Enter send  Esc cancel"
-	} else if o.selectedIsDraft() {
-		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
-		footer += " j/k or ↑/↓ navigate  y send  e edit  c revise  n discard  q return"
-	} else {
-		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
-		footer += " j/k or ↑/↓ navigate  r reply  a draft reply  d dismiss  q return"
-	}
-	buf.WriteString(footer)
-
+	// Clear screen and render the panel.
+	var buf strings.Builder
+	buf.WriteString("\033[2J\033[1;1H")
+	buf.WriteString(panel.Render(content))
 	fmt.Fprint(o.stdout, buf.String())
 }

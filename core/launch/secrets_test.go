@@ -2,9 +2,11 @@ package launch_test
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/launch"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -210,4 +212,40 @@ func TestDefaultVaultPath(t *testing.T) {
 			t.Errorf("expected secrets.json, got %q", filepath.Base(path))
 		}
 	}
+}
+
+func TestPromptVaultWithPanel_EscSkips(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &simpleOverlay{}
+	router := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go router.Run()
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	bar := launch.NewStatusBar(24, 80, "test")
+
+	done := make(chan vault.Vault, 1)
+	go func() {
+		done <- launch.PromptVaultWithPanel(copier, router, bar)
+	}()
+
+	// Give the prompt time to render and steal input.
+	time.Sleep(100 * time.Millisecond)
+
+	// Press Esc to skip.
+	stdinW.Write([]byte{0x1B})
+
+	select {
+	case v := <-done:
+		if v != nil {
+			t.Error("expected nil vault after Esc")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for vault prompt")
+	}
+	stdinW.Close()
 }

@@ -105,7 +105,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		cmd.Dir = config.Dir
 	}
 
-	// Create the notification queue and start any comms listeners.
+	// Create the notification queue and prepare comms config.
 	queue := NewNotifyQueue(100, nil)
 	wireQuietHours(config.Dir, queue)
 	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)
@@ -119,16 +119,20 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		"binary", agentPath,
 	)
 
-	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
-	defer stopCommsListeners(listeners)
+	commsConf := prepareCommsConfig(config.Dir, sessionLog)
 
 	// If stdin is a terminal, use the pty proxy with status bar.
+	// The pty path defers vault opening so it can show a Panel prompt.
 	var result LaunchResult
+	var listeners []comms.Listener
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		result, err = launchWithPty(cmd, config, queue, listeners, approvalSocket, commsSocket, auditLog, sessionID)
+		result, listeners, err = launchWithPty(ctx, cmd, config, queue, commsConf, approvalSocket, commsSocket, auditLog, sessionID)
 	} else {
+		// Non-pty path: use legacy tty-based vault prompt.
+		listeners = startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
 		result, err = launchDirect(cmd, config)
 	}
+	defer stopCommsListeners(listeners)
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	if auditLog != "" {
@@ -164,12 +168,12 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 }
 
 // launchWithPty runs the agent inside a pty with a status bar at the bottom.
-func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, listeners []comms.Listener, approvalSocket, commsSocket, auditLog, sessionID string) (LaunchResult, error) {
+func launchWithPty(ctx context.Context, cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, commsConf *commsSetup, approvalSocket, commsSocket, auditLog, sessionID string) (LaunchResult, []comms.Listener, error) {
 	stdinFd := int(os.Stdin.Fd())
 
 	cols, rows, err := term.GetSize(stdinFd)
 	if err != nil {
-		return LaunchResult{}, fmt.Errorf("getting terminal size: %w", err)
+		return LaunchResult{}, nil, fmt.Errorf("getting terminal size: %w", err)
 	}
 
 	bar := NewStatusBar(rows, cols, "Flying ✈️ withaileron.ai ")
@@ -180,13 +184,13 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 		Cols: uint16(cols),
 	})
 	if err != nil {
-		return LaunchResult{}, fmt.Errorf("failed to start %s in pty: %w", config.Agent.Name(), err)
+		return LaunchResult{}, nil, fmt.Errorf("failed to start %s in pty: %w", config.Agent.Name(), err)
 	}
 	defer ptmx.Close()
 
 	oldState, err := term.MakeRaw(stdinFd)
 	if err != nil {
-		return LaunchResult{}, fmt.Errorf("setting raw mode: %w", err)
+		return LaunchResult{}, nil, fmt.Errorf("setting raw mode: %w", err)
 	}
 	defer term.Restore(stdinFd, oldState)
 
@@ -204,11 +208,26 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 
 	WireDraftInjection(ptmx, overlay, queue)
 
+	// Start the router early so vault prompt can steal input.
+	go router.Run()
+	go outputCopier.Run()
+
+	// Now that the PTY, router, and copier are up, open the vault
+	// (with Panel-based retry prompt) and start comms listeners.
+	var listeners []comms.Listener
+	if commsConf != nil {
+		var v vault.Vault
+		if commsConf.needsVault {
+			v = PromptVaultWithPanel(outputCopier, router, bar)
+		}
+		listeners = startCommsWithVault(ctx, commsConf, v, queue, auditLog, sessionID)
+	}
+
 	// Start the approval server so aileron-sh can request user approvals
 	// on the real terminal (not the pty).
 	approvalSrv, err := NewApprovalServer(approvalSocket, bar, outputCopier, router, ptmx)
 	if err != nil {
-		return LaunchResult{}, fmt.Errorf("starting approval server: %w", err)
+		return LaunchResult{}, listeners, fmt.Errorf("starting approval server: %w", err)
 	}
 	defer approvalSrv.Close()
 	go approvalSrv.Serve()
@@ -216,7 +235,7 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	// Start the comms server so aileron-mcp can read/send messages.
 	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, bar, outputCopier, router, auditLog, sessionID)
 	if err != nil {
-		return LaunchResult{}, fmt.Errorf("starting comms server: %w", err)
+		return LaunchResult{}, listeners, fmt.Errorf("starting comms server: %w", err)
 	}
 	defer commsSrv.Close()
 	go commsSrv.Serve()
@@ -243,9 +262,6 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 		}
 	}()
 
-	go router.Run()
-	go outputCopier.Run()
-
 	err = cmd.Wait()
 	signal.Stop(sigCh)
 	close(sigCh)
@@ -257,7 +273,8 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 
 	CleanupTerminalScreen(os.Stdout, rows)
 
-	return exitResult(err)
+	r, exitErr := exitResult(err)
+	return r, listeners, exitErr
 }
 
 // WireDraftInjection connects the overlay's draft-request and converse
@@ -556,9 +573,20 @@ func EnvGlobMatch(pattern, name string) bool {
 	return pattern == name
 }
 
-// startCommsListeners reads the notification config from the policy file,
-// creates listeners, and starts them.
-func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string, sessionLog *slog.Logger) []comms.Listener {
+// commsSetup holds the parsed notification config from the policy file,
+// ready for vault resolution and listener creation.
+type commsSetup struct {
+	pf         *launchpolicy.PolicyFile
+	tokenRefs  []string
+	needsVault bool
+	sessionLog *slog.Logger
+}
+
+// prepareCommsConfig reads the notification policy and validates token
+// refs. Returns a commsSetup indicating whether a vault is needed. Does
+// NOT open the vault or start listeners — that is deferred until after
+// the PTY is set up so we can show a Panel-based passphrase prompt.
+func prepareCommsConfig(dir string, sessionLog *slog.Logger) *commsSetup {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
@@ -594,7 +622,6 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		}
 	}
 
-	// Collect token values and open vault if any are vault references.
 	var tokenRefs []string
 	if cfg := pf.Notifications.Slack; cfg != nil {
 		tokenRefs = append(tokenRefs, cfg.AppToken, cfg.BotToken)
@@ -603,21 +630,31 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		tokenRefs = append(tokenRefs, cfg.BotToken)
 	}
 
-	var v vault.Vault
+	needsVault := false
 	for _, ref := range tokenRefs {
 		if IsVaultRef(ref) {
-			var err error
-			v, err = OpenVaultFunc(os.Stderr)
-			if err != nil {
-				sessionLog.Warn("vault open failed", "error", err)
-				fmt.Fprintf(os.Stderr, "aileron: vault: %v\n", err)
-				return nil
-			}
+			needsVault = true
 			break
 		}
 	}
 
-	resolved, err := ResolveTokens(tokenRefs, v)
+	return &commsSetup{
+		pf:         pf,
+		tokenRefs:  tokenRefs,
+		needsVault: needsVault,
+		sessionLog: sessionLog,
+	}
+}
+
+// startCommsWithVault resolves tokens (using the provided vault, which
+// may be nil), creates listeners, and starts them.
+func startCommsWithVault(ctx context.Context, setup *commsSetup, v vault.Vault, queue *NotifyQueue, auditLog, sessionID string) []comms.Listener {
+	if setup == nil {
+		return nil
+	}
+	sessionLog := setup.sessionLog
+
+	resolved, err := ResolveTokens(setup.tokenRefs, v)
 	if err != nil {
 		sessionLog.Warn("token resolution failed", "error", err)
 		fmt.Fprintf(os.Stderr, "aileron: %v\n", err)
@@ -634,7 +671,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	autoDraft := make(map[string]bool)
 	priority := make(map[string]string)
 	var created []comms.Listener
-	if cfg := pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
+	if cfg := setup.pf.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
 		appToken, botToken := resolved[idx], resolved[idx+1]
 		idx += 2
 		channels := make([]string, 0, len(cfg.Channels))
@@ -654,7 +691,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		sl := comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore, sessionLog.With("component", "slack"))
 		created = append(created, sl)
 	}
-	if cfg := pf.Notifications.Discord; cfg != nil && cfg.BotToken != "" {
+	if cfg := setup.pf.Notifications.Discord; cfg != nil && cfg.BotToken != "" {
 		botToken := resolved[idx]
 		channels := make([]string, 0, len(cfg.Channels))
 		for _, ch := range cfg.Channels {
@@ -672,6 +709,29 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	}
 
 	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, priority, auditLog, sessionID, sessionLog)
+}
+
+// startCommsListeners is the legacy convenience wrapper that prepares
+// config, opens the vault via the old tty prompt, and starts listeners.
+// Used by the non-pty (direct) launch path.
+func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string, sessionLog *slog.Logger) []comms.Listener {
+	setup := prepareCommsConfig(dir, sessionLog)
+	if setup == nil {
+		return nil
+	}
+
+	var v vault.Vault
+	if setup.needsVault {
+		var err error
+		v, err = OpenVaultFunc(os.Stderr)
+		if err != nil {
+			sessionLog.Warn("vault open failed", "error", err)
+			fmt.Fprintf(os.Stderr, "aileron: vault: %v\n", err)
+			return nil
+		}
+	}
+
+	return startCommsWithVault(ctx, setup, v, queue, auditLog, sessionID)
 }
 
 // StartListeners connects and starts each listener, bridging incoming

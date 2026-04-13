@@ -300,51 +300,32 @@ func (cs *CommsServer) promptSendApproval(service, channel, body string) string 
 		}
 	}()
 
-	w := 74
 	termRows, termCols := 24, 80
 	if cs.bar != nil {
 		termRows, termCols = cs.bar.Dims()
 	}
+	panel := NewPanel(PanelConfig{
+		Title:      "✈️ Aileron ─ Send Message",
+		InnerWidth: 74,
+		Centered:   true,
+	}, termRows, termCols)
 
-	var lines []string
-	lines = append(lines, fmt.Sprintf("\033[33m┌─ ✈️ Aileron ─ Send Message %s┐\033[0m", strings.Repeat("─", w-27)))
-	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m%s\033[33m│\033[0m", strings.Repeat(" ", w)))
-	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  To: \033[1m%s %s\033[0m%s\033[33m│\033[0m",
-		service, channel, strings.Repeat(" ", max(0, w-6-len(service)-1-len(channel)))))
-
-	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m%s\033[33m│\033[0m", strings.Repeat(" ", w)))
-
-	// Wrap the body text into lines that fit the box.
-	bodyLines := wrapText(body, w-4)
-	for _, bl := range bodyLines {
-		lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  %s%s\033[33m│\033[0m",
-			bl, strings.Repeat(" ", max(0, w-2-len(bl)))))
+	var content []string
+	content = append(content, panel.BlankLine())
+	content = append(content, panel.PadLine(fmt.Sprintf("  To: \033[1m%s %s\033[0m", service, channel)))
+	content = append(content, panel.BlankLine())
+	for _, bl := range wrapText(body, panel.InnerWidth()-4) {
+		content = append(content, panel.PadLine("  "+bl))
 	}
+	content = append(content, panel.BlankLine())
+	content = append(content, panel.PadLine("  \033[1m[y]\033[0m  Send"))
+	content = append(content, panel.PadLine("  \033[1m[n]\033[0m  Discard"))
+	content = append(content, panel.BlankLine())
 
-	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m%s\033[33m│\033[0m", strings.Repeat(" ", w)))
-	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  \033[1m[y]\033[0m  Send%s\033[33m│\033[0m", strings.Repeat(" ", w-11)))
-	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m  \033[1m[n]\033[0m  Discard%s\033[33m│\033[0m", strings.Repeat(" ", w-14)))
-	lines = append(lines, fmt.Sprintf("\033[33m│\033[0m%s\033[33m│\033[0m", strings.Repeat(" ", w)))
-	lines = append(lines, fmt.Sprintf("\033[33m└%s┘\033[0m", strings.Repeat("─", w)))
-
-	boxWidth := w + 2
-	leftPad := max(0, (termCols-boxWidth)/2)
-	topPad := max(0, (termRows-len(lines)-2)/2)
-	margin := strings.Repeat(" ", leftPad)
-
-	var prompt strings.Builder
-	prompt.WriteString("\033[?1049h\033[2J\033[1;1H")
-	for i := 0; i < topPad; i++ {
-		prompt.WriteString("\r\n")
-	}
-	for _, line := range lines {
-		fmt.Fprintf(&prompt, "%s%s\r\n", margin, line)
-	}
-	prompt.WriteString("\r\n")
-	fmt.Fprintf(&prompt, "%s  > ", margin)
+	prompt := panel.RenderToAltScreen(content) + "\r\n  > "
 
 	if cs.copier != nil {
-		cs.copier.WriteExclusive([]byte(prompt.String()))
+		cs.copier.WriteExclusive([]byte(prompt))
 	}
 
 	if inputCh == nil {
@@ -368,27 +349,6 @@ func (cs *CommsServer) promptSendApproval(service, channel, body string) string 
 			continue
 		}
 	}
-}
-
-// wrapText splits text into lines of at most maxWidth characters.
-func wrapText(text string, maxWidth int) []string {
-	if len(text) <= maxWidth {
-		return []string{text}
-	}
-	var lines []string
-	for len(text) > maxWidth {
-		// Find a space to break at.
-		idx := strings.LastIndex(text[:maxWidth], " ")
-		if idx < 0 {
-			idx = maxWidth
-		}
-		lines = append(lines, text[:idx])
-		text = strings.TrimLeft(text[idx:], " ")
-	}
-	if len(text) > 0 {
-		lines = append(lines, text)
-	}
-	return lines
 }
 
 // DirectSend sends a message without an approval prompt. Used for
