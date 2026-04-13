@@ -80,7 +80,7 @@ func TestKeyRouter_NormalBytesPassThrough(t *testing.T) {
 	}
 }
 
-func TestKeyRouter_CtrlA_ActivatesOverlay(t *testing.T) {
+func TestKeyRouter_CtrlBracket_ActivatesOverlay(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
 	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
@@ -88,20 +88,20 @@ func TestKeyRouter_CtrlA_ActivatesOverlay(t *testing.T) {
 	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
-	// Send Ctrl-A then wait for the timeout to fire.
-	stdinW.Write([]byte{0x01})
+	// Send Ctrl-] then wait for the timeout to fire.
+	stdinW.Write([]byte{0x1D})
 	time.Sleep(600 * time.Millisecond)
 	stdinW.Close()
 
 	if !overlay.wasShown() {
-		t.Error("overlay should have been shown after Ctrl-A timeout")
+		t.Error("overlay should have been shown after Ctrl-] timeout")
 	}
 	if ptmxBuf.Len() != 0 {
-		t.Errorf("Ctrl-A should not have passed to pty, got %q", ptmxBuf.String())
+		t.Errorf("Ctrl-] should not have passed to pty, got %q", ptmxBuf.String())
 	}
 }
 
-func TestKeyRouter_DoubleCtrlA_PassesThrough(t *testing.T) {
+func TestKeyRouter_DoubleCtrlBracket_PassesThrough(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
 	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
@@ -109,24 +109,24 @@ func TestKeyRouter_DoubleCtrlA_PassesThrough(t *testing.T) {
 	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
-	// Double Ctrl-A within the timeout window.
-	stdinW.Write([]byte{0x01})
+	// Double Ctrl-] within the timeout window.
+	stdinW.Write([]byte{0x1D})
 	time.Sleep(50 * time.Millisecond)
-	stdinW.Write([]byte{0x01})
+	stdinW.Write([]byte{0x1D})
 	time.Sleep(50 * time.Millisecond)
 	stdinW.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
 	if overlay.wasShown() {
-		t.Error("overlay should not have been shown for double Ctrl-A")
+		t.Error("overlay should not have been shown for double Ctrl-]")
 	}
-	if ptmxBuf.String() != "\x01" {
-		t.Errorf("expected literal Ctrl-A in pty, got %q", ptmxBuf.String())
+	if ptmxBuf.String() != "\x1D" {
+		t.Errorf("expected literal Ctrl-] in pty, got %q", ptmxBuf.String())
 	}
 }
 
-func TestKeyRouter_CtrlAThenKey_ActivatesAndForwards(t *testing.T) {
+func TestKeyRouter_CtrlBracketThenKey_ActivatesAndForwards(t *testing.T) {
 	stdinR, stdinW := io.Pipe()
 	ptmxBuf := &safeBuf{}
 	overlay := &mockOverlay{}
@@ -134,9 +134,9 @@ func TestKeyRouter_CtrlAThenKey_ActivatesAndForwards(t *testing.T) {
 	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
-	// Ctrl-A followed by a regular key before timeout — activates overlay
+	// Ctrl-] followed by a regular key before timeout — activates overlay
 	// and forwards the key to the overlay.
-	stdinW.Write([]byte{0x01})
+	stdinW.Write([]byte{0x1D})
 	time.Sleep(50 * time.Millisecond)
 	stdinW.Write([]byte{'x'})
 	time.Sleep(50 * time.Millisecond)
@@ -164,8 +164,8 @@ func TestKeyRouter_OverlayMode_KeysGoToOverlay(t *testing.T) {
 	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
 	go kr.Run()
 
-	// Activate overlay via Ctrl-A + timeout.
-	stdinW.Write([]byte{0x01})
+	// Activate overlay via Ctrl-] + timeout.
+	stdinW.Write([]byte{0x1D})
 	time.Sleep(600 * time.Millisecond)
 
 	// Now send keys — they should go to the overlay, not the pty.
@@ -193,7 +193,7 @@ func TestKeyRouter_DeactivateOverlay(t *testing.T) {
 	go kr.Run()
 
 	// Activate overlay.
-	stdinW.Write([]byte{0x01})
+	stdinW.Write([]byte{0x1D})
 	time.Sleep(600 * time.Millisecond)
 
 	// Deactivate.
@@ -209,5 +209,120 @@ func TestKeyRouter_DeactivateOverlay(t *testing.T) {
 
 	if ptmxBuf.String() != "after" {
 		t.Errorf("expected 'after' in pty after deactivate, got %q", ptmxBuf.String())
+	}
+}
+
+// CSI u (kitty keyboard protocol) tests.
+
+func TestKeyRouter_CSIu_CtrlBracket_ActivatesOverlay(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// Send CSI u encoding of Ctrl-]: ESC [ 93 ; 5 u
+	// (codepoint 93 = ']', modifier 5 = 1+4 where 4=Ctrl)
+	stdinW.Write([]byte("\x1b[93;5u"))
+	time.Sleep(600 * time.Millisecond)
+	stdinW.Close()
+
+	if !overlay.wasShown() {
+		t.Error("overlay should have been shown after CSI u Ctrl-]")
+	}
+	if ptmxBuf.Len() != 0 {
+		t.Errorf("CSI u Ctrl-] should not pass to pty, got %q", ptmxBuf.String())
+	}
+}
+
+func TestKeyRouter_CSIu_DoubleCtrlBracket_PassesThrough(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// Two CSI u Ctrl-] within the timeout window.
+	stdinW.Write([]byte("\x1b[93;5u"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Write([]byte("\x1b[93;5u"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if overlay.wasShown() {
+		t.Error("overlay should not have been shown for double CSI u Ctrl-]")
+	}
+	if ptmxBuf.String() != "\x1D" {
+		t.Errorf("expected literal 0x1D in pty, got %q", ptmxBuf.String())
+	}
+}
+
+func TestKeyRouter_CSIu_NonPrefix_PassesThrough(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// Send CSI u encoding of Ctrl-A: ESC [ 97 ; 5 u — not our prefix.
+	stdinW.Write([]byte("\x1b[97;5u"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if overlay.wasShown() {
+		t.Error("overlay should not show for Ctrl-A CSI u")
+	}
+	// The raw sequence should pass through to the pty.
+	if ptmxBuf.Len() == 0 {
+		t.Error("expected non-prefix CSI u sequence to pass to pty")
+	}
+}
+
+func TestKeyRouter_CSIu_OtherEscSequence_PassesThrough(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// Arrow up: ESC [ A — not a CSI u sequence.
+	stdinW.Write([]byte("\x1b[A"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if overlay.wasShown() {
+		t.Error("overlay should not show for arrow key")
+	}
+	if ptmxBuf.Len() == 0 {
+		t.Error("expected arrow key sequence to pass to pty")
+	}
+}
+
+func TestKeyRouter_CSIu_CtrlShiftBracket_ActivatesOverlay(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// Ctrl+Shift+]: ESC [ 93 ; 6 u (modifier 6 = 1+4+1 = Ctrl+Shift)
+	// Should still activate because Ctrl bit is set.
+	stdinW.Write([]byte("\x1b[93;6u"))
+	time.Sleep(600 * time.Millisecond)
+	stdinW.Close()
+
+	if !overlay.wasShown() {
+		t.Error("overlay should have been shown for Ctrl+Shift+] CSI u")
 	}
 }

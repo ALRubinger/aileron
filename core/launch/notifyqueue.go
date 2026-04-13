@@ -124,6 +124,21 @@ func (q *NotifyQueue) HighPriorityUnreadCount() int {
 	return count
 }
 
+// DraftPendingCount returns the number of unread auto-draft messages
+// that do not yet have a draft reply. These are messages awaiting the
+// user to open the overlay and request a draft.
+func (q *NotifyQueue) DraftPendingCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	count := 0
+	for _, m := range q.messages {
+		if !m.Read && m.AutoDraft && m.Draft == "" {
+			count++
+		}
+	}
+	return count
+}
+
 // Latest returns the most recent message, or false if empty.
 func (q *NotifyQueue) Latest() (Message, bool) {
 	q.mu.Lock()

@@ -8,9 +8,9 @@ import (
 )
 
 // StatusBar renders a persistent notification bar at the bottom of the
-// terminal. It occupies 2 rows: a separator line and a content line.
-// When a NotifyQueue is connected, unread messages are shown on the left
-// with the branding text on the right.
+// terminal. It occupies 3 rows: a separator line, a content line, and
+// a hint line showing keybindings. When a NotifyQueue is connected,
+// unread messages are shown on the left with the branding text on the right.
 type StatusBar struct {
 	mu    sync.Mutex
 	rows  int
@@ -32,10 +32,11 @@ func (b *StatusBar) Resize(w io.Writer, rows, cols int) {
 	defer b.mu.Unlock()
 
 	// Clear old bar position before updating dimensions.
-	if b.rows >= 3 {
-		oldSep := b.rows - 1
-		oldText := b.rows
-		fmt.Fprintf(w, "\0337\033[%d;1H\033[2K\033[%d;1H\033[2K\0338", oldSep, oldText)
+	if b.rows >= 4 {
+		oldSep := b.rows - 2
+		oldContent := b.rows - 1
+		oldHint := b.rows
+		fmt.Fprintf(w, "\0337\033[%d;1H\033[2K\033[%d;1H\033[2K\033[%d;1H\033[2K\0338", oldSep, oldContent, oldHint)
 	}
 
 	b.rows = rows
@@ -43,8 +44,8 @@ func (b *StatusBar) Resize(w io.Writer, rows, cols int) {
 	b.render(w)
 }
 
-// Render draws the status bar. It saves the cursor, draws the separator
-// and content in the bottom 2 rows, then restores the cursor.
+// Render draws the status bar. It saves the cursor, draws the separator,
+// content, and hint in the bottom 3 rows, then restores the cursor.
 func (b *StatusBar) Render(w io.Writer) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -60,12 +61,13 @@ func (b *StatusBar) SetQueue(q *NotifyQueue) {
 }
 
 func (b *StatusBar) render(w io.Writer) {
-	if b.rows < 3 || b.cols < 1 {
+	if b.rows < 4 || b.cols < 1 {
 		return
 	}
 
-	sepRow := b.rows - 1
-	textRow := b.rows
+	sepRow := b.rows - 2
+	contentRow := b.rows - 1
+	hintRow := b.rows
 
 	// Build the separator line: dim thin rule
 	sep := strings.Repeat("─", b.cols)
@@ -73,13 +75,18 @@ func (b *StatusBar) render(w io.Writer) {
 	// Build the content line: notifications on the left, branding on the right.
 	content := b.buildContent()
 
+	// Build the hint line: keybinding instructions.
+	hint := b.buildHintLine()
+
 	var buf strings.Builder
 	// Save cursor position
 	buf.WriteString("\0337")
 	// Move to separator row, clear line, draw dim separator
 	fmt.Fprintf(&buf, "\033[%d;1H\033[2K\033[2m%s\033[0m", sepRow, sep)
-	// Move to text row, clear line, draw content
-	fmt.Fprintf(&buf, "\033[%d;1H\033[2K%s", textRow, content)
+	// Move to content row, clear line, draw content
+	fmt.Fprintf(&buf, "\033[%d;1H\033[2K%s", contentRow, content)
+	// Move to hint row, clear line, draw hint
+	fmt.Fprintf(&buf, "\033[%d;1H\033[2K%s", hintRow, hint)
 	// Restore cursor position
 	buf.WriteString("\0338")
 
@@ -125,6 +132,13 @@ func (b *StatusBar) buildContent() string {
 	left := fmt.Sprintf("\033[33m[%d unread]\033[0m", unread)
 	leftDisplay := len(fmt.Sprintf("[%d unread]", unread)) // display width without ANSI
 
+	// Append draft-pending indicator if any auto-draft messages are waiting.
+	if draftPending := b.queue.DraftPendingCount(); draftPending > 0 {
+		tag := fmt.Sprintf(" [%d awaiting draft]", draftPending)
+		left += fmt.Sprintf(" \033[36m[%d awaiting draft]\033[0m", draftPending)
+		leftDisplay += len(tag)
+	}
+
 	// Add preview if there's room.
 	previewSpace := b.cols - leftDisplay - brandWidth - 3 // 3 for spacing
 	if previewSpace > 10 && latest.Preview != "" {
@@ -164,7 +178,12 @@ func (b *StatusBar) Dims() (int, int) {
 
 // BarHeight returns the number of terminal rows the bar occupies.
 func (b *StatusBar) BarHeight() int {
-	return 2
+	return 3
+}
+
+// buildHintLine composes the keybinding hint shown at the bottom of the bar.
+func (b *StatusBar) buildHintLine() string {
+	return "\033[2mCtrl-] notifications\033[0m"
 }
 
 // SetScrollRegion writes the ANSI escape to confine scrolling to the top

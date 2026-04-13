@@ -27,11 +27,13 @@ type Overlay struct {
 	OnDraftApprove func(msg Message)         // called when user presses 'y' on a draft
 	OnDraftDiscard func(msg Message)         // called when user presses 'n' on a draft
 	OnDraftEdit    func(msg Message, edited string) // called when user edits and sends a draft
+	OnDraftConverse func(msg Message, feedback string) // called when user provides revision feedback
 
 	// Reply mode state.
-	replyMode bool
-	replyBuf  strings.Builder
-	replyMsg  Message
+	replyMode    bool
+	converseMode bool // true when reply mode is collecting revision feedback
+	replyBuf     strings.Builder
+	replyMsg     Message
 
 	// Escape sequence state machine for arrow keys.
 	escState int // 0=normal, 1=got ESC, 2=got ESC+[
@@ -151,6 +153,8 @@ func (o *Overlay) HandleKey(b byte) {
 		o.approveDraft()
 	case 'e':
 		o.editDraft()
+	case 'c':
+		o.converseDraft()
 	case 'n':
 		o.discardDraft()
 	}
@@ -313,6 +317,23 @@ func (o *Overlay) editDraft() {
 	o.render()
 }
 
+func (o *Overlay) converseDraft() {
+	msgs := o.queue.Messages()
+	if o.cursorPos >= len(msgs) {
+		return
+	}
+	msg := msgs[o.cursorPos]
+	if msg.Draft == "" {
+		return
+	}
+	// Enter reply mode for revision feedback (empty buffer).
+	o.replyMode = true
+	o.converseMode = true
+	o.replyMsg = msg
+	o.replyBuf.Reset()
+	o.render()
+}
+
 func (o *Overlay) startReply() {
 	msgs := o.queue.Messages()
 	if o.cursorPos >= len(msgs) {
@@ -375,8 +396,10 @@ func (o *Overlay) handleReplyKey(b byte) {
 func (o *Overlay) submitReply() {
 	reply := o.replyBuf.String()
 	msg := o.replyMsg
-	isDraftEdit := msg.Draft != ""
+	isConverse := o.converseMode
+	isDraftEdit := !isConverse && msg.Draft != ""
 	o.replyMode = false
+	o.converseMode = false
 	o.replyBuf.Reset()
 	o.queue.MarkRead(msg.ID)
 
@@ -395,7 +418,14 @@ func (o *Overlay) submitReply() {
 		o.mu.Lock()
 	}
 	if reply != "" {
-		if isDraftEdit && o.OnDraftEdit != nil {
+		if isConverse && o.OnDraftConverse != nil {
+			// Clear the current draft so the revision cycle can restart.
+			o.queue.ClearDraft(msg.ID)
+			cb := o.OnDraftConverse
+			o.mu.Unlock()
+			cb(msg, reply)
+			o.mu.Lock()
+		} else if isDraftEdit && o.OnDraftEdit != nil {
 			cb := o.OnDraftEdit
 			o.mu.Unlock()
 			cb(msg, reply)
@@ -411,6 +441,7 @@ func (o *Overlay) submitReply() {
 
 func (o *Overlay) cancelReply() {
 	o.replyMode = false
+	o.converseMode = false
 	o.replyBuf.Reset()
 	o.render()
 }
@@ -504,7 +535,11 @@ func (o *Overlay) render() {
 			// Reply input box.
 			if o.replyMode {
 				buf.WriteString("\n")
-				buf.WriteString(fmt.Sprintf(" \033[33m>\033[0m %s\033[7m \033[0m\n", o.replyBuf.String()))
+				label := "\033[33m>\033[0m"
+				if o.converseMode {
+					label = "\033[33mfeedback>\033[0m"
+				}
+				buf.WriteString(fmt.Sprintf(" %s %s\033[7m \033[0m\n", label, o.replyBuf.String()))
 			}
 		}
 	}
@@ -516,7 +551,7 @@ func (o *Overlay) render() {
 		footer += " Enter send  Esc cancel"
 	} else if o.selectedIsDraft() {
 		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
-		footer += " j/k or ↑/↓ navigate  y send  e edit  n discard  q return"
+		footer += " j/k or ↑/↓ navigate  y send  e edit  c revise  n discard  q return"
 	} else {
 		footer = "\n" + strings.Repeat("─", o.cols) + "\n"
 		footer += " j/k or ↑/↓ navigate  r reply  a draft reply  d dismiss  q return"

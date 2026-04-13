@@ -260,17 +260,19 @@ func launchWithPty(cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, liste
 	return exitResult(err)
 }
 
-// WireDraftInjection connects the overlay's draft-request action and the
-// queue's auto-draft callback to a DraftInjector that writes prompts into
-// the agent's pty stdin. Exported for testing.
+// WireDraftInjection connects the overlay's draft-request and converse
+// actions to a DraftInjector that writes prompts into the agent's pty
+// stdin. Auto-draft messages are NOT injected automatically — the user
+// must explicitly request a draft from the overlay. Exported for testing.
 func WireDraftInjection(ptmx io.Writer, overlay *Overlay, queue *NotifyQueue) {
 	injector := NewDraftInjector(ptmx)
 	overlay.OnDraftRequest = func(msg Message) {
 		injector.Inject(msg)
 	}
-	queue.SetOnAutoDraft(func(msg Message) {
-		injector.Inject(msg)
-	})
+	overlay.OnDraftConverse = func(msg Message, feedback string) {
+		injector.InjectRevision(msg, feedback)
+	}
+	// No queue.SetOnAutoDraft — user must open the overlay and press 'a'.
 }
 
 // WireReply connects the overlay's reply callback to the CommsServer's
@@ -299,9 +301,9 @@ func SetupTerminalScreen(w io.Writer, agentRows int, bar *StatusBar) {
 	fmt.Fprintf(w, "\033[1;1H")
 }
 
-// CleanupTerminalScreen clears the status bar area.
+// CleanupTerminalScreen clears the status bar area (3 rows).
 func CleanupTerminalScreen(w io.Writer, totalRows int) {
-	fmt.Fprintf(w, "\033[%d;1H\033[J", totalRows-1)
+	fmt.Fprintf(w, "\033[%d;1H\033[J", totalRows-2)
 }
 
 // HandleResize updates the pty size and re-renders the status bar after a

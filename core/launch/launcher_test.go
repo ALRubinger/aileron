@@ -574,22 +574,47 @@ func TestWireDraftInjection_OverlayCallback(t *testing.T) {
 	}
 }
 
-func TestWireDraftInjection_AutoDraftCallback(t *testing.T) {
+func TestWireDraftInjection_AutoDraftNoLongerInjects(t *testing.T) {
 	var buf strings.Builder
 	q := launch.NewNotifyQueue(10, nil)
 	o := launch.NewOverlay(q, nil, &buf, 24, 80, nil)
 
 	launch.WireDraftInjection(&buf, o, q)
 
-	// Push an auto-draft message — should trigger injection.
+	// Push an auto-draft message — should NOT trigger injection anymore.
 	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Bob", Body: "help?", AutoDraft: true})
 
 	out := buf.String()
-	if !strings.Contains(out, "send_message") {
-		t.Error("expected send_message in injected prompt from auto-draft callback")
+	if strings.Contains(out, "send_message") {
+		t.Error("auto-draft should no longer inject prompts automatically")
 	}
-	if !strings.Contains(out, "Bob") {
-		t.Error("expected author in injected prompt")
+}
+
+func TestWireDraftInjection_ConverseCallback(t *testing.T) {
+	var buf strings.Builder
+	q := launch.NewNotifyQueue(10, nil)
+	o := launch.NewOverlay(q, nil, &buf, 24, 80, nil)
+
+	launch.WireDraftInjection(&buf, o, q)
+
+	msg := launch.Message{
+		Source:  "slack",
+		Channel: "#backend",
+		Author:  "Sarah",
+		Body:    "question?",
+		Draft:   "Here is my draft.",
+	}
+	o.OnDraftConverse(msg, "make it shorter")
+
+	out := buf.String()
+	if !strings.Contains(out, "send_message") {
+		t.Error("expected send_message in converse revision prompt")
+	}
+	if !strings.Contains(out, "make it shorter") {
+		t.Error("expected user feedback in converse revision prompt")
+	}
+	if !strings.Contains(out, "Here is my draft.") {
+		t.Error("expected previous draft in converse revision prompt")
 	}
 }
 
@@ -1130,9 +1155,9 @@ func TestCleanupTerminalScreen(t *testing.T) {
 	launch.CleanupTerminalScreen(&buf, 24)
 	out := buf.String()
 
-	// Should move to bar area and clear
-	if !strings.Contains(out, "\033[23;1H\033[J") {
-		t.Errorf("expected clear at row 23, got %q", out)
+	// Should move to bar area and clear (3-row bar: starts at totalRows-2)
+	if !strings.Contains(out, "\033[22;1H\033[J") {
+		t.Errorf("expected clear at row 22, got %q", out)
 	}
 }
 
