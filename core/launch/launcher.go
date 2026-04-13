@@ -330,10 +330,16 @@ func WireReply(overlay *Overlay, commsSrv *CommsServer) {
 // text; Aileron sends it after user approval. Exported for testing.
 func WireDraftSend(overlay *Overlay, commsSrv *CommsServer) {
 	overlay.OnDraftApprove = func(msg Message) {
-		commsSrv.DirectSend(msg.Source, msg.Channel, msg.Draft)
+		fmt.Fprintf(os.Stderr, "aileron: DEBUG draft approve: source=%q channel=%q draft=%q\n", msg.Source, msg.Channel, msg.Draft)
+		if err := commsSrv.DirectSend(msg.Source, msg.Channel, msg.Draft); err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: ERROR sending draft: %v\n", err)
+		}
 	}
 	overlay.OnDraftEdit = func(msg Message, edited string) {
-		commsSrv.DirectSend(msg.Source, msg.Channel, edited)
+		fmt.Fprintf(os.Stderr, "aileron: DEBUG draft edit send: source=%q channel=%q body=%q\n", msg.Source, msg.Channel, edited)
+		if err := commsSrv.DirectSend(msg.Source, msg.Channel, edited); err != nil {
+			fmt.Fprintf(os.Stderr, "aileron: ERROR sending edited draft: %v\n", err)
+		}
 	}
 }
 
