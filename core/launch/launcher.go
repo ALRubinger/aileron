@@ -113,7 +113,8 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	// If the comms socket is set, register aileron-mcp as an MCP server
 	// so the agent has access to read_messages, draft_reply, etc.
-	if mcpBin, err := resolveSibling(agentPath, "aileron-mcp"); err == nil {
+	selfPath, _ := os.Executable()
+	if mcpBin, err := resolveSibling(selfPath, "aileron-mcp"); err == nil {
 		mcpConfig := fmt.Sprintf(
 			`{"mcpServers":{"aileron":{"command":%q,"env":{"AILERON_COMMS_SOCKET":%q}}}}`,
 			mcpBin, commsSocket,
