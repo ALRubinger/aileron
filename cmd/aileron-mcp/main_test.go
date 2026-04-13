@@ -82,15 +82,15 @@ func TestHandle_ToolsList_WithComms(t *testing.T) {
 	})
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]toolDef)
-	if len(tools) != 3 {
-		t.Fatalf("expected 3 tools (read_messages, send_message, http_request), got %d", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("expected 4 tools (read_messages, draft_reply, send_message, http_request), got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tool := range tools {
 		names[tool.Name] = true
 	}
-	if !names["read_messages"] || !names["send_message"] || !names["http_request"] {
-		t.Errorf("expected read_messages, send_message, and http_request, got %v", names)
+	if !names["read_messages"] || !names["draft_reply"] || !names["send_message"] || !names["http_request"] {
+		t.Errorf("expected read_messages, draft_reply, send_message, and http_request, got %v", names)
 	}
 }
 
@@ -103,8 +103,8 @@ func TestHandle_ToolsList_Both(t *testing.T) {
 	})
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]toolDef)
-	if len(tools) != 4 {
-		t.Fatalf("expected 4 tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("expected 5 tools, got %d", len(tools))
 	}
 }
 
