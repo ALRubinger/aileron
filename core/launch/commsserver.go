@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -376,18 +377,30 @@ func (cs *CommsServer) promptSendApproval(service, channel, body string) string 
 // user-authored replies from the overlay (the user typed it, so no
 // approval is needed).
 func (cs *CommsServer) DirectSend(service, channel, body string) error {
+	fmt.Fprintf(os.Stderr, "aileron: DEBUG DirectSend: service=%q channel=%q body_len=%d senders=%v\n", service, channel, len(body), cs.senderNames())
 	sender, ok := cs.senders[service]
 	if !ok {
 		return fmt.Errorf("no listener for service: %s", service)
 	}
-	err := sender.Send(nil, comms.OutgoingMessage{
+	err := sender.Send(context.Background(), comms.OutgoingMessage{
 		Channel: channel,
 		Body:    body,
 	})
-	if err == nil {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aileron: DEBUG DirectSend error: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "aileron: DEBUG DirectSend success\n")
 		cs.logMessage("reply_sent", service, channel, "", body, "")
 	}
 	return err
+}
+
+func (cs *CommsServer) senderNames() []string {
+	names := make([]string, 0, len(cs.senders))
+	for k := range cs.senders {
+		names = append(names, k)
+	}
+	return names
 }
 
 // SetSecrets configures the secrets mapping and vault for http_request
