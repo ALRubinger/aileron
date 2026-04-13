@@ -121,7 +121,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
 	defer stopCommsListeners(listeners)
-	sessionLog.Debug("comms listeners started", "count", len(listeners))
 
 	// If stdin is a terminal, use the pty proxy with status bar.
 	var result LaunchResult
@@ -568,6 +567,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	}
 	pf := loadPolicyFileFrom(policyPath)
 	if pf.Notifications == nil {
+		sessionLog.Debug("no notifications configured in policy file")
 		return nil
 	}
 
@@ -640,6 +640,10 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 				priority[ch.Name] = ch.Priority
 			}
 		}
+		sessionLog.Info("slack listener configured",
+			"channels", channels,
+			"ignore", cfg.Ignore,
+		)
 		sl := comms.NewSlackListener(appToken, botToken, channels, cfg.Ignore, sessionLog.With("component", "slack"))
 		created = append(created, sl)
 	}
@@ -652,6 +656,10 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 				priority[ch.Name] = ch.Priority
 			}
 		}
+		sessionLog.Info("discord listener configured",
+			"channels", channels,
+			"ignore", cfg.Ignore,
+		)
 		dl := comms.NewDiscordListener(botToken, channels, cfg.Ignore, sessionLog.With("component", "discord"))
 		created = append(created, dl)
 	}
