@@ -326,3 +326,69 @@ func TestKeyRouter_CSIu_CtrlShiftBracket_ActivatesOverlay(t *testing.T) {
 		t.Error("overlay should have been shown for Ctrl+Shift+] CSI u")
 	}
 }
+
+func TestKeyRouter_CSIu_NoModifier_PassesThrough(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// CSI 93 u — codepoint ']' but no modifier (bare key, no Ctrl).
+	stdinW.Write([]byte("\x1b[93u"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if overlay.wasShown() {
+		t.Error("overlay should not show for bare ] without Ctrl modifier")
+	}
+}
+
+func TestKeyRouter_CSIu_EscNonBracket_PassesThrough(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// ESC followed by 'O' (not '[') — e.g. SS3 sequence. Should pass through.
+	stdinW.Write([]byte("\x1bOP"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if overlay.wasShown() {
+		t.Error("overlay should not show for SS3 sequence")
+	}
+	if ptmxBuf.Len() == 0 {
+		t.Error("expected SS3 sequence to pass to pty")
+	}
+}
+
+func TestKeyRouter_CSIu_IncompleteSequence_PassesThrough(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &mockOverlay{}
+
+	kr := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go kr.Run()
+
+	// ESC [ followed by a non-digit — incomplete CSI u, should replay.
+	stdinW.Write([]byte("\x1b[X"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	if overlay.wasShown() {
+		t.Error("overlay should not show for incomplete CSI sequence")
+	}
+	if ptmxBuf.Len() == 0 {
+		t.Error("expected incomplete sequence to pass to pty")
+	}
+}

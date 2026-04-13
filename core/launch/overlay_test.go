@@ -1302,3 +1302,56 @@ func TestOverlay_Converse_ClearsDraftForCycle(t *testing.T) {
 		t.Errorf("expected draft to be cleared after converse, got %q", msg.Draft)
 	}
 }
+
+func TestOverlay_DraftApprove_DismissesOverlay(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.OnDraftApprove = func(msg launch.Message) {}
+
+	o.Show()
+	o.HandleKey('y')
+
+	if o.IsActive() {
+		t.Error("overlay should be dismissed after draft approve")
+	}
+	// Draft should be cleared from queue.
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "" {
+		t.Errorf("expected draft cleared after approve, got %q", msg.Draft)
+	}
+	// Output should contain alt-screen exit.
+	if !strings.Contains(w.String(), "\033[?1049l") {
+		t.Error("expected alt-screen exit in output")
+	}
+}
+
+func TestOverlay_DraftDiscard_DismissesOverlay(t *testing.T) {
+	q := launch.NewNotifyQueue(10, nil)
+	q.Push(launch.Message{
+		ID: "1", Source: "slack", Channel: "#backend", Author: "Alice",
+		Preview: "question", Body: "question?",
+		Draft: "my draft", DraftFor: "1",
+	})
+
+	var w testWriter
+	o := launch.NewOverlay(q, nil, &w, 30, 80, nil)
+	o.OnDraftDiscard = func(msg launch.Message) {}
+
+	o.Show()
+	o.HandleKey('n')
+
+	if o.IsActive() {
+		t.Error("overlay should be dismissed after draft discard")
+	}
+	msg, _ := q.FindByID("1")
+	if msg.Draft != "" {
+		t.Errorf("expected draft cleared after discard, got %q", msg.Draft)
+	}
+}
