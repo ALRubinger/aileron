@@ -249,3 +249,83 @@ func TestPromptVaultWithPanel_EscSkips(t *testing.T) {
 	}
 	stdinW.Close()
 }
+
+func TestPromptVaultWithPanel_EmptyPassphrase(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &simpleOverlay{}
+	router := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go router.Run()
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	outBuf := &safeBuf{}
+	copier := launch.NewOutputCopier(srcR, outBuf, nil)
+	go copier.Run()
+
+	bar := launch.NewStatusBar(24, 80, "test")
+
+	done := make(chan vault.Vault, 1)
+	go func() {
+		done <- launch.PromptVaultWithPanel(copier, router, bar, nil)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Press Enter with empty passphrase — should show error, not crash.
+	stdinW.Write([]byte{'\r'})
+	time.Sleep(100 * time.Millisecond)
+
+	// Then Esc to exit.
+	stdinW.Write([]byte{0x1B})
+
+	select {
+	case v := <-done:
+		if v != nil {
+			t.Error("expected nil vault")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+	stdinW.Close()
+}
+
+func TestPromptVaultWithPanel_TypeAndBackspace(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	ptmxBuf := &safeBuf{}
+	overlay := &simpleOverlay{}
+	router := launch.NewKeyRouter(stdinR, ptmxBuf, overlay)
+	go router.Run()
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	outBuf := &safeBuf{}
+	copier := launch.NewOutputCopier(srcR, outBuf, nil)
+	go copier.Run()
+
+	bar := launch.NewStatusBar(24, 80, "test")
+
+	done := make(chan vault.Vault, 1)
+	go func() {
+		done <- launch.PromptVaultWithPanel(copier, router, bar, nil)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Type some chars, backspace, then Esc.
+	stdinW.Write([]byte("abc"))
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Write([]byte{0x7F}) // backspace
+	time.Sleep(50 * time.Millisecond)
+	stdinW.Write([]byte{0x1B}) // Esc
+
+	select {
+	case v := <-done:
+		if v != nil {
+			t.Error("expected nil vault")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+	}
+	stdinW.Close()
+}

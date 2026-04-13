@@ -640,6 +640,68 @@ func TestJsonResult(t *testing.T) {
 	}
 }
 
+func TestDraftReply_NoSocket(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.draftReply(map[string]any{"message_id": "1", "body": "text"})
+	if !result.IsError {
+		t.Error("expected error when comms socket not set")
+	}
+}
+
+func TestDraftReply_MissingFields(t *testing.T) {
+	s := &server{commsSocket: "/tmp/fake.sock", httpClient: &http.Client{}}
+	result := s.draftReply(map[string]any{})
+	if !result.IsError {
+		t.Error("expected error for missing fields")
+	}
+}
+
+func TestDraftReply_WithServer(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-mcp-test-draft.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req commsRequest
+			json.NewDecoder(conn).Decode(&req)
+			if req.Method == "draft_reply" && req.ReplyTo != "" && req.Body != "" {
+				json.NewEncoder(conn).Encode(commsResponse{OK: true})
+			} else {
+				json.NewEncoder(conn).Encode(commsResponse{Error: "bad request"})
+			}
+			conn.Close()
+		}
+	}()
+
+	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
+	result := s.draftReply(map[string]any{"message_id": "msg-1", "body": "my draft"})
+	if result.IsError {
+		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
+	}
+	if !contains(result.Content[0].Text, "Draft submitted") {
+		t.Errorf("expected success message, got %s", result.Content[0].Text)
+	}
+}
+
+func TestDispatchTool_DraftReply(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.dispatchTool(context.Background(), "draft_reply", map[string]any{"message_id": "1", "body": "text"})
+	// No comms socket → error, but should not panic.
+	if !result.IsError {
+		t.Error("expected error without comms socket")
+	}
+}
+
 func TestErrorResponse(t *testing.T) {
 	resp := errorResponse(json.RawMessage(`99`), -32600, "invalid request")
 	if resp.JSONRPC != "2.0" {
