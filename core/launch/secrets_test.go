@@ -87,11 +87,15 @@ func TestOpenLocalVault_RoundTrip(t *testing.T) {
 func TestOpenLocalVault_WrongPassphrase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secrets.json")
 
-	v1, _ := launch.OpenLocalVault(path, "correct")
+	v1, err := launch.OpenLocalVault(path, "correct")
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
 	v1.Put(context.Background(), "token", []byte("value"), vault.Metadata{})
 
-	v2, _ := launch.OpenLocalVault(path, "wrong")
-	_, err := v2.Get(context.Background(), "token")
+	// Opening with the wrong passphrase should fail immediately now that
+	// the vault validates the passphrase against existing secrets.
+	_, err = launch.OpenLocalVault(path, "wrong")
 	if err == nil {
 		t.Error("expected error with wrong passphrase")
 	}

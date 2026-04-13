@@ -49,6 +49,17 @@ func OpenLocalVault(vaultPath, passphrase string) (vault.Vault, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating encrypted vault: %w", err)
 	}
+
+	// Validate the passphrase by trying to decrypt an existing secret.
+	// This prevents adding secrets with a wrong passphrase, which would
+	// leave the vault in a state where no single passphrase can decrypt
+	// all secrets.
+	if names := fv.Names(); len(names) > 0 {
+		if _, err := ev.Get(context.Background(), names[0]); err != nil {
+			return nil, fmt.Errorf("vault: decrypting secret at %q: %w", names[0], err)
+		}
+	}
+
 	return ev, nil
 }
 
