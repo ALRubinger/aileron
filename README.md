@@ -37,6 +37,7 @@ Today's agent hosts give you two modes: approve every command individually (50 p
 │  │ cmd string → │  │ http_request │  │             │  │
 │  │ policy eval  │  │ send_message │  │ inbound →   │  │
 │  │ exec | deny  │  │ read_messages│  │ /dev/tty    │  │
+│  │              │  │ draft_reply  │  │             │  │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬──────┘  │
 │         │                 │                  │         │
 │         ▼                 ▼                  ▼         │
@@ -89,13 +90,23 @@ Aileron works out of the box. Language toolchain rules (Go, Node, Python, Rust, 
 
 **4. Teammates message you — the agent drafts a reply**
 
-Slack and Discord messages arrive in your terminal. On channels configured with `auto_draft: true`, the agent drafts a reply using its live codebase context. You approve with one keypress:
+Slack and Discord messages arrive in your terminal. Press **Ctrl-]** to open the notification overlay, select a message, and press **a** to ask the agent to draft a reply using its codebase context. The agent submits a draft via the `draft_reply` tool — Aileron shows it for your review:
 
 ```
-  📝 aileron: agent drafted a reply to Sarah in #backend
-    "No, the claims structure isn't changing. The refactor
-     only affects validation logic in middleware.go."
-    [y] send  [e] edit and send  [n] discard
+│ aileron notifications (1 messages)
+│ ──────────────────────────────────────
+│ > ● slack · Sarah: Does the refactor change JWT claims?
+│
+│ ──────────────────────────────────────
+│  #backend · Sarah
+│  Does the refactor change JWT claims?
+│
+│  ── Draft Reply ──
+│  No, the claims structure isn't changing. The refactor
+│  only affects validation logic in middleware.go.
+│
+│ ──────────────────────────────────────
+│ y send  e edit  c revise  n discard  q return
 ```
 
 **5. Credentials are brokered, never exposed**

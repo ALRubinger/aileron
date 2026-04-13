@@ -639,6 +639,48 @@ func TestWireReply(t *testing.T) {
 	// Just verify no panic and the callback is wired.
 }
 
+func TestWireDraftSend_Approve(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "comms.sock")
+	sender := &testListener{service: "slack", msgs: make(chan comms.IncomingMessage, 1)}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	var buf strings.Builder
+	o := launch.NewOverlay(queue, nil, &buf, 24, 80, nil)
+
+	launch.WireDraftSend(o, srv)
+
+	msg := launch.Message{Source: "slack", Channel: "#backend", Draft: "my draft text"}
+	o.OnDraftApprove(msg)
+	// Verify no panic and the callback is wired.
+}
+
+func TestWireDraftSend_Edit(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "comms.sock")
+	sender := &testListener{service: "slack", msgs: make(chan comms.IncomingMessage, 1)}
+	queue := launch.NewNotifyQueue(10, nil)
+
+	srv, err := launch.NewCommsServer(socketPath, queue, []comms.Listener{sender}, nil, nil, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	var buf strings.Builder
+	o := launch.NewOverlay(queue, nil, &buf, 24, 80, nil)
+
+	launch.WireDraftSend(o, srv)
+
+	msg := launch.Message{Source: "slack", Channel: "#backend", Draft: "original"}
+	o.OnDraftEdit(msg, "edited text")
+	// Verify no panic and the callback is wired.
+}
+
 func TestBridgeMessages_AutoDraft(t *testing.T) {
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 3)

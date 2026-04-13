@@ -1096,3 +1096,127 @@ func TestCommsServer_ReadMessages_FilterByChannel(t *testing.T) {
 		t.Errorf("expected 1 #frontend message, got %v", resp.Messages)
 	}
 }
+
+func TestCommsServer_DraftReply(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draftreply.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	queue := launch.NewNotifyQueue(10, nil)
+	queue.Push(launch.Message{ID: "msg-1", Source: "slack", Channel: "#backend", Author: "Alice", Body: "question?"})
+
+	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, copier, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	go srv.Serve()
+	time.Sleep(100 * time.Millisecond)
+
+	resp := launch.RequestComms(socketPath, launch.CommsRequest{
+		Method:  "draft_reply",
+		ReplyTo: "msg-1",
+		Body:    "Here is my draft.",
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK, got error: %s", resp.Error)
+	}
+
+	// Verify draft was set on the message.
+	msg, ok := queue.FindByID("msg-1")
+	if !ok {
+		t.Fatal("message not found")
+	}
+	if msg.Draft != "Here is my draft." {
+		t.Errorf("expected draft text, got %q", msg.Draft)
+	}
+}
+
+func TestCommsServer_DraftReply_MissingFields(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draftreply-missing.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	srv, err := launch.NewCommsServer(socketPath, launch.NewNotifyQueue(10, nil), nil, nil, copier, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	go srv.Serve()
+	time.Sleep(100 * time.Millisecond)
+
+	resp := launch.RequestComms(socketPath, launch.CommsRequest{
+		Method: "draft_reply",
+	})
+	if resp.OK {
+		t.Error("expected error for missing fields")
+	}
+}
+
+func TestCommsServer_DraftReply_NotFound(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draftreply-notfound.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	srv, err := launch.NewCommsServer(socketPath, launch.NewNotifyQueue(10, nil), nil, nil, copier, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	go srv.Serve()
+	time.Sleep(100 * time.Millisecond)
+
+	resp := launch.RequestComms(socketPath, launch.CommsRequest{
+		Method:  "draft_reply",
+		ReplyTo: "nonexistent",
+		Body:    "draft text",
+	})
+	if resp.OK {
+		t.Error("expected error for nonexistent message")
+	}
+}
+
+func TestCommsServer_ReadMessages_DraftRequestFlag(t *testing.T) {
+	socketPath := os.TempDir() + "/aileron-test-comms-draftflag.sock"
+	t.Cleanup(func() { os.Remove(socketPath) })
+
+	srcR, srcW := io.Pipe()
+	defer srcW.Close()
+	copier := launch.NewOutputCopier(srcR, &safeBuf{}, nil)
+	go copier.Run()
+
+	queue := launch.NewNotifyQueue(10, nil)
+	queue.Push(launch.Message{ID: "1", Source: "slack", Channel: "#ch", AutoDraft: true})
+	queue.Push(launch.Message{ID: "2", Source: "slack", Channel: "#ch", AutoDraft: false})
+
+	srv, err := launch.NewCommsServer(socketPath, queue, nil, nil, copier, nil, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	go srv.Serve()
+	time.Sleep(100 * time.Millisecond)
+
+	resp := launch.RequestComms(socketPath, launch.CommsRequest{Method: "read_messages"})
+	if len(resp.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(resp.Messages))
+	}
+	if !resp.Messages[0].DraftRequest {
+		t.Error("expected DraftRequest=true on auto-draft message")
+	}
+	if resp.Messages[1].DraftRequest {
+		t.Error("expected DraftRequest=false on non-auto-draft message")
+	}
+}
