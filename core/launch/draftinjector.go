@@ -7,7 +7,8 @@ import (
 
 // DraftInjector writes draft-request prompts into the agent's pty stdin.
 // When the agent reads from stdin, it sees the prompt as user input and
-// can use the send_message MCP tool to draft a reply.
+// uses the draft_reply MCP tool to submit draft text for user review.
+// Aileron handles sending — the agent only drafts.
 type DraftInjector struct {
 	ptmx io.Writer
 }
@@ -21,19 +22,18 @@ func NewDraftInjector(ptmx io.Writer) *DraftInjector {
 // agent's pty. The trailing newline submits it as user input.
 func (di *DraftInjector) Inject(msg Message) {
 	prompt := fmt.Sprintf(
-		"A teammate sent a message in %s. %s says: %q Please draft a reply using the send_message tool with service=%q and channel=%q.\n",
-		msg.Channel, msg.Author, msg.Body, msg.Source, msg.Channel,
+		"You have a new message to draft a reply to. Use the read_messages tool to see it, then use the draft_reply tool with message_id=%q and your suggested reply. Do not use send_message.\n",
+		msg.ID,
 	)
 	di.ptmx.Write([]byte(prompt))
 }
 
-// InjectRevision writes a revision prompt that includes the original
-// message, the current draft, and the user's feedback so the agent can
-// produce an improved draft.
+// InjectRevision writes a revision prompt that includes the user's
+// feedback so the agent can produce an improved draft.
 func (di *DraftInjector) InjectRevision(msg Message, feedback string) {
 	prompt := fmt.Sprintf(
-		"A teammate sent a message in %s. %s says: %q Your previous draft reply was: %q The user wants you to revise. Feedback: %q Please draft a new reply using the send_message tool with service=%q and channel=%q.\n",
-		msg.Channel, msg.Author, msg.Body, msg.Draft, feedback, msg.Source, msg.Channel,
+		"The user wants you to revise your draft reply to message %q. Feedback: %q Use the draft_reply tool with your revised text. Do not use send_message.\n",
+		msg.ID, feedback,
 	)
 	di.ptmx.Write([]byte(prompt))
 }

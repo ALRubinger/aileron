@@ -93,7 +93,7 @@ type server struct {
 
 var readMessagesTool = toolDef{
 	Name:        "read_messages",
-	Description: "Read pending messages from communication channels (Slack, Discord). Returns unread messages from the notification queue.",
+	Description: "Read pending messages from communication channels (Slack, Discord). Returns unread messages from the notification queue. Messages with draft_request=true need a reply drafted — call draft_reply with the message ID and your suggested reply.",
 	InputSchema: schema{
 		Type: "object",
 		Properties: map[string]schemaProp{
@@ -114,6 +114,19 @@ var sendMessageTool = toolDef{
 			"body":    {Type: "string", Description: "Message text to send"},
 		},
 		Required: []string{"service", "channel", "body"},
+	},
+}
+
+var draftReplyTool = toolDef{
+	Name:        "draft_reply",
+	Description: "Submit a draft reply to a message. The draft is shown to the user for review — they can send, edit, or discard it. Use this when read_messages returns messages with draft_request=true. Do NOT use send_message for drafts; Aileron handles sending after user approval.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"message_id": {Type: "string", Description: "ID of the message to reply to (from read_messages)"},
+			"body":       {Type: "string", Description: "Your suggested reply text"},
+		},
+		Required: []string{"message_id", "body"},
 	},
 }
 
@@ -245,7 +258,7 @@ func (s *server) handle(req jsonrpcRequest) *jsonrpcResponse {
 func (s *server) availableTools() []toolDef {
 	var tools []toolDef
 	if s.commsSocket != "" {
-		tools = append(tools, readMessagesTool, sendMessageTool, httpRequestTool)
+		tools = append(tools, readMessagesTool, draftReplyTool, sendMessageTool, httpRequestTool)
 	}
 	if s.aileronURL != "" {
 		tools = append(tools, submitIntentTool)
@@ -259,6 +272,8 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 		return s.submitIntent(ctx, args)
 	case "read_messages":
 		return s.readMessages(args)
+	case "draft_reply":
+		return s.draftReply(args)
 	case "send_message":
 		return s.sendMessage(args)
 	case "http_request":
@@ -285,6 +300,31 @@ func (s *server) readMessages(args map[string]any) toolResult {
 		return errorResult(resp.Error)
 	}
 	return jsonResult(resp.Messages)
+}
+
+func (s *server) draftReply(args map[string]any) toolResult {
+	if s.commsSocket == "" {
+		return errorResult("comms not available (not launched via aileron)")
+	}
+
+	messageID, _ := args["message_id"].(string)
+	body, _ := args["body"].(string)
+
+	if messageID == "" || body == "" {
+		return errorResult("message_id and body are required")
+	}
+
+	resp := requestComms(s.commsSocket, commsRequest{
+		Method:  "draft_reply",
+		ReplyTo: messageID,
+		Body:    body,
+	})
+	if resp.Error != "" {
+		return errorResult(resp.Error)
+	}
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: "Draft submitted for user review."}},
+	}
 }
 
 func (s *server) sendMessage(args map[string]any) toolResult {
