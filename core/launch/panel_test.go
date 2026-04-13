@@ -7,41 +7,31 @@ import (
 	"github.com/ALRubinger/aileron/core/launch"
 )
 
-func TestPanel_Render_BasicBox(t *testing.T) {
+func TestPanel_Render_LeftAccent(t *testing.T) {
 	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "✈️ Aileron",
-		InnerWidth: 40,
+		Title: "✈️ Aileron",
 	}, 24, 80)
 
-	out := p.Render([]string{
-		p.PadLine("  Hello, world!"),
-	})
+	out := p.Render([]string{"  Hello, world!"})
 
-	if !strings.Contains(out, "┌") {
-		t.Error("expected top-left corner")
-	}
-	if !strings.Contains(out, "┘") {
-		t.Error("expected bottom-right corner")
+	if !strings.Contains(out, "│") {
+		t.Error("expected left accent bar")
 	}
 	if !strings.Contains(out, "Aileron") {
-		t.Error("expected title in top border")
+		t.Error("expected title in header")
 	}
 	if !strings.Contains(out, "Hello, world!") {
 		t.Error("expected content")
-	}
-	if !strings.Contains(out, "│") {
-		t.Error("expected side borders")
 	}
 }
 
 func TestPanel_Render_FooterHints(t *testing.T) {
 	p := launch.NewPanel(launch.PanelConfig{
 		Title:       "✈️ Aileron",
-		InnerWidth:  40,
 		FooterHints: []string{"y send", "n discard"},
 	}, 24, 80)
 
-	out := p.Render([]string{p.BlankLine()})
+	out := p.Render([]string{""})
 
 	if !strings.Contains(out, "y send") {
 		t.Error("expected 'y send' in footer")
@@ -49,123 +39,48 @@ func TestPanel_Render_FooterHints(t *testing.T) {
 	if !strings.Contains(out, "n discard") {
 		t.Error("expected 'n discard' in footer")
 	}
-	if !strings.Contains(out, "└") {
-		t.Error("expected bottom-left corner")
-	}
 }
 
 func TestPanel_Render_NoFooter(t *testing.T) {
 	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 30,
-	}, 24, 80)
-
-	out := p.Render([]string{p.BlankLine()})
-
-	if !strings.Contains(out, "└") {
-		t.Error("expected bottom border")
-	}
-	// Should not have stray text in footer area.
-	lines := strings.Split(out, "\r\n")
-	for _, line := range lines {
-		if strings.Contains(line, "└") && strings.Contains(line, "y ") {
-			t.Error("should not contain hint text when FooterHints is empty")
-		}
-	}
-}
-
-func TestPanel_InnerWidth_Auto(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{
 		Title: "Test",
-	}, 24, 100)
+	}, 24, 80)
 
-	// Auto: termCols - 4, capped at 80.
-	if p.InnerWidth() != 80 {
-		t.Errorf("expected auto inner width 80 (capped), got %d", p.InnerWidth())
-	}
+	out := p.Render([]string{""})
 
-	p2 := launch.NewPanel(launch.PanelConfig{Title: "Test"}, 24, 60)
-	if p2.InnerWidth() != 56 {
-		t.Errorf("expected auto inner width 56 (60-4), got %d", p2.InnerWidth())
+	// Footer separator should still appear.
+	if !strings.Contains(out, "─") {
+		t.Error("expected separator in output")
 	}
 }
 
-func TestPanel_InnerWidth_Explicit(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 74,
-	}, 24, 80)
+func TestPanel_ContentWidth(t *testing.T) {
+	p := launch.NewPanel(launch.PanelConfig{Title: "Test"}, 24, 80)
+	if p.ContentWidth() != 78 {
+		t.Errorf("expected content width 78 (80-2), got %d", p.ContentWidth())
+	}
 
-	if p.InnerWidth() != 74 {
-		t.Errorf("expected inner width 74, got %d", p.InnerWidth())
+	p2 := launch.NewPanel(launch.PanelConfig{Title: "Test"}, 24, 5)
+	if p2.ContentWidth() != 10 {
+		t.Errorf("expected content width 10 (minimum), got %d", p2.ContentWidth())
 	}
 }
 
 func TestPanel_SeparatorLine(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 30,
-	}, 24, 80)
+	p := launch.NewPanel(launch.PanelConfig{Title: "Test"}, 24, 80)
 
 	sep := p.SeparatorLine()
-	if !strings.Contains(sep, "├") {
-		t.Error("expected ├ in separator")
-	}
-	if !strings.Contains(sep, "┤") {
-		t.Error("expected ┤ in separator")
-	}
 	if !strings.Contains(sep, "─") {
 		t.Error("expected ─ in separator")
 	}
 }
 
-func TestPanel_PadLine(t *testing.T) {
+func TestPanel_RenderToAltScreen(t *testing.T) {
 	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 20,
+		Title: "Test",
 	}, 24, 80)
 
-	padded := p.PadLine("hi")
-	// "hi" is 2 chars, inner width 20, so 18 trailing spaces.
-	if len(padded) != 20 {
-		t.Errorf("expected padded length 20, got %d", len(padded))
-	}
-}
-
-func TestPanel_PadLine_WithANSI(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 20,
-	}, 24, 80)
-
-	// ANSI codes should not count toward visible width.
-	padded := p.PadLine("\033[1mhi\033[0m")
-	// Visible "hi" = 2, so 18 spaces of padding, but total bytes > 20 due to ANSI.
-	if !strings.HasSuffix(padded, strings.Repeat(" ", 18)) {
-		t.Error("expected 18 trailing spaces for ANSI-styled 2-char text")
-	}
-}
-
-func TestPanel_BlankLine(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 15,
-	}, 24, 80)
-
-	blank := p.BlankLine()
-	if len(blank) != 15 {
-		t.Errorf("expected blank line length 15, got %d", len(blank))
-	}
-}
-
-func TestPanel_RenderToAltScreen_Centered(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 40,
-		Centered:   true,
-	}, 24, 80)
-
-	out := p.RenderToAltScreen([]string{p.PadLine("content")})
+	out := p.RenderToAltScreen([]string{"content"})
 
 	if !strings.HasPrefix(out, "\033[?1049h") {
 		t.Error("expected alt-screen enter at start")
@@ -173,48 +88,35 @@ func TestPanel_RenderToAltScreen_Centered(t *testing.T) {
 	if !strings.Contains(out, "content") {
 		t.Error("expected content in output")
 	}
-	// Should have leading spaces for horizontal centering.
-	// Box width = 42 (40 inner + 2 borders), terminal = 80, margin = 19.
-	if !strings.Contains(out, strings.Repeat(" ", 19)) {
-		t.Error("expected horizontal centering margin")
-	}
 }
 
-func TestPanel_RenderToAltScreen_NotCentered(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{
-		Title:      "Test",
-		InnerWidth: 40,
-		Centered:   false,
-	}, 24, 80)
+func TestPanel_Render_CRLFLineEndings(t *testing.T) {
+	p := launch.NewPanel(launch.PanelConfig{Title: "Test"}, 24, 80)
+	out := p.Render([]string{"line1", "line2"})
 
-	out := p.RenderToAltScreen([]string{p.PadLine("content")})
-
-	if !strings.HasPrefix(out, "\033[?1049h") {
-		t.Error("expected alt-screen enter")
+	// Every line should use \r\n for raw terminal mode.
+	lines := strings.Split(out, "\r\n")
+	if len(lines) < 4 {
+		t.Errorf("expected at least 4 CRLF-delimited lines (header, sep, content, footer), got %d", len(lines))
 	}
-	// Non-centered should not have leading margin spaces before the box.
-	afterClear := strings.TrimPrefix(out, "\033[?1049h\033[2J\033[1;1H")
-	if strings.HasPrefix(afterClear, "   ") {
-		t.Error("non-centered output should not have large left margin")
+	// Should NOT contain bare \n (without preceding \r).
+	cleaned := strings.ReplaceAll(out, "\r\n", "")
+	if strings.Contains(cleaned, "\n") {
+		t.Error("found bare \\n without \\r — will misalign in raw terminal mode")
 	}
 }
 
 func TestVisibleWidth_PlainText(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{Title: "T", InnerWidth: 20}, 24, 80)
-	line := p.PadLine("hello")
-	// "hello" = 5 visible chars, padded to 20.
-	if len(line) != 20 {
-		t.Errorf("expected length 20 for 'hello' padded, got %d", len(line))
+	// "hello" is 5 visible chars.
+	if launch.VisibleWidthForTest("hello") != 5 {
+		t.Errorf("expected 5, got %d", launch.VisibleWidthForTest("hello"))
 	}
 }
 
 func TestVisibleWidth_ANSIStripped(t *testing.T) {
-	p := launch.NewPanel(launch.PanelConfig{Title: "T", InnerWidth: 20}, 24, 80)
 	// Bold "hi" is 2 visible chars.
-	line := p.PadLine("\033[1mhi\033[0m")
-	// Should end with 18 spaces.
-	if !strings.HasSuffix(line, strings.Repeat(" ", 18)) {
-		t.Errorf("expected 18 trailing spaces, got line=%q", line)
+	if launch.VisibleWidthForTest("\033[1mhi\033[0m") != 2 {
+		t.Errorf("expected 2, got %d", launch.VisibleWidthForTest("\033[1mhi\033[0m"))
 	}
 }
 

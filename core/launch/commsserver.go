@@ -305,22 +305,20 @@ func (cs *CommsServer) promptSendApproval(service, channel, body string) string 
 		termRows, termCols = cs.bar.Dims()
 	}
 	panel := NewPanel(PanelConfig{
-		Title:      "✈️ Aileron ─ Send Message",
-		InnerWidth: 74,
-		Centered:   true,
+		Title: "✈️ Aileron ─ Send Message",
 	}, termRows, termCols)
 
 	var content []string
-	content = append(content, panel.BlankLine())
-	content = append(content, panel.PadLine(fmt.Sprintf("  To: \033[1m%s %s\033[0m", service, channel)))
-	content = append(content, panel.BlankLine())
-	for _, bl := range wrapText(body, panel.InnerWidth()-4) {
-		content = append(content, panel.PadLine("  "+bl))
+	content = append(content, "")
+	content = append(content, fmt.Sprintf("  To: \033[1m%s %s\033[0m", service, channel))
+	content = append(content, "")
+	for _, bl := range wrapText(body, panel.ContentWidth()-4) {
+		content = append(content, "  "+bl)
 	}
-	content = append(content, panel.BlankLine())
-	content = append(content, panel.PadLine("  \033[1m[y]\033[0m  Send"))
-	content = append(content, panel.PadLine("  \033[1m[n]\033[0m  Discard"))
-	content = append(content, panel.BlankLine())
+	content = append(content, "")
+	content = append(content, "  \033[1m[y]\033[0m  Send")
+	content = append(content, "  \033[1m[n]\033[0m  Discard")
+	content = append(content, "")
 
 	prompt := panel.RenderToAltScreen(content) + "\r\n  > "
 

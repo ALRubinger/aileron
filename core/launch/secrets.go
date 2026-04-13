@@ -125,24 +125,22 @@ func PromptVaultWithPanel(copier *OutputCopier, router *KeyRouter, bar *StatusBa
 
 	for {
 		panel := NewPanel(PanelConfig{
-			Title:      "✈️ Aileron ─ Vault",
-			InnerWidth: 74,
-			Centered:   true,
+			Title: "✈️ Aileron ─ Vault",
 		}, termRows, termCols)
 
 		var content []string
-		content = append(content, panel.BlankLine())
-		content = append(content, panel.PadLine("  Enter your vault passphrase to unlock notifications."))
-		content = append(content, panel.BlankLine())
+		content = append(content, "")
+		content = append(content, "  Enter your vault passphrase to unlock notifications.")
+		content = append(content, "")
 		masked := strings.Repeat("*", len(passBuf))
-		content = append(content, panel.PadLine("  Passphrase: "+masked+"\033[7m \033[0m"))
-		content = append(content, panel.BlankLine())
+		content = append(content, "  Passphrase: "+masked+"\033[7m \033[0m")
+		content = append(content, "")
 		if errMsg != "" {
-			content = append(content, panel.PadLine("  \033[31m"+errMsg+"\033[0m"))
-			content = append(content, panel.BlankLine())
+			content = append(content, "  \033[31m"+errMsg+"\033[0m")
+			content = append(content, "")
 		}
-		content = append(content, panel.PadLine("  \033[2mEnter to unlock  Esc to skip\033[0m"))
-		content = append(content, panel.BlankLine())
+		content = append(content, "  \033[2mEnter to unlock  Esc to skip\033[0m")
+		content = append(content, "")
 
 		screen := panel.RenderToAltScreen(content)
 		copier.WriteExclusive([]byte(screen))
