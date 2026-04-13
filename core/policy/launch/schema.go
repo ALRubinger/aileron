@@ -56,10 +56,11 @@ type QuietHoursConfig struct {
 
 // SlackNotifyConfig configures Slack integration.
 type SlackNotifyConfig struct {
-	AppToken string         `yaml:"app_token,omitempty"` // xapp-... Socket Mode token
-	BotToken string         `yaml:"bot_token,omitempty"` // xoxb-... Bot token
-	Channels []ChannelConfig `yaml:"channels,omitempty"`
-	Ignore   []string       `yaml:"ignore,omitempty"`
+	AppToken  string          `yaml:"app_token,omitempty"`  // xapp-... Socket Mode token
+	BotToken  string          `yaml:"bot_token,omitempty"`  // xoxb-... Bot token (receiving)
+	UserToken string          `yaml:"user_token,omitempty"` // xoxp-... User OAuth token (sending as you)
+	Channels  []ChannelConfig `yaml:"channels,omitempty"`
+	Ignore    []string        `yaml:"ignore,omitempty"`
 }
 
 // DiscordNotifyConfig configures Discord integration.

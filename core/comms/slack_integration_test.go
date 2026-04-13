@@ -57,7 +57,7 @@ func TestSlackListener_ResolveChannelAndAuthor(t *testing.T) {
 	srv := newMockSlackServer()
 	defer srv.Close()
 
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	sl.SetAPIURL(srv.URL + "/")
 
 	if err := sl.Connect(context.Background()); err != nil {
@@ -114,7 +114,7 @@ func TestSlackListener_ResolveAuthorFallbackToName(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	sl.SetAPIURL(srv.URL + "/")
 	sl.Connect(context.Background())
 
@@ -135,7 +135,7 @@ func TestSlackListener_Send(t *testing.T) {
 	srv := newMockSlackServer()
 	defer srv.Close()
 
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	sl.SetAPIURL(srv.URL + "/")
 	sl.Connect(context.Background())
 
@@ -152,7 +152,7 @@ func TestSlackListener_SendConnected(t *testing.T) {
 	srv := newMockSlackServer()
 	defer srv.Close()
 
-	sl := comms.NewSlackListener("xapp-test", "xoxb-test", nil, nil, nopLogger())
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	sl.SetAPIURL(srv.URL + "/")
 	sl.Connect(context.Background())
 
