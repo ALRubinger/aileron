@@ -440,7 +440,7 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	fmt.Fprintf(stderr, "Value for new secret: %s: ", name)
+	fmt.Fprintf(stderr, "Value for new secret, %q: ", name)
 	value, err := promptPassphrase("", nil) // already printed prompt
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
