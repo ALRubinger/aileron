@@ -241,6 +241,7 @@ func launchWithPty(ctx context.Context, cmd *exec.Cmd, config LaunchConfig, queu
 	go commsSrv.Serve()
 
 	WireReply(overlay, commsSrv)
+	WireDraftSend(overlay, commsSrv)
 
 	// Wire onChange to re-render the status bar when notifications arrive.
 	queue.onChange = func() { bar.Render(os.Stdout) }
@@ -298,6 +299,18 @@ func WireDraftInjection(ptmx io.Writer, overlay *Overlay, queue *NotifyQueue) {
 func WireReply(overlay *Overlay, commsSrv *CommsServer) {
 	overlay.OnReply = func(msg Message, reply string) {
 		commsSrv.DirectSend(msg.Source, msg.Channel, reply)
+	}
+}
+
+// WireDraftSend connects the overlay's draft-approve and draft-edit
+// callbacks to send directly via the CommsServer. The agent drafts the
+// text; Aileron sends it after user approval. Exported for testing.
+func WireDraftSend(overlay *Overlay, commsSrv *CommsServer) {
+	overlay.OnDraftApprove = func(msg Message) {
+		commsSrv.DirectSend(msg.Source, msg.Channel, msg.Draft)
+	}
+	overlay.OnDraftEdit = func(msg Message, edited string) {
+		commsSrv.DirectSend(msg.Source, msg.Channel, edited)
 	}
 }
 

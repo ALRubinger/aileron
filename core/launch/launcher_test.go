@@ -562,15 +562,15 @@ func TestWireDraftInjection_OverlayCallback(t *testing.T) {
 	launch.WireDraftInjection(&buf, o, q)
 
 	// Simulate overlay draft request.
-	msg := launch.Message{Source: "slack", Channel: "#backend", Author: "Sarah", Body: "question?"}
+	msg := launch.Message{ID: "msg-1", Source: "slack", Channel: "#backend", Author: "Sarah", Body: "question?"}
 	o.OnDraftRequest(msg)
 
 	out := buf.String()
-	if !strings.Contains(out, "send_message") {
-		t.Error("expected send_message in injected prompt from overlay callback")
+	if !strings.Contains(out, "draft_reply") {
+		t.Error("expected draft_reply in injected prompt from overlay callback")
 	}
-	if !strings.Contains(out, "Sarah") {
-		t.Error("expected author in injected prompt")
+	if !strings.Contains(out, "msg-1") {
+		t.Error("expected message ID in injected prompt")
 	}
 }
 
@@ -585,7 +585,7 @@ func TestWireDraftInjection_AutoDraftNoLongerInjects(t *testing.T) {
 	q.Push(launch.Message{ID: "1", Source: "slack", Channel: "#backend", Author: "Bob", Body: "help?", AutoDraft: true})
 
 	out := buf.String()
-	if strings.Contains(out, "send_message") {
+	if strings.Contains(out, "draft_reply") {
 		t.Error("auto-draft should no longer inject prompts automatically")
 	}
 }
@@ -598,6 +598,7 @@ func TestWireDraftInjection_ConverseCallback(t *testing.T) {
 	launch.WireDraftInjection(&buf, o, q)
 
 	msg := launch.Message{
+		ID:      "msg-1",
 		Source:  "slack",
 		Channel: "#backend",
 		Author:  "Sarah",
@@ -607,14 +608,11 @@ func TestWireDraftInjection_ConverseCallback(t *testing.T) {
 	o.OnDraftConverse(msg, "make it shorter")
 
 	out := buf.String()
-	if !strings.Contains(out, "send_message") {
-		t.Error("expected send_message in converse revision prompt")
+	if !strings.Contains(out, "draft_reply") {
+		t.Error("expected draft_reply in converse revision prompt")
 	}
 	if !strings.Contains(out, "make it shorter") {
 		t.Error("expected user feedback in converse revision prompt")
-	}
-	if !strings.Contains(out, "Here is my draft.") {
-		t.Error("expected previous draft in converse revision prompt")
 	}
 }
 

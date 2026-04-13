@@ -13,6 +13,7 @@ func TestDraftInjector_Inject(t *testing.T) {
 	di := launch.NewDraftInjector(&buf)
 
 	di.Inject(launch.Message{
+		ID:      "msg-1",
 		Source:  "slack",
 		Channel: "#backend",
 		Author:  "Sarah",
@@ -21,23 +22,14 @@ func TestDraftInjector_Inject(t *testing.T) {
 
 	out := buf.String()
 
-	if !strings.Contains(out, "#backend") {
-		t.Error("expected channel in injected prompt")
+	if !strings.Contains(out, "msg-1") {
+		t.Error("expected message ID in injected prompt")
 	}
-	if !strings.Contains(out, "Sarah") {
-		t.Error("expected author in injected prompt")
+	if !strings.Contains(out, "read_messages") {
+		t.Error("expected read_messages tool reference in injected prompt")
 	}
-	if !strings.Contains(out, "JWT claims") {
-		t.Error("expected message body in injected prompt")
-	}
-	if !strings.Contains(out, "send_message") {
-		t.Error("expected send_message tool reference in injected prompt")
-	}
-	if !strings.Contains(out, `service="slack"`) {
-		t.Error("expected service parameter in injected prompt")
-	}
-	if !strings.Contains(out, `channel="#backend"`) {
-		t.Error("expected channel parameter in injected prompt")
+	if !strings.Contains(out, "draft_reply") {
+		t.Error("expected draft_reply tool reference in injected prompt")
 	}
 	if !strings.HasSuffix(out, "\n") {
 		t.Error("expected trailing newline to submit as user input")
@@ -48,18 +40,12 @@ func TestDraftInjector_InjectMultiple(t *testing.T) {
 	var buf bytes.Buffer
 	di := launch.NewDraftInjector(&buf)
 
-	di.Inject(launch.Message{Source: "slack", Channel: "#general", Author: "Alice", Body: "first"})
-	di.Inject(launch.Message{Source: "discord", Channel: "dev-chat", Author: "Bob", Body: "second"})
+	di.Inject(launch.Message{ID: "1", Source: "slack", Channel: "#general", Author: "Alice", Body: "first"})
+	di.Inject(launch.Message{ID: "2", Source: "discord", Channel: "dev-chat", Author: "Bob", Body: "second"})
 
 	out := buf.String()
 	if strings.Count(out, "\n") != 2 {
 		t.Errorf("expected 2 newlines for 2 injections, got %d", strings.Count(out, "\n"))
-	}
-	if !strings.Contains(out, "Alice") {
-		t.Error("expected first author")
-	}
-	if !strings.Contains(out, "Bob") {
-		t.Error("expected second author")
 	}
 }
 
@@ -68,6 +54,7 @@ func TestDraftInjector_InjectRevision(t *testing.T) {
 	di := launch.NewDraftInjector(&buf)
 
 	di.InjectRevision(launch.Message{
+		ID:      "msg-1",
 		Source:  "slack",
 		Channel: "#backend",
 		Author:  "Sarah",
@@ -77,26 +64,14 @@ func TestDraftInjector_InjectRevision(t *testing.T) {
 
 	out := buf.String()
 
-	if !strings.Contains(out, "#backend") {
-		t.Error("expected channel in revision prompt")
-	}
-	if !strings.Contains(out, "Sarah") {
-		t.Error("expected author in revision prompt")
-	}
-	if !strings.Contains(out, "JWT claims") {
-		t.Error("expected original message body in revision prompt")
-	}
-	if !strings.Contains(out, "Yes, we added a role claim.") {
-		t.Error("expected previous draft in revision prompt")
+	if !strings.Contains(out, "msg-1") {
+		t.Error("expected message ID in revision prompt")
 	}
 	if !strings.Contains(out, "make it more casual") {
 		t.Error("expected user feedback in revision prompt")
 	}
-	if !strings.Contains(out, "send_message") {
-		t.Error("expected send_message tool reference in revision prompt")
-	}
-	if !strings.Contains(out, `service="slack"`) {
-		t.Error("expected service parameter in revision prompt")
+	if !strings.Contains(out, "draft_reply") {
+		t.Error("expected draft_reply tool reference in revision prompt")
 	}
 	if !strings.HasSuffix(out, "\n") {
 		t.Error("expected trailing newline to submit as user input")

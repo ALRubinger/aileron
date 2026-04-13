@@ -35,12 +35,13 @@ type CommsResponse struct {
 
 // CommsMessageDTO is the wire format for a message.
 type CommsMessageDTO struct {
-	ID        string `json:"id"`
-	Service   string `json:"service"`
-	Channel   string `json:"channel"`
-	Author    string `json:"author"`
-	Body      string `json:"body"`
-	Timestamp string `json:"timestamp"`
+	ID           string `json:"id"`
+	Service      string `json:"service"`
+	Channel      string `json:"channel"`
+	Author       string `json:"author"`
+	Body         string `json:"body"`
+	Timestamp    string `json:"timestamp"`
+	DraftRequest bool   `json:"draft_request,omitempty"` // true if a reply draft is requested
 }
 
 // CommsServer handles IPC requests from aileron-mcp for reading and
@@ -124,6 +125,8 @@ func (cs *CommsServer) handleConn(conn net.Conn) {
 		resp = cs.readMessages(req)
 	case "send_message":
 		resp = cs.sendMessage(req)
+	case "draft_reply":
+		resp = cs.draftReply(req)
 	case "http_request":
 		resp = cs.httpRequest(req)
 	default:
@@ -143,17 +146,37 @@ func (cs *CommsServer) readMessages(req CommsRequest) CommsResponse {
 		if req.Channel != "" && m.Channel != req.Channel {
 			continue
 		}
-		dtos = append(dtos, CommsMessageDTO{
+		dto := CommsMessageDTO{
 			ID:        m.ID,
 			Service:   m.Source,
 			Channel:   m.Channel,
 			Author:    m.Author,
 			Body:      m.Body,
 			Timestamp: m.Timestamp.Format(time.RFC3339),
-		})
+		}
+		if m.AutoDraft && m.Draft == "" {
+			dto.DraftRequest = true
+		}
+		dtos = append(dtos, dto)
 	}
 	cs.queue.MarkAllRead()
 	return CommsResponse{OK: true, Messages: dtos}
+}
+
+// draftReply stores a draft reply on a message without sending it.
+// The user reviews the draft in the overlay and decides to send,
+// edit, or discard. Aileron handles sending — not the agent.
+func (cs *CommsServer) draftReply(req CommsRequest) CommsResponse {
+	if req.ReplyTo == "" || req.Body == "" {
+		return CommsResponse{Error: "reply_to and body are required"}
+	}
+
+	if !cs.queue.SetDraft(req.ReplyTo, req.Body) {
+		return CommsResponse{Error: "message not found: " + req.ReplyTo}
+	}
+
+	cs.logMessage("draft_queued", "", "", "", req.Body, req.ReplyTo)
+	return CommsResponse{OK: true}
 }
 
 func (cs *CommsServer) sendMessage(req CommsRequest) CommsResponse {
