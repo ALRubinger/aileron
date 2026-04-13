@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	ptyPkg "github.com/creack/pty/v2"
+
 	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/vault"
 	"golang.org/x/term"
@@ -92,13 +94,26 @@ func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
 
 // PromptVaultWithPanel shows a Panel-based passphrase prompt with retry.
 // The user can enter their passphrase, see errors on wrong input, and
-// retry or press Esc to skip. Returns nil if the user skips.
-func PromptVaultWithPanel(copier *OutputCopier, router *KeyRouter, bar *StatusBar) vault.Vault {
+// retry or press Esc to skip. Returns nil if the user skips. The ptmx
+// parameter is the agent's pty master — used to trigger a SIGWINCH
+// redraw after the prompt closes.
+func PromptVaultWithPanel(copier *OutputCopier, router *KeyRouter, bar *StatusBar, ptmx *os.File) vault.Vault {
 	inputCh := router.StealInput()
 	defer router.ReleaseInput()
 
 	copier.SetPaused(true)
 	defer copier.SetPaused(false)
+
+	// restoreScreen exits the alt-screen buffer and triggers a SIGWINCH
+	// on the agent's pty so it redraws its TUI.
+	restoreScreen := func() {
+		copier.WriteExclusive([]byte("\033[?1049l"))
+		if ptmx != nil {
+			if ws, err := ptyPkg.GetsizeFull(ptmx); err == nil {
+				ptyPkg.Setsize(ptmx, ws)
+			}
+		}
+	}
 
 	termRows, termCols := 24, 80
 	if bar != nil {
@@ -136,7 +151,7 @@ func PromptVaultWithPanel(copier *OutputCopier, router *KeyRouter, bar *StatusBa
 		b := <-inputCh
 		switch {
 		case b == 0x1B: // Esc — skip vault
-			copier.WriteExclusive([]byte("\033[?1049l"))
+			restoreScreen()
 			return nil
 		case b == '\r' || b == '\n': // Enter — try unlock
 			if len(passBuf) == 0 {
@@ -154,7 +169,7 @@ func PromptVaultWithPanel(copier *OutputCopier, router *KeyRouter, bar *StatusBa
 				continue
 			}
 			// Success — restore screen and return.
-			copier.WriteExclusive([]byte("\033[?1049l"))
+			restoreScreen()
 			return v
 		case b == 0x7F || b == 0x08: // Backspace
 			if len(passBuf) > 0 {
