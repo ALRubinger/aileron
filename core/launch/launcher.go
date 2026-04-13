@@ -656,7 +656,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		created = append(created, dl)
 	}
 
-	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, priority, auditLog, sessionID)
+	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, priority, auditLog, sessionID, sessionLog)
 }
 
 // StartListeners connects and starts each listener, bridging incoming
@@ -664,20 +664,23 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 // trigger automatic draft replies. The priority map controls the
 // priority level ("normal", "high") per channel. Returns the
 // successfully started listeners. Errors are written to w.
-func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string) []comms.Listener {
+func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string, log *slog.Logger) []comms.Listener {
 	var started []comms.Listener
 	for _, l := range listeners {
 		if err := l.Connect(ctx); err != nil {
 			fmt.Fprintf(w, "aileron: %s connect failed: %v\n", l.Service(), err)
+			log.Warn("listener connect failed", "service", l.Service(), "error", err)
 			continue
 		}
 		msgs, err := l.Listen(ctx)
 		if err != nil {
 			fmt.Fprintf(w, "aileron: %s listen failed: %v\n", l.Service(), err)
+			log.Warn("listener listen failed", "service", l.Service(), "error", err)
 			continue
 		}
+		log.Info("listener started", "service", l.Service())
 		started = append(started, l)
-		go BridgeMessages(msgs, queue, autoDraft, priority, auditLog, sessionID)
+		go BridgeMessages(msgs, queue, autoDraft, priority, auditLog, sessionID, log)
 	}
 	return started
 }
@@ -686,7 +689,7 @@ func StartListeners(ctx context.Context, listeners []comms.Listener, queue *Noti
 // into the NotifyQueue. The autoDraft map controls which channels trigger
 // automatic draft replies. The priority map sets the priority level per
 // channel. Exported for testing.
-func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string) {
+func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string, log *slog.Logger) {
 	for msg := range msgs {
 		preview := msg.Body
 		if len(preview) > 80 {
@@ -696,6 +699,13 @@ func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoD
 		if pri == "" {
 			pri = "normal"
 		}
+		log.Debug("message received",
+			"service", msg.Service,
+			"channel", msg.Channel,
+			"author", msg.Author,
+			"priority", pri,
+			"preview", preview,
+		)
 		queue.Push(Message{
 			ID:        msg.ID,
 			Source:    msg.Service,
