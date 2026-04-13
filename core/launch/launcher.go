@@ -111,8 +111,17 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)
 	defer closeSessionLog()
 	fmt.Fprintf(os.Stderr, "aileron: session log → %s\n", sessionLogPath(config.Dir))
+
+	sessionLog.Info("session started",
+		"agent", config.Agent.Name(),
+		"session_id", sessionID,
+		"dir", config.Dir,
+		"binary", agentPath,
+	)
+
 	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
 	defer stopCommsListeners(listeners)
+	sessionLog.Debug("comms listeners started", "count", len(listeners))
 
 	// If stdin is a terminal, use the pty proxy with status bar.
 	var result LaunchResult
@@ -122,6 +131,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		result, err = launchDirect(cmd, config)
 	}
 
+	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	if auditLog != "" {
 		PrintSessionSummary(os.Stderr, auditLog, sessionID)
 	}
@@ -553,6 +563,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 	}
 	policyPath := FindPolicyFile(dir)
 	if policyPath == "" {
+		sessionLog.Debug("no policy file found, skipping comms listeners")
 		return nil
 	}
 	pf := loadPolicyFileFrom(policyPath)
