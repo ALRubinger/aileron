@@ -53,6 +53,17 @@ func ResolveBinary(names []string) (string, error) {
 	return "", fmt.Errorf("could not find any of %v on PATH", names)
 }
 
+// resolveSibling looks for a binary next to the given executable path,
+// then falls back to searching PATH.
+func resolveSibling(selfPath, name string) (string, error) {
+	dir := filepath.Dir(selfPath)
+	candidate := filepath.Join(dir, name)
+	if _, err := os.Stat(candidate); err == nil {
+		return filepath.Abs(candidate)
+	}
+	return exec.LookPath(name)
+}
+
 // ResolveShim looks for the aileron-sh binary next to the given executable
 // path, then falls back to searching PATH.
 func ResolveShim(selfPath string) (string, error) {
@@ -99,6 +110,17 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	// Agent-required args come first, then user-supplied args.
 	allArgs := append(config.Agent.Args(), config.Args...)
+
+	// If the comms socket is set, register aileron-mcp as an MCP server
+	// so the agent has access to read_messages, draft_reply, etc.
+	if mcpBin, err := resolveSibling(agentPath, "aileron-mcp"); err == nil {
+		mcpConfig := fmt.Sprintf(
+			`{"mcpServers":{"aileron":{"command":%q,"env":{"AILERON_COMMS_SOCKET":%q}}}}`,
+			mcpBin, commsSocket,
+		)
+		allArgs = append(allArgs, "--mcp-config", mcpConfig)
+	}
+
 	cmd := exec.CommandContext(ctx, agentPath, allArgs...)
 	cmd.Env = env
 	if config.Dir != "" {
