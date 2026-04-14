@@ -17,6 +17,7 @@ export type NavLink = {
 export type NavSection = {
   label: string;
   children: NavItem[];
+  href?: string;
   defaultOpen?: boolean;
   icon?: Component;
 };
@@ -36,8 +37,8 @@ export function isSection(item: NavItem): item is NavSection {
 export const navigation: NavItem[] = [
   {
     label: 'Meet Aileron',
+    href: '/',
     children: [
-      { label: 'Home', href: '/' },
       { label: 'For Individuals', href: '/for-individuals' },
       { label: 'For Organizations', href: '/for-organizations' },
       { label: 'How Aileron Works', href: '/how-aileron-works' }
@@ -45,8 +46,8 @@ export const navigation: NavItem[] = [
   },
   {
     label: 'Getting Started',
+    href: '/getting-started/installation',
     children: [
-      { label: 'Installation', href: '/getting-started/installation' },
       { label: 'Quick Start', href: '/getting-started/quick-start' },
       { label: 'Policy Configuration', href: '/getting-started/policy-configuration' },
       { label: 'Credential Vault', href: '/getting-started/credential-vault' },

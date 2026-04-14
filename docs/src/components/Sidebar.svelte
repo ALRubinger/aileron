@@ -28,6 +28,7 @@
 
   function sectionContainsActive(item: NavItem): boolean {
     if (!isSection(item)) return isActive(item.href);
+    if (item.href && isActive(item.href)) return true;
     return item.children.some(child => sectionContainsActive(child));
   }
 </script>
@@ -118,12 +119,25 @@
   <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''} {active ? 'bg-accent/30 rounded border border-border' : ''}">
     <summary class="group/summary flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium cursor-pointer select-none
       {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden">
-      <span class="flex items-center gap-2">
-        {#if Icon}
-          <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover/section:scale-125'}" />
-        {/if}
-        {item.label}
-      </span>
+      {#if item.href}
+        <a
+          href={item.href}
+          class="flex items-center gap-2 no-underline {active && isActive(item.href) ? 'text-accent-foreground' : 'text-inherit'}"
+          onclick={(e) => { e.stopPropagation(); mobileOpen = false; }}
+        >
+          {#if Icon}
+            <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover/section:scale-125'}" />
+          {/if}
+          {item.label}
+        </a>
+      {:else}
+        <span class="flex items-center gap-2">
+          {#if Icon}
+            <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover/section:scale-125'}" />
+          {/if}
+          {item.label}
+        </span>
+      {/if}
       <svg class="w-4 h-4 transition-transform group-open/section:rotate-90" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="9 18 15 12 9 6" />
       </svg>
