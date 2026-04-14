@@ -123,6 +123,7 @@ tasks:
       - rm -rf build
       - rm -rf ui/.svelte-kit ui/build ui/node_modules
       - rm -rf docs/.astro docs/dist docs/node_modules
+      - rm -f docs/public/openapi.yaml
 
   logs:
     desc: Tail service logs
