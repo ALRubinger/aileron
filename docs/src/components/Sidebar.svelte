@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { navigation, externalLinks, isSection, type NavItem } from '../lib/navigation';
+  import { externalLinks, isSection, type NavItem } from '../lib/navigation';
   import Plane from '@lucide/svelte/icons/plane';
   import Rocket from '@lucide/svelte/icons/rocket';
   import Server from '@lucide/svelte/icons/server';
@@ -8,7 +8,7 @@
   import Braces from '@lucide/svelte/icons/braces';
   import Cloud from '@lucide/svelte/icons/cloud';
 
-  let { currentPath = '' }: { currentPath?: string } = $props();
+  let { currentPath = '', navigation = [] as NavItem[] }: { currentPath?: string; navigation?: NavItem[] } = $props();
   let mobileOpen = $state(false);
 
   // Map top-level labels to icons
