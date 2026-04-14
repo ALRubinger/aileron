@@ -18,7 +18,8 @@ import (
 const vaultPrefix = "vault:"
 
 // DefaultVaultPath returns the default vault file path (~/.aileron/secrets.json).
-func DefaultVaultPath() string {
+// Replaceable in tests.
+var DefaultVaultPath = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".aileron", "secrets.json")

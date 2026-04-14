@@ -486,7 +486,10 @@ func runSecretList(stdout, stderr io.Writer) int {
 }
 
 // promptPassphrase reads a password from the terminal without echoing.
-func promptPassphrase(prompt string, w io.Writer) (string, error) {
+// Replaceable in tests.
+var promptPassphrase = defaultPromptPassphrase
+
+func defaultPromptPassphrase(prompt string, w io.Writer) (string, error) {
 	if w != nil && prompt != "" {
 		fmt.Fprint(w, prompt)
 	}
