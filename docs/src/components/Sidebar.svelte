@@ -117,12 +117,16 @@
   {@const open = active || item.defaultOpen !== false}
   {@const Icon = iconMap[item.label]}
   <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''} rounded border {active ? 'bg-accent/30 border-border' : 'border-transparent'}">
-    <summary class="group/summary flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium cursor-pointer select-none
-      {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden">
+    <summary
+      class="group/summary flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium select-none
+        {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden
+        {item.href ? '' : 'cursor-pointer'}"
+      onclick={item.href ? (e: MouseEvent) => { e.preventDefault(); } : undefined}
+    >
       {#if item.href}
         <a
           href={item.href}
-          class="flex items-center gap-2 no-underline {active && isActive(item.href) ? 'text-accent-foreground' : 'text-inherit'}"
+          class="flex-1 flex items-center gap-2 no-underline {active && isActive(item.href) ? 'text-accent-foreground' : 'text-inherit'}"
           onclick={(e) => { e.stopPropagation(); mobileOpen = false; }}
         >
           {#if Icon}
@@ -138,9 +142,20 @@
           {item.label}
         </span>
       {/if}
-      <svg class="w-4 h-4 transition-transform group-open/section:rotate-90" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="9 18 15 12 9 6" />
-      </svg>
+      <button
+        class="p-0.5 rounded hover:bg-accent/70 cursor-pointer"
+        onclick={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          const details = (e.currentTarget as HTMLElement).closest('details');
+          if (details) details.open = !details.open;
+        }}
+        aria-label="Toggle section"
+      >
+        <svg class="w-4 h-4 transition-transform group-open/section:rotate-90" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+      </button>
     </summary>
     <div class="ml-2 border-l border-border pl-2">
       {#each item.children as child}
