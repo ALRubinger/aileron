@@ -119,7 +119,7 @@
   <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''} rounded border {active ? 'bg-accent/30 border-border' : 'border-transparent'}">
     <summary
       class="group/summary flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium select-none
-        {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden
+        {item.href && isActive(item.href) ? 'bg-accent text-accent-foreground' : active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden
         {item.href ? '' : 'cursor-pointer'}"
       onclick={item.href ? (e: MouseEvent) => { e.preventDefault(); } : undefined}
     >
