@@ -15,7 +15,10 @@ Aileron is built for you. At home, at work, to get you back to real life sooner.
 
 ---
 
-## Documentation
+## Learn more
 
-- [API Reference](/api) - Full OpenAPI specification with interactive explorer
-- [Architecture Decision Records](/adr) - Design decisions and their rationale
+- [For Individuals](/for-individuals) - How Aileron gives you your time back
+- [For Organizations](/for-organizations) - Institutional memory that builds itself
+- [How Aileron Works](/how-aileron-works) - The building blocks that make it trustworthy
+- [Getting Started](/getting-started/installation) - Install and launch your first session
+- [API Reference](/api) - Full OpenAPI specification
