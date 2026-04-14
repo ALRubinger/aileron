@@ -120,7 +120,7 @@
       {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden">
       <span class="flex items-center gap-2">
         {#if Icon}
-          <Icon size={16} class="shrink-0 transition-transform duration-150 {sectionContainsActive(item) ? 'scale-125' : 'group-hover/summary:scale-125'}" />
+          <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover/section:scale-125'}" />
         {/if}
         {item.label}
       </span>
