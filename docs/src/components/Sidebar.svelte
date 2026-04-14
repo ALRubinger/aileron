@@ -1,15 +1,23 @@
 <script lang="ts">
   import { navigation, externalLinks, isSection, type NavItem } from '../lib/navigation';
-  import House from '@lucide/svelte/icons/house';
+  import Plane from '@lucide/svelte/icons/plane';
+  import Rocket from '@lucide/svelte/icons/rocket';
+  import Server from '@lucide/svelte/icons/server';
+  import Wrench from '@lucide/svelte/icons/wrench';
   import GitFork from '@lucide/svelte/icons/git-fork';
   import Braces from '@lucide/svelte/icons/braces';
+  import Cloud from '@lucide/svelte/icons/cloud';
 
   let { currentPath = '' }: { currentPath?: string } = $props();
   let mobileOpen = $state(false);
 
   // Map top-level labels to icons
-  const iconMap: Record<string, typeof House> = {
-    'Home': House,
+  const iconMap: Record<string, typeof Plane> = {
+    'Meet Aileron': Plane,
+    'Getting Started': Rocket,
+    'Operations': Server,
+    'Deployment': Cloud,
+    'Development': Wrench,
     'Architecture Decisions': GitFork,
     'API Reference': Braces
   };
