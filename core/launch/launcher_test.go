@@ -743,6 +743,76 @@ notifications:
 	}
 }
 
+func TestLaunch_VaultRefsWithUserToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  slack:
+    app_token: vault:slack_app
+    bot_token: vault:slack_bot
+    user_token: vault:slack_user
+    channels:
+      - name: "#test"
+`), 0o644)
+
+	v := vault.NewMemVault()
+	v.Put(nil, "slack_app", []byte("xapp-resolved"), vault.Metadata{})
+	v.Put(nil, "slack_bot", []byte("xoxb-resolved"), vault.Metadata{})
+	v.Put(nil, "slack_user", []byte("xoxp-resolved"), vault.Metadata{})
+
+	old := launch.OpenVaultFunc
+	launch.OpenVaultFunc = func(w io.Writer) (vault.Vault, error) { return v, nil }
+	defer func() { launch.OpenVaultFunc = old }()
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch with user_token vault ref should succeed: %v", err)
+	}
+}
+
+func TestLaunch_UserTokenPlaintextRejected(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
+version: 1
+default: allow
+notifications:
+  slack:
+    app_token: vault:slack_app
+    bot_token: vault:slack_bot
+    user_token: xoxp-plaintext-bad
+    channels:
+      - name: "#test"
+`), 0o644)
+
+	script := filepath.Join(dir, "noop.sh")
+	os.WriteFile(script, []byte("#!/bin/sh\ntrue\n"), 0o755)
+
+	agent := scriptAgent{script: script}
+	// Should succeed (launch continues without notifications when validation fails).
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:     agent,
+		ShellShim: "/tmp/fake-shim",
+		Dir:       dir,
+	})
+	if err != nil {
+		t.Fatalf("launch should succeed even when user_token is rejected: %v", err)
+	}
+}
+
 func TestLaunch_VaultRefsWithDiscord(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
