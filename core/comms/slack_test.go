@@ -52,6 +52,25 @@ func TestSlackListener_ConnectValidTokens(t *testing.T) {
 	}
 }
 
+func TestSlackListener_ConnectWithUserToken(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "xoxp-user", nil, nil, nopLogger())
+	err := sl.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	// Send should use the user token client (we can't verify the token
+	// directly, but Connect should not error with a user token set).
+}
+
+func TestSlackListener_SendWithoutConnect_UserToken(t *testing.T) {
+	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "xoxp-user", nil, nil, nopLogger())
+	// Don't call Connect — sendAPI is nil.
+	err := sl.Send(context.Background(), comms.OutgoingMessage{Channel: "#test", Body: "hi"})
+	if err == nil {
+		t.Fatal("expected error when sending without connect")
+	}
+}
+
 func TestSlackListener_ListenWithoutConnect(t *testing.T) {
 	sl := comms.NewSlackListener("xapp-test", "xoxb-test", "", nil, nil, nopLogger())
 	// Don't call Connect.

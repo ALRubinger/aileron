@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1147,5 +1149,86 @@ func TestRunSecret_InHelp(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "aileron secret list") {
 		t.Error("expected 'aileron secret list' in help output")
+	}
+}
+
+func mockPromptPassphrase(responses []string) func() {
+	calls := 0
+	old := promptPassphrase
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		if calls >= len(responses) {
+			return "", fmt.Errorf("unexpected prompt call %d", calls)
+		}
+		r := responses[calls]
+		calls++
+		return r, nil
+	}
+	return func() { promptPassphrase = old }
+}
+
+func TestRunSecretSet_NewVault(t *testing.T) {
+	dir := t.TempDir()
+	origDefault := launch.DefaultVaultPath
+	launch.DefaultVaultPath = func() string { return filepath.Join(dir, "secrets.json") }
+	defer func() { launch.DefaultVaultPath = origDefault }()
+
+	// Passphrase, confirm, secret value.
+	restore := mockPromptPassphrase([]string{"mypass", "mypass", "secret-value"})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runSecretSet([]string{"test_token"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Stored secret") {
+		t.Error("expected success message")
+	}
+	if !strings.Contains(stderr.String(), "Creating a new Aileron vault") {
+		t.Error("expected new vault warning")
+	}
+}
+
+func TestRunSecretSet_WrongPassphrase(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "secrets.json")
+	origDefault := launch.DefaultVaultPath
+	launch.DefaultVaultPath = func() string { return vaultPath }
+	defer func() { launch.DefaultVaultPath = origDefault }()
+
+	// Create a vault with one secret.
+	restore := mockPromptPassphrase([]string{"correct", "correct", "val"})
+	var discard bytes.Buffer
+	runSecretSet([]string{"existing"}, &discard, &discard)
+	restore()
+
+	// Now try to add with wrong passphrase.
+	restore = mockPromptPassphrase([]string{"wrong", "also-wrong"})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runSecretSet([]string{"new_token"}, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected non-zero exit for wrong passphrase")
+	}
+}
+
+func TestRunSecretSet_MismatchedConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	origDefault := launch.DefaultVaultPath
+	launch.DefaultVaultPath = func() string { return filepath.Join(dir, "secrets.json") }
+	defer func() { launch.DefaultVaultPath = origDefault }()
+
+	// Passphrase and confirm don't match.
+	restore := mockPromptPassphrase([]string{"pass1", "pass2"})
+	defer restore()
+
+	var stdout, stderr bytes.Buffer
+	code := runSecretSet([]string{"test_token"}, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected non-zero exit for mismatched passphrases")
+	}
+	if !strings.Contains(stderr.String(), "do not match") {
+		t.Error("expected mismatch error")
 	}
 }
