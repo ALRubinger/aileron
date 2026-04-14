@@ -4,6 +4,8 @@ description: "Accelerate your work and life. You in control. Throttle up."
 order: 0
 ---
 
+*Accelerate your work and life. You in control. Throttle up.*
+
 Time is our most precious asset. We pour it into purpose, into connection. Managing our modern life demands time, and we believe it should take far less.
 
 Aileron learns how you already live and work. Your conversations, your decisions, your preferences, your corrections. Not because you sit down and teach it, but because it's there, paying attention, getting sharper every day. It builds an understanding of your world that no one had to write down, and that understanding is what makes the difference between an answer that wastes your time and one you'd trust with your name on it.
