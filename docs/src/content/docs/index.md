@@ -1,30 +1,21 @@
 ---
 title: "Aileron"
-description: "Policy-enforced shell for AI coding agents"
+description: "Aileron already did the homework"
 order: 0
 ---
 
-**Policy-enforced shell for AI coding agents.**
+Time is our most precious asset. We pour it into purpose, into connection. Managing our modern life demands time, and we believe it should take far less.
 
-Aileron lets your agents fly. Security, privacy, and accountability keep you in control so you can put on the afterburner.
+Aileron learns how you already live and work. Your conversations, your decisions, your preferences, your corrections. Not because you sit down and teach it, but because it's there, paying attention, getting sharper every day. It builds an understanding of your world that no one had to write down, and that understanding is what makes the difference between an answer that wastes your time and one you'd trust with your name on it.
 
-## The Problem
+We built Aileron to work with your real life. Your real conversations, your real decisions, your real data. That meant designing from the ground up for privacy, for security, and for you to always be the one in control.
+A message comes in and the reply is ready. In your voice, with the right context, waiting for your approval. A decision needs to be made and the relevant information is already assembled. Something needs to happen and Aileron handles it responsibly, on your behalf, with your data staying yours. You review, approve, and move on. And tomorrow it's a little better than today, because it learned from what you did. That's not a feature. That's the whole point.
 
-AI coding agents run shell commands on your behalf — but giving them unrestricted access to your terminal is dangerous. Every team faces the same question: *"How do we let agents run commands without rubber-stamping everything or missing the dangerous ones?"*
+Aileron is built for you. At home, at work, to get you back to real life sooner.
 
-## The Solution
-
-`aileron launch claude` wraps your agent in a policy-enforced shell. Every command the agent runs flows through `aileron-sh`, which evaluates it against your `aileron.yaml` rules before allowing execution. Safe commands auto-approve. Dangerous commands are blocked. Ambiguous commands prompt you once.
-
-### Key Principles
-
-- **Policy-as-code** — Allow, deny, or ask rules defined in `aileron.yaml`, checked into your repo, reviewable in PRs.
-- **Single approval layer** — Aileron replaces the agent's native permission prompts. One policy, one prompt.
-- **Credential isolation** — Locally, credential brokering keeps secrets out of the agent's context. With the cloud vault (coming), secrets are encrypted with a key only you hold — Aileron architecturally *cannot* see them.
-- **Complete audit trail** — Every decision is logged. The audit trail is the ground truth for what happened.
-- **Agent-aware** — Works with Claude Code today, extensible to other agents. Agent-specific quirks (command wrapping, shell validation) are handled transparently.
+---
 
 ## Documentation
 
-- [API Reference](/api) — Full OpenAPI specification with interactive explorer
-- [Architecture Decision Records](/adr) — Design decisions and their rationale
+- [API Reference](/api) - Full OpenAPI specification with interactive explorer
+- [Architecture Decision Records](/adr) - Design decisions and their rationale

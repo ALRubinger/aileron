@@ -35,6 +35,9 @@ export function isSection(item: NavItem): item is NavSection {
  */
 export const navigation: NavItem[] = [
   { label: 'Home', href: '/' },
+  { label: 'For Individuals', href: '/for-individuals' },
+  { label: 'For Organizations', href: '/for-organizations' },
+  { label: 'How Aileron Works', href: '/how-aileron-works' },
   {
     label: 'Architecture Decisions',
     defaultOpen: false,
