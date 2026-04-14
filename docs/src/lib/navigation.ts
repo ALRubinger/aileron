@@ -39,6 +39,44 @@ export const navigation: NavItem[] = [
   { label: 'For Organizations', href: '/for-organizations' },
   { label: 'How Aileron Works', href: '/how-aileron-works' },
   {
+    label: 'Getting Started',
+    children: [
+      { label: 'Installation', href: '/getting-started/installation' },
+      { label: 'Quick Start', href: '/getting-started/quick-start' },
+      { label: 'Policy Configuration', href: '/getting-started/policy-configuration' },
+      { label: 'Credential Vault', href: '/getting-started/credential-vault' },
+      { label: 'Slack Integration', href: '/getting-started/slack-integration' },
+      { label: 'Discord Integration', href: '/getting-started/discord-integration' }
+    ]
+  },
+  {
+    label: 'Operations',
+    children: [
+      { label: 'Supported Agents', href: '/operations/supported-agents' },
+      { label: 'Status & Audit', href: '/operations/status-and-audit' },
+      { label: 'Running Locally', href: '/operations/running-locally' }
+    ]
+  },
+  {
+    label: 'Deployment',
+    defaultOpen: false,
+    children: [
+      { label: 'Cloud Deployment', href: '/deployment/cloud' },
+      { label: 'Railway', href: '/deployment/railway' },
+      { label: 'TEE Enclave', href: '/deployment/tee-enclave' }
+    ]
+  },
+  {
+    label: 'Development',
+    defaultOpen: false,
+    children: [
+      { label: 'Building from Source', href: '/development/building-from-source' },
+      { label: 'Testing', href: '/development/testing' },
+      { label: 'Project Structure', href: '/development/project-structure' },
+      { label: 'Releasing', href: '/development/releasing' }
+    ]
+  },
+  {
     label: 'Architecture Decisions',
     defaultOpen: false,
     children: [
