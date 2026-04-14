@@ -34,10 +34,15 @@ export function isSection(item: NavItem): item is NavSection {
  * The sidebar navigation tree. Update this when adding new docs pages.
  */
 export const navigation: NavItem[] = [
-  { label: 'Home', href: '/' },
-  { label: 'For Individuals', href: '/for-individuals' },
-  { label: 'For Organizations', href: '/for-organizations' },
-  { label: 'How Aileron Works', href: '/how-aileron-works' },
+  {
+    label: 'Meet Aileron',
+    children: [
+      { label: 'Home', href: '/' },
+      { label: 'For Individuals', href: '/for-individuals' },
+      { label: 'For Organizations', href: '/for-organizations' },
+      { label: 'How Aileron Works', href: '/how-aileron-works' }
+    ]
+  },
   {
     label: 'Getting Started',
     children: [
