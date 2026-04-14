@@ -102,7 +102,8 @@ export const navigation: NavItem[] = [
       { label: 'ADR-0014: aileron.yaml Policy Schema', href: '/adr/0014-aileron-yaml-policy-schema' },
       { label: 'ADR-0015: Built-in Policy Defaults', href: '/adr/0015-built-in-policy-defaults' },
       { label: 'ADR-0016: Layer Overrides & Specificity', href: '/adr/0016-layer-overrides-and-specificity' },
-      { label: 'ADR-0017: Pluggable Agent SPI', href: '/adr/0017-pluggable-agent-spi' }
+      { label: 'ADR-0017: Pluggable Agent SPI', href: '/adr/0017-pluggable-agent-spi' },
+      { label: 'ADR-0018: Context Store Architecture', href: '/adr/0018-context-store-architecture' }
     ]
   }
 ];
