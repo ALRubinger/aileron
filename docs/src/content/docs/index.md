@@ -1,6 +1,6 @@
 ---
 title: "Aileron"
-description: "Aileron already did the homework"
+description: "Accelerate your work and life. You in control. Throttle up."
 order: 0
 ---
 
