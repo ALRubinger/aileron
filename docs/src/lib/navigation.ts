@@ -6,19 +6,19 @@
  * tree with collapsible groups.
  */
 
-import type { ComponentType } from 'svelte';
+import type { Component } from 'svelte';
 
 export type NavLink = {
   label: string;
   href: string;
-  icon?: ComponentType;
+  icon?: Component;
 };
 
 export type NavSection = {
   label: string;
   children: NavItem[];
   defaultOpen?: boolean;
-  icon?: ComponentType;
+  icon?: Component;
 };
 
 export type NavItem = NavLink | NavSection;
