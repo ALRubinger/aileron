@@ -1,0 +1,27 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="API Reference">
+  <div id="scalar-container"></div>
+
+  <script is:inline>
+    const container = document.getElementById('scalar-container');
+    if (container) {
+      const ref = document.createElement('script');
+      ref.id = 'api-reference';
+      ref.dataset.url = '/openapi.yaml';
+      container.appendChild(ref);
+
+      const cdn = document.createElement('script');
+      cdn.src = 'https://cdn.jsdelivr.net/npm/@scalar/api-reference';
+      document.head.appendChild(cdn);
+    }
+  </script>
+
+  <style>
+    #scalar-container {
+      min-height: 100vh;
+    }
+  </style>
+</BaseLayout>

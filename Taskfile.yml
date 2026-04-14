@@ -95,8 +95,8 @@ tasks:
     dir: docs
     cmds:
       - pnpm install
-      - mkdir -p static
-      - cp ../core/api/openapi.yaml static/openapi.yaml
+      - mkdir -p public
+      - cp ../core/api/openapi.yaml public/openapi.yaml
       - pnpm run build
 
   mcp:setup:
@@ -122,7 +122,7 @@ tasks:
       - docker compose -f {{.COMPOSE_FILE}} down -v --remove-orphans
       - rm -rf build
       - rm -rf ui/.svelte-kit ui/build ui/node_modules
-      - rm -rf docs/.svelte-kit docs/build docs/node_modules
+      - rm -rf docs/.astro docs/dist docs/node_modules
 
   logs:
     desc: Tail service logs
@@ -144,7 +144,8 @@ tasks:
     desc: Run the docs dev server locally
     dir: docs
     cmds:
-      - cp ../core/api/openapi.yaml static/openapi.yaml
+      - mkdir -p public
+      - cp ../core/api/openapi.yaml public/openapi.yaml
       - pnpm dev
 
   lint:
