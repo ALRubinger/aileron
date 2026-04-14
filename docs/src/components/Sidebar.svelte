@@ -112,11 +112,12 @@
 </aside>
 
 {#snippet section(item: import('../lib/navigation').NavSection, depth: number)}
-  {@const open = sectionContainsActive(item) || item.defaultOpen !== false}
+  {@const active = sectionContainsActive(item)}
+  {@const open = active || item.defaultOpen !== false}
   {@const Icon = iconMap[item.label]}
-  <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''}">
+  <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''} {active ? 'bg-accent/30 rounded' : ''}">
     <summary class="group/summary flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium cursor-pointer select-none
-      text-foreground hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden">
+      {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden">
       <span class="flex items-center gap-2">
         {#if Icon}
           <Icon size={16} class="shrink-0 transition-transform duration-150 {sectionContainsActive(item) ? 'scale-125' : 'group-hover/summary:scale-125'}" />
