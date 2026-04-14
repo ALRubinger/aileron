@@ -1,5 +1,7 @@
 ---
+import { getCollection } from 'astro:content';
 import Sidebar from '../components/Sidebar.svelte';
+import { navigation, type NavSection } from '../lib/navigation';
 import '../styles/global.css';
 
 interface Props {
@@ -8,6 +10,24 @@ interface Props {
 
 const { title } = Astro.props;
 const currentPath = Astro.url.pathname;
+
+// Build ADR nav entries from the content collection
+const docs = await getCollection('docs');
+const adrEntries = docs
+  .filter((entry) => entry.id.startsWith('adr/'))
+  .sort((a, b) => a.id.localeCompare(b.id))
+  .map((entry) => ({
+    label: entry.data.title.replace(/^ADR-\d+:\s*/, (m: string) => m),
+    href: `/${entry.id}`
+  }));
+
+// Inject ADR entries into the Architecture Decisions section
+const nav = navigation.map((item) => {
+  if ('children' in item && item.label === 'Architecture Decisions') {
+    return { ...item, children: adrEntries } as NavSection;
+  }
+  return item;
+});
 ---
 
 <!doctype html>
@@ -19,7 +39,7 @@ const currentPath = Astro.url.pathname;
   </head>
   <body>
     <div class="flex min-h-screen">
-      <Sidebar currentPath={currentPath} client:load />
+      <Sidebar currentPath={currentPath} navigation={nav} client:load />
 
       <div class="flex-1">
         <slot />
