@@ -116,7 +116,7 @@
   {@const active = sectionContainsActive(item)}
   {@const open = active || item.defaultOpen !== false}
   {@const Icon = iconMap[item.label]}
-  <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''} {active ? 'bg-accent/30 rounded border border-border' : ''}">
+  <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''} rounded border {active ? 'bg-accent/30 border-border' : 'border-transparent'}">
     <summary class="group/summary flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium cursor-pointer select-none
       {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden">
       {#if item.href}
