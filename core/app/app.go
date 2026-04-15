@@ -12,6 +12,8 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/comms"
+	"github.com/ALRubinger/aileron/core/source"
+	slacksource "github.com/ALRubinger/aileron/core/source/slack"
 	"github.com/ALRubinger/aileron/core/auth"
 	githubauth "github.com/ALRubinger/aileron/core/auth/github"
 	googleauth "github.com/ALRubinger/aileron/core/auth/google"
@@ -94,6 +96,9 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// --- HTTP handler ---
 	mux := http.NewServeMux()
 
+	// --- Source connectors (read-only context retrieval) ---
+	sourceReg := source.NewRegistry()
+
 	server := &apiServer{
 		log:            log,
 		registry:       registry,
@@ -111,6 +116,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		credentials:       credentialStore,
 		fundingSources:    fundingSourceStore,
 		traces:            traceStore,
+		sourceRegistry:    sourceReg,
 		enclaveClient:     enclaveClient,
 		enclaveVerifier:   enclaveVerifier,
 		teeCfg:            teeCfg,
@@ -120,6 +126,10 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.teeState = newTeeState()
 	}
 	api.HandlerFromMux(server, mux)
+
+	// Source connector tools API (read-only context retrieval).
+	mux.HandleFunc("GET /v1/tools", server.handleListTools)
+	mux.HandleFunc("POST /v1/tools/execute", server.handleExecuteTool)
 
 	registerDocsRoutes(mux)
 
@@ -187,7 +197,8 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 				connectedAccountStore,
 				v,
 			))
-			log.Info("enabled Slack connected accounts")
+			sourceReg.Register(slacksource.New())
+			log.Info("enabled Slack connected accounts and source connector")
 		}
 
 		if len(accountRegistry.Providers()) > 0 {
