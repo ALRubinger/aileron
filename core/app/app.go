@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
@@ -14,6 +15,7 @@ import (
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/llm"
+	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/source"
 	slacksource "github.com/ALRubinger/aileron/core/source/slack"
 	"github.com/ALRubinger/aileron/core/auth"
@@ -49,6 +51,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	fundingSourceStore := mem.NewFundingSourceStore()
 	traceStore := mem.NewTraceStore()
 	connectedAccountStore := mem.NewConnectedAccountStore()
+	draftStore := mem.NewDraftStore()
 
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
@@ -115,6 +118,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		executions:     executionStore,
 		connectors:     connectorStore,
 		connectedAccounts: connectedAccountStore,
+		drafts:            draftStore,
 		credentials:       credentialStore,
 		fundingSources:    fundingSourceStore,
 		traces:            traceStore,
@@ -132,6 +136,11 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// Source connector tools API (read-only context retrieval).
 	mux.HandleFunc("GET /v1/tools", server.handleListTools)
 	mux.HandleFunc("POST /v1/tools/execute", server.handleExecuteTool)
+
+	// Draft lifecycle API.
+	mux.HandleFunc("GET /v1/drafts", server.handleListDrafts)
+	mux.HandleFunc("GET /v1/drafts/", server.handleGetDraft)
+	mux.HandleFunc("POST /v1/drafts/", server.handleDraftAction)
 
 	registerDocsRoutes(mux)
 
@@ -230,11 +239,30 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 						log.Error("draft generation failed", "user_id", userID, "error", err)
 						return
 					}
-					log.Info("draft ready",
+
+					now := time.Now().UTC()
+					d := model.Draft{
+						ID:          "dft_" + server.newID(),
+						UserID:      userID,
+						Status:      model.DraftStatusPending,
+						Service:     msg.Service,
+						Channel:     msg.Channel,
+						Author:      msg.Author,
+						MessageBody: msg.Body,
+						MessageTS:   msg.ID,
+						DraftBody:   draftText,
+						CreatedAt:   now,
+						UpdatedAt:   now,
+					}
+					if err := draftStore.Create(ctx, d); err != nil {
+						log.Error("failed to store draft", "error", err)
+						return
+					}
+					log.Info("draft pending review",
+						"draft_id", d.ID,
 						"user_id", userID,
 						"channel", msg.Channel,
-						"draft_length", len(draftText),
-						"draft_preview", draftText[:min(len(draftText), 100)])
+						"draft_length", len(draftText))
 				}
 			}
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
