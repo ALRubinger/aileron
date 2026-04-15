@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -203,6 +204,161 @@ func TestDraftAction_Routing(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 via action router, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func newDraftsTestServerWithSend() *apiServer {
+	srv := newDraftsTestServer()
+	// Set up a connected Slack account + vault token so send works.
+	ctx := context.Background()
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_s1",
+		UserID:   "usr_a",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+	// Mock sender so we don't call real Slack.
+	srv.slackSender = func(_ context.Context, token, channel, body string) error {
+		return nil
+	}
+	return srv
+}
+
+func TestApproveDraft_Success(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var d model.Draft
+	json.NewDecoder(w.Body).Decode(&d)
+	if d.Status != model.DraftStatusApproved {
+		t.Errorf("expected approved, got %s", d.Status)
+	}
+	if d.SentBody != "No, the claims stay the same." {
+		t.Errorf("expected SentBody to match DraftBody, got %q", d.SentBody)
+	}
+}
+
+func TestApproveDraft_OwnershipCheck(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userBClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestApproveDraft_AlreadyActioned(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusDiscarded)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", w.Code)
+	}
+}
+
+func TestApproveDraft_NotFound(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/nonexistent/approve", "", userAClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestApproveDraft_SendFails(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.slackSender = func(_ context.Context, _, _, _ string) error {
+		return fmt.Errorf("slack API unavailable")
+	}
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApproveDraft_NoSlackAccount(t *testing.T) {
+	srv := newDraftsTestServer() // no connected account seeded
+	srv.slackSender = func(_ context.Context, _, _, _ string) error { return nil }
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestEditDraft_Success(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/edit", `{"body":"Actually, yes it does change."}`, userAClaims)
+	srv.handleEditDraft(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var d model.Draft
+	json.NewDecoder(w.Body).Decode(&d)
+	if d.Status != model.DraftStatusEdited {
+		t.Errorf("expected edited, got %s", d.Status)
+	}
+	if d.SentBody != "Actually, yes it does change." {
+		t.Errorf("expected edited SentBody, got %q", d.SentBody)
+	}
+	// DraftBody should still be the original.
+	if d.DraftBody != "No, the claims stay the same." {
+		t.Errorf("expected original DraftBody preserved, got %q", d.DraftBody)
+	}
+}
+
+func TestEditDraft_SendFails(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.slackSender = func(_ context.Context, _, _, _ string) error {
+		return fmt.Errorf("slack error")
+	}
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/edit", `{"body":"revised"}`, userAClaims)
+	srv.handleEditDraft(w, r)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
 	}
 }
 

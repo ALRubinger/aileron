@@ -51,6 +51,7 @@ type apiServer struct {
 	sourceRegistry     *source.Registry       // read-only source connectors for context retrieval
 	draftPipeline      *draft.Pipeline        // nil when LLM not configured
 	drafts             store.DraftStore       // draft lifecycle store
+	slackSender        SlackSender            // injectable for testing; defaults to comms.SendSlackMessage
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
 	slackDedup         *slackEventDedup        // deduplication cache for Slack events
 	onSlackMessage     func(ctx context.Context, userID string, msg comms.IncomingMessage) // callback for incoming Slack messages
