@@ -165,16 +165,21 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	// the code for tokens, encrypts them with the user's KEK, and returns
 	// only the ciphertext. The server never sees the plaintext tokens.
 	if s.enclaveClient != nil {
+		providerSvc, provErr := s.accountService.ProviderFor(provider)
+		if provErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_provider", provErr.Error())
+			return
+		}
 		oauthResp, oauthErr := s.enclaveClient.OAuthExchange(r.Context(), enclave.OAuthExchangeRequest{
 			UserID:           userID,
 			Provider:         providerStr,
 			Code:             params.Code,
 			RedirectURI:      redirectURL,
-			ClientID:         s.accountService.ClientID(),
-			ClientSecret:     s.accountService.ClientSecret(),
-			Scopes:           s.accountService.ScopesFor(provider),
-			TokenEndpoint:    s.accountService.TokenEndpointFor(provider),
-			UserInfoEndpoint: s.accountService.UserInfoEndpoint(),
+			ClientID:         providerSvc.ClientID(),
+			ClientSecret:     providerSvc.ClientSecret(),
+			Scopes:           providerSvc.ScopesFor(provider),
+			TokenEndpoint:    providerSvc.TokenEndpointFor(provider),
+			UserInfoEndpoint: providerSvc.UserInfoEndpoint(),
 		})
 		if oauthErr != nil {
 			s.log.Error("enclave OAuth exchange failed", "error", oauthErr, "provider", providerStr)
@@ -189,7 +194,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 			UserID:    userID,
 			Provider:  provider,
 			Email:     oauthResp.Email,
-			Scopes:    s.accountService.ScopesFor(provider),
+			Scopes:    providerSvc.ScopesFor(provider),
 			Status:    model.ConnectedAccountStatusActive,
 			CreatedAt: now,
 			UpdatedAt: now,

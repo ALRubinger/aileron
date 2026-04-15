@@ -57,3 +57,25 @@ type Service interface {
 	// Disconnect removes a connected account and revokes its tokens.
 	Disconnect(ctx context.Context, accountID string) error
 }
+
+// ProviderService extends Service with OAuth introspection methods needed
+// by the TEE callback path. Each provider (Google, Slack, etc.) implements
+// this interface so the enclave can exchange OAuth codes on the user's behalf.
+type ProviderService interface {
+	Service
+
+	// ClientID returns the OAuth client ID for this provider.
+	ClientID() string
+
+	// ClientSecret returns the OAuth client secret for this provider.
+	ClientSecret() string
+
+	// ScopesFor returns the OAuth scopes requested for a given provider.
+	ScopesFor(provider model.ConnectedAccountProvider) []string
+
+	// TokenEndpointFor returns the OAuth token exchange URL for a provider.
+	TokenEndpointFor(provider model.ConnectedAccountProvider) string
+
+	// UserInfoEndpoint returns the URL to fetch user identity after OAuth.
+	UserInfoEndpoint() string
+}

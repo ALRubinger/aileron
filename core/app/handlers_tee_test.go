@@ -448,8 +448,10 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 
 	connectedAccounts := mem.NewConnectedAccountStore()
 	v := vault.NewMemVault()
-	accountSvc := account.NewGoogleService("test-client-id", "test-client-secret", connectedAccounts, v).
+	googleSvc := account.NewGoogleService("test-client-id", "test-client-secret", connectedAccounts, v).
 		WithEndpoints(tokenServer.URL, userinfoServer.URL)
+	accountReg := account.NewRegistry()
+	accountReg.Register(googleSvc)
 
 	srv := &apiServer{
 		log:               slog.Default(),
@@ -458,7 +460,7 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 		teeCfg:            &config.TEEConfig{Provider: "local"},
 		connectedAccounts: connectedAccounts,
 		vault:             v,
-		accountService:    accountSvc,
+		accountService:    accountReg,
 		users:             &stubUserStore{},
 		newID:             func() string { return "test-id" },
 		userKeyMaterials:  mem.NewUserKeyMaterialStore(),
