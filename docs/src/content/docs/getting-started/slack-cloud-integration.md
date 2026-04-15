@@ -106,6 +106,40 @@ User's processing pipeline
 Draft generation (future)
 ```
 
+## Context retrieval tools
+
+Once connected, Aileron exposes read-only tools that an LLM can call to retrieve Slack context during draft generation:
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `slack_channel_history` | Get recent messages from a channel | `channel` (required), `limit` (optional, default 20) |
+| `slack_thread_replies` | Get replies in a thread | `channel` (required), `thread_ts` (required) |
+| `slack_search_messages` | Search messages across channels | `query` (required), `count` (optional, default 10) |
+
+**List available tools:**
+
+```
+GET /v1/tools
+Authorization: Bearer <token>
+```
+
+Returns only tools for providers the user has connected. If no Slack account is connected, no Slack tools appear.
+
+**Execute a tool:**
+
+```
+POST /v1/tools/execute
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "tool": "slack_channel_history",
+  "params": { "channel": "C0BACKEND", "limit": 10 }
+}
+```
+
+The execute endpoint retrieves the user's Slack OAuth token from the vault and passes it to the tool. The LLM never sees the token directly — Aileron is the access-controlled gateway.
+
 ## Security
 
 - **Signature verification:** Every webhook request is verified using HMAC-SHA256 with the signing secret. Invalid or stale (>5 minutes) signatures are rejected.
