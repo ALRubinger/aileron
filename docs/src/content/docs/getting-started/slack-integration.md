@@ -5,6 +5,8 @@ description: "Receive and reply to Slack messages from your terminal"
 
 Aileron can receive Slack messages in your terminal while you work. Incoming messages appear in the status bar; press **Ctrl-]** to open the full notification overlay.
 
+> **Looking for always-on cloud integration?** See [Slack Cloud Integration](/getting-started/slack-cloud-integration) for webhook-based event ingestion that works without `aileron launch` running.
+
 ## 1. Create a Slack app
 
 Create a Slack app with [Socket Mode](https://api.slack.com/apis/socket-mode) enabled. You need:
