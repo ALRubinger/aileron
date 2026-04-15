@@ -221,6 +221,22 @@ type DraftFilter struct {
 	PageSize int
 }
 
+// UserInstructionStore persists and retrieves user instructions for
+// the context store envelope.
+type UserInstructionStore interface {
+	Create(ctx context.Context, instruction model.UserInstruction) error
+	Get(ctx context.Context, instructionID string) (model.UserInstruction, error)
+	List(ctx context.Context, filter UserInstructionFilter) ([]model.UserInstruction, error)
+	Update(ctx context.Context, instruction model.UserInstruction) error
+	Delete(ctx context.Context, instructionID string) error
+}
+
+// UserInstructionFilter scopes an instruction list query.
+type UserInstructionFilter struct {
+	UserID string
+	Active *bool
+}
+
 // UserKeyMaterialStore persists and retrieves user key material for the
 // zero-knowledge vault. The KEK itself is never stored — only the Argon2id
 // salt and an encrypted verification blob.
