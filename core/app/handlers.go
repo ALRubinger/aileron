@@ -44,7 +44,7 @@ type apiServer struct {
 	fundingSources *mem.FundingSourceStore
 	traces         *mem.TraceStore
 	connectedAccounts  store.ConnectedAccountStore
-	accountService     *account.GoogleService // nil when Google OAuth not configured
+	accountService     *account.Registry // nil when no account providers configured
 	enterprises        store.EnterpriseStore  // nil when auth is disabled
 	users              store.UserStore        // nil when auth is disabled
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled

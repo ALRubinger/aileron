@@ -160,6 +160,8 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		)
 
 		authRegistry := auth.NewRegistry()
+		accountRegistry := account.NewRegistry()
+
 		if authCfg.GoogleEnabled() {
 			authRegistry.Register(googleauth.New(
 				authCfg.GoogleClientID,
@@ -168,13 +170,17 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			log.Info("registered Google OAuth provider")
 
 			// Enable connected accounts for Google services (Gmail, Calendar).
-			server.accountService = account.NewGoogleService(
+			accountRegistry.Register(account.NewGoogleService(
 				authCfg.GoogleClientID,
 				authCfg.GoogleClientSecret,
 				connectedAccountStore,
 				v,
-			)
+			))
 			log.Info("enabled Google connected accounts (Gmail, Calendar)")
+		}
+
+		if len(accountRegistry.Providers()) > 0 {
+			server.accountService = accountRegistry
 		}
 		if authCfg.GitHubEnabled() {
 			authRegistry.Register(githubauth.New(

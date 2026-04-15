@@ -32,6 +32,12 @@ func newConnectedAccountServerWithAuth() *apiServer {
 	return srv
 }
 
+func newGoogleAccountRegistry(accounts store.ConnectedAccountStore, v vault.Vault) *account.Registry {
+	r := account.NewRegistry()
+	r.Register(account.NewGoogleService("id", "secret", accounts, v))
+	return r
+}
+
 func seedConnectedAccount(ctx context.Context, s store.ConnectedAccountStore, id, userID string, provider model.ConnectedAccountProvider) {
 	s.Create(ctx, model.ConnectedAccount{
 		ID:       id,
@@ -180,7 +186,7 @@ func TestDeleteConnectedAccount_NotFound(t *testing.T) {
 
 func TestDeleteConnectedAccount_WithAccountService(t *testing.T) {
 	srv := newConnectedAccountServerWithAuth()
-	srv.accountService = account.NewGoogleService("id", "secret", srv.connectedAccounts, srv.vault)
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
 	ctx := context.Background()
 
 	seedConnectedAccount(ctx, srv.connectedAccounts, "conn_1", "usr_a", model.ConnectedAccountProviderGmail)
@@ -198,7 +204,7 @@ func TestDeleteConnectedAccount_WithAccountService(t *testing.T) {
 
 func TestConnectAccountCallback_ValidStateButBadCode(t *testing.T) {
 	srv := newConnectedAccountServerWithAuth()
-	srv.accountService = account.NewGoogleService("id", "secret", srv.connectedAccounts, srv.vault)
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
 
 	state := "test-state-123"
 	w := httptest.NewRecorder()
@@ -236,7 +242,9 @@ func TestDeleteConnectedAccount_Unauthorized(t *testing.T) {
 
 func TestConnectAccount_RedirectsToGoogle(t *testing.T) {
 	srv := newConnectedAccountServer()
-	srv.accountService = account.NewGoogleService("test-client-id", "secret", srv.connectedAccounts, srv.vault)
+	reg := account.NewRegistry()
+	reg.Register(account.NewGoogleService("test-client-id", "secret", srv.connectedAccounts, srv.vault))
+	srv.accountService = reg
 
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
@@ -270,7 +278,7 @@ func TestConnectAccount_RedirectsToGoogle(t *testing.T) {
 
 func TestConnectAccount_UnsupportedProvider(t *testing.T) {
 	srv := newConnectedAccountServer()
-	srv.accountService = account.NewGoogleService("id", "secret", srv.connectedAccounts, srv.vault)
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
 
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/outlook", "", nil)
@@ -318,7 +326,7 @@ func TestConnectAccountCallback_NotConfigured(t *testing.T) {
 
 func TestConnectAccountCallback_StateMismatch(t *testing.T) {
 	srv := newConnectedAccountServer()
-	srv.accountService = account.NewGoogleService("id", "secret", srv.connectedAccounts, srv.vault)
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
 
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail/callback?code=x&state=bad", "", nil)
