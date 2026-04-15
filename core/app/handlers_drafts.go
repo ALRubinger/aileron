@@ -264,6 +264,29 @@ func (s *apiServer) handleDraftAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// createDraftFromMessage stores a generated draft as pending in the draft store.
+// Extracted from the onSlackMessage closure so it can be unit tested.
+func (s *apiServer) createDraftFromMessage(ctx context.Context, userID string, msg comms.IncomingMessage, draftText string) (model.Draft, error) {
+	now := time.Now().UTC()
+	d := model.Draft{
+		ID:          "dft_" + s.newID(),
+		UserID:      userID,
+		Status:      model.DraftStatusPending,
+		Service:     msg.Service,
+		Channel:     msg.Channel,
+		Author:      msg.Author,
+		MessageBody: msg.Body,
+		MessageTS:   msg.ID,
+		DraftBody:   draftText,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := s.drafts.Create(ctx, d); err != nil {
+		return model.Draft{}, err
+	}
+	return d, nil
+}
+
 // Sentinel errors for draft handlers.
 var (
 	errBadRequest      = &store.ErrNotFound{Entity: "request", ID: "bad"}

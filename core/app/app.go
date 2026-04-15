@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
@@ -15,7 +14,6 @@ import (
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/llm"
-	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/source"
 	slacksource "github.com/ALRubinger/aileron/core/source/slack"
 	"github.com/ALRubinger/aileron/core/auth"
@@ -240,21 +238,8 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 						return
 					}
 
-					now := time.Now().UTC()
-					d := model.Draft{
-						ID:          "dft_" + server.newID(),
-						UserID:      userID,
-						Status:      model.DraftStatusPending,
-						Service:     msg.Service,
-						Channel:     msg.Channel,
-						Author:      msg.Author,
-						MessageBody: msg.Body,
-						MessageTS:   msg.ID,
-						DraftBody:   draftText,
-						CreatedAt:   now,
-						UpdatedAt:   now,
-					}
-					if err := draftStore.Create(ctx, d); err != nil {
+					d, err := server.createDraftFromMessage(ctx, userID, msg, draftText)
+					if err != nil {
 						log.Error("failed to store draft", "error", err)
 						return
 					}
