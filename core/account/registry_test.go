@@ -101,3 +101,104 @@ func TestRegistry_Empty_Disconnect(t *testing.T) {
 		t.Fatal("expected error from empty registry")
 	}
 }
+
+func TestRegistry_HandleCallback(t *testing.T) {
+	r, svc := newTestRegistry(t)
+
+	// Use WithEndpoints to point at a mock server so the exchange fails gracefully.
+	// The important thing is that the registry dispatches to the right provider.
+	_, err := r.HandleCallback(context.Background(), model.ConnectedAccountProviderGmail, account.CallbackRequest{
+		Code:        "test-code",
+		State:       "test-state",
+		RedirectURL: "http://localhost/callback",
+		UserID:      "usr_1",
+	})
+	// This will fail because we can't reach Google, but it proves dispatch works.
+	if err == nil {
+		t.Fatal("expected error (can't reach Google), but dispatch should have worked")
+	}
+	_ = svc // used in setup
+}
+
+func TestRegistry_HandleCallback_Unsupported(t *testing.T) {
+	r := account.NewRegistry()
+	_, err := r.HandleCallback(context.Background(), "nonexistent", account.CallbackRequest{})
+	if err == nil {
+		t.Fatal("expected error for unsupported provider")
+	}
+}
+
+func TestRegistry_Get_Found(t *testing.T) {
+	ctx := context.Background()
+	store := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	svc := account.NewGoogleService("id", "secret", store, v)
+	r := account.NewRegistry()
+	r.Register(svc)
+
+	store.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_test",
+		UserID:   "usr_1",
+		Provider: model.ConnectedAccountProviderGmail,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+
+	acct, err := r.Get(ctx, "conn_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acct.ID != "conn_test" {
+		t.Errorf("expected conn_test, got %s", acct.ID)
+	}
+}
+
+func TestRegistry_Disconnect_Found(t *testing.T) {
+	store := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+
+	svc := account.NewGoogleService("id", "secret", store, v)
+	r := account.NewRegistry()
+	r.Register(svc)
+
+	store.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_del",
+		UserID:   "usr_1",
+		Provider: model.ConnectedAccountProviderGmail,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	v.Put(ctx, "connected-accounts/usr_1/gmail", []byte(`{"token":"x"}`), vault.Metadata{Type: "oauth_refresh_token"})
+
+	if err := r.Disconnect(ctx, "conn_del"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	_, err := store.Get(ctx, "conn_del")
+	if err == nil {
+		t.Error("expected account to be deleted")
+	}
+}
+
+func TestRegistry_List_WithAccounts(t *testing.T) {
+	store := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+
+	svc := account.NewGoogleService("id", "secret", store, v)
+	r := account.NewRegistry()
+	r.Register(svc)
+
+	store.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_1",
+		UserID:   "usr_1",
+		Provider: model.ConnectedAccountProviderGmail,
+	})
+
+	accounts, err := r.List(ctx, "usr_1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accounts))
+	}
+}

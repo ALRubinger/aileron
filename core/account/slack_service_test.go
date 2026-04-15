@@ -242,6 +242,74 @@ func TestSlackService_Disconnect(t *testing.T) {
 	}
 }
 
+func TestSlackService_TokenEndpointFor(t *testing.T) {
+	svc := account.NewSlackService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	ep := svc.TokenEndpointFor(model.ConnectedAccountProviderSlack)
+	if ep == "" {
+		t.Fatal("expected non-empty token endpoint")
+	}
+	if !containsSubstr(ep, "slack.com") {
+		t.Errorf("expected slack.com in endpoint, got %s", ep)
+	}
+}
+
+func TestSlackService_UserInfoEndpoint(t *testing.T) {
+	svc := account.NewSlackService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	ep := svc.UserInfoEndpoint()
+	// Slack returns user info in OAuth response, so this is empty.
+	if ep != "" {
+		t.Errorf("expected empty userinfo endpoint, got %s", ep)
+	}
+}
+
+func TestSlackService_List(t *testing.T) {
+	accounts := mem.NewConnectedAccountStore()
+	svc := account.NewSlackService("id", "secret", accounts, vault.NewMemVault())
+	ctx := context.Background()
+
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_s1",
+		UserID:   "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+	})
+
+	listed, err := svc.List(ctx, "usr_1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(listed))
+	}
+}
+
+func TestSlackService_Get(t *testing.T) {
+	accounts := mem.NewConnectedAccountStore()
+	svc := account.NewSlackService("id", "secret", accounts, vault.NewMemVault())
+	ctx := context.Background()
+
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_s1",
+		UserID:   "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+	})
+
+	acct, err := svc.Get(ctx, "conn_s1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acct.ID != "conn_s1" {
+		t.Errorf("expected conn_s1, got %s", acct.ID)
+	}
+}
+
+func TestSlackService_Get_NotFound(t *testing.T) {
+	svc := account.NewSlackService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	_, err := svc.Get(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for missing account")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
 }
