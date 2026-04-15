@@ -11,6 +11,7 @@ import (
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
+	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/auth"
 	githubauth "github.com/ALRubinger/aileron/core/auth/github"
 	googleauth "github.com/ALRubinger/aileron/core/auth/google"
@@ -192,6 +193,20 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		if len(accountRegistry.Providers()) > 0 {
 			server.accountService = accountRegistry
 		}
+
+		if authCfg.SlackEnabled() {
+			server.slackSigningSecret = authCfg.SlackSigningSecret
+			server.slackDedup = newSlackEventDedup()
+			server.onSlackMessage = func(ctx context.Context, userID string, msg comms.IncomingMessage) {
+				log.Info("slack cloud message received",
+					"user_id", userID,
+					"channel", msg.Channel,
+					"author", msg.Author,
+					"preview", msg.Body[:min(len(msg.Body), 80)])
+			}
+			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
+			log.Info("enabled Slack Events API webhook endpoint")
+		}
 		if authCfg.GitHubEnabled() {
 			authRegistry.Register(githubauth.New(
 				authCfg.GitHubClientID,
@@ -223,7 +238,8 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		authHandler.RegisterRoutes(mux)
 
 		skipPaths := map[string]bool{
-			"/v1/health": true,
+			"/v1/health":                    true,
+			"/v1/webhooks/slack/events":     true,
 		}
 		handler = auth.Middleware(tokenIssuer, skipPaths)(handler)
 		log.Info("auth middleware enabled")

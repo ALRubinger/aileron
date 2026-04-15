@@ -12,6 +12,7 @@ import (
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/config"
@@ -44,7 +45,10 @@ type apiServer struct {
 	fundingSources *mem.FundingSourceStore
 	traces         *mem.TraceStore
 	connectedAccounts  store.ConnectedAccountStore
-	accountService     *account.Registry // nil when no account providers configured
+	accountService     *account.Registry      // nil when no account providers configured
+	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
+	slackDedup         *slackEventDedup        // deduplication cache for Slack events
+	onSlackMessage     func(ctx context.Context, userID string, msg comms.IncomingMessage) // callback for incoming Slack messages
 	enterprises        store.EnterpriseStore  // nil when auth is disabled
 	users              store.UserStore        // nil when auth is disabled
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
