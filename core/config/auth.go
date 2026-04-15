@@ -60,6 +60,10 @@ type AuthConfig struct {
 	// MailFrom is the sender address for outgoing emails.
 	// Env: MAIL_FROM (default: "noreply@withaileron.ai")
 	MailFrom string
+
+	// LLM configuration for cloud-hosted draft generation.
+	AnthropicAPIKey string // Env: ANTHROPIC_API_KEY
+	LLMModel        string // Env: AILERON_LLM_MODEL (default: "claude-sonnet-4-6")
 }
 
 // LoadAuthConfig loads auth configuration from environment variables.
@@ -81,6 +85,8 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		SlackSigningSecret: os.Getenv("SLACK_SIGNING_SECRET"),
 		ResendAPIKey:       os.Getenv("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
+		AnthropicAPIKey:    os.Getenv("ANTHROPIC_API_KEY"),
+		LLMModel:           envOrDefault("AILERON_LLM_MODEL", "claude-sonnet-4-6"),
 	}
 
 	// Parse durations with defaults.
@@ -127,6 +133,11 @@ func (c *AuthConfig) GitHubEnabled() bool {
 // webhook signature verification.
 func (c *AuthConfig) SlackEnabled() bool {
 	return c.SlackClientID != "" && c.SlackClientSecret != "" && c.SlackSigningSecret != ""
+}
+
+// LLMEnabled reports whether cloud-hosted draft generation is configured.
+func (c *AuthConfig) LLMEnabled() bool {
+	return c.AnthropicAPIKey != ""
 }
 
 // ResendEnabled reports whether Resend email delivery is configured.
