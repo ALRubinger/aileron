@@ -179,6 +179,16 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			log.Info("enabled Google connected accounts (Gmail, Calendar)")
 		}
 
+		if authCfg.SlackEnabled() {
+			accountRegistry.Register(account.NewSlackService(
+				authCfg.SlackClientID,
+				authCfg.SlackClientSecret,
+				connectedAccountStore,
+				v,
+			))
+			log.Info("enabled Slack connected accounts")
+		}
+
 		if len(accountRegistry.Providers()) > 0 {
 			server.accountService = accountRegistry
 		}
