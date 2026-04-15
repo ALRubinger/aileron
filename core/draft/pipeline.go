@@ -1,0 +1,153 @@
+// Package draft orchestrates cloud-hosted draft generation.
+//
+// The Pipeline assembles context from source connectors, calls an LLM with
+// tool access, and returns a draft reply. It bridges the source connector
+// layer (read-only context retrieval), the LLM client (text generation with
+// tool use), and the vault (credential management).
+package draft
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+
+	"github.com/ALRubinger/aileron/core/comms"
+	"github.com/ALRubinger/aileron/core/llm"
+	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/source"
+	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/vault"
+)
+
+const systemPrompt = `You are an AI assistant that drafts reply messages on behalf of a user.
+
+You will receive a message from someone in a communication channel (e.g. Slack).
+Your job is to draft a helpful, accurate reply that the user can review before sending.
+
+Guidelines:
+- Be direct and specific. Reference concrete details (PR numbers, file names, code, dates).
+- Match the formality of the channel and the message.
+- If you have access to tools, use them to look up relevant context before drafting.
+- Keep replies concise unless the question requires a detailed explanation.
+- Do not make up information. If you don't have enough context, say so.
+- Write the reply text only — no preamble like "Here's a draft:" or metadata.`
+
+// Pipeline orchestrates draft generation for incoming messages.
+type Pipeline struct {
+	llm               llm.Client
+	sourceRegistry    *source.Registry
+	connectedAccounts store.ConnectedAccountStore
+	vault             vault.Vault
+	log               *slog.Logger
+}
+
+// NewPipeline creates a draft generation pipeline.
+func NewPipeline(
+	llmClient llm.Client,
+	sourceReg *source.Registry,
+	accounts store.ConnectedAccountStore,
+	v vault.Vault,
+	log *slog.Logger,
+) *Pipeline {
+	return &Pipeline{
+		llm:               llmClient,
+		sourceRegistry:    sourceReg,
+		connectedAccounts: accounts,
+		vault:             v,
+		log:               log,
+	}
+}
+
+// GenerateDraft produces a draft reply for an incoming message.
+// It assembles context from source connectors available to the user,
+// calls the LLM with tool access, and returns the draft text.
+func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.IncomingMessage) (string, error) {
+	// Build the user message from the incoming message.
+	userMessage := fmt.Sprintf(
+		"Draft a reply to this message from %s in %s:\n\n%s",
+		msg.Author, msg.Channel, msg.Body,
+	)
+
+	// Get the user's connected accounts to determine available tools.
+	accounts, err := p.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
+	if err != nil {
+		return "", fmt.Errorf("listing connected accounts: %w", err)
+	}
+
+	// Collect tools from source connectors matching connected accounts.
+	connectedProviders := make(map[string]bool)
+	for _, acct := range accounts {
+		if acct.Status == model.ConnectedAccountStatusActive {
+			connectedProviders[string(acct.Provider)] = true
+		}
+	}
+
+	var tools []source.ToolDefinition
+	if p.sourceRegistry != nil {
+		for _, provider := range p.sourceRegistry.Providers() {
+			if connectedProviders[provider] {
+				tools = append(tools, p.sourceRegistry.ToolsForProvider(provider)...)
+			}
+		}
+	}
+
+	// Build a tool executor that resolves credentials and calls source connectors.
+	executor := p.buildToolExecutor(ctx, userID, accounts)
+
+	resp, err := p.llm.GenerateWithTools(ctx, llm.GenerateRequest{
+		SystemPrompt: systemPrompt,
+		UserMessage:  userMessage,
+		Tools:        tools,
+		ToolExecutor: executor,
+	})
+	if err != nil {
+		return "", fmt.Errorf("LLM generation failed: %w", err)
+	}
+
+	p.log.Info("draft generated",
+		"user_id", userID,
+		"channel", msg.Channel,
+		"tool_calls", len(resp.ToolCalls),
+		"draft_length", len(resp.Text),
+	)
+
+	return resp.Text, nil
+}
+
+// buildToolExecutor creates a closure that resolves credentials from the vault
+// and dispatches tool calls to the source connector registry.
+func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, accounts []model.ConnectedAccount) llm.ToolExecutor {
+	return func(execCtx context.Context, tool string, params map[string]any) (map[string]any, error) {
+		if p.sourceRegistry == nil {
+			return nil, fmt.Errorf("no source registry configured")
+		}
+
+		// Resolve the tool to a provider.
+		provider, err := p.sourceRegistry.ResolveToolProvider(tool)
+		if err != nil {
+			return nil, err
+		}
+
+		// Find the user's connected account for this provider.
+		var acct *model.ConnectedAccount
+		providerEnum := model.ConnectedAccountProvider(provider)
+		for i := range accounts {
+			if accounts[i].Provider == providerEnum && accounts[i].Status == model.ConnectedAccountStatusActive {
+				acct = &accounts[i]
+				break
+			}
+		}
+		if acct == nil {
+			return nil, fmt.Errorf("no connected %s account for user %s", provider, userID)
+		}
+
+		// Get the OAuth token from the vault.
+		secret, err := p.vault.Get(ctx, acct.VaultPath())
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve %s credentials: %w", provider, err)
+		}
+
+		p.log.Debug("executing tool", "tool", tool, "provider", provider, "user_id", userID)
+		return p.sourceRegistry.ExecuteTool(execCtx, tool, params, secret.Value)
+	}
+}
