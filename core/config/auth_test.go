@@ -289,6 +289,52 @@ func TestLoadAuthConfig_SlackPartial(t *testing.T) {
 	}
 }
 
+func TestLoadAuthConfig_LLMEnabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+	t.Setenv("AILERON_LLM_MODEL", "claude-haiku-4-5")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.LLMEnabled() {
+		t.Error("expected LLM enabled")
+	}
+	if cfg.AnthropicAPIKey != "sk-ant-test-key" {
+		t.Errorf("AnthropicAPIKey = %q", cfg.AnthropicAPIKey)
+	}
+	if cfg.LLMModel != "claude-haiku-4-5" {
+		t.Errorf("LLMModel = %q", cfg.LLMModel)
+	}
+}
+
+func TestLoadAuthConfig_LLMDisabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLMEnabled() {
+		t.Error("expected LLM disabled when API key missing")
+	}
+}
+
+func TestLoadAuthConfig_LLMModelDefault(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("AILERON_LLM_MODEL", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLMModel != "claude-sonnet-4-6" {
+		t.Errorf("LLMModel = %q, want claude-sonnet-4-6", cfg.LLMModel)
+	}
+}
+
 func TestLoadAuthConfig_MailFromDefault(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("MAIL_FROM", "")

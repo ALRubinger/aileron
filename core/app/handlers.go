@@ -13,6 +13,7 @@ import (
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/comms"
+	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/source"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/auth"
@@ -48,6 +49,7 @@ type apiServer struct {
 	connectedAccounts  store.ConnectedAccountStore
 	accountService     *account.Registry      // nil when no account providers configured
 	sourceRegistry     *source.Registry       // read-only source connectors for context retrieval
+	draftPipeline      *draft.Pipeline        // nil when LLM not configured
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
 	slackDedup         *slackEventDedup        // deduplication cache for Slack events
 	onSlackMessage     func(ctx context.Context, userID string, msg comms.IncomingMessage) // callback for incoming Slack messages

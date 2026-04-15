@@ -12,6 +12,8 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/comms"
+	"github.com/ALRubinger/aileron/core/draft"
+	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/source"
 	slacksource "github.com/ALRubinger/aileron/core/source/slack"
 	"github.com/ALRubinger/aileron/core/auth"
@@ -205,6 +207,13 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			server.accountService = accountRegistry
 		}
 
+		// LLM-powered draft generation pipeline.
+		if authCfg.LLMEnabled() {
+			llmClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModel)
+			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, connectedAccountStore, v, log)
+			log.Info("enabled cloud draft generation", "model", authCfg.LLMModel)
+		}
+
 		if authCfg.SlackEnabled() {
 			server.slackSigningSecret = authCfg.SlackSigningSecret
 			server.slackDedup = newSlackEventDedup()
@@ -214,6 +223,19 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 					"channel", msg.Channel,
 					"author", msg.Author,
 					"preview", msg.Body[:min(len(msg.Body), 80)])
+
+				if server.draftPipeline != nil {
+					draftText, err := server.draftPipeline.GenerateDraft(ctx, userID, msg)
+					if err != nil {
+						log.Error("draft generation failed", "user_id", userID, "error", err)
+						return
+					}
+					log.Info("draft ready",
+						"user_id", userID,
+						"channel", msg.Channel,
+						"draft_length", len(draftText),
+						"draft_preview", draftText[:min(len(draftText), 100)])
+				}
 			}
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
 			log.Info("enabled Slack Events API webhook endpoint")
