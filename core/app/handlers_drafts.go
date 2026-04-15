@@ -185,6 +185,10 @@ func (s *apiServer) getDraftForAction(w http.ResponseWriter, r *http.Request, dr
 	return draft, nil
 }
 
+// SlackSender is the function used to send messages to Slack.
+// Defaults to comms.SendSlackMessage. Override in tests.
+type SlackSender func(ctx context.Context, token, channel, body string) error
+
 // sendDraftMessage sends a message to Slack using the user's connected account token.
 func (s *apiServer) sendDraftMessage(ctx context.Context, userID, channel, body string) error {
 	slackProvider := model.ConnectedAccountProviderSlack
@@ -214,7 +218,11 @@ func (s *apiServer) sendDraftMessage(ctx context.Context, userID, channel, body 
 		return errNoSlackToken
 	}
 
-	return comms.SendSlackMessage(ctx, token, channel, body)
+	sender := s.slackSender
+	if sender == nil {
+		sender = comms.SendSlackMessage
+	}
+	return sender(ctx, token, channel, body)
 }
 
 // extractDraftID extracts the draft ID from /v1/drafts/{draft_id}
