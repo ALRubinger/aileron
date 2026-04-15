@@ -151,6 +151,43 @@ Content-Type: application/json
 
 The execute endpoint retrieves the user's Slack OAuth token from the vault and passes it to the tool. The LLM never sees the token directly — Aileron is the access-controlled gateway.
 
+## Draft lifecycle
+
+When a Slack message arrives and `ANTHROPIC_API_KEY` is configured, Aileron generates a draft reply and stores it as `pending`. Use the draft API to review and act on drafts from any surface:
+
+**List pending drafts:**
+
+```
+GET /v1/drafts?status=pending
+Authorization: Bearer <token>
+```
+
+**Approve (send as-is):**
+
+```
+POST /v1/drafts/{draft_id}/approve
+Authorization: Bearer <token>
+```
+
+**Edit and send:**
+
+```
+POST /v1/drafts/{draft_id}/edit
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "body": "Revised reply text" }
+```
+
+**Discard:**
+
+```
+POST /v1/drafts/{draft_id}/discard
+Authorization: Bearer <token>
+```
+
+On approve or edit, Aileron sends the message to Slack using your OAuth user token — the reply comes from you, not a bot.
+
 ## Security
 
 - **Signature verification:** Every webhook request is verified using HMAC-SHA256 with the signing secret. Invalid or stale (>5 minutes) signatures are rejected.
