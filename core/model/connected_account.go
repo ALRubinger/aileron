@@ -6,10 +6,11 @@ import "time"
 type ConnectedAccountProvider string
 
 const (
-	ConnectedAccountProviderGmail          ConnectedAccountProvider = "gmail"
-	ConnectedAccountProviderGoogleCalendar ConnectedAccountProvider = "google_calendar"
-	ConnectedAccountProviderOutlook        ConnectedAccountProvider = "outlook"
+	ConnectedAccountProviderGmail             ConnectedAccountProvider = "gmail"
+	ConnectedAccountProviderGoogleCalendar    ConnectedAccountProvider = "google_calendar"
+	ConnectedAccountProviderOutlook           ConnectedAccountProvider = "outlook"
 	ConnectedAccountProviderMicrosoftCalendar ConnectedAccountProvider = "microsoft_calendar"
+	ConnectedAccountProviderSlack             ConnectedAccountProvider = "slack"
 )
 
 // ConnectedAccountStatus tracks the lifecycle state of a connected account.
@@ -27,14 +28,16 @@ const (
 // refresh token is stored in the vault at a well-known path; this record
 // holds metadata only.
 type ConnectedAccount struct {
-	ID        string                   // conn_ + UUID
-	UserID    string                   // owning user (usr_ + UUID)
-	Provider  ConnectedAccountProvider // which external service
-	Email     string                   // email associated with the external account
-	Scopes    []string                 // OAuth scopes granted
-	Status    ConnectedAccountStatus
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID             string                   // conn_ + UUID
+	UserID         string                   // owning user (usr_ + UUID)
+	Provider       ConnectedAccountProvider // which external service
+	Email          string                   // email associated with the external account
+	Scopes         []string                 // OAuth scopes granted
+	Status         ConnectedAccountStatus
+	ExternalUserID string // provider-specific user ID (e.g. Slack U...), empty for providers that don't need it
+	ExternalTeamID string // provider-specific workspace/team ID (e.g. Slack T...), empty for providers that don't need it
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // VaultPath returns the vault key where the OAuth refresh token is stored.

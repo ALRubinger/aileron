@@ -198,10 +198,12 @@ type ConnectedAccountStore interface {
 
 // ConnectedAccountFilter scopes a connected account list query.
 type ConnectedAccountFilter struct {
-	UserID   string
-	Provider *model.ConnectedAccountProvider
-	Status   *model.ConnectedAccountStatus
-	PageSize int
+	UserID         string
+	Provider       *model.ConnectedAccountProvider
+	Status         *model.ConnectedAccountStatus
+	ExternalUserID string // filter by provider-specific user ID (e.g. Slack user)
+	ExternalTeamID string // filter by provider-specific team/workspace ID (e.g. Slack team)
+	PageSize       int
 }
 
 // UserKeyMaterialStore persists and retrieves user key material for the
