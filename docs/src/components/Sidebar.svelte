@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import { slide } from 'svelte/transition';
   import { externalLinks, isSection, type NavItem } from '../lib/navigation';
   import Plane from '@lucide/svelte/icons/plane';
   import Rocket from '@lucide/svelte/icons/rocket';
@@ -10,6 +12,41 @@
 
   let { currentPath = '', navigation = [] as NavItem[] }: { currentPath?: string; navigation?: NavItem[] } = $props();
   let mobileOpen = $state(false);
+  let mounted = $state(false);
+
+  // Track which sections the user has manually toggled (label → open/closed)
+  // Persisted in localStorage so state survives Astro page navigations
+  const STORAGE_KEY = 'sidebar-toggles';
+
+  function loadToggles(): Record<string, boolean> {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      return stored ? JSON.parse(stored) : {};
+    } catch { return {}; }
+  }
+
+  function saveToggles(toggles: Record<string, boolean>) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(toggles)); } catch {}
+  }
+
+  let manualToggles: Record<string, boolean> = $state(loadToggles());
+
+  onMount(() => {
+    mounted = true;
+  });
+
+  function isSectionOpen(item: import('../lib/navigation').NavSection): boolean {
+    // Manual toggle always wins
+    const manual = manualToggles[item.label];
+    if (manual !== undefined) return manual;
+    // Default: open if it contains the active page, or if defaultOpen
+    return sectionContainsActive(item) || item.defaultOpen !== false;
+  }
+
+  function toggleSection(label: string, currentlyOpen: boolean) {
+    manualToggles[label] = !currentlyOpen;
+    saveToggles(manualToggles);
+  }
 
   // Map top-level labels to icons
   const iconMap: Record<string, typeof Plane> = {
@@ -28,14 +65,13 @@
 
   function sectionContainsActive(item: NavItem): boolean {
     if (!isSection(item)) return isActive(item.href);
-    if (item.href && isActive(item.href)) return true;
     return item.children.some(child => sectionContainsActive(child));
   }
 </script>
 
 <!-- Mobile toggle button -->
 <button
-  class="lg:hidden fixed top-3 left-3 z-50 p-2 rounded-md bg-background border border-border"
+  class="fixed top-4 left-3 z-50 p-2 rounded-md bg-background border border-border opacity-100 visible translate-x-0 transition-[opacity,visibility,translate] duration-200 lg:opacity-0 lg:invisible lg:-translate-x-12"
   onclick={() => mobileOpen = !mobileOpen}
   aria-label="Toggle navigation"
 >
@@ -62,14 +98,11 @@
 
 <!-- Sidebar -->
 <aside
-  class="fixed top-0 left-0 z-40 h-screen w-80 shrink-0 border-r border-border bg-background overflow-y-auto transition-transform duration-200
-    {mobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 lg:sticky lg:top-0"
+  class="fixed top-16 left-0 z-40 h-[calc(100vh-4rem)] w-80 shrink-0 border-r border-border bg-background overflow-y-auto transition-transform duration-200
+    {mobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)]"
 >
   <div class="p-4">
-    <a href="/" class="font-bold text-lg block mb-6 text-foreground no-underline hover:text-foreground">
-      Aileron Docs
-    </a>
-    <nav>
+    <nav class="flex flex-col gap-4 {mounted ? 'visible' : 'invisible'}">
       {#each navigation as item}
         {#if isSection(item)}
           {@render section(item, 0)}
@@ -114,64 +147,41 @@
 
 {#snippet section(item: import('../lib/navigation').NavSection, depth: number)}
   {@const active = sectionContainsActive(item)}
-  {@const open = active || item.defaultOpen !== false}
+  {@const open = isSectionOpen(item)}
   {@const Icon = iconMap[item.label]}
-  <details open={open} class="group/section {depth > 0 ? 'ml-2' : ''} rounded border {active ? 'bg-accent/30 border-border' : 'border-transparent'}">
-    <summary
-      class="group/summary flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium select-none
-        {item.href && isActive(item.href) ? 'bg-accent text-accent-foreground' : active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50 list-none [&::-webkit-details-marker]:hidden
-        {item.href ? '' : 'cursor-pointer'}"
-      onclick={item.href ? (e: MouseEvent) => { e.preventDefault(); } : undefined}
+  <div class="group {depth > 0 ? 'ml-2' : ''} rounded border border-border {active ? 'bg-accent' : 'bg-muted'}">
+    <button
+      class="w-full flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium select-none cursor-pointer
+        {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50"
+      onclick={() => toggleSection(item.label, open)}
     >
-      {#if item.href}
-        <a
-          href={item.href}
-          class="flex-1 flex items-center gap-2 no-underline {active && isActive(item.href) ? 'text-accent-foreground' : 'text-inherit'}"
-          onclick={(e) => { e.stopPropagation(); mobileOpen = false; }}
-        >
-          {#if Icon}
-            <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover/section:scale-125'}" />
-          {/if}
-          {item.label}
-        </a>
-      {:else}
-        <span class="flex items-center gap-2">
-          {#if Icon}
-            <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover/section:scale-125'}" />
-          {/if}
-          {item.label}
-        </span>
-      {/if}
-      <button
-        class="p-0.5 rounded hover:bg-accent/70 cursor-pointer"
-        onclick={(e) => {
-          e.stopPropagation();
-          e.preventDefault();
-          const details = (e.currentTarget as HTMLElement).closest('details');
-          if (details) details.open = !details.open;
-        }}
-        aria-label="Toggle section"
-      >
-        <svg class="w-4 h-4 transition-transform group-open/section:rotate-90" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
-      </button>
-    </summary>
-    <div class="ml-2 border-l border-border pl-2">
-      {#each item.children as child}
-        {#if isSection(child)}
-          {@render section(child, depth + 1)}
-        {:else}
-          <a
-            href={child.href}
-            class="block py-1 px-2 rounded text-sm no-underline
-              {isActive(child.href) ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-accent-foreground hover:bg-accent/70'}"
-            onclick={() => mobileOpen = false}
-          >
-            {child.label}
-          </a>
+      <span class="flex items-center gap-2">
+        {#if Icon}
+          <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover:scale-125'}" />
         {/if}
-      {/each}
-    </div>
-  </details>
+        {item.label}
+      </span>
+      <svg class="w-4 h-4 transition-transform duration-200 {open ? 'rotate-90' : ''}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="9 18 15 12 9 6" />
+      </svg>
+    </button>
+    {#if open}
+      <div class="ml-2 pl-2" transition:slide={{ duration: mounted ? 150 : 0 }}>
+        {#each item.children as child}
+          {#if isSection(child)}
+            {@render section(child, depth + 1)}
+          {:else}
+            <a
+              href={child.href}
+              class="block py-1 px-2 rounded text-sm no-underline
+                {isActive(child.href) ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-accent-foreground hover:bg-accent/70'}"
+              onclick={() => mobileOpen = false}
+            >
+              {child.label}
+            </a>
+          {/if}
+        {/each}
+      </div>
+    {/if}
+  </div>
 {/snippet}

@@ -1,0 +1,23 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+
+export async function getStaticPaths() {
+  const docs = await getCollection('docs');
+  return docs.map((entry) => ({
+    params: { slug: entry.id === 'index' ? undefined : entry.id },
+    props: { entry }
+  }));
+}
+
+const { entry } = Astro.props;
+---
+
+<BaseLayout title={`${entry.data.title} — Raw Markdown`}>
+  <main class="px-6 pt-14 pb-8 lg:px-10 lg:pt-8">
+    <div class="mb-4 flex items-center gap-4">
+      <a href={entry.id === 'index' ? '/' : `/${entry.id}`} class="text-sm text-muted-foreground hover:text-foreground no-underline">&larr; Back to formatted view</a>
+    </div>
+    <pre class="bg-muted text-foreground p-6 rounded-lg overflow-x-auto text-sm whitespace-pre-wrap">{entry.body}</pre>
+  </main>
+</BaseLayout>

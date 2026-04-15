@@ -12,8 +12,9 @@ export async function getStaticPaths() {
 
 const { entry } = Astro.props;
 const { Content, headings } = await render(entry);
+const slug = entry.id === 'index' ? '' : entry.id;
 ---
 
-<DocsLayout title={entry.data.title} headings={headings}>
+<DocsLayout title={entry.data.title} headings={headings} slug={slug} rawMarkdown={entry.body ?? ''}>
   <Content />
 </DocsLayout>
