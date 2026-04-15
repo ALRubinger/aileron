@@ -245,6 +245,167 @@ func TestSlackWebhook_UnknownTeamReturns200(t *testing.T) {
 	}
 }
 
+func TestSlackWebhook_MethodNotAllowed(t *testing.T) {
+	srv := newSlackWebhookServer()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/v1/webhooks/slack/events", nil)
+	srv.handleSlackEvent(w, r)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestSlackWebhook_InvalidJSON(t *testing.T) {
+	srv := newSlackWebhookServer()
+	body := []byte(`not json`)
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestSlackWebhook_UnknownPayloadType(t *testing.T) {
+	srv := newSlackWebhookServer()
+	body, _ := json.Marshal(map[string]string{"type": "app_rate_limited"})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for unknown type, got %d", w.Code)
+	}
+}
+
+func TestSlackWebhook_NonMessageEvent(t *testing.T) {
+	srv := newSlackWebhookServer()
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001",
+		"event_id": "ev_reaction",
+		"event": map[string]any{
+			"type": "reaction_added",
+			"user": "U123",
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	called := false
+	srv.onSlackMessage = func(_ context.Context, _ string, _ comms.IncomingMessage) {
+		called = true
+	}
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	time.Sleep(50 * time.Millisecond)
+	if called {
+		t.Error("expected non-message event to be ignored")
+	}
+}
+
+func TestSlackWebhook_NoHandlerConfigured(t *testing.T) {
+	srv := newSlackWebhookServer()
+	ctx := context.Background()
+
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:             "conn_s1",
+		UserID:         "usr_alice",
+		Provider:       model.ConnectedAccountProviderSlack,
+		ExternalUserID: "U123ABC",
+		ExternalTeamID: "T001TEAM",
+		Status:         model.ConnectedAccountStatusActive,
+	})
+	// onSlackMessage is nil — should log, not panic.
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001TEAM",
+		"event_id": "ev_nohandler",
+		"event": map[string]any{
+			"type":    "message",
+			"user":    "U123ABC",
+			"text":    "Hello",
+			"channel": "C123",
+			"ts":      "123.456",
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// No panic = pass.
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestSlackWebhook_EmptySigningSecret(t *testing.T) {
+	srv := newSlackWebhookServer()
+	srv.slackSigningSecret = "" // empty — should reject all
+
+	body := []byte(`{"type":"url_verification","challenge":"x"}`)
+	ts, sig := signSlackRequest(body, "any-secret")
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with empty signing secret, got %d", w.Code)
+	}
+}
+
+func TestSlackWebhook_MalformedInnerEvent(t *testing.T) {
+	srv := newSlackWebhookServer()
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001",
+		"event_id": "ev_malformed",
+		"event":    "not-a-json-object", // string instead of object
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	// Should still return 200 (Slack requires it) and not panic.
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestSlackDedup_Expiry(t *testing.T) {
+	d := &slackEventDedup{
+		seen: map[string]time.Time{
+			"old_event": time.Now().Add(-10 * time.Minute), // expired
+		},
+		ttl: 5 * time.Minute,
+	}
+
+	// A new event should trigger cleanup of the old one.
+	if d.isDuplicate("new_event") {
+		t.Error("new event should not be duplicate")
+	}
+
+	// Old event should have been swept.
+	d.mu.Lock()
+	_, exists := d.seen["old_event"]
+	d.mu.Unlock()
+	if exists {
+		t.Error("expected old_event to be swept")
+	}
+}
+
 func TestSlackWebhook_EventDeduplication(t *testing.T) {
 	srv := newSlackWebhookServer()
 	ctx := context.Background()
