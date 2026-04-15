@@ -114,7 +114,8 @@ Draft Generation Pipeline
     │   └─ LLM generates draft from assembled context
     │
     ▼
-Draft ready for user review (delivery TBD)
+Draft stored as "pending" → GET /v1/drafts
+  → User approves/edits/discards → Sent to Slack as user
 ```
 
 ## Context retrieval tools
