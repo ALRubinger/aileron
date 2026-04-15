@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
@@ -371,5 +372,179 @@ func TestDraftAction_UnknownAction(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown action, got %d", w.Code)
+	}
+}
+
+func TestDraftAction_ApproveRouting(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
+	srv.handleDraftAction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 via action router for approve, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestDraftAction_EditRouting(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/edit", `{"body":"revised"}`, userAClaims)
+	srv.handleDraftAction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 via action router for edit, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateDraftFromMessage(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+
+	msg := comms.IncomingMessage{
+		ID:      "1234567890.123456",
+		Service: "slack",
+		Channel: "C0BACKEND",
+		Author:  "Sarah",
+		Body:    "Does the JWT refactor change the claims?",
+	}
+
+	d, err := srv.createDraftFromMessage(ctx, "usr_a", msg, "No, the claims stay the same.")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.ID == "" {
+		t.Error("expected non-empty ID")
+	}
+	if d.Status != model.DraftStatusPending {
+		t.Errorf("expected pending, got %s", d.Status)
+	}
+	if d.UserID != "usr_a" {
+		t.Errorf("expected usr_a, got %s", d.UserID)
+	}
+	if d.DraftBody != "No, the claims stay the same." {
+		t.Errorf("unexpected draft body: %s", d.DraftBody)
+	}
+	if d.MessageTS != "1234567890.123456" {
+		t.Errorf("expected message timestamp preserved, got %s", d.MessageTS)
+	}
+
+	// Verify it's in the store.
+	got, err := srv.drafts.Get(ctx, d.ID)
+	if err != nil {
+		t.Fatalf("draft not in store: %v", err)
+	}
+	if got.Channel != "C0BACKEND" {
+		t.Errorf("expected C0BACKEND, got %s", got.Channel)
+	}
+}
+
+func TestSendDraftMessage_BadTokenJSON(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_s1",
+		UserID:   "usr_a",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	// Store invalid JSON as token.
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte("not-json"), vault.Metadata{})
+
+	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello")
+	if err == nil {
+		t.Fatal("expected error for bad token JSON")
+	}
+}
+
+func TestSendDraftMessage_EmptyAccessToken(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_s1",
+		UserID:   "usr_a",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"token_type":"user"}`), vault.Metadata{})
+
+	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello")
+	if err == nil {
+		t.Fatal("expected error for missing access_token")
+	}
+}
+
+func TestListDrafts_Empty(t *testing.T) {
+	srv := newDraftsTestServer()
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/drafts", "", userAClaims)
+	srv.handleListDrafts(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Items []model.Draft `json:"items"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Items) != 0 {
+		t.Fatalf("expected empty list, got %d", len(resp.Items))
+	}
+}
+
+func TestGetDraft_EmptyID(t *testing.T) {
+	srv := newDraftsTestServer()
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/drafts/", "", userAClaims)
+	srv.handleGetDraft(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty ID, got %d", w.Code)
+	}
+}
+
+func TestExtractDraftID(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/v1/drafts/dft_123", "dft_123"},
+		{"/v1/drafts/dft_123/", "dft_123"},
+		{"/v1/drafts/", ""},
+		{"/other/path", ""},
+	}
+	for _, tt := range tests {
+		got := extractDraftID(tt.path)
+		if got != tt.want {
+			t.Errorf("extractDraftID(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestExtractDraftIDFromAction(t *testing.T) {
+	tests := []struct {
+		path   string
+		action string
+		want   string
+	}{
+		{"/v1/drafts/dft_123/approve", "/approve", "dft_123"},
+		{"/v1/drafts/dft_123/edit", "/edit", "dft_123"},
+		{"/other/path/approve", "/approve", ""},
+	}
+	for _, tt := range tests {
+		got := extractDraftIDFromAction(tt.path, tt.action)
+		if got != tt.want {
+			t.Errorf("extractDraftIDFromAction(%q, %q) = %q, want %q", tt.path, tt.action, got, tt.want)
+		}
 	}
 }
