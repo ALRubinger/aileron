@@ -47,6 +47,11 @@ type AuthConfig struct {
 	GitHubClientID     string // Env: GITHUB_OAUTH_CLIENT_ID
 	GitHubClientSecret string // Env: GITHUB_OAUTH_CLIENT_SECRET
 
+	// Slack OAuth and Events API configuration.
+	SlackClientID      string // Env: SLACK_CLIENT_ID
+	SlackClientSecret  string // Env: SLACK_CLIENT_SECRET
+	SlackSigningSecret string // Env: SLACK_SIGNING_SECRET (for webhook signature verification)
+
 	// Resend email configuration.
 	// ResendAPIKey enables real email sending via Resend. When set, ResendMailer
 	// is used; otherwise LogMailer is used (prints to log, safe for dev/CI).
@@ -71,6 +76,9 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		GoogleClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GitHubClientID:     os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
 		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+		SlackClientID:      os.Getenv("SLACK_CLIENT_ID"),
+		SlackClientSecret:  os.Getenv("SLACK_CLIENT_SECRET"),
+		SlackSigningSecret: os.Getenv("SLACK_SIGNING_SECRET"),
 		ResendAPIKey:       os.Getenv("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
 	}
@@ -112,6 +120,13 @@ func (c *AuthConfig) GoogleEnabled() bool {
 // GitHubEnabled reports whether GitHub OAuth is configured.
 func (c *AuthConfig) GitHubEnabled() bool {
 	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
+}
+
+// SlackEnabled reports whether Slack OAuth and Events API are configured.
+// Requires client credentials for the OAuth flow and a signing secret for
+// webhook signature verification.
+func (c *AuthConfig) SlackEnabled() bool {
+	return c.SlackClientID != "" && c.SlackClientSecret != "" && c.SlackSigningSecret != ""
 }
 
 // ResendEnabled reports whether Resend email delivery is configured.

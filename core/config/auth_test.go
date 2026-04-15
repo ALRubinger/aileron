@@ -241,6 +241,54 @@ func TestEscrowTTL_Invalid(t *testing.T) {
 	}
 }
 
+func TestLoadAuthConfig_SlackEnabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("SLACK_CLIENT_ID", "slack-client-id")
+	t.Setenv("SLACK_CLIENT_SECRET", "slack-secret")
+	t.Setenv("SLACK_SIGNING_SECRET", "slack-signing")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.SlackEnabled() {
+		t.Error("expected Slack enabled")
+	}
+	if cfg.SlackClientID != "slack-client-id" {
+		t.Errorf("SlackClientID = %q", cfg.SlackClientID)
+	}
+}
+
+func TestLoadAuthConfig_SlackDisabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("SLACK_CLIENT_ID", "")
+	t.Setenv("SLACK_CLIENT_SECRET", "")
+	t.Setenv("SLACK_SIGNING_SECRET", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SlackEnabled() {
+		t.Error("expected Slack disabled when credentials missing")
+	}
+}
+
+func TestLoadAuthConfig_SlackPartial(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("SLACK_CLIENT_ID", "slack-client-id")
+	t.Setenv("SLACK_CLIENT_SECRET", "slack-secret")
+	t.Setenv("SLACK_SIGNING_SECRET", "") // missing signing secret
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SlackEnabled() {
+		t.Error("expected Slack disabled when signing secret missing")
+	}
+}
+
 func TestLoadAuthConfig_MailFromDefault(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("MAIL_FROM", "")
