@@ -206,6 +206,21 @@ type ConnectedAccountFilter struct {
 	PageSize       int
 }
 
+// DraftStore persists and retrieves AI-generated draft replies.
+type DraftStore interface {
+	Create(ctx context.Context, draft model.Draft) error
+	Get(ctx context.Context, draftID string) (model.Draft, error)
+	List(ctx context.Context, filter DraftFilter) ([]model.Draft, error)
+	Update(ctx context.Context, draft model.Draft) error
+}
+
+// DraftFilter scopes a draft list query.
+type DraftFilter struct {
+	UserID   string
+	Status   *model.DraftStatus
+	PageSize int
+}
+
 // UserKeyMaterialStore persists and retrieves user key material for the
 // zero-knowledge vault. The KEK itself is never stored — only the Argon2id
 // salt and an encrypted verification blob.
