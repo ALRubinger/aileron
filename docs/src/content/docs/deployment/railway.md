@@ -30,6 +30,11 @@ Link the Postgres plugin to the server service.
 | `GOOGLE_CLIENT_SECRET` | From Google Cloud Console (optional) |
 | `GITHUB_OAUTH_CLIENT_ID` | From GitHub Developer Settings (optional) |
 | `GITHUB_OAUTH_CLIENT_SECRET` | From GitHub Developer Settings (optional) |
+| `SLACK_CLIENT_ID` | From Slack app Basic Information (optional) |
+| `SLACK_CLIENT_SECRET` | From Slack app Basic Information (optional) |
+| `SLACK_SIGNING_SECRET` | From Slack app Basic Information (optional) |
+| `ANTHROPIC_API_KEY` | Anthropic API key for draft generation (optional) |
+| `AILERON_LLM_MODEL` | LLM model (default: `claude-sonnet-4-6`) (optional) |
 
 **UI service:**
 

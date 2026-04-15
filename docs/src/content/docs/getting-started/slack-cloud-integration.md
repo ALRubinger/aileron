@@ -61,9 +61,13 @@ Set these on your Aileron cloud server (Railway, Docker, etc.):
 SLACK_CLIENT_ID=your-client-id
 SLACK_CLIENT_SECRET=your-client-secret
 SLACK_SIGNING_SECRET=your-signing-secret
+
+# For AI-powered draft generation (optional but recommended):
+ANTHROPIC_API_KEY=sk-ant-your-key
+AILERON_LLM_MODEL=claude-sonnet-4-6  # optional, this is the default
 ```
 
-All three are required. If any are missing, the Slack cloud integration is disabled.
+The Slack variables are required for event ingestion. `ANTHROPIC_API_KEY` enables automatic draft generation — without it, messages are received but no drafts are produced.
 
 ## 3. Connect your Slack account
 
@@ -100,10 +104,17 @@ Aileron Cloud (/v1/webhooks/slack/events)
     ├─ Look up (team_id, user_id) → ConnectedAccount
     │
     ▼
-User's processing pipeline
+Draft Generation Pipeline
+    │
+    ├─ Build system prompt + user message
+    ├─ Resolve available tools from connected accounts
+    ├─ Call LLM (Anthropic API) with tools
+    │   ├─ LLM may call tools (e.g. slack_channel_history)
+    │   ├─ Aileron executes tools with user's OAuth token
+    │   └─ LLM generates draft from assembled context
     │
     ▼
-Draft generation (future)
+Draft ready for user review (delivery TBD)
 ```
 
 ## Context retrieval tools
