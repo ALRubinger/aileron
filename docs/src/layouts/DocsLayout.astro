@@ -1,22 +1,32 @@
 ---
 import BaseLayout from './BaseLayout.astro';
 import TableOfContents from '../components/TableOfContents.svelte';
+import MarkdownForAI from '../components/MarkdownForAI.svelte';
 
 interface Props {
   title: string;
   headings?: { slug: string; text: string; depth: number }[];
+  slug?: string;
+  rawMarkdown?: string;
 }
 
-const { title, headings = [] } = Astro.props;
+const { title, headings = [], slug = '', rawMarkdown = '' } = Astro.props;
 ---
 
 <BaseLayout title={title}>
-  <main class="px-6 pt-14 pb-8 lg:px-10 lg:pt-8 flex gap-8">
+  <main class="px-6 pt-8 pb-8 lg:px-10 flex gap-8">
     <article class="prose flex-1 min-w-0">
       <h1>{title}</h1>
       <slot />
     </article>
 
-    <TableOfContents headings={headings} client:load />
+    <aside class="w-0 xl:w-56 shrink-0 opacity-0 invisible translate-x-12 xl:opacity-100 xl:visible xl:translate-x-0 transition-[opacity,visibility,translate,width] duration-200 overflow-hidden xl:overflow-visible">
+      <div class="sticky top-8">
+        <div class="mb-10">
+          <MarkdownForAI slug={slug} rawMarkdown={rawMarkdown} client:load />
+        </div>
+        <TableOfContents headings={headings} client:load />
+      </div>
+    </aside>
   </main>
 </BaseLayout>

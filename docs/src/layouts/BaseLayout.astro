@@ -38,7 +38,12 @@ const nav = navigation.map((item) => {
     <title>{title} - Aileron Docs</title>
   </head>
   <body>
-    <div class="flex min-h-screen">
+    <header class="fixed top-0 left-0 right-0 z-50 h-16 flex items-center pl-16 pr-6 lg:px-6 border-b border-border bg-background transition-[padding] duration-200">
+      <a href="/" class="font-bold text-lg text-foreground no-underline hover:text-foreground">
+        Aileron Docs
+      </a>
+    </header>
+    <div class="flex min-h-screen pt-16">
       <Sidebar currentPath={currentPath} navigation={nav} client:load />
 
       <div class="flex-1">
