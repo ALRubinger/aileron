@@ -30,6 +30,16 @@ func NewAnthropicClient(apiKey, model string) *AnthropicClient {
 	}
 }
 
+// SetBaseURL overrides the Anthropic API base URL. Used for testing with
+// a mock HTTP server.
+func (a *AnthropicClient) SetBaseURL(url string) {
+	c := anthropic.NewClient(
+		option.WithAPIKey("test"),
+		option.WithBaseURL(url),
+	)
+	a.client = &c
+}
+
 func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
 	maxRounds := req.MaxToolRounds
 	if maxRounds <= 0 {
