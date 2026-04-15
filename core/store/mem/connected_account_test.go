@@ -113,6 +113,64 @@ func TestConnectedAccountStore_List(t *testing.T) {
 	}
 }
 
+func TestConnectedAccountStore_ListByExternalIDs(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	slack := model.ConnectedAccountProviderSlack
+
+	// Create Slack accounts with external IDs.
+	acct1 := newTestAccount("conn_s1", "usr_1", slack)
+	acct1.ExternalUserID = "U111"
+	acct1.ExternalTeamID = "T001"
+	s.Create(ctx, acct1)
+
+	acct2 := newTestAccount("conn_s2", "usr_2", slack)
+	acct2.ExternalUserID = "U222"
+	acct2.ExternalTeamID = "T001"
+	s.Create(ctx, acct2)
+
+	// Look up by team + user.
+	accounts, err := s.List(ctx, store.ConnectedAccountFilter{
+		Provider:       &slack,
+		ExternalTeamID: "T001",
+		ExternalUserID: "U111",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accounts))
+	}
+	if accounts[0].ID != "conn_s1" {
+		t.Errorf("expected conn_s1, got %s", accounts[0].ID)
+	}
+
+	// Team-only filter returns both.
+	accounts, err = s.List(ctx, store.ConnectedAccountFilter{
+		Provider:       &slack,
+		ExternalTeamID: "T001",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("expected 2 accounts for team T001, got %d", len(accounts))
+	}
+
+	// Unknown team returns empty.
+	accounts, err = s.List(ctx, store.ConnectedAccountFilter{
+		Provider:       &slack,
+		ExternalTeamID: "T999",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("expected 0 accounts for unknown team, got %d", len(accounts))
+	}
+}
+
 func TestConnectedAccountStore_Update(t *testing.T) {
 	s := mem.NewConnectedAccountStore()
 	ctx := context.Background()

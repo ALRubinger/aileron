@@ -61,6 +61,12 @@ func (s *ConnectedAccountStore) List(_ context.Context, filter store.ConnectedAc
 		if filter.Status != nil && acc.Status != *filter.Status {
 			continue
 		}
+		if filter.ExternalUserID != "" && acc.ExternalUserID != filter.ExternalUserID {
+			continue
+		}
+		if filter.ExternalTeamID != "" && acc.ExternalTeamID != filter.ExternalTeamID {
+			continue
+		}
 		result = append(result, acc)
 	}
 	return result, nil
