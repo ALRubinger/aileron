@@ -292,6 +292,81 @@ func TestConnector_MissingNumber(t *testing.T) {
 	}
 }
 
+func TestConnector_SearchIssues_MissingQuery(t *testing.T) {
+	c := githubsource.New()
+	_, err := c.Execute(context.Background(), "github_search_issues", map[string]any{}, testToken())
+	if err == nil {
+		t.Fatal("expected error for missing query")
+	}
+}
+
+func TestConnector_GetPR_FloatNumber(t *testing.T) {
+	server := newMockGitHubServer()
+	defer server.Close()
+
+	c := githubsource.New().WithBaseURL(server.URL + "/api/v3/")
+	result, err := c.Execute(context.Background(), "github_get_pr", map[string]any{
+		"repo":   "ALRubinger/aileron",
+		"number": float64(247), // JSON numbers often come as float64
+	}, testToken())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result["title"] == nil {
+		t.Error("expected PR details")
+	}
+}
+
+func TestConnector_GetFile_WithRef(t *testing.T) {
+	server := newMockGitHubServer()
+	defer server.Close()
+
+	c := githubsource.New().WithBaseURL(server.URL + "/api/v3/")
+	result, err := c.Execute(context.Background(), "github_get_file", map[string]any{
+		"repo": "ALRubinger/aileron",
+		"path": "auth/jwt.go",
+		"ref":  "main",
+	}, testToken())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result["content"] == nil {
+		t.Error("expected file content")
+	}
+}
+
+func TestConnector_OAuthTokenFormat(t *testing.T) {
+	// Token stored as golang.org/x/oauth2.Token JSON format.
+	token, _ := json.Marshal(map[string]any{
+		"access_token": "ghp_oauth2_format",
+		"token_type":   "bearer",
+		"expiry":       "2026-12-31T00:00:00Z",
+	})
+
+	server := newMockGitHubServer()
+	defer server.Close()
+
+	c := githubsource.New().WithBaseURL(server.URL + "/api/v3/")
+	_, err := c.Execute(context.Background(), "github_search_code", map[string]any{
+		"query": "test",
+	}, token)
+
+	if err != nil {
+		t.Fatalf("unexpected error with oauth2 token format: %v", err)
+	}
+}
+
+func TestConnector_EmptyAccessToken(t *testing.T) {
+	token, _ := json.Marshal(map[string]string{"token_type": "bearer"})
+	c := githubsource.New()
+	_, err := c.Execute(context.Background(), "github_search_code", map[string]any{"query": "test"}, token)
+	if err == nil {
+		t.Fatal("expected error for missing access_token")
+	}
+}
+
 func TestConnector_MissingPath(t *testing.T) {
 	c := githubsource.New()
 	_, err := c.Execute(context.Background(), "github_get_file", map[string]any{
