@@ -52,6 +52,7 @@ type apiServer struct {
 	draftPipeline      *draft.Pipeline        // nil when LLM not configured
 	drafts             store.DraftStore       // draft lifecycle store
 	instructions       store.UserInstructionStore // user instructions for context store
+	feedback           store.DraftFeedbackStore  // draft feedback signals for behavioral model
 	slackSender        SlackSender            // injectable for testing; defaults to comms.SendSlackMessage
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
 	slackDedup         *slackEventDedup        // deduplication cache for Slack events

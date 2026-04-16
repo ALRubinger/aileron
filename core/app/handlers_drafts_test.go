@@ -21,6 +21,7 @@ func newDraftsTestServer() *apiServer {
 	return &apiServer{
 		log:               slog.Default(),
 		drafts:            mem.NewDraftStore(),
+		feedback:          mem.NewDraftFeedbackStore(),
 		connectedAccounts: mem.NewConnectedAccountStore(),
 		vault:             vault.NewMemVault(),
 		users:             &stubUserStore{},
@@ -546,5 +547,168 @@ func TestExtractDraftIDFromAction(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("extractDraftIDFromAction(%q, %q) = %q, want %q", tt.path, tt.action, got, tt.want)
 		}
+	}
+}
+
+func TestApproveDraft_RecordsFeedback(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	fb, _ := srv.feedback.List(ctx, store.DraftFeedbackFilter{UserID: "usr_a"})
+	if len(fb) != 1 {
+		t.Fatalf("expected 1 feedback signal, got %d", len(fb))
+	}
+	if fb[0].Signal != model.FeedbackSignalApproved {
+		t.Errorf("expected approved, got %s", fb[0].Signal)
+	}
+	if fb[0].DraftID != "dft_1" {
+		t.Errorf("expected dft_1, got %s", fb[0].DraftID)
+	}
+	if fb[0].SentBody != "No, the claims stay the same." {
+		t.Errorf("expected SentBody = DraftBody, got %q", fb[0].SentBody)
+	}
+}
+
+func TestEditDraft_RecordsFeedback(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/edit", `{"body":"Actually yes it does."}`, userAClaims)
+	srv.handleEditDraft(w, r)
+
+	fb, _ := srv.feedback.List(ctx, store.DraftFeedbackFilter{UserID: "usr_a"})
+	if len(fb) != 1 {
+		t.Fatalf("expected 1 feedback, got %d", len(fb))
+	}
+	if fb[0].Signal != model.FeedbackSignalEdited {
+		t.Errorf("expected edited, got %s", fb[0].Signal)
+	}
+	if fb[0].DraftBody != "No, the claims stay the same." {
+		t.Errorf("expected original DraftBody preserved, got %q", fb[0].DraftBody)
+	}
+	if fb[0].SentBody != "Actually yes it does." {
+		t.Errorf("expected edited SentBody, got %q", fb[0].SentBody)
+	}
+}
+
+func TestDiscardDraft_RecordsFeedback(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/discard", "", userAClaims)
+	srv.handleDiscardDraft(w, r)
+
+	fb, _ := srv.feedback.List(ctx, store.DraftFeedbackFilter{UserID: "usr_a"})
+	if len(fb) != 1 {
+		t.Fatalf("expected 1 feedback, got %d", len(fb))
+	}
+	if fb[0].Signal != model.FeedbackSignalDiscarded {
+		t.Errorf("expected discarded, got %s", fb[0].Signal)
+	}
+	if fb[0].SentBody != "" {
+		t.Errorf("expected empty SentBody for discard, got %q", fb[0].SentBody)
+	}
+}
+
+func TestListFeedback_Success(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+
+	// Generate feedback by approving and discarding drafts.
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+	w := httptest.NewRecorder()
+	srv.handleApproveDraft(w, mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims))
+
+	seedDraft(ctx, srv.drafts, "dft_2", "usr_a", model.DraftStatusPending)
+	w = httptest.NewRecorder()
+	srv.handleDiscardDraft(w, mcpRequest("POST", "/v1/drafts/dft_2/discard", "", userAClaims))
+
+	// List all feedback.
+	w = httptest.NewRecorder()
+	srv.handleListFeedback(w, mcpRequest("GET", "/v1/feedback", "", userAClaims))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp struct {
+		Items []model.DraftFeedback `json:"items"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Items) != 2 {
+		t.Fatalf("expected 2 feedback items, got %d", len(resp.Items))
+	}
+}
+
+func TestListFeedback_FilterBySignal(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+	w := httptest.NewRecorder()
+	srv.handleApproveDraft(w, mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims))
+
+	seedDraft(ctx, srv.drafts, "dft_2", "usr_a", model.DraftStatusPending)
+	w = httptest.NewRecorder()
+	srv.handleDiscardDraft(w, mcpRequest("POST", "/v1/drafts/dft_2/discard", "", userAClaims))
+
+	// Filter by approved only.
+	w = httptest.NewRecorder()
+	srv.handleListFeedback(w, mcpRequest("GET", "/v1/feedback?signal=approved", "", userAClaims))
+
+	var resp struct {
+		Items []model.DraftFeedback `json:"items"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected 1 approved feedback, got %d", len(resp.Items))
+	}
+}
+
+func TestListFeedback_Unauthorized(t *testing.T) {
+	srv := newDraftsTestServer()
+	w := httptest.NewRecorder()
+	srv.handleListFeedback(w, mcpRequest("GET", "/v1/feedback", "", nil))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestListFeedback_Empty(t *testing.T) {
+	srv := newDraftsTestServer()
+	w := httptest.NewRecorder()
+	srv.handleListFeedback(w, mcpRequest("GET", "/v1/feedback", "", userAClaims))
+
+	var resp struct {
+		Items []model.DraftFeedback `json:"items"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if len(resp.Items) != 0 {
+		t.Fatalf("expected empty, got %d", len(resp.Items))
+	}
+}
+
+func TestListFeedback_NilStore(t *testing.T) {
+	srv := newDraftsTestServer()
+	srv.feedback = nil
+
+	w := httptest.NewRecorder()
+	srv.handleListFeedback(w, mcpRequest("GET", "/v1/feedback", "", userAClaims))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }

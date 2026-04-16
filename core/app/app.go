@@ -51,6 +51,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	connectedAccountStore := mem.NewConnectedAccountStore()
 	draftStore := mem.NewDraftStore()
 	instructionStore := mem.NewUserInstructionStore()
+	feedbackStore := mem.NewDraftFeedbackStore()
 
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
@@ -119,6 +120,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		connectedAccounts: connectedAccountStore,
 		drafts:            draftStore,
 		instructions:      instructionStore,
+		feedback:          feedbackStore,
 		credentials:       credentialStore,
 		fundingSources:    fundingSourceStore,
 		traces:            traceStore,
@@ -143,6 +145,9 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/instructions/", server.handleInstructionByID)
 	mux.HandleFunc("PATCH /v1/instructions/", server.handleInstructionByID)
 	mux.HandleFunc("DELETE /v1/instructions/", server.handleInstructionByID)
+
+	// Draft feedback API (context store envelope).
+	mux.HandleFunc("GET /v1/feedback", server.handleListFeedback)
 
 	// Draft lifecycle API.
 	mux.HandleFunc("GET /v1/drafts", server.handleListDrafts)
