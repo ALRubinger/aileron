@@ -221,6 +221,19 @@ type DraftFilter struct {
 	PageSize int
 }
 
+// DraftFeedbackStore persists and retrieves feedback signals from draft
+// approve/edit/discard actions. These signals feed the behavioral model.
+type DraftFeedbackStore interface {
+	Create(ctx context.Context, feedback model.DraftFeedback) error
+	List(ctx context.Context, filter DraftFeedbackFilter) ([]model.DraftFeedback, error)
+}
+
+// DraftFeedbackFilter scopes a feedback list query.
+type DraftFeedbackFilter struct {
+	UserID string
+	Signal *model.FeedbackSignal
+}
+
 // UserInstructionStore persists and retrieves user instructions for
 // the context store envelope.
 type UserInstructionStore interface {
