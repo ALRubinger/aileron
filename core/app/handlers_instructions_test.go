@@ -321,6 +321,90 @@ func TestInstructionByID_Routing(t *testing.T) {
 	}
 }
 
+func TestUpdateInstruction_InvalidJSON(t *testing.T) {
+	srv := newInstructionsTestServer()
+	ctx := context.Background()
+	srv.instructions.Create(ctx, model.UserInstruction{ID: "ins_1", UserID: "usr_a", Body: "Rule", Active: true})
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("PATCH", "/v1/instructions/ins_1", "not-json", userAClaims)
+	srv.handleUpdateInstruction(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdateInstruction_EmptyID(t *testing.T) {
+	srv := newInstructionsTestServer()
+	w := httptest.NewRecorder()
+	r := mcpRequest("PATCH", "/v1/instructions/", `{"body":"x"}`, userAClaims)
+	srv.handleUpdateInstruction(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestUpdateInstruction_Scope(t *testing.T) {
+	srv := newInstructionsTestServer()
+	ctx := context.Background()
+	srv.instructions.Create(ctx, model.UserInstruction{ID: "ins_1", UserID: "usr_a", Body: "Rule", Scope: "old", Active: true})
+
+	scope := "new scope"
+	w := httptest.NewRecorder()
+	r := mcpRequest("PATCH", "/v1/instructions/ins_1", `{"scope":"`+scope+`"}`, userAClaims)
+	srv.handleUpdateInstruction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var ins model.UserInstruction
+	json.NewDecoder(w.Body).Decode(&ins)
+	if ins.Scope != "new scope" {
+		t.Errorf("expected 'new scope', got %s", ins.Scope)
+	}
+}
+
+func TestDeleteInstruction_EmptyID(t *testing.T) {
+	srv := newInstructionsTestServer()
+	w := httptest.NewRecorder()
+	r := mcpRequest("DELETE", "/v1/instructions/", "", userAClaims)
+	srv.handleDeleteInstruction(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestInstructionByID_PatchRouting(t *testing.T) {
+	srv := newInstructionsTestServer()
+	ctx := context.Background()
+	srv.instructions.Create(ctx, model.UserInstruction{ID: "ins_1", UserID: "usr_a", Body: "Rule", Active: true})
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("PATCH", "/v1/instructions/ins_1", `{"body":"Updated via router"}`, userAClaims)
+	srv.handleInstructionByID(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestInstructionByID_DeleteRouting(t *testing.T) {
+	srv := newInstructionsTestServer()
+	ctx := context.Background()
+	srv.instructions.Create(ctx, model.UserInstruction{ID: "ins_1", UserID: "usr_a", Body: "Rule"})
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("DELETE", "/v1/instructions/ins_1", "", userAClaims)
+	srv.handleInstructionByID(w, r)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+}
+
 func TestExtractInstructionID(t *testing.T) {
 	tests := []struct {
 		path string
