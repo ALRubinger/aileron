@@ -50,6 +50,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	traceStore := mem.NewTraceStore()
 	connectedAccountStore := mem.NewConnectedAccountStore()
 	draftStore := mem.NewDraftStore()
+	instructionStore := mem.NewUserInstructionStore()
 
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
@@ -117,6 +118,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		connectors:     connectorStore,
 		connectedAccounts: connectedAccountStore,
 		drafts:            draftStore,
+		instructions:      instructionStore,
 		credentials:       credentialStore,
 		fundingSources:    fundingSourceStore,
 		traces:            traceStore,
@@ -134,6 +136,13 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// Source connector tools API (read-only context retrieval).
 	mux.HandleFunc("GET /v1/tools", server.handleListTools)
 	mux.HandleFunc("POST /v1/tools/execute", server.handleExecuteTool)
+
+	// User instructions API (context store envelope).
+	mux.HandleFunc("POST /v1/instructions", server.handleCreateInstruction)
+	mux.HandleFunc("GET /v1/instructions", server.handleListInstructions)
+	mux.HandleFunc("GET /v1/instructions/", server.handleInstructionByID)
+	mux.HandleFunc("PATCH /v1/instructions/", server.handleInstructionByID)
+	mux.HandleFunc("DELETE /v1/instructions/", server.handleInstructionByID)
 
 	// Draft lifecycle API.
 	mux.HandleFunc("GET /v1/drafts", server.handleListDrafts)
@@ -217,7 +226,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		// LLM-powered draft generation pipeline.
 		if authCfg.LLMEnabled() {
 			llmClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModel)
-			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, connectedAccountStore, v, log)
+			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, connectedAccountStore, instructionStore, v, log)
 			log.Info("enabled cloud draft generation", "model", authCfg.LLMModel)
 		}
 

@@ -37,6 +37,7 @@ type Pipeline struct {
 	llm               llm.Client
 	sourceRegistry    *source.Registry
 	connectedAccounts store.ConnectedAccountStore
+	instructions      store.UserInstructionStore
 	vault             vault.Vault
 	log               *slog.Logger
 }
@@ -46,6 +47,7 @@ func NewPipeline(
 	llmClient llm.Client,
 	sourceReg *source.Registry,
 	accounts store.ConnectedAccountStore,
+	instructions store.UserInstructionStore,
 	v vault.Vault,
 	log *slog.Logger,
 ) *Pipeline {
@@ -53,6 +55,7 @@ func NewPipeline(
 		llm:               llmClient,
 		sourceRegistry:    sourceReg,
 		connectedAccounts: accounts,
+		instructions:      instructions,
 		vault:             v,
 		log:               log,
 	}
@@ -62,6 +65,12 @@ func NewPipeline(
 // It assembles context from source connectors available to the user,
 // calls the LLM with tool access, and returns the draft text.
 func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.IncomingMessage) (string, error) {
+	// Assemble the system prompt from base + user instructions.
+	prompt, err := p.assembleSystemPrompt(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("assembling system prompt: %w", err)
+	}
+
 	// Build the user message from the incoming message.
 	userMessage := fmt.Sprintf(
 		"Draft a reply to this message from %s in %s:\n\n%s",
@@ -95,7 +104,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	executor := p.buildToolExecutor(ctx, userID, accounts)
 
 	resp, err := p.llm.GenerateWithTools(ctx, llm.GenerateRequest{
-		SystemPrompt: systemPrompt,
+		SystemPrompt: prompt,
 		UserMessage:  userMessage,
 		Tools:        tools,
 		ToolExecutor: executor,
@@ -112,6 +121,40 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	)
 
 	return resp.Text, nil
+}
+
+// assembleSystemPrompt builds the system prompt from the base prompt plus
+// the user's active instructions. Instructions are the highest-priority
+// context — they override learned patterns and behavioral model inferences.
+func (p *Pipeline) assembleSystemPrompt(ctx context.Context, userID string) (string, error) {
+	prompt := systemPrompt
+
+	if p.instructions == nil {
+		return prompt, nil
+	}
+
+	active := true
+	instructions, err := p.instructions.List(ctx, store.UserInstructionFilter{
+		UserID: userID,
+		Active: &active,
+	})
+	if err != nil {
+		return "", fmt.Errorf("listing instructions: %w", err)
+	}
+
+	if len(instructions) == 0 {
+		return prompt, nil
+	}
+
+	prompt += "\n\n## User Instructions\n\nThe user has set these explicit rules. Follow them precisely:\n"
+	for _, ins := range instructions {
+		prompt += "\n- " + ins.Body
+		if ins.Scope != "" {
+			prompt += " [scope: " + ins.Scope + "]"
+		}
+	}
+
+	return prompt, nil
 }
 
 // buildToolExecutor creates a closure that resolves credentials from the vault

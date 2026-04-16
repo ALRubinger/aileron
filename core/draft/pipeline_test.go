@@ -3,6 +3,7 @@ package draft_test
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/comms"
@@ -53,7 +54,7 @@ func TestPipeline_GenerateDraft_Simple(t *testing.T) {
 	v := vault.NewMemVault()
 	sourceReg := source.NewRegistry()
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
 
 	draftText, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID:      "msg_1",
@@ -108,7 +109,7 @@ func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
 
 	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID:      "msg_1",
@@ -162,7 +163,7 @@ func TestPipeline_GenerateDraft_ToolExecutor(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -197,7 +198,7 @@ func TestPipeline_GenerateDraft_NoConnectedAccounts(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
 
 	draftText, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -215,12 +216,82 @@ func TestPipeline_GenerateDraft_NoConnectedAccounts(t *testing.T) {
 	}
 }
 
+func TestPipeline_GenerateDraft_WithInstructions(t *testing.T) {
+	mock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "Draft with instructions"},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	instructions := mem.NewUserInstructionStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+
+	// Seed instructions.
+	instructions.Create(ctx, model.UserInstruction{
+		ID: "ins_1", UserID: "usr_1", Body: "Always reference PR numbers", Scope: "#backend", Active: true,
+	})
+	instructions.Create(ctx, model.UserInstruction{
+		ID: "ins_2", UserID: "usr_1", Body: "Be brief in incidents", Active: true,
+	})
+	instructions.Create(ctx, model.UserInstruction{
+		ID: "ins_3", UserID: "usr_1", Body: "Inactive rule", Active: false, // should NOT appear
+	})
+
+	sourceReg := source.NewRegistry()
+	p := draft.NewPipeline(mock, sourceReg, accounts, instructions, v, slog.Default())
+
+	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify instructions were included in the system prompt.
+	prompt := mock.lastRequest.SystemPrompt
+	if !strings.Contains(prompt, "Always reference PR numbers") {
+		t.Error("expected instruction 1 in prompt")
+	}
+	if !strings.Contains(prompt, "[scope: #backend]") {
+		t.Error("expected scope annotation in prompt")
+	}
+	if !strings.Contains(prompt, "Be brief in incidents") {
+		t.Error("expected instruction 2 in prompt")
+	}
+	if strings.Contains(prompt, "Inactive rule") {
+		t.Error("inactive instruction should not appear in prompt")
+	}
+	if !strings.Contains(prompt, "User Instructions") {
+		t.Error("expected User Instructions section header")
+	}
+}
+
+func TestPipeline_GenerateDraft_NoInstructions(t *testing.T) {
+	mock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "Draft without instructions"},
+	}
+
+	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default())
+
+	_, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// System prompt should NOT contain instructions section.
+	if strings.Contains(mock.lastRequest.SystemPrompt, "User Instructions") {
+		t.Error("expected no User Instructions section when none exist")
+	}
+}
+
 func TestPipeline_GenerateDraft_LLMError(t *testing.T) {
 	mock := &mockLLMClient{
 		err: context.DeadlineExceeded,
 	}
 
-	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default())
 
 	_, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
