@@ -188,6 +188,10 @@ func (s *apiServer) getDraftForAction(w http.ResponseWriter, r *http.Request, dr
 	return draft, nil
 }
 
+// EphemeralPoster is the function used to post ephemeral draft messages.
+// Defaults to comms.PostEphemeralDraft. Override in tests.
+type EphemeralPoster func(ctx context.Context, msg comms.SlackDraftMessage) error
+
 // SlackSender is the function used to send messages to Slack.
 // Defaults to comms.SendSlackMessage. Override in tests.
 type SlackSender func(ctx context.Context, token, channel, body string) error
@@ -359,7 +363,11 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 		return
 	}
 
-	err = comms.PostEphemeralDraft(ctx, comms.SlackDraftMessage{
+	poster := s.ephemeralPoster
+	if poster == nil {
+		poster = comms.PostEphemeralDraft
+	}
+	err = poster(ctx, comms.SlackDraftMessage{
 		BotToken: botToken,
 		Channel:  draft.Channel,
 		UserID:   slackUserID,

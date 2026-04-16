@@ -214,14 +214,19 @@ func newDraftsTestServerWithSend() *apiServer {
 	// Set up a connected Slack account + vault token so send works.
 	ctx := context.Background()
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID:       "conn_s1",
-		UserID:   "usr_a",
-		Provider: model.ConnectedAccountProviderSlack,
-		Status:   model.ConnectedAccountStatusActive,
+		ID:             "conn_s1",
+		UserID:         "usr_a",
+		Provider:       model.ConnectedAccountProviderSlack,
+		Status:         model.ConnectedAccountStatusActive,
+		ExternalUserID: "U123ABC",
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test","bot_access_token":"xoxb-test"}`), vault.Metadata{})
 	// Mock sender so we don't call real Slack.
 	srv.slackSender = func(_ context.Context, token, channel, body string) error {
+		return nil
+	}
+	// Mock ephemeral poster.
+	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
 		return nil
 	}
 	return srv
@@ -511,6 +516,97 @@ func TestGetDraft_EmptyID(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for empty ID, got %d", w.Code)
+	}
+}
+
+func TestDeliverEphemeralDraft_Success(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	var posted bool
+	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
+		posted = true
+		if msg.BotToken != "xoxb-test" {
+			t.Errorf("expected bot token xoxb-test, got %s", msg.BotToken)
+		}
+		if msg.UserID != "U123ABC" {
+			t.Errorf("expected user ID U123ABC, got %s", msg.UserID)
+		}
+		if msg.DraftID != "dft_eph" {
+			t.Errorf("expected draft ID dft_eph, got %s", msg.DraftID)
+		}
+		return nil
+	}
+
+	ctx := context.Background()
+	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{
+		ID:        "dft_eph",
+		UserID:    "usr_a",
+		Channel:   "C0BACKEND",
+		Author:    "Sarah",
+		DraftBody: "Draft reply text",
+	})
+
+	if !posted {
+		t.Error("expected ephemeral to be posted")
+	}
+}
+
+func TestDeliverEphemeralDraft_NoBotToken(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+
+	// Connected account without bot token.
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	var posted bool
+	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
+		posted = true
+		return nil
+	}
+
+	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{ID: "dft_1", Channel: "C123", DraftBody: "test"})
+	if posted {
+		t.Error("should not post when bot token missing")
+	}
+}
+
+func TestDeliverEphemeralDraft_NoSlackAccount(t *testing.T) {
+	srv := newDraftsTestServer()
+	var posted bool
+	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
+		posted = true
+		return nil
+	}
+
+	srv.deliverEphemeralDraft(context.Background(), "usr_a", model.Draft{ID: "dft_1"})
+	if posted {
+		t.Error("should not post when no slack account")
+	}
+}
+
+func TestDeliverEphemeralDraft_NoExternalUserID(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive,
+		// ExternalUserID is empty
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp","bot_access_token":"xoxb"}`), vault.Metadata{})
+
+	var posted bool
+	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
+		posted = true
+		return nil
+	}
+
+	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{ID: "dft_1", Channel: "C123", DraftBody: "test"})
+	if posted {
+		t.Error("should not post when external user ID missing")
 	}
 }
 
