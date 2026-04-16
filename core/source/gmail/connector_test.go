@@ -240,6 +240,60 @@ func TestConnector_DriveSearch_MissingQuery(t *testing.T) {
 	}
 }
 
+func TestConnector_DriveGetDoc_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The Drive export endpoint returns plain text directly.
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("This is the migration plan document content.\n\nPhase 1: Schema changes\nPhase 2: Data migration"))
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	result, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{
+		"file_id": "doc_123",
+	}, testToken())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content, ok := result["content"].(string)
+	if !ok || content == "" {
+		t.Fatal("expected non-empty content")
+	}
+	if !containsStr(content, "migration plan") {
+		t.Errorf("expected content to contain 'migration plan', got: %s", content)
+	}
+}
+
+func TestConnector_DriveGetDoc_InvalidToken(t *testing.T) {
+	c := gmailsource.New()
+	_, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{
+		"file_id": "doc_123",
+	}, []byte("not-json"))
+	if err == nil {
+		t.Fatal("expected error for invalid token")
+	}
+}
+
+func TestConnector_DriveSearch_InvalidToken(t *testing.T) {
+	c := gmailsource.New()
+	_, err := c.Execute(context.Background(), "drive_search", map[string]any{
+		"query": "test",
+	}, []byte("not-json"))
+	if err == nil {
+		t.Fatal("expected error for invalid token")
+	}
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestConnector_DriveGetDoc_MissingFileID(t *testing.T) {
 	c := gmailsource.New()
 	_, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{}, testToken())
