@@ -335,6 +335,72 @@ func TestLoadAuthConfig_LLMModelDefault(t *testing.T) {
 	}
 }
 
+func TestLoadAuthConfig_TrimsWhitespace(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("SLACK_CLIENT_ID", "  slack-id  ")
+	t.Setenv("SLACK_CLIENT_SECRET", "slack-secret\n")
+	t.Setenv("SLACK_SIGNING_SECRET", "\tsigning-secret ")
+	t.Setenv("ANTHROPIC_API_KEY", " sk-ant-key ")
+	t.Setenv("GOOGLE_CLIENT_ID", "google-id\t")
+	t.Setenv("GITHUB_OAUTH_CLIENT_ID", " github-id")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SlackClientID != "slack-id" {
+		t.Errorf("SlackClientID not trimmed: %q", cfg.SlackClientID)
+	}
+	if cfg.SlackClientSecret != "slack-secret" {
+		t.Errorf("SlackClientSecret not trimmed: %q", cfg.SlackClientSecret)
+	}
+	if cfg.SlackSigningSecret != "signing-secret" {
+		t.Errorf("SlackSigningSecret not trimmed: %q", cfg.SlackSigningSecret)
+	}
+	if cfg.AnthropicAPIKey != "sk-ant-key" {
+		t.Errorf("AnthropicAPIKey not trimmed: %q", cfg.AnthropicAPIKey)
+	}
+	if cfg.GoogleClientID != "google-id" {
+		t.Errorf("GoogleClientID not trimmed: %q", cfg.GoogleClientID)
+	}
+	if cfg.GitHubClientID != "github-id" {
+		t.Errorf("GitHubClientID not trimmed: %q", cfg.GitHubClientID)
+	}
+}
+
+func TestLoadAuthConfig_TrimsWhitespace_EnvOrDefault(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("AILERON_LLM_MODEL", " claude-haiku-4-5 ")
+	t.Setenv("MAIL_FROM", " custom@example.com\n")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLMModel != "claude-haiku-4-5" {
+		t.Errorf("LLMModel not trimmed: %q", cfg.LLMModel)
+	}
+	if cfg.MailFrom != "custom@example.com" {
+		t.Errorf("MailFrom not trimmed: %q", cfg.MailFrom)
+	}
+}
+
+func TestLoadAuthConfig_TrimsWhitespace_DatabaseURL(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", " postgres://localhost/test ")
+	t.Setenv("AILERON_JWT_SIGNING_KEY", " test-key ")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.DatabaseURL != "postgres://localhost/test" {
+		t.Errorf("DatabaseURL not trimmed: %q", cfg.DatabaseURL)
+	}
+	if cfg.JWTSigningKey != "test-key" {
+		t.Errorf("JWTSigningKey not trimmed: %q", cfg.JWTSigningKey)
+	}
+}
+
 func TestLoadAuthConfig_MailFromDefault(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("MAIL_FROM", "")

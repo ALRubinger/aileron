@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -71,21 +72,21 @@ type AuthConfig struct {
 // enabled (indicated by AILERON_DATABASE_URL being set).
 func LoadAuthConfig() (*AuthConfig, error) {
 	cfg := &AuthConfig{
-		DatabaseURL:        os.Getenv("AILERON_DATABASE_URL"),
-		JWTSigningKey:      os.Getenv("AILERON_JWT_SIGNING_KEY"),
+		DatabaseURL:        envTrimmed("AILERON_DATABASE_URL"),
+		JWTSigningKey:      envTrimmed("AILERON_JWT_SIGNING_KEY"),
 		JWTIssuer:          envOrDefault("AILERON_JWT_ISSUER", "aileron"),
 		UIRedirectURL:      envOrDefault("AILERON_UI_REDIRECT_URL", "/"),
-		AutoVerifyEmail:    os.Getenv("AILERON_AUTO_VERIFY_EMAIL") == "true",
-		GoogleClientID:       os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret:   os.Getenv("GOOGLE_CLIENT_SECRET"),
-		GitHubClientID:     os.Getenv("GITHUB_OAUTH_CLIENT_ID"),
-		GitHubClientSecret: os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
-		SlackClientID:      os.Getenv("SLACK_CLIENT_ID"),
-		SlackClientSecret:  os.Getenv("SLACK_CLIENT_SECRET"),
-		SlackSigningSecret: os.Getenv("SLACK_SIGNING_SECRET"),
-		ResendAPIKey:       os.Getenv("RESEND_API_KEY"),
+		AutoVerifyEmail:    envTrimmed("AILERON_AUTO_VERIFY_EMAIL") == "true",
+		GoogleClientID:       envTrimmed("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret:   envTrimmed("GOOGLE_CLIENT_SECRET"),
+		GitHubClientID:     envTrimmed("GITHUB_OAUTH_CLIENT_ID"),
+		GitHubClientSecret: envTrimmed("GITHUB_OAUTH_CLIENT_SECRET"),
+		SlackClientID:      envTrimmed("SLACK_CLIENT_ID"),
+		SlackClientSecret:  envTrimmed("SLACK_CLIENT_SECRET"),
+		SlackSigningSecret: envTrimmed("SLACK_SIGNING_SECRET"),
+		ResendAPIKey:       envTrimmed("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
-		AnthropicAPIKey:    os.Getenv("ANTHROPIC_API_KEY"),
+		AnthropicAPIKey:    envTrimmed("ANTHROPIC_API_KEY"),
 		LLMModel:           envOrDefault("AILERON_LLM_MODEL", "claude-sonnet-4-6"),
 	}
 
@@ -170,15 +171,22 @@ func (c *AuthConfig) EscrowTTL() time.Duration {
 	return d
 }
 
+// envTrimmed reads an environment variable and trims leading/trailing
+// whitespace. Prevents copy-paste errors in web UIs (Railway, Docker)
+// where invisible trailing spaces cause cryptic failures.
+func envTrimmed(key string) string {
+	return strings.TrimSpace(os.Getenv(key))
+}
+
 func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+	if v := envTrimmed(key); v != "" {
 		return v
 	}
 	return def
 }
 
 func parseDurationOrDefault(envKey string, def time.Duration) (time.Duration, error) {
-	v := os.Getenv(envKey)
+	v := envTrimmed(envKey)
 	if v == "" {
 		return def, nil
 	}
