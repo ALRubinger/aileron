@@ -19,14 +19,20 @@ import (
 func (s *apiServer) ListConnectedAccounts(w http.ResponseWriter, r *http.Request) {
 	userID, _, ok := s.requireAuth(w, r)
 	if !ok {
+		s.log.Warn("list connected accounts: auth failed")
 		return
 	}
 
+	s.log.Info("list connected accounts", "user_id", userID)
+
 	accounts, err := s.connectedAccounts.List(r.Context(), store.ConnectedAccountFilter{UserID: userID})
 	if err != nil {
+		s.log.Error("list connected accounts: store error", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+
+	s.log.Info("list connected accounts: found", "count", len(accounts))
 
 	items := make([]api.ConnectedAccount, 0, len(accounts))
 	for _, a := range accounts {
