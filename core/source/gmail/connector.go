@@ -1,14 +1,21 @@
-// Package gmail implements a SourceConnector for Gmail, providing read-only
-// tools for searching emails and reading threads.
+// Package gmail implements a SourceConnector for Gmail and Google Drive,
+// providing read-only tools for searching emails, reading threads,
+// searching Drive files, and reading document contents.
+//
+// Gmail and Drive share the same Google OAuth token. The Gmail OAuth
+// scopes should include drive.readonly for Drive tools to work.
 package gmail
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+
 	"github.com/ALRubinger/aileron/core/source"
 	"golang.org/x/oauth2"
-	gmail "google.golang.org/api/gmail/v1"
+	driveapi "google.golang.org/api/drive/v3"
+	gmailapi "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 )
 
@@ -49,6 +56,21 @@ func (c *Connector) Tools() []source.ToolDefinition {
 				{Name: "thread_id", Type: "string", Description: "The Gmail thread ID", Required: true},
 			},
 		},
+		{
+			Name:        "drive_search",
+			Description: "Search Google Drive files by name or content. Returns file names, types, and IDs.",
+			Parameters: []source.ToolParam{
+				{Name: "query", Type: "string", Description: "Search query (e.g. 'migration plan')", Required: true},
+				{Name: "max_results", Type: "integer", Description: "Maximum results (default 10, max 25)", Required: false},
+			},
+		},
+		{
+			Name:        "drive_get_doc",
+			Description: "Get the text content of a Google Doc. Returns the document as plain text.",
+			Parameters: []source.ToolParam{
+				{Name: "file_id", Type: "string", Description: "The Google Drive file ID", Required: true},
+			},
+		},
 	}
 }
 
@@ -63,12 +85,16 @@ func (c *Connector) Execute(ctx context.Context, tool string, params map[string]
 		return c.search(ctx, svc, params)
 	case "gmail_get_thread":
 		return c.getThread(ctx, svc, params)
+	case "drive_search":
+		return c.driveSearch(ctx, token, params)
+	case "drive_get_doc":
+		return c.driveGetDoc(ctx, token, params)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", tool)
 	}
 }
 
-func (c *Connector) newService(ctx context.Context, token []byte) (*gmail.Service, error) {
+func (c *Connector) newService(ctx context.Context, token []byte) (*gmailapi.Service, error) {
 	accessToken, err := extractAccessToken(token)
 	if err != nil {
 		return nil, fmt.Errorf("invalid token: %w", err)
@@ -79,14 +105,14 @@ func (c *Connector) newService(ctx context.Context, token []byte) (*gmail.Servic
 	if c.clientOption != nil {
 		opts = append(opts, c.clientOption)
 	}
-	svc, err := gmail.NewService(ctx, opts...)
+	svc, err := gmailapi.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating gmail service: %w", err)
 	}
 	return svc, nil
 }
 
-func (c *Connector) search(ctx context.Context, svc *gmail.Service, params map[string]any) (map[string]any, error) {
+func (c *Connector) search(ctx context.Context, svc *gmailapi.Service, params map[string]any) (map[string]any, error) {
 	query, ok := params["query"].(string)
 	if !ok || query == "" {
 		return nil, fmt.Errorf("query parameter is required")
@@ -134,7 +160,7 @@ func (c *Connector) search(ctx context.Context, svc *gmail.Service, params map[s
 	return map[string]any{"messages": messages, "total": resp.ResultSizeEstimate}, nil
 }
 
-func (c *Connector) getThread(ctx context.Context, svc *gmail.Service, params map[string]any) (map[string]any, error) {
+func (c *Connector) getThread(ctx context.Context, svc *gmailapi.Service, params map[string]any) (map[string]any, error) {
 	threadID, ok := params["thread_id"].(string)
 	if !ok || threadID == "" {
 		return nil, fmt.Errorf("thread_id parameter is required")
@@ -166,6 +192,96 @@ func (c *Connector) getThread(ctx context.Context, svc *gmail.Service, params ma
 	}
 
 	return map[string]any{"messages": messages}, nil
+}
+
+func (c *Connector) newDriveService(ctx context.Context, token []byte) (*driveapi.Service, error) {
+	accessToken, err := extractAccessToken(token)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token: %w", err)
+	}
+
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken})
+	opts := []option.ClientOption{option.WithTokenSource(ts)}
+	if c.clientOption != nil {
+		opts = append(opts, c.clientOption)
+	}
+	svc, err := driveapi.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating drive service: %w", err)
+	}
+	return svc, nil
+}
+
+func (c *Connector) driveSearch(ctx context.Context, token []byte, params map[string]any) (map[string]any, error) {
+	query, ok := params["query"].(string)
+	if !ok || query == "" {
+		return nil, fmt.Errorf("query parameter is required")
+	}
+
+	svc, err := c.newDriveService(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	maxResults := int64(10)
+	if mr, ok := params["max_results"]; ok {
+		maxResults = toInt64(mr, 10)
+	}
+	if maxResults > 25 {
+		maxResults = 25
+	}
+
+	driveQuery := fmt.Sprintf("fullText contains '%s' and trashed = false", query)
+	resp, err := svc.Files.List().Q(driveQuery).
+		PageSize(maxResults).
+		Fields("files(id, name, mimeType, modifiedTime, webViewLink)").
+		Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("drive API error: %w", err)
+	}
+
+	files := make([]map[string]any, 0, len(resp.Files))
+	for _, f := range resp.Files {
+		files = append(files, map[string]any{
+			"id":            f.Id,
+			"name":          f.Name,
+			"mime_type":     f.MimeType,
+			"modified_time": f.ModifiedTime,
+			"url":           f.WebViewLink,
+		})
+	}
+
+	return map[string]any{"files": files}, nil
+}
+
+func (c *Connector) driveGetDoc(ctx context.Context, token []byte, params map[string]any) (map[string]any, error) {
+	fileID, ok := params["file_id"].(string)
+	if !ok || fileID == "" {
+		return nil, fmt.Errorf("file_id parameter is required")
+	}
+
+	svc, err := c.newDriveService(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := svc.Files.Export(fileID, "text/plain").Context(ctx).Download()
+	if err != nil {
+		return nil, fmt.Errorf("drive API error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading document: %w", err)
+	}
+
+	content := string(body)
+	if len(content) > 20000 {
+		content = content[:20000] + "\n... (truncated)"
+	}
+
+	return map[string]any{"content": content}, nil
 }
 
 // extractAccessToken parses stored token JSON and returns the access token.

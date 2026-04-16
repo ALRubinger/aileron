@@ -29,18 +29,17 @@ func TestConnector_Provider(t *testing.T) {
 func TestConnector_Tools(t *testing.T) {
 	c := gmailsource.New()
 	tools := c.Tools()
-	if len(tools) != 2 {
-		t.Fatalf("expected 2 tools, got %d", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("expected 4 tools, got %d", len(tools))
 	}
 	names := make(map[string]bool)
 	for _, tool := range tools {
 		names[tool.Name] = true
 	}
-	if !names["gmail_search"] {
-		t.Error("expected gmail_search tool")
-	}
-	if !names["gmail_get_thread"] {
-		t.Error("expected gmail_get_thread tool")
+	for _, expected := range []string{"gmail_search", "gmail_get_thread", "drive_search", "drive_get_doc"} {
+		if !names[expected] {
+			t.Errorf("expected %s tool", expected)
+		}
 	}
 }
 
@@ -196,6 +195,91 @@ func TestConnector_OAuthTokenFormat(t *testing.T) {
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{"query": "test"}, token)
 	if err != nil {
 		t.Fatalf("unexpected error with oauth2 token format: %v", err)
+	}
+}
+
+func TestConnector_DriveSearch_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"files": []map[string]any{
+				{
+					"id":           "doc_123",
+					"name":         "Migration Plan",
+					"mimeType":     "application/vnd.google-apps.document",
+					"modifiedTime": "2026-04-10T10:00:00Z",
+					"webViewLink":  "https://docs.google.com/document/d/doc_123",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	result, err := c.Execute(context.Background(), "drive_search", map[string]any{
+		"query": "migration plan",
+	}, testToken())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	files := result["files"].([]map[string]any)
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0]["name"] != "Migration Plan" {
+		t.Errorf("expected Migration Plan, got %v", files[0]["name"])
+	}
+}
+
+func TestConnector_DriveSearch_MissingQuery(t *testing.T) {
+	c := gmailsource.New()
+	_, err := c.Execute(context.Background(), "drive_search", map[string]any{}, testToken())
+	if err == nil {
+		t.Fatal("expected error for missing query")
+	}
+}
+
+func TestConnector_DriveGetDoc_MissingFileID(t *testing.T) {
+	c := gmailsource.New()
+	_, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{}, testToken())
+	if err == nil {
+		t.Fatal("expected error for missing file_id")
+	}
+}
+
+func TestConnector_ToolsIncludeDrive(t *testing.T) {
+	c := gmailsource.New()
+	tools := c.Tools()
+	if len(tools) != 4 {
+		t.Fatalf("expected 4 tools (2 gmail + 2 drive), got %d", len(tools))
+	}
+	names := make(map[string]bool)
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+	if !names["drive_search"] {
+		t.Error("expected drive_search tool")
+	}
+	if !names["drive_get_doc"] {
+		t.Error("expected drive_get_doc tool")
+	}
+}
+
+func TestConnector_DriveSearch_WithMaxResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	_, err := c.Execute(context.Background(), "drive_search", map[string]any{
+		"query":       "test",
+		"max_results": float64(5),
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
