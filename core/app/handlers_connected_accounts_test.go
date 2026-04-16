@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -346,6 +347,83 @@ func TestListConnectedAccounts_Unauthorized(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestRequestScheme_XForwardedProto(t *testing.T) {
+	r := httptest.NewRequest("GET", "/test", nil)
+	r.Header.Set("X-Forwarded-Proto", "https")
+
+	if got := requestScheme(r); got != "https" {
+		t.Errorf("expected https from X-Forwarded-Proto, got %s", got)
+	}
+}
+
+func TestRequestScheme_XForwardedProtoHTTP(t *testing.T) {
+	r := httptest.NewRequest("GET", "/test", nil)
+	r.Header.Set("X-Forwarded-Proto", "http")
+
+	if got := requestScheme(r); got != "http" {
+		t.Errorf("expected http from X-Forwarded-Proto, got %s", got)
+	}
+}
+
+func TestRequestScheme_TLSDirect(t *testing.T) {
+	r := httptest.NewRequest("GET", "/test", nil)
+	r.TLS = &tls.ConnectionState{} // simulate direct TLS connection
+	if got := requestScheme(r); got != "https" {
+		t.Errorf("expected https from TLS, got %s", got)
+	}
+}
+
+func TestRequestScheme_NoHeader_NoTLS(t *testing.T) {
+	r := httptest.NewRequest("GET", "/test", nil)
+	// No X-Forwarded-Proto, no TLS → http
+	if got := requestScheme(r); got != "http" {
+		t.Errorf("expected http without proxy or TLS, got %s", got)
+	}
+}
+
+func TestConnectAccount_RedirectURL_UsesHTTPS_BehindProxy(t *testing.T) {
+	srv := newConnectedAccountServer()
+	reg := account.NewRegistry()
+	reg.Register(account.NewGoogleService("test-client-id", "secret", srv.connectedAccounts, srv.vault))
+	srv.accountService = reg
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
+	// Simulate reverse proxy (Railway, Cloudflare) setting X-Forwarded-Proto.
+	r.Header.Set("X-Forwarded-Proto", "https")
+	srv.ConnectAccount(w, r, "gmail")
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	// The redirect_uri parameter in the OAuth URL should be https://.
+	if !containsStr(loc, "redirect_uri=https") {
+		t.Errorf("expected https redirect_uri behind proxy, got: %s", loc)
+	}
+}
+
+func TestConnectAccount_RedirectURL_HTTP_WithoutProxy(t *testing.T) {
+	srv := newConnectedAccountServer()
+	reg := account.NewRegistry()
+	reg.Register(account.NewGoogleService("test-client-id", "secret", srv.connectedAccounts, srv.vault))
+	srv.accountService = reg
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
+	// No X-Forwarded-Proto, no TLS → http (local dev).
+	srv.ConnectAccount(w, r, "gmail")
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	// Without a proxy, redirect_uri should be http:// (local dev).
+	if !containsStr(loc, "redirect_uri=http") {
+		t.Errorf("expected http redirect_uri without proxy, got: %s", loc)
 	}
 }
 

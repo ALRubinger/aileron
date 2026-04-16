@@ -104,11 +104,7 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 	provider := model.ConnectedAccountProvider(providerStr)
 	state := s.newID()
 
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
-	}
-	redirectURL := scheme + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
+	redirectURL := requestScheme(r) + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
 
 	result, err := s.accountService.AuthorizationURL(r.Context(), provider, state, redirectURL)
 	if err != nil {
@@ -155,11 +151,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 
 	provider := model.ConnectedAccountProvider(providerStr)
 
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
-	}
-	redirectURL := scheme + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
+	redirectURL := requestScheme(r) + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
 
 	// TEE mode: forward the OAuth code to the enclave. The enclave exchanges
 	// the code for tokens, encrypts them with the user's KEK, and returns
@@ -238,6 +230,20 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	}
 
 	http.Redirect(w, r, "/settings", http.StatusFound)
+}
+
+// requestScheme returns "https" or "http" based on the request. It checks
+// X-Forwarded-Proto first (set by reverse proxies like Railway, Cloudflare)
+// then falls back to r.TLS. Defaults to "https" when behind a proxy that
+// terminates TLS — the Go server sees plain HTTP but the client used HTTPS.
+func requestScheme(r *http.Request) string {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 func connectedAccountToAPI(a model.ConnectedAccount) api.ConnectedAccount {
