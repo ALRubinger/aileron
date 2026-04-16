@@ -157,6 +157,48 @@ func TestConnector_GetThread_Success(t *testing.T) {
 	}
 }
 
+func TestConnector_Search_WithMaxResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":            []map[string]any{},
+			"resultSizeEstimate": 0,
+		})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
+		"query":       "test",
+		"max_results": float64(5),
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConnector_OAuthTokenFormat(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":            []map[string]any{},
+			"resultSizeEstimate": 0,
+		})
+	}))
+	defer server.Close()
+
+	token, _ := json.Marshal(map[string]any{
+		"access_token": "oauth2-format-token",
+		"token_type":   "bearer",
+		"expiry":       "2026-12-31T00:00:00Z",
+	})
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{"query": "test"}, token)
+	if err != nil {
+		t.Fatalf("unexpected error with oauth2 token format: %v", err)
+	}
+}
+
 func TestConnector_Search_MissingQuery(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
 	c := gmailsource.New()
