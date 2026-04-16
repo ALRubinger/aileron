@@ -241,6 +241,78 @@ func TestDeleteConnectedAccount_Unauthorized(t *testing.T) {
 	}
 }
 
+func TestWriteJSON_MarshalError(t *testing.T) {
+	w := httptest.NewRecorder()
+	// A channel cannot be JSON-marshaled — triggers the error path.
+	writeJSON(w, http.StatusOK, map[string]any{"bad": make(chan int)})
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on marshal failure, got %d", w.Code)
+	}
+	if w.Body.Len() == 0 {
+		t.Fatal("expected error body, got empty")
+	}
+}
+
+func TestWriteJSON_Success(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeJSON(w, http.StatusOK, map[string]any{"items": []string{}})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Body.Len() == 0 {
+		t.Fatal("expected non-empty body")
+	}
+}
+
+func TestListConnectedAccounts_SlackWithEmptyEmail(t *testing.T) {
+	srv := newConnectedAccountServerWithAuth()
+	ctx := context.Background()
+
+	// Slack accounts have no email — this previously caused a silent
+	// JSON marshal failure (200 with empty body) because
+	// openapi_types.Email rejects empty strings in MarshalJSON.
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:             "conn_slack",
+		UserID:         "usr_a",
+		Provider:       model.ConnectedAccountProviderSlack,
+		Email:          "", // empty — Slack OAuth doesn't return email
+		Scopes:         []string{"channels:history"},
+		Status:         model.ConnectedAccountStatusActive,
+		ExternalUserID: "U123",
+		ExternalTeamID: "T001",
+	})
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connected-accounts", "", userAClaims)
+	srv.ListConnectedAccounts(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if w.Body.Len() == 0 {
+		t.Fatal("expected non-empty response body (was previously 0 bytes due to Email marshal failure)")
+	}
+
+	var resp struct {
+		Items []api.ConnectedAccount `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(resp.Items))
+	}
+	if *resp.Items[0].Id != "conn_slack" {
+		t.Errorf("expected conn_slack, got %s", *resp.Items[0].Id)
+	}
+	// Email should be nil (omitted), not an empty string.
+	if resp.Items[0].Email != nil {
+		t.Errorf("expected nil email for Slack account, got %v", resp.Items[0].Email)
+	}
+}
+
 func TestConnectAccount_RedirectsToGoogle(t *testing.T) {
 	srv := newConnectedAccountServer()
 	reg := account.NewRegistry()

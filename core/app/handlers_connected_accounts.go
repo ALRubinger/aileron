@@ -249,17 +249,23 @@ func requestScheme(r *http.Request) string {
 func connectedAccountToAPI(a model.ConnectedAccount) api.ConnectedAccount {
 	provider := api.ConnectedAccountProvider(a.Provider)
 	status := api.ConnectedAccountStatus(a.Status)
-	email := openapi_types.Email(a.Email)
 	createdAt := a.CreatedAt
 	updatedAt := a.UpdatedAt
-	return api.ConnectedAccount{
+	result := api.ConnectedAccount{
 		Id:        &a.ID,
 		UserId:    &a.UserID,
 		Provider:  &provider,
-		Email:     &email,
 		Scopes:    &a.Scopes,
 		Status:    &status,
 		CreatedAt: &createdAt,
 		UpdatedAt: &updatedAt,
 	}
+	// Only set Email when non-empty — openapi_types.Email validates via
+	// regex on marshal and rejects empty strings, which causes silent
+	// JSON encoding failures (200 with empty body).
+	if a.Email != "" {
+		email := openapi_types.Email(a.Email)
+		result.Email = &email
+	}
+	return result
 }

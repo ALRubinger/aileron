@@ -74,9 +74,18 @@ type apiServer struct {
 // --- JSON helpers ---
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		// Log to stderr since we don't have the logger here.
+		// This should never happen with well-formed data — if it does,
+		// it's a bug (e.g. a type with a broken MarshalJSON).
+		slog.Error("writeJSON: marshal failed", "error", err)
+		http.Error(w, `{"error":{"code":"internal_error","message":"response serialization failed"}}`, http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	w.Write(data)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
