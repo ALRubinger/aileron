@@ -337,6 +337,70 @@ func TestConnector_DriveSearch_WithMaxResults(t *testing.T) {
 	}
 }
 
+func TestConnector_DriveGetDoc_LargeContent(t *testing.T) {
+	// Generate content > 20KB to test truncation.
+	largeContent := make([]byte, 25000)
+	for i := range largeContent {
+		largeContent[i] = 'x'
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write(largeContent)
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	result, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{
+		"file_id": "doc_big",
+	}, testToken())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content := result["content"].(string)
+	if !containsStr(content, "truncated") {
+		t.Error("expected truncation marker in large document")
+	}
+}
+
+func TestConnector_Search_IntMaxResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":           []map[string]any{},
+			"resultSizeEstimate": 0,
+		})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	// Test with int type (not float64).
+	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
+		"query":       "test",
+		"max_results": 3,
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConnector_DriveSearch_IntMaxResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{}})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	_, err := c.Execute(context.Background(), "drive_search", map[string]any{
+		"query":       "test",
+		"max_results": 3,
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestConnector_Search_MissingQuery(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
 	c := gmailsource.New()
