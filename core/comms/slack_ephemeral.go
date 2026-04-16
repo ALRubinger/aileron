@@ -25,16 +25,31 @@ func PostEphemeralDraft(ctx context.Context, msg SlackDraftMessage) error {
 	if msg.BotToken == "" {
 		return fmt.Errorf("slack: bot token is required for ephemeral messages")
 	}
+	if msg.Channel == "" {
+		return fmt.Errorf("slack: channel is required")
+	}
+	if msg.UserID == "" {
+		return fmt.Errorf("slack: user ID is required")
+	}
 
 	client := slack.New(msg.BotToken)
+	blocks := BuildDraftBlocks(msg)
 
-	// Truncate draft for preview if very long.
+	_, err := client.PostEphemeralContext(ctx, msg.Channel, msg.UserID,
+		slack.MsgOptionBlocks(blocks...),
+	)
+	return err
+}
+
+// BuildDraftBlocks constructs the Block Kit layout for a draft ephemeral
+// message. Exported for testing.
+func BuildDraftBlocks(msg SlackDraftMessage) []slack.Block {
 	draftPreview := msg.Draft
 	if len(draftPreview) > 500 {
 		draftPreview = draftPreview[:497] + "..."
 	}
 
-	blocks := []slack.Block{
+	return []slack.Block{
 		slack.NewSectionBlock(
 			slack.NewTextBlockObject("mrkdwn",
 				fmt.Sprintf("*Draft reply to %s:*\n\n%s", msg.Author, draftPreview),
@@ -53,9 +68,4 @@ func PostEphemeralDraft(ctx context.Context, msg SlackDraftMessage) error {
 			).WithStyle(slack.StyleDanger),
 		),
 	}
-
-	_, err := client.PostEphemeralContext(ctx, msg.Channel, msg.UserID,
-		slack.MsgOptionBlocks(blocks...),
-	)
-	return err
 }

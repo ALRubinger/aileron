@@ -587,6 +587,47 @@ func TestDeliverEphemeralDraft_NoSlackAccount(t *testing.T) {
 	}
 }
 
+func TestDeliverEphemeralDraft_BadTokenJSON(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte("not-json"), vault.Metadata{})
+
+	var posted bool
+	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
+		posted = true
+		return nil
+	}
+
+	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{ID: "dft_1", Channel: "C123", DraftBody: "test"})
+	if posted {
+		t.Error("should not post when token JSON is invalid")
+	}
+}
+
+func TestDeliverEphemeralDraft_PosterError(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
+		return fmt.Errorf("slack API unavailable")
+	}
+
+	// Should not panic — just logs the error.
+	srv.deliverEphemeralDraft(context.Background(), "usr_a", model.Draft{
+		ID: "dft_1", Channel: "C0BACKEND", Author: "Sarah", DraftBody: "test",
+	})
+}
+
+func TestRecordFeedback_NilStore(t *testing.T) {
+	srv := newDraftsTestServer()
+	srv.feedback = nil
+	// Should not panic.
+	srv.recordFeedback(context.Background(), model.Draft{ID: "dft_1"}, model.FeedbackSignalApproved)
+}
+
 func TestDeliverEphemeralDraft_NoExternalUserID(t *testing.T) {
 	srv := newDraftsTestServer()
 	ctx := context.Background()
