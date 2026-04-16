@@ -94,6 +94,7 @@ func (s *apiServer) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 	draft.UpdatedAt = time.Now().UTC()
 	s.drafts.Update(r.Context(), draft)
 
+	s.recordFeedback(r.Context(), draft, model.FeedbackSignalApproved)
 	writeJSON(w, http.StatusOK, draft)
 }
 
@@ -130,6 +131,7 @@ func (s *apiServer) handleEditDraft(w http.ResponseWriter, r *http.Request) {
 	draft.UpdatedAt = time.Now().UTC()
 	s.drafts.Update(r.Context(), draft)
 
+	s.recordFeedback(r.Context(), draft, model.FeedbackSignalEdited)
 	writeJSON(w, http.StatusOK, draft)
 }
 
@@ -151,6 +153,7 @@ func (s *apiServer) handleDiscardDraft(w http.ResponseWriter, r *http.Request) {
 	draft.UpdatedAt = time.Now().UTC()
 	s.drafts.Update(r.Context(), draft)
 
+	s.recordFeedback(r.Context(), draft, model.FeedbackSignalDiscarded)
 	writeJSON(w, http.StatusOK, draft)
 }
 
@@ -262,6 +265,57 @@ func (s *apiServer) handleDraftAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "unknown draft action")
 	}
+}
+
+// recordFeedback writes a feedback signal for a draft action.
+func (s *apiServer) recordFeedback(ctx context.Context, draft model.Draft, signal model.FeedbackSignal) {
+	if s.feedback == nil {
+		return
+	}
+	fb := model.DraftFeedback{
+		ID:        "fb_" + s.newID(),
+		UserID:    draft.UserID,
+		DraftID:   draft.ID,
+		Signal:    signal,
+		Service:   draft.Service,
+		Channel:   draft.Channel,
+		DraftBody: draft.DraftBody,
+		SentBody:  draft.SentBody,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := s.feedback.Create(ctx, fb); err != nil {
+		s.log.Error("failed to record feedback", "draft_id", draft.ID, "signal", signal, "error", err)
+	}
+}
+
+// handleListFeedback returns the user's draft feedback signals.
+// GET /v1/feedback?signal=edited
+func (s *apiServer) handleListFeedback(w http.ResponseWriter, r *http.Request) {
+	userID, _, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+
+	if s.feedback == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []model.DraftFeedback{}})
+		return
+	}
+
+	filter := store.DraftFeedbackFilter{UserID: userID}
+	if signalParam := r.URL.Query().Get("signal"); signalParam != "" {
+		signal := model.FeedbackSignal(signalParam)
+		filter.Signal = &signal
+	}
+
+	feedback, err := s.feedback.List(r.Context(), filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	if feedback == nil {
+		feedback = []model.DraftFeedback{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": feedback})
 }
 
 // createDraftFromMessage stores a generated draft as pending in the draft store.
