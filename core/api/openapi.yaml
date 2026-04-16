@@ -1261,7 +1261,7 @@ paths:
         required: true
         schema:
           type: string
-          enum: [gmail, google_calendar, outlook, microsoft_calendar, slack]
+          enum: [gmail, google_calendar, outlook, microsoft_calendar, slack, github_repos]
         description: External service provider to connect
     get:
       tags: [Connected Accounts]
@@ -1280,7 +1280,7 @@ paths:
         required: true
         schema:
           type: string
-          enum: [gmail, google_calendar, outlook, microsoft_calendar, slack]
+          enum: [gmail, google_calendar, outlook, microsoft_calendar, slack, github_repos]
     get:
       tags: [Connected Accounts]
       summary: Handle OAuth callback for account connection

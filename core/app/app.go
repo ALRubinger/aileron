@@ -15,6 +15,7 @@ import (
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/source"
+	githubsource "github.com/ALRubinger/aileron/core/source/github"
 	slacksource "github.com/ALRubinger/aileron/core/source/slack"
 	"github.com/ALRubinger/aileron/core/auth"
 	githubauth "github.com/ALRubinger/aileron/core/auth/github"
@@ -272,7 +273,14 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 				authCfg.GitHubClientID,
 				authCfg.GitHubClientSecret,
 			))
-			log.Info("registered GitHub OAuth provider")
+			accountRegistry.Register(account.NewGitHubAccountService(
+				authCfg.GitHubClientID,
+				authCfg.GitHubClientSecret,
+				connectedAccountStore,
+				v,
+			))
+			sourceReg.Register(githubsource.New())
+			log.Info("registered GitHub OAuth provider and source connector")
 		}
 
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)

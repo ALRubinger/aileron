@@ -11,6 +11,7 @@ const (
 	ConnectedAccountProviderOutlook           ConnectedAccountProvider = "outlook"
 	ConnectedAccountProviderMicrosoftCalendar ConnectedAccountProvider = "microsoft_calendar"
 	ConnectedAccountProviderSlack             ConnectedAccountProvider = "slack"
+	ConnectedAccountProviderGitHub            ConnectedAccountProvider = "github_repos"
 )
 
 // ConnectedAccountStatus tracks the lifecycle state of a connected account.
