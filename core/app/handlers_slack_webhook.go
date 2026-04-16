@@ -179,21 +179,30 @@ func (s *apiServer) processSlackEvent(payload slackWebhookPayload) {
 // verifySlackSignature validates the HMAC-SHA256 signature from Slack.
 func (s *apiServer) verifySlackSignature(r *http.Request, body []byte) bool {
 	if s.slackSigningSecret == "" {
+		s.log.Warn("slack signature: no signing secret configured")
 		return false
 	}
 
 	timestamp := r.Header.Get("X-Slack-Request-Timestamp")
 	signature := r.Header.Get("X-Slack-Signature")
 	if timestamp == "" || signature == "" {
+		s.log.Warn("slack signature: missing headers",
+			"has_timestamp", timestamp != "",
+			"has_signature", signature != "")
 		return false
 	}
 
 	// Reject stale timestamps (>5 minutes) to prevent replay attacks.
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
+		s.log.Warn("slack signature: invalid timestamp", "timestamp", timestamp)
 		return false
 	}
-	if math.Abs(float64(time.Now().Unix()-ts)) > 300 {
+	age := time.Now().Unix() - ts
+	if math.Abs(float64(age)) > 300 {
+		s.log.Warn("slack signature: stale timestamp",
+			"timestamp", timestamp,
+			"age_seconds", age)
 		return false
 	}
 
@@ -203,6 +212,15 @@ func (s *apiServer) verifySlackSignature(r *http.Request, body []byte) bool {
 	mac.Write([]byte(baseString))
 	expected := "v0=" + hex.EncodeToString(mac.Sum(nil))
 
-	return hmac.Equal([]byte(expected), []byte(signature))
+	if !hmac.Equal([]byte(expected), []byte(signature)) {
+		s.log.Warn("slack signature: mismatch",
+			"expected_prefix", expected[:20],
+			"received_prefix", signature[:min(len(signature), 20)],
+			"body_length", len(body),
+			"secret_length", len(s.slackSigningSecret))
+		return false
+	}
+
+	return true
 }
 
