@@ -32,11 +32,22 @@ var slackUserScopes = []string{
 	"users:read",
 }
 
+// slackBotScopes are the OAuth bot scopes requested for Slack.
+// The bot token is used for posting ephemeral messages (draft previews
+// visible only to the user). The bot is silent — it never posts visible
+// messages. Replies are sent via the user token.
+var slackBotScopes = []string{
+	"chat:write",
+}
+
 // slackOAuthResponse is the non-standard response from Slack's oauth.v2.access endpoint.
 type slackOAuthResponse struct {
-	OK         bool   `json:"ok"`
-	Error      string `json:"error,omitempty"`
-	AuthedUser struct {
+	OK          bool   `json:"ok"`
+	Error       string `json:"error,omitempty"`
+	AccessToken string `json:"access_token,omitempty"` // bot token (top-level)
+	TokenType   string `json:"token_type,omitempty"`
+	BotUserID   string `json:"bot_user_id,omitempty"`
+	AuthedUser  struct {
 		ID          string `json:"id"`
 		AccessToken string `json:"access_token"`
 		Scope       string `json:"scope"`
@@ -127,6 +138,7 @@ func (s *SlackService) Providers() []model.ConnectedAccountProvider {
 func (s *SlackService) AuthorizationURL(_ context.Context, _ model.ConnectedAccountProvider, state, redirectURL string) (*ConnectResult, error) {
 	params := url.Values{
 		"client_id":    {s.clientID},
+		"scope":        {strings.Join(slackBotScopes, ",")},
 		"user_scope":   {strings.Join(slackUserScopes, ",")},
 		"redirect_uri": {redirectURL},
 		"state":        {state},
@@ -157,14 +169,16 @@ func (s *SlackService) HandleCallback(ctx context.Context, _ model.ConnectedAcco
 		UpdatedAt:      time.Now().UTC(),
 	}
 
-	// Store the user token in the vault.
+	// Store both user and bot tokens in the vault.
 	tokenJSON, err := json.Marshal(map[string]string{
-		"access_token": resp.AuthedUser.AccessToken,
-		"token_type":   resp.AuthedUser.TokenType,
-		"scope":        resp.AuthedUser.Scope,
-		"team_id":      resp.Team.ID,
-		"team_name":    resp.Team.Name,
-		"user_id":      resp.AuthedUser.ID,
+		"access_token":     resp.AuthedUser.AccessToken,
+		"bot_access_token": resp.AccessToken,
+		"token_type":       resp.AuthedUser.TokenType,
+		"scope":            resp.AuthedUser.Scope,
+		"team_id":          resp.Team.ID,
+		"team_name":        resp.Team.Name,
+		"user_id":          resp.AuthedUser.ID,
+		"bot_user_id":      resp.BotUserID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshalling token: %w", err)

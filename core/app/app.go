@@ -267,10 +267,14 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 						"user_id", userID,
 						"channel", msg.Channel,
 						"draft_length", len(draftText))
+
+					// Post ephemeral draft preview in Slack.
+					server.deliverEphemeralDraft(ctx, userID, d)
 				}
 			}
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
-			log.Info("enabled Slack Events API webhook endpoint")
+			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
+			log.Info("enabled Slack Events API webhook and interaction endpoints")
 		}
 		if authCfg.GitHubEnabled() {
 			authRegistry.Register(githubauth.New(
@@ -310,8 +314,9 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		authHandler.RegisterRoutes(mux)
 
 		skipPaths := map[string]bool{
-			"/v1/health":                    true,
-			"/v1/webhooks/slack/events":     true,
+			"/v1/health":                        true,
+			"/v1/webhooks/slack/events":          true,
+			"/v1/webhooks/slack/interactions":    true,
 		}
 		handler = auth.Middleware(tokenIssuer, skipPaths)(handler)
 		log.Info("auth middleware enabled")

@@ -318,6 +318,67 @@ func (s *apiServer) handleListFeedback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": feedback})
 }
 
+// deliverEphemeralDraft posts an ephemeral Block Kit message in the Slack
+// channel where the original message was, showing the draft with
+// approve/edit/discard buttons. Only the target user sees it.
+func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, draft model.Draft) {
+	slackProvider := model.ConnectedAccountProviderSlack
+	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
+		UserID:   userID,
+		Provider: &slackProvider,
+	})
+	if err != nil || len(accounts) == 0 {
+		s.log.Debug("ephemeral: no slack account for ephemeral delivery", "user_id", userID)
+		return
+	}
+
+	acct := accounts[0]
+
+	// Get the token data from vault.
+	secret, err := s.vault.Get(ctx, acct.VaultPath())
+	if err != nil {
+		s.log.Debug("ephemeral: failed to get vault token", "user_id", userID, "error", err)
+		return
+	}
+
+	var tokenData map[string]string
+	if err := json.Unmarshal(secret.Value, &tokenData); err != nil {
+		s.log.Debug("ephemeral: failed to parse token", "user_id", userID, "error", err)
+		return
+	}
+
+	botToken := tokenData["bot_access_token"]
+	if botToken == "" {
+		s.log.Debug("ephemeral: no bot token available", "user_id", userID)
+		return
+	}
+
+	slackUserID := acct.ExternalUserID
+	if slackUserID == "" {
+		s.log.Debug("ephemeral: no slack user ID", "user_id", userID)
+		return
+	}
+
+	err = comms.PostEphemeralDraft(ctx, comms.SlackDraftMessage{
+		BotToken: botToken,
+		Channel:  draft.Channel,
+		UserID:   slackUserID,
+		DraftID:  draft.ID,
+		Author:   draft.Author,
+		Body:     draft.MessageBody,
+		Draft:    draft.DraftBody,
+	})
+	if err != nil {
+		s.log.Error("ephemeral: failed to post", "user_id", userID, "draft_id", draft.ID, "error", err)
+		return
+	}
+
+	s.log.Info("ephemeral draft delivered",
+		"draft_id", draft.ID,
+		"user_id", userID,
+		"channel", draft.Channel)
+}
+
 // createDraftFromMessage stores a generated draft as pending in the draft store.
 // Extracted from the onSlackMessage closure so it can be unit tested.
 func (s *apiServer) createDraftFromMessage(ctx context.Context, userID string, msg comms.IncomingMessage, draftText string) (model.Draft, error) {
