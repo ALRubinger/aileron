@@ -15,7 +15,9 @@ import (
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/source"
+	calendarsource "github.com/ALRubinger/aileron/core/source/calendar"
 	githubsource "github.com/ALRubinger/aileron/core/source/github"
+	gmailsource "github.com/ALRubinger/aileron/core/source/gmail"
 	slacksource "github.com/ALRubinger/aileron/core/source/slack"
 	"github.com/ALRubinger/aileron/core/auth"
 	githubauth "github.com/ALRubinger/aileron/core/auth/github"
@@ -211,7 +213,9 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 				connectedAccountStore,
 				v,
 			))
-			log.Info("enabled Google connected accounts (Gmail, Calendar)")
+			sourceReg.Register(gmailsource.New())
+			sourceReg.Register(calendarsource.New())
+			log.Info("enabled Google connected accounts and source connectors (Gmail, Calendar)")
 		}
 
 		if authCfg.SlackEnabled() {
