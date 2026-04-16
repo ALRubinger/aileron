@@ -31,8 +31,9 @@ type GitHubAccountService struct {
 	vault        vault.Vault
 
 	// Testing hooks.
-	exchangeToken tokenExchanger
+	exchangeToken    tokenExchanger
 	endpointOverride oauth2.Endpoint
+	userInfoURL      string // overrides https://api.github.com/user for testing
 }
 
 // NewGitHubAccountService creates a service for GitHub connected accounts.
@@ -49,6 +50,13 @@ func NewGitHubAccountService(clientID, clientSecret string, accounts store.Conne
 func (s *GitHubAccountService) WithEndpoint(endpoint oauth2.Endpoint) *GitHubAccountService {
 	cp := *s
 	cp.endpointOverride = endpoint
+	return &cp
+}
+
+// WithUserInfoURL returns a shallow copy with an overridden user info URL (for testing).
+func (s *GitHubAccountService) WithUserInfoURL(url string) *GitHubAccountService {
+	cp := *s
+	cp.userInfoURL = url
 	return &cp
 }
 
@@ -112,7 +120,11 @@ func (s *GitHubAccountService) HandleCallback(ctx context.Context, _ model.Conne
 	}
 
 	// Fetch GitHub username.
-	username, err := fetchGitHubUsername(ctx, cfg, token)
+	userInfoURL := "https://api.github.com/user"
+	if s.userInfoURL != "" {
+		userInfoURL = s.userInfoURL
+	}
+	username, err := fetchGitHubUsername(ctx, cfg, token, userInfoURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetching GitHub user: %w", err)
 	}
@@ -170,9 +182,9 @@ func (s *GitHubAccountService) Disconnect(ctx context.Context, accountID string)
 }
 
 // fetchGitHubUsername calls the GitHub user API to get the username.
-func fetchGitHubUsername(ctx context.Context, cfg *oauth2.Config, token *oauth2.Token) (string, error) {
+func fetchGitHubUsername(ctx context.Context, cfg *oauth2.Config, token *oauth2.Token, userInfoURL string) (string, error) {
 	client := cfg.Client(ctx, token)
-	resp, err := client.Get("https://api.github.com/user")
+	resp, err := client.Get(userInfoURL)
 	if err != nil {
 		return "", err
 	}
