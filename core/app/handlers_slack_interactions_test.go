@@ -54,9 +54,18 @@ func signedInteractionRequest(payloadJSON string) (*http.Request, string) {
 	return r, ts
 }
 
+func newMockResponseURLServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
 func TestInteraction_ApproveDraft(t *testing.T) {
 	srv := newInteractionTestServer()
 	ctx := context.Background()
+
+	responseServer := newMockResponseURLServer()
+	defer responseServer.Close()
 
 	// Seed a pending draft.
 	srv.drafts.Create(ctx, model.Draft{
@@ -83,7 +92,7 @@ func TestInteraction_ApproveDraft(t *testing.T) {
 		"actions": []map[string]any{
 			{"action_id": "approve_draft", "value": "dft_1"},
 		},
-		"response_url": "",
+		"response_url": responseServer.URL,
 	})
 
 	w := httptest.NewRecorder()
@@ -112,15 +121,19 @@ func TestInteraction_DiscardDraft(t *testing.T) {
 	srv := newInteractionTestServer()
 	ctx := context.Background()
 
+	responseServer := newMockResponseURLServer()
+	defer responseServer.Close()
+
 	srv.drafts.Create(ctx, model.Draft{
 		ID: "dft_1", UserID: "usr_a", Status: model.DraftStatusPending,
 		DraftBody: "draft text",
 	})
 
 	payload, _ := json.Marshal(map[string]any{
-		"type":    "block_actions",
-		"user":    map[string]any{"id": "U123"},
-		"actions": []map[string]any{{"action_id": "discard_draft", "value": "dft_1"}},
+		"type":         "block_actions",
+		"user":         map[string]any{"id": "U123"},
+		"actions":      []map[string]any{{"action_id": "discard_draft", "value": "dft_1"}},
+		"response_url": responseServer.URL,
 	})
 
 	w := httptest.NewRecorder()
@@ -245,9 +258,18 @@ func TestInteraction_AlreadyActioned(t *testing.T) {
 	}
 }
 
+func TestInteraction_RespondToInteraction_EmptyURL(t *testing.T) {
+	srv := newInteractionTestServer()
+	// Should not panic with empty response URL.
+	srv.respondToInteraction("", "test message")
+}
+
 func TestInteraction_EditDraft(t *testing.T) {
 	srv := newInteractionTestServer()
 	ctx := context.Background()
+
+	responseServer := newMockResponseURLServer()
+	defer responseServer.Close()
 
 	srv.drafts.Create(ctx, model.Draft{
 		ID: "dft_1", UserID: "usr_a", Status: model.DraftStatusPending,
@@ -255,9 +277,10 @@ func TestInteraction_EditDraft(t *testing.T) {
 	})
 
 	payload, _ := json.Marshal(map[string]any{
-		"type":    "block_actions",
-		"user":    map[string]any{"id": "U123"},
-		"actions": []map[string]any{{"action_id": "edit_draft", "value": "dft_1"}},
+		"type":         "block_actions",
+		"user":         map[string]any{"id": "U123"},
+		"actions":      []map[string]any{{"action_id": "edit_draft", "value": "dft_1"}},
+		"response_url": responseServer.URL,
 	})
 
 	w := httptest.NewRecorder()
