@@ -10,6 +10,8 @@ export default defineConfig({
 		globals: true,
 		setupFiles: ['src/tests/setup.ts'],
 		restoreMocks: true,
+		reporters: ['default', 'junit'],
+		outputFile: { junit: 'test-results/junit-vitest.xml' },
 		coverage: {
 			provider: 'v8',
 			reporter: ['text', 'lcov'],

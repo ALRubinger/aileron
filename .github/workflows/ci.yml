@@ -151,6 +151,13 @@ jobs:
           files: ui/coverage/lcov.info
           flags: ui
 
+      - name: Upload UI test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ui/test-results/junit-vitest.xml,ui/test-results/junit-playwright.xml
+
   build:
     name: Build Docker Images
     needs: generate
