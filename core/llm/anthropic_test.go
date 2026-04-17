@@ -69,6 +69,76 @@ func anthropicToolUseResponse(toolID, toolName string, input map[string]any) htt
 	}
 }
 
+func TestConvertTools_SchemaStructure(t *testing.T) {
+	// This test validates that the tool input_schema has the correct structure
+	// for the Anthropic API. Previously, properties were double-nested:
+	//   input_schema.properties = {"properties": {...}, "required": [...], "type": "object"}
+	// which Anthropic rejected with "JSON schema is invalid."
+	// The correct structure is:
+	//   input_schema.properties = {"channel": {"type": "string", ...}}
+	//   input_schema.required = ["channel"]
+
+	tools := llm.ConvertTools([]source.ToolDefinition{
+		{
+			Name:        "slack_channel_history",
+			Description: "Get channel messages",
+			Parameters: []source.ToolParam{
+				{Name: "channel", Type: "string", Description: "Channel ID", Required: true},
+				{Name: "limit", Type: "integer", Description: "Max results", Required: false},
+			},
+		},
+	})
+
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+
+	// Marshal the tool to JSON and inspect the schema structure.
+	toolJSON, err := json.Marshal(tools[0])
+	if err != nil {
+		t.Fatalf("failed to marshal tool: %v", err)
+	}
+
+	var toolMap map[string]any
+	json.Unmarshal(toolJSON, &toolMap)
+
+	schema, ok := toolMap["input_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected input_schema to be an object, got %T", toolMap["input_schema"])
+	}
+
+	// Properties should contain "channel" and "limit" directly — NOT a nested
+	// {"properties": ..., "type": "object"} wrapper.
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected properties to be an object, got %T", schema["properties"])
+	}
+
+	if _, hasChannel := props["channel"]; !hasChannel {
+		t.Error("expected 'channel' in properties")
+	}
+	if _, hasLimit := props["limit"]; !hasLimit {
+		t.Error("expected 'limit' in properties")
+	}
+
+	// Properties should NOT contain a nested "type" key — that was the bug.
+	if _, hasNestedType := props["type"]; hasNestedType {
+		t.Error("properties contains nested 'type' key — schema is double-nested (the bug)")
+	}
+	if _, hasNestedRequired := props["required"]; hasNestedRequired {
+		t.Error("properties contains nested 'required' key — schema is double-nested (the bug)")
+	}
+
+	// Required should be at the schema level, containing "channel".
+	required, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatalf("expected required to be an array, got %T", schema["required"])
+	}
+	if len(required) != 1 || required[0] != "channel" {
+		t.Errorf("expected required=[channel], got %v", required)
+	}
+}
+
 func TestAnthropicClient_SimpleTextGeneration(t *testing.T) {
 	server := mockAnthropicServer(anthropicTextResponse("Hello, I'm Claude."))
 	defer server.Close()
