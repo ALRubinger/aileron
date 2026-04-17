@@ -508,8 +508,8 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 	if len(accounts) != 1 {
 		t.Fatalf("expected 1 connected account, got %d", len(accounts))
 	}
-	if accounts[0].Email != "testuser@gmail.com" {
-		t.Fatalf("expected email testuser@gmail.com, got %q", accounts[0].Email)
+	if accounts[0].ExternalUserID != "testuser@gmail.com" {
+		t.Fatalf("expected ExternalUserID testuser@gmail.com, got %q", accounts[0].ExternalUserID)
 	}
 
 	// Verify the encrypted token was stored in the vault.

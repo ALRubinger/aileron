@@ -168,11 +168,8 @@ func TestGitHubService_HandleCallback_Success(t *testing.T) {
 	if result.Account.ExternalUserID != "alrubinger" {
 		t.Errorf("expected alrubinger, got %s", result.Account.ExternalUserID)
 	}
-	// Email must be empty — GitHub username is not a valid email and
-	// openapi_types.Email rejects non-email strings during JSON marshal.
-	if result.Account.Email != "" {
-		t.Errorf("expected empty email for GitHub account, got %q", result.Account.Email)
-	}
+	// ExternalUserID should be the GitHub username.
+	// (Email field was removed from the model.)
 
 	// Verify stored in accounts.
 	listed, _ := accounts.List(context.Background(), store.ConnectedAccountFilter{UserID: "usr_test"})

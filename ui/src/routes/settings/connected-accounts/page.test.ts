@@ -20,7 +20,7 @@ const mockAccounts = [
 	{
 		id: 'conn_1',
 		provider: 'slack',
-		email: 'user@workspace.slack.com',
+		external_user_id: 'U123SLACK',
 		status: 'active',
 		scopes: ['channels:read', 'chat:write'],
 		created_at: '2025-01-15T00:00:00Z',
@@ -29,7 +29,7 @@ const mockAccounts = [
 	{
 		id: 'conn_2',
 		provider: 'github_repos',
-		email: 'user@github.com',
+		external_user_id: 'alrubinger',
 		status: 'expired',
 		scopes: ['repo'],
 		created_at: '2025-02-20T00:00:00Z',
@@ -55,8 +55,8 @@ describe('Connected Accounts Page', () => {
 			expect(screen.getByText('Slack')).toBeInTheDocument();
 		});
 		expect(screen.getByText('GitHub')).toBeInTheDocument();
-		expect(screen.getByText('user@workspace.slack.com')).toBeInTheDocument();
-		expect(screen.getByText('user@github.com')).toBeInTheDocument();
+		expect(screen.getByText('U123SLACK')).toBeInTheDocument();
+		expect(screen.getByText('alrubinger')).toBeInTheDocument();
 	});
 
 	it('shows status badges for each account', async () => {

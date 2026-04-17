@@ -15,7 +15,6 @@ func newTestAccount(id, userID string, provider model.ConnectedAccountProvider) 
 		ID:        id,
 		UserID:    userID,
 		Provider:  provider,
-		Email:     "test@example.com",
 		Scopes:    []string{"email", "calendar"},
 		Status:    model.ConnectedAccountStatusActive,
 		CreatedAt: time.Now().UTC(),

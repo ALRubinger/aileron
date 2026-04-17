@@ -105,8 +105,8 @@ func TestGoogleService_HandleCallback_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.Account.Email != "user@example.com" {
-		t.Errorf("expected user@example.com, got %s", result.Account.Email)
+	if result.Account.ExternalUserID != "user@example.com" {
+		t.Errorf("expected user@example.com, got %s", result.Account.ExternalUserID)
 	}
 	if result.Account.Provider != model.ConnectedAccountProviderGmail {
 		t.Errorf("expected gmail, got %s", result.Account.Provider)
@@ -223,7 +223,6 @@ func TestGoogleService_ListAndDisconnect(t *testing.T) {
 		ID:       "conn_test",
 		UserID:   "usr_1",
 		Provider: model.ConnectedAccountProviderGmail,
-		Email:    "test@example.com",
 		Scopes:   []string{"gmail.readonly"},
 		Status:   model.ConnectedAccountStatusActive,
 	}
@@ -244,8 +243,8 @@ func TestGoogleService_ListAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Email != "test@example.com" {
-		t.Errorf("expected test@example.com, got %s", got.Email)
+	if got.ExternalUserID != "" {
+		t.Errorf("expected empty ExternalUserID, got %s", got.ExternalUserID)
 	}
 
 	// Disconnect.

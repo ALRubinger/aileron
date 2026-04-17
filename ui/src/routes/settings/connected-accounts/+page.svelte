@@ -11,7 +11,7 @@
 	interface ConnectedAccount {
 		id: string;
 		provider: string;
-		email: string;
+		external_user_id: string;
 		status: string;
 		scopes: string[];
 		created_at: string;
@@ -144,7 +144,7 @@
 										</Badge>
 									</div>
 									<span class="text-sm text-muted-foreground">
-										{account.email}
+										{account.external_user_id}
 									</span>
 									<span class="text-xs text-muted-foreground">
 										Connected {formatDate(account.created_at)}

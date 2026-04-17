@@ -44,7 +44,6 @@ func seedConnectedAccount(ctx context.Context, s store.ConnectedAccountStore, id
 		ID:       id,
 		UserID:   userID,
 		Provider: provider,
-		Email:    "test@example.com",
 		Scopes:   []string{"gmail.readonly"},
 		Status:   model.ConnectedAccountStatusActive,
 	})
@@ -266,18 +265,14 @@ func TestWriteJSON_Success(t *testing.T) {
 	}
 }
 
-func TestListConnectedAccounts_SlackWithEmptyEmail(t *testing.T) {
+func TestListConnectedAccounts_SlackAccount(t *testing.T) {
 	srv := newConnectedAccountServerWithAuth()
 	ctx := context.Background()
 
-	// Slack accounts have no email — this previously caused a silent
-	// JSON marshal failure (200 with empty body) because
-	// openapi_types.Email rejects empty strings in MarshalJSON.
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID:             "conn_slack",
 		UserID:         "usr_a",
 		Provider:       model.ConnectedAccountProviderSlack,
-		Email:          "", // empty — Slack OAuth doesn't return email
 		Scopes:         []string{"channels:history"},
 		Status:         model.ConnectedAccountStatusActive,
 		ExternalUserID: "U123",
@@ -292,7 +287,7 @@ func TestListConnectedAccounts_SlackWithEmptyEmail(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	if w.Body.Len() == 0 {
-		t.Fatal("expected non-empty response body (was previously 0 bytes due to Email marshal failure)")
+		t.Fatal("expected non-empty response body")
 	}
 
 	var resp struct {
@@ -307,9 +302,8 @@ func TestListConnectedAccounts_SlackWithEmptyEmail(t *testing.T) {
 	if *resp.Items[0].Id != "conn_slack" {
 		t.Errorf("expected conn_slack, got %s", *resp.Items[0].Id)
 	}
-	// Email should be nil (omitted), not an empty string.
-	if resp.Items[0].Email != nil {
-		t.Errorf("expected nil email for Slack account, got %v", resp.Items[0].Email)
+	if resp.Items[0].ExternalUserId == nil || *resp.Items[0].ExternalUserId != "U123" {
+		t.Errorf("expected ExternalUserId U123, got %v", resp.Items[0].ExternalUserId)
 	}
 }
 
@@ -641,12 +635,12 @@ func TestConnectAccount_RedirectURL_HTTP_WithoutProxy(t *testing.T) {
 
 func TestConnectedAccountToAPI(t *testing.T) {
 	acc := model.ConnectedAccount{
-		ID:       "conn_1",
-		UserID:   "usr_1",
-		Provider: model.ConnectedAccountProviderGmail,
-		Email:    "test@example.com",
-		Scopes:   []string{"gmail.readonly"},
-		Status:   model.ConnectedAccountStatusActive,
+		ID:             "conn_1",
+		UserID:         "usr_1",
+		Provider:       model.ConnectedAccountProviderGmail,
+		Scopes:         []string{"gmail.readonly"},
+		Status:         model.ConnectedAccountStatusActive,
+		ExternalUserID: "test@example.com",
 	}
 	result := connectedAccountToAPI(acc)
 	if *result.Id != "conn_1" {
@@ -655,7 +649,7 @@ func TestConnectedAccountToAPI(t *testing.T) {
 	if string(*result.Provider) != "gmail" {
 		t.Errorf("expected gmail, got %s", *result.Provider)
 	}
-	if result.Email == nil || string(*result.Email) != "test@example.com" {
+	if result.ExternalUserId == nil || *result.ExternalUserId != "test@example.com" {
 		t.Errorf("expected test@example.com")
 	}
 }

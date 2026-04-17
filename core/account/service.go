@@ -208,14 +208,14 @@ func (s *GoogleService) HandleCallback(ctx context.Context, provider model.Conne
 	pc := googleProviders[provider]
 
 	account := model.ConnectedAccount{
-		ID:        "conn_" + uuid.New().String(),
-		UserID:    req.UserID,
-		Provider:  provider,
-		Email:     email,
-		Scopes:    pc.scopes,
-		Status:    model.ConnectedAccountStatusActive,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		ID:             "conn_" + uuid.New().String(),
+		UserID:         req.UserID,
+		Provider:       provider,
+		Scopes:         pc.scopes,
+		Status:         model.ConnectedAccountStatusActive,
+		ExternalUserID: email,
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
 	}
 
 	// Store the refresh token in the vault.
