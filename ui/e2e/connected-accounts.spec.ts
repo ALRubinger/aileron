@@ -4,7 +4,7 @@ const mockAccounts = [
 	{
 		id: 'conn_1',
 		provider: 'slack',
-		email: 'user@workspace.slack.com',
+		external_user_id: 'U123SLACK',
 		status: 'active',
 		scopes: ['channels:read', 'chat:write'],
 		created_at: '2025-01-15T00:00:00Z',
@@ -13,7 +13,7 @@ const mockAccounts = [
 	{
 		id: 'conn_2',
 		provider: 'gmail',
-		email: 'user@gmail.com',
+		external_user_id: 'user@gmail.com',
 		status: 'active',
 		scopes: ['gmail.readonly'],
 		created_at: '2025-02-20T00:00:00Z',
@@ -66,7 +66,7 @@ test.describe('Connected Accounts Page', () => {
 
 		// Connected accounts section
 		await expect(page.getByText('Slack', { exact: true })).toBeVisible();
-		await expect(page.getByText('user@workspace.slack.com')).toBeVisible();
+		await expect(page.getByText('U123SLACK')).toBeVisible();
 		await expect(page.getByText('Gmail', { exact: true })).toBeVisible();
 		await expect(page.getByText('user@gmail.com')).toBeVisible();
 
