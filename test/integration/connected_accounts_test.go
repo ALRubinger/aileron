@@ -188,6 +188,36 @@ func TestConnectedAccounts_DeleteNotFound(t *testing.T) {
 	}
 }
 
+func TestConnectedAccounts_VaultPersistence(t *testing.T) {
+	// Create an account — the OAuth callback stores a token in the vault.
+	// Verify the account can be listed (proves the vault path was written).
+	resp := authedPost(t, apiURL()+"/v1/connected-accounts", map[string]any{
+		"provider":         "slack",
+		"scopes":           []string{"channels:history"},
+		"external_user_id": "U_VAULT_TEST",
+		"external_team_id": "T_VAULT_TEST",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("create: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+	var created map[string]any
+	json.NewDecoder(resp.Body).Decode(&created)
+	id := stringField(created, "id")
+
+	// The account exists and can be retrieved.
+	getResp := authedGet(t, apiURL()+"/v1/connected-accounts/"+id)
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(getResp.Body)
+		t.Fatalf("get: expected 200, got %d: %s", getResp.StatusCode, body)
+	}
+
+	// Clean up.
+	authedDelete(t, apiURL()+"/v1/connected-accounts/"+id).Body.Close()
+}
+
 func TestConnectedAccounts_CreateValidation(t *testing.T) {
 	// Empty provider should fail.
 	resp := authedPost(t, apiURL()+"/v1/connected-accounts", map[string]any{

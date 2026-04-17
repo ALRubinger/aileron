@@ -27,11 +27,12 @@ func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.
 	}
 
 	var req struct {
-		Provider       string   `json:"provider"`
-		Email          string   `json:"email"`
-		Scopes         []string `json:"scopes"`
-		ExternalUserID string   `json:"external_user_id"`
-		ExternalTeamID string   `json:"external_team_id"`
+		Provider       string            `json:"provider"`
+		Email          string            `json:"email"`
+		Scopes         []string          `json:"scopes"`
+		ExternalUserID string            `json:"external_user_id"`
+		ExternalTeamID string            `json:"external_team_id"`
+		Token          map[string]string `json:"token,omitempty"` // optional: stored in vault
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
@@ -54,6 +55,21 @@ func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.
 		ExternalTeamID: req.ExternalTeamID,
 		CreatedAt:      now,
 		UpdatedAt:      now,
+	}
+
+	// Store token in vault if provided.
+	if len(req.Token) > 0 {
+		tokenJSON, _ := json.Marshal(req.Token)
+		if err := s.vault.Put(r.Context(), acct.VaultPath(), tokenJSON, vault.Metadata{
+			Type: "oauth_token",
+			Labels: map[string]string{
+				"provider": req.Provider,
+				"user_id":  userID,
+			},
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, "vault_error", err.Error())
+			return
+		}
 	}
 
 	if err := s.connectedAccounts.Create(r.Context(), acct); err != nil {
@@ -144,10 +160,18 @@ func (s *apiServer) DeleteConnectedAccount(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Always clean up the vault secret if it exists.
+	_ = s.vault.Delete(r.Context(), acc.VaultPath())
+
 	if s.accountService != nil {
 		if err := s.accountService.Disconnect(r.Context(), id); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
-			return
+			// Disconnect may fail if the account was created without a vault token
+			// (e.g. via POST /v1/connected-accounts without a token field).
+			// Fall through to delete the account record directly.
+			if err := s.connectedAccounts.Delete(r.Context(), id); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+				return
+			}
 		}
 	} else {
 		if err := s.connectedAccounts.Delete(r.Context(), id); err != nil {

@@ -63,7 +63,8 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	registry.Register(ctx, github.New())
 
 	// --- Vault ---
-	v := vault.NewMemVault()
+	// Start with in-memory vault; upgrade to Postgres when database is available.
+	var v vault.Vault = vault.NewMemVault()
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{
 			Type: "api_key",
@@ -195,14 +196,16 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.userKeyMaterials = userKeyMaterialStore
 		server.escrowTTL = authCfg.EscrowTTL()
 
-		// Switch to Postgres-backed stores now that the database is available.
+		// Switch to Postgres-backed stores and vault now that the database is available.
 		pgConnectedAccountStore := postgres.NewConnectedAccountStore(db)
 		server.connectedAccounts = pgConnectedAccountStore
 		server.drafts = postgres.NewDraftStore(db)
 		pgInstructionStore := postgres.NewUserInstructionStore(db)
 		server.instructions = pgInstructionStore
 		server.feedback = postgres.NewDraftFeedbackStore(db)
-		log.Info("using Postgres-backed stores for connected accounts, drafts, instructions, and feedback")
+		v = vault.NewPostgresVault(db.Pool)
+		server.vault = v
+		log.Info("using Postgres-backed stores and vault")
 
 		tokenIssuer := auth.NewTokenIssuer(
 			[]byte(authCfg.JWTSigningKey),
