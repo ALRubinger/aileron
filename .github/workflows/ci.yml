@@ -142,6 +142,11 @@ jobs:
         working-directory: ui
         run: pnpm test:e2e
 
+      - name: Prefix lcov paths with ui/
+        if: ${{ !cancelled() }}
+        working-directory: ui
+        run: sed -i 's|^SF:|SF:ui/|' coverage/lcov.info
+
       - name: Upload UI coverage to Codecov
         if: ${{ !cancelled() }}
         uses: codecov/codecov-action@v5
