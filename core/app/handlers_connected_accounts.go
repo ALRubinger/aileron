@@ -1,8 +1,8 @@
 package app
 
 import (
+	"encoding/json"
 	"net/http"
-
 	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
@@ -16,23 +16,81 @@ import (
 
 // --- Connected Accounts ---
 
-func (s *apiServer) ListConnectedAccounts(w http.ResponseWriter, r *http.Request) {
+// handleCreateConnectedAccount creates a connected account directly
+// (for programmatic/admin use and testing). The normal user flow is
+// the OAuth connect path (/v1/connect/{provider}).
+// POST /v1/connected-accounts
+func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.Request) {
 	userID, _, ok := s.requireAuth(w, r)
 	if !ok {
-		s.log.Warn("list connected accounts: auth failed")
 		return
 	}
 
-	s.log.Info("list connected accounts", "user_id", userID)
+	var req struct {
+		Provider       string   `json:"provider"`
+		Email          string   `json:"email"`
+		Scopes         []string `json:"scopes"`
+		ExternalUserID string   `json:"external_user_id"`
+		ExternalTeamID string   `json:"external_team_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+		return
+	}
+	if req.Provider == "" {
+		writeError(w, http.StatusBadRequest, "invalid_body", "provider is required")
+		return
+	}
 
-	accounts, err := s.connectedAccounts.List(r.Context(), store.ConnectedAccountFilter{UserID: userID})
-	if err != nil {
-		s.log.Error("list connected accounts: store error", "error", err)
+	now := time.Now().UTC()
+	acct := model.ConnectedAccount{
+		ID:             "conn_" + s.newID(),
+		UserID:         userID,
+		Provider:       model.ConnectedAccountProvider(req.Provider),
+		Email:          req.Email,
+		Scopes:         req.Scopes,
+		Status:         model.ConnectedAccountStatusActive,
+		ExternalUserID: req.ExternalUserID,
+		ExternalTeamID: req.ExternalTeamID,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	if err := s.connectedAccounts.Create(r.Context(), acct); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 
-	s.log.Info("list connected accounts: found", "count", len(accounts))
+	writeJSON(w, http.StatusCreated, connectedAccountToAPI(acct))
+}
+
+func (s *apiServer) ListConnectedAccounts(w http.ResponseWriter, r *http.Request) {
+	userID, _, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+
+	filter := store.ConnectedAccountFilter{UserID: userID}
+	if providerParam := r.URL.Query().Get("provider"); providerParam != "" {
+		provider := model.ConnectedAccountProvider(providerParam)
+		filter.Provider = &provider
+	}
+	if statusParam := r.URL.Query().Get("status"); statusParam != "" {
+		status := model.ConnectedAccountStatus(statusParam)
+		filter.Status = &status
+	}
+	if extUser := r.URL.Query().Get("external_user_id"); extUser != "" {
+		filter.ExternalUserID = extUser
+	}
+	if extTeam := r.URL.Query().Get("external_team_id"); extTeam != "" {
+		filter.ExternalTeamID = extTeam
+	}
+
+	accounts, err := s.connectedAccounts.List(r.Context(), filter)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 
 	items := make([]api.ConnectedAccount, 0, len(accounts))
 	for _, a := range accounts {

@@ -41,12 +41,6 @@ func (s *ConnectedAccountStore) Get(ctx context.Context, accountID string) (mode
 		`SELECT `+connectedAccountColumns+` FROM connected_accounts WHERE id = $1`, accountID)
 }
 
-func (s *ConnectedAccountStore) GetByUserAndProvider(ctx context.Context, userID string, provider model.ConnectedAccountProvider) (model.ConnectedAccount, error) {
-	return s.scanOne(ctx,
-		`SELECT `+connectedAccountColumns+` FROM connected_accounts WHERE user_id = $1 AND provider = $2`,
-		userID, string(provider))
-}
-
 func (s *ConnectedAccountStore) List(ctx context.Context, filter store.ConnectedAccountFilter) ([]model.ConnectedAccount, error) {
 	query := `SELECT ` + connectedAccountColumns + ` FROM connected_accounts WHERE 1=1`
 	args := []any{}
@@ -80,11 +74,6 @@ func (s *ConnectedAccountStore) List(ctx context.Context, filter store.Connected
 
 	query += " ORDER BY created_at ASC"
 
-	if filter.PageSize > 0 {
-		query += fmt.Sprintf(" LIMIT $%d", argIdx)
-		args = append(args, filter.PageSize)
-	}
-
 	rows, err := s.db.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -100,25 +89,6 @@ func (s *ConnectedAccountStore) List(ctx context.Context, filter store.Connected
 		accounts = append(accounts, a)
 	}
 	return accounts, rows.Err()
-}
-
-func (s *ConnectedAccountStore) Update(ctx context.Context, a model.ConnectedAccount) error {
-	scopes, _ := json.Marshal(a.Scopes)
-	tag, err := s.db.Pool.Exec(ctx,
-		`UPDATE connected_accounts
-		 SET provider=$2, email=$3, scopes=$4, status=$5,
-			 external_user_id=$6, external_team_id=$7, updated_at=$8
-		 WHERE id=$1`,
-		a.ID, string(a.Provider), a.Email, string(scopes),
-		string(a.Status), a.ExternalUserID, a.ExternalTeamID, a.UpdatedAt,
-	)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return &store.ErrNotFound{Entity: "connected_account", ID: a.ID}
-	}
-	return nil
 }
 
 func (s *ConnectedAccountStore) Delete(ctx context.Context, accountID string) error {

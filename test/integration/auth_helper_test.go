@@ -128,6 +128,29 @@ func authedDelete(t *testing.T, url string) *http.Response {
 	return resp
 }
 
+// authedPatch sends an authenticated PATCH request with JSON body.
+func authedPatch(t *testing.T, url string, body any) *http.Response {
+	t.Helper()
+	token := ensureAuth(t)
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req, err := http.NewRequest("PATCH", url, bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PATCH %s: %v", url, err)
+	}
+	return resp
+}
+
 // authedGet sends an authenticated GET request.
 func authedGet(t *testing.T, url string) *http.Response {
 	t.Helper()

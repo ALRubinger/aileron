@@ -36,17 +36,6 @@ func (s *ConnectedAccountStore) Get(_ context.Context, accountID string) (model.
 	return acc, nil
 }
 
-func (s *ConnectedAccountStore) GetByUserAndProvider(_ context.Context, userID string, provider model.ConnectedAccountProvider) (model.ConnectedAccount, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, acc := range s.accounts {
-		if acc.UserID == userID && acc.Provider == provider {
-			return acc, nil
-		}
-	}
-	return model.ConnectedAccount{}, &store.ErrNotFound{Entity: "connected_account", ID: userID + "/" + string(provider)}
-}
-
 func (s *ConnectedAccountStore) List(_ context.Context, filter store.ConnectedAccountFilter) ([]model.ConnectedAccount, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -72,15 +61,6 @@ func (s *ConnectedAccountStore) List(_ context.Context, filter store.ConnectedAc
 	return result, nil
 }
 
-func (s *ConnectedAccountStore) Update(_ context.Context, account model.ConnectedAccount) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.accounts[account.ID]; !ok {
-		return &store.ErrNotFound{Entity: "connected_account", ID: account.ID}
-	}
-	s.accounts[account.ID] = account
-	return nil
-}
 
 func (s *ConnectedAccountStore) Delete(_ context.Context, accountID string) error {
 	s.mu.Lock()

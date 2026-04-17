@@ -150,9 +150,14 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	mux.HandleFunc("DELETE /v1/instructions/", server.handleInstructionByID)
 
 	// Draft feedback API (context store envelope).
+	mux.HandleFunc("POST /v1/feedback", server.handleCreateFeedback)
 	mux.HandleFunc("GET /v1/feedback", server.handleListFeedback)
 
+	// Connected accounts — programmatic create (in addition to OAuth flow).
+	mux.HandleFunc("POST /v1/connected-accounts", server.handleCreateConnectedAccount)
+
 	// Draft lifecycle API.
+	mux.HandleFunc("POST /v1/drafts", server.handleCreateDraft)
 	mux.HandleFunc("GET /v1/drafts", server.handleListDrafts)
 	mux.HandleFunc("GET /v1/drafts/", server.handleGetDraft)
 	mux.HandleFunc("POST /v1/drafts/", server.handleDraftAction)

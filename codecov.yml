@@ -7,7 +7,7 @@ coverage:
     project:
       default:
         target: auto
-        threshold: 3%
+        threshold: 2%
         after_n_builds: 2
     patch: off
 
@@ -30,7 +30,6 @@ flags:
 
 ignore:
   - "core/api/gen/**"       # generated code (oapi-codegen) — DO NOT EDIT
-  - "core/store/postgres/**" # requires live PostgreSQL — covered by integration tests
   - "ui/**"                  # SvelteKit UI — needs its own test framework
   - "docs/**"                # documentation and ADRs
 

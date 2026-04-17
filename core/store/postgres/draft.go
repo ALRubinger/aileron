@@ -57,11 +57,6 @@ func (s *DraftStore) List(ctx context.Context, filter store.DraftFilter) ([]mode
 
 	query += " ORDER BY created_at DESC"
 
-	if filter.PageSize > 0 {
-		query += fmt.Sprintf(" LIMIT $%d", argIdx)
-		args = append(args, filter.PageSize)
-	}
-
 	rows, err := s.db.Pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
