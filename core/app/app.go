@@ -29,6 +29,7 @@ import (
 	"github.com/ALRubinger/aileron/core/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/core/notify"
 	"github.com/ALRubinger/aileron/core/policy"
+	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/store/postgres"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -216,36 +217,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		authRegistry := auth.NewRegistry()
 		accountRegistry := account.NewRegistry()
 
-		if authCfg.GoogleSigninEnabled() {
-			authRegistry.Register(googleauth.New(
-				authCfg.GoogleSigninClientID,
-				authCfg.GoogleSigninClientSecret,
-			))
-			log.Info("registered Google sign-in OAuth provider")
-		}
-
-		if authCfg.GoogleConnectorEnabled() {
-			accountRegistry.Register(account.NewGoogleService(
-				authCfg.GoogleConnectorClientID,
-				authCfg.GoogleConnectorClientSecret,
-				pgConnectedAccountStore,
-				v,
-			))
-			sourceReg.Register(gmailsource.New())
-			sourceReg.Register(calendarsource.New())
-			log.Info("enabled Google connected accounts and source connectors (Gmail, Calendar)")
-		}
-
-		if authCfg.SlackEnabled() {
-			accountRegistry.Register(account.NewSlackService(
-				authCfg.SlackClientID,
-				authCfg.SlackClientSecret,
-				pgConnectedAccountStore,
-				v,
-			))
-			sourceReg.Register(slacksource.New())
-			log.Info("enabled Slack connected accounts and source connector")
-		}
+		registerProviders(authCfg, authRegistry, accountRegistry, sourceReg, pgConnectedAccountStore, v, log)
 
 		if len(accountRegistry.Providers()) > 0 {
 			server.accountService = accountRegistry
@@ -293,24 +265,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
 			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
 			log.Info("enabled Slack Events API webhook and interaction endpoints")
-		}
-		if authCfg.GitHubSigninEnabled() {
-			authRegistry.Register(githubauth.New(
-				authCfg.GitHubSigninClientID,
-				authCfg.GitHubSigninClientSecret,
-			))
-			log.Info("registered GitHub sign-in OAuth provider")
-		}
-
-		if authCfg.GitHubConnectorEnabled() {
-			accountRegistry.Register(account.NewGitHubAccountService(
-				authCfg.GitHubConnectorClientID,
-				authCfg.GitHubConnectorClientSecret,
-				pgConnectedAccountStore,
-				v,
-			))
-			sourceReg.Register(githubsource.New())
-			log.Info("enabled GitHub connected accounts and source connector")
 		}
 
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)
@@ -363,4 +317,67 @@ func newMailer(log *slog.Logger, cfg *config.AuthConfig) auth.Mailer {
 	}
 	log.Warn("RESEND_API_KEY not set — verification codes will be printed to the log (dev mode)")
 	return auth.NewLogMailer(log)
+}
+
+// registerProviders populates the auth, account, and source registries based
+// on which OAuth providers are configured. Extracted from NewHandler so the
+// wiring logic can be tested without a database or HTTP server.
+func registerProviders(
+	cfg *config.AuthConfig,
+	authReg *auth.Registry,
+	accountReg *account.Registry,
+	sourceReg *source.Registry,
+	accounts store.ConnectedAccountStore,
+	v vault.Vault,
+	log *slog.Logger,
+) {
+	if cfg.GoogleSigninEnabled() {
+		authReg.Register(googleauth.New(
+			cfg.GoogleSigninClientID,
+			cfg.GoogleSigninClientSecret,
+		))
+		log.Info("registered Google sign-in OAuth provider")
+	}
+
+	if cfg.GoogleConnectorEnabled() {
+		accountReg.Register(account.NewGoogleService(
+			cfg.GoogleConnectorClientID,
+			cfg.GoogleConnectorClientSecret,
+			accounts,
+			v,
+		))
+		sourceReg.Register(gmailsource.New())
+		sourceReg.Register(calendarsource.New())
+		log.Info("enabled Google connected accounts and source connectors (Gmail, Calendar)")
+	}
+
+	if cfg.SlackEnabled() {
+		accountReg.Register(account.NewSlackService(
+			cfg.SlackClientID,
+			cfg.SlackClientSecret,
+			accounts,
+			v,
+		))
+		sourceReg.Register(slacksource.New())
+		log.Info("enabled Slack connected accounts and source connector")
+	}
+
+	if cfg.GitHubSigninEnabled() {
+		authReg.Register(githubauth.New(
+			cfg.GitHubSigninClientID,
+			cfg.GitHubSigninClientSecret,
+		))
+		log.Info("registered GitHub sign-in OAuth provider")
+	}
+
+	if cfg.GitHubConnectorEnabled() {
+		accountReg.Register(account.NewGitHubAccountService(
+			cfg.GitHubConnectorClientID,
+			cfg.GitHubConnectorClientSecret,
+			accounts,
+			v,
+		))
+		sourceReg.Register(githubsource.New())
+		log.Info("enabled GitHub connected accounts and source connector")
+	}
 }
