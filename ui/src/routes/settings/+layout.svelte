@@ -6,7 +6,8 @@
 
 	const navItems = [
 		{ href: '/settings/profile', label: 'Profile' },
-		{ href: '/settings/organization', label: 'Organization' }
+		{ href: '/settings/organization', label: 'Organization' },
+		{ href: '/settings/connected-accounts', label: 'Connected Accounts' }
 	];
 </script>
 

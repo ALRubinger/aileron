@@ -31,6 +31,16 @@ export function effectColor(effect: string): string {
 	}
 }
 
+/** Connected account status colors */
+export function connectedAccountStatusColor(status: string): string {
+	switch (status) {
+		case 'active': return 'var(--color-status-green)';
+		case 'expired': return 'var(--color-status-yellow)';
+		case 'revoked': return 'var(--color-status-red)';
+		default: return 'var(--color-muted-foreground)';
+	}
+}
+
 /** Trace event type colors */
 export function eventColor(eventType: string): string {
 	if (eventType.includes('submitted')) return 'var(--color-status-blue)';
