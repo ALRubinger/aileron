@@ -46,7 +46,7 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 		maxRounds = defaultMaxToolRounds
 	}
 
-	tools := convertTools(req.Tools)
+	tools := ConvertTools(req.Tools)
 
 	messages := []anthropic.MessageParam{
 		anthropic.NewUserMessage(anthropic.NewTextBlock(req.UserMessage)),
@@ -159,8 +159,9 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 	return nil, fmt.Errorf("exceeded maximum tool rounds (%d)", maxRounds)
 }
 
-// convertTools converts source.ToolDefinition to Anthropic ToolParam format.
-func convertTools(tools []source.ToolDefinition) []anthropic.ToolUnionParam {
+// ConvertTools converts source.ToolDefinition to Anthropic ToolParam format.
+// Exported for testing schema structure.
+func ConvertTools(tools []source.ToolDefinition) []anthropic.ToolUnionParam {
 	if len(tools) == 0 {
 		return nil
 	}
@@ -182,12 +183,8 @@ func convertTools(tools []source.ToolDefinition) []anthropic.ToolUnionParam {
 		}
 
 		schema := anthropic.ToolInputSchemaParam{
-			Type: "object",
-			Properties: map[string]any{
-				"properties": properties,
-				"required":   required,
-				"type":       "object",
-			},
+			Properties: properties,
+			Required:   required,
 		}
 
 		result = append(result, anthropic.ToolUnionParam{
