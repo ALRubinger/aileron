@@ -15,17 +15,29 @@ import (
 	"github.com/ALRubinger/aileron/core/vault"
 )
 
-// mockLLMClient records requests and returns a configured response.
+// mockLLMClient records requests and returns configured responses.
+// Supports two-round pipeline: first call is research, second is ghostwrite.
 type mockLLMClient struct {
-	lastRequest *llm.GenerateRequest
-	response    *llm.GenerateResponse
-	err         error
+	requests       []*llm.GenerateRequest
+	lastRequest    *llm.GenerateRequest
+	researchResp   *llm.GenerateResponse // response for round 1 (with tools)
+	ghostwriteResp *llm.GenerateResponse // response for round 2 (no tools)
+	response       *llm.GenerateResponse // fallback if specific round responses not set
+	err            error
 }
 
 func (m *mockLLMClient) GenerateWithTools(_ context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	m.requests = append(m.requests, &req)
 	m.lastRequest = &req
 	if m.err != nil {
 		return nil, m.err
+	}
+	// If specific round responses are set, use them based on whether tools are present.
+	if len(req.Tools) > 0 && m.researchResp != nil {
+		return m.researchResp, nil
+	}
+	if len(req.Tools) == 0 && m.ghostwriteResp != nil {
+		return m.ghostwriteResp, nil
 	}
 	return m.response, nil
 }
@@ -87,9 +99,12 @@ func TestPipeline_GenerateDraft_Simple(t *testing.T) {
 
 func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 	mock := &mockLLMClient{
-		response: &llm.GenerateResponse{
-			Text:      "Based on the channel history, the answer is yes.",
+		researchResp: &llm.GenerateResponse{
+			Text:      "Found PR #247 which refactors JWT validation.",
 			ToolCalls: []llm.ToolCall{{Tool: "slack_channel_history"}},
+		},
+		ghostwriteResp: &llm.GenerateResponse{
+			Text: "Based on the channel history, the answer is yes.",
 		},
 	}
 
@@ -97,7 +112,6 @@ func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 	v := vault.NewMemVault()
 	ctx := context.Background()
 
-	// Seed a connected Slack account.
 	accounts.Create(ctx, model.ConnectedAccount{
 		ID:       "conn_s1",
 		UserID:   "usr_1",
@@ -126,28 +140,33 @@ func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 		t.Fatal("expected non-empty draft")
 	}
 
-	// Verify tools were provided to the LLM.
-	if len(mock.lastRequest.Tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(mock.lastRequest.Tools))
-	}
-	if mock.lastRequest.Tools[0].Name != "slack_channel_history" {
-		t.Errorf("expected slack_channel_history, got %s", mock.lastRequest.Tools[0].Name)
+	// Two-round pipeline: should have made 2 LLM calls.
+	if len(mock.requests) != 2 {
+		t.Fatalf("expected 2 LLM calls (research + ghostwrite), got %d", len(mock.requests))
 	}
 
-	// Verify tool executor was provided.
-	if mock.lastRequest.ToolExecutor == nil {
-		t.Error("expected ToolExecutor to be set")
+	// Round 1 (research) should have tools.
+	if len(mock.requests[0].Tools) != 1 {
+		t.Fatalf("expected 1 tool in research round, got %d", len(mock.requests[0].Tools))
+	}
+	if mock.requests[0].ToolExecutor == nil {
+		t.Error("expected ToolExecutor in research round")
+	}
+
+	// Round 2 (ghostwrite) should have NO tools.
+	if len(mock.requests[1].Tools) != 0 {
+		t.Errorf("expected 0 tools in ghostwrite round, got %d", len(mock.requests[1].Tools))
 	}
 }
 
 func TestPipeline_GenerateDraft_ToolExecutor(t *testing.T) {
-	// This test verifies the tool executor resolves credentials and calls the source connector.
-	var executorCalled bool
+	// Verify the research round's tool executor resolves credentials
+	// and calls the source connector.
 	mock := &mockLLMClient{
-		response: &llm.GenerateResponse{Text: "draft"},
+		researchResp:   &llm.GenerateResponse{Text: "context gathered"},
+		ghostwriteResp: &llm.GenerateResponse{Text: "draft"},
 	}
 
-	// Override: capture the executor and call it ourselves.
 	accounts := mem.NewConnectedAccountStore()
 	v := vault.NewMemVault()
 	ctx := context.Background()
@@ -172,19 +191,21 @@ func TestPipeline_GenerateDraft_ToolExecutor(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Now call the tool executor that was passed to the LLM.
-	if mock.lastRequest.ToolExecutor != nil {
-		result, execErr := mock.lastRequest.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
-		if execErr != nil {
-			t.Fatalf("tool executor error: %v", execErr)
-		}
-		if result["executed"] != true {
-			t.Error("expected tool to be executed")
-		}
-		executorCalled = true
+	// The tool executor is on the research round (first request).
+	if len(mock.requests) < 1 {
+		t.Fatal("expected at least 1 LLM call")
 	}
-	if !executorCalled {
-		t.Error("expected executor to be callable")
+	researchReq := mock.requests[0]
+	if researchReq.ToolExecutor == nil {
+		t.Fatal("expected ToolExecutor in research round")
+	}
+
+	result, execErr := researchReq.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
+	if execErr != nil {
+		t.Fatalf("tool executor error: %v", execErr)
+	}
+	if result["executed"] != true {
+		t.Error("expected tool to be executed")
 	}
 }
 

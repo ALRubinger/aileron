@@ -1,15 +1,18 @@
 // Package draft orchestrates cloud-hosted draft generation.
 //
-// The Pipeline assembles context from source connectors, calls an LLM with
-// tool access, and returns a draft reply. It bridges the source connector
-// layer (read-only context retrieval), the LLM client (text generation with
-// tool use), and the vault (credential management).
+// The Pipeline uses a two-round approach:
+//   Round 1 (research): LLM has tools, searches broadly, gathers context.
+//     Its output is internal — never shown to anyone.
+//   Round 2 (ghostwrite): LLM has NO tools, receives the gathered context,
+//     writes the reply in the user's voice. No narration possible because
+//     there's no research phase.
 package draft
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/llm"
@@ -18,6 +21,19 @@ import (
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/vault"
 )
+
+// researchPrompt instructs the LLM to gather context using tools.
+// Its output is internal — fed to the ghostwriting round, never shown to users.
+const researchPrompt = `You are a research assistant gathering context to help draft a reply to a message.
+
+Your job is to find all relevant information needed to write a good reply. Use the available tools to search broadly and thoroughly.
+
+IMPORTANT:
+- If the message references a time range ("this week," "since Monday," "last sprint"), search the FULL range. Today is %s. Make multiple searches with different queries to cover the full period — do not rely on a single search that only returns recent results.
+- Search for PRs, issues, commits, messages, events — whatever is relevant to the question.
+- Include links (full URLs) to everything you find.
+- Output a structured summary of what you found. Include all relevant details — the ghostwriter will decide what to include in the final reply.
+- Be thorough. It's better to find too much than too little.`
 
 // Pipeline orchestrates draft generation for incoming messages.
 type Pipeline struct {
@@ -31,7 +47,7 @@ type Pipeline struct {
 }
 
 // NewPipeline creates a draft generation pipeline. The systemPrompt is the
-// base prompt loaded from AILERON.md (or the hardcoded default).
+// base prompt loaded from AILERON.md.
 func NewPipeline(
 	llmClient llm.Client,
 	sourceReg *source.Registry,
@@ -52,31 +68,17 @@ func NewPipeline(
 	}
 }
 
-// GenerateDraft produces a draft reply for an incoming message.
-// It assembles context from source connectors available to the user,
-// calls the LLM with tool access, and returns the draft text.
+// GenerateDraft produces a draft reply using a two-round approach:
+//   Round 1: Research — LLM uses tools to gather context. Output is internal.
+//   Round 2: Ghostwrite — LLM writes the reply using the gathered context.
+//     No tools, no narration.
 func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.IncomingMessage) (string, error) {
-	// Assemble the system prompt from base + user instructions.
-	prompt, err := p.assembleSystemPrompt(ctx, userID)
-	if err != nil {
-		return "", fmt.Errorf("assembling system prompt: %w", err)
-	}
-
-	// Present the message as context — don't say "draft a reply" as that
-	// triggers assistant-mode behavior. The system prompt already establishes
-	// the identity and role.
-	userMessage := fmt.Sprintf(
-		"Message from %s in %s:\n\n%s",
-		msg.Author, msg.Channel, msg.Body,
-	)
-
-	// Get the user's connected accounts to determine available tools.
+	// Get available tools.
 	accounts, err := p.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
 	if err != nil {
 		return "", fmt.Errorf("listing connected accounts: %w", err)
 	}
 
-	// Collect tools from source connectors matching connected accounts.
 	connectedProviders := make(map[string]bool)
 	for _, acct := range accounts {
 		if acct.Status == model.ConnectedAccountStatusActive {
@@ -93,27 +95,70 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		}
 	}
 
-	// Build a tool executor that resolves credentials and calls source connectors.
 	executor := p.buildToolExecutor(ctx, userID, accounts)
 
-	resp, err := p.llm.GenerateWithTools(ctx, llm.GenerateRequest{
-		SystemPrompt: prompt,
-		UserMessage:  userMessage,
-		Tools:        tools,
-		ToolExecutor: executor,
+	// --- Round 1: Research ---
+	// The LLM gathers context using tools. Its output is a structured
+	// summary of what it found — never shown to the user.
+	researchSysPrompt := fmt.Sprintf(researchPrompt, time.Now().Format("2006-01-02 (Monday)"))
+	researchMessage := fmt.Sprintf(
+		"Find relevant context to help reply to this message from %s in %s:\n\n%s",
+		msg.Author, msg.Channel, msg.Body,
+	)
+
+	var gatheredContext string
+	if len(tools) > 0 {
+		researchResp, err := p.llm.GenerateWithTools(ctx, llm.GenerateRequest{
+			SystemPrompt: researchSysPrompt,
+			UserMessage:  researchMessage,
+			Tools:        tools,
+			ToolExecutor: executor,
+		})
+		if err != nil {
+			p.log.Error("research round failed", "user_id", userID, "error", err)
+			gatheredContext = "(No additional context available — tool search failed.)"
+		} else {
+			gatheredContext = researchResp.Text
+			p.log.Info("research round complete",
+				"user_id", userID,
+				"tool_calls", len(researchResp.ToolCalls),
+				"context_length", len(gatheredContext),
+			)
+		}
+	} else {
+		gatheredContext = "(No source connectors available — replying with general knowledge only.)"
+	}
+
+	// --- Round 2: Ghostwrite ---
+	// The LLM writes the reply using AILERON.md instructions + user
+	// instructions + gathered context. NO tools — just text in, text out.
+	// This eliminates narration because there's no research to narrate.
+	ghostwritePrompt, err := p.assembleSystemPrompt(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("assembling system prompt: %w", err)
+	}
+
+	ghostwriteMessage := fmt.Sprintf(
+		"Message from %s in %s:\n\n%s\n\n---\n\nContext gathered from connected sources:\n\n%s",
+		msg.Author, msg.Channel, msg.Body, gatheredContext,
+	)
+
+	draftResp, err := p.llm.GenerateWithTools(ctx, llm.GenerateRequest{
+		SystemPrompt: ghostwritePrompt,
+		UserMessage:  ghostwriteMessage,
+		// No tools — force text-only output.
 	})
 	if err != nil {
-		return "", fmt.Errorf("LLM generation failed: %w", err)
+		return "", fmt.Errorf("ghostwrite round failed: %w", err)
 	}
 
 	p.log.Info("draft generated",
 		"user_id", userID,
 		"channel", msg.Channel,
-		"tool_calls", len(resp.ToolCalls),
-		"draft_length", len(resp.Text),
+		"draft_length", len(draftResp.Text),
 	)
 
-	return resp.Text, nil
+	return draftResp.Text, nil
 }
 
 // assembleSystemPrompt builds the system prompt from the base prompt plus
