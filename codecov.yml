@@ -1,6 +1,6 @@
 codecov:
   notify:
-    after_n_builds: 2
+    after_n_builds: 3
 
 coverage:
   status:
@@ -8,7 +8,7 @@ coverage:
       default:
         target: auto
         threshold: 2%
-        after_n_builds: 2
+        after_n_builds: 3
     patch: off
 
 flags:
@@ -27,10 +27,13 @@ flags:
       - cmd/aileron-enclave/
       - cmd/aileron-mcp/
     carryforward: false
+  ui:
+    paths:
+      - ui/src/
+    carryforward: false
 
 ignore:
   - "core/api/gen/**"       # generated code (oapi-codegen) — DO NOT EDIT
-  - "ui/**"                  # SvelteKit UI — needs its own test framework
   - "docs/**"                # documentation and ADRs
 
 comment:
