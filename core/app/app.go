@@ -228,7 +228,10 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			llmClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModel)
 			sysPrompt := draft.LoadSystemPrompt()
 			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, pgConnectedAccountStore, pgInstructionStore, v, log, sysPrompt)
-			log.Info("enabled cloud draft generation", "model", authCfg.LLMModel)
+			log.Info("enabled cloud draft generation",
+				"model", authCfg.LLMModel,
+				"prompt_length", len(sysPrompt),
+				"prompt_source", draft.PromptSource())
 		}
 
 		if authCfg.SlackEnabled() {

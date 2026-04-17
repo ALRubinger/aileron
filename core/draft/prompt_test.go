@@ -19,38 +19,32 @@ func TestLoadSystemPrompt_FromFile(t *testing.T) {
 	}
 }
 
-func TestLoadSystemPrompt_FallbackWhenMissing(t *testing.T) {
+func TestLoadSystemPrompt_PanicsWhenMissing(t *testing.T) {
 	t.Setenv("AILERON_PROMPT_FILE", "/nonexistent/AILERON.md")
 
-	got := LoadSystemPrompt()
-	if got != defaultSystemPrompt {
-		t.Error("expected default prompt when file is missing")
-	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when AILERON.md is missing")
+		}
+	}()
+	LoadSystemPrompt()
 }
 
-func TestLoadSystemPrompt_FallbackWhenEmpty(t *testing.T) {
+func TestLoadSystemPrompt_PanicsWhenEmpty(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "AILERON.md")
 	os.WriteFile(path, []byte("   \n  "), 0644)
 
 	t.Setenv("AILERON_PROMPT_FILE", path)
 
-	got := LoadSystemPrompt()
-	if got != defaultSystemPrompt {
-		t.Error("expected default prompt when file is empty/whitespace")
-	}
-}
-
-func TestLoadSystemPrompt_DefaultPath(t *testing.T) {
-	// Unset the env var — should look for AILERON.md in working dir.
-	t.Setenv("AILERON_PROMPT_FILE", "")
-
-	// From the test working directory, AILERON.md doesn't exist,
-	// so it should fall back to the default.
-	got := LoadSystemPrompt()
-	if got != defaultSystemPrompt {
-		t.Error("expected default prompt when AILERON.md not in working dir")
-	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when AILERON.md is empty")
+		}
+	}()
+	LoadSystemPrompt()
 }
 
 func TestLoadSystemPrompt_TrimsWhitespace(t *testing.T) {
@@ -63,5 +57,18 @@ func TestLoadSystemPrompt_TrimsWhitespace(t *testing.T) {
 	got := LoadSystemPrompt()
 	if got != "Custom prompt content" {
 		t.Errorf("expected trimmed content, got %q", got)
+	}
+}
+
+func TestLoadSystemPrompt_SetsPromptSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AILERON.md")
+	os.WriteFile(path, []byte("test prompt"), 0644)
+
+	t.Setenv("AILERON_PROMPT_FILE", path)
+	LoadSystemPrompt()
+
+	if PromptSource() != path {
+		t.Errorf("expected source %q, got %q", path, PromptSource())
 	}
 }
