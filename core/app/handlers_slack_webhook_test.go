@@ -217,6 +217,54 @@ func TestSlackWebhook_OwnMessage_Skipped(t *testing.T) {
 	}
 }
 
+func TestSlackWebhook_SelfMention_GetsDraft(t *testing.T) {
+	// Regression test: @mentioning yourself should trigger a draft.
+	// Previously, the author was always skipped even when self-mentioned.
+	srv := newSlackWebhookServer()
+	ctx := context.Background()
+
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:             "conn_s1",
+		UserID:         "usr_alice",
+		Provider:       model.ConnectedAccountProviderSlack,
+		ExternalUserID: "U_ALICE",
+		ExternalTeamID: "T001TEAM",
+		Status:         model.ConnectedAccountStatusActive,
+	})
+
+	var mu sync.Mutex
+	called := false
+	srv.onSlackMessage = func(_ context.Context, _ string, _ comms.IncomingMessage) {
+		mu.Lock()
+		called = true
+		mu.Unlock()
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001TEAM",
+		"event_id": "ev_selfmention",
+		"event": map[string]any{
+			"type":    "message",
+			"user":    "U_ALICE",
+			"text":    "<@U_ALICE> remind me to review PR #247",
+			"channel": "C0BACKEND",
+			"ts":      "123.789",
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if !called {
+		t.Error("expected self-mention to trigger a draft")
+	}
+}
+
 func TestSlackWebhook_NoMention_NoDraft(t *testing.T) {
 	srv := newSlackWebhookServer()
 	ctx := context.Background()
