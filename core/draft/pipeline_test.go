@@ -54,7 +54,7 @@ func TestPipeline_GenerateDraft_Simple(t *testing.T) {
 	v := vault.NewMemVault()
 	sourceReg := source.NewRegistry()
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), "test system prompt")
 
 	draftText, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID:      "msg_1",
@@ -109,7 +109,7 @@ func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), "test system prompt")
 
 	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID:      "msg_1",
@@ -163,7 +163,7 @@ func TestPipeline_GenerateDraft_ToolExecutor(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), "test system prompt")
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -198,7 +198,7 @@ func TestPipeline_GenerateDraft_NoConnectedAccounts(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), "test system prompt")
 
 	draftText, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -238,7 +238,7 @@ func TestPipeline_GenerateDraft_WithInstructions(t *testing.T) {
 	})
 
 	sourceReg := source.NewRegistry()
-	p := draft.NewPipeline(mock, sourceReg, accounts, instructions, v, slog.Default())
+	p := draft.NewPipeline(mock, sourceReg, accounts, instructions, v, slog.Default(), "test system prompt")
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -271,7 +271,7 @@ func TestPipeline_GenerateDraft_NoInstructions(t *testing.T) {
 		response: &llm.GenerateResponse{Text: "Draft without instructions"},
 	}
 
-	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default())
+	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default(), "test system prompt")
 
 	_, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -291,7 +291,7 @@ func TestPipeline_GenerateDraft_LLMError(t *testing.T) {
 		err: context.DeadlineExceeded,
 	}
 
-	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default())
+	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default(), "test system prompt")
 
 	_, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
