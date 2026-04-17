@@ -945,6 +945,72 @@ func TestListFeedback_Empty(t *testing.T) {
 	}
 }
 
+func TestPostDraftingIndicator_PostsEphemeralText(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
+
+	var capturedText, capturedChannel, capturedUserID string
+	srv.ephemeralTextPoster = func(_ context.Context, _, channel, userID, text, _ string) error {
+		capturedChannel = channel
+		capturedUserID = userID
+		capturedText = text
+		return nil
+	}
+
+	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
+	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "1234567890.123456")
+
+	if capturedChannel != "C0BACKEND" {
+		t.Errorf("expected channel C0BACKEND, got %s", capturedChannel)
+	}
+	if capturedUserID != "U123ABC" {
+		t.Errorf("expected user U123ABC, got %s", capturedUserID)
+	}
+	if capturedText == "" {
+		t.Error("expected non-empty indicator text")
+	}
+}
+
+func TestPostDraftingIndicator_ThreadTS_WhenRepliesExist(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return true }
+
+	var capturedThreadTS string
+	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, threadTS string) error {
+		capturedThreadTS = threadTS
+		return nil
+	}
+
+	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
+	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "1234567890.123456")
+
+	if capturedThreadTS != "1234567890.123456" {
+		t.Errorf("expected threadTS when thread has replies, got %q", capturedThreadTS)
+	}
+}
+
+func TestResolveSlackCredentials_Success(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	creds, err := srv.resolveSlackCredentials(context.Background(), "usr_a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.BotToken != "xoxb-test" {
+		t.Errorf("expected xoxb-test, got %s", creds.BotToken)
+	}
+	if creds.SlackUserID != "U123ABC" {
+		t.Errorf("expected U123ABC, got %s", creds.SlackUserID)
+	}
+}
+
+func TestResolveSlackCredentials_NoAccount(t *testing.T) {
+	srv := newDraftsTestServer()
+	_, err := srv.resolveSlackCredentials(context.Background(), "usr_a")
+	if err == nil {
+		t.Fatal("expected error when no slack account")
+	}
+}
+
 func TestListFeedback_NilStore(t *testing.T) {
 	srv := newDraftsTestServer()
 	srv.feedback = nil

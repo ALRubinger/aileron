@@ -246,6 +246,15 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 					"preview", msg.Body[:min(len(msg.Body), 80)])
 
 				if server.draftPipeline != nil {
+					// Post immediate "drafting..." indicator so the user
+					// knows Aileron is working while the LLM runs.
+					creds, err := server.resolveSlackCredentials(ctx, userID)
+					if err != nil {
+						log.Error("failed to resolve slack credentials", "user_id", userID, "error", err)
+					} else {
+						server.postDraftingIndicator(ctx, creds, msg.Channel, msg.ID)
+					}
+
 					draftText, err := server.draftPipeline.GenerateDraft(ctx, userID, msg)
 					if err != nil {
 						log.Error("draft generation failed", "user_id", userID, "error", err)

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -427,46 +428,84 @@ func (s *apiServer) handleListFeedback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": feedback})
 }
 
-// deliverEphemeralDraft posts an ephemeral Block Kit message in the Slack
-// channel where the original message was, showing the draft with
-// approve/edit/discard buttons. Only the target user sees it.
-func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, draft model.Draft) {
+// slackCredentials holds resolved Slack bot token and user ID for a user.
+type slackCredentials struct {
+	BotToken    string
+	SlackUserID string
+}
+
+// resolveSlackCredentials looks up the user's connected Slack account and
+// retrieves their bot token and Slack user ID from the vault.
+func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) (*slackCredentials, error) {
 	slackProvider := model.ConnectedAccountProviderSlack
 	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
 		UserID:   userID,
 		Provider: &slackProvider,
 	})
 	if err != nil || len(accounts) == 0 {
-		s.log.Error("ephemeral: no slack account — user must connect Slack via /v1/connect/slack", "user_id", userID)
-		return
+		return nil, fmt.Errorf("no slack account for user %s", userID)
 	}
 
 	acct := accounts[0]
 
-	// Get the token data from vault.
 	secret, err := s.vault.Get(ctx, acct.VaultPath())
 	if err != nil {
-		s.log.Error("ephemeral: failed to get vault token", "user_id", userID, "error", err)
-		return
+		return nil, fmt.Errorf("failed to get vault token: %w", err)
 	}
 
 	var tokenData map[string]string
 	if err := json.Unmarshal(secret.Value, &tokenData); err != nil {
-		s.log.Error("ephemeral: failed to parse token — reconnect Slack", "user_id", userID, "error", err)
-		return
+		return nil, fmt.Errorf("failed to parse token: %w", err)
 	}
 
 	botToken := tokenData["bot_access_token"]
 	if botToken == "" {
-		s.log.Error("ephemeral: no bot token — Slack app needs chat:write bot scope, then reconnect Slack",
-			"user_id", userID,
-			"has_user_token", tokenData["access_token"] != "")
-		return
+		return nil, fmt.Errorf("no bot token — Slack app needs chat:write bot scope")
 	}
 
 	slackUserID := acct.ExternalUserID
 	if slackUserID == "" {
-		s.log.Error("ephemeral: no slack user ID on connected account — reconnect Slack", "user_id", userID)
+		return nil, fmt.Errorf("no slack user ID on connected account")
+	}
+
+	return &slackCredentials{BotToken: botToken, SlackUserID: slackUserID}, nil
+}
+
+// EphemeralTextPoster posts a simple text ephemeral message.
+// Defaults to comms.PostEphemeralText. Override in tests.
+type EphemeralTextPoster func(ctx context.Context, botToken, channel, userID, text, threadTS string) error
+
+// postDraftingIndicator posts a transient "Drafting a reply..." ephemeral
+// message so the user gets immediate feedback while the LLM works.
+func (s *apiServer) postDraftingIndicator(ctx context.Context, creds *slackCredentials, channel, messageTS string) {
+	// Resolve thread safety: only post in-thread if thread has replies.
+	checker := s.threadChecker
+	if checker == nil {
+		checker = comms.SlackThreadHasReplies
+	}
+	threadTS := ""
+	if messageTS != "" {
+		if checker(ctx, creds.BotToken, channel, messageTS) {
+			threadTS = messageTS
+		}
+	}
+
+	poster := s.ephemeralTextPoster
+	if poster == nil {
+		poster = comms.PostEphemeralText
+	}
+	if err := poster(ctx, creds.BotToken, channel, creds.SlackUserID, ":writing_hand: Drafting a reply…", threadTS); err != nil {
+		s.log.Error("drafting indicator: failed to post", "error", err)
+	}
+}
+
+// deliverEphemeralDraft posts an ephemeral Block Kit message in the Slack
+// channel where the original message was, showing the draft with
+// approve/edit/discard buttons. Only the target user sees it.
+func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, draft model.Draft) {
+	creds, err := s.resolveSlackCredentials(ctx, userID)
+	if err != nil {
+		s.log.Error("ephemeral: "+err.Error(), "user_id", userID)
 		return
 	}
 
@@ -479,7 +518,7 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 	}
 	threadTS := ""
 	if draft.MessageTS != "" {
-		if checker(ctx, botToken, draft.Channel, draft.MessageTS) {
+		if checker(ctx, creds.BotToken, draft.Channel, draft.MessageTS) {
 			threadTS = draft.MessageTS
 		}
 	}
@@ -489,9 +528,9 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 		poster = comms.PostEphemeralDraft
 	}
 	err = poster(ctx, comms.SlackDraftMessage{
-		BotToken: botToken,
+		BotToken: creds.BotToken,
 		Channel:  draft.Channel,
-		UserID:   slackUserID,
+		UserID:   creds.SlackUserID,
 		DraftID:  draft.ID,
 		Author:   draft.Author,
 		Body:     draft.MessageBody,
