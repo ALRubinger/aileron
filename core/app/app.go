@@ -216,17 +216,18 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		authRegistry := auth.NewRegistry()
 		accountRegistry := account.NewRegistry()
 
-		if authCfg.GoogleEnabled() {
+		if authCfg.GoogleSigninEnabled() {
 			authRegistry.Register(googleauth.New(
-				authCfg.GoogleClientID,
-				authCfg.GoogleClientSecret,
+				authCfg.GoogleSigninClientID,
+				authCfg.GoogleSigninClientSecret,
 			))
-			log.Info("registered Google OAuth provider")
+			log.Info("registered Google sign-in OAuth provider")
+		}
 
-			// Enable connected accounts for Google services (Gmail, Calendar).
+		if authCfg.GoogleConnectorEnabled() {
 			accountRegistry.Register(account.NewGoogleService(
-				authCfg.GoogleClientID,
-				authCfg.GoogleClientSecret,
+				authCfg.GoogleConnectorClientID,
+				authCfg.GoogleConnectorClientSecret,
 				pgConnectedAccountStore,
 				v,
 			))
@@ -293,19 +294,23 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
 			log.Info("enabled Slack Events API webhook and interaction endpoints")
 		}
-		if authCfg.GitHubEnabled() {
+		if authCfg.GitHubSigninEnabled() {
 			authRegistry.Register(githubauth.New(
-				authCfg.GitHubClientID,
-				authCfg.GitHubClientSecret,
+				authCfg.GitHubSigninClientID,
+				authCfg.GitHubSigninClientSecret,
 			))
+			log.Info("registered GitHub sign-in OAuth provider")
+		}
+
+		if authCfg.GitHubConnectorEnabled() {
 			accountRegistry.Register(account.NewGitHubAccountService(
-				authCfg.GitHubClientID,
-				authCfg.GitHubClientSecret,
+				authCfg.GitHubConnectorClientID,
+				authCfg.GitHubConnectorClientSecret,
 				pgConnectedAccountStore,
 				v,
 			))
 			sourceReg.Register(githubsource.New())
-			log.Info("registered GitHub OAuth provider and source connector")
+			log.Info("enabled GitHub connected accounts and source connector")
 		}
 
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)

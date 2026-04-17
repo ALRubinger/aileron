@@ -39,10 +39,14 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `AILERON_REFRESH_TOKEN_TTL` | No | `168h` | Refresh token lifetime (7 days) |
 | `AILERON_UI_REDIRECT_URL` | No | `/` | Redirect destination after successful login |
 | `AILERON_AUTO_VERIFY_EMAIL` | No | `false` | Skip email verification on signup. **Never enable in production.** |
-| `GOOGLE_CLIENT_ID` | No | | Google OAuth 2.0 client ID |
-| `GOOGLE_CLIENT_SECRET` | No | | Google OAuth 2.0 client secret |
-| `GITHUB_OAUTH_CLIENT_ID` | No | | GitHub OAuth 2.0 client ID |
-| `GITHUB_OAUTH_CLIENT_SECRET` | No | | GitHub OAuth 2.0 client secret |
+| `GOOGLE_SIGNIN_CLIENT_ID` | No | | Google OAuth client ID for sign-in |
+| `GOOGLE_SIGNIN_CLIENT_SECRET` | No | | Google OAuth client secret for sign-in |
+| `GOOGLE_CONNECTOR_CLIENT_ID` | No | | Google OAuth client ID for connected accounts (Gmail, Calendar, Drive) |
+| `GOOGLE_CONNECTOR_CLIENT_SECRET` | No | | Google OAuth client secret for connected accounts |
+| `GITHUB_SIGNIN_CLIENT_ID` | No | | GitHub OAuth client ID for sign-in |
+| `GITHUB_SIGNIN_CLIENT_SECRET` | No | | GitHub OAuth client secret for sign-in |
+| `GITHUB_CONNECTOR_CLIENT_ID` | No | | GitHub OAuth client ID for connected accounts (repos, PRs) |
+| `GITHUB_CONNECTOR_CLIENT_SECRET` | No | | GitHub OAuth client secret for connected accounts |
 | `RESEND_API_KEY` | No | | [Resend](https://resend.com) API key for sending verification emails. When unset, codes are printed to the log. |
 | `MAIL_FROM` | No | `noreply@withaileron.ai` | Sender address for transactional emails (requires `RESEND_API_KEY`) |
 | `AILERON_KEK_SESSION_TTL` | No | `24h` | How long a verified vault passphrase session remains active |
@@ -82,15 +86,27 @@ No configuration required.
 
 5. **Deploy.** The server entrypoint automatically runs [Atlas](https://atlasgo.io) schema migrations against `AILERON_DATABASE_URL` before starting. Migrations are declarative and idempotent.
 
-6. **Configure OAuth providers** (optional, each is independent):
+6. **Configure OAuth apps** (optional). Sign-in and connected accounts use separate OAuth apps with different callback URLs and scopes:
 
-   **Google** (in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)):
+   **Google sign-in** (in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)):
    - Create an OAuth 2.0 Client ID (Web application type)
-   - Add `https://auth.yourdomain.com/auth/google/callback` as an authorized redirect URI
+   - Add `https://api.yourdomain.com/auth/google/callback` as an authorized redirect URI
+   - Set `GOOGLE_SIGNIN_CLIENT_ID` and `GOOGLE_SIGNIN_CLIENT_SECRET`
 
-   **GitHub** (in [GitHub Developer Settings](https://github.com/settings/developers)):
-   - Create a new OAuth App
-   - Set the authorization callback URL to `https://auth.yourdomain.com/auth/github/callback`
+   **Google connected accounts** (Gmail, Calendar, Drive):
+   - Create a second OAuth 2.0 Client ID
+   - Add `https://api.yourdomain.com/v1/connect/gmail/callback`, `https://api.yourdomain.com/v1/connect/google_calendar/callback` as authorized redirect URIs
+   - Set `GOOGLE_CONNECTOR_CLIENT_ID` and `GOOGLE_CONNECTOR_CLIENT_SECRET`
+
+   **GitHub sign-in** (in [GitHub Developer Settings](https://github.com/settings/developers)):
+   - Create an OAuth App
+   - Set the authorization callback URL to `https://api.yourdomain.com/auth/github/callback`
+   - Set `GITHUB_SIGNIN_CLIENT_ID` and `GITHUB_SIGNIN_CLIENT_SECRET`
+
+   **GitHub connected accounts** (repos, PRs):
+   - Create a second OAuth App
+   - Set the authorization callback URL to `https://api.yourdomain.com/v1/connect/github_repos/callback`
+   - Set `GITHUB_CONNECTOR_CLIENT_ID` and `GITHUB_CONNECTOR_CLIENT_SECRET`
 
 7. **Verify:**
    ```sh

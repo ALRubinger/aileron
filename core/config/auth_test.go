@@ -98,65 +98,127 @@ func TestLoadAuthConfig_InvalidDuration(t *testing.T) {
 	}
 }
 
-func TestLoadAuthConfig_GoogleEnabled(t *testing.T) {
+func TestLoadAuthConfig_GoogleSigninEnabled(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("GOOGLE_CLIENT_ID", "my-client-id")
-	t.Setenv("GOOGLE_CLIENT_SECRET", "my-secret")
+	t.Setenv("GOOGLE_SIGNIN_CLIENT_ID", "signin-id")
+	t.Setenv("GOOGLE_SIGNIN_CLIENT_SECRET", "signin-secret")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cfg.GoogleEnabled() {
-		t.Error("expected Google enabled")
+	if !cfg.GoogleSigninEnabled() {
+		t.Error("expected Google sign-in enabled")
 	}
-	if cfg.GoogleClientID != "my-client-id" {
-		t.Errorf("GoogleClientID = %q", cfg.GoogleClientID)
+	if cfg.GoogleSigninClientID != "signin-id" {
+		t.Errorf("GoogleSigninClientID = %q", cfg.GoogleSigninClientID)
 	}
 }
 
-func TestLoadAuthConfig_GoogleDisabled(t *testing.T) {
+func TestLoadAuthConfig_GoogleSigninDisabled(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("GOOGLE_CLIENT_ID", "")
-	t.Setenv("GOOGLE_CLIENT_SECRET", "")
+	t.Setenv("GOOGLE_SIGNIN_CLIENT_ID", "")
+	t.Setenv("GOOGLE_SIGNIN_CLIENT_SECRET", "")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.GoogleEnabled() {
-		t.Error("expected Google disabled when credentials missing")
+	if cfg.GoogleSigninEnabled() {
+		t.Error("expected Google sign-in disabled when credentials missing")
 	}
 }
 
-func TestLoadAuthConfig_GitHubEnabled(t *testing.T) {
+func TestLoadAuthConfig_GoogleConnectorEnabled(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "gh-client-id")
-	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "gh-secret")
+	t.Setenv("GOOGLE_CONNECTOR_CLIENT_ID", "connector-id")
+	t.Setenv("GOOGLE_CONNECTOR_CLIENT_SECRET", "connector-secret")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cfg.GitHubEnabled() {
-		t.Error("expected GitHub enabled")
+	if !cfg.GoogleConnectorEnabled() {
+		t.Error("expected Google connector enabled")
 	}
-	if cfg.GitHubClientID != "gh-client-id" {
-		t.Errorf("GitHubClientID = %q", cfg.GitHubClientID)
+	if cfg.GoogleConnectorClientID != "connector-id" {
+		t.Errorf("GoogleConnectorClientID = %q", cfg.GoogleConnectorClientID)
 	}
 }
 
-func TestLoadAuthConfig_GitHubDisabled(t *testing.T) {
+func TestLoadAuthConfig_GoogleConnectorDisabled(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("GITHUB_OAUTH_CLIENT_ID", "")
-	t.Setenv("GITHUB_OAUTH_CLIENT_SECRET", "")
+	t.Setenv("GOOGLE_CONNECTOR_CLIENT_ID", "")
+	t.Setenv("GOOGLE_CONNECTOR_CLIENT_SECRET", "")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.GitHubEnabled() {
-		t.Error("expected GitHub disabled when credentials missing")
+	if cfg.GoogleConnectorEnabled() {
+		t.Error("expected Google connector disabled when credentials missing")
+	}
+}
+
+func TestLoadAuthConfig_GitHubSigninEnabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("GITHUB_SIGNIN_CLIENT_ID", "gh-signin-id")
+	t.Setenv("GITHUB_SIGNIN_CLIENT_SECRET", "gh-signin-secret")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.GitHubSigninEnabled() {
+		t.Error("expected GitHub sign-in enabled")
+	}
+	if cfg.GitHubSigninClientID != "gh-signin-id" {
+		t.Errorf("GitHubSigninClientID = %q", cfg.GitHubSigninClientID)
+	}
+}
+
+func TestLoadAuthConfig_GitHubSigninDisabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("GITHUB_SIGNIN_CLIENT_ID", "")
+	t.Setenv("GITHUB_SIGNIN_CLIENT_SECRET", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GitHubSigninEnabled() {
+		t.Error("expected GitHub sign-in disabled when credentials missing")
+	}
+}
+
+func TestLoadAuthConfig_GitHubConnectorEnabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("GITHUB_CONNECTOR_CLIENT_ID", "gh-connector-id")
+	t.Setenv("GITHUB_CONNECTOR_CLIENT_SECRET", "gh-connector-secret")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.GitHubConnectorEnabled() {
+		t.Error("expected GitHub connector enabled")
+	}
+	if cfg.GitHubConnectorClientID != "gh-connector-id" {
+		t.Errorf("GitHubConnectorClientID = %q", cfg.GitHubConnectorClientID)
+	}
+}
+
+func TestLoadAuthConfig_GitHubConnectorDisabled(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("GITHUB_CONNECTOR_CLIENT_ID", "")
+	t.Setenv("GITHUB_CONNECTOR_CLIENT_SECRET", "")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.GitHubConnectorEnabled() {
+		t.Error("expected GitHub connector disabled when credentials missing")
 	}
 }
 
@@ -341,8 +403,8 @@ func TestLoadAuthConfig_TrimsWhitespace(t *testing.T) {
 	t.Setenv("SLACK_CLIENT_SECRET", "slack-secret\n")
 	t.Setenv("SLACK_SIGNING_SECRET", "\tsigning-secret ")
 	t.Setenv("ANTHROPIC_API_KEY", " sk-ant-key ")
-	t.Setenv("GOOGLE_CLIENT_ID", "google-id\t")
-	t.Setenv("GITHUB_OAUTH_CLIENT_ID", " github-id")
+	t.Setenv("GOOGLE_SIGNIN_CLIENT_ID", "google-id\t")
+	t.Setenv("GITHUB_SIGNIN_CLIENT_ID", " github-id")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
@@ -360,11 +422,11 @@ func TestLoadAuthConfig_TrimsWhitespace(t *testing.T) {
 	if cfg.AnthropicAPIKey != "sk-ant-key" {
 		t.Errorf("AnthropicAPIKey not trimmed: %q", cfg.AnthropicAPIKey)
 	}
-	if cfg.GoogleClientID != "google-id" {
-		t.Errorf("GoogleClientID not trimmed: %q", cfg.GoogleClientID)
+	if cfg.GoogleSigninClientID != "google-id" {
+		t.Errorf("GoogleSigninClientID not trimmed: %q", cfg.GoogleSigninClientID)
 	}
-	if cfg.GitHubClientID != "github-id" {
-		t.Errorf("GitHubClientID not trimmed: %q", cfg.GitHubClientID)
+	if cfg.GitHubSigninClientID != "github-id" {
+		t.Errorf("GitHubSigninClientID not trimmed: %q", cfg.GitHubSigninClientID)
 	}
 }
 
