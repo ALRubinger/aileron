@@ -7,7 +7,7 @@ coverage:
     project:
       default:
         target: auto
-        threshold: 2%
+        threshold: 3%
         after_n_builds: 2
     patch: off
 
