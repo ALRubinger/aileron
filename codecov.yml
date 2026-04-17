@@ -9,6 +9,11 @@ coverage:
         target: auto
         threshold: 2%
         after_n_builds: 3
+      ui:
+        target: auto
+        threshold: 5%
+        flags:
+          - ui
     patch: off
 
 flags:
@@ -34,6 +39,7 @@ flags:
 
 ignore:
   - "core/api/gen/**"       # generated code (oapi-codegen) — DO NOT EDIT
+  - "ui/**"                  # tracked separately via ui flag
   - "docs/**"                # documentation and ADRs
 
 comment:
