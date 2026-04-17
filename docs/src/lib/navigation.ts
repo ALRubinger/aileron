@@ -52,6 +52,7 @@ export const navigation: NavItem[] = [
       { label: 'Credential Vault', href: '/getting-started/credential-vault' },
       { label: 'Slack Integration', href: '/getting-started/slack-integration' },
       { label: 'Slack Cloud Integration', href: '/getting-started/slack-cloud-integration' },
+      { label: 'GitHub Integration', href: '/getting-started/github-integration' },
       { label: 'Discord Integration', href: '/getting-started/discord-integration' }
     ]
   },
