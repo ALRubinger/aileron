@@ -3,8 +3,11 @@ package llm_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -223,6 +226,73 @@ func TestAnthropicClient_NoToolExecutor(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error when tool use requested but no executor")
+	}
+}
+
+func TestAnthropicClient_ToolRoundsExhausted_GracefulFallback(t *testing.T) {
+	// Regression test: when tool rounds are exhausted, the LLM should make
+	// one final call WITHOUT tools and return whatever text it can produce.
+	// Previously, this returned an error and the user got no draft.
+	var callCount atomic.Int32
+	server := mockAnthropicServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		count := callCount.Add(1)
+
+		// Check if tools are present in the request to detect the final call.
+		body, _ := io.ReadAll(r.Body)
+		hasTools := strings.Contains(string(body), `"tools"`)
+
+		if !hasTools {
+			// Final call without tools — return text.
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_final", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "end_turn",
+				"content": []map[string]any{
+					{"type": "text", "text": "Here's what I found with the context I gathered."},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+			return
+		}
+
+		// Keep returning tool_use to exhaust rounds.
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": fmt.Sprintf("msg_%d", count), "type": "message", "role": "assistant",
+			"model": "claude-sonnet-4-6", "stop_reason": "tool_use",
+			"content": []map[string]any{
+				{"type": "tool_use", "id": fmt.Sprintf("tool_%d", count),
+					"name": "slack_search_messages", "input": map[string]any{"query": "test"}},
+			},
+			"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+		})
+	})
+	defer server.Close()
+
+	client := llm.NewAnthropicClient("test-key", "claude-sonnet-4-6")
+	client.SetBaseURL(server.URL)
+
+	resp, err := client.GenerateWithTools(context.Background(), llm.GenerateRequest{
+		SystemPrompt:  "You are helpful.",
+		UserMessage:   "Summarize the week.",
+		MaxToolRounds: 2, // low limit to trigger exhaustion quickly
+		Tools: []source.ToolDefinition{
+			{Name: "slack_search_messages", Description: "Search messages"},
+		},
+		ToolExecutor: func(_ context.Context, tool string, params map[string]any) (map[string]any, error) {
+			return map[string]any{"messages": []string{"result"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected graceful fallback, got error: %v", err)
+	}
+	if resp.Text == "" {
+		t.Fatal("expected non-empty text from graceful fallback")
+	}
+	if resp.Text != "Here's what I found with the context I gathered." {
+		t.Errorf("unexpected text: %q", resp.Text)
+	}
+	if len(resp.ToolCalls) == 0 {
+		t.Error("expected tool calls to be recorded before exhaustion")
 	}
 }
 

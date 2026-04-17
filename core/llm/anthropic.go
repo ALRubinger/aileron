@@ -10,7 +10,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
-const defaultMaxToolRounds = 5
+const defaultMaxToolRounds = 15
 
 // AnthropicClient implements Client using the Anthropic Messages API.
 type AnthropicClient struct {
@@ -156,7 +156,43 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 		})
 	}
 
-	return nil, fmt.Errorf("exceeded maximum tool rounds (%d)", maxRounds)
+	// Tool rounds exhausted. Make one final call WITHOUT tools to force
+	// the LLM to produce a text response with whatever context it has
+	// gathered so far. This prevents silent failures where the user gets
+	// no draft at all.
+	finalParams := anthropic.MessageNewParams{
+		Model:     a.model,
+		MaxTokens: 4096,
+		Messages:  messages,
+	}
+	if req.SystemPrompt != "" {
+		finalParams.System = []anthropic.TextBlockParam{
+			{Text: req.SystemPrompt},
+		}
+	}
+	// No tools — force text output.
+	resp, err := a.client.Messages.New(ctx, finalParams)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic API error on final round: %w", err)
+	}
+
+	var textParts []string
+	for _, block := range resp.Content {
+		if block.Type == "text" && block.Text != "" {
+			textParts = append(textParts, block.Text)
+		}
+	}
+	text := ""
+	for _, t := range textParts {
+		if text != "" {
+			text += "\n"
+		}
+		text += t
+	}
+	return &GenerateResponse{
+		Text:      text,
+		ToolCalls: allToolCalls,
+	}, nil
 }
 
 // ConvertTools converts source.ToolDefinition to Anthropic ToolParam format.
