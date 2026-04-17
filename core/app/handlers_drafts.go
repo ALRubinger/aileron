@@ -432,7 +432,7 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 		Provider: &slackProvider,
 	})
 	if err != nil || len(accounts) == 0 {
-		s.log.Debug("ephemeral: no slack account for ephemeral delivery", "user_id", userID)
+		s.log.Error("ephemeral: no slack account — user must connect Slack via /v1/connect/slack", "user_id", userID)
 		return
 	}
 
@@ -441,25 +441,27 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 	// Get the token data from vault.
 	secret, err := s.vault.Get(ctx, acct.VaultPath())
 	if err != nil {
-		s.log.Debug("ephemeral: failed to get vault token", "user_id", userID, "error", err)
+		s.log.Error("ephemeral: failed to get vault token", "user_id", userID, "error", err)
 		return
 	}
 
 	var tokenData map[string]string
 	if err := json.Unmarshal(secret.Value, &tokenData); err != nil {
-		s.log.Debug("ephemeral: failed to parse token", "user_id", userID, "error", err)
+		s.log.Error("ephemeral: failed to parse token — reconnect Slack", "user_id", userID, "error", err)
 		return
 	}
 
 	botToken := tokenData["bot_access_token"]
 	if botToken == "" {
-		s.log.Debug("ephemeral: no bot token available", "user_id", userID)
+		s.log.Error("ephemeral: no bot token — Slack app needs chat:write bot scope, then reconnect Slack",
+			"user_id", userID,
+			"has_user_token", tokenData["access_token"] != "")
 		return
 	}
 
 	slackUserID := acct.ExternalUserID
 	if slackUserID == "" {
-		s.log.Debug("ephemeral: no slack user ID", "user_id", userID)
+		s.log.Error("ephemeral: no slack user ID on connected account — reconnect Slack", "user_id", userID)
 		return
 	}
 
