@@ -226,11 +226,12 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		// LLM-powered draft generation pipeline.
 		if authCfg.LLMEnabled() {
 			llmClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModel)
-			sysPrompt := draft.LoadSystemPrompt()
-			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, pgConnectedAccountStore, pgInstructionStore, v, log, sysPrompt)
+			prompts := draft.LoadPrompts()
+			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, pgConnectedAccountStore, pgInstructionStore, v, log, prompts)
 			log.Info("enabled cloud draft generation",
 				"model", authCfg.LLMModel,
-				"prompt_length", len(sysPrompt),
+				"research_prompt_length", len(prompts.Research),
+				"ghostwrite_prompt_length", len(prompts.Ghostwrite),
 				"prompt_source", draft.PromptSource())
 		}
 

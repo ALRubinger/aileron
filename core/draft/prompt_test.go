@@ -72,3 +72,36 @@ func TestLoadSystemPrompt_SetsPromptSource(t *testing.T) {
 		t.Errorf("expected source %q, got %q", path, PromptSource())
 	}
 }
+
+func TestLoadPrompts_TwoSections(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AILERON.md")
+	content := "# Research Prompt\n\nGather context.\n\n---\n\n# Ghostwrite Prompt\n\nWrite the reply."
+	os.WriteFile(path, []byte(content), 0644)
+
+	t.Setenv("AILERON_PROMPT_FILE", path)
+
+	prompts := LoadPrompts()
+	if prompts.Research != "# Research Prompt\n\nGather context." {
+		t.Errorf("unexpected research prompt: %q", prompts.Research)
+	}
+	if prompts.Ghostwrite != "# Ghostwrite Prompt\n\nWrite the reply." {
+		t.Errorf("unexpected ghostwrite prompt: %q", prompts.Ghostwrite)
+	}
+}
+
+func TestLoadPrompts_SingleSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AILERON.md")
+	os.WriteFile(path, []byte("Single section prompt"), 0644)
+
+	t.Setenv("AILERON_PROMPT_FILE", path)
+
+	prompts := LoadPrompts()
+	if prompts.Research != "" {
+		t.Errorf("expected empty research prompt, got %q", prompts.Research)
+	}
+	if prompts.Ghostwrite != "Single section prompt" {
+		t.Errorf("expected single section as ghostwrite, got %q", prompts.Ghostwrite)
+	}
+}
