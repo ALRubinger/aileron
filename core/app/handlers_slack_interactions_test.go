@@ -33,7 +33,7 @@ func newInteractionTestServer() *apiServer {
 		users:              &stubUserStore{},
 		newID:              func() string { return "test-id" },
 	}
-	srv.slackSender = func(_ context.Context, _, _, _ string) error { return nil }
+	srv.slackSender = func(_ context.Context, _, _, _, _ string) error { return nil }
 	return srv
 }
 
