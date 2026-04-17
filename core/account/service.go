@@ -233,12 +233,13 @@ func (s *GoogleService) HandleCallback(ctx context.Context, provider model.Conne
 		return nil, fmt.Errorf("storing token in vault: %w", err)
 	}
 
-	// Create the account record.
-	if err := s.accounts.Create(ctx, account); err != nil {
-		return nil, fmt.Errorf("creating account record: %w", err)
+	// Upsert the account record — allows reconnecting to refresh tokens/scopes.
+	upserted, err := s.accounts.Upsert(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("upserting account record: %w", err)
 	}
 
-	return &CallbackResult{Account: account}, nil
+	return &CallbackResult{Account: upserted}, nil
 }
 
 func (s *GoogleService) List(ctx context.Context, userID string) ([]model.ConnectedAccount, error) {

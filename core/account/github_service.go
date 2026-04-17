@@ -154,11 +154,12 @@ func (s *GitHubAccountService) HandleCallback(ctx context.Context, _ model.Conne
 		return nil, fmt.Errorf("storing token in vault: %w", err)
 	}
 
-	if err := s.accounts.Create(ctx, account); err != nil {
-		return nil, fmt.Errorf("creating account record: %w", err)
+	upserted, err := s.accounts.Upsert(ctx, account)
+	if err != nil {
+		return nil, fmt.Errorf("upserting account record: %w", err)
 	}
 
-	return &CallbackResult{Account: account}, nil
+	return &CallbackResult{Account: upserted}, nil
 }
 
 func (s *GitHubAccountService) List(ctx context.Context, userID string) ([]model.ConnectedAccount, error) {

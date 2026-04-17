@@ -239,3 +239,64 @@ func TestConnectedAccounts_Unauthorized(t *testing.T) {
 		t.Fatalf("expected 401 or 200 (auth disabled), got %d", resp.StatusCode)
 	}
 }
+
+func TestConnectedAccounts_ReconnectDoesNotFail(t *testing.T) {
+	// Regression test: reconnecting a provider (same user+provider) previously
+	// failed with "duplicate key value violates unique constraint". Now it
+	// upserts — updates the existing record instead of failing.
+
+	// First connection.
+	resp1 := authedPost(t, apiURL()+"/v1/connected-accounts", map[string]any{
+		"provider":         "slack",
+		"scopes":           []string{"channels:history"},
+		"external_user_id": "U_RECONNECT",
+		"external_team_id": "T_RECONNECT",
+		"token": map[string]string{
+			"access_token": "xoxp-old",
+		},
+	})
+	defer resp1.Body.Close()
+	if resp1.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp1.Body)
+		t.Fatalf("first create: expected 201, got %d: %s", resp1.StatusCode, body)
+	}
+	var created1 map[string]any
+	json.NewDecoder(resp1.Body).Decode(&created1)
+	id1 := stringField(created1, "id")
+
+	// Second connection — same provider. Should NOT fail.
+	resp2 := authedPost(t, apiURL()+"/v1/connected-accounts", map[string]any{
+		"provider":         "slack",
+		"scopes":           []string{"channels:history", "search:read"},
+		"external_user_id": "U_RECONNECT_NEW",
+		"external_team_id": "T_RECONNECT",
+		"token": map[string]string{
+			"access_token": "xoxp-new",
+		},
+	})
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp2.Body)
+		t.Fatalf("reconnect: expected 201, got %d: %s", resp2.StatusCode, body)
+	}
+
+	// Should still be only 1 Slack account.
+	listResp := authedGet(t, apiURL()+"/v1/connected-accounts?provider=slack")
+	defer listResp.Body.Close()
+	var listResult map[string]any
+	json.NewDecoder(listResp.Body).Decode(&listResult)
+	items, _ := listResult["items"].([]any)
+	slackCount := 0
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		if stringField(m, "provider") == "slack" {
+			slackCount++
+		}
+	}
+	if slackCount != 1 {
+		t.Fatalf("expected 1 Slack account after reconnect, got %d", slackCount)
+	}
+
+	// Clean up.
+	authedDelete(t, apiURL()+"/v1/connected-accounts/"+id1).Body.Close()
+}
