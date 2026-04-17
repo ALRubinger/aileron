@@ -26,10 +26,14 @@ Link the Postgres plugin to the server service.
 |----------|-------|
 | `AILERON_DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Railway variable reference) |
 | `AILERON_JWT_SIGNING_KEY` | Generate with `openssl rand -hex 32` |
-| `GOOGLE_CLIENT_ID` | From Google Cloud Console (optional) |
-| `GOOGLE_CLIENT_SECRET` | From Google Cloud Console (optional) |
-| `GITHUB_OAUTH_CLIENT_ID` | From GitHub Developer Settings (optional) |
-| `GITHUB_OAUTH_CLIENT_SECRET` | From GitHub Developer Settings (optional) |
+| `GOOGLE_SIGNIN_CLIENT_ID` | Google sign-in OAuth app (optional) |
+| `GOOGLE_SIGNIN_CLIENT_SECRET` | Google sign-in OAuth app (optional) |
+| `GOOGLE_CONNECTOR_CLIENT_ID` | Google connected accounts OAuth app (optional) |
+| `GOOGLE_CONNECTOR_CLIENT_SECRET` | Google connected accounts OAuth app (optional) |
+| `GITHUB_SIGNIN_CLIENT_ID` | GitHub sign-in OAuth app (optional) |
+| `GITHUB_SIGNIN_CLIENT_SECRET` | GitHub sign-in OAuth app (optional) |
+| `GITHUB_CONNECTOR_CLIENT_ID` | GitHub connected accounts OAuth app (optional) |
+| `GITHUB_CONNECTOR_CLIENT_SECRET` | GitHub connected accounts OAuth app (optional) |
 | `SLACK_CLIENT_ID` | From Slack app Basic Information (optional) |
 | `SLACK_CLIENT_SECRET` | From Slack app Basic Information (optional) |
 | `SLACK_SIGNING_SECRET` | From Slack app Basic Information (optional) |
@@ -56,8 +60,13 @@ Add custom domains in each service's **Settings > Networking > Custom Domain**. 
 
 ## 4. Register OAuth callback URLs
 
-- **Google:** `https://api.withaileron.ai/auth/google/callback`
-- **GitHub:** `https://api.withaileron.ai/auth/github/callback`
+**Sign-in apps:**
+- **Google sign-in:** `https://api.withaileron.ai/auth/google/callback`
+- **GitHub sign-in:** `https://api.withaileron.ai/auth/github/callback`
+
+**Connected account apps:**
+- **Google connector:** `https://api.withaileron.ai/v1/connect/gmail/callback` and `https://api.withaileron.ai/v1/connect/google_calendar/callback`
+- **GitHub connector:** `https://api.withaileron.ai/v1/connect/github_repos/callback`
 
 ## 5. Deploy
 

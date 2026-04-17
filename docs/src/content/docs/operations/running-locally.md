@@ -22,10 +22,14 @@ Edit `deploy/.env` (gitignored) to customize. For example, to enable OAuth provi
 ```sh
 # deploy/.env
 AILERON_JWT_SIGNING_KEY=local-dev-signing-key-not-for-production
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-client-secret
-GITHUB_OAUTH_CLIENT_ID=your-github-client-id
-GITHUB_OAUTH_CLIENT_SECRET=your-github-client-secret
+GOOGLE_SIGNIN_CLIENT_ID=your-google-signin-client-id
+GOOGLE_SIGNIN_CLIENT_SECRET=your-google-signin-client-secret
+GOOGLE_CONNECTOR_CLIENT_ID=your-google-connector-client-id
+GOOGLE_CONNECTOR_CLIENT_SECRET=your-google-connector-client-secret
+GITHUB_SIGNIN_CLIENT_ID=your-github-signin-client-id
+GITHUB_SIGNIN_CLIENT_SECRET=your-github-signin-client-secret
+GITHUB_CONNECTOR_CLIENT_ID=your-github-connector-client-id
+GITHUB_CONNECTOR_CLIENT_SECRET=your-github-connector-client-secret
 ```
 
 Verification codes for email/password signup are printed to the server log when `RESEND_API_KEY` is not set (dev mode). To send real emails, add `RESEND_API_KEY` (and optionally `MAIL_FROM`) to your `.env`.

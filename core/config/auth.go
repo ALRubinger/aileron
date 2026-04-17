@@ -40,13 +40,21 @@ type AuthConfig struct {
 	// Env: AILERON_AUTO_VERIFY_EMAIL
 	AutoVerifyEmail bool
 
-	// Google OAuth configuration.
-	GoogleClientID     string // Env: GOOGLE_CLIENT_ID
-	GoogleClientSecret string // Env: GOOGLE_CLIENT_SECRET
+	// Google sign-in OAuth configuration.
+	GoogleSigninClientID     string // Env: GOOGLE_SIGNIN_CLIENT_ID
+	GoogleSigninClientSecret string // Env: GOOGLE_SIGNIN_CLIENT_SECRET
 
-	// GitHub OAuth configuration.
-	GitHubClientID     string // Env: GITHUB_OAUTH_CLIENT_ID
-	GitHubClientSecret string // Env: GITHUB_OAUTH_CLIENT_SECRET
+	// Google connector OAuth configuration (Gmail, Calendar, Drive).
+	GoogleConnectorClientID     string // Env: GOOGLE_CONNECTOR_CLIENT_ID
+	GoogleConnectorClientSecret string // Env: GOOGLE_CONNECTOR_CLIENT_SECRET
+
+	// GitHub sign-in OAuth configuration.
+	GitHubSigninClientID     string // Env: GITHUB_SIGNIN_CLIENT_ID
+	GitHubSigninClientSecret string // Env: GITHUB_SIGNIN_CLIENT_SECRET
+
+	// GitHub connector OAuth configuration (repos, issues, PRs).
+	GitHubConnectorClientID     string // Env: GITHUB_CONNECTOR_CLIENT_ID
+	GitHubConnectorClientSecret string // Env: GITHUB_CONNECTOR_CLIENT_SECRET
 
 	// Slack OAuth and Events API configuration.
 	SlackClientID      string // Env: SLACK_CLIENT_ID
@@ -77,10 +85,14 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		JWTIssuer:          envOrDefault("AILERON_JWT_ISSUER", "aileron"),
 		UIRedirectURL:      envOrDefault("AILERON_UI_REDIRECT_URL", "/"),
 		AutoVerifyEmail:    envTrimmed("AILERON_AUTO_VERIFY_EMAIL") == "true",
-		GoogleClientID:       envTrimmed("GOOGLE_CLIENT_ID"),
-		GoogleClientSecret:   envTrimmed("GOOGLE_CLIENT_SECRET"),
-		GitHubClientID:     envTrimmed("GITHUB_OAUTH_CLIENT_ID"),
-		GitHubClientSecret: envTrimmed("GITHUB_OAUTH_CLIENT_SECRET"),
+		GoogleSigninClientID:        envTrimmed("GOOGLE_SIGNIN_CLIENT_ID"),
+		GoogleSigninClientSecret:    envTrimmed("GOOGLE_SIGNIN_CLIENT_SECRET"),
+		GoogleConnectorClientID:     envTrimmed("GOOGLE_CONNECTOR_CLIENT_ID"),
+		GoogleConnectorClientSecret: envTrimmed("GOOGLE_CONNECTOR_CLIENT_SECRET"),
+		GitHubSigninClientID:        envTrimmed("GITHUB_SIGNIN_CLIENT_ID"),
+		GitHubSigninClientSecret:    envTrimmed("GITHUB_SIGNIN_CLIENT_SECRET"),
+		GitHubConnectorClientID:     envTrimmed("GITHUB_CONNECTOR_CLIENT_ID"),
+		GitHubConnectorClientSecret: envTrimmed("GITHUB_CONNECTOR_CLIENT_SECRET"),
 		SlackClientID:      envTrimmed("SLACK_CLIENT_ID"),
 		SlackClientSecret:  envTrimmed("SLACK_CLIENT_SECRET"),
 		SlackSigningSecret: envTrimmed("SLACK_SIGNING_SECRET"),
@@ -119,14 +131,24 @@ func (c *AuthConfig) AuthEnabled() bool {
 	return c.DatabaseURL != ""
 }
 
-// GoogleEnabled reports whether Google OAuth is configured.
-func (c *AuthConfig) GoogleEnabled() bool {
-	return c.GoogleClientID != "" && c.GoogleClientSecret != ""
+// GoogleSigninEnabled reports whether Google sign-in is configured.
+func (c *AuthConfig) GoogleSigninEnabled() bool {
+	return c.GoogleSigninClientID != "" && c.GoogleSigninClientSecret != ""
 }
 
-// GitHubEnabled reports whether GitHub OAuth is configured.
-func (c *AuthConfig) GitHubEnabled() bool {
-	return c.GitHubClientID != "" && c.GitHubClientSecret != ""
+// GoogleConnectorEnabled reports whether Google connected accounts (Gmail, Calendar) are configured.
+func (c *AuthConfig) GoogleConnectorEnabled() bool {
+	return c.GoogleConnectorClientID != "" && c.GoogleConnectorClientSecret != ""
+}
+
+// GitHubSigninEnabled reports whether GitHub sign-in is configured.
+func (c *AuthConfig) GitHubSigninEnabled() bool {
+	return c.GitHubSigninClientID != "" && c.GitHubSigninClientSecret != ""
+}
+
+// GitHubConnectorEnabled reports whether GitHub connected accounts (repos, PRs) are configured.
+func (c *AuthConfig) GitHubConnectorEnabled() bool {
+	return c.GitHubConnectorClientID != "" && c.GitHubConnectorClientSecret != ""
 }
 
 // SlackEnabled reports whether Slack OAuth and Events API are configured.
