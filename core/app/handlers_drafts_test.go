@@ -254,6 +254,79 @@ func TestApproveDraft_Success(t *testing.T) {
 	}
 }
 
+func TestApproveDraft_PassesThreadTS(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	var capturedThreadTS string
+	srv.slackSender = func(_ context.Context, _, _, _, threadTS string) error {
+		capturedThreadTS = threadTS
+		return nil
+	}
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
+	srv.handleApproveDraft(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedThreadTS != "1234567890.123456" {
+		t.Errorf("expected threadTS = %q, got %q", "1234567890.123456", capturedThreadTS)
+	}
+}
+
+func TestEditDraft_PassesThreadTS(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
+
+	var capturedThreadTS string
+	srv.slackSender = func(_ context.Context, _, _, _, threadTS string) error {
+		capturedThreadTS = threadTS
+		return nil
+	}
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/drafts/dft_1/edit", `{"body":"edited reply"}`, userAClaims)
+	srv.handleEditDraft(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedThreadTS != "1234567890.123456" {
+		t.Errorf("expected threadTS = %q, got %q", "1234567890.123456", capturedThreadTS)
+	}
+}
+
+func TestDeliverEphemeralDraft_PassesThreadTS(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+
+	var capturedThreadTS string
+	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
+		capturedThreadTS = msg.ThreadTS
+		return nil
+	}
+
+	draft := model.Draft{
+		ID:        "dft_1",
+		UserID:    "usr_a",
+		Status:    model.DraftStatusPending,
+		Service:   "slack",
+		Channel:   "C0BACKEND",
+		Author:    "Sarah",
+		DraftBody: "Draft reply",
+		MessageTS: "1234567890.123456",
+	}
+	srv.deliverEphemeralDraft(ctx, "usr_a", draft)
+
+	if capturedThreadTS != "1234567890.123456" {
+		t.Errorf("expected ThreadTS = %q, got %q", "1234567890.123456", capturedThreadTS)
+	}
+}
+
 func TestApproveDraft_OwnershipCheck(t *testing.T) {
 	srv := newDraftsTestServerWithSend()
 	ctx := context.Background()
