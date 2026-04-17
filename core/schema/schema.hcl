@@ -669,3 +669,38 @@ table "draft_feedback" {
     columns = [column.user_id]
   }
 }
+
+table "vault_secrets" {
+  schema = schema.public
+
+  column "path" {
+    type    = varchar(512)
+    null    = false
+    comment = "Vault path (e.g. connected-accounts/usr_xxx/slack)"
+  }
+  column "value" {
+    type    = bytea
+    null    = false
+    comment = "Secret value (plaintext in Phase 1, encrypted in Phase 2)"
+  }
+  column "metadata" {
+    type    = jsonb
+    null    = false
+    default = "{}"
+    comment = "Non-secret attributes: type, labels, environment"
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+  column "updated_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.path]
+  }
+}

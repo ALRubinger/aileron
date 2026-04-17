@@ -14,7 +14,11 @@ coverage:
         threshold: 5%
         flags:
           - ui
-    patch: off
+    patch:
+      default:
+        target: 80%
+        threshold: 2%
+        after_n_builds: 3
 
 flags:
   unit:
