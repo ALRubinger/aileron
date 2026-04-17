@@ -47,6 +47,20 @@ func PostEphemeralDraft(ctx context.Context, msg SlackDraftMessage) error {
 	return err
 }
 
+// PostEphemeralText posts a simple text-only ephemeral message to a user.
+// Used for transient status indicators like "Drafting a reply...".
+func PostEphemeralText(ctx context.Context, botToken, channel, userID, text, threadTS string) error {
+	client := slack.New(botToken)
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(text, false),
+	}
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	_, err := client.PostEphemeralContext(ctx, channel, userID, opts...)
+	return err
+}
+
 // BuildDraftBlocks constructs the Block Kit layout for a draft ephemeral
 // message. Exported for testing.
 func BuildDraftBlocks(msg SlackDraftMessage) []slack.Block {
