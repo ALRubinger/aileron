@@ -29,6 +29,7 @@ var slackUserScopes = []string{
 	"channels:history",
 	"channels:read",
 	"chat:write",
+	"search:read",
 	"users:read",
 }
 
