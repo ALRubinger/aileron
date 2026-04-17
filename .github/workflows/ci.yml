@@ -105,6 +105,43 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  test-ui:
+    name: UI Tests
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Run unit and component tests
+        working-directory: ui
+        run: pnpm test
+
+      - name: Build for E2E
+        working-directory: ui
+        run: pnpm build
+
+      - name: Install Playwright browsers
+        working-directory: ui
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run E2E tests
+        working-directory: ui
+        run: pnpm test:e2e
+
   build:
     name: Build Docker Images
     needs: generate
@@ -150,7 +187,7 @@ jobs:
 
   integration:
     name: Integration Tests
-    needs: [build, lint, test]
+    needs: [build, lint, test, test-ui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

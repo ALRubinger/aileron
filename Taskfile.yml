@@ -177,6 +177,14 @@ tasks:
     desc: Run all tests
     cmds:
       - task: test:go
+      - task: test:ui
+
+  test:ui:
+    desc: Run UI unit and component tests
+    dir: ui
+    cmds:
+      - pnpm install
+      - pnpm test
 
   test:go:
     desc: Run Go tests
