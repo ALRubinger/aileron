@@ -62,9 +62,11 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		return "", fmt.Errorf("assembling system prompt: %w", err)
 	}
 
-	// Build the user message from the incoming message.
+	// Present the message as context — don't say "draft a reply" as that
+	// triggers assistant-mode behavior. The system prompt already establishes
+	// the identity and role.
 	userMessage := fmt.Sprintf(
-		"Draft a reply to this message from %s in %s:\n\n%s",
+		"Message from %s in %s:\n\n%s",
 		msg.Author, msg.Channel, msg.Body,
 	)
 
