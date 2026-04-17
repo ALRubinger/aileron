@@ -433,7 +433,7 @@ func TestConnectAccountCallback_RedirectsToUIBaseURL(t *testing.T) {
 	defer tokenServer.Close()
 
 	srv := newConnectedAccountServerWithAuth()
-	srv.uiRedirect = "https://app.withaileron.ai"
+	srv.uiOrigin = "https://app.withaileron.ai"
 	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
 		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
 	reg := account.NewRegistry()
@@ -457,7 +457,7 @@ func TestConnectAccountCallback_RedirectsToUIBaseURL(t *testing.T) {
 }
 
 func TestConnectAccountCallback_DefaultRedirectWhenUINotSet(t *testing.T) {
-	// When uiRedirect is empty (local dev), the redirect should be a relative path.
+	// When uiOrigin is empty (local dev), the redirect should be a relative path.
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"ok": true,
@@ -476,7 +476,7 @@ func TestConnectAccountCallback_DefaultRedirectWhenUINotSet(t *testing.T) {
 	defer tokenServer.Close()
 
 	srv := newConnectedAccountServerWithAuth()
-	// uiRedirect left as "" (default)
+	// uiOrigin left as "" (default)
 	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
 		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
 	reg := account.NewRegistry()
