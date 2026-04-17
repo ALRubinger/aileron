@@ -411,6 +411,94 @@ func TestConnectAccountCallback_StateMismatch(t *testing.T) {
 	}
 }
 
+func TestConnectAccountCallback_RedirectsToUIBaseURL(t *testing.T) {
+	// Regression test: after a successful OAuth callback the server must redirect
+	// to the UI origin (e.g. https://app.withaileron.ai), not to a relative path
+	// on the API host.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"authed_user": map[string]any{
+				"id":           "U123ABC",
+				"access_token": "xoxp-user-token-123",
+				"scope":        "channels:history",
+				"token_type":   "user",
+			},
+			"team": map[string]any{
+				"id":   "T001TEAM",
+				"name": "Test Workspace",
+			},
+		})
+	}))
+	defer tokenServer.Close()
+
+	srv := newConnectedAccountServerWithAuth()
+	srv.uiRedirect = "https://app.withaileron.ai"
+	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
+		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
+	reg := account.NewRegistry()
+	reg.Register(slackSvc)
+	srv.accountService = reg
+
+	state := "test-state-123"
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/slack/callback?code=valid&state="+state, "", userAClaims)
+	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
+	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: state})
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d: %s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	want := "https://app.withaileron.ai/settings/connected-accounts"
+	if loc != want {
+		t.Errorf("Location = %q, want %q", loc, want)
+	}
+}
+
+func TestConnectAccountCallback_DefaultRedirectWhenUINotSet(t *testing.T) {
+	// When uiRedirect is empty (local dev), the redirect should be a relative path.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"authed_user": map[string]any{
+				"id":           "U123ABC",
+				"access_token": "xoxp-user-token-123",
+				"scope":        "channels:history",
+				"token_type":   "user",
+			},
+			"team": map[string]any{
+				"id":   "T001TEAM",
+				"name": "Test Workspace",
+			},
+		})
+	}))
+	defer tokenServer.Close()
+
+	srv := newConnectedAccountServerWithAuth()
+	// uiRedirect left as "" (default)
+	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
+		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
+	reg := account.NewRegistry()
+	reg.Register(slackSvc)
+	srv.accountService = reg
+
+	state := "test-state-456"
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/slack/callback?code=valid&state="+state, "", userAClaims)
+	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
+	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: state})
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d: %s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	want := "/settings/connected-accounts"
+	if loc != want {
+		t.Errorf("Location = %q, want %q", loc, want)
+	}
+}
+
 func TestListConnectedAccounts_Unauthorized(t *testing.T) {
 	srv := newConnectedAccountServerWithAuth()
 	w := httptest.NewRecorder()
