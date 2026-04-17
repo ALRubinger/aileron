@@ -300,7 +300,39 @@ func TestEditDraft_PassesThreadTS(t *testing.T) {
 	}
 }
 
-func TestDeliverEphemeralDraft_PassesThreadTS(t *testing.T) {
+func TestDeliverEphemeralDraft_ThreadTS_WhenRepliesExist(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	ctx := context.Background()
+
+	// Mock thread checker returns true — thread has replies.
+	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return true }
+
+	var capturedThreadTS string
+	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
+		capturedThreadTS = msg.ThreadTS
+		return nil
+	}
+
+	draft := model.Draft{
+		ID:        "dft_1",
+		UserID:    "usr_a",
+		Service:   "slack",
+		Channel:   "C0BACKEND",
+		Author:    "Sarah",
+		DraftBody: "Draft reply",
+		MessageTS: "1234567890.123456",
+	}
+	srv.deliverEphemeralDraft(ctx, "usr_a", draft)
+
+	if capturedThreadTS != "1234567890.123456" {
+		t.Errorf("expected ThreadTS when thread has replies, got %q", capturedThreadTS)
+	}
+}
+
+func TestDeliverEphemeralDraft_NoThreadTS_WhenNoReplies(t *testing.T) {
+	// Ephemeral drafts should NOT be posted in-thread when the thread has
+	// no replies yet — Slack silently drops them. ThreadTS should be empty
+	// so the ephemeral appears at channel level.
 	srv := newDraftsTestServerWithSend()
 	ctx := context.Background()
 
@@ -322,8 +354,10 @@ func TestDeliverEphemeralDraft_PassesThreadTS(t *testing.T) {
 	}
 	srv.deliverEphemeralDraft(ctx, "usr_a", draft)
 
-	if capturedThreadTS != "1234567890.123456" {
-		t.Errorf("expected ThreadTS = %q, got %q", "1234567890.123456", capturedThreadTS)
+	// SlackThreadHasReplies returns false in tests (no real Slack API),
+	// so ThreadTS should be empty — ephemeral at channel level.
+	if capturedThreadTS != "" {
+		t.Errorf("expected empty ThreadTS (no thread replies), got %q", capturedThreadTS)
 	}
 }
 
