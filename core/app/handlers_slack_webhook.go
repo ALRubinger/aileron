@@ -168,11 +168,10 @@ func (s *apiServer) processSlackEvent(payload slackWebhookPayload) {
 
 	msg := comms.BuildIncomingMessage(evt.TS, evt.Channel, evt.User, evt.Text)
 
-	// Notify each mentioned user (skip the message author).
+	// Notify each mentioned user. If the author @mentions themselves,
+	// they still get a draft — they explicitly asked for it.
+	// Only skip the author when they are NOT mentioned.
 	for _, acct := range accounts {
-		if acct.ExternalUserID == evt.User {
-			continue // don't draft for your own messages
-		}
 		if !isSlackMention(evt.Text, acct.ExternalUserID) {
 			continue // only draft when the user is @mentioned
 		}
