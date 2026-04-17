@@ -195,7 +195,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.userAuthProviders = userAuthProviderStore
 		server.userKeyMaterials = userKeyMaterialStore
 		server.escrowTTL = authCfg.EscrowTTL()
-		server.uiRedirect = authCfg.UIRedirectURL
+		server.uiOrigin = authCfg.UIOrigin
 
 		// Switch to Postgres-backed stores and vault now that the database is available.
 		pgConnectedAccountStore := postgres.NewConnectedAccountStore(db)

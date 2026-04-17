@@ -35,6 +35,12 @@ type AuthConfig struct {
 	// Env: AILERON_UI_REDIRECT_URL (default: "/")
 	UIRedirectURL string
 
+	// UIOrigin is the base URL of the UI application (e.g. "https://app.withaileron.ai").
+	// Used to build absolute redirects to specific UI pages (e.g. after OAuth
+	// account connection). When empty, redirects use relative paths (local dev).
+	// Env: AILERON_UI_ORIGIN
+	UIOrigin string
+
 	// AutoVerifyEmail skips email verification on signup, activating
 	// accounts immediately. For development and CI only.
 	// Env: AILERON_AUTO_VERIFY_EMAIL
@@ -76,6 +82,7 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		JWTSigningKey:      envTrimmed("AILERON_JWT_SIGNING_KEY"),
 		JWTIssuer:          envOrDefault("AILERON_JWT_ISSUER", "aileron"),
 		UIRedirectURL:      envOrDefault("AILERON_UI_REDIRECT_URL", "/"),
+		UIOrigin:           strings.TrimRight(envTrimmed("AILERON_UI_ORIGIN"), "/"),
 		AutoVerifyEmail:    envTrimmed("AILERON_AUTO_VERIFY_EMAIL") == "true",
 		GoogleClientID:       envTrimmed("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret:   envTrimmed("GOOGLE_CLIENT_SECRET"),
