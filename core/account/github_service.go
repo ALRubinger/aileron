@@ -133,7 +133,6 @@ func (s *GitHubAccountService) HandleCallback(ctx context.Context, _ model.Conne
 		ID:             "conn_" + uuid.New().String(),
 		UserID:         req.UserID,
 		Provider:       model.ConnectedAccountProviderGitHub,
-		Email:          username, // GitHub username, not email
 		Scopes:         githubRepoScopes,
 		Status:         model.ConnectedAccountStatusActive,
 		ExternalUserID: username,
