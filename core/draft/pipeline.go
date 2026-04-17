@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/ALRubinger/aileron/core/comms"
@@ -22,19 +23,6 @@ import (
 	"github.com/ALRubinger/aileron/core/vault"
 )
 
-// researchPrompt instructs the LLM to gather context using tools.
-// Its output is internal — fed to the ghostwriting round, never shown to users.
-const researchPrompt = `You are a research assistant gathering context to help draft a reply to a message.
-
-Your job is to find all relevant information needed to write a good reply. Use the available tools to search broadly and thoroughly.
-
-IMPORTANT:
-- If the message references a time range ("this week," "since Monday," "last sprint"), search the FULL range. Today is %s. Make multiple searches with different queries to cover the full period — do not rely on a single search that only returns recent results.
-- Search for PRs, issues, commits, messages, events — whatever is relevant to the question.
-- Include links (full URLs) to everything you find.
-- Output a structured summary of what you found. Include all relevant details — the ghostwriter will decide what to include in the final reply.
-- Be thorough. It's better to find too much than too little.`
-
 // Pipeline orchestrates draft generation for incoming messages.
 type Pipeline struct {
 	llm               llm.Client
@@ -43,11 +31,11 @@ type Pipeline struct {
 	instructions      store.UserInstructionStore
 	vault             vault.Vault
 	log               *slog.Logger
-	systemPrompt      string
+	researchPrompt    string
+	ghostwritePrompt  string
 }
 
-// NewPipeline creates a draft generation pipeline. The systemPrompt is the
-// base prompt loaded from AILERON.md.
+// NewPipeline creates a draft generation pipeline.
 func NewPipeline(
 	llmClient llm.Client,
 	sourceReg *source.Registry,
@@ -55,7 +43,7 @@ func NewPipeline(
 	instructions store.UserInstructionStore,
 	v vault.Vault,
 	log *slog.Logger,
-	systemPrompt string,
+	prompts Prompts,
 ) *Pipeline {
 	return &Pipeline{
 		llm:               llmClient,
@@ -64,7 +52,8 @@ func NewPipeline(
 		instructions:      instructions,
 		vault:             v,
 		log:               log,
-		systemPrompt:      systemPrompt,
+		researchPrompt:    prompts.Research,
+		ghostwritePrompt:  prompts.Ghostwrite,
 	}
 }
 
@@ -100,7 +89,11 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	// --- Round 1: Research ---
 	// The LLM gathers context using tools. Its output is a structured
 	// summary of what it found — never shown to the user.
-	researchSysPrompt := fmt.Sprintf(researchPrompt, time.Now().Format("2006-01-02 (Monday)"))
+	researchSysPrompt := strings.ReplaceAll(
+		p.researchPrompt,
+		"{{today}}",
+		time.Now().Format("2006-01-02 (Monday)"),
+	)
 	researchMessage := fmt.Sprintf(
 		"Find relevant context to help reply to this message from %s in %s:\n\n%s",
 		msg.Author, msg.Channel, msg.Body,
@@ -165,7 +158,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 // the user's active instructions. Instructions are the highest-priority
 // context — they override learned patterns and behavioral model inferences.
 func (p *Pipeline) assembleSystemPrompt(ctx context.Context, userID string) (string, error) {
-	prompt := p.systemPrompt
+	prompt := p.ghostwritePrompt
 
 	if p.instructions == nil {
 		return prompt, nil
