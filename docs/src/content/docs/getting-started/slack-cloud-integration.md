@@ -1,94 +1,157 @@
 ---
 title: "Slack Cloud Integration"
-description: "Always-on Slack event ingestion via cloud webhook"
+description: "Always-on Slack event ingestion and AI-drafted replies via cloud webhook"
 ---
 
-The Slack cloud integration receives Slack messages at Aileron's cloud endpoint, enabling always-on message handling without requiring `aileron launch` to be running. Messages arrive via the Slack Events API, are routed to the correct Aileron user, and will be available for context-aware draft generation.
+The Slack cloud integration receives Slack messages at Aileron's cloud endpoint, generates AI-drafted replies with source context, and presents them for review as ephemeral messages in Slack. Always-on — no `aileron launch` required.
 
-This is separate from the [local Slack integration](/getting-started/slack-integration), which uses Socket Mode and requires an active terminal session. Both can coexist — use local for development, cloud for always-on.
+This is separate from the [local Slack integration](/getting-started/slack-integration), which uses Socket Mode and requires an active terminal session. Both can coexist.
 
 ## How it works
 
-1. You connect your Slack account to Aileron via OAuth ("Connect Slack")
-2. Slack sends message events to `https://your-domain/v1/webhooks/slack/events`
-3. Aileron verifies the request signature, identifies your account by Slack team + user ID, and routes the event to your processing pipeline
-4. Messages are sent as you (your OAuth user token), not as a bot
+1. You connect your Slack account to Aileron via OAuth
+2. Slack sends message events to Aileron's webhook endpoint
+3. Aileron generates a context-aware draft reply using the LLM and source connector tools
+4. An ephemeral message appears in the Slack channel (visible only to you) with the draft and Approve/Edit/Discard buttons
+5. You click Approve — the reply is sent as you, not as a bot
 
-There is no bot in your channels. No bot avatar, no bot in the member list. Aileron uses your user token with your permissions.
+## 1. Create a Slack App
 
-## 1. Create a Slack app
-
-Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app.
+Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app from scratch.
 
 ### OAuth & Permissions
+
+Under **Bot Token Scopes**, add:
+
+- `chat:write` — for posting ephemeral draft previews (visible only to you)
 
 Under **User Token Scopes**, add:
 
 - `channels:history` — read messages in public channels
 - `channels:read` — list channels and their info
 - `chat:write` — send messages as the user
+- `search:read` — search message history for context
 - `users:read` — look up user names
 
-These are *user* scopes, not bot scopes. Aileron acts as the user, not as a bot.
-
-### Event Subscriptions
-
-Enable **Event Subscriptions** and set the Request URL to:
+Under **Redirect URLs**, add:
 
 ```
-https://your-domain/v1/webhooks/slack/events
+https://api.withaileron.ai/v1/connect/slack/callback
 ```
-
-Slack will send a verification challenge to this URL. Aileron responds automatically once the webhook endpoint is running.
-
-Under **Subscribe to events on behalf of users**, add:
-
-- `message.channels` — messages in public channels
 
 ### App Credentials
 
 From **Basic Information**, note:
 
-- **Client ID** — for the OAuth flow
-- **Client Secret** — for the OAuth flow
-- **Signing Secret** — for webhook signature verification
+- **Client ID** → `SLACK_CLIENT_ID`
+- **Client Secret** → `SLACK_CLIENT_SECRET`
+- **Signing Secret** → `SLACK_SIGNING_SECRET`
+
+### Install to workspace
+
+Sidebar → **Install App** → **Install to Workspace**. Authorize the requested scopes.
+
+> **Do NOT configure Event Subscriptions or Interactivity yet.** The Aileron server must be running first. See step 3.
 
 ## 2. Configure environment variables
 
-Set these on your Aileron cloud server (Railway, Docker, etc.):
+Set these on your Aileron cloud server:
 
 ```sh
 SLACK_CLIENT_ID=your-client-id
 SLACK_CLIENT_SECRET=your-client-secret
 SLACK_SIGNING_SECRET=your-signing-secret
 
-# For AI-powered draft generation (optional but recommended):
+# For AI-powered draft generation:
 ANTHROPIC_API_KEY=sk-ant-your-key
 AILERON_LLM_MODEL=claude-sonnet-4-6  # optional, this is the default
 ```
 
-The Slack variables are required for event ingestion. `ANTHROPIC_API_KEY` enables automatic draft generation — without it, messages are received but no drafts are produced.
-
-## 3. Connect your Slack account
-
-Once the server is running with the environment variables set:
-
-1. Navigate to `https://your-domain/v1/connect/slack`
-2. Slack's OAuth consent screen appears — authorize with your user scopes
-3. Aileron stores your user token in the encrypted vault and creates a connected account record
-4. Your Slack team ID and user ID are recorded for event routing
-
-First user in a workspace may need Slack admin approval for the app. Subsequent users in the same workspace self-serve.
-
-## 4. Verify webhook delivery
-
-Once connected, Slack will start sending events to your webhook endpoint. Check the server logs for:
+Verify the server logs show:
 
 ```
-slack cloud message received  user_id=usr_xxx channel=C0BACKEND author=U123ABC
+enabled Slack connected accounts and source connector
+enabled cloud draft generation  model=claude-sonnet-4-6
+enabled Slack Events API webhook and interaction endpoints
 ```
 
-You can also check Slack's **Event Subscriptions** page for delivery status — it shows recent webhook attempts and response codes.
+## 3. Enable Event Subscriptions and Interactivity
+
+The server must be running before this step — Slack sends verification challenges immediately.
+
+### Event Subscriptions
+
+1. Sidebar → **Event Subscriptions** → toggle ON
+2. **Request URL:** `https://your-domain/v1/webhooks/slack/events`
+3. Wait for the green checkmark ✓
+4. Under **Subscribe to events on behalf of users**, add: `message.channels`
+5. Click **Save Changes**
+
+### Interactivity
+
+1. Sidebar → **Interactivity & Shortcuts** → toggle ON
+2. **Request URL:** `https://your-domain/v1/webhooks/slack/interactions`
+3. Click **Save Changes**
+
+### Reinstall
+
+Sidebar → **Install App** → **Reinstall to Workspace** if prompted.
+
+## 4. Connect your Slack account
+
+Open in browser (must be logged into Aileron):
+
+```
+https://your-domain/v1/connect/slack
+```
+
+Verify:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+  https://your-domain/v1/connected-accounts
+```
+
+Should show your Slack account with `status: active`.
+
+## 5. Invite the bot to channels
+
+The bot must be a member of channels where you want to receive draft previews:
+
+```
+/invite @Aileron
+```
+
+The bot is silent — it only posts ephemeral messages (visible to you, invisible to teammates). Replies are sent via your user token.
+
+## 6. Test it
+
+Have someone send a message in a channel. You should see:
+
+1. Server logs: `draft pending review` and `ephemeral draft delivered`
+2. An ephemeral message in Slack with the draft and Approve/Edit/Discard buttons
+3. Click **Approve** → reply appears from your account
+
+## Context retrieval tools
+
+The LLM can call these tools during draft generation:
+
+| Tool | Description |
+|------|-------------|
+| `slack_channel_history` | Recent messages in a channel |
+| `slack_thread_replies` | Replies in a thread |
+| `slack_search_messages` | Search messages across channels |
+
+## Draft lifecycle API
+
+Drafts are also available via REST (fallback when ephemeral delivery fails):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v1/drafts?status=pending` | List pending drafts |
+| `POST /v1/drafts/{id}/approve` | Approve and send |
+| `POST /v1/drafts/{id}/edit` | Edit body and send |
+| `POST /v1/drafts/{id}/discard` | Discard |
 
 ## Architecture
 
@@ -106,103 +169,35 @@ Aileron Cloud (/v1/webhooks/slack/events)
     ▼
 Draft Generation Pipeline
     │
-    ├─ Build system prompt + user message
+    ├─ Build system prompt + user instructions
     ├─ Resolve available tools from connected accounts
-    ├─ Call LLM (Anthropic API) with tools
+    ├─ Call LLM with tools
     │   ├─ LLM may call tools (e.g. slack_channel_history)
     │   ├─ Aileron executes tools with user's OAuth token
     │   └─ LLM generates draft from assembled context
     │
     ▼
-Draft stored as "pending" → GET /v1/drafts
-  → User approves/edits/discards → Sent to Slack as user
+Ephemeral message in Slack (Approve / Edit / Discard)
+    │
+    ▼
+User approves → Aileron sends reply as user
 ```
-
-## Context retrieval tools
-
-Once connected, Aileron exposes read-only tools that an LLM can call to retrieve Slack context during draft generation:
-
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `slack_channel_history` | Get recent messages from a channel | `channel` (required), `limit` (optional, default 20) |
-| `slack_thread_replies` | Get replies in a thread | `channel` (required), `thread_ts` (required) |
-| `slack_search_messages` | Search messages across channels | `query` (required), `count` (optional, default 10) |
-
-**List available tools:**
-
-```
-GET /v1/tools
-Authorization: Bearer <token>
-```
-
-Returns only tools for providers the user has connected. If no Slack account is connected, no Slack tools appear.
-
-**Execute a tool:**
-
-```
-POST /v1/tools/execute
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{
-  "tool": "slack_channel_history",
-  "params": { "channel": "C0BACKEND", "limit": 10 }
-}
-```
-
-The execute endpoint retrieves the user's Slack OAuth token from the vault and passes it to the tool. The LLM never sees the token directly — Aileron is the access-controlled gateway.
-
-## Draft lifecycle
-
-When a Slack message arrives and `ANTHROPIC_API_KEY` is configured, Aileron generates a draft reply and stores it as `pending`. Use the draft API to review and act on drafts from any surface:
-
-**List pending drafts:**
-
-```
-GET /v1/drafts?status=pending
-Authorization: Bearer <token>
-```
-
-**Approve (send as-is):**
-
-```
-POST /v1/drafts/{draft_id}/approve
-Authorization: Bearer <token>
-```
-
-**Edit and send:**
-
-```
-POST /v1/drafts/{draft_id}/edit
-Authorization: Bearer <token>
-Content-Type: application/json
-
-{ "body": "Revised reply text" }
-```
-
-**Discard:**
-
-```
-POST /v1/drafts/{draft_id}/discard
-Authorization: Bearer <token>
-```
-
-On approve or edit, Aileron sends the message to Slack using your OAuth user token — the reply comes from you, not a bot.
 
 ## Security
 
-- **Signature verification:** Every webhook request is verified using HMAC-SHA256 with the signing secret. Invalid or stale (>5 minutes) signatures are rejected.
-- **No JWT auth on webhook:** The webhook endpoint is excluded from Aileron's JWT auth middleware — Slack calls it directly. Signature verification provides authentication.
-- **Event deduplication:** Slack may retry events. Aileron deduplicates by `event_id` with a 5-minute TTL.
-- **Token storage:** OAuth user tokens are stored in the encrypted vault (see [Credential Vault](/getting-started/credential-vault)).
+- **Signature verification:** HMAC-SHA256 with the signing secret. Invalid or stale (>5min) signatures rejected.
+- **No JWT auth on webhooks:** The webhook endpoints are excluded from Aileron's JWT middleware — Slack calls them directly. Signature verification provides authentication.
+- **Event deduplication:** In-memory TTL map by `event_id` (5 minutes).
+- **Token storage:** OAuth tokens stored in the vault (Postgres-backed, encrypted at rest in Phase 2).
+- **Read/write boundary (ADR-0019):** The LLM reads via tools. Aileron owns all writes (sending messages). User approval required.
 
-## Relationship to local Slack integration
+## Troubleshooting
 
-| Concern | Local (Socket Mode) | Cloud (Events API) |
-|---------|--------------------|--------------------|
-| Connection | WebSocket from your machine | HTTP webhook to cloud server |
-| Requires | `aileron launch` running | Cloud server running |
-| Bot in channels | Yes (must invite bot) | No (user token only) |
-| Token type | Bot + App tokens | User OAuth token |
-| Always-on | No (active session only) | Yes |
-| Configuration | `aileron.yaml` + vault secrets | Environment variables + OAuth |
+| Symptom | Likely cause |
+|---------|-------------|
+| url_verification fails | Server not running, wrong URL, signing secret mismatch |
+| No events arriving | App not installed, event subscriptions not saved, channel is private |
+| Events arrive but no draft | `ANTHROPIC_API_KEY` not set, check logs for `draft generation failed` |
+| Draft generated but no ephemeral | No bot token (reconnect Slack), bot not in channel, check `ephemeral:` errors |
+| Buttons don't work | Interactivity not enabled, wrong Request URL |
+| Duplicate key on reconnect | Disconnect first, then reconnect |
