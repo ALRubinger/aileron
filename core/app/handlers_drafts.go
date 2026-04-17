@@ -240,6 +240,10 @@ func (s *apiServer) getDraftForAction(w http.ResponseWriter, r *http.Request, dr
 // Defaults to comms.PostEphemeralDraft. Override in tests.
 type EphemeralPoster func(ctx context.Context, msg comms.SlackDraftMessage) error
 
+// ThreadChecker checks if a Slack thread has replies.
+// Defaults to comms.SlackThreadHasReplies. Override in tests.
+type ThreadChecker func(ctx context.Context, botToken, channel, messageTS string) bool
+
 // SlackSender is the function used to send messages to Slack.
 // Defaults to comms.SendSlackMessage. Override in tests.
 type SlackSender func(ctx context.Context, token, channel, body, threadTS string) error
@@ -466,6 +470,20 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 		return
 	}
 
+	// Only post in-thread if the thread already has replies. Slack silently
+	// drops ephemeral messages in threads with no replies. If no thread
+	// exists yet, post at channel level so the user sees the draft.
+	checker := s.threadChecker
+	if checker == nil {
+		checker = comms.SlackThreadHasReplies
+	}
+	threadTS := ""
+	if draft.MessageTS != "" {
+		if checker(ctx, botToken, draft.Channel, draft.MessageTS) {
+			threadTS = draft.MessageTS
+		}
+	}
+
 	poster := s.ephemeralPoster
 	if poster == nil {
 		poster = comms.PostEphemeralDraft
@@ -478,7 +496,7 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 		Author:   draft.Author,
 		Body:     draft.MessageBody,
 		Draft:    draft.DraftBody,
-		ThreadTS: draft.MessageTS,
+		ThreadTS: threadTS,
 	})
 	if err != nil {
 		s.log.Error("ephemeral: failed to post", "user_id", userID, "draft_id", draft.ID, "error", err)

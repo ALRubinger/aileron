@@ -55,6 +55,7 @@ type apiServer struct {
 	feedback           store.DraftFeedbackStore  // draft feedback signals for behavioral model
 	slackSender        SlackSender            // injectable for testing; defaults to comms.SendSlackMessage
 	ephemeralPoster    EphemeralPoster        // injectable for testing; defaults to comms.PostEphemeralDraft
+	threadChecker      ThreadChecker          // injectable for testing; defaults to comms.SlackThreadHasReplies
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
 	slackDedup         *slackEventDedup        // deduplication cache for Slack events
 	onSlackMessage     func(ctx context.Context, userID string, msg comms.IncomingMessage) // callback for incoming Slack messages
