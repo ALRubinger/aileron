@@ -54,7 +54,8 @@
 	}
 
 	function handleConnect(provider: string) {
-		window.location.href = `${PUBLIC_API_BASE}/v1/connect/${provider}`;
+		const returnTo = `${window.location.origin}/settings/connected-accounts`;
+		window.location.href = `${PUBLIC_API_BASE}/v1/connect/${provider}?return_to=${encodeURIComponent(returnTo)}`;
 	}
 
 	function openDisconnectDialog(account: ConnectedAccount) {

@@ -38,7 +38,6 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `AILERON_ACCESS_TOKEN_TTL` | No | `15m` | Access token lifetime |
 | `AILERON_REFRESH_TOKEN_TTL` | No | `168h` | Refresh token lifetime (7 days) |
 | `AILERON_UI_REDIRECT_URL` | No | `/` | Redirect destination after successful login |
-| `AILERON_UI_ORIGIN` | No | *(empty)* | UI origin for post-action redirects (e.g. `https://app.yourdomain.com`). Required when the API and UI are on different domains so that OAuth account-connection callbacks redirect to the UI. No trailing slash. |
 | `AILERON_AUTO_VERIFY_EMAIL` | No | `false` | Skip email verification on signup. **Never enable in production.** |
 | `GOOGLE_CLIENT_ID` | No | | Google OAuth 2.0 client ID |
 | `GOOGLE_CLIENT_SECRET` | No | | Google OAuth 2.0 client secret |
