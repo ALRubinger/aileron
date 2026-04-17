@@ -67,6 +67,7 @@ type apiServer struct {
 	teeCfg             *config.TEEConfig          // nil when TEE is disabled
 	teeState           *teeState                  // nil when TEE is disabled
 	escrowTTL          time.Duration              // TTL for auto-escrowed credentials
+	uiRedirect         string                     // base URL for UI redirects (e.g. "https://app.withaileron.ai")
 	escrowIndex        sync.Map                   // vault path (string) -> escrow ID (string)
 	newID              func() string
 }

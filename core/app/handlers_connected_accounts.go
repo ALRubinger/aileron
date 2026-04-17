@@ -271,7 +271,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		http.Redirect(w, r, "/settings/connected-accounts", http.StatusFound)
+		http.Redirect(w, r, s.uiRedirect+"/settings/connected-accounts", http.StatusFound)
 		return
 	}
 
@@ -293,7 +293,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	http.Redirect(w, r, "/settings/connected-accounts", http.StatusFound)
+	http.Redirect(w, r, s.uiRedirect+"/settings/connected-accounts", http.StatusFound)
 }
 
 // requestScheme returns "https" or "http" based on the request. It checks
