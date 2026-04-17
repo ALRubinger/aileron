@@ -12,6 +12,54 @@ import (
 	"github.com/ALRubinger/aileron/core/store"
 )
 
+// handleCreateDraft creates a draft directly (for programmatic/admin use).
+// POST /v1/drafts
+func (s *apiServer) handleCreateDraft(w http.ResponseWriter, r *http.Request) {
+	userID, _, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Service     string `json:"service"`
+		Channel     string `json:"channel"`
+		Author      string `json:"author"`
+		MessageBody string `json:"message_body"`
+		MessageTS   string `json:"message_ts"`
+		DraftBody   string `json:"draft_body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+		return
+	}
+	if req.DraftBody == "" {
+		writeError(w, http.StatusBadRequest, "invalid_body", "draft_body is required")
+		return
+	}
+
+	now := time.Now().UTC()
+	d := model.Draft{
+		ID:          "dft_" + s.newID(),
+		UserID:      userID,
+		Status:      model.DraftStatusPending,
+		Service:     req.Service,
+		Channel:     req.Channel,
+		Author:      req.Author,
+		MessageBody: req.MessageBody,
+		MessageTS:   req.MessageTS,
+		DraftBody:   req.DraftBody,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	if err := s.drafts.Create(r.Context(), d); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, d)
+}
+
 // handleListDrafts returns pending drafts for the authenticated user.
 // GET /v1/drafts?status=pending
 func (s *apiServer) handleListDrafts(w http.ResponseWriter, r *http.Request) {
@@ -290,6 +338,58 @@ func (s *apiServer) recordFeedback(ctx context.Context, draft model.Draft, signa
 	if err := s.feedback.Create(ctx, fb); err != nil {
 		s.log.Error("failed to record feedback", "draft_id", draft.ID, "signal", signal, "error", err)
 	}
+}
+
+// handleCreateFeedback creates a feedback signal directly (for programmatic/admin use).
+// POST /v1/feedback
+func (s *apiServer) handleCreateFeedback(w http.ResponseWriter, r *http.Request) {
+	userID, _, ok := s.requireAuth(w, r)
+	if !ok {
+		return
+	}
+
+	if s.feedback == nil {
+		writeError(w, http.StatusNotImplemented, "not_implemented", "feedback store not configured")
+		return
+	}
+
+	var req struct {
+		DraftID   string   `json:"draft_id"`
+		Signal    string   `json:"signal"`
+		Service   string   `json:"service"`
+		Channel   string   `json:"channel"`
+		DraftBody string   `json:"draft_body"`
+		SentBody  string   `json:"sent_body"`
+		ToolsUsed []string `json:"tools_used"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+		return
+	}
+	if req.Signal == "" {
+		writeError(w, http.StatusBadRequest, "invalid_body", "signal is required")
+		return
+	}
+
+	fb := model.DraftFeedback{
+		ID:        "fb_" + s.newID(),
+		UserID:    userID,
+		DraftID:   req.DraftID,
+		Signal:    model.FeedbackSignal(req.Signal),
+		Service:   req.Service,
+		Channel:   req.Channel,
+		DraftBody: req.DraftBody,
+		SentBody:  req.SentBody,
+		ToolsUsed: req.ToolsUsed,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := s.feedback.Create(r.Context(), fb); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, fb)
 }
 
 // handleListFeedback returns the user's draft feedback signals.

@@ -190,9 +190,7 @@ type SSOConfigStore interface {
 type ConnectedAccountStore interface {
 	Create(ctx context.Context, account model.ConnectedAccount) error
 	Get(ctx context.Context, accountID string) (model.ConnectedAccount, error)
-	GetByUserAndProvider(ctx context.Context, userID string, provider model.ConnectedAccountProvider) (model.ConnectedAccount, error)
 	List(ctx context.Context, filter ConnectedAccountFilter) ([]model.ConnectedAccount, error)
-	Update(ctx context.Context, account model.ConnectedAccount) error
 	Delete(ctx context.Context, accountID string) error
 }
 
@@ -203,7 +201,6 @@ type ConnectedAccountFilter struct {
 	Status         *model.ConnectedAccountStatus
 	ExternalUserID string // filter by provider-specific user ID (e.g. Slack user)
 	ExternalTeamID string // filter by provider-specific team/workspace ID (e.g. Slack team)
-	PageSize       int
 }
 
 // DraftStore persists and retrieves AI-generated draft replies.
@@ -216,9 +213,8 @@ type DraftStore interface {
 
 // DraftFilter scopes a draft list query.
 type DraftFilter struct {
-	UserID   string
-	Status   *model.DraftStatus
-	PageSize int
+	UserID string
+	Status *model.DraftStatus
 }
 
 // DraftFeedbackStore persists and retrieves feedback signals from draft
