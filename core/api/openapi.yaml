@@ -1269,6 +1269,12 @@ paths:
       operationId: connectAccount
       description: Redirects the user to the provider's OAuth consent screen with service-specific scopes.
       security: []
+      parameters:
+        - name: return_to
+          in: query
+          required: false
+          schema: { type: string }
+          description: URL to redirect to after the account is connected. Must be a same-site absolute URL or a relative path. Defaults to /settings/connected-accounts.
       responses:
         "302":
           description: Redirect to provider consent screen

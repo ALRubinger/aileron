@@ -52,7 +52,6 @@ func TestLoadAuthConfig_Defaults(t *testing.T) {
 	t.Setenv("AILERON_ACCESS_TOKEN_TTL", "")
 	t.Setenv("AILERON_REFRESH_TOKEN_TTL", "")
 	t.Setenv("AILERON_UI_REDIRECT_URL", "")
-	t.Setenv("AILERON_UI_ORIGIN", "")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
@@ -69,22 +68,6 @@ func TestLoadAuthConfig_Defaults(t *testing.T) {
 	}
 	if cfg.UIRedirectURL != "/" {
 		t.Errorf("UIRedirectURL = %q, want /", cfg.UIRedirectURL)
-	}
-	if cfg.UIOrigin != "" {
-		t.Errorf("UIOrigin = %q, want empty", cfg.UIOrigin)
-	}
-}
-
-func TestLoadAuthConfig_UIOriginTrimsTrailingSlash(t *testing.T) {
-	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("AILERON_UI_ORIGIN", "https://app.withaileron.ai/")
-
-	cfg, err := LoadAuthConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.UIOrigin != "https://app.withaileron.ai" {
-		t.Errorf("UIOrigin = %q, want trailing slash stripped", cfg.UIOrigin)
 	}
 }
 

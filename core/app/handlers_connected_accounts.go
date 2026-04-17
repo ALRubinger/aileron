@@ -183,7 +183,10 @@ func (s *apiServer) DeleteConnectedAccount(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, providerStr string) {
+// connectReturnDefault is the fallback redirect after a successful account connection.
+const connectReturnDefault = "/settings/connected-accounts"
+
+func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, providerStr string, params api.ConnectAccountParams) {
 	if s.accountService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented", "connected accounts not configured")
 		return
@@ -200,6 +203,8 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 		return
 	}
 
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     "aileron_connect_state",
 		Value:    state,
@@ -207,7 +212,22 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 		MaxAge:   600,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
+	})
+
+	// Persist the caller's desired return URL so the callback can redirect there.
+	returnTo := connectReturnDefault
+	if params.ReturnTo != nil && *params.ReturnTo != "" {
+		returnTo = *params.ReturnTo
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "aileron_connect_return",
+		Value:    returnTo,
+		Path:     "/v1/connect/",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
 	})
 
 	http.Redirect(w, r, result.URL, http.StatusFound)
@@ -225,10 +245,23 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Read the return URL set during ConnectAccount, falling back to the default.
+	returnTo := connectReturnDefault
+	if rc, err := r.Cookie("aileron_connect_return"); err == nil && rc.Value != "" {
+		returnTo = rc.Value
+	}
+
+	// Clear both cookies.
 	http.SetCookie(w, &http.Cookie{
 		Name:   "aileron_connect_state",
 		Value:  "",
-		Path:   "/auth/connect/",
+		Path:   "/v1/connect/",
+		MaxAge: -1,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:   "aileron_connect_return",
+		Value:  "",
+		Path:   "/v1/connect/",
 		MaxAge: -1,
 	})
 
@@ -295,7 +328,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		http.Redirect(w, r, s.uiOrigin+"/settings/connected-accounts", http.StatusFound)
+		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
 
@@ -317,7 +350,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	http.Redirect(w, r, s.uiOrigin+"/settings/connected-accounts", http.StatusFound)
+	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 
 // requestScheme returns "https" or "http" based on the request. It checks

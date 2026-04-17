@@ -321,7 +321,7 @@ func TestConnectAccount_RedirectsToGoogle(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
-	srv.ConnectAccount(w, r, "gmail")
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
@@ -355,7 +355,7 @@ func TestConnectAccount_UnsupportedProvider(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/outlook", "", nil)
-	srv.ConnectAccount(w, r, "outlook")
+	srv.ConnectAccount(w, r, "outlook", api.ConnectAccountParams{})
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for unsupported provider, got %d", w.Code)
@@ -377,7 +377,7 @@ func TestConnectAccount_NotConfigured(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
-	srv.ConnectAccount(w, r, "gmail")
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
 
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501, got %d", w.Code)
@@ -411,9 +411,9 @@ func TestConnectAccountCallback_StateMismatch(t *testing.T) {
 	}
 }
 
-func TestConnectAccountCallback_RedirectsToUIBaseURL(t *testing.T) {
+func TestConnectAccountCallback_RedirectsToReturnTo(t *testing.T) {
 	// Regression test: after a successful OAuth callback the server must redirect
-	// to the UI origin (e.g. https://app.withaileron.ai), not to a relative path
+	// to the return_to URL set during ConnectAccount, not to a relative path
 	// on the API host.
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
@@ -433,7 +433,6 @@ func TestConnectAccountCallback_RedirectsToUIBaseURL(t *testing.T) {
 	defer tokenServer.Close()
 
 	srv := newConnectedAccountServerWithAuth()
-	srv.uiOrigin = "https://app.withaileron.ai"
 	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
 		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
 	reg := account.NewRegistry()
@@ -444,6 +443,7 @@ func TestConnectAccountCallback_RedirectsToUIBaseURL(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/slack/callback?code=valid&state="+state, "", userAClaims)
 	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
+	r.AddCookie(&http.Cookie{Name: "aileron_connect_return", Value: "https://app.withaileron.ai/settings/connected-accounts"})
 	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: state})
 
 	if w.Code != http.StatusFound {
@@ -456,8 +456,8 @@ func TestConnectAccountCallback_RedirectsToUIBaseURL(t *testing.T) {
 	}
 }
 
-func TestConnectAccountCallback_DefaultRedirectWhenUINotSet(t *testing.T) {
-	// When uiOrigin is empty (local dev), the redirect should be a relative path.
+func TestConnectAccountCallback_DefaultRedirectWhenNoReturnTo(t *testing.T) {
+	// When no return_to cookie is set, the redirect should use the default path.
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"ok": true,
@@ -476,7 +476,6 @@ func TestConnectAccountCallback_DefaultRedirectWhenUINotSet(t *testing.T) {
 	defer tokenServer.Close()
 
 	srv := newConnectedAccountServerWithAuth()
-	// uiOrigin left as "" (default)
 	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
 		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
 	reg := account.NewRegistry()
@@ -487,6 +486,7 @@ func TestConnectAccountCallback_DefaultRedirectWhenUINotSet(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/slack/callback?code=valid&state="+state, "", userAClaims)
 	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
+	// No aileron_connect_return cookie — should use default.
 	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: state})
 
 	if w.Code != http.StatusFound {
@@ -497,6 +497,58 @@ func TestConnectAccountCallback_DefaultRedirectWhenUINotSet(t *testing.T) {
 	if loc != want {
 		t.Errorf("Location = %q, want %q", loc, want)
 	}
+}
+
+func TestConnectAccount_SetsReturnToCookie(t *testing.T) {
+	srv := newConnectedAccountServer()
+	reg := account.NewRegistry()
+	reg.Register(account.NewGoogleService("test-client-id", "secret", srv.connectedAccounts, srv.vault))
+	srv.accountService = reg
+
+	returnTo := "https://app.withaileron.ai/settings/connected-accounts"
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/gmail?return_to="+returnTo, "", nil)
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{ReturnTo: &returnTo})
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	var found bool
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "aileron_connect_return" {
+			found = true
+			if c.Value != returnTo {
+				t.Errorf("aileron_connect_return = %q, want %q", c.Value, returnTo)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected aileron_connect_return cookie to be set")
+	}
+}
+
+func TestConnectAccount_DefaultReturnToCookie(t *testing.T) {
+	srv := newConnectedAccountServer()
+	reg := account.NewRegistry()
+	reg.Register(account.NewGoogleService("test-client-id", "secret", srv.connectedAccounts, srv.vault))
+	srv.accountService = reg
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", w.Code)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "aileron_connect_return" {
+			if c.Value != "/settings/connected-accounts" {
+				t.Errorf("aileron_connect_return = %q, want default", c.Value)
+			}
+			return
+		}
+	}
+	t.Error("expected aileron_connect_return cookie to be set")
 }
 
 func TestListConnectedAccounts_Unauthorized(t *testing.T) {
@@ -554,7 +606,7 @@ func TestConnectAccount_RedirectURL_UsesHTTPS_BehindProxy(t *testing.T) {
 	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
 	// Simulate reverse proxy (Railway, Cloudflare) setting X-Forwarded-Proto.
 	r.Header.Set("X-Forwarded-Proto", "https")
-	srv.ConnectAccount(w, r, "gmail")
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
@@ -575,7 +627,7 @@ func TestConnectAccount_RedirectURL_HTTP_WithoutProxy(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail", "", nil)
 	// No X-Forwarded-Proto, no TLS → http (local dev).
-	srv.ConnectAccount(w, r, "gmail")
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d", w.Code)
