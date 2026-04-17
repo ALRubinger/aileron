@@ -2848,11 +2848,10 @@ components:
           type: string
           enum: [gmail, google_calendar, outlook, microsoft_calendar]
           readOnly: true
-        email:
+        external_user_id:
           type: string
-          format: email
           readOnly: true
-          description: Email address of the connected external account
+          description: Provider-specific user identifier (e.g. email for Gmail, username for GitHub, user ID for Slack)
         scopes:
           type: array
           items:

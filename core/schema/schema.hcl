@@ -416,11 +416,6 @@ table "connected_accounts" {
     null    = false
     comment = "External service provider (gmail, slack, github_repos, etc.)"
   }
-  column "email" {
-    type    = varchar(255)
-    null    = false
-    default = ""
-  }
   column "scopes" {
     type    = text
     null    = false

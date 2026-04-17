@@ -32,7 +32,6 @@ type ConnectedAccount struct {
 	ID             string                   // conn_ + UUID
 	UserID         string                   // owning user (usr_ + UUID)
 	Provider       ConnectedAccountProvider // which external service
-	Email          string                   // email associated with the external account
 	Scopes         []string                 // OAuth scopes granted
 	Status         ConnectedAccountStatus
 	ExternalUserID string // provider-specific user ID (e.g. Slack U...), empty for providers that don't need it

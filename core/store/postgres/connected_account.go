@@ -20,7 +20,7 @@ func NewConnectedAccountStore(db *DB) *ConnectedAccountStore {
 	return &ConnectedAccountStore{db: db}
 }
 
-const connectedAccountColumns = `id, user_id, provider, email, scopes, status,
+const connectedAccountColumns = `id, user_id, provider, scopes, status,
 	external_user_id, external_team_id, created_at, updated_at`
 
 func (s *ConnectedAccountStore) Create(ctx context.Context, a model.ConnectedAccount) error {
@@ -28,8 +28,8 @@ func (s *ConnectedAccountStore) Create(ctx context.Context, a model.ConnectedAcc
 	_, err := s.db.Pool.Exec(ctx,
 		`INSERT INTO connected_accounts
 			(`+connectedAccountColumns+`)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		a.ID, a.UserID, string(a.Provider), a.Email, string(scopes),
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		a.ID, a.UserID, string(a.Provider), string(scopes),
 		string(a.Status), a.ExternalUserID, a.ExternalTeamID,
 		a.CreatedAt, a.UpdatedAt,
 	)
@@ -108,7 +108,7 @@ func (s *ConnectedAccountStore) scanOne(ctx context.Context, query string, args 
 	var a model.ConnectedAccount
 	var provider, status, scopesJSON string
 	err := row.Scan(
-		&a.ID, &a.UserID, &provider, &a.Email, &scopesJSON,
+		&a.ID, &a.UserID, &provider, &scopesJSON,
 		&status, &a.ExternalUserID, &a.ExternalTeamID,
 		&a.CreatedAt, &a.UpdatedAt,
 	)
@@ -128,7 +128,7 @@ func scanConnectedAccount(rows pgx.Rows) (model.ConnectedAccount, error) {
 	var a model.ConnectedAccount
 	var provider, status, scopesJSON string
 	err := rows.Scan(
-		&a.ID, &a.UserID, &provider, &a.Email, &scopesJSON,
+		&a.ID, &a.UserID, &provider, &scopesJSON,
 		&status, &a.ExternalUserID, &a.ExternalTeamID,
 		&a.CreatedAt, &a.UpdatedAt,
 	)

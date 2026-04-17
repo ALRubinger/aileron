@@ -11,7 +11,6 @@ import (
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/enclave"
-	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 // --- Connected Accounts ---
@@ -28,7 +27,6 @@ func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.
 
 	var req struct {
 		Provider       string            `json:"provider"`
-		Email          string            `json:"email"`
 		Scopes         []string          `json:"scopes"`
 		ExternalUserID string            `json:"external_user_id"`
 		ExternalTeamID string            `json:"external_team_id"`
@@ -48,7 +46,6 @@ func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.
 		ID:             "conn_" + s.newID(),
 		UserID:         userID,
 		Provider:       model.ConnectedAccountProvider(req.Provider),
-		Email:          req.Email,
 		Scopes:         req.Scopes,
 		Status:         model.ConnectedAccountStatusActive,
 		ExternalUserID: req.ExternalUserID,
@@ -305,9 +302,9 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		acct := model.ConnectedAccount{
 			ID:        "conn_" + s.newID(),
 			UserID:    userID,
-			Provider:  provider,
-			Email:     oauthResp.Email,
-			Scopes:    providerSvc.ScopesFor(provider),
+			Provider:       provider,
+			Scopes:         providerSvc.ScopesFor(provider),
+			ExternalUserID: oauthResp.Email,
 			Status:    model.ConnectedAccountStatusActive,
 			CreatedAt: now,
 			UpdatedAt: now,
@@ -373,20 +370,14 @@ func connectedAccountToAPI(a model.ConnectedAccount) api.ConnectedAccount {
 	createdAt := a.CreatedAt
 	updatedAt := a.UpdatedAt
 	result := api.ConnectedAccount{
-		Id:        &a.ID,
-		UserId:    &a.UserID,
-		Provider:  &provider,
-		Scopes:    &a.Scopes,
-		Status:    &status,
-		CreatedAt: &createdAt,
-		UpdatedAt: &updatedAt,
-	}
-	// Only set Email when non-empty — openapi_types.Email validates via
-	// regex on marshal and rejects empty strings, which causes silent
-	// JSON encoding failures (200 with empty body).
-	if a.Email != "" {
-		email := openapi_types.Email(a.Email)
-		result.Email = &email
+		Id:             &a.ID,
+		UserId:         &a.UserID,
+		Provider:       &provider,
+		Scopes:         &a.Scopes,
+		Status:         &status,
+		ExternalUserId: &a.ExternalUserID,
+		CreatedAt:      &createdAt,
+		UpdatedAt:      &updatedAt,
 	}
 	return result
 }

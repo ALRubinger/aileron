@@ -161,7 +161,6 @@ func (s *SlackService) HandleCallback(ctx context.Context, _ model.ConnectedAcco
 		ID:             "conn_" + uuid.New().String(),
 		UserID:         req.UserID,
 		Provider:       model.ConnectedAccountProviderSlack,
-		Email:          "", // Slack OAuth does not return email by default
 		Scopes:         slackUserScopes,
 		Status:         model.ConnectedAccountStatusActive,
 		ExternalUserID: resp.AuthedUser.ID,
