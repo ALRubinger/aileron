@@ -1,29 +1,24 @@
 package draft
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
 
-// defaultSystemPrompt is the fallback when AILERON.md is missing.
-const defaultSystemPrompt = `You draft reply messages on behalf of a user. Your output will be sent directly as a message in a communication channel (e.g. Slack) — the user will review it first but your output IS the message text.
+// promptSource records where the system prompt was loaded from.
+var promptSource string
 
-CRITICAL: Output ONLY the message text that would be sent. Nothing else. No commentary, no notes, no warnings, no explanations, no "Here's a draft:", no markdown headers, no "Note:" sections. The entire output must be something that could be pasted directly into a chat message and sent.
-
-Good output: "No, the JWT claims are unchanged. PR #247 only moves validation into middleware."
-Bad output: "Here's a draft reply:\n\nNo, the JWT claims are unchanged.\n\n Note: I'm not certain about this."
-
-Guidelines:
-- Be direct and specific. Reference concrete details (PR numbers, file names, code, dates).
-- Match the formality and tone of the channel and the message.
-- If you have access to tools, use them to look up relevant context before drafting.
-- Keep replies concise unless the question requires a detailed explanation.
-- If you don't have enough context to write a useful reply, write a short honest reply like "Not sure off the top of my head — let me check and get back to you."
-- Never include caveats, disclaimers, or meta-commentary about the draft itself.`
+// PromptSource returns the path the system prompt was loaded from.
+func PromptSource() string {
+	return promptSource
+}
 
 // LoadSystemPrompt reads the AILERON.md file and returns its contents as the
-// system prompt. If the file does not exist, it returns the hardcoded default.
-// The path can be overridden via the AILERON_PROMPT_FILE environment variable.
+// system prompt. The path can be overridden via the AILERON_PROMPT_FILE
+// environment variable. Panics if the file is missing or empty — the system
+// prompt is required for draft generation and must not silently fall back to
+// a hardcoded default.
 func LoadSystemPrompt() string {
 	path := os.Getenv("AILERON_PROMPT_FILE")
 	if path == "" {
@@ -32,12 +27,14 @@ func LoadSystemPrompt() string {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return defaultSystemPrompt
+		panic(fmt.Sprintf("AILERON.md not found at %q: %v — the system prompt is required for draft generation", path, err))
 	}
 
 	content := strings.TrimSpace(string(data))
 	if content == "" {
-		return defaultSystemPrompt
+		panic(fmt.Sprintf("AILERON.md at %q is empty — the system prompt is required for draft generation", path))
 	}
+
+	promptSource = path
 	return content
 }

@@ -40,11 +40,14 @@ RUN apk add --no-cache curl && \
 COPY --from=builder /aileron-server /usr/local/bin/aileron-server
 COPY core/schema/schema.hcl /schema/schema.hcl
 COPY core/server/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY AILERON.md /app/AILERON.md
 
 # Create output directory for coverage-instrumented builds (used when COVERAGE=true).
 RUN mkdir -p /tmp/gocoverdir && chown aileron:aileron /tmp/gocoverdir
 
 USER aileron
+
+WORKDIR /app
 
 EXPOSE 8080
 
