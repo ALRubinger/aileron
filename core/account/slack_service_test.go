@@ -62,6 +62,24 @@ func TestSlackService_ScopesFor(t *testing.T) {
 	}
 }
 
+func TestSlackService_ScopesIncludeSearchRead(t *testing.T) {
+	// slack_search_messages requires the search:read OAuth user scope.
+	// Without it, Slack returns a permissions error when the LLM tries
+	// to search message history during draft generation.
+	svc := account.NewSlackService("id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	scopes := svc.ScopesFor(model.ConnectedAccountProviderSlack)
+
+	found := false
+	for _, s := range scopes {
+		if s == "search:read" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected search:read in Slack user scopes — required by slack_search_messages tool")
+	}
+}
+
 func TestSlackService_AuthorizationURL(t *testing.T) {
 	svc := account.NewSlackService("test-client-id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
 	result, err := svc.AuthorizationURL(context.Background(), model.ConnectedAccountProviderSlack, "state123", "http://localhost/callback")
