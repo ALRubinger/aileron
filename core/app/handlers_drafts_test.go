@@ -222,7 +222,7 @@ func newDraftsTestServerWithSend() *apiServer {
 	})
 	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test","bot_access_token":"xoxb-test"}`), vault.Metadata{})
 	// Mock sender so we don't call real Slack.
-	srv.slackSender = func(_ context.Context, token, channel, body string) error {
+	srv.slackSender = func(_ context.Context, token, channel, body, threadTS string) error {
 		return nil
 	}
 	// Mock ephemeral poster.
@@ -296,7 +296,7 @@ func TestApproveDraft_NotFound(t *testing.T) {
 
 func TestApproveDraft_SendFails(t *testing.T) {
 	srv := newDraftsTestServerWithSend()
-	srv.slackSender = func(_ context.Context, _, _, _ string) error {
+	srv.slackSender = func(_ context.Context, _, _, _, _ string) error {
 		return fmt.Errorf("slack API unavailable")
 	}
 	ctx := context.Background()
@@ -313,7 +313,7 @@ func TestApproveDraft_SendFails(t *testing.T) {
 
 func TestApproveDraft_NoSlackAccount(t *testing.T) {
 	srv := newDraftsTestServer() // no connected account seeded
-	srv.slackSender = func(_ context.Context, _, _, _ string) error { return nil }
+	srv.slackSender = func(_ context.Context, _, _, _, _ string) error { return nil }
 	ctx := context.Background()
 	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
 
@@ -354,7 +354,7 @@ func TestEditDraft_Success(t *testing.T) {
 
 func TestEditDraft_SendFails(t *testing.T) {
 	srv := newDraftsTestServerWithSend()
-	srv.slackSender = func(_ context.Context, _, _, _ string) error {
+	srv.slackSender = func(_ context.Context, _, _, _, _ string) error {
 		return fmt.Errorf("slack error")
 	}
 	ctx := context.Background()
@@ -464,7 +464,7 @@ func TestSendDraftMessage_BadTokenJSON(t *testing.T) {
 	// Store invalid JSON as token.
 	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte("not-json"), vault.Metadata{})
 
-	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello")
+	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello", "")
 	if err == nil {
 		t.Fatal("expected error for bad token JSON")
 	}
@@ -482,7 +482,7 @@ func TestSendDraftMessage_EmptyAccessToken(t *testing.T) {
 	})
 	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"token_type":"user"}`), vault.Metadata{})
 
-	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello")
+	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello", "")
 	if err == nil {
 		t.Fatal("expected error for missing access_token")
 	}

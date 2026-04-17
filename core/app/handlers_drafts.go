@@ -131,7 +131,7 @@ func (s *apiServer) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 		return // error already written
 	}
 
-	if err := s.sendDraftMessage(r.Context(), draft.UserID, draft.Channel, draft.DraftBody); err != nil {
+	if err := s.sendDraftMessage(r.Context(), draft.UserID, draft.Channel, draft.DraftBody, draft.MessageTS); err != nil {
 		s.log.Error("failed to send draft", "draft_id", draftID, "error", err)
 		writeError(w, http.StatusInternalServerError, "send_error", "failed to send message: "+err.Error())
 		return
@@ -168,7 +168,7 @@ func (s *apiServer) handleEditDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sendDraftMessage(r.Context(), draft.UserID, draft.Channel, req.Body); err != nil {
+	if err := s.sendDraftMessage(r.Context(), draft.UserID, draft.Channel, req.Body, draft.MessageTS); err != nil {
 		s.log.Error("failed to send edited draft", "draft_id", draftID, "error", err)
 		writeError(w, http.StatusInternalServerError, "send_error", "failed to send message: "+err.Error())
 		return
@@ -242,10 +242,11 @@ type EphemeralPoster func(ctx context.Context, msg comms.SlackDraftMessage) erro
 
 // SlackSender is the function used to send messages to Slack.
 // Defaults to comms.SendSlackMessage. Override in tests.
-type SlackSender func(ctx context.Context, token, channel, body string) error
+type SlackSender func(ctx context.Context, token, channel, body, threadTS string) error
 
 // sendDraftMessage sends a message to Slack using the user's connected account token.
-func (s *apiServer) sendDraftMessage(ctx context.Context, userID, channel, body string) error {
+// When threadTS is non-empty the message is posted as a threaded reply.
+func (s *apiServer) sendDraftMessage(ctx context.Context, userID, channel, body, threadTS string) error {
 	slackProvider := model.ConnectedAccountProviderSlack
 	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
 		UserID:   userID,
@@ -277,7 +278,7 @@ func (s *apiServer) sendDraftMessage(ctx context.Context, userID, channel, body 
 	if sender == nil {
 		sender = comms.SendSlackMessage
 	}
-	return sender(ctx, token, channel, body)
+	return sender(ctx, token, channel, body, threadTS)
 }
 
 // extractDraftID extracts the draft ID from /v1/drafts/{draft_id}
@@ -477,6 +478,7 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 		Author:   draft.Author,
 		Body:     draft.MessageBody,
 		Draft:    draft.DraftBody,
+		ThreadTS: draft.MessageTS,
 	})
 	if err != nil {
 		s.log.Error("ephemeral: failed to post", "user_id", userID, "draft_id", draft.ID, "error", err)

@@ -102,7 +102,7 @@ func (s *apiServer) processInteraction(actionID, draftID string, payload slackIn
 
 	switch actionID {
 	case "approve_draft":
-		if err := s.sendDraftMessage(ctx, draft.UserID, draft.Channel, draft.DraftBody); err != nil {
+		if err := s.sendDraftMessage(ctx, draft.UserID, draft.Channel, draft.DraftBody, draft.MessageTS); err != nil {
 			s.log.Error("interaction: failed to send approved draft", "draft_id", draftID, "error", err)
 			s.respondToInteraction(payload.ResponseURL, "Failed to send: "+err.Error())
 			return

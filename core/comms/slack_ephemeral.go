@@ -17,6 +17,7 @@ type SlackDraftMessage struct {
 	Author   string // who sent the original message
 	Body     string // the original message text
 	Draft    string // the AI-generated draft reply
+	ThreadTS string // original message timestamp for threading (empty = top-level)
 }
 
 // PostEphemeralDraft posts an ephemeral message with the draft and
@@ -35,9 +36,14 @@ func PostEphemeralDraft(ctx context.Context, msg SlackDraftMessage) error {
 	client := slack.New(msg.BotToken)
 	blocks := BuildDraftBlocks(msg)
 
-	_, err := client.PostEphemeralContext(ctx, msg.Channel, msg.UserID,
+	opts := []slack.MsgOption{
 		slack.MsgOptionBlocks(blocks...),
-	)
+	}
+	if msg.ThreadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(msg.ThreadTS))
+	}
+
+	_, err := client.PostEphemeralContext(ctx, msg.Channel, msg.UserID, opts...)
 	return err
 }
 
