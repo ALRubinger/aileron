@@ -115,16 +115,16 @@ func TestSlackWebhook_StaleTimestamp(t *testing.T) {
 	}
 }
 
-func TestSlackWebhook_MessageEvent_RoutesToUser(t *testing.T) {
+func TestSlackWebhook_MentionedUser_GetsDraft(t *testing.T) {
 	srv := newSlackWebhookServer()
 	ctx := context.Background()
 
-	// Seed a connected Slack account.
+	// Alice is the Aileron user; Bob sends the message mentioning Alice.
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID:             "conn_s1",
 		UserID:         "usr_alice",
 		Provider:       model.ConnectedAccountProviderSlack,
-		ExternalUserID: "U123ABC",
+		ExternalUserID: "U_ALICE",
 		ExternalTeamID: "T001TEAM",
 		Status:         model.ConnectedAccountStatusActive,
 	})
@@ -142,11 +142,11 @@ func TestSlackWebhook_MessageEvent_RoutesToUser(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"type":     "event_callback",
 		"team_id":  "T001TEAM",
-		"event_id": "ev_001",
+		"event_id": "ev_mention",
 		"event": map[string]any{
 			"type":    "message",
-			"user":    "U123ABC",
-			"text":    "Does the JWT refactor change the claims structure?",
+			"user":    "U_BOB",
+			"text":    "Hey <@U_ALICE> can you review this PR?",
 			"channel": "C0BACKEND",
 			"ts":      "1234567890.123456",
 		},
@@ -160,7 +160,6 @@ func TestSlackWebhook_MessageEvent_RoutesToUser(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	// Wait briefly for async processing.
 	time.Sleep(50 * time.Millisecond)
 
 	mu.Lock()
@@ -168,11 +167,115 @@ func TestSlackWebhook_MessageEvent_RoutesToUser(t *testing.T) {
 	if receivedUserID != "usr_alice" {
 		t.Errorf("expected usr_alice, got %q", receivedUserID)
 	}
-	if receivedMsg.Body != "Does the JWT refactor change the claims structure?" {
+	if receivedMsg.Body != "Hey <@U_ALICE> can you review this PR?" {
 		t.Errorf("expected message body, got %q", receivedMsg.Body)
 	}
 	if receivedMsg.Service != "slack" {
 		t.Errorf("expected service=slack, got %q", receivedMsg.Service)
+	}
+}
+
+func TestSlackWebhook_OwnMessage_Skipped(t *testing.T) {
+	srv := newSlackWebhookServer()
+	ctx := context.Background()
+
+	// Alice sends a message — should NOT trigger a draft for Alice.
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:             "conn_s1",
+		UserID:         "usr_alice",
+		Provider:       model.ConnectedAccountProviderSlack,
+		ExternalUserID: "U_ALICE",
+		ExternalTeamID: "T001TEAM",
+		Status:         model.ConnectedAccountStatusActive,
+	})
+
+	called := false
+	srv.onSlackMessage = func(_ context.Context, _ string, _ comms.IncomingMessage) {
+		called = true
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001TEAM",
+		"event_id": "ev_own",
+		"event": map[string]any{
+			"type":    "message",
+			"user":    "U_ALICE",
+			"text":    "I pushed the fix",
+			"channel": "C0BACKEND",
+			"ts":      "123.456",
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	time.Sleep(50 * time.Millisecond)
+	if called {
+		t.Error("expected own message to be skipped, but draft was triggered")
+	}
+}
+
+func TestSlackWebhook_NoMention_NoDraft(t *testing.T) {
+	srv := newSlackWebhookServer()
+	ctx := context.Background()
+
+	// Alice is connected but not mentioned in the message.
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID:             "conn_s1",
+		UserID:         "usr_alice",
+		Provider:       model.ConnectedAccountProviderSlack,
+		ExternalUserID: "U_ALICE",
+		ExternalTeamID: "T001TEAM",
+		Status:         model.ConnectedAccountStatusActive,
+	})
+
+	called := false
+	srv.onSlackMessage = func(_ context.Context, _ string, _ comms.IncomingMessage) {
+		called = true
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001TEAM",
+		"event_id": "ev_nomention",
+		"event": map[string]any{
+			"type":    "message",
+			"user":    "U_BOB",
+			"text":    "General discussion, no mentions",
+			"channel": "C0BACKEND",
+			"ts":      "123.456",
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	time.Sleep(50 * time.Millisecond)
+	if called {
+		t.Error("expected no draft when user is not mentioned")
+	}
+}
+
+func TestIsSlackMention(t *testing.T) {
+	tests := []struct {
+		text   string
+		userID string
+		want   bool
+	}{
+		{"Hey <@U123> check this", "U123", true},
+		{"<@U123> <@U456> both mentioned", "U456", true},
+		{"No mentions here", "U123", false},
+		{"Partial U123 not a mention", "U123", false},
+		{"<@U999> wrong user", "U123", false},
+		{"", "U123", false},
+	}
+	for _, tt := range tests {
+		if got := isSlackMention(tt.text, tt.userID); got != tt.want {
+			t.Errorf("isSlackMention(%q, %q) = %v, want %v", tt.text, tt.userID, got, tt.want)
+		}
 	}
 }
 
@@ -318,11 +421,11 @@ func TestSlackWebhook_NoHandlerConfigured(t *testing.T) {
 		ID:             "conn_s1",
 		UserID:         "usr_alice",
 		Provider:       model.ConnectedAccountProviderSlack,
-		ExternalUserID: "U123ABC",
+		ExternalUserID: "U_ALICE",
 		ExternalTeamID: "T001TEAM",
 		Status:         model.ConnectedAccountStatusActive,
 	})
-	// onSlackMessage is nil — should log, not panic.
+	// onSlackMessage is nil — should not panic when a mentioned user is found.
 
 	body, _ := json.Marshal(map[string]any{
 		"type":     "event_callback",
@@ -330,8 +433,8 @@ func TestSlackWebhook_NoHandlerConfigured(t *testing.T) {
 		"event_id": "ev_nohandler",
 		"event": map[string]any{
 			"type":    "message",
-			"user":    "U123ABC",
-			"text":    "Hello",
+			"user":    "U_BOB",
+			"text":    "Hey <@U_ALICE> hello",
 			"channel": "C123",
 			"ts":      "123.456",
 		},
@@ -414,7 +517,7 @@ func TestSlackWebhook_EventDeduplication(t *testing.T) {
 		ID:             "conn_s1",
 		UserID:         "usr_alice",
 		Provider:       model.ConnectedAccountProviderSlack,
-		ExternalUserID: "U123ABC",
+		ExternalUserID: "U_ALICE",
 		ExternalTeamID: "T001TEAM",
 		Status:         model.ConnectedAccountStatusActive,
 	})
@@ -433,8 +536,8 @@ func TestSlackWebhook_EventDeduplication(t *testing.T) {
 		"event_id": "ev_dedup_001", // same event ID both times
 		"event": map[string]any{
 			"type":    "message",
-			"user":    "U123ABC",
-			"text":    "Duplicate event",
+			"user":    "U_BOB",
+			"text":    "<@U_ALICE> duplicate event",
 			"channel": "C123",
 			"ts":      "123.456",
 		},
