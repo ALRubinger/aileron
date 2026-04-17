@@ -10,6 +10,13 @@ export default defineConfig({
 		globals: true,
 		setupFiles: ['src/tests/setup.ts'],
 		restoreMocks: true,
+		coverage: {
+			provider: 'v8',
+			reporter: ['text', 'lcov'],
+			reportsDirectory: 'coverage',
+			include: ['src/lib/**', 'src/routes/**'],
+			exclude: ['src/tests/**']
+		},
 		alias: {
 			'$env/static/public': new URL('./src/tests/mocks/env.ts', import.meta.url).pathname
 		},

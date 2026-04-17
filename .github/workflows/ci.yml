@@ -142,6 +142,15 @@ jobs:
         working-directory: ui
         run: pnpm test:e2e
 
+      - name: Upload UI coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron
+          files: ui/coverage/lcov.info
+          flags: ui
+
   build:
     name: Build Docker Images
     needs: generate
