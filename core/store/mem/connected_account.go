@@ -26,6 +26,22 @@ func (s *ConnectedAccountStore) Create(_ context.Context, account model.Connecte
 	return nil
 }
 
+func (s *ConnectedAccountStore) Upsert(_ context.Context, account model.ConnectedAccount) (model.ConnectedAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Check if an account already exists for this user+provider.
+	for id, existing := range s.accounts {
+		if existing.UserID == account.UserID && existing.Provider == account.Provider {
+			account.ID = id
+			account.CreatedAt = existing.CreatedAt
+			s.accounts[id] = account
+			return account, nil
+		}
+	}
+	s.accounts[account.ID] = account
+	return account, nil
+}
+
 func (s *ConnectedAccountStore) Get(_ context.Context, accountID string) (model.ConnectedAccount, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

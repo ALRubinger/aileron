@@ -173,3 +173,64 @@ func TestConnectedAccountStore_DeleteNotFound(t *testing.T) {
 	}
 }
 
+func TestConnectedAccountStore_Upsert_Insert(t *testing.T) {
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	acct := newTestAccount("conn_1", "usr_1", model.ConnectedAccountProviderSlack)
+	result, err := s.Upsert(ctx, acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ID != "conn_1" {
+		t.Errorf("expected conn_1, got %s", result.ID)
+	}
+
+	// Should be in the store.
+	got, err := s.Get(ctx, "conn_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UserID != "usr_1" {
+		t.Errorf("expected usr_1, got %s", got.UserID)
+	}
+}
+
+func TestConnectedAccountStore_Upsert_Update(t *testing.T) {
+	// Regression test: reconnecting a provider (e.g. Slack) previously failed
+	// with "duplicate key value violates unique constraint" because
+	// HandleCallback always called Create. Now it calls Upsert which updates
+	// the existing record instead of failing.
+	s := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	// First connection.
+	acct1 := newTestAccount("conn_1", "usr_1", model.ConnectedAccountProviderSlack)
+	acct1.ExternalUserID = "U_OLD"
+	s.Upsert(ctx, acct1)
+
+	// Reconnect — same user+provider, different metadata.
+	acct2 := newTestAccount("conn_new", "usr_1", model.ConnectedAccountProviderSlack)
+	acct2.ExternalUserID = "U_NEW"
+	result, err := s.Upsert(ctx, acct2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should reuse the original ID, not create a new one.
+	if result.ID != "conn_1" {
+		t.Errorf("expected original ID conn_1, got %s", result.ID)
+	}
+
+	// Metadata should be updated.
+	if result.ExternalUserID != "U_NEW" {
+		t.Errorf("expected U_NEW, got %s", result.ExternalUserID)
+	}
+
+	// Should still be only 1 account in the store.
+	all, _ := s.List(ctx, store.ConnectedAccountFilter{UserID: "usr_1"})
+	if len(all) != 1 {
+		t.Fatalf("expected 1 account after upsert, got %d", len(all))
+	}
+}
+

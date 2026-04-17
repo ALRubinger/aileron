@@ -69,12 +69,13 @@ func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.
 		}
 	}
 
-	if err := s.connectedAccounts.Create(r.Context(), acct); err != nil {
+	upserted, err := s.connectedAccounts.Upsert(r.Context(), acct)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, connectedAccountToAPI(acct))
+	writeJSON(w, http.StatusCreated, connectedAccountToAPI(upserted))
 }
 
 func (s *apiServer) ListConnectedAccounts(w http.ResponseWriter, r *http.Request) {
@@ -320,8 +321,8 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusInternalServerError, "vault_error", "failed to store encrypted token")
 			return
 		}
-		if err := s.connectedAccounts.Create(r.Context(), acct); err != nil {
-			writeError(w, http.StatusInternalServerError, "store_error", "failed to create account record")
+		if _, err := s.connectedAccounts.Upsert(r.Context(), acct); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", "failed to upsert account record")
 			return
 		}
 

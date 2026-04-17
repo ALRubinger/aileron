@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
@@ -34,6 +35,30 @@ func (s *ConnectedAccountStore) Create(ctx context.Context, a model.ConnectedAcc
 		a.CreatedAt, a.UpdatedAt,
 	)
 	return err
+}
+
+func (s *ConnectedAccountStore) Upsert(ctx context.Context, a model.ConnectedAccount) (model.ConnectedAccount, error) {
+	scopes, _ := json.Marshal(a.Scopes)
+	var id string
+	var createdAt time.Time
+	err := s.db.Pool.QueryRow(ctx,
+		`INSERT INTO connected_accounts
+			(`+connectedAccountColumns+`)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		 ON CONFLICT (user_id, provider) DO UPDATE SET
+			scopes = $4, status = $5, external_user_id = $6,
+			external_team_id = $7, updated_at = $9
+		 RETURNING id, created_at`,
+		a.ID, a.UserID, string(a.Provider), string(scopes),
+		string(a.Status), a.ExternalUserID, a.ExternalTeamID,
+		a.CreatedAt, a.UpdatedAt,
+	).Scan(&id, &createdAt)
+	if err != nil {
+		return model.ConnectedAccount{}, err
+	}
+	a.ID = id
+	a.CreatedAt = createdAt
+	return a, nil
 }
 
 func (s *ConnectedAccountStore) Get(ctx context.Context, accountID string) (model.ConnectedAccount, error) {

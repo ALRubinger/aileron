@@ -189,6 +189,11 @@ type SSOConfigStore interface {
 // etc.) to Aileron so it can execute irreversible actions on the user's behalf.
 type ConnectedAccountStore interface {
 	Create(ctx context.Context, account model.ConnectedAccount) error
+	// Upsert creates or updates a connected account by user+provider.
+	// If an account already exists for this user+provider, it updates the
+	// metadata (scopes, external IDs, timestamps) and returns the existing ID.
+	// Used by OAuth callbacks when a user reconnects.
+	Upsert(ctx context.Context, account model.ConnectedAccount) (model.ConnectedAccount, error)
 	Get(ctx context.Context, accountID string) (model.ConnectedAccount, error)
 	List(ctx context.Context, filter ConnectedAccountFilter) ([]model.ConnectedAccount, error)
 	Delete(ctx context.Context, accountID string) error
