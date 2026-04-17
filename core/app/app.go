@@ -190,6 +190,15 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.userKeyMaterials = userKeyMaterialStore
 		server.escrowTTL = authCfg.EscrowTTL()
 
+		// Switch to Postgres-backed stores now that the database is available.
+		pgConnectedAccountStore := postgres.NewConnectedAccountStore(db)
+		server.connectedAccounts = pgConnectedAccountStore
+		server.drafts = postgres.NewDraftStore(db)
+		pgInstructionStore := postgres.NewUserInstructionStore(db)
+		server.instructions = pgInstructionStore
+		server.feedback = postgres.NewDraftFeedbackStore(db)
+		log.Info("using Postgres-backed stores for connected accounts, drafts, instructions, and feedback")
+
 		tokenIssuer := auth.NewTokenIssuer(
 			[]byte(authCfg.JWTSigningKey),
 			authCfg.JWTIssuer,
@@ -210,7 +219,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			accountRegistry.Register(account.NewGoogleService(
 				authCfg.GoogleClientID,
 				authCfg.GoogleClientSecret,
-				connectedAccountStore,
+				pgConnectedAccountStore,
 				v,
 			))
 			sourceReg.Register(gmailsource.New())
@@ -222,7 +231,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			accountRegistry.Register(account.NewSlackService(
 				authCfg.SlackClientID,
 				authCfg.SlackClientSecret,
-				connectedAccountStore,
+				pgConnectedAccountStore,
 				v,
 			))
 			sourceReg.Register(slacksource.New())
@@ -236,7 +245,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		// LLM-powered draft generation pipeline.
 		if authCfg.LLMEnabled() {
 			llmClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModel)
-			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, connectedAccountStore, instructionStore, v, log)
+			server.draftPipeline = draft.NewPipeline(llmClient, sourceReg, pgConnectedAccountStore, pgInstructionStore, v, log)
 			log.Info("enabled cloud draft generation", "model", authCfg.LLMModel)
 		}
 
@@ -284,7 +293,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			accountRegistry.Register(account.NewGitHubAccountService(
 				authCfg.GitHubClientID,
 				authCfg.GitHubClientSecret,
-				connectedAccountStore,
+				pgConnectedAccountStore,
 				v,
 			))
 			sourceReg.Register(githubsource.New())
