@@ -1011,6 +1011,80 @@ func TestResolveSlackCredentials_NoAccount(t *testing.T) {
 	}
 }
 
+func TestResolveSlackCredentials_BadTokenJSON(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte("not-json"), vault.Metadata{})
+
+	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
+	if err == nil {
+		t.Fatal("expected error for bad token JSON")
+	}
+}
+
+func TestResolveSlackCredentials_NoBotToken(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
+	if err == nil {
+		t.Fatal("expected error when bot token missing")
+	}
+}
+
+func TestResolveSlackCredentials_NoExternalUserID(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive,
+		// No ExternalUserID
+	})
+	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp","bot_access_token":"xoxb"}`), vault.Metadata{})
+
+	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
+	if err == nil {
+		t.Fatal("expected error when external user ID missing")
+	}
+}
+
+func TestPostDraftingIndicator_NoMessageTS(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	var capturedThreadTS string
+	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, threadTS string) error {
+		capturedThreadTS = threadTS
+		return nil
+	}
+
+	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
+	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "")
+
+	if capturedThreadTS != "" {
+		t.Errorf("expected empty threadTS when messageTS is empty, got %q", capturedThreadTS)
+	}
+}
+
+func TestPostDraftingIndicator_PosterError(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
+	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error {
+		return fmt.Errorf("slack API error")
+	}
+
+	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
+	// Should not panic — just logs the error.
+	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "1234567890.123456")
+}
+
 func TestListFeedback_NilStore(t *testing.T) {
 	srv := newDraftsTestServer()
 	srv.feedback = nil
