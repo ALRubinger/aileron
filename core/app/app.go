@@ -11,7 +11,6 @@ import (
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
-	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/source"
@@ -238,44 +237,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		if authCfg.SlackEnabled() {
 			server.slackSigningSecret = authCfg.SlackSigningSecret
 			server.slackDedup = newSlackEventDedup()
-			server.onSlackMessage = func(ctx context.Context, userID string, msg comms.IncomingMessage) {
-				log.Info("slack cloud message received",
-					"user_id", userID,
-					"channel", msg.Channel,
-					"author", msg.Author,
-					"preview", msg.Body[:min(len(msg.Body), 80)])
-
-				if server.draftPipeline != nil {
-					// Post immediate "drafting..." indicator so the user
-					// knows Aileron is working while the LLM runs.
-					creds, err := server.resolveSlackCredentials(ctx, userID)
-					if err != nil {
-						log.Error("failed to resolve slack credentials", "user_id", userID, "error", err)
-					} else {
-						server.postDraftingIndicator(ctx, creds, msg.Channel, msg.ID)
-					}
-
-					draftText, err := server.draftPipeline.GenerateDraft(ctx, userID, msg)
-					if err != nil {
-						log.Error("draft generation failed", "user_id", userID, "error", err)
-						return
-					}
-
-					d, err := server.createDraftFromMessage(ctx, userID, msg, draftText)
-					if err != nil {
-						log.Error("failed to store draft", "error", err)
-						return
-					}
-					log.Info("draft pending review",
-						"draft_id", d.ID,
-						"user_id", userID,
-						"channel", msg.Channel,
-						"draft_length", len(draftText))
-
-					// Post ephemeral draft preview in Slack.
-					server.deliverEphemeralDraft(ctx, userID, d)
-				}
-			}
+			server.onSlackMessage = server.handleIncomingSlackMessage
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
 			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
 			log.Info("enabled Slack Events API webhook and interaction endpoints")

@@ -11,11 +11,27 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/core/comms"
+	"github.com/ALRubinger/aileron/core/draft"
+	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/source"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 )
+
+// stubLLMClient returns a fixed response for all LLM calls.
+type stubLLMClient struct {
+	response *llm.GenerateResponse
+	err      error
+}
+
+func (s *stubLLMClient) GenerateWithTools(_ context.Context, _ llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.response, nil
+}
 
 func newDraftsTestServer() *apiServer {
 	return &apiServer{
@@ -1070,6 +1086,134 @@ func TestPostDraftingIndicator_NoMessageTS(t *testing.T) {
 
 	if capturedThreadTS != "" {
 		t.Errorf("expected empty threadTS when messageTS is empty, got %q", capturedThreadTS)
+	}
+}
+
+func TestHandleIncomingSlackMessage_FullPipeline(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
+
+	mockLLM := &stubLLMClient{
+		response: &llm.GenerateResponse{Text: "Draft reply text"},
+	}
+	srv.draftPipeline = draft.NewPipeline(
+		mockLLM, source.NewRegistry(), srv.connectedAccounts,
+		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
+		draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"},
+	)
+
+	var indicatorPosted, draftPosted bool
+	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error {
+		indicatorPosted = true
+		return nil
+	}
+	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
+		draftPosted = true
+		if msg.Draft != "Draft reply text" {
+			t.Errorf("expected draft text, got %q", msg.Draft)
+		}
+		return nil
+	}
+
+	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
+		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
+		Body: "What happened this week?",
+	})
+
+	if !indicatorPosted {
+		t.Error("expected drafting indicator to be posted")
+	}
+	if !draftPosted {
+		t.Error("expected draft ephemeral to be posted")
+	}
+
+	// Verify draft was stored.
+	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
+	if len(drafts) != 1 {
+		t.Fatalf("expected 1 draft in store, got %d", len(drafts))
+	}
+	if drafts[0].DraftBody != "Draft reply text" {
+		t.Errorf("unexpected stored draft body: %q", drafts[0].DraftBody)
+	}
+}
+
+func TestHandleIncomingSlackMessage_NoPipeline(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.draftPipeline = nil // no pipeline configured
+
+	called := false
+	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error {
+		called = true
+		return nil
+	}
+
+	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
+		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
+		Body: "Hello",
+	})
+
+	if called {
+		t.Error("should not post indicator when pipeline is nil")
+	}
+}
+
+func TestHandleIncomingSlackMessage_LLMError(t *testing.T) {
+	srv := newDraftsTestServerWithSend()
+	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
+
+	mockLLM := &stubLLMClient{err: fmt.Errorf("LLM unavailable")}
+	srv.draftPipeline = draft.NewPipeline(
+		mockLLM, source.NewRegistry(), srv.connectedAccounts,
+		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
+		draft.Prompts{Research: "test", Ghostwrite: "test"},
+	)
+
+	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error { return nil }
+
+	var draftPosted bool
+	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
+		draftPosted = true
+		return nil
+	}
+
+	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
+		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
+		Body: "Hello",
+	})
+
+	if draftPosted {
+		t.Error("should not post draft when LLM fails")
+	}
+
+	// Verify no draft was stored.
+	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
+	if len(drafts) != 0 {
+		t.Fatalf("expected 0 drafts after LLM error, got %d", len(drafts))
+	}
+}
+
+func TestHandleIncomingSlackMessage_NoSlackCredentials(t *testing.T) {
+	// User has no connected Slack account — indicator should be skipped
+	// but draft generation should still proceed.
+	srv := newDraftsTestServer() // no connected account
+	mockLLM := &stubLLMClient{
+		response: &llm.GenerateResponse{Text: "Draft without indicator"},
+	}
+	srv.draftPipeline = draft.NewPipeline(
+		mockLLM, source.NewRegistry(), srv.connectedAccounts,
+		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
+		draft.Prompts{Research: "test", Ghostwrite: "test"},
+	)
+
+	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
+		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
+		Body: "Hello",
+	})
+
+	// Draft should still be stored even without credentials for indicator.
+	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
+	if len(drafts) != 1 {
+		t.Fatalf("expected 1 draft, got %d", len(drafts))
 	}
 }
 

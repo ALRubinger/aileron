@@ -47,17 +47,40 @@ func PostEphemeralDraft(ctx context.Context, msg SlackDraftMessage) error {
 	return err
 }
 
+// slackEphemeralAPIURL overrides the Slack API URL for testing.
+var slackEphemeralAPIURL string
+
+// SetEphemeralAPIURL sets the Slack API URL for testing. Call with empty string to reset.
+func SetEphemeralAPIURL(url string) {
+	slackEphemeralAPIURL = url
+}
+
 // PostEphemeralText posts a simple text-only ephemeral message to a user.
 // Used for transient status indicators like "Drafting a reply...".
 func PostEphemeralText(ctx context.Context, botToken, channel, userID, text, threadTS string) error {
-	client := slack.New(botToken)
-	opts := []slack.MsgOption{
+	if botToken == "" {
+		return fmt.Errorf("slack: bot token is required for ephemeral messages")
+	}
+	if channel == "" {
+		return fmt.Errorf("slack: channel is required")
+	}
+	if userID == "" {
+		return fmt.Errorf("slack: user ID is required")
+	}
+
+	var opts []slack.Option
+	if slackEphemeralAPIURL != "" {
+		opts = append(opts, slack.OptionAPIURL(slackEphemeralAPIURL))
+	}
+	client := slack.New(botToken, opts...)
+
+	msgOpts := []slack.MsgOption{
 		slack.MsgOptionText(text, false),
 	}
 	if threadTS != "" {
-		opts = append(opts, slack.MsgOptionTS(threadTS))
+		msgOpts = append(msgOpts, slack.MsgOptionTS(threadTS))
 	}
-	_, err := client.PostEphemeralContext(ctx, channel, userID, opts...)
+	_, err := client.PostEphemeralContext(ctx, channel, userID, msgOpts...)
 	return err
 }
 
