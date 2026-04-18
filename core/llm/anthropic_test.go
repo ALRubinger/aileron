@@ -296,6 +296,148 @@ func TestAnthropicClient_ToolRoundsExhausted_GracefulFallback(t *testing.T) {
 	}
 }
 
+func TestAnthropicClient_ParallelToolExecution(t *testing.T) {
+	// When the LLM returns multiple tool_use blocks in one response,
+	// they should be executed concurrently. We verify:
+	// 1. All tools run in parallel (total time ≈ max, not sum)
+	// 2. Results are returned in the same order as the tool_use blocks
+	var callCount atomic.Int32
+	server := mockAnthropicServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		count := callCount.Add(1)
+		if count == 1 {
+			// Return 3 tool_use blocks in one response.
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "tool_use",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "t1", "name": "tool_a", "input": map[string]any{"q": "a"}},
+					{"type": "tool_use", "id": "t2", "name": "tool_b", "input": map[string]any{"q": "b"}},
+					{"type": "tool_use", "id": "t3", "name": "tool_c", "input": map[string]any{"q": "c"}},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_2", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "end_turn",
+				"content": []map[string]any{
+					{"type": "text", "text": "done"},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+		}
+	})
+	defer server.Close()
+
+	client := llm.NewAnthropicClient("test-key", "claude-sonnet-4-6")
+	client.SetBaseURL(server.URL)
+
+	// Track concurrent execution: each tool signals arrival, then waits
+	// until all 3 are running before returning.
+	var running atomic.Int32
+	allRunning := make(chan struct{})
+	go func() {
+		for running.Load() < 3 {
+			// spin until all 3 goroutines are in-flight
+		}
+		close(allRunning)
+	}()
+
+	resp, err := client.GenerateWithTools(context.Background(), llm.GenerateRequest{
+		SystemPrompt: "You are helpful.",
+		UserMessage:  "Do three things.",
+		Tools: []source.ToolDefinition{
+			{Name: "tool_a", Description: "A"},
+			{Name: "tool_b", Description: "B"},
+			{Name: "tool_c", Description: "C"},
+		},
+		ToolExecutor: func(ctx context.Context, tool string, params map[string]any) (map[string]any, error) {
+			running.Add(1)
+			<-allRunning // block until all 3 are running concurrently
+			return map[string]any{"tool": tool}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify all 3 tool calls recorded in order.
+	if len(resp.ToolCalls) != 3 {
+		t.Fatalf("expected 3 tool calls, got %d", len(resp.ToolCalls))
+	}
+	expectedOrder := []string{"tool_a", "tool_b", "tool_c"}
+	for i, name := range expectedOrder {
+		if resp.ToolCalls[i].Tool != name {
+			t.Errorf("tool call %d: expected %s, got %s", i, name, resp.ToolCalls[i].Tool)
+		}
+	}
+}
+
+func TestAnthropicClient_ParallelToolExecution_PartialError(t *testing.T) {
+	// When one tool fails, the others should still complete and the error
+	// should be reported in the correct position.
+	var callCount atomic.Int32
+	server := mockAnthropicServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		count := callCount.Add(1)
+		if count == 1 {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "tool_use",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "t1", "name": "tool_ok", "input": map[string]any{}},
+					{"type": "tool_use", "id": "t2", "name": "tool_fail", "input": map[string]any{}},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_2", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "end_turn",
+				"content": []map[string]any{
+					{"type": "text", "text": "handled error"},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+		}
+	})
+	defer server.Close()
+
+	client := llm.NewAnthropicClient("test-key", "claude-sonnet-4-6")
+	client.SetBaseURL(server.URL)
+
+	resp, err := client.GenerateWithTools(context.Background(), llm.GenerateRequest{
+		SystemPrompt: "You are helpful.",
+		UserMessage:  "Do two things.",
+		Tools: []source.ToolDefinition{
+			{Name: "tool_ok", Description: "OK"},
+			{Name: "tool_fail", Description: "Fail"},
+		},
+		ToolExecutor: func(_ context.Context, tool string, params map[string]any) (map[string]any, error) {
+			if tool == "tool_fail" {
+				return nil, fmt.Errorf("connection refused")
+			}
+			return map[string]any{"status": "ok"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Text != "handled error" {
+		t.Errorf("unexpected text: %q", resp.Text)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Tool != "tool_ok" {
+		t.Errorf("expected tool_ok first, got %s", resp.ToolCalls[0].Tool)
+	}
+	if resp.ToolCalls[1].Tool != "tool_fail" {
+		t.Errorf("expected tool_fail second, got %s", resp.ToolCalls[1].Tool)
+	}
+}
+
 func TestAnthropicClient_DefaultModel(t *testing.T) {
 	server := mockAnthropicServer(anthropicTextResponse("ok"))
 	defer server.Close()

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/ALRubinger/aileron/core/source"
 	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"golang.org/x/sync/errgroup"
 )
 
 const defaultMaxToolRounds = 15
@@ -125,9 +127,18 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 			Content: assistantBlocks,
 		})
 
-		// Execute each tool and build tool result messages.
-		var toolResults []anthropic.ContentBlockParamUnion
-		for _, block := range toolUseBlocks {
+		// Execute tool calls in parallel and collect results.
+		type toolExecResult struct {
+			id       string
+			toolCall ToolCall
+			result   map[string]any
+			err      error
+		}
+		execResults := make([]toolExecResult, len(toolUseBlocks))
+
+		g, gCtx := errgroup.WithContext(ctx)
+		var mu sync.Mutex
+		for i, block := range toolUseBlocks {
 			tu := block.AsToolUse()
 
 			var params map[string]any
@@ -135,19 +146,34 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 				params = make(map[string]any)
 			}
 
-			allToolCalls = append(allToolCalls, ToolCall{
-				Tool:   tu.Name,
-				Params: params,
-			})
+			execResults[i].id = tu.ID
+			execResults[i].toolCall = ToolCall{Tool: tu.Name, Params: params}
 
-			result, execErr := req.ToolExecutor(ctx, tu.Name, params)
-			if execErr != nil {
-				toolResults = append(toolResults, anthropic.NewToolResultBlock(tu.ID, fmt.Sprintf("Error: %s", execErr.Error()), true))
+			g.Go(func() error {
+				result, execErr := req.ToolExecutor(gCtx, tu.Name, params)
+				mu.Lock()
+				execResults[i] = toolExecResult{
+					id:       tu.ID,
+					toolCall: ToolCall{Tool: tu.Name, Params: params},
+					result:   result,
+					err:      execErr,
+				}
+				mu.Unlock()
+				return nil // don't cancel other tools on individual error
+			})
+		}
+		g.Wait()
+
+		// Build tool results in original order.
+		var toolResults []anthropic.ContentBlockParamUnion
+		for _, er := range execResults {
+			allToolCalls = append(allToolCalls, er.toolCall)
+			if er.err != nil {
+				toolResults = append(toolResults, anthropic.NewToolResultBlock(er.id, fmt.Sprintf("Error: %s", er.err.Error()), true))
 				continue
 			}
-
-			resultJSON, _ := json.Marshal(result)
-			toolResults = append(toolResults, anthropic.NewToolResultBlock(tu.ID, string(resultJSON), false))
+			resultJSON, _ := json.Marshal(er.result)
+			toolResults = append(toolResults, anthropic.NewToolResultBlock(er.id, string(resultJSON), false))
 		}
 
 		messages = append(messages, anthropic.MessageParam{
