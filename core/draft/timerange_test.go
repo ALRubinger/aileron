@@ -1,7 +1,6 @@
 package draft
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -162,23 +161,3 @@ func TestFindUncoveredDays_DateFormats(t *testing.T) {
 	}
 }
 
-func TestFormatGapPrompt(t *testing.T) {
-	uncovered := []time.Time{
-		time.Date(2026, 4, 14, 0, 0, 0, 0, time.UTC),
-		time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC),
-	}
-	prompt := FormatGapPrompt(uncovered, "What happened this week?")
-
-	if !strings.Contains(prompt, "Tuesday 2026-04-14") {
-		t.Error("expected Tuesday date in prompt")
-	}
-	if !strings.Contains(prompt, "Wednesday 2026-04-15") {
-		t.Error("expected Wednesday date in prompt")
-	}
-	if !strings.Contains(prompt, "What happened this week?") {
-		t.Error("expected original message in prompt")
-	}
-	if !strings.Contains(prompt, "NO activity") {
-		t.Error("expected gap framing in prompt")
-	}
-}

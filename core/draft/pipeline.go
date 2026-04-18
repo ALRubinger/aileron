@@ -14,6 +14,7 @@ package draft
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -130,8 +131,8 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 
 			// --- Round 1b: Backward pass ---
 			// If the message implies a time range and the research output has
-			// date gaps, make a targeted follow-up call to fill them.
-			gatheredContext = p.backwardPass(ctx, gatheredContext, msg.Body, now, researchSysPrompt, tools, executor, userID)
+			// date gaps, call search tools directly with explicit date filters.
+			gatheredContext = p.backwardPass(ctx, gatheredContext, msg.Body, now, tools, executor, userID)
 		}
 	} else {
 		gatheredContext = "(No source connectors available — replying with general knowledge only.)"
@@ -204,14 +205,15 @@ func (p *Pipeline) assembleSystemPrompt(ctx context.Context, userID string) (str
 }
 
 // backwardPass checks whether the research output covers the full time range
-// implied by the message. If date gaps are found, it makes a targeted follow-up
-// research call and appends the results to the gathered context.
+// implied by the message. If date gaps are found, it calls search tools
+// directly with explicit after/before date parameters — bypassing the LLM
+// entirely. This is deterministic: the pipeline decides what to search for,
+// not the model.
 func (p *Pipeline) backwardPass(
 	ctx context.Context,
 	gatheredContext string,
 	messageBody string,
 	now time.Time,
-	sysPrompt string,
 	tools []source.ToolDefinition,
 	executor llm.ToolExecutor,
 	userID string,
@@ -230,31 +232,92 @@ func (p *Pipeline) backwardPass(
 		return gatheredContext
 	}
 
-	p.log.Info("backward pass: date gaps detected",
+	p.log.Info("backward pass: date gaps detected, calling tools directly",
 		"user_id", userID,
 		"range", tr.Label,
 		"uncovered_days", len(uncovered),
 	)
 
-	gapPrompt := FormatGapPrompt(uncovered, messageBody)
-	gapResp, err := p.researchLLM.GenerateWithTools(ctx, llm.GenerateRequest{
-		SystemPrompt: sysPrompt,
-		UserMessage:  gapPrompt,
-		Tools:        tools,
-		ToolExecutor: executor,
-	})
-	if err != nil {
-		p.log.Error("backward pass failed", "user_id", userID, "error", err)
+	// Build the date window covering all uncovered days.
+	after := uncovered[0].Format("2006-01-02")
+	// before is the day after the last uncovered day (exclusive end).
+	before := uncovered[len(uncovered)-1].AddDate(0, 0, 1).Format("2006-01-02")
+
+	// Call every search tool directly with date filters.
+	searchTools := filterSearchTools(tools)
+	var results []string
+	for _, tool := range searchTools {
+		params := map[string]any{
+			"after":  after,
+			"before": before,
+		}
+		// Search tools need a query — use a broad wildcard.
+		if needsQuery(tool.Name) {
+			params["query"] = "*"
+		}
+
+		result, err := executor(ctx, tool.Name, params)
+		if err != nil {
+			p.log.Debug("backward pass tool error",
+				"tool", tool.Name,
+				"error", err,
+			)
+			continue
+		}
+
+		resultJSON, _ := json.Marshal(result)
+		results = append(results, fmt.Sprintf("[%s %s–%s]: %s", tool.Name, after, before, string(resultJSON)))
+	}
+
+	if len(results) == 0 {
+		p.log.Info("backward pass: no additional results from direct tool calls",
+			"user_id", userID,
+		)
 		return gatheredContext
 	}
 
 	p.log.Info("backward pass complete",
 		"user_id", userID,
-		"tool_calls", len(gapResp.ToolCalls),
-		"additional_context_length", len(gapResp.Text),
+		"tools_called", len(searchTools),
+		"results", len(results),
 	)
 
-	return gatheredContext + "\n\n---\n\nAdditional context (targeted search for " + tr.Label + "):\n\n" + gapResp.Text
+	return gatheredContext + "\n\n---\n\nAdditional context (direct retrieval for " + after + " to " + before + "):\n\n" + strings.Join(results, "\n\n")
+}
+
+// filterSearchTools returns only the tools that support date-filtered search.
+func filterSearchTools(tools []source.ToolDefinition) []source.ToolDefinition {
+	var out []source.ToolDefinition
+	for _, t := range tools {
+		if hasDateParams(t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// hasDateParams returns true if a tool has both "after" and "before" parameters.
+func hasDateParams(t source.ToolDefinition) bool {
+	hasAfter, hasBefore := false, false
+	for _, p := range t.Parameters {
+		if p.Name == "after" {
+			hasAfter = true
+		}
+		if p.Name == "before" {
+			hasBefore = true
+		}
+	}
+	return hasAfter && hasBefore
+}
+
+// needsQuery returns true if a tool requires a "query" parameter.
+func needsQuery(toolName string) bool {
+	switch toolName {
+	case "slack_search_messages", "github_search_issues", "gmail_search":
+		return true
+	default:
+		return false
+	}
 }
 
 // buildToolExecutor creates a closure that resolves credentials from the vault
