@@ -71,8 +71,9 @@ type AuthConfig struct {
 	MailFrom string
 
 	// LLM configuration for cloud-hosted draft generation.
-	AnthropicAPIKey string // Env: ANTHROPIC_API_KEY
-	LLMModel        string // Env: AILERON_LLM_MODEL (default: "claude-sonnet-4-6")
+	AnthropicAPIKey  string // Env: ANTHROPIC_API_KEY
+	LLMModel         string // Env: AILERON_LLM_MODEL (default: "claude-sonnet-4-6")
+	LLMResearchModel string // Env: AILERON_LLM_RESEARCH_MODEL (default: "claude-haiku-4-5-20251001")
 }
 
 // LoadAuthConfig loads auth configuration from environment variables.
@@ -100,6 +101,7 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
 		AnthropicAPIKey:    envTrimmed("ANTHROPIC_API_KEY"),
 		LLMModel:           envOrDefault("AILERON_LLM_MODEL", "claude-sonnet-4-6"),
+		LLMResearchModel:   envOrDefault("AILERON_LLM_RESEARCH_MODEL", "claude-haiku-4-5-20251001"),
 	}
 
 	// Parse durations with defaults.

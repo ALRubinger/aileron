@@ -66,7 +66,7 @@ func TestPipeline_GenerateDraft_Simple(t *testing.T) {
 	v := vault.NewMemVault()
 	sourceReg := source.NewRegistry()
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	draftText, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID:      "msg_1",
@@ -123,7 +123,7 @@ func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID:      "msg_1",
@@ -159,6 +159,70 @@ func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 	}
 }
 
+func TestPipeline_GenerateDraft_SeparateClients(t *testing.T) {
+	// Verify the pipeline dispatches research to one client and ghostwriting
+	// to another — enabling a fast model for research and a capable model
+	// for composition.
+	researchMock := &mockLLMClient{
+		response: &llm.GenerateResponse{
+			Text: "Context gathered from Slack and GitHub.",
+		},
+	}
+	ghostwriteMock := &mockLLMClient{
+		response: &llm.GenerateResponse{
+			Text: "Deployed the new auth middleware on Tuesday.",
+		},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID:       "conn_s1",
+		UserID:   "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+
+	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
+		Body: "What shipped this week?",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if draftText != "Deployed the new auth middleware on Tuesday." {
+		t.Errorf("unexpected draft: %q", draftText)
+	}
+
+	// Research client should have received the tool-bearing request.
+	if len(researchMock.requests) != 1 {
+		t.Fatalf("expected 1 research call, got %d", len(researchMock.requests))
+	}
+	if len(researchMock.requests[0].Tools) == 0 {
+		t.Error("expected tools in research request")
+	}
+
+	// Ghostwrite client should have received the tool-free request.
+	if len(ghostwriteMock.requests) != 1 {
+		t.Fatalf("expected 1 ghostwrite call, got %d", len(ghostwriteMock.requests))
+	}
+	if len(ghostwriteMock.requests[0].Tools) != 0 {
+		t.Errorf("expected 0 tools in ghostwrite request, got %d", len(ghostwriteMock.requests[0].Tools))
+	}
+	// Ghostwrite should receive the gathered context.
+	if !strings.Contains(ghostwriteMock.requests[0].UserMessage, "Context gathered from Slack and GitHub.") {
+		t.Error("expected gathered context in ghostwrite user message")
+	}
+}
+
 func TestPipeline_GenerateDraft_ToolExecutor(t *testing.T) {
 	// Verify the research round's tool executor resolves credentials
 	// and calls the source connector.
@@ -182,7 +246,7 @@ func TestPipeline_GenerateDraft_ToolExecutor(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -219,7 +283,7 @@ func TestPipeline_GenerateDraft_NoConnectedAccounts(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	draftText, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -259,7 +323,7 @@ func TestPipeline_GenerateDraft_WithInstructions(t *testing.T) {
 	})
 
 	sourceReg := source.NewRegistry()
-	p := draft.NewPipeline(mock, sourceReg, accounts, instructions, v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, instructions, v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -292,7 +356,7 @@ func TestPipeline_GenerateDraft_NoInstructions(t *testing.T) {
 		response: &llm.GenerateResponse{Text: "Draft without instructions"},
 	}
 
-	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	_, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
@@ -312,7 +376,7 @@ func TestPipeline_GenerateDraft_LLMError(t *testing.T) {
 		err: context.DeadlineExceeded,
 	}
 
-	p := draft.NewPipeline(mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, source.NewRegistry(), mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(), vault.NewMemVault(), slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	_, err := p.GenerateDraft(context.Background(), "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",

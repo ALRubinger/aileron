@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/source"
 	anthropic "github.com/anthropics/anthropic-sdk-go"
@@ -18,17 +20,33 @@ const defaultMaxToolRounds = 15
 type AnthropicClient struct {
 	client *anthropic.Client
 	model  anthropic.Model
+	log    *slog.Logger
 }
 
 // NewAnthropicClient creates an Anthropic LLM client.
-func NewAnthropicClient(apiKey, model string) *AnthropicClient {
+func NewAnthropicClient(apiKey, model string, opts ...AnthropicOption) *AnthropicClient {
 	c := anthropic.NewClient(option.WithAPIKey(apiKey))
 	if model == "" {
 		model = "claude-sonnet-4-6"
 	}
-	return &AnthropicClient{
+	ac := &AnthropicClient{
 		client: &c,
 		model:  anthropic.Model(model),
+		log:    slog.Default(),
+	}
+	for _, opt := range opts {
+		opt(ac)
+	}
+	return ac
+}
+
+// AnthropicOption configures an AnthropicClient.
+type AnthropicOption func(*AnthropicClient)
+
+// WithLogger sets the logger for the AnthropicClient.
+func WithLogger(log *slog.Logger) AnthropicOption {
+	return func(c *AnthropicClient) {
+		c.log = log
 	}
 }
 
@@ -43,6 +61,7 @@ func (a *AnthropicClient) SetBaseURL(url string) {
 }
 
 func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
+	totalStart := time.Now()
 	maxRounds := req.MaxToolRounds
 	if maxRounds <= 0 {
 		maxRounds = defaultMaxToolRounds
@@ -71,10 +90,19 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 			params.Tools = tools
 		}
 
+		apiStart := time.Now()
 		resp, err := a.client.Messages.New(ctx, params)
+		apiDur := time.Since(apiStart)
 		if err != nil {
 			return nil, fmt.Errorf("anthropic API error: %w", err)
 		}
+		a.log.Info("llm api call",
+			"round", round,
+			"model", string(a.model),
+			"duration_ms", apiDur.Milliseconds(),
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens,
+		)
 
 		// Check if the response contains tool use requests.
 		var toolUseBlocks []anthropic.ContentBlockUnion
@@ -100,6 +128,12 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 				}
 				text += t
 			}
+			a.log.Info("llm generation complete",
+				"model", string(a.model),
+				"rounds", round,
+				"tool_calls", len(allToolCalls),
+				"total_ms", time.Since(totalStart).Milliseconds(),
+			)
 			return &GenerateResponse{
 				Text:      text,
 				ToolCalls: allToolCalls,
@@ -136,6 +170,7 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 		}
 		execResults := make([]toolExecResult, len(toolUseBlocks))
 
+		toolStart := time.Now()
 		g, gCtx := errgroup.WithContext(ctx)
 		var mu sync.Mutex
 		for i, block := range toolUseBlocks {
@@ -163,6 +198,11 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 			})
 		}
 		g.Wait()
+		a.log.Info("tool execution complete",
+			"round", round,
+			"tools", len(toolUseBlocks),
+			"duration_ms", time.Since(toolStart).Milliseconds(),
+		)
 
 		// Build tool results in original order.
 		var toolResults []anthropic.ContentBlockParamUnion
@@ -186,6 +226,12 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 	// the LLM to produce a text response with whatever context it has
 	// gathered so far. This prevents silent failures where the user gets
 	// no draft at all.
+	a.log.Warn("tool rounds exhausted, forcing text output",
+		"model", string(a.model),
+		"max_rounds", maxRounds,
+		"tool_calls", len(allToolCalls),
+		"elapsed_ms", time.Since(totalStart).Milliseconds(),
+	)
 	finalParams := anthropic.MessageNewParams{
 		Model:     a.model,
 		MaxTokens: 4096,
@@ -215,6 +261,12 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 		}
 		text += t
 	}
+	a.log.Info("llm generation complete (after exhaustion fallback)",
+		"model", string(a.model),
+		"rounds", maxRounds+1,
+		"tool_calls", len(allToolCalls),
+		"total_ms", time.Since(totalStart).Milliseconds(),
+	)
 	return &GenerateResponse{
 		Text:      text,
 		ToolCalls: allToolCalls,
