@@ -1,8 +1,12 @@
 // Package draft orchestrates cloud-hosted draft generation.
 //
-// The Pipeline uses a two-round approach:
+// The Pipeline uses a multi-round approach:
 //   Round 1 (research): LLM has tools, searches broadly, gathers context.
 //     Its output is internal — never shown to anyone.
+//   Round 1b (backward pass): If the message implies a time range and the
+//     research output has date gaps, a targeted follow-up research call
+//     fills them. This is deterministic — it fires based on what was found,
+//     not what the LLM decided to do.
 //   Round 2 (ghostwrite): LLM has NO tools, receives the gathered context,
 //     writes the reply in the user's voice. No narration possible because
 //     there's no research phase.
@@ -104,6 +108,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		msg.Author, msg.Channel, msg.Body,
 	)
 
+	now := time.Now()
 	var gatheredContext string
 	if len(tools) > 0 {
 		researchResp, err := p.researchLLM.GenerateWithTools(ctx, llm.GenerateRequest{
@@ -122,6 +127,11 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 				"tool_calls", len(researchResp.ToolCalls),
 				"context_length", len(gatheredContext),
 			)
+
+			// --- Round 1b: Backward pass ---
+			// If the message implies a time range and the research output has
+			// date gaps, make a targeted follow-up call to fill them.
+			gatheredContext = p.backwardPass(ctx, gatheredContext, msg.Body, now, researchSysPrompt, tools, executor, userID)
 		}
 	} else {
 		gatheredContext = "(No source connectors available — replying with general knowledge only.)"
@@ -191,6 +201,60 @@ func (p *Pipeline) assembleSystemPrompt(ctx context.Context, userID string) (str
 	}
 
 	return prompt, nil
+}
+
+// backwardPass checks whether the research output covers the full time range
+// implied by the message. If date gaps are found, it makes a targeted follow-up
+// research call and appends the results to the gathered context.
+func (p *Pipeline) backwardPass(
+	ctx context.Context,
+	gatheredContext string,
+	messageBody string,
+	now time.Time,
+	sysPrompt string,
+	tools []source.ToolDefinition,
+	executor llm.ToolExecutor,
+	userID string,
+) string {
+	tr := DetectTimeRange(messageBody, now)
+	if tr == nil {
+		return gatheredContext
+	}
+
+	uncovered := FindUncoveredDays(gatheredContext, *tr)
+	if len(uncovered) == 0 {
+		p.log.Info("backward pass: full date coverage",
+			"user_id", userID,
+			"range", tr.Label,
+		)
+		return gatheredContext
+	}
+
+	p.log.Info("backward pass: date gaps detected",
+		"user_id", userID,
+		"range", tr.Label,
+		"uncovered_days", len(uncovered),
+	)
+
+	gapPrompt := FormatGapPrompt(uncovered, messageBody)
+	gapResp, err := p.researchLLM.GenerateWithTools(ctx, llm.GenerateRequest{
+		SystemPrompt: sysPrompt,
+		UserMessage:  gapPrompt,
+		Tools:        tools,
+		ToolExecutor: executor,
+	})
+	if err != nil {
+		p.log.Error("backward pass failed", "user_id", userID, "error", err)
+		return gatheredContext
+	}
+
+	p.log.Info("backward pass complete",
+		"user_id", userID,
+		"tool_calls", len(gapResp.ToolCalls),
+		"additional_context_length", len(gapResp.Text),
+	)
+
+	return gatheredContext + "\n\n---\n\nAdditional context (targeted search for " + tr.Label + "):\n\n" + gapResp.Text
 }
 
 // buildToolExecutor creates a closure that resolves credentials from the vault
