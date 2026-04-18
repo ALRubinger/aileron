@@ -193,7 +193,7 @@ func TestPipeline_GenerateDraft_SeparateClients(t *testing.T) {
 
 	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
-		Body: "What shipped this week?",
+		Body: "What's the status of the auth refactor?",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -203,6 +203,7 @@ func TestPipeline_GenerateDraft_SeparateClients(t *testing.T) {
 	}
 
 	// Research client should have received the tool-bearing request.
+	// (No time range in message, so no backward pass — just 1 research call.)
 	if len(researchMock.requests) != 1 {
 		t.Fatalf("expected 1 research call, got %d", len(researchMock.requests))
 	}
@@ -368,6 +369,167 @@ func TestPipeline_GenerateDraft_NoInstructions(t *testing.T) {
 	// System prompt should NOT contain instructions section.
 	if strings.Contains(mock.lastRequest.SystemPrompt, "User Instructions") {
 		t.Error("expected no User Instructions section when none exist")
+	}
+}
+
+// sequencingLLMClient returns different responses for sequential calls with
+// tools. Used to test the backward pass where both the initial research and
+// the gap-fill call have tools.
+type sequencingLLMClient struct {
+	requests  []*llm.GenerateRequest
+	responses []*llm.GenerateResponse
+	callIndex int
+}
+
+func (s *sequencingLLMClient) GenerateWithTools(_ context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	s.requests = append(s.requests, &req)
+	idx := s.callIndex
+	s.callIndex++
+	if idx < len(s.responses) {
+		return s.responses[idx], nil
+	}
+	return &llm.GenerateResponse{Text: "fallback"}, nil
+}
+
+func TestPipeline_GenerateDraft_BackwardPass_FillsGaps(t *testing.T) {
+	// Research returns context that only mentions Monday and Friday.
+	// The message asks about "this week" (Mon–Fri).
+	// The backward pass should detect Tue/Wed/Thu gaps and make a second call.
+	researchMock := &sequencingLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: "On Monday we merged PR #1. On Friday we deployed v2.3."},
+			{Text: "Tuesday: standup discussed auth. Wednesday: code review on PR #5. Thursday: fixed the CI flake."},
+		},
+	}
+	ghostwriteMock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "Busy week — merged PRs, fixed CI, deployed v2.3."},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+
+	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
+		Body: "What happened this week?",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if draftText == "" {
+		t.Fatal("expected non-empty draft")
+	}
+
+	// Research mock should have been called twice: initial + backward pass.
+	if len(researchMock.requests) != 2 {
+		t.Fatalf("expected 2 research calls (initial + backward pass), got %d", len(researchMock.requests))
+	}
+
+	// Second call should mention the gap dates.
+	backwardReq := researchMock.requests[1]
+	if !strings.Contains(backwardReq.UserMessage, "NO activity") {
+		t.Error("expected backward pass prompt to mention missing activity")
+	}
+
+	// Ghostwrite should receive both the initial and backward pass context.
+	gwMsg := ghostwriteMock.lastRequest.UserMessage
+	if !strings.Contains(gwMsg, "On Monday we merged PR #1") {
+		t.Error("expected initial context in ghostwrite")
+	}
+	if !strings.Contains(gwMsg, "Tuesday: standup discussed auth") {
+		t.Error("expected backward pass context in ghostwrite")
+	}
+}
+
+func TestPipeline_GenerateDraft_BackwardPass_SkipsWhenFullCoverage(t *testing.T) {
+	// Research mentions all days — no backward pass needed.
+	researchMock := &sequencingLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: "Monday: standup. Tuesday: PR review. Wednesday: deploy. Thursday: bug fix. Friday: retro."},
+			{Text: "this should not be reached"},
+		},
+	}
+	ghostwriteMock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "Full week summary."},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+
+	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
+		Body: "What happened this week?",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Only 1 research call — no backward pass.
+	if len(researchMock.requests) != 1 {
+		t.Errorf("expected 1 research call (no backward pass), got %d", len(researchMock.requests))
+	}
+}
+
+func TestPipeline_GenerateDraft_BackwardPass_SkipsNoTimeRange(t *testing.T) {
+	// Message doesn't imply a time range — no backward pass.
+	researchMock := &sequencingLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: "The auth refactor is in PR #247."},
+		},
+	}
+	ghostwriteMock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "PR #247."},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+
+	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
+		Body: "What's the status of the auth refactor?",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(researchMock.requests) != 1 {
+		t.Errorf("expected 1 research call (no time range), got %d", len(researchMock.requests))
 	}
 }
 
