@@ -224,13 +224,13 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 
 		// LLM-powered draft generation pipeline.
 		if authCfg.LLMEnabled() {
-			researchClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMResearchModel, llm.WithLogger(log))
-			ghostwriteClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModel, llm.WithLogger(log))
+			researchClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModelResearch, llm.WithLogger(log))
+			synthesisClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModelSynthesis, llm.WithLogger(log))
 			prompts := draft.LoadPrompts()
-			server.draftPipeline = draft.NewPipeline(researchClient, ghostwriteClient, sourceReg, pgConnectedAccountStore, pgInstructionStore, v, log, prompts)
+			server.draftPipeline = draft.NewPipeline(researchClient, synthesisClient, sourceReg, pgConnectedAccountStore, pgInstructionStore, v, log, prompts)
 			log.Info("enabled cloud draft generation",
-				"research_model", authCfg.LLMResearchModel,
-				"ghostwrite_model", authCfg.LLMModel,
+				"research_model", authCfg.LLMModelResearch,
+				"synthesis_model", authCfg.LLMModelSynthesis,
 				"research_prompt_length", len(prompts.Research),
 				"ghostwrite_prompt_length", len(prompts.Ghostwrite),
 				"prompt_source", draft.PromptSource())

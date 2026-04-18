@@ -64,14 +64,19 @@ SLACK_SIGNING_SECRET=your-signing-secret
 
 # For AI-powered draft generation:
 ANTHROPIC_API_KEY=sk-ant-your-key
-AILERON_LLM_MODEL=claude-sonnet-4-6  # optional, this is the default
+
+# Optional — these are the defaults:
+AILERON_LLM_MODEL_RESEARCH=claude-haiku-4-5-20251001   # fast model for tool-call decisions
+AILERON_LLM_MODEL_SYNTHESIS=claude-sonnet-4-6           # capable model for composing the reply
 ```
+
+The draft pipeline uses two models: a fast model gathers context via tool calls (research), and a capable model composes the reply in your voice (synthesis). This keeps latency low without sacrificing quality.
 
 Verify the server logs show:
 
 ```
 enabled Slack connected accounts and source connector
-enabled cloud draft generation  model=claude-sonnet-4-6
+enabled cloud draft generation  research_model=claude-haiku-4-5-20251001  synthesis_model=claude-sonnet-4-6
 enabled Slack Events API webhook and interaction endpoints
 ```
 
