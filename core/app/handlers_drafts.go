@@ -548,6 +548,50 @@ func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, dr
 		"channel", draft.Channel)
 }
 
+// handleIncomingSlackMessage processes an incoming Slack message that mentions
+// the user. It posts a drafting indicator, generates a draft via the LLM
+// pipeline, stores it, and delivers an ephemeral preview with action buttons.
+func (s *apiServer) handleIncomingSlackMessage(ctx context.Context, userID string, msg comms.IncomingMessage) {
+	s.log.Info("slack cloud message received",
+		"user_id", userID,
+		"channel", msg.Channel,
+		"author", msg.Author,
+		"preview", msg.Body[:min(len(msg.Body), 80)])
+
+	if s.draftPipeline == nil {
+		return
+	}
+
+	// Post immediate "drafting..." indicator so the user
+	// knows Aileron is working while the LLM runs.
+	creds, err := s.resolveSlackCredentials(ctx, userID)
+	if err != nil {
+		s.log.Error("failed to resolve slack credentials", "user_id", userID, "error", err)
+	} else {
+		s.postDraftingIndicator(ctx, creds, msg.Channel, msg.ID)
+	}
+
+	draftText, err := s.draftPipeline.GenerateDraft(ctx, userID, msg)
+	if err != nil {
+		s.log.Error("draft generation failed", "user_id", userID, "error", err)
+		return
+	}
+
+	d, err := s.createDraftFromMessage(ctx, userID, msg, draftText)
+	if err != nil {
+		s.log.Error("failed to store draft", "error", err)
+		return
+	}
+	s.log.Info("draft pending review",
+		"draft_id", d.ID,
+		"user_id", userID,
+		"channel", msg.Channel,
+		"draft_length", len(draftText))
+
+	// Post ephemeral draft preview in Slack.
+	s.deliverEphemeralDraft(ctx, userID, d)
+}
+
 // createDraftFromMessage stores a generated draft as pending in the draft store.
 // Extracted from the onSlackMessage closure so it can be unit tested.
 func (s *apiServer) createDraftFromMessage(ctx context.Context, userID string, msg comms.IncomingMessage, draftText string) (model.Draft, error) {
