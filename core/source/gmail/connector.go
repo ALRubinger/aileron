@@ -47,6 +47,8 @@ func (c *Connector) Tools() []source.ToolDefinition {
 			Parameters: []source.ToolParam{
 				{Name: "query", Type: "string", Description: "Gmail search query (e.g. 'from:sarah subject:migration')", Required: true},
 				{Name: "max_results", Type: "integer", Description: "Maximum results to return (default 10, max 25)", Required: false},
+				{Name: "after", Type: "string", Description: "Only return emails after this date (YYYY-MM-DD)", Required: false},
+				{Name: "before", Type: "string", Description: "Only return emails before this date (YYYY-MM-DD)", Required: false},
 			},
 		},
 		{
@@ -116,6 +118,14 @@ func (c *Connector) search(ctx context.Context, svc *gmailapi.Service, params ma
 	query, ok := params["query"].(string)
 	if !ok || query == "" {
 		return nil, fmt.Errorf("query parameter is required")
+	}
+
+	// Inject date filters into Gmail search syntax.
+	if after, ok := params["after"].(string); ok && after != "" {
+		query += " after:" + after
+	}
+	if before, ok := params["before"].(string); ok && before != "" {
+		query += " before:" + before
 	}
 
 	maxResults := int64(10)

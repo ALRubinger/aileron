@@ -49,6 +49,8 @@ func (c *Connector) Tools() []source.ToolDefinition {
 			Parameters: []source.ToolParam{
 				{Name: "query", Type: "string", Description: "Search query (GitHub issue search syntax)", Required: true},
 				{Name: "repo", Type: "string", Description: "Limit search to a specific repo (owner/name)", Required: false},
+				{Name: "after", Type: "string", Description: "Only return items created/updated after this date (YYYY-MM-DD)", Required: false},
+				{Name: "before", Type: "string", Description: "Only return items created/updated before this date (YYYY-MM-DD)", Required: false},
 			},
 		},
 		{
@@ -148,6 +150,13 @@ func (c *Connector) searchIssues(ctx context.Context, client *gh.Client, params 
 	}
 	if repo, ok := params["repo"].(string); ok && repo != "" {
 		query = query + " repo:" + repo
+	}
+	// Inject date range into GitHub search syntax.
+	if after, ok := params["after"].(string); ok && after != "" {
+		query += " updated:>=" + after
+	}
+	if before, ok := params["before"].(string); ok && before != "" {
+		query += " updated:<=" + before
 	}
 
 	result, _, err := client.Search.Issues(ctx, query, &gh.SearchOptions{

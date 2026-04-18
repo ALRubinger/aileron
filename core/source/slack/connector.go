@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/source"
 	slackapi "github.com/slack-go/slack"
@@ -39,6 +41,8 @@ func (c *Connector) Tools() []source.ToolDefinition {
 			Parameters: []source.ToolParam{
 				{Name: "channel", Type: "string", Description: "The channel ID (e.g. C0BACKEND)", Required: true},
 				{Name: "limit", Type: "integer", Description: "Maximum number of messages to return (default 20, max 100)", Required: false},
+				{Name: "after", Type: "string", Description: "Only return messages after this date (YYYY-MM-DD)", Required: false},
+				{Name: "before", Type: "string", Description: "Only return messages before this date (YYYY-MM-DD)", Required: false},
 			},
 		},
 		{
@@ -55,6 +59,8 @@ func (c *Connector) Tools() []source.ToolDefinition {
 			Parameters: []source.ToolParam{
 				{Name: "query", Type: "string", Description: "The search query", Required: true},
 				{Name: "count", Type: "integer", Description: "Maximum number of results (default 10, max 50)", Required: false},
+				{Name: "after", Type: "string", Description: "Only return messages after this date (YYYY-MM-DD)", Required: false},
+				{Name: "before", Type: "string", Description: "Only return messages before this date (YYYY-MM-DD)", Required: false},
 			},
 		},
 	}
@@ -103,10 +109,21 @@ func (c *Connector) channelHistory(_ context.Context, client *slackapi.Client, p
 		limit = 100
 	}
 
-	resp, err := client.GetConversationHistory(&slackapi.GetConversationHistoryParameters{
+	histParams := &slackapi.GetConversationHistoryParameters{
 		ChannelID: channel,
 		Limit:     limit,
-	})
+	}
+	if after, ok := params["after"].(string); ok && after != "" {
+		if ts, err := dateToUnix(after); err == nil {
+			histParams.Oldest = ts
+		}
+	}
+	if before, ok := params["before"].(string); ok && before != "" {
+		if ts, err := dateToUnix(before); err == nil {
+			histParams.Latest = ts
+		}
+	}
+	resp, err := client.GetConversationHistory(histParams)
 	if err != nil {
 		return nil, fmt.Errorf("slack API error: %w", err)
 	}
@@ -159,6 +176,14 @@ func (c *Connector) searchMessages(_ context.Context, client *slackapi.Client, p
 		return nil, fmt.Errorf("query parameter is required")
 	}
 
+	// Inject date filters into Slack search query syntax.
+	if after, ok := params["after"].(string); ok && after != "" {
+		query += " after:" + after
+	}
+	if before, ok := params["before"].(string); ok && before != "" {
+		query += " before:" + before
+	}
+
 	count := 10
 	if c, ok := params["count"]; ok {
 		count = toInt(c, 10)
@@ -198,6 +223,16 @@ func extractAccessToken(token []byte) (string, error) {
 		return "", fmt.Errorf("no access_token in token data")
 	}
 	return at, nil
+}
+
+// dateToUnix converts a YYYY-MM-DD string to a Unix timestamp string
+// suitable for Slack's oldest/latest parameters.
+func dateToUnix(date string) (string, error) {
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return "", err
+	}
+	return strconv.FormatInt(t.Unix(), 10), nil
 }
 
 // toInt converts an any value to int with a default.

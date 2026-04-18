@@ -48,11 +48,28 @@ type mockSourceConnector struct{}
 func (m *mockSourceConnector) Provider() string { return "slack" }
 func (m *mockSourceConnector) Tools() []source.ToolDefinition {
 	return []source.ToolDefinition{
-		{Name: "slack_channel_history", Description: "Get channel messages"},
+		{
+			Name:        "slack_channel_history",
+			Description: "Get channel messages",
+			Parameters: []source.ToolParam{
+				{Name: "channel", Type: "string", Required: true},
+				{Name: "after", Type: "string", Required: false},
+				{Name: "before", Type: "string", Required: false},
+			},
+		},
+		{
+			Name:        "slack_search_messages",
+			Description: "Search messages",
+			Parameters: []source.ToolParam{
+				{Name: "query", Type: "string", Required: true},
+				{Name: "after", Type: "string", Required: false},
+				{Name: "before", Type: "string", Required: false},
+			},
+		},
 	}
 }
 func (m *mockSourceConnector) Execute(_ context.Context, tool string, params map[string]any, _ []byte) (map[string]any, error) {
-	return map[string]any{"tool": tool, "executed": true}, nil
+	return map[string]any{"tool": tool, "params": params, "executed": true}, nil
 }
 
 func TestPipeline_GenerateDraft_Simple(t *testing.T) {
@@ -146,8 +163,8 @@ func TestPipeline_GenerateDraft_WithTools(t *testing.T) {
 	}
 
 	// Round 1 (research) should have tools.
-	if len(mock.requests[0].Tools) != 1 {
-		t.Fatalf("expected 1 tool in research round, got %d", len(mock.requests[0].Tools))
+	if len(mock.requests[0].Tools) != 2 {
+		t.Fatalf("expected 2 tools in research round, got %d", len(mock.requests[0].Tools))
 	}
 	if mock.requests[0].ToolExecutor == nil {
 		t.Error("expected ToolExecutor in research round")
@@ -372,37 +389,18 @@ func TestPipeline_GenerateDraft_NoInstructions(t *testing.T) {
 	}
 }
 
-// sequencingLLMClient returns different responses for sequential calls with
-// tools. Used to test the backward pass where both the initial research and
-// the gap-fill call have tools.
-type sequencingLLMClient struct {
-	requests  []*llm.GenerateRequest
-	responses []*llm.GenerateResponse
-	callIndex int
-}
-
-func (s *sequencingLLMClient) GenerateWithTools(_ context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
-	s.requests = append(s.requests, &req)
-	idx := s.callIndex
-	s.callIndex++
-	if idx < len(s.responses) {
-		return s.responses[idx], nil
-	}
-	return &llm.GenerateResponse{Text: "fallback"}, nil
-}
-
-func TestPipeline_GenerateDraft_BackwardPass_FillsGaps(t *testing.T) {
+func TestPipeline_GenerateDraft_BackwardPass_DirectToolCalls(t *testing.T) {
 	// Research returns context that only mentions Monday and Friday.
 	// The message asks about "this week" (Mon–Fri).
-	// The backward pass should detect Tue/Wed/Thu gaps and make a second call.
-	researchMock := &sequencingLLMClient{
-		responses: []*llm.GenerateResponse{
-			{Text: "On Monday we merged PR #1. On Friday we deployed v2.3."},
-			{Text: "Tuesday: standup discussed auth. Wednesday: code review on PR #5. Thursday: fixed the CI flake."},
+	// The backward pass should detect Tue/Wed/Thu gaps and call tools
+	// directly with after/before parameters — NOT through the LLM.
+	researchMock := &mockLLMClient{
+		researchResp: &llm.GenerateResponse{
+			Text: "On Monday we merged PR #1. On Friday we deployed v2.3.",
 		},
-	}
-	ghostwriteMock := &mockLLMClient{
-		response: &llm.GenerateResponse{Text: "Busy week — merged PRs, fixed CI, deployed v2.3."},
+		ghostwriteResp: &llm.GenerateResponse{
+			Text: "Busy week — merged PRs, fixed CI, deployed v2.3.",
+		},
 	}
 
 	accounts := mem.NewConnectedAccountStore()
@@ -419,7 +417,7 @@ func TestPipeline_GenerateDraft_BackwardPass_FillsGaps(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(researchMock, researchMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
 
 	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
@@ -432,37 +430,33 @@ func TestPipeline_GenerateDraft_BackwardPass_FillsGaps(t *testing.T) {
 		t.Fatal("expected non-empty draft")
 	}
 
-	// Research mock should have been called twice: initial + backward pass.
+	// Research LLM should have been called exactly twice: research + ghostwrite.
+	// The backward pass does NOT call the LLM — it calls tools directly.
 	if len(researchMock.requests) != 2 {
-		t.Fatalf("expected 2 research calls (initial + backward pass), got %d", len(researchMock.requests))
+		t.Fatalf("expected 2 LLM calls (research + ghostwrite), got %d", len(researchMock.requests))
 	}
 
-	// Second call should mention the gap dates.
-	backwardReq := researchMock.requests[1]
-	if !strings.Contains(backwardReq.UserMessage, "NO activity") {
-		t.Error("expected backward pass prompt to mention missing activity")
-	}
-
-	// Ghostwrite should receive both the initial and backward pass context.
-	gwMsg := ghostwriteMock.lastRequest.UserMessage
+	// Ghostwrite should receive both the initial context AND direct tool results.
+	gwMsg := researchMock.requests[1].UserMessage
 	if !strings.Contains(gwMsg, "On Monday we merged PR #1") {
 		t.Error("expected initial context in ghostwrite")
 	}
-	if !strings.Contains(gwMsg, "Tuesday: standup discussed auth") {
-		t.Error("expected backward pass context in ghostwrite")
+	// The backward pass appends direct tool call results.
+	if !strings.Contains(gwMsg, "direct retrieval") {
+		t.Error("expected backward pass direct retrieval marker in ghostwrite context")
+	}
+	if !strings.Contains(gwMsg, "slack_channel_history") {
+		t.Error("expected tool call results in ghostwrite context")
 	}
 }
 
 func TestPipeline_GenerateDraft_BackwardPass_SkipsWhenFullCoverage(t *testing.T) {
 	// Research mentions all days — no backward pass needed.
-	researchMock := &sequencingLLMClient{
-		responses: []*llm.GenerateResponse{
-			{Text: "Monday: standup. Tuesday: PR review. Wednesday: deploy. Thursday: bug fix. Friday: retro."},
-			{Text: "this should not be reached"},
+	mock := &mockLLMClient{
+		researchResp: &llm.GenerateResponse{
+			Text: "Monday: standup. Tuesday: PR review. Wednesday: deploy. Thursday: bug fix. Friday: retro.",
 		},
-	}
-	ghostwriteMock := &mockLLMClient{
-		response: &llm.GenerateResponse{Text: "Full week summary."},
+		ghostwriteResp: &llm.GenerateResponse{Text: "Full week summary."},
 	}
 
 	accounts := mem.NewConnectedAccountStore()
@@ -478,7 +472,7 @@ func TestPipeline_GenerateDraft_BackwardPass_SkipsWhenFullCoverage(t *testing.T)
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
@@ -488,21 +482,23 @@ func TestPipeline_GenerateDraft_BackwardPass_SkipsWhenFullCoverage(t *testing.T)
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Only 1 research call — no backward pass.
-	if len(researchMock.requests) != 1 {
-		t.Errorf("expected 1 research call (no backward pass), got %d", len(researchMock.requests))
+	// Only 2 LLM calls (research + ghostwrite) — no backward pass, no extra tools.
+	if len(mock.requests) != 2 {
+		t.Errorf("expected 2 LLM calls, got %d", len(mock.requests))
+	}
+
+	// Ghostwrite context should NOT contain backward pass marker.
+	gwMsg := mock.requests[1].UserMessage
+	if strings.Contains(gwMsg, "direct retrieval") {
+		t.Error("expected no backward pass when full coverage")
 	}
 }
 
 func TestPipeline_GenerateDraft_BackwardPass_SkipsNoTimeRange(t *testing.T) {
 	// Message doesn't imply a time range — no backward pass.
-	researchMock := &sequencingLLMClient{
-		responses: []*llm.GenerateResponse{
-			{Text: "The auth refactor is in PR #247."},
-		},
-	}
-	ghostwriteMock := &mockLLMClient{
-		response: &llm.GenerateResponse{Text: "PR #247."},
+	mock := &mockLLMClient{
+		researchResp:   &llm.GenerateResponse{Text: "The auth refactor is in PR #247."},
+		ghostwriteResp: &llm.GenerateResponse{Text: "PR #247."},
 	}
 
 	accounts := mem.NewConnectedAccountStore()
@@ -518,7 +514,7 @@ func TestPipeline_GenerateDraft_BackwardPass_SkipsNoTimeRange(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
@@ -528,8 +524,8 @@ func TestPipeline_GenerateDraft_BackwardPass_SkipsNoTimeRange(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(researchMock.requests) != 1 {
-		t.Errorf("expected 1 research call (no time range), got %d", len(researchMock.requests))
+	if len(mock.requests) != 2 {
+		t.Errorf("expected 2 LLM calls (research + ghostwrite), got %d", len(mock.requests))
 	}
 }
 

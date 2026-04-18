@@ -119,24 +119,6 @@ func dayMentioned(lowerText string, day time.Time) bool {
 	return false
 }
 
-// FormatGapPrompt builds the follow-up prompt for uncovered days.
-func FormatGapPrompt(uncovered []time.Time, originalMessage string) string {
-	dayStrs := make([]string, len(uncovered))
-	for i, d := range uncovered {
-		dayStrs[i] = d.Format("Monday 2006-01-02")
-	}
-
-	return fmt.Sprintf(
-		"Your initial research found NO activity for these dates: %s\n\n"+
-			"Search specifically for activity on those dates. Use explicit date filters "+
-			"(after:/before: parameters) and broad query terms. The absence of results in "+
-			"your first pass usually means the queries were too narrow, not that nothing happened.\n\n"+
-			"Original message: %s",
-		strings.Join(dayStrs, ", "),
-		originalMessage,
-	)
-}
-
 // matchesAny returns true if text contains any of the given substrings.
 func matchesAny(text string, subs ...string) bool {
 	for _, s := range subs {
