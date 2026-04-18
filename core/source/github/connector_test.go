@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	githubsource "github.com/ALRubinger/aileron/core/source/github"
@@ -169,6 +170,38 @@ func TestConnector_SearchIssues(t *testing.T) {
 	}
 	if results[0]["is_pr"] != true {
 		t.Error("expected is_pr=true")
+	}
+}
+
+func TestConnector_SearchIssues_WithDateFilters(t *testing.T) {
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("q")
+		json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 0,
+			"items":       []map[string]any{},
+		})
+	}))
+	defer server.Close()
+
+	c := githubsource.New().WithBaseURL(server.URL + "/")
+	_, err := c.Execute(context.Background(), "github_search_issues", map[string]any{
+		"query":  "auth refactor",
+		"after":  "2026-04-14",
+		"before": "2026-04-16",
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(gotQuery, "updated:>=2026-04-14") {
+		t.Errorf("expected updated:>= in query, got %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "updated:<=2026-04-16") {
+		t.Errorf("expected updated:<= in query, got %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "auth refactor") {
+		t.Errorf("expected original query preserved, got %q", gotQuery)
 	}
 }
 

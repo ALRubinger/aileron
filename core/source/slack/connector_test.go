@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	slacksource "github.com/ALRubinger/aileron/core/source/slack"
@@ -205,6 +206,73 @@ func TestConnector_SearchMessages_MissingQuery(t *testing.T) {
 	_, err := c.Execute(context.Background(), "slack_search_messages", map[string]any{}, testToken())
 	if err == nil {
 		t.Fatal("expected error for missing query")
+	}
+}
+
+func TestConnector_ChannelHistory_WithDateFilters(t *testing.T) {
+	var gotOldest, gotLatest string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		gotOldest = r.FormValue("oldest")
+		gotLatest = r.FormValue("latest")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":       true,
+			"messages": []map[string]any{},
+		})
+	}))
+	defer server.Close()
+
+	c := slacksource.New().WithAPIURL(server.URL + "/")
+	_, err := c.Execute(context.Background(), "slack_channel_history", map[string]any{
+		"channel": "C0BACKEND",
+		"after":   "2026-04-14",
+		"before":  "2026-04-16",
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// after=2026-04-14 → Unix 1776211200 (UTC midnight)
+	if gotOldest == "" {
+		t.Error("expected oldest param to be set from after")
+	}
+	if gotLatest == "" {
+		t.Error("expected latest param to be set from before")
+	}
+}
+
+func TestConnector_SearchMessages_WithDateFilters(t *testing.T) {
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		gotQuery = r.FormValue("query")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"messages": map[string]any{
+				"matches": []map[string]any{},
+			},
+		})
+	}))
+	defer server.Close()
+
+	c := slacksource.New().WithAPIURL(server.URL + "/")
+	_, err := c.Execute(context.Background(), "slack_search_messages", map[string]any{
+		"query":  "deploy",
+		"after":  "2026-04-14",
+		"before": "2026-04-16",
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotQuery == "" {
+		t.Fatal("expected query to be set")
+	}
+	if !strings.Contains(gotQuery, "after:2026-04-14") {
+		t.Errorf("expected after: in query, got %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "before:2026-04-16") {
+		t.Errorf("expected before: in query, got %q", gotQuery)
 	}
 }
 
