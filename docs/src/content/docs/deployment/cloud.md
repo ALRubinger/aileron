@@ -55,6 +55,9 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `AILERON_ENCLAVE_URL` | No | | Base URL of the enclave binary. Required when `AILERON_TEE_PROVIDER=confidential-space` |
 | `AILERON_ENCLAVE_IMAGE_DIGEST` | No | | Expected container image digest (`sha256:...`) for attestation verification |
 | `AILERON_GCP_PROJECT_ID` | No | | Expected GCP project ID for attestation verification |
+| `ANTHROPIC_API_KEY` | No | | Anthropic API key. Enables AI-powered draft generation when set |
+| `AILERON_LLM_MODEL_RESEARCH` | No | `claude-haiku-4-5-20251001` | Model for the research round (tool-call decisions, context gathering). Use a fast model — quality is less important than speed here. Any Anthropic model ID works |
+| `AILERON_LLM_MODEL_SYNTHESIS` | No | `claude-sonnet-4-6` | Model for the synthesis round (composing the final reply in the user's voice). Use a capable model — this is the quality-sensitive step |
 
 ### UI service
 

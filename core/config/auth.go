@@ -71,9 +71,11 @@ type AuthConfig struct {
 	MailFrom string
 
 	// LLM configuration for cloud-hosted draft generation.
-	AnthropicAPIKey  string // Env: ANTHROPIC_API_KEY
-	LLMModel         string // Env: AILERON_LLM_MODEL (default: "claude-sonnet-4-6")
-	LLMResearchModel string // Env: AILERON_LLM_RESEARCH_MODEL (default: "claude-haiku-4-5-20251001")
+	// Two models: research (fast, cheap — tool-call decisions) and synthesis
+	// (capable — composing the final reply in the user's voice).
+	AnthropicAPIKey   string // Env: ANTHROPIC_API_KEY
+	LLMModelResearch  string // Env: AILERON_LLM_MODEL_RESEARCH (default: "claude-haiku-4-5-20251001")
+	LLMModelSynthesis string // Env: AILERON_LLM_MODEL_SYNTHESIS (default: "claude-sonnet-4-6")
 }
 
 // LoadAuthConfig loads auth configuration from environment variables.
@@ -100,8 +102,8 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		ResendAPIKey:       envTrimmed("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
 		AnthropicAPIKey:    envTrimmed("ANTHROPIC_API_KEY"),
-		LLMModel:           envOrDefault("AILERON_LLM_MODEL", "claude-sonnet-4-6"),
-		LLMResearchModel:   envOrDefault("AILERON_LLM_RESEARCH_MODEL", "claude-haiku-4-5-20251001"),
+		LLMModelResearch:  envOrDefault("AILERON_LLM_MODEL_RESEARCH", "claude-haiku-4-5-20251001"),
+		LLMModelSynthesis: envOrDefault("AILERON_LLM_MODEL_SYNTHESIS", "claude-sonnet-4-6"),
 	}
 
 	// Parse durations with defaults.

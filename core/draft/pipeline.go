@@ -37,8 +37,8 @@ type Pipeline struct {
 }
 
 // NewPipeline creates a draft generation pipeline.
-// researchLLM handles tool-use context gathering (can be a fast/cheap model).
-// ghostwriteLLM handles the final reply composition (should be a capable model).
+// researchLLM handles tool-use context gathering (fast/cheap model like Haiku).
+// ghostwriteLLM handles synthesis — composing the reply (capable model like Sonnet).
 func NewPipeline(
 	researchLLM llm.Client,
 	ghostwriteLLM llm.Client,

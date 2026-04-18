@@ -354,7 +354,7 @@ func TestLoadAuthConfig_SlackPartial(t *testing.T) {
 func TestLoadAuthConfig_LLMEnabled(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
-	t.Setenv("AILERON_LLM_MODEL", "claude-haiku-4-5")
+	t.Setenv("AILERON_LLM_MODEL_SYNTHESIS", "claude-haiku-4-5")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
@@ -366,8 +366,8 @@ func TestLoadAuthConfig_LLMEnabled(t *testing.T) {
 	if cfg.AnthropicAPIKey != "sk-ant-test-key" {
 		t.Errorf("AnthropicAPIKey = %q", cfg.AnthropicAPIKey)
 	}
-	if cfg.LLMModel != "claude-haiku-4-5" {
-		t.Errorf("LLMModel = %q", cfg.LLMModel)
+	if cfg.LLMModelSynthesis != "claude-haiku-4-5" {
+		t.Errorf("LLMModelSynthesis = %q", cfg.LLMModelSynthesis)
 	}
 }
 
@@ -384,16 +384,20 @@ func TestLoadAuthConfig_LLMDisabled(t *testing.T) {
 	}
 }
 
-func TestLoadAuthConfig_LLMModelDefault(t *testing.T) {
+func TestLoadAuthConfig_LLMModelDefaults(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("AILERON_LLM_MODEL", "")
+	t.Setenv("AILERON_LLM_MODEL_RESEARCH", "")
+	t.Setenv("AILERON_LLM_MODEL_SYNTHESIS", "")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.LLMModel != "claude-sonnet-4-6" {
-		t.Errorf("LLMModel = %q, want claude-sonnet-4-6", cfg.LLMModel)
+	if cfg.LLMModelResearch != "claude-haiku-4-5-20251001" {
+		t.Errorf("LLMModelResearch = %q, want claude-haiku-4-5-20251001", cfg.LLMModelResearch)
+	}
+	if cfg.LLMModelSynthesis != "claude-sonnet-4-6" {
+		t.Errorf("LLMModelSynthesis = %q, want claude-sonnet-4-6", cfg.LLMModelSynthesis)
 	}
 }
 
@@ -432,15 +436,15 @@ func TestLoadAuthConfig_TrimsWhitespace(t *testing.T) {
 
 func TestLoadAuthConfig_TrimsWhitespace_EnvOrDefault(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("AILERON_LLM_MODEL", " claude-haiku-4-5 ")
+	t.Setenv("AILERON_LLM_MODEL_SYNTHESIS", " claude-haiku-4-5 ")
 	t.Setenv("MAIL_FROM", " custom@example.com\n")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.LLMModel != "claude-haiku-4-5" {
-		t.Errorf("LLMModel not trimmed: %q", cfg.LLMModel)
+	if cfg.LLMModelSynthesis != "claude-haiku-4-5" {
+		t.Errorf("LLMModelSynthesis not trimmed: %q", cfg.LLMModelSynthesis)
 	}
 	if cfg.MailFrom != "custom@example.com" {
 		t.Errorf("MailFrom not trimmed: %q", cfg.MailFrom)
