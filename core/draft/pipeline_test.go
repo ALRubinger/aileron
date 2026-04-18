@@ -389,14 +389,17 @@ func TestPipeline_GenerateDraft_NoInstructions(t *testing.T) {
 	}
 }
 
-func TestPipeline_GenerateDraft_BackwardPass_DirectToolCalls(t *testing.T) {
-	// Research returns context that only mentions Monday and Friday.
-	// The message asks about "this week" (Mon–Fri).
-	// The backward pass should detect Tue/Wed/Thu gaps and call tools
-	// directly with after/before parameters — NOT through the LLM.
+func TestPipeline_GenerateDraft_BackwardPass_ReplaysWithDates(t *testing.T) {
+	// Research returns context that only mentions Monday and Friday, plus
+	// the tool calls it made. The backward pass should replay those same
+	// tool calls with after/before date filters for the uncovered window.
 	researchMock := &mockLLMClient{
 		researchResp: &llm.GenerateResponse{
 			Text: "On Monday we merged PR #1. On Friday we deployed v2.3.",
+			ToolCalls: []llm.ToolCall{
+				{Tool: "slack_search_messages", Params: map[string]any{"query": "deploy merge"}},
+				{Tool: "slack_channel_history", Params: map[string]any{"channel": "C0BACKEND"}},
+			},
 		},
 		ghostwriteResp: &llm.GenerateResponse{
 			Text: "Busy week — merged PRs, fixed CI, deployed v2.3.",
@@ -431,22 +434,71 @@ func TestPipeline_GenerateDraft_BackwardPass_DirectToolCalls(t *testing.T) {
 	}
 
 	// Research LLM should have been called exactly twice: research + ghostwrite.
-	// The backward pass does NOT call the LLM — it calls tools directly.
+	// The backward pass does NOT call the LLM — it replays tools directly.
 	if len(researchMock.requests) != 2 {
 		t.Fatalf("expected 2 LLM calls (research + ghostwrite), got %d", len(researchMock.requests))
 	}
 
-	// Ghostwrite should receive both the initial context AND direct tool results.
+	// Ghostwrite should receive both the initial context AND replayed results.
 	gwMsg := researchMock.requests[1].UserMessage
 	if !strings.Contains(gwMsg, "On Monday we merged PR #1") {
 		t.Error("expected initial context in ghostwrite")
 	}
-	// The backward pass appends direct tool call results.
-	if !strings.Contains(gwMsg, "direct retrieval") {
-		t.Error("expected backward pass direct retrieval marker in ghostwrite context")
+	if !strings.Contains(gwMsg, "date-filtered replay") {
+		t.Error("expected backward pass replay marker in ghostwrite context")
+	}
+	// The replayed tool calls should appear in results.
+	if !strings.Contains(gwMsg, "slack_search_messages") {
+		t.Error("expected replayed slack_search_messages in ghostwrite context")
 	}
 	if !strings.Contains(gwMsg, "slack_channel_history") {
-		t.Error("expected tool call results in ghostwrite context")
+		t.Error("expected replayed slack_channel_history in ghostwrite context")
+	}
+}
+
+func TestPipeline_GenerateDraft_BackwardPass_NoReplayableTools(t *testing.T) {
+	// Research only used non-search tools (e.g., get_pr) — nothing to replay.
+	researchMock := &mockLLMClient{
+		researchResp: &llm.GenerateResponse{
+			Text: "On Monday we reviewed PR #5.",
+			ToolCalls: []llm.ToolCall{
+				{Tool: "github_get_pr", Params: map[string]any{"repo": "org/repo", "number": 5}},
+			},
+		},
+		ghostwriteResp: &llm.GenerateResponse{Text: "We reviewed PR #5."},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+
+	p := draft.NewPipeline(researchMock, researchMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+
+	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
+		Body: "What happened this week?",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// No replayable search calls → no backward pass, just research + ghostwrite.
+	if len(researchMock.requests) != 2 {
+		t.Errorf("expected 2 LLM calls, got %d", len(researchMock.requests))
+	}
+	// Ghostwrite should NOT contain replay marker.
+	gwMsg := researchMock.requests[1].UserMessage
+	if strings.Contains(gwMsg, "date-filtered replay") {
+		t.Error("expected no replay when no search tools used")
 	}
 }
 
@@ -455,6 +507,9 @@ func TestPipeline_GenerateDraft_BackwardPass_SkipsWhenFullCoverage(t *testing.T)
 	mock := &mockLLMClient{
 		researchResp: &llm.GenerateResponse{
 			Text: "Monday: standup. Tuesday: PR review. Wednesday: deploy. Thursday: bug fix. Friday: retro.",
+			ToolCalls: []llm.ToolCall{
+				{Tool: "slack_search_messages", Params: map[string]any{"query": "standup deploy"}},
+			},
 		},
 		ghostwriteResp: &llm.GenerateResponse{Text: "Full week summary."},
 	}
@@ -482,15 +537,15 @@ func TestPipeline_GenerateDraft_BackwardPass_SkipsWhenFullCoverage(t *testing.T)
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Only 2 LLM calls (research + ghostwrite) — no backward pass, no extra tools.
+	// Only 2 LLM calls (research + ghostwrite) — no backward pass.
 	if len(mock.requests) != 2 {
 		t.Errorf("expected 2 LLM calls, got %d", len(mock.requests))
 	}
 
-	// Ghostwrite context should NOT contain backward pass marker.
+	// Ghostwrite context should NOT contain replay marker.
 	gwMsg := mock.requests[1].UserMessage
-	if strings.Contains(gwMsg, "direct retrieval") {
-		t.Error("expected no backward pass when full coverage")
+	if strings.Contains(gwMsg, "date-filtered replay") {
+		t.Error("expected no replay when full coverage")
 	}
 }
 

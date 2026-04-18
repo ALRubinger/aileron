@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	gmailsource "github.com/ALRubinger/aileron/core/source/gmail"
@@ -108,6 +109,52 @@ func TestConnector_Search_Success(t *testing.T) {
 	}
 	if messages[0]["subject"] != "Migration Proposal" {
 		t.Errorf("expected Migration Proposal, got %v", messages[0]["subject"])
+	}
+}
+
+func TestConnector_Search_WithDateFilters(t *testing.T) {
+	var gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/messages/") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "snippet": "Test",
+				"payload": map[string]any{
+					"headers": []map[string]any{
+						{"name": "Subject", "value": "Test"},
+						{"name": "From", "value": "test@example.com"},
+						{"name": "Date", "value": "Wed, 15 Apr 2026"},
+					},
+				},
+			})
+			return
+		}
+		gotQuery = r.URL.Query().Get("q")
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":           []map[string]any{{"id": "msg_1", "threadId": "t_1"}},
+			"resultSizeEstimate": 1,
+		})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
+		"query":  "migration",
+		"after":  "2026-04-14",
+		"before": "2026-04-16",
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(gotQuery, "after:2026-04-14") {
+		t.Errorf("expected after: in query, got %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "before:2026-04-16") {
+		t.Errorf("expected before: in query, got %q", gotQuery)
+	}
+	if !strings.Contains(gotQuery, "migration") {
+		t.Errorf("expected original query preserved, got %q", gotQuery)
 	}
 }
 

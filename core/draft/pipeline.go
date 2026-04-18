@@ -131,8 +131,9 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 
 			// --- Round 1b: Backward pass ---
 			// If the message implies a time range and the research output has
-			// date gaps, call search tools directly with explicit date filters.
-			gatheredContext = p.backwardPass(ctx, gatheredContext, msg.Body, now, tools, executor, userID)
+			// date gaps, replay the LLM's own search queries with explicit
+			// after/before date filters for the uncovered window.
+			gatheredContext = p.backwardPass(ctx, gatheredContext, msg.Body, now, researchResp.ToolCalls, executor, userID)
 		}
 	} else {
 		gatheredContext = "(No source connectors available — replying with general knowledge only.)"
@@ -205,16 +206,16 @@ func (p *Pipeline) assembleSystemPrompt(ctx context.Context, userID string) (str
 }
 
 // backwardPass checks whether the research output covers the full time range
-// implied by the message. If date gaps are found, it calls search tools
-// directly with explicit after/before date parameters — bypassing the LLM
-// entirely. This is deterministic: the pipeline decides what to search for,
-// not the model.
+// implied by the message. If date gaps are found, it replays the LLM's own
+// search queries from round 1 with after/before date filters injected for
+// the uncovered window. The LLM chose the queries (what terms matter); the
+// pipeline enforces the dates (mechanical constraint).
 func (p *Pipeline) backwardPass(
 	ctx context.Context,
 	gatheredContext string,
 	messageBody string,
 	now time.Time,
-	tools []source.ToolDefinition,
+	researchToolCalls []llm.ToolCall,
 	executor llm.ToolExecutor,
 	userID string,
 ) string {
@@ -232,10 +233,20 @@ func (p *Pipeline) backwardPass(
 		return gatheredContext
 	}
 
-	p.log.Info("backward pass: date gaps detected, calling tools directly",
+	// Only replay search-type tool calls (ones the LLM used for querying).
+	replayable := filterReplayable(researchToolCalls)
+	if len(replayable) == 0 {
+		p.log.Info("backward pass: no replayable search calls from research round",
+			"user_id", userID,
+		)
+		return gatheredContext
+	}
+
+	p.log.Info("backward pass: replaying searches with date filters",
 		"user_id", userID,
 		"range", tr.Label,
 		"uncovered_days", len(uncovered),
+		"replay_calls", len(replayable),
 	)
 
 	// Build the date window covering all uncovered days.
@@ -243,34 +254,31 @@ func (p *Pipeline) backwardPass(
 	// before is the day after the last uncovered day (exclusive end).
 	before := uncovered[len(uncovered)-1].AddDate(0, 0, 1).Format("2006-01-02")
 
-	// Call every search tool directly with date filters.
-	searchTools := filterSearchTools(tools)
+	// Replay each search call with date filters injected.
 	var results []string
-	for _, tool := range searchTools {
-		params := map[string]any{
-			"after":  after,
-			"before": before,
+	for _, tc := range replayable {
+		params := make(map[string]any, len(tc.Params)+2)
+		for k, v := range tc.Params {
+			params[k] = v
 		}
-		// Search tools need a query — use a broad wildcard.
-		if needsQuery(tool.Name) {
-			params["query"] = "*"
-		}
+		params["after"] = after
+		params["before"] = before
 
-		result, err := executor(ctx, tool.Name, params)
+		result, err := executor(ctx, tc.Tool, params)
 		if err != nil {
 			p.log.Debug("backward pass tool error",
-				"tool", tool.Name,
+				"tool", tc.Tool,
 				"error", err,
 			)
 			continue
 		}
 
 		resultJSON, _ := json.Marshal(result)
-		results = append(results, fmt.Sprintf("[%s %s–%s]: %s", tool.Name, after, before, string(resultJSON)))
+		results = append(results, fmt.Sprintf("[%s %s–%s]: %s", tc.Tool, after, before, string(resultJSON)))
 	}
 
 	if len(results) == 0 {
-		p.log.Info("backward pass: no additional results from direct tool calls",
+		p.log.Info("backward pass: no additional results",
 			"user_id", userID,
 		)
 		return gatheredContext
@@ -278,46 +286,32 @@ func (p *Pipeline) backwardPass(
 
 	p.log.Info("backward pass complete",
 		"user_id", userID,
-		"tools_called", len(searchTools),
+		"replayed", len(replayable),
 		"results", len(results),
 	)
 
-	return gatheredContext + "\n\n---\n\nAdditional context (direct retrieval for " + after + " to " + before + "):\n\n" + strings.Join(results, "\n\n")
+	return gatheredContext + "\n\n---\n\nAdditional context (date-filtered replay for " + after + " to " + before + "):\n\n" + strings.Join(results, "\n\n")
 }
 
-// filterSearchTools returns only the tools that support date-filtered search.
-func filterSearchTools(tools []source.ToolDefinition) []source.ToolDefinition {
-	var out []source.ToolDefinition
-	for _, t := range tools {
-		if hasDateParams(t) {
-			out = append(out, t)
+// searchTools are the tool names that support date-filtered replay.
+var searchTools = map[string]bool{
+	"slack_search_messages": true,
+	"slack_channel_history": true,
+	"github_search_issues":  true,
+	"gmail_search":          true,
+	"calendar_events":       true,
+}
+
+// filterReplayable returns only the tool calls that are search-type tools
+// worth replaying with date filters.
+func filterReplayable(calls []llm.ToolCall) []llm.ToolCall {
+	var out []llm.ToolCall
+	for _, tc := range calls {
+		if searchTools[tc.Tool] {
+			out = append(out, tc)
 		}
 	}
 	return out
-}
-
-// hasDateParams returns true if a tool has both "after" and "before" parameters.
-func hasDateParams(t source.ToolDefinition) bool {
-	hasAfter, hasBefore := false, false
-	for _, p := range t.Parameters {
-		if p.Name == "after" {
-			hasAfter = true
-		}
-		if p.Name == "before" {
-			hasBefore = true
-		}
-	}
-	return hasAfter && hasBefore
-}
-
-// needsQuery returns true if a tool requires a "query" parameter.
-func needsQuery(toolName string) bool {
-	switch toolName {
-	case "slack_search_messages", "github_search_issues", "gmail_search":
-		return true
-	default:
-		return false
-	}
 }
 
 // buildToolExecutor creates a closure that resolves credentials from the vault
