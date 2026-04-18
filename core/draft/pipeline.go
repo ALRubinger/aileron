@@ -25,7 +25,8 @@ import (
 
 // Pipeline orchestrates draft generation for incoming messages.
 type Pipeline struct {
-	llm               llm.Client
+	researchLLM       llm.Client
+	ghostwriteLLM     llm.Client
 	sourceRegistry    *source.Registry
 	connectedAccounts store.ConnectedAccountStore
 	instructions      store.UserInstructionStore
@@ -36,8 +37,11 @@ type Pipeline struct {
 }
 
 // NewPipeline creates a draft generation pipeline.
+// researchLLM handles tool-use context gathering (can be a fast/cheap model).
+// ghostwriteLLM handles the final reply composition (should be a capable model).
 func NewPipeline(
-	llmClient llm.Client,
+	researchLLM llm.Client,
+	ghostwriteLLM llm.Client,
 	sourceReg *source.Registry,
 	accounts store.ConnectedAccountStore,
 	instructions store.UserInstructionStore,
@@ -46,7 +50,8 @@ func NewPipeline(
 	prompts Prompts,
 ) *Pipeline {
 	return &Pipeline{
-		llm:               llmClient,
+		researchLLM:       researchLLM,
+		ghostwriteLLM:     ghostwriteLLM,
 		sourceRegistry:    sourceReg,
 		connectedAccounts: accounts,
 		instructions:      instructions,
@@ -101,7 +106,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 
 	var gatheredContext string
 	if len(tools) > 0 {
-		researchResp, err := p.llm.GenerateWithTools(ctx, llm.GenerateRequest{
+		researchResp, err := p.researchLLM.GenerateWithTools(ctx, llm.GenerateRequest{
 			SystemPrompt: researchSysPrompt,
 			UserMessage:  researchMessage,
 			Tools:        tools,
@@ -136,7 +141,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		msg.Author, msg.Channel, msg.Body, gatheredContext,
 	)
 
-	draftResp, err := p.llm.GenerateWithTools(ctx, llm.GenerateRequest{
+	draftResp, err := p.ghostwriteLLM.GenerateWithTools(ctx, llm.GenerateRequest{
 		SystemPrompt: ghostwritePrompt,
 		UserMessage:  ghostwriteMessage,
 		// No tools — force text-only output.

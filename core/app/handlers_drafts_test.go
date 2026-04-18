@@ -1097,7 +1097,7 @@ func TestHandleIncomingSlackMessage_FullPipeline(t *testing.T) {
 		response: &llm.GenerateResponse{Text: "Draft reply text"},
 	}
 	srv.draftPipeline = draft.NewPipeline(
-		mockLLM, source.NewRegistry(), srv.connectedAccounts,
+		mockLLM, mockLLM, source.NewRegistry(), srv.connectedAccounts,
 		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
 		draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"},
 	)
@@ -1163,7 +1163,7 @@ func TestHandleIncomingSlackMessage_LLMError(t *testing.T) {
 
 	mockLLM := &stubLLMClient{err: fmt.Errorf("LLM unavailable")}
 	srv.draftPipeline = draft.NewPipeline(
-		mockLLM, source.NewRegistry(), srv.connectedAccounts,
+		mockLLM, mockLLM, source.NewRegistry(), srv.connectedAccounts,
 		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
 		draft.Prompts{Research: "test", Ghostwrite: "test"},
 	)
@@ -1200,7 +1200,7 @@ func TestHandleIncomingSlackMessage_NoSlackCredentials(t *testing.T) {
 		response: &llm.GenerateResponse{Text: "Draft without indicator"},
 	}
 	srv.draftPipeline = draft.NewPipeline(
-		mockLLM, source.NewRegistry(), srv.connectedAccounts,
+		mockLLM, mockLLM, source.NewRegistry(), srv.connectedAccounts,
 		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
 		draft.Prompts{Research: "test", Ghostwrite: "test"},
 	)
