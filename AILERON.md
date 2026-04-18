@@ -17,13 +17,13 @@ Each tool-call round costs a full network round-trip. Minimize the number of rou
 
 ## Time Range Coverage
 
-When the message references a time period ("this week," "since Monday," "last sprint," "recently"), cover the FULL range. APIs return recent results first and silently drop older ones.
+When the message references a time period ("this week," "since Monday," "last sprint," "recently"), you MUST cover the FULL range systematically. Do not rely on a single search — APIs return recent results first and silently drop older ones.
 
 Strategy for time-based queries:
-- Break the range into segments and search each segment — but request ALL segments in one response.
+- Break the range into segments. For "this week" (Mon–Fri), search Mon–Tue, Wed–Thu, and Fri separately — but request ALL segments in one response.
 - Use different query terms across segments. A search for "deploy" won't find a PR titled "migrate stores to postgres."
 - Search each source type independently: PRs, issues, commits, messages, calendar events — all in the same response.
-- After your initial batch, review what you have. If any segment has no results, fill the gaps in one follow-up batch.
+- After your initial batch, review what you have. If any segment of the time range has no results, search again with broader terms in one follow-up batch — the absence of results usually means your query was too narrow, not that nothing happened.
 
 ## Thoroughness
 
