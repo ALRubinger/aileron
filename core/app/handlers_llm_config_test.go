@@ -2,11 +2,14 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ALRubinger/aileron/core/auth"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -216,7 +219,7 @@ func TestRequireEnterpriseAdmin_DevMode(t *testing.T) {
 
 func TestRequireEnterpriseAdmin_NonMember(t *testing.T) {
 	users := mem.NewUserStore()
-	users.Create(nil, model.User{
+	users.Create(context.Background(), model.User{
 		ID:           "usr_1",
 		EnterpriseID: "ent_other",
 		Email:        "test@example.com",
@@ -225,13 +228,243 @@ func TestRequireEnterpriseAdmin_NonMember(t *testing.T) {
 
 	s := &apiServer{users: users}
 
-	// requireAuth returns empty enterpriseID in test (no auth context).
-	req := httptest.NewRequest("GET", "/", nil)
+	// Auth context with a different enterprise.
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_1"},
+		EnterpriseID:     "ent_other",
+	})
+	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 
-	// Calling with a different enterprise should fail because callerEnterpriseID
-	// (empty in test) doesn't match "ent_1".
 	if s.requireEnterpriseAdmin(w, req, "ent_1") {
 		t.Error("expected false for non-member")
+	}
+}
+
+func TestRequireEnterpriseAdmin_MemberNotAdmin(t *testing.T) {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID:           "usr_1",
+		EnterpriseID: "ent_1",
+		Email:        "test@example.com",
+		Role:         model.UserRoleMember,
+	})
+
+	s := &apiServer{users: users}
+
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_1"},
+		EnterpriseID:     "ent_1",
+	})
+	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	if s.requireEnterpriseAdmin(w, req, "ent_1") {
+		t.Error("expected false for non-admin member")
+	}
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestRequireEnterpriseAdmin_Admin(t *testing.T) {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID:           "usr_1",
+		EnterpriseID: "ent_1",
+		Email:        "test@example.com",
+		Role:         model.UserRoleAdmin,
+	})
+
+	s := &apiServer{users: users}
+
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_1"},
+		EnterpriseID:     "ent_1",
+	})
+	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	if !s.requireEnterpriseAdmin(w, req, "ent_1") {
+		t.Error("expected true for admin")
+	}
+}
+
+// --- Enterprise handler tests (with auth context) ---
+
+func newTestEnterpriseLLMConfigServer() *apiServer {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID:           "usr_admin",
+		EnterpriseID: "ent_1",
+		Email:        "admin@example.com",
+		Role:         model.UserRoleAdmin,
+	})
+	return &apiServer{
+		llmConfigs: mem.NewLLMConfigStore(),
+		vault:      vault.NewMemVault(),
+		users:      users,
+		newID:      func() string { return "test-id" },
+	}
+}
+
+func withAdminAuth(req *http.Request) *http.Request {
+	ctx := auth.ContextWithClaims(req.Context(), &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_admin"},
+		EnterpriseID:     "ent_1",
+	})
+	return req.WithContext(ctx)
+}
+
+func TestHandleUpsertEnterpriseLLMConfig(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-org"}`
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	w := httptest.NewRecorder()
+
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["owner_type"] != "enterprise" {
+		t.Errorf("expected enterprise, got %v", resp["owner_type"])
+	}
+	if resp["api_key_configured"] != true {
+		t.Error("expected api_key_configured=true")
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_MissingProvider(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	body := `{"api_key":"sk-org"}`
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	w := httptest.NewRecorder()
+
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleGetEnterpriseLLMConfig(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	// Create first.
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-org"}`
+	createReq := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	createW := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(createW, createReq)
+
+	// Get.
+	req := withAdminAuth(httptest.NewRequest("GET", "/v1/enterprises/ent_1/llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleGetEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleGetEnterpriseLLMConfig_NotFound(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	req := withAdminAuth(httptest.NewRequest("GET", "/v1/enterprises/ent_1/llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleGetEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandleDeleteEnterpriseLLMConfig(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	// Create.
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-org"}`
+	createReq := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	createW := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(createW, createReq)
+
+	// Delete.
+	req := withAdminAuth(httptest.NewRequest("DELETE", "/v1/enterprises/ent_1/llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleDeleteEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDeleteEnterpriseLLMConfig_NotFound(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	req := withAdminAuth(httptest.NewRequest("DELETE", "/v1/enterprises/ent_1/llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleDeleteEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_Forbidden(t *testing.T) {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID:           "usr_member",
+		EnterpriseID: "ent_1",
+		Email:        "member@example.com",
+		Role:         model.UserRoleMember,
+	})
+	s := &apiServer{
+		llmConfigs: mem.NewLLMConfigStore(),
+		vault:      vault.NewMemVault(),
+		users:      users,
+		newID:      func() string { return "test-id" },
+	}
+
+	body := `{"provider":"anthropic","api_key":"sk-org"}`
+	ctx := auth.ContextWithClaims(context.Background(), &auth.Claims{
+		RegisteredClaims: jwt.RegisteredClaims{Subject: "usr_member"},
+		EnterpriseID:     "ent_1",
+	})
+	req := httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_BadPath(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	body := `{"provider":"anthropic","api_key":"sk-org"}`
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises//llm-config", bytes.NewBufferString(body)))
+	w := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleUpsertUserLLMConfig_InvalidJSON(t *testing.T) {
+	s := newTestLLMConfigServer()
+
+	req := httptest.NewRequest("PUT", "/v1/llm-config", bytes.NewBufferString("not json"))
+	w := httptest.NewRecorder()
+	s.handleUpsertUserLLMConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
