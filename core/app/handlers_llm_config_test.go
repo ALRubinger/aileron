@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,9 +12,51 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 )
+
+// --- Mocks for error path testing ---
+
+// failingVault returns errors on Put.
+type failingVault struct {
+	vault.Vault
+}
+
+func (f *failingVault) Get(_ context.Context, _ string) (vault.Secret, error) {
+	return vault.Secret{}, fmt.Errorf("vault unavailable")
+}
+func (f *failingVault) Put(_ context.Context, _ string, _ []byte, _ vault.Metadata) error {
+	return fmt.Errorf("vault write failed")
+}
+func (f *failingVault) Delete(_ context.Context, _ string) error { return nil }
+
+// failingLLMConfigStore returns errors on Upsert and GetByOwner.
+type failingLLMConfigStore struct{}
+
+func (f *failingLLMConfigStore) Upsert(_ context.Context, _ model.LLMConfig) (model.LLMConfig, error) {
+	return model.LLMConfig{}, fmt.Errorf("store write failed")
+}
+func (f *failingLLMConfigStore) GetByOwner(_ context.Context, _ model.LLMConfigOwnerType, _ string) (model.LLMConfig, error) {
+	return model.LLMConfig{}, fmt.Errorf("store read failed")
+}
+func (f *failingLLMConfigStore) Delete(_ context.Context, _ string) error {
+	return fmt.Errorf("store delete failed")
+}
+
+// storeWithConfig returns a fixed config from GetByOwner but fails on Delete.
+type storeWithConfig struct {
+	store.LLMConfigStore
+	cfg model.LLMConfig
+}
+
+func (s *storeWithConfig) GetByOwner(_ context.Context, _ model.LLMConfigOwnerType, _ string) (model.LLMConfig, error) {
+	return s.cfg, nil
+}
+func (s *storeWithConfig) Delete(_ context.Context, _ string) error {
+	return fmt.Errorf("delete failed")
+}
 
 func newTestLLMConfigServer() *apiServer {
 	return &apiServer{
@@ -463,6 +506,243 @@ func TestHandleUpsertUserLLMConfig_InvalidJSON(t *testing.T) {
 	req := httptest.NewRequest("PUT", "/v1/llm-config", bytes.NewBufferString("not json"))
 	w := httptest.NewRecorder()
 	s.handleUpsertUserLLMConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+// --- Error path tests using mocks ---
+
+func TestHandleUpsertUserLLMConfig_VaultPutError(t *testing.T) {
+	s := &apiServer{
+		llmConfigs: mem.NewLLMConfigStore(),
+		vault:      &failingVault{},
+		users:      nil,
+		newID:      func() string { return "test-id" },
+	}
+
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-test"}`
+	req := httptest.NewRequest("PUT", "/v1/llm-config", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	s.handleUpsertUserLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUpsertUserLLMConfig_StoreUpsertError(t *testing.T) {
+	s := &apiServer{
+		llmConfigs: &failingLLMConfigStore{},
+		vault:      vault.NewMemVault(),
+		users:      nil,
+		newID:      func() string { return "test-id" },
+	}
+
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-test"}`
+	req := httptest.NewRequest("PUT", "/v1/llm-config", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	s.handleUpsertUserLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleGetUserLLMConfig_StoreError(t *testing.T) {
+	s := &apiServer{
+		llmConfigs: &failingLLMConfigStore{},
+		vault:      vault.NewMemVault(),
+		users:      nil,
+		newID:      func() string { return "test-id" },
+	}
+
+	req := httptest.NewRequest("GET", "/v1/llm-config", nil)
+	w := httptest.NewRecorder()
+	s.handleGetUserLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDeleteUserLLMConfig_StoreGetError(t *testing.T) {
+	s := &apiServer{
+		llmConfigs: &failingLLMConfigStore{},
+		vault:      vault.NewMemVault(),
+		users:      nil,
+		newID:      func() string { return "test-id" },
+	}
+
+	req := httptest.NewRequest("DELETE", "/v1/llm-config", nil)
+	w := httptest.NewRecorder()
+	s.handleDeleteUserLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDeleteUserLLMConfig_StoreDeleteError(t *testing.T) {
+	s := &apiServer{
+		llmConfigs: &storeWithConfig{cfg: model.LLMConfig{ID: "llm_1", OwnerType: model.LLMConfigOwnerUser, OwnerID: ""}},
+		vault:      vault.NewMemVault(),
+		users:      nil,
+		newID:      func() string { return "test-id" },
+	}
+
+	req := httptest.NewRequest("DELETE", "/v1/llm-config", nil)
+	w := httptest.NewRecorder()
+	s.handleDeleteUserLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_VaultPutError(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+	s.vault = &failingVault{}
+
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-org"}`
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	w := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_StoreError(t *testing.T) {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID: "usr_admin", EnterpriseID: "ent_1", Email: "a@x.com", Role: model.UserRoleAdmin,
+	})
+	s := &apiServer{
+		llmConfigs: &failingLLMConfigStore{},
+		vault:      vault.NewMemVault(),
+		users:      users,
+		newID:      func() string { return "test-id" },
+	}
+
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-org"}`
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	w := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleGetEnterpriseLLMConfig_StoreError(t *testing.T) {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID: "usr_admin", EnterpriseID: "ent_1", Email: "a@x.com", Role: model.UserRoleAdmin,
+	})
+	s := &apiServer{
+		llmConfigs: &failingLLMConfigStore{},
+		vault:      vault.NewMemVault(),
+		users:      users,
+		newID:      func() string { return "test-id" },
+	}
+
+	req := withAdminAuth(httptest.NewRequest("GET", "/v1/enterprises/ent_1/llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleGetEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDeleteEnterpriseLLMConfig_StoreGetError(t *testing.T) {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID: "usr_admin", EnterpriseID: "ent_1", Email: "a@x.com", Role: model.UserRoleAdmin,
+	})
+	s := &apiServer{
+		llmConfigs: &failingLLMConfigStore{},
+		vault:      vault.NewMemVault(),
+		users:      users,
+		newID:      func() string { return "test-id" },
+	}
+
+	req := withAdminAuth(httptest.NewRequest("DELETE", "/v1/enterprises/ent_1/llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleDeleteEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDeleteEnterpriseLLMConfig_StoreDeleteError(t *testing.T) {
+	users := mem.NewUserStore()
+	users.Create(context.Background(), model.User{
+		ID: "usr_admin", EnterpriseID: "ent_1", Email: "a@x.com", Role: model.UserRoleAdmin,
+	})
+	s := &apiServer{
+		llmConfigs: &storeWithConfig{cfg: model.LLMConfig{ID: "llm_1", OwnerType: model.LLMConfigOwnerEnterprise, OwnerID: "ent_1"}},
+		vault:      vault.NewMemVault(),
+		users:      users,
+		newID:      func() string { return "test-id" },
+	}
+
+	req := withAdminAuth(httptest.NewRequest("DELETE", "/v1/enterprises/ent_1/llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleDeleteEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_InvalidJSON(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString("bad")))
+	w := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_MissingAPIKey(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	body := `{"provider":"anthropic","model_research":"haiku"}`
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	w := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleGetEnterpriseLLMConfig_BadPath(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	req := withAdminAuth(httptest.NewRequest("GET", "/v1/enterprises//llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleGetEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestHandleDeleteEnterpriseLLMConfig_BadPath(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+
+	req := withAdminAuth(httptest.NewRequest("DELETE", "/v1/enterprises//llm-config", nil))
+	w := httptest.NewRecorder()
+	s.handleDeleteEnterpriseLLMConfig(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
