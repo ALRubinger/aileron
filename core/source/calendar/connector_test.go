@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	calendarsource "github.com/ALRubinger/aileron/core/source/calendar"
 	"google.golang.org/api/option"
@@ -228,5 +230,74 @@ func TestConnector_FreeBusy_MissingEnd(t *testing.T) {
 	}, token)
 	if err == nil {
 		t.Fatal("expected error for missing end")
+	}
+}
+
+func TestConnector_Events_RefreshesExpiredToken(t *testing.T) {
+	// Regression test: the connector must automatically refresh an expired
+	// access token using the refresh token + OAuth client credentials.
+	// Previously, StaticTokenSource was used, so expired tokens caused
+	// permanent auth failures until the user reconnected.
+
+	var tokenRefreshed atomic.Bool
+
+	// Mock OAuth token endpoint — returns a fresh access token.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenRefreshed.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "fresh-access-token",
+			"token_type":   "bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	// Mock Calendar API.
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"id":      "evt_1",
+					"summary": "Team Standup",
+					"status":  "confirmed",
+					"start":   map[string]string{"dateTime": "2026-04-20T09:00:00Z"},
+					"end":     map[string]string{"dateTime": "2026-04-20T09:30:00Z"},
+				},
+			},
+		})
+	}))
+	defer apiServer.Close()
+
+	// Token with an expired access token but a valid refresh token.
+	expiredToken, _ := json.Marshal(map[string]any{
+		"access_token":  "expired-token",
+		"refresh_token": "valid-refresh-token",
+		"token_type":    "bearer",
+		"expiry":        time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	})
+
+	c := calendarsource.New("test-client-id", "test-client-secret").
+		WithTokenEndpoint(tokenServer.URL).
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	result, err := c.Execute(context.Background(), "calendar_events", map[string]any{
+		"start": "2026-04-20T00:00:00Z",
+		"end":   "2026-04-21T00:00:00Z",
+	}, expiredToken)
+
+	if err != nil {
+		t.Fatalf("expected successful call after token refresh, got: %v", err)
+	}
+	if !tokenRefreshed.Load() {
+		t.Error("expected token endpoint to be called for refresh")
+	}
+	events := result["events"].([]map[string]any)
+	if len(events) != 1 {
+		t.Errorf("expected 1 event, got %d", len(events))
+	}
+	if events[0]["summary"] != "Team Standup" {
+		t.Errorf("expected Team Standup, got %v", events[0]["summary"])
 	}
 }

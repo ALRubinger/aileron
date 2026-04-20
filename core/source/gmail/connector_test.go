@@ -602,3 +602,74 @@ func TestConnector_Search_ConcurrentFetch_ErrorPropagation(t *testing.T) {
 		t.Errorf("expected 'fetching message metadata' in error, got: %v", err)
 	}
 }
+
+func TestConnector_Search_RefreshesExpiredToken(t *testing.T) {
+	// Regression test: the connector must automatically refresh an expired
+	// access token using the refresh token + OAuth client credentials.
+	// Previously, StaticTokenSource was used, so expired tokens caused
+	// permanent auth failures until the user reconnected.
+
+	var tokenRefreshed atomic.Bool
+
+	// Mock OAuth token endpoint — returns a fresh access token.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenRefreshed.Store(true)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "fresh-access-token",
+			"token_type":   "bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	// Mock Gmail API.
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/messages/") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "snippet": "Hello",
+				"payload": map[string]any{
+					"headers": []map[string]any{
+						{"name": "Subject", "value": "Test"},
+						{"name": "From", "value": "test@example.com"},
+						{"name": "Date", "value": "Mon, 20 Apr 2026"},
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":           []map[string]any{{"id": "msg_1", "threadId": "t_1"}},
+			"resultSizeEstimate": 1,
+		})
+	}))
+	defer apiServer.Close()
+
+	// Token with an expired access token but a valid refresh token.
+	expiredToken, _ := json.Marshal(map[string]any{
+		"access_token":  "expired-token",
+		"refresh_token": "valid-refresh-token",
+		"token_type":    "bearer",
+		"expiry":        time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	})
+
+	c := gmailsource.New("test-client-id", "test-client-secret").
+		WithTokenEndpoint(tokenServer.URL).
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	result, err := c.Execute(context.Background(), "gmail_search", map[string]any{
+		"query": "test",
+	}, expiredToken)
+
+	if err != nil {
+		t.Fatalf("expected successful call after token refresh, got: %v", err)
+	}
+	if !tokenRefreshed.Load() {
+		t.Error("expected token endpoint to be called for refresh")
+	}
+	messages := result["messages"].([]map[string]any)
+	if len(messages) != 1 {
+		t.Errorf("expected 1 message, got %d", len(messages))
+	}
+}

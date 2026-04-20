@@ -46,6 +46,19 @@ func (c *Connector) WithClientOption(opt option.ClientOption) *Connector {
 	return &cp
 }
 
+// WithTokenEndpoint returns a copy that uses the given URL for OAuth token
+// refresh instead of Google's production endpoint. For testing only.
+func (c *Connector) WithTokenEndpoint(tokenURL string) *Connector {
+	cp := *c
+	cfg := *c.oauthConfig
+	cfg.Endpoint = oauth2.Endpoint{
+		AuthURL:  cfg.Endpoint.AuthURL,
+		TokenURL: tokenURL,
+	}
+	cp.oauthConfig = &cfg
+	return &cp
+}
+
 func (c *Connector) Provider() string { return "gmail" }
 
 func (c *Connector) Tools() []source.ToolDefinition {
