@@ -265,7 +265,8 @@ func (s *apiServer) sendDraftMessage(ctx context.Context, userID, channel, body,
 		return errNoSlackAccount
 	}
 
-	secret, err := s.vault.Get(ctx, accounts[0].VaultPath())
+	vlt := s.userVault(userID)
+	secret, err := vlt.Get(ctx, accounts[0].VaultPath())
 	if err != nil {
 		return err
 	}

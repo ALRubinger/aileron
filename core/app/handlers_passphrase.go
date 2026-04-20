@@ -9,7 +9,6 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
-	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/vault"
 )
 
@@ -241,50 +240,6 @@ func (s *apiServer) GetVaultStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *apiServer) MigrateVault(w http.ResponseWriter, r *http.Request) {
-	kek, ok := s.requireKEK(w, r)
-	if !ok {
-		return
-	}
-	defer zeroBytes(kek)
-
-	userID, _, _ := s.requireAuth(w, r)
-
-	accounts, err := s.connectedAccounts.List(r.Context(), store.ConnectedAccountFilter{UserID: userID})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", "failed to list accounts")
-		return
-	}
-
-	migrated := 0
-	for _, acct := range accounts {
-		secret, err := s.vault.Get(r.Context(), acct.VaultPath())
-		if err != nil {
-			continue
-		}
-		if vault.IsEncrypted(secret.Metadata) {
-			continue
-		}
-
-		ciphertext, err := crypto.Encrypt(secret.Value, kek)
-		if err != nil {
-			continue
-		}
-
-		meta := secret.Metadata
-		if meta.Labels == nil {
-			meta.Labels = make(map[string]string)
-		}
-		meta.Labels[vault.EncryptedLabel] = "true"
-		if err := s.vault.Put(r.Context(), acct.VaultPath(), ciphertext, meta); err != nil {
-			continue
-		}
-		migrated++
-	}
-
-	writeJSON(w, http.StatusOK, api.MigrateVaultResponse{Migrated: migrated})
-}
-
 // requireKEK retrieves the user's cached KEK. Returns 423 if vault is locked,
 // 400 if no passphrase is set. The caller must zero the returned KEK when done.
 func (s *apiServer) requireKEK(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
@@ -325,15 +280,11 @@ func (s *apiServer) getUserKEK(userID string) []byte {
 }
 
 // userVault returns a vault scoped to the user's KEK for decryption.
-// If the user has an active KEK session, the base vault is wrapped with
-// UserScopedVault. Otherwise the base vault is returned (reads of
-// encrypted secrets will fail with a clear error).
+// Returns a UserScopedVault if KEK is cached, or a nil-KEK vault that
+// will fail on any operation (forcing callers to handle the locked state).
 func (s *apiServer) userVault(userID string) vault.Vault {
 	kek := s.getUserKEK(userID)
-	if kek != nil {
-		return vault.NewUserScopedVault(s.vault, kek)
-	}
-	return s.vault
+	return vault.NewUserScopedVault(s.vault, kek)
 }
 
 // zeroBytes overwrites a byte slice with zeros.

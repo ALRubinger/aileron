@@ -227,7 +227,8 @@ func TestDraftAction_Routing(t *testing.T) {
 
 func newDraftsTestServerWithSend() *apiServer {
 	srv := newDraftsTestServer()
-	// Set up a connected Slack account + vault token so send works.
+	enableVaultEncryption(srv, "usr_a")
+	// Set up a connected Slack account + encrypted vault token so send works.
 	ctx := context.Background()
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID:             "conn_s1",
@@ -236,7 +237,7 @@ func newDraftsTestServerWithSend() *apiServer {
 		Status:         model.ConnectedAccountStatusActive,
 		ExternalUserID: "U123ABC",
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test","bot_access_token":"xoxb-test"}`), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test","bot_access_token":"xoxb-test"}`))
 	// Mock sender so we don't call real Slack.
 	srv.slackSender = func(_ context.Context, token, channel, body, threadTS string) error {
 		return nil
@@ -576,6 +577,7 @@ func TestCreateDraftFromMessage(t *testing.T) {
 
 func TestSendDraftMessage_BadTokenJSON(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
@@ -585,7 +587,7 @@ func TestSendDraftMessage_BadTokenJSON(t *testing.T) {
 		Status:   model.ConnectedAccountStatusActive,
 	})
 	// Store invalid JSON as token.
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte("not-json"), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte("not-json"))
 
 	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello", "")
 	if err == nil {
@@ -595,6 +597,7 @@ func TestSendDraftMessage_BadTokenJSON(t *testing.T) {
 
 func TestSendDraftMessage_EmptyAccessToken(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
@@ -603,7 +606,7 @@ func TestSendDraftMessage_EmptyAccessToken(t *testing.T) {
 		Provider: model.ConnectedAccountProviderSlack,
 		Status:   model.ConnectedAccountStatusActive,
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"token_type":"user"}`), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"token_type":"user"}`))
 
 	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello", "")
 	if err == nil {
@@ -675,6 +678,7 @@ func TestDeliverEphemeralDraft_Success(t *testing.T) {
 
 func TestDeliverEphemeralDraft_NoBotToken(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 
 	// Connected account without bot token.
@@ -682,7 +686,7 @@ func TestDeliverEphemeralDraft_NoBotToken(t *testing.T) {
 		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
 		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`))
 
 	var posted bool
 	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
@@ -712,13 +716,14 @@ func TestDeliverEphemeralDraft_NoSlackAccount(t *testing.T) {
 
 func TestDeliverEphemeralDraft_BadTokenJSON(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
 		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte("not-json"), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte("not-json"))
 
 	var posted bool
 	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
@@ -753,6 +758,7 @@ func TestRecordFeedback_NilStore(t *testing.T) {
 
 func TestDeliverEphemeralDraft_NoExternalUserID(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
@@ -760,7 +766,7 @@ func TestDeliverEphemeralDraft_NoExternalUserID(t *testing.T) {
 		Status: model.ConnectedAccountStatusActive,
 		// ExternalUserID is empty
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp","bot_access_token":"xoxb"}`), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp","bot_access_token":"xoxb"}`))
 
 	var posted bool
 	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
@@ -1029,12 +1035,13 @@ func TestResolveSlackCredentials_NoAccount(t *testing.T) {
 
 func TestResolveSlackCredentials_BadTokenJSON(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
 		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte("not-json"), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte("not-json"))
 
 	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
 	if err == nil {
@@ -1044,12 +1051,13 @@ func TestResolveSlackCredentials_BadTokenJSON(t *testing.T) {
 
 func TestResolveSlackCredentials_NoBotToken(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
 		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`))
 
 	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
 	if err == nil {
@@ -1059,13 +1067,14 @@ func TestResolveSlackCredentials_NoBotToken(t *testing.T) {
 
 func TestResolveSlackCredentials_NoExternalUserID(t *testing.T) {
 	srv := newDraftsTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
 		Status: model.ConnectedAccountStatusActive,
 		// No ExternalUserID
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp","bot_access_token":"xoxb"}`), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp","bot_access_token":"xoxb"}`))
 
 	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
 	if err == nil {

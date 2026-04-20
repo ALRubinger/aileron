@@ -676,13 +676,18 @@ table "vault_secrets" {
   column "value" {
     type    = bytea
     null    = false
-    comment = "Secret value (plaintext in Phase 1, encrypted in Phase 2)"
+    comment = "AES-256-GCM encrypted secret value (nonce || ciphertext || tag)"
   }
   column "metadata" {
     type    = jsonb
     null    = false
     default = "{}"
     comment = "Non-secret attributes: type, labels, environment"
+  }
+
+  check "vault_secrets_encrypted" {
+    expr    = "metadata->'labels'->>'encrypted' = 'true'"
+    comment = "All vault secrets must be encrypted — plaintext storage is not allowed"
   }
   column "created_at" {
     type    = timestamptz

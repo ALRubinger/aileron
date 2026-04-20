@@ -13,15 +13,13 @@ import (
 const EncryptedLabel = "encrypted"
 
 // UserScopedVault is a decorator that applies per-user encryption to vault
-// operations. Put always encrypts values before storage (fails if no KEK).
-// Get decrypts encrypted values on retrieval (fails if encrypted and no KEK,
-// passes through unencrypted values for migration reads).
+// operations. Both Put and Get require a KEK — plaintext storage and
+// retrieval are not supported. All vault secrets are encrypted.
 //
-// Secrets encrypted by this vault are tagged with the metadata label
-// "encrypted": "true" so that downstream consumers can detect ciphertext.
+// Secrets are tagged with the metadata label "encrypted": "true".
 type UserScopedVault struct {
 	inner Vault
-	kek   []byte // nil means read-only (Get passthrough for migration, Put rejects)
+	kek   []byte // required — nil causes both Get and Put to fail
 }
 
 // NewUserScopedVault wraps a vault with optional per-user encryption.
@@ -30,20 +28,16 @@ func NewUserScopedVault(inner Vault, kek []byte) *UserScopedVault {
 	return &UserScopedVault{inner: inner, kek: kek}
 }
 
-// Get retrieves a secret. If the secret is marked as encrypted and a KEK is
-// available, the value is decrypted before returning.
+// Get retrieves and decrypts a secret. Requires a KEK — all vault secrets
+// are encrypted and plaintext storage is not supported.
 func (v *UserScopedVault) Get(ctx context.Context, path string) (Secret, error) {
+	if v.kek == nil {
+		return Secret{}, fmt.Errorf("vault: cannot read %q — no KEK available", path)
+	}
+
 	secret, err := v.inner.Get(ctx, path)
 	if err != nil {
 		return Secret{}, err
-	}
-
-	if !isEncrypted(secret.Metadata) {
-		return secret, nil
-	}
-
-	if v.kek == nil {
-		return Secret{}, fmt.Errorf("vault: secret at %q is encrypted but no KEK available", path)
 	}
 
 	plaintext, err := crypto.Decrypt(secret.Value, v.kek)

@@ -62,6 +62,7 @@ func newMockResponseURLServer() *httptest.Server {
 
 func TestInteraction_ApproveDraft(t *testing.T) {
 	srv := newInteractionTestServer()
+	enableVaultEncryption(srv, "usr_a")
 	ctx := context.Background()
 
 	responseServer := newMockResponseURLServer()
@@ -78,13 +79,13 @@ func TestInteraction_ApproveDraft(t *testing.T) {
 		DraftBody:   "No, the claims stay the same.",
 	})
 
-	// Seed connected account + vault token for sending.
+	// Seed connected account + encrypted vault token for sending.
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
 		Status: model.ConnectedAccountStatusActive,
 	})
-	srv.vault.Put(ctx, "connected-accounts/usr_a/slack",
-		[]byte(`{"access_token":"xoxp-test","bot_access_token":"xoxb-test"}`), vault.Metadata{})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack",
+		[]byte(`{"access_token":"xoxp-test","bot_access_token":"xoxb-test"}`))
 
 	payload, _ := json.Marshal(map[string]any{
 		"type": "block_actions",

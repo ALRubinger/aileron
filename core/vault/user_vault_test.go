@@ -90,19 +90,18 @@ func TestUserScopedVault_NilKEK_PutRejectsPlaintext(t *testing.T) {
 	}
 }
 
-func TestUserScopedVault_NilKEK_GetPassthroughUnencrypted(t *testing.T) {
-	// Get passthrough allows reading plaintext secrets (needed for migration).
+func TestUserScopedVault_NilKEK_GetRejectsRead(t *testing.T) {
 	inner := NewMemVault()
 	ctx := context.Background()
-	inner.Put(ctx, "test/path", []byte("plaintext-value"), Metadata{Type: "api_key"})
+	inner.Put(ctx, "test/path", []byte("some-value"), Metadata{Type: "api_key"})
 
 	uv := NewUserScopedVault(inner, nil)
-	got, err := uv.Get(ctx, "test/path")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
+	_, err := uv.Get(ctx, "test/path")
+	if err == nil {
+		t.Fatal("expected Get to reject when KEK is nil")
 	}
-	if !bytes.Equal(got.Value, []byte("plaintext-value")) {
-		t.Fatal("nil KEK should passthrough unencrypted Get")
+	if !strings.Contains(err.Error(), "no KEK available") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
