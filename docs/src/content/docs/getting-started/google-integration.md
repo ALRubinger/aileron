@@ -66,22 +66,25 @@ In the [API Library](https://console.cloud.google.com/apis/library), enable:
 
 All three must be enabled in the same project as your OAuth client.
 
-### Configure the OAuth consent screen
+### Configure data access scopes
 
-If you haven't already configured the OAuth consent screen for this project:
+In the [Google Auth Platform](https://console.cloud.google.com/auth/scopes), go to **Data Access** and add these scopes:
 
-1. Go to **APIs & Services** → **OAuth consent screen**
-2. Select **External** (or **Internal** for Google Workspace orgs)
-3. Fill in the required fields (app name, support email, developer contact)
-4. Add these scopes:
-   - `https://www.googleapis.com/auth/gmail.readonly`
-   - `https://www.googleapis.com/auth/gmail.send`
-   - `https://www.googleapis.com/auth/gmail.compose`
-   - `https://www.googleapis.com/auth/drive.readonly`
-   - `https://www.googleapis.com/auth/calendar`
-   - `https://www.googleapis.com/auth/calendar.events`
-   - `https://www.googleapis.com/auth/userinfo.email`
-5. Add your email as a **test user** (required while the app is in "Testing" status)
+- `https://www.googleapis.com/auth/gmail.readonly`
+- `https://www.googleapis.com/auth/gmail.send`
+- `https://www.googleapis.com/auth/gmail.compose`
+- `https://www.googleapis.com/auth/drive.readonly`
+- `https://www.googleapis.com/auth/calendar`
+- `https://www.googleapis.com/auth/calendar.events`
+- `https://www.googleapis.com/auth/userinfo.email`
+
+### Configure the audience
+
+If you haven't already, configure the OAuth consent screen under **Google Auth Platform** → **Audience**:
+
+1. Select **External** (or **Internal** for Google Workspace orgs)
+2. Fill in the required fields (app name, support email, developer contact)
+3. Add your email as a **test user** (required while the app is in "Testing" status)
 
 > **Publishing status:** While in "Testing", only users listed as test users can authorize. Move to "Production" when ready to remove this restriction. Google may require a verification review for sensitive scopes.
 
