@@ -34,6 +34,12 @@ function mockApi(page: import('@playwright/test').Page, accounts = mockAccounts)
 			}
 			return route.continue();
 		}),
+		// Mock vault status — unlocked and ready
+		page.route('**/v1/users/me/vault/status', (route) =>
+			route.fulfill({
+				json: { locked: false, has_passphrase: true }
+			})
+		),
 		// Mock user endpoint (required by auth)
 		page.route('**/v1/users/me', (route) =>
 			route.fulfill({
