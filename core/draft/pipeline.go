@@ -39,6 +39,7 @@ type Pipeline struct {
 	log               *slog.Logger
 	researchPrompt    string
 	ghostwritePrompt  string
+	clock             func() time.Time // defaults to time.Now; override in tests
 }
 
 // NewPipeline creates a draft generation pipeline.
@@ -64,7 +65,16 @@ func NewPipeline(
 		log:               log,
 		researchPrompt:    prompts.Research,
 		ghostwritePrompt:  prompts.Ghostwrite,
+		clock:             time.Now,
 	}
+}
+
+// WithClock returns a copy of the pipeline that uses the given clock function
+// instead of time.Now. For testing only.
+func (p *Pipeline) WithClock(clock func() time.Time) *Pipeline {
+	cp := *p
+	cp.clock = clock
+	return &cp
 }
 
 // GenerateDraft produces a draft reply using a two-round approach:
@@ -102,14 +112,14 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	researchSysPrompt := strings.ReplaceAll(
 		p.researchPrompt,
 		"{{today}}",
-		time.Now().Format("2006-01-02 (Monday)"),
+		p.clock().Format("2006-01-02 (Monday)"),
 	)
 	researchMessage := fmt.Sprintf(
 		"Find relevant context to help reply to this message from %s in %s:\n\n%s",
 		msg.Author, msg.Channel, msg.Body,
 	)
 
-	now := time.Now()
+	now := p.clock()
 	var gatheredContext string
 	if len(tools) > 0 {
 		researchResp, err := p.researchLLM.GenerateWithTools(ctx, llm.GenerateRequest{
