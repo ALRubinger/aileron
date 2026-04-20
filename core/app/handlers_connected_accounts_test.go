@@ -407,6 +407,35 @@ func TestConnectAccount_NotConfigured(t *testing.T) {
 	}
 }
 
+func TestConnectAccount_RequiresPassphrase(t *testing.T) {
+	srv := newConnectedAccountServerWithAuth()
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	srv.userKeyMaterials = mem.NewUserKeyMaterialStore()
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/gmail", "", userAClaims)
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 passphrase_required, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestConnectAccount_VaultLocked(t *testing.T) {
+	srv, _ := newConnectedAccountServerWithVault()
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
+	srv.kekSessionCache.Clear("usr_a") // lock the vault
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/gmail", "", userAClaims)
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
+
+	if w.Code != 423 {
+		t.Fatalf("expected 423 vault_locked, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestConnectAccountCallback_NotConfigured(t *testing.T) {
 	srv := newConnectedAccountServer()
 	srv.accountService = nil

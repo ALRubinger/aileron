@@ -827,3 +827,95 @@ func TestGetVaultStatus_NoPassphrase(t *testing.T) {
 		t.Error("expected has_passphrase=false")
 	}
 }
+
+func TestUnlockVault_AuthDisabled(t *testing.T) {
+	srv := &apiServer{} // no kekSessionCache, no userKeyMaterials
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", "{}", testClaims)
+	srv.UnlockVault(w, r)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", w.Code)
+	}
+}
+
+func TestUnlockVault_InvalidBody(t *testing.T) {
+	srv := unlockServer()
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", "not-json", testClaims)
+	srv.UnlockVault(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestLockVault_AuthDisabled(t *testing.T) {
+	srv := &apiServer{}
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/lock", "", testClaims)
+	srv.LockVault(w, r)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", w.Code)
+	}
+}
+
+func TestLockVault_Unauthenticated(t *testing.T) {
+	srv := unlockServer()
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/lock", "", nil)
+	srv.LockVault(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestGetVaultStatus_AuthDisabled(t *testing.T) {
+	srv := &apiServer{}
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", testClaims)
+	srv.GetVaultStatus(w, r)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", w.Code)
+	}
+}
+
+func TestGetVaultStatus_Unauthenticated(t *testing.T) {
+	srv := unlockServer()
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", nil)
+	srv.GetVaultStatus(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestRequireKEK_AuthDisabled(t *testing.T) {
+	srv := &apiServer{} // no kekSessionCache, no userKeyMaterials
+	srv.users = &stubUserStore{}
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/test", "", testClaims)
+	_, ok := srv.requireKEK(w, r)
+	if ok {
+		t.Fatal("expected failure when auth disabled")
+	}
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d", w.Code)
+	}
+}
+
+func TestRequireKEK_InternalError(t *testing.T) {
+	srv := unlockServer()
+	srv.userKeyMaterials = &mockKeyMaterialStore{
+		inner:  mem.NewUserKeyMaterialStore(),
+		getErr: errors.New("db connection lost"),
+	}
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/test", "", testClaims)
+	_, ok := srv.requireKEK(w, r)
+	if ok {
+		t.Fatal("expected failure on internal error")
+	}
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}

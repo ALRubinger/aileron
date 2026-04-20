@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/llm"
@@ -1223,6 +1224,24 @@ func TestHandleIncomingSlackMessage_NoSlackCredentials(t *testing.T) {
 	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
 	if len(drafts) != 1 {
 		t.Fatalf("expected 1 draft, got %d", len(drafts))
+	}
+}
+
+func TestHandleIncomingSlackMessage_VaultLocked_Skips(t *testing.T) {
+	srv := newDraftsTestServer()
+	// Enable vault encryption but DON'T unlock — KEK session is empty.
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	srv.draftPipeline = &draft.Pipeline{} // non-nil so we don't bail early
+
+	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
+		Body: "What happened this week?",
+	})
+
+	// No draft should be created because vault is locked.
+	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
+	if len(drafts) != 0 {
+		t.Fatalf("expected 0 drafts when vault locked, got %d", len(drafts))
 	}
 }
 
