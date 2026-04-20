@@ -12,7 +12,6 @@ import (
 	api "github.com/ALRubinger/aileron/core/api/gen"
 	"github.com/ALRubinger/aileron/core/approval"
 	"github.com/ALRubinger/aileron/core/draft"
-	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/source"
 	calendarsource "github.com/ALRubinger/aileron/core/source/calendar"
 	githubsource "github.com/ALRubinger/aileron/core/source/github"
@@ -239,21 +238,20 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 
 		// LLM-powered draft generation pipeline.
 		if authCfg.LLMEnabled() {
-			researchClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModelResearch, llm.WithLogger(log))
-			synthesisClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModelSynthesis, llm.WithLogger(log))
 			prompts := draft.LoadPrompts()
-
-			resolver := llm.NewClientResolver(
-				pgLLMConfigStore, userStore, v,
-				authCfg.AnthropicAPIKey, authCfg.LLMModelResearch, authCfg.LLMModelSynthesis,
-				log,
-			)
-
-			server.draftPipeline = draft.NewPipeline(
-				researchClient, synthesisClient, sourceReg,
-				pgConnectedAccountStore, pgInstructionStore, v, log, prompts,
-			).WithClientResolver(resolver)
-
+			server.draftPipeline = buildDraftPipeline(draftPipelineDeps{
+				apiKey:         authCfg.AnthropicAPIKey,
+				modelResearch:  authCfg.LLMModelResearch,
+				modelSynthesis: authCfg.LLMModelSynthesis,
+				llmConfigs:     pgLLMConfigStore,
+				users:          userStore,
+				accounts:       pgConnectedAccountStore,
+				instructions:   pgInstructionStore,
+				vault:          v,
+				sourceReg:      sourceReg,
+				log:            log,
+				prompts:        prompts,
+			})
 			log.Info("enabled cloud draft generation",
 				"research_model", authCfg.LLMModelResearch,
 				"synthesis_model", authCfg.LLMModelSynthesis,
