@@ -29,15 +29,15 @@ const (
 // refresh token is stored in the vault at a well-known path; this record
 // holds metadata only.
 type ConnectedAccount struct {
-	ID             string                   // conn_ + UUID
-	UserID         string                   // owning user (usr_ + UUID)
-	Provider       ConnectedAccountProvider // which external service
-	Scopes         []string                 // OAuth scopes granted
-	Status         ConnectedAccountStatus
-	ExternalUserID string // provider-specific user ID (e.g. Slack U...), empty for providers that don't need it
-	ExternalTeamID string // provider-specific workspace/team ID (e.g. Slack T...), empty for providers that don't need it
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             string                   `json:"id"`               // conn_ + UUID
+	UserID         string                   `json:"user_id"`          // owning user (usr_ + UUID)
+	Provider       ConnectedAccountProvider `json:"provider"`         // which external service
+	Scopes         []string                 `json:"scopes"`           // OAuth scopes granted
+	Status         ConnectedAccountStatus   `json:"status"`
+	ExternalUserID string                   `json:"external_user_id"` // provider-specific user ID (e.g. Slack U...)
+	ExternalTeamID string                   `json:"external_team_id"` // provider-specific workspace/team ID (e.g. Slack T...)
+	CreatedAt      time.Time                `json:"created_at"`
+	UpdatedAt      time.Time                `json:"updated_at"`
 }
 
 // VaultPath returns the vault key where the OAuth refresh token is stored.

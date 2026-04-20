@@ -17,16 +17,16 @@ const (
 // The user reviews and either approves (send as-is), edits (send
 // revised text), or discards (don't send).
 type Draft struct {
-	ID          string      // dft_ + UUID
-	UserID      string      // owning user (usr_ + UUID)
-	Status      DraftStatus // pending → approved | edited | discarded
-	Service     string      // "slack", "discord"
-	Channel     string      // channel ID where the original message arrived
-	Author      string      // who sent the original message
-	MessageBody string      // the original message text
-	MessageTS   string      // original message timestamp (for threading)
-	DraftBody   string      // the AI-generated draft reply
-	SentBody    string      // what was actually sent (empty until approved/edited)
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID          string      `json:"id"`           // dft_ + UUID
+	UserID      string      `json:"user_id"`      // owning user (usr_ + UUID)
+	Status      DraftStatus `json:"status"`       // pending → approved | edited | discarded
+	Service     string      `json:"service"`      // "slack", "discord"
+	Channel     string      `json:"channel"`      // channel ID where the original message arrived
+	Author      string      `json:"author"`       // who sent the original message
+	MessageBody string      `json:"message_body"` // the original message text
+	MessageTS   string      `json:"message_ts"`   // original message timestamp (for threading)
+	DraftBody   string      `json:"draft_body"`   // the AI-generated draft reply
+	SentBody    string      `json:"sent_body"`    // what was actually sent (empty until approved/edited)
+	CreatedAt   time.Time   `json:"created_at"`
+	UpdatedAt   time.Time   `json:"updated_at"`
 }

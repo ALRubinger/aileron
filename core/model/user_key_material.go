@@ -10,9 +10,9 @@ import "time"
 // the KEK) are persisted. This enables passphrase verification without
 // revealing the KEK.
 type UserKeyMaterial struct {
-	UserID          string    // owning user (usr_ + UUID)
-	Salt            []byte    // Argon2id salt for KEK derivation
-	KEKVerification []byte    // known constant encrypted with KEK — used to verify passphrase
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	UserID          string    `json:"user_id"`          // owning user (usr_ + UUID)
+	Salt            []byte    `json:"-"`                // Argon2id salt for KEK derivation; never exposed via API
+	KEKVerification []byte    `json:"-"`                // known constant encrypted with KEK; never exposed via API
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }

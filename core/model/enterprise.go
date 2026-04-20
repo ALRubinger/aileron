@@ -17,17 +17,17 @@ const (
 // A personal enterprise (Personal == true) is auto-created for users who sign
 // in with a personal email (e.g. Gmail) that is not tied to an organization.
 type Enterprise struct {
-	ID                   string
-	Name                 string
-	Slug                 string // URL-friendly, unique
-	Plan                 EnterprisePlan
-	Personal             bool   // true for single-user personal accounts
-	BillingEmail         string
-	SSORequired          bool
-	AllowedAuthProviders []string // e.g. ["google", "okta"]
-	AllowedEmailDomains  []string // e.g. ["acme.com"]
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                   string         `json:"id"`
+	Name                 string         `json:"name"`
+	Slug                 string         `json:"slug"`                    // URL-friendly, unique
+	Plan                 EnterprisePlan `json:"plan"`
+	Personal             bool           `json:"personal"`                // true for single-user personal accounts
+	BillingEmail         string         `json:"billing_email"`
+	SSORequired          bool           `json:"sso_required"`
+	AllowedAuthProviders []string       `json:"allowed_auth_providers"`  // e.g. ["google", "okta"]
+	AllowedEmailDomains  []string       `json:"allowed_email_domains"`   // e.g. ["acme.com"]
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
 }
 
 // UserRole classifies a user's permissions within an enterprise.
@@ -54,49 +54,49 @@ const (
 // logical identity used to deduplicate across OAuth providers — when any
 // provider returns an email, we look up or create the user by email.
 type User struct {
-	ID            string // usr_ + UUID — immutable surrogate key
-	EnterpriseID  string
-	Email         string // unique, used for cross-provider deduplication
-	DisplayName   string
-	AvatarURL     string
-	Role          UserRole
-	Status        UserStatus
-	PasswordHash  string // bcrypt hash; empty for OAuth-only users
-	LastLoginAt   *time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	AuthProviders []UserAuthProvider // populated by handler; not stored on users table
+	ID            string             `json:"id"`              // usr_ + UUID — immutable surrogate key
+	EnterpriseID  string             `json:"enterprise_id"`
+	Email         string             `json:"email"`           // unique, used for cross-provider deduplication
+	DisplayName   string             `json:"display_name"`
+	AvatarURL     string             `json:"avatar_url"`
+	Role          UserRole           `json:"role"`
+	Status        UserStatus         `json:"status"`
+	PasswordHash  string             `json:"-"`               // bcrypt hash; never exposed via API
+	LastLoginAt   *time.Time         `json:"last_login_at"`
+	CreatedAt     time.Time          `json:"created_at"`
+	UpdatedAt     time.Time          `json:"updated_at"`
+	AuthProviders []UserAuthProvider `json:"auth_providers"`  // populated by handler; not stored on users table
 }
 
 // UserAuthProvider links a user to an external OAuth/SSO identity provider.
 // Each row represents one connected provider (e.g. Google, GitHub).
 type UserAuthProvider struct {
-	ID        string // uap_ + UUID
-	UserID    string
-	Provider  string // "google", "github", "okta", "saml", etc.
-	SubjectID string // external IdP subject identifier
-	CreatedAt time.Time
+	ID        string    `json:"id"`         // uap_ + UUID
+	UserID    string    `json:"user_id"`
+	Provider  string    `json:"provider"`   // "google", "github", "okta", "saml", etc.
+	SubjectID string    `json:"subject_id"` // external IdP subject identifier
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // VerificationCode is a single-use code sent to a user's email to verify
 // their account. Codes are hashed (SHA-256) before storage.
 type VerificationCode struct {
-	ID        string
-	UserID    string
-	CodeHash  string // SHA-256 of the 6-digit code
-	ExpiresAt time.Time
-	Used      bool
-	CreatedAt time.Time
+	ID        string    `json:"id"`
+	UserID    string    `json:"user_id"`
+	CodeHash  string    `json:"-"`          // SHA-256 of the 6-digit code; never exposed via API
+	ExpiresAt time.Time `json:"expires_at"`
+	Used      bool      `json:"used"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Session is a login session backed by a refresh token.
 type Session struct {
-	ID               string
-	UserID           string
-	TokenHash        string // SHA-256 of access token
-	RefreshTokenHash string // SHA-256 of refresh token
-	ExpiresAt        time.Time
-	CreatedAt        time.Time
+	ID               string    `json:"id"`
+	UserID           string    `json:"user_id"`
+	TokenHash        string    `json:"-"`          // SHA-256 of access token; never exposed via API
+	RefreshTokenHash string    `json:"-"`          // SHA-256 of refresh token; never exposed via API
+	ExpiresAt        time.Time `json:"expires_at"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // SSOProvider identifies the type of SSO integration.
@@ -110,12 +110,12 @@ const (
 
 // SSOConfig stores per-enterprise SSO provider configuration.
 type SSOConfig struct {
-	ID           string
-	EnterpriseID string
-	Provider     SSOProvider
-	ClientID     string // stored encrypted
-	IssuerURL    string
-	Enabled      bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID           string      `json:"id"`
+	EnterpriseID string      `json:"enterprise_id"`
+	Provider     SSOProvider `json:"provider"`
+	ClientID     string      `json:"-"`              // stored encrypted; never exposed via API
+	IssuerURL    string      `json:"issuer_url"`
+	Enabled      bool        `json:"enabled"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
 }

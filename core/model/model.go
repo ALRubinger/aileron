@@ -9,9 +9,9 @@ import "time"
 
 // ActorRef identifies who or what performed an action.
 type ActorRef struct {
-	ID          string
-	Type        ActorType
-	DisplayName string
+	ID          string    `json:"id"`
+	Type        ActorType `json:"type"`
+	DisplayName string    `json:"display_name"`
 }
 
 // ActorType classifies the actor.
@@ -26,188 +26,188 @@ const (
 
 // ActionTarget describes the resource an action operates on.
 type ActionTarget struct {
-	Kind        string
-	ID          string
-	DisplayName string
+	Kind        string `json:"kind"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
 }
 
 // ActionIntent describes what an agent intends to do.
 type ActionIntent struct {
 	// Type is a dot-namespaced action identifier, e.g. "payment.charge",
 	// "git.pull_request.create", "calendar.event.create".
-	Type          string
-	Summary       string
-	Justification string
-	Target        ActionTarget
-	Domain        DomainAction
-	Metadata      map[string]any
+	Type          string         `json:"type"`
+	Summary       string         `json:"summary"`
+	Justification string         `json:"justification"`
+	Target        ActionTarget   `json:"target"`
+	Domain        DomainAction   `json:"domain"`
+	Metadata      map[string]any `json:"metadata"`
 }
 
 // DomainAction carries action-type-specific fields.
 // Exactly one field should be populated, corresponding to the ActionIntent.Type prefix.
 type DomainAction struct {
-	Git         *GitAction
-	Deploy      *DeployAction
-	Cloud       *CloudAction
-	Email       *EmailAction
-	Calendar    *CalendarAction
-	Payment     *PaymentAction
-	Procurement *ProcurementAction
+	Git         *GitAction         `json:"git,omitempty"`
+	Deploy      *DeployAction      `json:"deploy,omitempty"`
+	Cloud       *CloudAction       `json:"cloud,omitempty"`
+	Email       *EmailAction       `json:"email,omitempty"`
+	Calendar    *CalendarAction    `json:"calendar,omitempty"`
+	Payment     *PaymentAction     `json:"payment,omitempty"`
+	Procurement *ProcurementAction `json:"procurement,omitempty"`
 }
 
 // Money represents an amount in minor units (e.g. cents) with a currency code.
 type Money struct {
-	Amount   int64
-	Currency string // ISO 4217, e.g. "USD"
+	Amount   int64  `json:"amount"`
+	Currency string `json:"currency"` // ISO 4217, e.g. "USD"
 }
 
 // GitAction carries git/source-control-specific intent fields.
 type GitAction struct {
-	Provider       string // "github", "gitlab", "bitbucket", "custom"
-	Repository     string
-	Branch         string
-	BaseBranch     string
-	CommitSHAs     []string
-	FilesChanged   []string
-	PRTitle        string
-	PRBody         string
-	Labels         []string
-	Reviewers      []string
-	ChecksRequired []string
+	Provider       string   `json:"provider"`        // "github", "gitlab", "bitbucket", "custom"
+	Repository     string   `json:"repository"`
+	Branch         string   `json:"branch"`
+	BaseBranch     string   `json:"base_branch"`
+	CommitSHAs     []string `json:"commit_shas"`
+	FilesChanged   []string `json:"files_changed"`
+	PRTitle        string   `json:"pr_title"`
+	PRBody         string   `json:"pr_body"`
+	Labels         []string `json:"labels"`
+	Reviewers      []string `json:"reviewers"`
+	ChecksRequired []string `json:"checks_required"`
 }
 
 // DeployAction carries deployment-specific intent fields.
 type DeployAction struct {
-	Provider            string // "kubernetes", "vercel", "netlify", etc.
-	Service             string
-	Environment         string
-	ArtifactRef         string
-	ImageRef            string
-	Cluster             string
-	Namespace           string
-	Strategy            string // "rolling", "blue_green", "canary", "replace", "custom"
-	RollbackSupported   bool
-	ChangeTicketID      string
-	MaintenanceWindowID string
+	Provider            string `json:"provider"` // "kubernetes", "vercel", "netlify", etc.
+	Service             string `json:"service"`
+	Environment         string `json:"environment"`
+	ArtifactRef         string `json:"artifact_ref"`
+	ImageRef            string `json:"image_ref"`
+	Cluster             string `json:"cluster"`
+	Namespace           string `json:"namespace"`
+	Strategy            string `json:"strategy"` // "rolling", "blue_green", "canary", "replace", "custom"
+	RollbackSupported   bool   `json:"rollback_supported"`
+	ChangeTicketID      string `json:"change_ticket_id"`
+	MaintenanceWindowID string `json:"maintenance_window_id"`
 }
 
 // CloudAction carries cloud-resource-specific intent fields.
 type CloudAction struct {
-	Provider      string // "aws", "gcp", "azure", "cloudflare", "custom"
-	AccountID     string
-	Region        string
-	ResourceType  string
-	ResourceID    string
-	Operation     string
-	EstimatedCost *Money
-	Tags          map[string]string
+	Provider      string            `json:"provider"` // "aws", "gcp", "azure", "cloudflare", "custom"
+	AccountID     string            `json:"account_id"`
+	Region        string            `json:"region"`
+	ResourceType  string            `json:"resource_type"`
+	ResourceID    string            `json:"resource_id"`
+	Operation     string            `json:"operation"`
+	EstimatedCost *Money            `json:"estimated_cost,omitempty"`
+	Tags          map[string]string `json:"tags"`
 }
 
 // EmailAction carries email-specific intent fields.
 type EmailAction struct {
-	From        *Recipient
-	To          []Recipient
-	CC          []Recipient
-	BCC         []Recipient
-	Subject     string
-	BodyText    string
-	BodyHTML    string
-	Attachments []AttachmentRef
-	ThreadRef   string
-	SendMode    string // "send_now", "draft_only"
+	From        *Recipient      `json:"from,omitempty"`
+	To          []Recipient     `json:"to"`
+	CC          []Recipient     `json:"cc,omitempty"`
+	BCC         []Recipient     `json:"bcc,omitempty"`
+	Subject     string          `json:"subject"`
+	BodyText    string          `json:"body_text"`
+	BodyHTML    string          `json:"body_html"`
+	Attachments []AttachmentRef `json:"attachments,omitempty"`
+	ThreadRef   string          `json:"thread_ref"`
+	SendMode    string          `json:"send_mode"` // "send_now", "draft_only"
 }
 
 // Recipient identifies an email participant.
 type Recipient struct {
-	Name  string
-	Email string
+	Name  string `json:"name"`
+	Email string `json:"email"`
 }
 
 // AttachmentRef references a file attachment.
 type AttachmentRef struct {
-	Name       string
-	MIMEType   string
-	URL        string
-	StorageRef string
+	Name       string `json:"name"`
+	MIMEType   string `json:"mime_type"`
+	URL        string `json:"url"`
+	StorageRef string `json:"storage_ref"`
 }
 
 // CalendarAction carries calendar-specific intent fields.
 type CalendarAction struct {
-	Provider       string // "google_calendar", "outlook", "custom"
-	Title          string
-	Description    string
-	Attendees      []CalendarAttendee
-	StartTime      *time.Time
-	EndTime        *time.Time
-	Timezone       string
-	Location       string
-	ConferenceType string // "none", "google_meet", "zoom", "teams", "custom"
-	CalendarID     string
-	Visibility     string // "default", "public", "private"
+	Provider       string             `json:"provider"` // "google_calendar", "outlook", "custom"
+	Title          string             `json:"title"`
+	Description    string             `json:"description"`
+	Attendees      []CalendarAttendee `json:"attendees,omitempty"`
+	StartTime      *time.Time         `json:"start_time,omitempty"`
+	EndTime        *time.Time         `json:"end_time,omitempty"`
+	Timezone       string             `json:"timezone"`
+	Location       string             `json:"location"`
+	ConferenceType string             `json:"conference_type"` // "none", "google_meet", "zoom", "teams", "custom"
+	CalendarID     string             `json:"calendar_id"`
+	Visibility     string             `json:"visibility"` // "default", "public", "private"
 }
 
 // CalendarAttendee is a participant in a calendar event.
 type CalendarAttendee struct {
-	Name     string
-	Email    string
-	Optional bool
+	Name     string `json:"name"`
+	Email    string `json:"email"`
+	Optional bool   `json:"optional"`
 }
 
 // PaymentAction carries payment-specific intent fields.
 type PaymentAction struct {
-	VendorName                   string
-	VendorID                     string
-	Amount                       Money
-	MerchantCategory             string
-	BudgetCode                   string
-	FundingSourceID              string
-	PaymentInstrumentPreference  string // "virtual_card", "ach", "wallet", "network_proxy", "unspecified"
-	Beneficiary                  *PaymentBeneficiary
-	LineItems                    []LineItem
-	Renewal                      bool
-	ContractTerm                 string
-	RecurringInterval            string // "none", "monthly", "quarterly", "annual"
-	MerchantReference            string
+	VendorName                  string              `json:"vendor_name"`
+	VendorID                    string              `json:"vendor_id"`
+	Amount                      Money               `json:"amount"`
+	MerchantCategory            string              `json:"merchant_category"`
+	BudgetCode                  string              `json:"budget_code"`
+	FundingSourceID             string              `json:"funding_source_id"`
+	PaymentInstrumentPreference string              `json:"payment_instrument_preference"` // "virtual_card", "ach", "wallet", "network_proxy", "unspecified"
+	Beneficiary                 *PaymentBeneficiary `json:"beneficiary,omitempty"`
+	LineItems                   []LineItem          `json:"line_items,omitempty"`
+	Renewal                     bool                `json:"renewal"`
+	ContractTerm                string              `json:"contract_term"`
+	RecurringInterval           string              `json:"recurring_interval"` // "none", "monthly", "quarterly", "annual"
+	MerchantReference           string              `json:"merchant_reference"`
 }
 
 // PaymentBeneficiary identifies the person or team benefiting from a payment.
 type PaymentBeneficiary struct {
-	Name       string
-	Email      string
-	Department string
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	Department string `json:"department"`
 }
 
 // LineItem is a single item in a payment or procurement request.
 type LineItem struct {
-	Description string
-	Quantity    int
-	UnitAmount  Money
-	SKU         string
+	Description string `json:"description"`
+	Quantity    int    `json:"quantity"`
+	UnitAmount  Money  `json:"unit_amount"`
+	SKU         string `json:"sku"`
 }
 
 // ProcurementAction carries procurement-specific intent fields.
 type ProcurementAction struct {
-	RequestType            string // "software", "travel", "equipment", "contractor", "services", "other"
-	VendorName             string
-	AmountEstimate         *Money
-	Justification          string
-	Requestor              string
-	CostCenter             string
-	LegalReviewRequired    bool
-	SecurityReviewRequired bool
-	LineItems              []LineItem
+	RequestType            string     `json:"request_type"` // "software", "travel", "equipment", "contractor", "services", "other"
+	VendorName             string     `json:"vendor_name"`
+	AmountEstimate         *Money     `json:"amount_estimate,omitempty"`
+	Justification          string     `json:"justification"`
+	Requestor              string     `json:"requestor"`
+	CostCenter             string     `json:"cost_center"`
+	LegalReviewRequired    bool       `json:"legal_review_required"`
+	SecurityReviewRequired bool       `json:"security_review_required"`
+	LineItems              []LineItem `json:"line_items,omitempty"`
 }
 
 // IntentContext carries runtime context used by policy rules.
 type IntentContext struct {
-	Environment      string
-	SourcePlatform   string
-	SourceSessionID  string
-	SourceTraceID    string
-	IPAddress        string
-	UserPresent      bool
-	RiskHints        []string
-	TemporaryGrantID string
+	Environment      string   `json:"environment"`
+	SourcePlatform   string   `json:"source_platform"`
+	SourceSessionID  string   `json:"source_session_id"`
+	SourceTraceID    string   `json:"source_trace_id"`
+	IPAddress        string   `json:"ip_address"`
+	UserPresent      bool     `json:"user_present"`
+	RiskHints        []string `json:"risk_hints,omitempty"`
+	TemporaryGrantID string   `json:"temporary_grant_id"`
 }
 
 // Disposition is the outcome of policy evaluation.
@@ -233,18 +233,18 @@ const (
 
 // Decision is the output of policy evaluation.
 type Decision struct {
-	Disposition     Disposition
-	RiskLevel       RiskLevel
-	MatchedPolicies []PolicyMatch
-	DenialReason    string
+	Disposition     Disposition   `json:"disposition"`
+	RiskLevel       RiskLevel     `json:"risk_level"`
+	MatchedPolicies []PolicyMatch `json:"matched_policies,omitempty"`
+	DenialReason    string        `json:"denial_reason"`
 }
 
 // PolicyMatch records which policy rule produced a decision.
 type PolicyMatch struct {
-	PolicyID      string
-	PolicyVersion int
-	RuleID        string
-	Explanation   string
+	PolicyID      string `json:"policy_id"`
+	PolicyVersion int    `json:"policy_version"`
+	RuleID        string `json:"rule_id"`
+	Explanation   string `json:"explanation"`
 }
 
 // EventType identifies the kind of audit event.
