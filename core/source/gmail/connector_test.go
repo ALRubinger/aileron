@@ -3,10 +3,14 @@ package gmail_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	gmailsource "github.com/ALRubinger/aileron/core/source/gmail"
 	"google.golang.org/api/option"
@@ -463,5 +467,138 @@ func TestConnector_GetThread_MissingThreadID(t *testing.T) {
 	_, err := c.Execute(context.Background(), "gmail_get_thread", map[string]any{}, token)
 	if err == nil {
 		t.Fatal("expected error for missing thread_id")
+	}
+}
+
+func TestConnector_Search_ConcurrentFetch(t *testing.T) {
+	const numMessages = 5
+	var peakConcurrent atomic.Int32
+	var currentConcurrent atomic.Int32
+
+	// Gate ensures all in-flight requests arrive before any responds,
+	// so we can measure true peak concurrency.
+	var gate sync.WaitGroup
+	gate.Add(numMessages)
+
+	// Build the list response with multiple messages.
+	listMessages := make([]map[string]any, numMessages)
+	for i := range numMessages {
+		listMessages[i] = map[string]any{
+			"id":       fmt.Sprintf("msg_%d", i),
+			"threadId": fmt.Sprintf("thread_%d", i),
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// List endpoint.
+		if r.URL.Path == "/gmail/v1/users/me/messages" && !strings.Contains(r.URL.Path, "msg_") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"messages":           listMessages,
+				"resultSizeEstimate": numMessages,
+			})
+			return
+		}
+
+		// Get endpoint — track concurrency and wait at the gate.
+		cur := currentConcurrent.Add(1)
+		for {
+			peak := peakConcurrent.Load()
+			if cur <= peak || peakConcurrent.CompareAndSwap(peak, cur) {
+				break
+			}
+		}
+		gate.Done()
+		gate.Wait() // wait for all requests to arrive
+		defer currentConcurrent.Add(-1)
+
+		// Small sleep so peak measurement stays stable.
+		time.Sleep(time.Millisecond)
+
+		msgID := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":      msgID,
+			"snippet": "Snippet for " + msgID,
+			"payload": map[string]any{
+				"headers": []map[string]any{
+					{"name": "Subject", "value": "Subject " + msgID},
+					{"name": "From", "value": "sender@example.com"},
+					{"name": "Date", "value": "Mon, 14 Apr 2026 10:00:00 -0700"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	result, err := c.Execute(context.Background(), "gmail_search", map[string]any{
+		"query": "test",
+	}, testToken())
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	messages := result["messages"].([]map[string]any)
+	if len(messages) != numMessages {
+		t.Fatalf("expected %d messages, got %d", numMessages, len(messages))
+	}
+
+	// All messages should have correct metadata.
+	for _, msg := range messages {
+		if msg["subject"] == nil || msg["from"] == nil || msg["date"] == nil {
+			t.Errorf("message missing metadata: %v", msg)
+		}
+	}
+
+	// Verify that at least 2 requests ran concurrently (proves parallelism).
+	if peak := peakConcurrent.Load(); peak < 2 {
+		t.Errorf("expected concurrent fetches (peak >= 2), got peak=%d", peak)
+	}
+}
+
+func TestConnector_Search_ConcurrentFetch_ErrorPropagation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.URL.Path == "/gmail/v1/users/me/messages" && !strings.Contains(r.URL.Path, "msg_") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"messages": []map[string]any{
+					{"id": "msg_ok", "threadId": "t1"},
+					{"id": "msg_fail", "threadId": "t2"},
+				},
+				"resultSizeEstimate": 2,
+			})
+			return
+		}
+
+		// Fail on msg_fail.
+		if strings.HasSuffix(r.URL.Path, "/msg_fail") {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"id": "msg_ok", "snippet": "ok",
+			"payload": map[string]any{
+				"headers": []map[string]any{
+					{"name": "Subject", "value": "OK"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
+		"query": "test",
+	}, testToken())
+
+	if err == nil {
+		t.Fatal("expected error when a message fetch fails")
+	}
+	if !strings.Contains(err.Error(), "fetching message metadata") {
+		t.Errorf("expected 'fetching message metadata' in error, got: %v", err)
 	}
 }
