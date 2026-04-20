@@ -699,3 +699,56 @@ table "vault_secrets" {
     columns = [column.path]
   }
 }
+
+table "llm_configs" {
+  schema = schema.public
+
+  column "id" {
+    type = varchar(64)
+    null = false
+  }
+  column "owner_type" {
+    type    = varchar(32)
+    null    = false
+    comment = "user or enterprise"
+  }
+  column "owner_id" {
+    type    = varchar(64)
+    null    = false
+    comment = "usr_xxx or enterprise ID"
+  }
+  column "provider" {
+    type    = varchar(32)
+    null    = false
+    comment = "anthropic, openai, etc."
+  }
+  column "model_research" {
+    type    = varchar(128)
+    null    = false
+    default = ""
+  }
+  column "model_synthesis" {
+    type    = varchar(128)
+    null    = false
+    default = ""
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+  column "updated_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  index "idx_llm_configs_owner" {
+    columns = [column.owner_type, column.owner_id]
+    unique  = true
+  }
+}
