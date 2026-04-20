@@ -9,7 +9,7 @@
 	import { initPosthog, posthog } from '$lib/posthog.js';
 	import PassphraseModal from '$lib/components/PassphraseModal.svelte';
 	import { sessionExpiresAt, setSessionExpiresAt } from '$lib/vault.svelte.js';
-	import { lockVault } from '$lib/api';
+	import { lockVault, getVaultStatus } from '$lib/api';
 
 	let { children } = $props();
 	let mounted = $state(false);
@@ -60,6 +60,24 @@
 		if (!isPublic && !isAuthenticated()) {
 			goto('/login');
 		}
+	});
+
+	// Redirect to vault setup if authenticated but no passphrase set.
+	let vaultChecked = $state(false);
+	$effect(() => {
+		if (!mounted || !isAuthenticated() || vaultChecked) return;
+		const path = page.url.pathname;
+		if (path === '/setup-vault') return;
+		vaultChecked = true;
+		getVaultStatus()
+			.then((status) => {
+				if (!status.has_passphrase) {
+					goto('/setup-vault');
+				}
+			})
+			.catch(() => {
+				// Vault status unavailable — don't block.
+			});
 	});
 
 	// Close menu when clicking outside.
