@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
@@ -420,7 +421,10 @@ func TestPipeline_GenerateDraft_BackwardPass_ReplaysWithDates(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(researchMock, researchMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+	// Fix the clock to a Thursday so "this week" spans Mon–Thu with date gaps.
+	fixedNow := time.Date(2026, 4, 16, 14, 0, 0, 0, time.UTC) // Thursday Apr 16
+	p := draft.NewPipeline(researchMock, researchMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"}).
+		WithClock(func() time.Time { return fixedNow })
 
 	draftText, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
@@ -481,7 +485,11 @@ func TestPipeline_GenerateDraft_BackwardPass_NoReplayableTools(t *testing.T) {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(researchMock, researchMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+	// Fix clock to Thursday so "this week" spans Mon–Thu with date gaps,
+	// ensuring we actually reach the replayable-tools check.
+	fixedNow := time.Date(2026, 4, 16, 14, 0, 0, 0, time.UTC) // Thursday Apr 16
+	p := draft.NewPipeline(researchMock, researchMock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"}).
+		WithClock(func() time.Time { return fixedNow })
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
@@ -527,7 +535,10 @@ func TestPipeline_GenerateDraft_BackwardPass_SkipsWhenFullCoverage(t *testing.T)
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
-	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"})
+	// Fix clock to Friday so "this week" spans Mon–Fri, and all days are mentioned.
+	fixedNow := time.Date(2026, 4, 17, 14, 0, 0, 0, time.UTC) // Friday Apr 17
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(), v, slog.Default(), draft.Prompts{Research: "test research\n\nToday is {{today}}.", Ghostwrite: "test ghostwrite"}).
+		WithClock(func() time.Time { return fixedNow })
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
