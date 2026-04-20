@@ -1,8 +1,15 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { getCurrentEnterprise, updateCurrentEnterprise } from '$lib/api';
+	import {
+		getCurrentEnterprise,
+		updateCurrentEnterprise,
+		getEnterpriseLLMConfig,
+		upsertEnterpriseLLMConfig,
+		deleteEnterpriseLLMConfig
+	} from '$lib/api';
 	import { getUser } from '$lib/auth.svelte.js';
 	import * as Card from '$lib/components/ui/card';
+	import * as Dialog from '$lib/components/ui/dialog';
 	import { Input } from '$lib/components/ui/input';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
@@ -18,6 +25,20 @@
 	let ssoRequired = $state(false);
 	let allowedProviders = $state('');
 	let allowedDomains = $state('');
+
+	// LLM provider configuration state.
+	let llmConfig = $state<any>(null);
+	let llmSaving = $state(false);
+	let llmDeleting = $state(false);
+	let llmError = $state('');
+	let llmSuccess = $state('');
+	let llmConfirmDeleteOpen = $state(false);
+	let llmShowApiKey = $state(false);
+
+	let llmProvider = $state('anthropic');
+	let llmModelResearch = $state('');
+	let llmModelSynthesis = $state('');
+	let llmApiKey = $state('');
 
 	$effect(() => {
 		if (enterprise) {
@@ -39,6 +60,17 @@
 	onMount(async () => {
 		try {
 			enterprise = await getCurrentEnterprise();
+			// Load org LLM config (admin only, 404 is expected).
+			if (canEdit && enterprise) {
+				try {
+					llmConfig = await getEnterpriseLLMConfig(enterprise.id);
+					llmProvider = llmConfig.provider || 'anthropic';
+					llmModelResearch = llmConfig.model_research || '';
+					llmModelSynthesis = llmConfig.model_synthesis || '';
+				} catch {
+					llmConfig = null;
+				}
+			}
 		} catch (e: any) {
 			error = e.message;
 		} finally {
@@ -71,6 +103,59 @@
 			error = e.message;
 		} finally {
 			saving = false;
+		}
+	}
+
+	async function handleLLMSave() {
+		llmError = '';
+		llmSuccess = '';
+
+		if (!llmApiKey && !llmConfig) {
+			llmError = 'API key is required';
+			return;
+		}
+		if (!llmApiKey && llmConfig) {
+			llmError = 'Enter a new API key to update the configuration';
+			return;
+		}
+
+		llmSaving = true;
+		try {
+			llmConfig = await upsertEnterpriseLLMConfig(enterprise.id, {
+				provider: llmProvider,
+				model_research: llmModelResearch,
+				model_synthesis: llmModelSynthesis,
+				api_key: llmApiKey
+			});
+			llmApiKey = '';
+			llmShowApiKey = false;
+			llmSuccess = 'Organization LLM configuration saved';
+			setTimeout(() => (llmSuccess = ''), 3000);
+		} catch (e: any) {
+			llmError = e.message;
+		} finally {
+			llmSaving = false;
+		}
+	}
+
+	async function handleLLMDelete() {
+		llmError = '';
+		llmSuccess = '';
+		llmDeleting = true;
+		try {
+			await deleteEnterpriseLLMConfig(enterprise.id);
+			llmConfig = null;
+			llmProvider = 'anthropic';
+			llmModelResearch = '';
+			llmModelSynthesis = '';
+			llmApiKey = '';
+			llmConfirmDeleteOpen = false;
+			llmSuccess = 'Organization LLM configuration removed. Using server defaults.';
+			setTimeout(() => (llmSuccess = ''), 3000);
+		} catch (e: any) {
+			llmError = e.message;
+		} finally {
+			llmDeleting = false;
 		}
 	}
 
@@ -238,5 +323,137 @@
 				</div>
 			</Card.Content>
 		</Card.Root>
+		{#if canEdit}
+			<Card.Root>
+				<Card.Header>
+					<div class="flex items-center justify-between">
+						<div>
+							<Card.Title>LLM Provider</Card.Title>
+							<Card.Description>
+								Default LLM configuration for all organization members
+							</Card.Description>
+						</div>
+						{#if llmConfig}
+							<Badge variant="outline" class="text-green-600 border-green-500/50">Configured</Badge>
+						{:else}
+							<Badge variant="secondary">Using server defaults</Badge>
+						{/if}
+					</div>
+				</Card.Header>
+				<Card.Content>
+					<div class="flex flex-col gap-4">
+						<p class="text-xs text-muted-foreground">
+							This applies to all members who haven't set their own LLM configuration.
+							Individual members can override this in their personal settings.
+						</p>
+
+						<div class="flex flex-col gap-1.5">
+							<label for="org_llm_provider" class="text-sm font-medium">Provider</label>
+							<select
+								id="org_llm_provider"
+								bind:value={llmProvider}
+								class="flex h-9 w-full max-w-sm rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+							>
+								<option value="anthropic">Anthropic</option>
+								<option value="openai" disabled>OpenAI (coming soon)</option>
+							</select>
+						</div>
+
+						<div class="flex flex-col gap-1.5">
+							<label for="org_llm_research" class="text-sm font-medium">Research model</label>
+							<Input
+								id="org_llm_research"
+								bind:value={llmModelResearch}
+								placeholder="e.g. claude-haiku-4-5-20251001"
+								class="max-w-sm"
+							/>
+							<p class="text-xs text-muted-foreground">
+								Fast model used for tool-based context gathering
+							</p>
+						</div>
+
+						<div class="flex flex-col gap-1.5">
+							<label for="org_llm_synthesis" class="text-sm font-medium">Synthesis model</label>
+							<Input
+								id="org_llm_synthesis"
+								bind:value={llmModelSynthesis}
+								placeholder="e.g. claude-sonnet-4-6"
+								class="max-w-sm"
+							/>
+							<p class="text-xs text-muted-foreground">
+								Capable model used for composing draft replies
+							</p>
+						</div>
+
+						<div class="flex flex-col gap-1.5">
+							<label for="org_llm_api_key" class="text-sm font-medium">API key</label>
+							<div class="flex items-center gap-2 max-w-sm">
+								<Input
+									id="org_llm_api_key"
+									type={llmShowApiKey ? 'text' : 'password'}
+									bind:value={llmApiKey}
+									placeholder={llmConfig?.api_key_configured
+										? 'Enter new key to update'
+										: 'Enter your API key'}
+									class="flex-1"
+								/>
+								<Button
+									variant="ghost"
+									size="sm"
+									onclick={() => (llmShowApiKey = !llmShowApiKey)}
+								>
+									{llmShowApiKey ? 'Hide' : 'Show'}
+								</Button>
+							</div>
+							{#if llmConfig?.api_key_configured}
+								<p class="text-xs text-muted-foreground">
+									A key is already configured. Enter a new key to replace it.
+								</p>
+							{/if}
+						</div>
+
+						{#if llmError}
+							<p class="text-sm text-destructive">{llmError}</p>
+						{/if}
+						{#if llmSuccess}
+							<p class="text-sm text-green-600">{llmSuccess}</p>
+						{/if}
+
+						<div class="flex items-center gap-3">
+							<Button onclick={handleLLMSave} disabled={llmSaving} size="sm">
+								{llmSaving ? 'Saving...' : 'Save'}
+							</Button>
+							{#if llmConfig}
+								<Button
+									variant="destructive"
+									size="sm"
+									onclick={() => (llmConfirmDeleteOpen = true)}
+								>
+									Remove configuration
+								</Button>
+							{/if}
+						</div>
+					</div>
+				</Card.Content>
+			</Card.Root>
+
+			<Dialog.Root bind:open={llmConfirmDeleteOpen}>
+				<Dialog.Content>
+					<Dialog.Header>
+						<Dialog.Title>Remove organization LLM configuration?</Dialog.Title>
+						<Dialog.Description>
+							This will remove the organization's LLM provider settings. All members
+							without personal configurations will fall back to server defaults.
+						</Dialog.Description>
+					</Dialog.Header>
+					<Dialog.Footer>
+						<Button variant="outline" onclick={() => (llmConfirmDeleteOpen = false)}>Cancel</Button>
+						<Button variant="destructive" onclick={handleLLMDelete} disabled={llmDeleting}>
+							{llmDeleting ? 'Removing...' : 'Remove'}
+						</Button>
+					</Dialog.Footer>
+				</Dialog.Content>
+			</Dialog.Root>
+		{/if}
 	</div>
 {/if}
