@@ -772,27 +772,23 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Direct mode: decrypt credential in-process if encrypted.
-	credValue := secret.Value
-	if vault.IsEncrypted(secret.Metadata) {
-		var execUserID string
-		if claims := auth.ClaimsFromContext(ctx); claims != nil {
-			execUserID = claims.Subject
-		}
-		kek := s.getUserKEK(execUserID)
-		if kek == nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "vault locked — unlock to execute")
-			writeError(w, 423, "vault_locked", "vault is locked — unlock with POST /v1/users/me/passphrase/unlock")
-			return
-		}
-		plaintext, decErr := crypto.Decrypt(secret.Value, kek)
-		zeroBytes(kek)
-		if decErr != nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential decryption failed")
-			writeError(w, http.StatusInternalServerError, "decryption_error", "failed to decrypt credential")
-			return
-		}
-		credValue = plaintext
+	// Direct mode: all credentials are encrypted — decrypt with user's KEK.
+	var execUserID string
+	if claims := auth.ClaimsFromContext(ctx); claims != nil {
+		execUserID = claims.Subject
+	}
+	kek := s.getUserKEK(execUserID)
+	if kek == nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "vault locked — unlock to execute")
+		writeError(w, 423, "vault_locked", "vault is locked — unlock with POST /v1/users/me/passphrase/unlock")
+		return
+	}
+	credValue, decErr := crypto.Decrypt(secret.Value, kek)
+	zeroBytes(kek)
+	if decErr != nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential decryption failed")
+		writeError(w, http.StatusInternalServerError, "decryption_error", "failed to decrypt credential")
+		return
 	}
 
 	result, err := conn.Execute(ctx, connectorpkg.ExecutionRequest{

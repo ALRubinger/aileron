@@ -5,10 +5,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/auth"
+	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/store/mem"
+	"github.com/ALRubinger/aileron/core/vault"
 )
 
 // stubUserStore is a minimal non-nil UserStore to signal auth is enabled.
@@ -52,4 +56,41 @@ var userBClaims = &auth.Claims{
 func init() {
 	userAClaims.Subject = "usr_a"
 	userBClaims.Subject = "usr_b"
+}
+
+// testKEK returns a deterministic 32-byte test KEK.
+var testKEK = func() []byte {
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	return kek
+}()
+
+// enableVaultEncryption adds KEK session infrastructure to a test server
+// and unlocks the vault for the given user. Tokens stored via the vault
+// must use UserScopedVault to encrypt.
+func enableVaultEncryption(srv *apiServer, userID string) {
+	if srv.userKeyMaterials == nil {
+		srv.userKeyMaterials = mem.NewUserKeyMaterialStore()
+	}
+	verification, _ := crypto.Encrypt([]byte("aileron-kek-ok"), testKEK)
+	srv.userKeyMaterials.Create(context.Background(), model.UserKeyMaterial{
+		UserID:          userID,
+		Salt:            make([]byte, 16),
+		KEKVerification: verification,
+	})
+	if srv.kekSessionCache == nil {
+		srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	}
+	srv.kekSessionCache.Set(userID, testKEK)
+}
+
+// storeEncryptedToken stores an encrypted token in the vault for a connected account.
+func storeEncryptedToken(srv *apiServer, path string, tokenJSON []byte) {
+	ciphertext, _ := crypto.Encrypt(tokenJSON, testKEK)
+	srv.vault.Put(context.Background(), path, ciphertext, vault.Metadata{
+		Type:   "oauth_refresh_token",
+		Labels: map[string]string{vault.EncryptedLabel: "true"},
+	})
 }

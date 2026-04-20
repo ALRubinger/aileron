@@ -474,27 +474,6 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
-  /v1/users/me/vault/migrate:
-    post:
-      tags: [Users]
-      summary: Migrate plaintext tokens to encrypted storage
-      description: |
-        Re-encrypts any plaintext tokens in the vault with the user's KEK.
-        The vault must be unlocked. Idempotent — already-encrypted tokens
-        are skipped.
-      operationId: migrateVault
-      responses:
-        "200":
-          description: Migration complete
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/MigrateVaultResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "423":
-          $ref: "#/components/responses/VaultLocked"
-
   /v1/intents:
     post:
       tags: [Intents]
@@ -3028,14 +3007,6 @@ components:
           type: string
           format: date-time
           description: When the current KEK session expires (omitted when locked)
-
-    MigrateVaultResponse:
-      type: object
-      required: [migrated]
-      properties:
-        migrated:
-          type: integer
-          description: Number of secrets re-encrypted during migration
 
     TeeStatus:
       type: object

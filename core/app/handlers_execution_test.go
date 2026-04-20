@@ -91,8 +91,10 @@ func seedGrantAndIntent(ctx context.Context, s *apiServer, grantID, intentID str
 		Status:    api.ExecutionGrantStatusActive,
 		ExpiresAt: time.Now().UTC().Add(time.Hour),
 	})
-	s.vault.Put(ctx, "connectors/github/default", []byte("ghp_token"), vault.Metadata{
-		Type: "api_key",
+	ciphertext, _ := crypto.Encrypt([]byte("ghp_token"), testKEK)
+	s.vault.Put(ctx, "connectors/github/default", ciphertext, vault.Metadata{
+		Type:   "api_key",
+		Labels: map[string]string{vault.EncryptedLabel: "true"},
 	})
 }
 
@@ -105,6 +107,7 @@ func execRequest(grantID string) *http.Request {
 
 func TestRunExecution_DirectMode_Success(t *testing.T) {
 	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_a")
 	ctx := context.Background()
 
 	conn := &stubConnector{
@@ -119,7 +122,7 @@ func TestRunExecution_DirectMode_Success(t *testing.T) {
 	seedGrantAndIntent(ctx, s, "grant_1", "int_1")
 
 	w := httptest.NewRecorder()
-	s.RunExecution(w, execRequest("grant_1"))
+	s.RunExecution(w, authedExecRequest("grant_1", userAClaims))
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
@@ -294,6 +297,7 @@ func TestRunExecution_TEEMode_EnclaveError(t *testing.T) {
 
 func TestRunExecution_DirectMode_ConnectorError(t *testing.T) {
 	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_a")
 	ctx := context.Background()
 
 	conn := &stubConnector{
@@ -304,7 +308,7 @@ func TestRunExecution_DirectMode_ConnectorError(t *testing.T) {
 	seedGrantAndIntent(ctx, s, "grant_ce", "int_ce")
 
 	w := httptest.NewRecorder()
-	s.RunExecution(w, execRequest("grant_ce"))
+	s.RunExecution(w, authedExecRequest("grant_ce", userAClaims))
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
 	}
@@ -312,6 +316,7 @@ func TestRunExecution_DirectMode_ConnectorError(t *testing.T) {
 
 func TestRunExecution_DirectMode_ConnectorFailed(t *testing.T) {
 	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_a")
 	ctx := context.Background()
 
 	conn := &stubConnector{
@@ -325,7 +330,7 @@ func TestRunExecution_DirectMode_ConnectorFailed(t *testing.T) {
 	seedGrantAndIntent(ctx, s, "grant_cf", "int_cf")
 
 	w := httptest.NewRecorder()
-	s.RunExecution(w, execRequest("grant_cf"))
+	s.RunExecution(w, authedExecRequest("grant_cf", userAClaims))
 
 	// Even on connector failure, the handler returns 202 with the execution ID.
 	if w.Code != http.StatusAccepted {
