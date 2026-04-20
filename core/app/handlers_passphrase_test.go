@@ -645,3 +645,185 @@ func TestActionTypesForProvider(t *testing.T) {
 		}
 	}
 }
+
+// --- UnlockVault / LockVault / GetVaultStatus tests ---
+
+func unlockServer() *apiServer {
+	srv := passphraseServer()
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	srv.users = &stubUserStore{}
+
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	verification, _ := crypto.Encrypt(testVerificationConstant, kek)
+	srv.userKeyMaterials.Create(context.Background(), model.UserKeyMaterial{
+		UserID:          testClaims.Subject,
+		Salt:            make([]byte, 16),
+		KEKVerification: verification,
+	})
+	return srv
+}
+
+func TestUnlockVault_Success(t *testing.T) {
+	srv := unlockServer()
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	body, _ := json.Marshal(api.UnlockVaultRequest{Kek: kek})
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", string(body), testClaims)
+	srv.UnlockVault(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp api.VaultStatusResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Locked {
+		t.Error("expected unlocked")
+	}
+	if !resp.HasPassphrase {
+		t.Error("expected has_passphrase=true")
+	}
+	if resp.ExpiresAt == nil {
+		t.Error("expected expires_at")
+	}
+	if srv.kekSessionCache.Get(testClaims.Subject) == nil {
+		t.Error("expected KEK in session cache")
+	}
+}
+
+func TestUnlockVault_WrongKEK(t *testing.T) {
+	srv := unlockServer()
+	body, _ := json.Marshal(api.UnlockVaultRequest{Kek: make([]byte, 32)})
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", string(body), testClaims)
+	srv.UnlockVault(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUnlockVault_NoPassphraseSet(t *testing.T) {
+	srv := passphraseServer()
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	body, _ := json.Marshal(api.UnlockVaultRequest{Kek: make([]byte, 32)})
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", string(body), testClaims)
+	srv.UnlockVault(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUnlockVault_BadKEKLength(t *testing.T) {
+	srv := unlockServer()
+	body, _ := json.Marshal(api.UnlockVaultRequest{Kek: []byte("short")})
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", string(body), testClaims)
+	srv.UnlockVault(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUnlockVault_Unauthenticated(t *testing.T) {
+	srv := unlockServer()
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", "{}", nil)
+	srv.UnlockVault(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestLockVault_ClearsSession(t *testing.T) {
+	srv := unlockServer()
+	srv.kekSessionCache.Set(testClaims.Subject, make([]byte, 32))
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/lock", "", testClaims)
+	srv.LockVault(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp api.VaultStatusResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !resp.Locked {
+		t.Error("expected locked=true")
+	}
+	if srv.kekSessionCache.Get(testClaims.Subject) != nil {
+		t.Error("expected KEK cleared")
+	}
+}
+
+func TestGetVaultStatus_Locked(t *testing.T) {
+	srv := unlockServer()
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", testClaims)
+	srv.GetVaultStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp api.VaultStatusResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !resp.Locked {
+		t.Error("expected locked=true")
+	}
+	if !resp.HasPassphrase {
+		t.Error("expected has_passphrase=true")
+	}
+}
+
+func TestGetVaultStatus_Unlocked(t *testing.T) {
+	srv := unlockServer()
+	srv.kekSessionCache.Set(testClaims.Subject, make([]byte, 32))
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", testClaims)
+	srv.GetVaultStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp api.VaultStatusResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Locked {
+		t.Error("expected locked=false")
+	}
+	if resp.ExpiresAt == nil {
+		t.Error("expected expires_at")
+	}
+}
+
+func TestGetVaultStatus_NoPassphrase(t *testing.T) {
+	srv := passphraseServer()
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", testClaims)
+	srv.GetVaultStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp api.VaultStatusResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.HasPassphrase {
+		t.Error("expected has_passphrase=false")
+	}
+}
