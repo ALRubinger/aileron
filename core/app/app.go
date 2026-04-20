@@ -324,8 +324,8 @@ func registerProviders(
 			accounts,
 			v,
 		))
-		sourceReg.Register(gmailsource.New())
-		sourceReg.Register(calendarsource.New())
+		sourceReg.Register(gmailsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
+		sourceReg.Register(calendarsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
 		log.Info("enabled Google connected accounts and source connectors (Gmail, Calendar)")
 	}
 

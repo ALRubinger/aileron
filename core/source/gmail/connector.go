@@ -14,6 +14,7 @@ import (
 
 	"github.com/ALRubinger/aileron/core/source"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	"golang.org/x/sync/errgroup"
 	driveapi "google.golang.org/api/drive/v3"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -22,13 +23,20 @@ import (
 
 // Connector implements source.SourceConnector for Gmail.
 type Connector struct {
+	oauthConfig *oauth2.Config
 	// clientOption allows injecting a custom HTTP client for testing.
 	clientOption option.ClientOption
 }
 
-// New creates a new Gmail source connector.
-func New() *Connector {
-	return &Connector{}
+// New creates a new Gmail source connector with OAuth credentials for token refresh.
+func New(clientID, clientSecret string) *Connector {
+	return &Connector{
+		oauthConfig: &oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			Endpoint:     google.Endpoint,
+		},
+	}
 }
 
 // WithClientOption returns a copy with a custom client option (for testing).
@@ -98,12 +106,11 @@ func (c *Connector) Execute(ctx context.Context, tool string, params map[string]
 }
 
 func (c *Connector) newService(ctx context.Context, token []byte) (*gmailapi.Service, error) {
-	accessToken, err := extractAccessToken(token)
+	ts, err := c.tokenSource(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("invalid token: %w", err)
+		return nil, err
 	}
 
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken})
 	opts := []option.ClientOption{option.WithTokenSource(ts)}
 	if c.clientOption != nil {
 		opts = append(opts, c.clientOption)
@@ -223,12 +230,11 @@ func (c *Connector) getThread(ctx context.Context, svc *gmailapi.Service, params
 }
 
 func (c *Connector) newDriveService(ctx context.Context, token []byte) (*driveapi.Service, error) {
-	accessToken, err := extractAccessToken(token)
+	ts, err := c.tokenSource(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("invalid token: %w", err)
+		return nil, err
 	}
 
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken})
 	opts := []option.ClientOption{option.WithTokenSource(ts)}
 	if c.clientOption != nil {
 		opts = append(opts, c.clientOption)
@@ -312,21 +318,19 @@ func (c *Connector) driveGetDoc(ctx context.Context, token []byte, params map[st
 	return map[string]any{"content": content}, nil
 }
 
-// extractAccessToken parses stored token JSON and returns the access token.
-func extractAccessToken(token []byte) (string, error) {
-	// Try OAuth2 token format.
-	var oauthToken oauth2.Token
-	if err := json.Unmarshal(token, &oauthToken); err == nil && oauthToken.AccessToken != "" {
-		return oauthToken.AccessToken, nil
+// tokenSource parses the stored OAuth token and returns a token source that
+// automatically refreshes expired access tokens using the OAuth client credentials.
+func (c *Connector) tokenSource(ctx context.Context, tokenJSON []byte) (oauth2.TokenSource, error) {
+	var tok oauth2.Token
+	if err := json.Unmarshal(tokenJSON, &tok); err != nil {
+		return nil, fmt.Errorf("invalid token JSON: %w", err)
 	}
-	// Try simple map.
-	var data map[string]string
-	if err := json.Unmarshal(token, &data); err == nil {
-		if at := data["access_token"]; at != "" {
-			return at, nil
-		}
+	if tok.RefreshToken == "" && tok.AccessToken == "" {
+		return nil, fmt.Errorf("token has neither access_token nor refresh_token")
 	}
-	return "", fmt.Errorf("no access_token in token data")
+	// ReuseTokenSourceWithExpiry returns the existing access token if still valid,
+	// and transparently refreshes via the oauth2.Config when it expires.
+	return c.oauthConfig.TokenSource(ctx, &tok), nil
 }
 
 func toInt64(v any, def int64) int64 {

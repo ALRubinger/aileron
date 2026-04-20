@@ -17,14 +17,14 @@ func testToken() []byte {
 }
 
 func TestConnector_Provider(t *testing.T) {
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	if c.Provider() != "google_calendar" {
 		t.Errorf("expected google_calendar, got %s", c.Provider())
 	}
 }
 
 func TestConnector_Tools(t *testing.T) {
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	tools := c.Tools()
 	if len(tools) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(tools))
@@ -42,7 +42,7 @@ func TestConnector_Tools(t *testing.T) {
 }
 
 func TestConnector_UnknownTool(t *testing.T) {
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
 	_, err := c.Execute(context.Background(), "calendar_nonexistent", nil, token)
 	if err == nil {
@@ -51,7 +51,7 @@ func TestConnector_UnknownTool(t *testing.T) {
 }
 
 func TestConnector_InvalidToken(t *testing.T) {
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "calendar_events", map[string]any{
 		"start": "2026-04-15T00:00:00Z",
 		"end":   "2026-04-16T00:00:00Z",
@@ -63,7 +63,7 @@ func TestConnector_InvalidToken(t *testing.T) {
 
 func TestConnector_EmptyAccessToken(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"token_type": "bearer"})
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "calendar_events", map[string]any{
 		"start": "2026-04-15T00:00:00Z",
 		"end":   "2026-04-16T00:00:00Z",
@@ -95,7 +95,7 @@ func TestConnector_Events_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := calendarsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := calendarsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "calendar_events", map[string]any{
 		"start": "2026-04-15T00:00:00Z",
 		"end":   "2026-04-16T00:00:00Z",
@@ -132,7 +132,7 @@ func TestConnector_FreeBusy_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := calendarsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := calendarsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "calendar_free_busy", map[string]any{
 		"start": "2026-04-15T00:00:00Z",
 		"end":   "2026-04-16T00:00:00Z",
@@ -154,7 +154,7 @@ func TestConnector_Events_WithMaxResults(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := calendarsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := calendarsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "calendar_events", map[string]any{
 		"start":       "2026-04-15T00:00:00Z",
 		"end":         "2026-04-16T00:00:00Z",
@@ -177,7 +177,7 @@ func TestConnector_OAuthTokenFormat(t *testing.T) {
 		"token_type":   "bearer",
 		"expiry":       "2026-12-31T00:00:00Z",
 	})
-	c := calendarsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := calendarsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "calendar_events", map[string]any{
 		"start": "2026-04-15T00:00:00Z",
 		"end":   "2026-04-16T00:00:00Z",
@@ -189,7 +189,7 @@ func TestConnector_OAuthTokenFormat(t *testing.T) {
 
 func TestConnector_Events_MissingStart(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "calendar_events", map[string]any{
 		"end": "2026-04-16T00:00:00Z",
 	}, token)
@@ -200,7 +200,7 @@ func TestConnector_Events_MissingStart(t *testing.T) {
 
 func TestConnector_Events_MissingEnd(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "calendar_events", map[string]any{
 		"start": "2026-04-15T00:00:00Z",
 	}, token)
@@ -211,7 +211,7 @@ func TestConnector_Events_MissingEnd(t *testing.T) {
 
 func TestConnector_FreeBusy_MissingStart(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "calendar_free_busy", map[string]any{
 		"end": "2026-04-16T00:00:00Z",
 	}, token)
@@ -222,7 +222,7 @@ func TestConnector_FreeBusy_MissingStart(t *testing.T) {
 
 func TestConnector_FreeBusy_MissingEnd(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
-	c := calendarsource.New()
+	c := calendarsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "calendar_free_busy", map[string]any{
 		"start": "2026-04-15T00:00:00Z",
 	}, token)
