@@ -697,6 +697,25 @@ func TestUnlockVault_Success(t *testing.T) {
 	}
 }
 
+func TestUnlockVault_BlockedWhenTEEEnabled(t *testing.T) {
+	srv := unlockServer()
+	srv.enclaveClient = &mockEscrowClient{} // non-nil = TEE enabled
+
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	body, _ := json.Marshal(api.UnlockVaultRequest{Kek: kek})
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", string(body), testClaims)
+	srv.UnlockVault(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when TEE enabled, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestUnlockVault_WrongKEK(t *testing.T) {
 	srv := unlockServer()
 	body, _ := json.Marshal(api.UnlockVaultRequest{Kek: make([]byte, 32)})
