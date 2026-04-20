@@ -14,6 +14,7 @@ import (
 
 	"github.com/ALRubinger/aileron/core/source"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/errgroup"
 	driveapi "google.golang.org/api/drive/v3"
 	gmailapi "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
@@ -141,17 +142,34 @@ func (c *Connector) search(ctx context.Context, svc *gmailapi.Service, params ma
 		return nil, fmt.Errorf("gmail API error: %w", err)
 	}
 
-	messages := make([]map[string]any, 0, len(resp.Messages))
-	for _, msg := range resp.Messages {
-		detail, err := svc.Users.Messages.Get("me", msg.Id).Format("metadata").
-			MetadataHeaders("Subject", "From", "Date").Context(ctx).Do()
-		if err != nil {
+	// Fetch message metadata concurrently with a bounded worker pool.
+	results := make([]*gmailapi.Message, len(resp.Messages))
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(10)
+
+	for i, msg := range resp.Messages {
+		g.Go(func() error {
+			detail, err := svc.Users.Messages.Get("me", msg.Id).Format("metadata").
+				MetadataHeaders("Subject", "From", "Date").Context(gCtx).Do()
+			if err != nil {
+				return err
+			}
+			results[i] = detail
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, fmt.Errorf("fetching message metadata: %w", err)
+	}
+
+	messages := make([]map[string]any, 0, len(results))
+	for i, detail := range results {
+		if detail == nil {
 			continue
 		}
-
 		item := map[string]any{
-			"id":        msg.Id,
-			"thread_id": msg.ThreadId,
+			"id":        resp.Messages[i].Id,
+			"thread_id": resp.Messages[i].ThreadId,
 			"snippet":   detail.Snippet,
 		}
 		for _, h := range detail.Payload.Headers {
