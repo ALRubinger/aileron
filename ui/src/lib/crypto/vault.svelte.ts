@@ -14,8 +14,10 @@ import { VERIFICATION_CONSTANT, SALT_LENGTH } from './constants.js';
 import {
 	getPassphraseSalt,
 	getPassphraseVerification,
+	getTeeStatus,
 	initiateAttestation,
 	establishTeeSession,
+	unlockVaultDirect,
 	setPassphrase
 } from '$lib/api';
 
@@ -33,11 +35,12 @@ export interface UnlockResult {
 }
 
 /**
- * Unlocks the vault by deriving the KEK client-side, verifying the
- * passphrase locally, then transmitting the KEK to the enclave via
- * an end-to-end encrypted channel.
+ * Unlocks the vault by deriving the KEK client-side and verifying the
+ * passphrase locally.
  *
- * The passphrase and KEK never leave the browser in plaintext.
+ * If TEE is enabled: transmits KEK via end-to-end encrypted channel (ECDH).
+ * If TEE is disabled: sends KEK directly over HTTPS to the server's
+ * session cache. The passphrase never leaves the browser in either mode.
  */
 export async function unlockVault(
 	passphrase: string,
@@ -76,48 +79,64 @@ export async function unlockVault(
 			return { valid: false };
 		}
 
-		// 5. Initiate attestation.
-		onProgress?.('attesting');
-		const attestResp = await initiateAttestation();
-		const enclavePublicKey = base64ToBytes(attestResp.public_key);
+		// 5. Check if TEE is available.
+		const teeStatus = await getTeeStatus();
 
-		// 6. Verify attestation client-side.
-		const attResult = await verifyAttestation(
-			attestResp.token,
-			enclavePublicKey,
-			'aileron-enclave'
-		);
-		if (!attResult.verified) {
-			throw new Error('Enclave attestation verification failed');
+		if (teeStatus.enabled) {
+			// TEE mode: attestation + ECDH + encrypted KEK transmission.
+			return await unlockViaTee(kek, onProgress);
 		}
 
-		// 7. Generate ephemeral ECDH key pair.
+		// Direct mode: send KEK over HTTPS to server session cache.
 		onProgress?.('establishing');
-		const { privateKey, publicKey: clientPubKey } = await generateKeyPair();
-
-		// 8. Derive shared secret using enclave's attested public key.
-		const sharedSecret = await deriveSharedSecret(privateKey, attResult.enclavePublicKey);
-
-		// 9. Encrypt KEK with shared secret.
-		const encryptedKEK = await encrypt(kek, sharedSecret);
-
-		// 10. Send opaque blob through server to enclave.
-		const sessionResp = await establishTeeSession({
-			encrypted_kek: bytesToBase64(encryptedKEK),
-			client_public_key: bytesToBase64(clientPubKey)
-		});
+		const resp = await unlockVaultDirect(bytesToBase64(kek));
 
 		onProgress?.('done');
-
 		return {
 			valid: true,
-			sessionExpiresAt: sessionResp.expires_at ? new Date(sessionResp.expires_at) : undefined,
-			escrowedCount: sessionResp.escrowed_count
+			sessionExpiresAt: resp.expires_at ? new Date(resp.expires_at) : undefined
 		};
 	} finally {
-		// Best-effort memory zeroing (JS doesn't guarantee this, but we try).
 		kek.fill(0);
 	}
+}
+
+/**
+ * TEE unlock path: attestation, ECDH key exchange, encrypted KEK transmission.
+ */
+async function unlockViaTee(
+	kek: Uint8Array,
+	onProgress?: (step: UnlockProgress) => void
+): Promise<UnlockResult> {
+	onProgress?.('attesting');
+	const attestResp = await initiateAttestation();
+	const enclavePublicKey = base64ToBytes(attestResp.public_key);
+
+	const attResult = await verifyAttestation(
+		attestResp.token,
+		enclavePublicKey,
+		'aileron-enclave'
+	);
+	if (!attResult.verified) {
+		throw new Error('Enclave attestation verification failed');
+	}
+
+	onProgress?.('establishing');
+	const { privateKey, publicKey: clientPubKey } = await generateKeyPair();
+	const sharedSecret = await deriveSharedSecret(privateKey, attResult.enclavePublicKey);
+	const encryptedKEK = await encrypt(kek, sharedSecret);
+
+	const sessionResp = await establishTeeSession({
+		encrypted_kek: bytesToBase64(encryptedKEK),
+		client_public_key: bytesToBase64(clientPubKey)
+	});
+
+	onProgress?.('done');
+	return {
+		valid: true,
+		sessionExpiresAt: sessionResp.expires_at ? new Date(sessionResp.expires_at) : undefined,
+		escrowedCount: sessionResp.escrowed_count
+	};
 }
 
 /**

@@ -202,6 +202,13 @@ export async function lockVault() {
 	return apiFetch('/v1/users/me/passphrase/lock', { method: 'POST' });
 }
 
+export async function unlockVaultDirect(kek: string) {
+	return apiFetch('/v1/users/me/passphrase/unlock', {
+		method: 'POST',
+		body: JSON.stringify({ kek })
+	});
+}
+
 // --- TEE ---
 
 export async function initiateAttestation(audience?: string) {
