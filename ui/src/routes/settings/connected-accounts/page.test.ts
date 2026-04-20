@@ -5,7 +5,19 @@ import userEvent from '@testing-library/user-event';
 // Mock $lib/api before importing the component
 vi.mock('$lib/api', () => ({
 	listConnectedAccounts: vi.fn(),
-	deleteConnectedAccount: vi.fn()
+	deleteConnectedAccount: vi.fn(),
+	getVaultStatus: vi.fn()
+}));
+
+// Mock $lib/crypto/vault.svelte.js
+vi.mock('$lib/crypto/vault.svelte.js', () => ({
+	setupPassphrase: vi.fn(),
+	unlockVault: vi.fn()
+}));
+
+// Mock $lib/vault.svelte.js
+vi.mock('$lib/vault.svelte.js', () => ({
+	setSessionExpiresAt: vi.fn()
 }));
 
 // Mock $lib/colors — use real implementation
@@ -14,7 +26,7 @@ vi.mock('$lib/colors', async () => {
 });
 
 import Page from './+page.svelte';
-import { listConnectedAccounts, deleteConnectedAccount } from '$lib/api';
+import { listConnectedAccounts, deleteConnectedAccount, getVaultStatus } from '$lib/api';
 
 const mockAccounts = [
 	{
@@ -40,11 +52,13 @@ const mockAccounts = [
 beforeEach(() => {
 	vi.mocked(listConnectedAccounts).mockResolvedValue({ items: mockAccounts });
 	vi.mocked(deleteConnectedAccount).mockResolvedValue(null);
+	vi.mocked(getVaultStatus).mockResolvedValue({ locked: false, has_passphrase: true });
 });
 
 describe('Connected Accounts Page', () => {
 	it('shows loading state initially', () => {
 		vi.mocked(listConnectedAccounts).mockReturnValue(new Promise(() => {})); // never resolves
+		vi.mocked(getVaultStatus).mockReturnValue(new Promise(() => {})); // never resolves
 		render(Page);
 		expect(screen.getByText('Loading...')).toBeInTheDocument();
 	});
@@ -171,6 +185,61 @@ describe('Connected Accounts Page', () => {
 		render(Page);
 		await waitFor(() => {
 			expect(screen.getByText('Slack')).toBeInTheDocument();
+		});
+	});
+
+	it('shows vault setup prompt when no passphrase exists', async () => {
+		vi.mocked(listConnectedAccounts).mockResolvedValue({ items: [] });
+		vi.mocked(getVaultStatus).mockResolvedValue({ locked: false, has_passphrase: false });
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Set up vault passphrase')).toBeInTheDocument();
+		});
+	});
+
+	it('shows vault locked prompt when vault is locked', async () => {
+		vi.mocked(listConnectedAccounts).mockResolvedValue({ items: [] });
+		vi.mocked(getVaultStatus).mockResolvedValue({ locked: true, has_passphrase: true });
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Vault locked')).toBeInTheDocument();
+		});
+	});
+
+	it('disables Connect buttons when vault is locked', async () => {
+		vi.mocked(listConnectedAccounts).mockResolvedValue({ items: [] });
+		vi.mocked(getVaultStatus).mockResolvedValue({ locked: true, has_passphrase: true });
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Slack')).toBeInTheDocument();
+		});
+		const connectButtons = screen.getAllByRole('button', { name: 'Connect' });
+		for (const btn of connectButtons) {
+			expect(btn).toBeDisabled();
+		}
+	});
+
+	it('enables Connect buttons when vault is unlocked', async () => {
+		vi.mocked(listConnectedAccounts).mockResolvedValue({ items: [] });
+		vi.mocked(getVaultStatus).mockResolvedValue({ locked: false, has_passphrase: true });
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Slack')).toBeInTheDocument();
+		});
+		const connectButtons = screen.getAllByRole('button', { name: 'Connect' });
+		for (const btn of connectButtons) {
+			expect(btn).not.toBeDisabled();
+		}
+	});
+
+	it('shows guidance text when vault not ready', async () => {
+		vi.mocked(listConnectedAccounts).mockResolvedValue({ items: [] });
+		vi.mocked(getVaultStatus).mockResolvedValue({ locked: true, has_passphrase: true });
+		render(Page);
+		await waitFor(() => {
+			expect(
+				screen.getByText('Unlock your vault above to connect new accounts.')
+			).toBeInTheDocument();
 		});
 	});
 });
