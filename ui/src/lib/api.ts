@@ -194,6 +194,14 @@ export async function setPassphrase(data: { salt: string; kek_verification: stri
 	});
 }
 
+export async function getVaultStatus() {
+	return apiFetch('/v1/users/me/vault/status');
+}
+
+export async function lockVault() {
+	return apiFetch('/v1/users/me/passphrase/lock', { method: 'POST' });
+}
+
 // --- TEE ---
 
 export async function initiateAttestation(audience?: string) {
