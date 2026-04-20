@@ -9,18 +9,26 @@ import (
 
 	"github.com/ALRubinger/aileron/core/source"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
 	cal "google.golang.org/api/calendar/v3"
 	"google.golang.org/api/option"
 )
 
 // Connector implements source.SourceConnector for Google Calendar.
 type Connector struct {
+	oauthConfig  *oauth2.Config
 	clientOption option.ClientOption
 }
 
-// New creates a new Calendar source connector.
-func New() *Connector {
-	return &Connector{}
+// New creates a new Calendar source connector with OAuth credentials for token refresh.
+func New(clientID, clientSecret string) *Connector {
+	return &Connector{
+		oauthConfig: &oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			Endpoint:     google.Endpoint,
+		},
+	}
 }
 
 // WithClientOption returns a copy with a custom client option (for testing).
@@ -71,12 +79,11 @@ func (c *Connector) Execute(ctx context.Context, tool string, params map[string]
 }
 
 func (c *Connector) newService(ctx context.Context, token []byte) (*cal.Service, error) {
-	accessToken, err := extractAccessToken(token)
+	ts, err := c.tokenSource(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("invalid token: %w", err)
+		return nil, err
 	}
 
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken})
 	opts := []option.ClientOption{option.WithTokenSource(ts)}
 	if c.clientOption != nil {
 		opts = append(opts, c.clientOption)
@@ -187,18 +194,17 @@ func (c *Connector) freeBusy(ctx context.Context, svc *cal.Service, params map[s
 	return map[string]any{"busy": busySlots}, nil
 }
 
-func extractAccessToken(token []byte) (string, error) {
-	var oauthToken oauth2.Token
-	if err := json.Unmarshal(token, &oauthToken); err == nil && oauthToken.AccessToken != "" {
-		return oauthToken.AccessToken, nil
+// tokenSource parses the stored OAuth token and returns a token source that
+// automatically refreshes expired access tokens using the OAuth client credentials.
+func (c *Connector) tokenSource(ctx context.Context, tokenJSON []byte) (oauth2.TokenSource, error) {
+	var tok oauth2.Token
+	if err := json.Unmarshal(tokenJSON, &tok); err != nil {
+		return nil, fmt.Errorf("invalid token JSON: %w", err)
 	}
-	var data map[string]string
-	if err := json.Unmarshal(token, &data); err == nil {
-		if at := data["access_token"]; at != "" {
-			return at, nil
-		}
+	if tok.RefreshToken == "" && tok.AccessToken == "" {
+		return nil, fmt.Errorf("token has neither access_token nor refresh_token")
 	}
-	return "", fmt.Errorf("no access_token in token data")
+	return c.oauthConfig.TokenSource(ctx, &tok), nil
 }
 
 func toInt64(v any, def int64) int64 {
@@ -217,4 +223,3 @@ func toInt64(v any, def int64) int64 {
 		return def
 	}
 }
-

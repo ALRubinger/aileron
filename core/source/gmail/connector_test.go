@@ -25,14 +25,14 @@ func testToken() []byte {
 }
 
 func TestConnector_Provider(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	if c.Provider() != "gmail" {
 		t.Errorf("expected gmail, got %s", c.Provider())
 	}
 }
 
 func TestConnector_Tools(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	tools := c.Tools()
 	if len(tools) != 4 {
 		t.Fatalf("expected 4 tools, got %d", len(tools))
@@ -49,7 +49,7 @@ func TestConnector_Tools(t *testing.T) {
 }
 
 func TestConnector_UnknownTool(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
 	_, err := c.Execute(context.Background(), "gmail_nonexistent", nil, token)
 	if err == nil {
@@ -58,7 +58,7 @@ func TestConnector_UnknownTool(t *testing.T) {
 }
 
 func TestConnector_InvalidToken(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{"query": "test"}, []byte("not-json"))
 	if err == nil {
 		t.Fatal("expected error for invalid token")
@@ -67,7 +67,7 @@ func TestConnector_InvalidToken(t *testing.T) {
 
 func TestConnector_EmptyAccessToken(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"token_type": "bearer"})
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{"query": "test"}, token)
 	if err == nil {
 		t.Fatal("expected error for missing access_token")
@@ -99,7 +99,7 @@ func TestConnector_Search_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "gmail_search", map[string]any{
 		"query": "migration proposal",
 	}, testToken())
@@ -141,7 +141,7 @@ func TestConnector_Search_WithDateFilters(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
 		"query":  "migration",
 		"after":  "2026-04-14",
@@ -193,7 +193,7 @@ func TestConnector_GetThread_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "gmail_get_thread", map[string]any{
 		"thread_id": "thread_1",
 	}, testToken())
@@ -217,7 +217,7 @@ func TestConnector_Search_WithMaxResults(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
 		"query":       "test",
 		"max_results": float64(5),
@@ -242,7 +242,7 @@ func TestConnector_OAuthTokenFormat(t *testing.T) {
 		"token_type":   "bearer",
 		"expiry":       "2026-12-31T00:00:00Z",
 	})
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{"query": "test"}, token)
 	if err != nil {
 		t.Fatalf("unexpected error with oauth2 token format: %v", err)
@@ -266,7 +266,7 @@ func TestConnector_DriveSearch_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "drive_search", map[string]any{
 		"query": "migration plan",
 	}, testToken())
@@ -284,7 +284,7 @@ func TestConnector_DriveSearch_Success(t *testing.T) {
 }
 
 func TestConnector_DriveSearch_MissingQuery(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "drive_search", map[string]any{}, testToken())
 	if err == nil {
 		t.Fatal("expected error for missing query")
@@ -299,7 +299,7 @@ func TestConnector_DriveGetDoc_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{
 		"file_id": "doc_123",
 	}, testToken())
@@ -317,7 +317,7 @@ func TestConnector_DriveGetDoc_Success(t *testing.T) {
 }
 
 func TestConnector_DriveGetDoc_InvalidToken(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{
 		"file_id": "doc_123",
 	}, []byte("not-json"))
@@ -327,7 +327,7 @@ func TestConnector_DriveGetDoc_InvalidToken(t *testing.T) {
 }
 
 func TestConnector_DriveSearch_InvalidToken(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "drive_search", map[string]any{
 		"query": "test",
 	}, []byte("not-json"))
@@ -346,7 +346,7 @@ func containsStr(s, sub string) bool {
 }
 
 func TestConnector_DriveGetDoc_MissingFileID(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{}, testToken())
 	if err == nil {
 		t.Fatal("expected error for missing file_id")
@@ -354,7 +354,7 @@ func TestConnector_DriveGetDoc_MissingFileID(t *testing.T) {
 }
 
 func TestConnector_ToolsIncludeDrive(t *testing.T) {
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	tools := c.Tools()
 	if len(tools) != 4 {
 		t.Fatalf("expected 4 tools (2 gmail + 2 drive), got %d", len(tools))
@@ -378,7 +378,7 @@ func TestConnector_DriveSearch_WithMaxResults(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "drive_search", map[string]any{
 		"query":       "test",
 		"max_results": float64(5),
@@ -400,7 +400,7 @@ func TestConnector_DriveGetDoc_LargeContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "drive_get_doc", map[string]any{
 		"file_id": "doc_big",
 	}, testToken())
@@ -424,7 +424,7 @@ func TestConnector_Search_IntMaxResults(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	// Test with int type (not float64).
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
 		"query":       "test",
@@ -442,7 +442,7 @@ func TestConnector_DriveSearch_IntMaxResults(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "drive_search", map[string]any{
 		"query":       "test",
 		"max_results": 3,
@@ -454,7 +454,7 @@ func TestConnector_DriveSearch_IntMaxResults(t *testing.T) {
 
 func TestConnector_Search_MissingQuery(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{}, token)
 	if err == nil {
 		t.Fatal("expected error for missing query")
@@ -463,7 +463,7 @@ func TestConnector_Search_MissingQuery(t *testing.T) {
 
 func TestConnector_GetThread_MissingThreadID(t *testing.T) {
 	token, _ := json.Marshal(map[string]string{"access_token": "test"})
-	c := gmailsource.New()
+	c := gmailsource.New("test-client-id", "test-client-secret")
 	_, err := c.Execute(context.Background(), "gmail_get_thread", map[string]any{}, token)
 	if err == nil {
 		t.Fatal("expected error for missing thread_id")
@@ -531,7 +531,7 @@ func TestConnector_Search_ConcurrentFetch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	result, err := c.Execute(context.Background(), "gmail_search", map[string]any{
 		"query": "test",
 	}, testToken())
@@ -590,7 +590,7 @@ func TestConnector_Search_ConcurrentFetch_ErrorPropagation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := gmailsource.New().WithClientOption(option.WithEndpoint(server.URL))
+	c := gmailsource.New("test-client-id", "test-client-secret").WithClientOption(option.WithEndpoint(server.URL))
 	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
 		"query": "test",
 	}, testToken())
