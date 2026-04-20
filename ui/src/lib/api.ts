@@ -132,6 +132,51 @@ export async function updateCurrentEnterprise(data: {
 	});
 }
 
+// --- LLM Provider Configuration ---
+
+export async function getUserLLMConfig() {
+	return apiFetch('/v1/llm-config');
+}
+
+export async function upsertUserLLMConfig(data: {
+	provider: string;
+	model_research: string;
+	model_synthesis: string;
+	api_key: string;
+}) {
+	return apiFetch('/v1/llm-config', {
+		method: 'PUT',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function deleteUserLLMConfig() {
+	return apiFetch('/v1/llm-config', { method: 'DELETE' });
+}
+
+export async function getEnterpriseLLMConfig(enterpriseId: string) {
+	return apiFetch(`/v1/enterprises/${enterpriseId}/llm-config`);
+}
+
+export async function upsertEnterpriseLLMConfig(
+	enterpriseId: string,
+	data: {
+		provider: string;
+		model_research: string;
+		model_synthesis: string;
+		api_key: string;
+	}
+) {
+	return apiFetch(`/v1/enterprises/${enterpriseId}/llm-config`, {
+		method: 'PUT',
+		body: JSON.stringify(data)
+	});
+}
+
+export async function deleteEnterpriseLLMConfig(enterpriseId: string) {
+	return apiFetch(`/v1/enterprises/${enterpriseId}/llm-config`, { method: 'DELETE' });
+}
+
 // --- Vault / Passphrase ---
 
 export async function getPassphraseSalt() {
