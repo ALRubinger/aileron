@@ -16,14 +16,14 @@ const (
 // and tone, edited drafts provide correction signals (the diff between
 // DraftBody and SentBody), and discarded drafts are negative signals.
 type DraftFeedback struct {
-	ID        string         // fb_ + UUID
-	UserID    string         // owning user
-	DraftID   string         // the draft this feedback is for
-	Signal    FeedbackSignal // approved, edited, discarded
-	Service   string         // "slack", etc.
-	Channel   string         // where the original message was
-	DraftBody string         // what the AI generated
-	SentBody  string         // what was actually sent (empty if discarded)
-	ToolsUsed []string       // source connector tools called during generation
-	CreatedAt time.Time
+	ID        string         `json:"id"`         // fb_ + UUID
+	UserID    string         `json:"user_id"`    // owning user
+	DraftID   string         `json:"draft_id"`   // the draft this feedback is for
+	Signal    FeedbackSignal `json:"signal"`     // approved, edited, discarded
+	Service   string         `json:"service"`    // "slack", etc.
+	Channel   string         `json:"channel"`    // where the original message was
+	DraftBody string         `json:"draft_body"` // what the AI generated
+	SentBody  string         `json:"sent_body"`  // what was actually sent (empty if discarded)
+	ToolsUsed []string       `json:"tools_used"` // source connector tools called during generation
+	CreatedAt time.Time      `json:"created_at"`
 }
