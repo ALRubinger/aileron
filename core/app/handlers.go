@@ -60,6 +60,7 @@ type apiServer struct {
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
 	slackDedup         *slackEventDedup        // deduplication cache for Slack events
 	onSlackMessage     func(ctx context.Context, userID string, msg comms.IncomingMessage) // callback for incoming Slack messages
+	llmConfigs         store.LLMConfigStore   // per-user/per-org LLM provider config
 	enterprises        store.EnterpriseStore  // nil when auth is disabled
 	users              store.UserStore        // nil when auth is disabled
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled

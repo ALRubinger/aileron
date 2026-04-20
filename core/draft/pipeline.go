@@ -32,6 +32,7 @@ import (
 type Pipeline struct {
 	researchLLM       llm.Client
 	ghostwriteLLM     llm.Client
+	clientResolver    *llm.ClientResolver // optional; overrides researchLLM/ghostwriteLLM per-user
 	sourceRegistry    *source.Registry
 	connectedAccounts store.ConnectedAccountStore
 	instructions      store.UserInstructionStore
@@ -69,6 +70,15 @@ func NewPipeline(
 	}
 }
 
+// WithClientResolver returns a copy of the pipeline that resolves per-user
+// LLM clients at draft generation time. When set, the resolver's result
+// overrides the default researchLLM and ghostwriteLLM clients.
+func (p *Pipeline) WithClientResolver(r *llm.ClientResolver) *Pipeline {
+	cp := *p
+	cp.clientResolver = r
+	return &cp
+}
+
 // WithClock returns a copy of the pipeline that uses the given clock function
 // instead of time.Now. For testing only.
 func (p *Pipeline) WithClock(clock func() time.Time) *Pipeline {
@@ -82,6 +92,16 @@ func (p *Pipeline) WithClock(clock func() time.Time) *Pipeline {
 //   Round 2: Ghostwrite — LLM writes the reply using the gathered context.
 //     No tools, no narration.
 func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.IncomingMessage) (string, error) {
+	// Resolve LLM clients: per-user/per-org config overrides defaults.
+	researchClient, synthesisClient := p.researchLLM, p.ghostwriteLLM
+	if p.clientResolver != nil {
+		var resolveErr error
+		researchClient, synthesisClient, resolveErr = p.clientResolver.Resolve(ctx, userID)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolving LLM config: %w", resolveErr)
+		}
+	}
+
 	// Get available tools.
 	accounts, err := p.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
 	if err != nil {
@@ -122,7 +142,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	now := p.clock()
 	var gatheredContext string
 	if len(tools) > 0 {
-		researchResp, err := p.researchLLM.GenerateWithTools(ctx, llm.GenerateRequest{
+		researchResp, err := researchClient.GenerateWithTools(ctx, llm.GenerateRequest{
 			SystemPrompt: researchSysPrompt,
 			UserMessage:  researchMessage,
 			Tools:        tools,
@@ -163,7 +183,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		msg.Author, msg.Channel, msg.Body, gatheredContext,
 	)
 
-	draftResp, err := p.ghostwriteLLM.GenerateWithTools(ctx, llm.GenerateRequest{
+	draftResp, err := synthesisClient.GenerateWithTools(ctx, llm.GenerateRequest{
 		SystemPrompt: ghostwritePrompt,
 		UserMessage:  ghostwriteMessage,
 		// No tools — force text-only output.

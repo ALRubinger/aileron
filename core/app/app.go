@@ -55,6 +55,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	draftStore := mem.NewDraftStore()
 	instructionStore := mem.NewUserInstructionStore()
 	feedbackStore := mem.NewDraftFeedbackStore()
+	llmConfigStore := mem.NewLLMConfigStore()
 
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
@@ -127,6 +128,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		feedback:          feedbackStore,
 		credentials:       credentialStore,
 		fundingSources:    fundingSourceStore,
+		llmConfigs:        llmConfigStore,
 		traces:            traceStore,
 		sourceRegistry:    sourceReg,
 		enclaveClient:     enclaveClient,
@@ -153,6 +155,15 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// Draft feedback API (context store envelope).
 	mux.HandleFunc("POST /v1/feedback", server.handleCreateFeedback)
 	mux.HandleFunc("GET /v1/feedback", server.handleListFeedback)
+
+	// LLM provider configuration (per-user).
+	mux.HandleFunc("PUT /v1/llm-config", server.handleUpsertUserLLMConfig)
+	mux.HandleFunc("GET /v1/llm-config", server.handleGetUserLLMConfig)
+	mux.HandleFunc("DELETE /v1/llm-config", server.handleDeleteUserLLMConfig)
+	// LLM provider configuration (per-enterprise, admin only).
+	mux.HandleFunc("PUT /v1/enterprises/{id}/llm-config", server.handleUpsertEnterpriseLLMConfig)
+	mux.HandleFunc("GET /v1/enterprises/{id}/llm-config", server.handleGetEnterpriseLLMConfig)
+	mux.HandleFunc("DELETE /v1/enterprises/{id}/llm-config", server.handleDeleteEnterpriseLLMConfig)
 
 	// Connected accounts — programmatic create (in addition to OAuth flow).
 	mux.HandleFunc("POST /v1/connected-accounts", server.handleCreateConnectedAccount)
@@ -222,12 +233,27 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			server.accountService = accountRegistry
 		}
 
+		// Per-user/per-org LLM configuration store.
+		pgLLMConfigStore := postgres.NewLLMConfigStore(db)
+		server.llmConfigs = pgLLMConfigStore
+
 		// LLM-powered draft generation pipeline.
 		if authCfg.LLMEnabled() {
 			researchClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModelResearch, llm.WithLogger(log))
 			synthesisClient := llm.NewAnthropicClient(authCfg.AnthropicAPIKey, authCfg.LLMModelSynthesis, llm.WithLogger(log))
 			prompts := draft.LoadPrompts()
-			server.draftPipeline = draft.NewPipeline(researchClient, synthesisClient, sourceReg, pgConnectedAccountStore, pgInstructionStore, v, log, prompts)
+
+			resolver := llm.NewClientResolver(
+				pgLLMConfigStore, userStore, v,
+				authCfg.AnthropicAPIKey, authCfg.LLMModelResearch, authCfg.LLMModelSynthesis,
+				log,
+			)
+
+			server.draftPipeline = draft.NewPipeline(
+				researchClient, synthesisClient, sourceReg,
+				pgConnectedAccountStore, pgInstructionStore, v, log, prompts,
+			).WithClientResolver(resolver)
+
 			log.Info("enabled cloud draft generation",
 				"research_model", authCfg.LLMModelResearch,
 				"synthesis_model", authCfg.LLMModelSynthesis,

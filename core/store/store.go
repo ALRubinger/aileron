@@ -260,6 +260,17 @@ type UserKeyMaterialStore interface {
 	Update(ctx context.Context, material model.UserKeyMaterial) error
 }
 
+// LLMConfigStore persists and retrieves per-user and per-org LLM provider
+// configurations. At most one config exists per owner (unique on owner_type + owner_id).
+type LLMConfigStore interface {
+	// Upsert creates or updates an LLM config by owner_type + owner_id.
+	Upsert(ctx context.Context, cfg model.LLMConfig) (model.LLMConfig, error)
+	// GetByOwner returns the config for a specific owner, or ErrNotFound.
+	GetByOwner(ctx context.Context, ownerType model.LLMConfigOwnerType, ownerID string) (model.LLMConfig, error)
+	// Delete removes an LLM config by ID.
+	Delete(ctx context.Context, configID string) error
+}
+
 // ErrNotFound is returned when a requested entity does not exist.
 type ErrNotFound struct {
 	Entity string
