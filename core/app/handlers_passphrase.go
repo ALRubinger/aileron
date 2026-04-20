@@ -152,6 +152,13 @@ func (s *apiServer) UnlockVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// When TEE is available, direct unlock is disabled — KEK must be
+	// transmitted via the encrypted enclave session (Phase 3).
+	if s.enclaveClient != nil {
+		writeError(w, http.StatusForbidden, "tee_required", "direct unlock disabled — use TEE session")
+		return
+	}
+
 	var req api.UnlockVaultRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
