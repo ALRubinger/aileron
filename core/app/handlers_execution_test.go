@@ -371,7 +371,7 @@ func authedExecRequest(grantID string, claims *auth.Claims) *http.Request {
 	return req
 }
 
-func TestRunExecution_EncryptedCredential_RequiresTEE(t *testing.T) {
+func TestRunExecution_EncryptedCredential_VaultLocked(t *testing.T) {
 	s := newExecutionServer()
 	ctx := context.Background()
 
@@ -383,9 +383,9 @@ func TestRunExecution_EncryptedCredential_RequiresTEE(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	s.RunExecution(w, authedExecRequest("grant_enc1", userAClaims))
-	// Encrypted credentials now require TEE — server returns 501.
-	if w.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d: %s", w.Code, w.Body.String())
+	// Encrypted credentials with no KEK session → 423 vault locked.
+	if w.Code != 423 {
+		t.Fatalf("expected 423, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -421,20 +421,27 @@ func TestRunExecution_TEEMode_WithEscrow(t *testing.T) {
 	}
 }
 
-func TestRunExecution_EncryptedCredential_NoTEE(t *testing.T) {
+func TestRunExecution_EncryptedCredential_DecryptsWithKEK(t *testing.T) {
 	s := newExecutionServer()
 	ctx := context.Background()
 
 	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
 	s.registry.Register(ctx, conn)
-	// No TEE configured — encrypted credential execution returns 501.
 
 	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
 	seedEncryptedGrantAndIntent(ctx, s, "grant_enc5", "int_enc5", kek)
+
+	// Set up KEK session so the handler can decrypt.
+	cache := auth.NewKEKSessionCache(24 * time.Hour)
+	cache.Set("usr_a", kek)
+	s.kekSessionCache = cache
 
 	w := httptest.NewRecorder()
 	s.RunExecution(w, authedExecRequest("grant_enc5", userAClaims))
-	if w.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (decrypted + executed), got %d: %s", w.Code, w.Body.String())
 	}
 }

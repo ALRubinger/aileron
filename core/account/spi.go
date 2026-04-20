@@ -15,6 +15,7 @@ import (
 	"context"
 
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/vault"
 )
 
 // ConnectResult is returned after initiating an account connection flow.
@@ -78,4 +79,9 @@ type ProviderService interface {
 
 	// UserInfoEndpoint returns the URL to fetch user identity after OAuth.
 	UserInfoEndpoint() string
+
+	// WithVault returns a shallow copy of the service that uses the given vault
+	// for token storage. This enables per-request vault scoping (e.g. wrapping
+	// the base vault with a UserScopedVault for encrypted token storage).
+	WithVault(v vault.Vault) ProviderService
 }

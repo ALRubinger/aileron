@@ -407,6 +407,94 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/users/me/passphrase/unlock:
+    post:
+      tags: [Users]
+      summary: Unlock vault with passphrase-derived KEK
+      description: |
+        The client derives the KEK locally from the passphrase and stored salt
+        using Argon2id, then sends the 32-byte KEK to the server over HTTPS.
+        The server verifies it against the stored verification blob, and on
+        success caches the KEK in memory for the session TTL. Tokens can only
+        be encrypted or decrypted while the vault is unlocked.
+      operationId: unlockVault
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnlockVaultRequest"
+      responses:
+        "200":
+          description: Vault unlocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VaultStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/users/me/passphrase/lock:
+    post:
+      tags: [Users]
+      summary: Lock vault and clear cached KEK
+      description: |
+        Clears the user's cached KEK from server memory. Connected account
+        operations will return 423 until the vault is unlocked again.
+      operationId: lockVault
+      responses:
+        "200":
+          description: Vault locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VaultStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/users/me/vault/status:
+    get:
+      tags: [Users]
+      summary: Get vault lock status
+      description: |
+        Returns whether the vault is locked or unlocked, the session expiry
+        time, and whether the user has set a passphrase.
+      operationId: getVaultStatus
+      responses:
+        "200":
+          description: Vault status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VaultStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/users/me/vault/migrate:
+    post:
+      tags: [Users]
+      summary: Migrate plaintext tokens to encrypted storage
+      description: |
+        Re-encrypts any plaintext tokens in the vault with the user's KEK.
+        The vault must be unlocked. Idempotent — already-encrypted tokens
+        are skipped.
+      operationId: migrateVault
+      responses:
+        "200":
+          description: Migration complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MigrateVaultResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "423":
+          $ref: "#/components/responses/VaultLocked"
+
   /v1/intents:
     post:
       tags: [Intents]
@@ -1278,6 +1366,10 @@ paths:
       responses:
         "302":
           description: Redirect to provider consent screen
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "423":
+          $ref: "#/components/responses/VaultLocked"
 
   /v1/connect/{provider}/callback:
     parameters:
@@ -1447,6 +1539,12 @@ components:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    VaultLocked:
+      description: Vault is locked — unlock with POST /v1/users/me/passphrase/unlock
       content:
         application/json:
           schema:
@@ -2906,6 +3004,38 @@ components:
           type: string
           format: byte
           description: Base64-encoded Argon2id salt (omitted when no passphrase is set)
+
+    UnlockVaultRequest:
+      type: object
+      required: [kek]
+      properties:
+        kek:
+          type: string
+          format: byte
+          description: Base64-encoded 32-byte KEK derived from passphrase via Argon2id
+
+    VaultStatusResponse:
+      type: object
+      required: [locked, has_passphrase]
+      properties:
+        locked:
+          type: boolean
+          description: Whether the vault is currently locked (no active KEK session)
+        has_passphrase:
+          type: boolean
+          description: Whether the user has set a vault passphrase
+        expires_at:
+          type: string
+          format: date-time
+          description: When the current KEK session expires (omitted when locked)
+
+    MigrateVaultResponse:
+      type: object
+      required: [migrated]
+      properties:
+        migrated:
+          type: integer
+          description: Number of secrets re-encrypted during migration
 
     TeeStatus:
       type: object

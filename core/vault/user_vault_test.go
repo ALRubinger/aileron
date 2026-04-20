@@ -3,6 +3,7 @@ package vault
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -75,37 +76,33 @@ func TestUserScopedVault_WithKEK_WrongKEKFails(t *testing.T) {
 	}
 }
 
-func TestUserScopedVault_NilKEK_Passthrough(t *testing.T) {
+func TestUserScopedVault_NilKEK_PutRejectsPlaintext(t *testing.T) {
 	inner := NewMemVault()
 	uv := NewUserScopedVault(inner, nil)
 
 	ctx := context.Background()
-	path := "connectors/github/default"
-	value := []byte("api-key-plaintext")
+	err := uv.Put(ctx, "connectors/github/default", []byte("api-key"), Metadata{Type: "api_key"})
+	if err == nil {
+		t.Fatal("expected Put to reject plaintext when KEK is nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to store plaintext") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
-	if err := uv.Put(ctx, path, value, Metadata{Type: "api_key"}); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+func TestUserScopedVault_NilKEK_GetPassthroughUnencrypted(t *testing.T) {
+	// Get passthrough allows reading plaintext secrets (needed for migration).
+	inner := NewMemVault()
+	ctx := context.Background()
+	inner.Put(ctx, "test/path", []byte("plaintext-value"), Metadata{Type: "api_key"})
 
-	// Inner vault should have plaintext (no encryption).
-	raw, err := inner.Get(ctx, path)
-	if err != nil {
-		t.Fatalf("inner.Get: %v", err)
-	}
-	if !bytes.Equal(raw.Value, value) {
-		t.Fatal("nil KEK should passthrough without encryption")
-	}
-	if raw.Metadata.Labels != nil && raw.Metadata.Labels[EncryptedLabel] == "true" {
-		t.Fatal("should not set encrypted label when KEK is nil")
-	}
-
-	// Get through UserScopedVault should also return plaintext.
-	got, err := uv.Get(ctx, path)
+	uv := NewUserScopedVault(inner, nil)
+	got, err := uv.Get(ctx, "test/path")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if !bytes.Equal(got.Value, value) {
-		t.Fatal("nil KEK passthrough Get failed")
+	if !bytes.Equal(got.Value, []byte("plaintext-value")) {
+		t.Fatal("nil KEK should passthrough unencrypted Get")
 	}
 }
 
