@@ -8,7 +8,8 @@
 	import { initAuth, isAuthenticated, getUser, logout } from '$lib/auth.svelte.js';
 	import { initPosthog, posthog } from '$lib/posthog.js';
 	import PassphraseModal from '$lib/components/PassphraseModal.svelte';
-	import { sessionExpiresAt } from '$lib/vault.svelte.js';
+	import { sessionExpiresAt, setSessionExpiresAt } from '$lib/vault.svelte.js';
+	import { lockVault } from '$lib/api';
 
 	let { children } = $props();
 	let mounted = $state(false);
@@ -91,6 +92,18 @@
 			<span class="text-xs text-muted-foreground flex items-center gap-1">
 				<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>
 				Vault unlocked ({vaultTimeRemaining})
+				<button
+					class="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer bg-transparent border-0 p-0 ml-1"
+					onclick={async () => {
+						try {
+							await lockVault();
+							setSessionExpiresAt(null);
+							vaultTimeRemaining = '';
+						} catch {}
+					}}
+				>
+					Lock
+				</button>
 			</span>
 		{/if}
 
