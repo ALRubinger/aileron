@@ -11,6 +11,7 @@ import (
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/vault"
 )
 
 // handleCreateDraft creates a draft directly (for programmatic/admin use).
@@ -436,6 +437,8 @@ type slackCredentials struct {
 
 // resolveSlackCredentials looks up the user's connected Slack account and
 // retrieves their bot token and Slack user ID from the vault.
+// If the user has an active KEK session, the vault is wrapped with
+// UserScopedVault for transparent decryption.
 func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) (*slackCredentials, error) {
 	slackProvider := model.ConnectedAccountProviderSlack
 	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
@@ -448,7 +451,8 @@ func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) 
 
 	acct := accounts[0]
 
-	secret, err := s.vault.Get(ctx, acct.VaultPath())
+	vlt := s.userVault(userID)
+	secret, err := vlt.Get(ctx, acct.VaultPath())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get vault token: %w", err)
 	}
@@ -562,6 +566,17 @@ func (s *apiServer) handleIncomingSlackMessage(ctx context.Context, userID strin
 		return
 	}
 
+	// Resolve user's KEK for vault decryption. If locked, skip draft generation.
+	pipeline := s.draftPipeline
+	if kek := s.getUserKEK(userID); kek != nil {
+		pipeline = pipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
+		defer zeroBytes(kek)
+	} else if s.kekSessionCache != nil {
+		s.log.Warn("vault locked for user during draft generation — skipping",
+			"user_id", userID)
+		return
+	}
+
 	// Post immediate "drafting..." indicator so the user
 	// knows Aileron is working while the LLM runs.
 	creds, err := s.resolveSlackCredentials(ctx, userID)
@@ -571,7 +586,7 @@ func (s *apiServer) handleIncomingSlackMessage(ctx context.Context, userID strin
 		s.postDraftingIndicator(ctx, creds, msg.Channel, msg.ID)
 	}
 
-	draftText, err := s.draftPipeline.GenerateDraft(ctx, userID, msg)
+	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("draft generation failed", "user_id", userID, "error", err)
 		return

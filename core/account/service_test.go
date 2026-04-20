@@ -382,12 +382,8 @@ func TestGoogleService_WithVault(t *testing.T) {
 	if svc.vault == v2 {
 		t.Fatal("original service should keep its vault")
 	}
-	// Scoped copy should use v2.
-	if scoped.vault != v2 {
-		t.Fatal("scoped service should use the new vault")
-	}
-	// Should preserve other fields.
-	if scoped.clientID != "id" || scoped.clientSecret != "secret" {
+	// Scoped copy is a ProviderService — verify it preserved credentials.
+	if scoped.ClientID() != "id" || scoped.ClientSecret() != "secret" {
 		t.Fatal("WithVault should preserve client credentials")
 	}
 }

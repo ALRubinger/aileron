@@ -87,6 +87,15 @@ func (p *Pipeline) WithClock(clock func() time.Time) *Pipeline {
 	return &cp
 }
 
+// WithVault returns a copy of the pipeline that uses the given vault for
+// credential retrieval. Used to scope the vault with per-user encryption
+// (e.g. wrapping with UserScopedVault for KEK-based decryption).
+func (p *Pipeline) WithVault(v vault.Vault) *Pipeline {
+	cp := *p
+	cp.vault = v
+	return &cp
+}
+
 // GenerateDraft produces a draft reply using a two-round approach:
 //   Round 1: Research — LLM uses tools to gather context. Output is internal.
 //   Round 2: Ghostwrite — LLM writes the reply using the gathered context.

@@ -190,6 +190,15 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 		return
 	}
 
+	// Fail fast: require passphrase + unlocked vault before starting OAuth flow.
+	if s.kekSessionCache != nil {
+		kek, ok := s.requireKEK(w, r)
+		if !ok {
+			return
+		}
+		zeroBytes(kek)
+	}
+
 	provider := model.ConnectedAccountProvider(providerStr)
 	state := s.newID()
 
@@ -276,6 +285,13 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	// the code for tokens, encrypts them with the user's KEK, and returns
 	// only the ciphertext. The server never sees the plaintext tokens.
 	if s.enclaveClient != nil {
+		// Verify passphrase exists (enclave has escrowed KEK).
+		if s.userKeyMaterials != nil {
+			if _, err := s.userKeyMaterials.Get(r.Context(), userID); err != nil && isNotFound(err) {
+				writeError(w, http.StatusBadRequest, "passphrase_required", "set a vault passphrase before connecting accounts")
+				return
+			}
+		}
 		providerSvc, provErr := s.accountService.ProviderFor(provider)
 		if provErr != nil {
 			writeError(w, http.StatusBadRequest, "invalid_provider", provErr.Error())
@@ -330,13 +346,22 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Direct mode: exchange code on the host.
-	// Note: KEK-based vault encryption requires TEE mode. In direct mode,
-	// credentials are stored unencrypted (or not at all if vault encryption
-	// is required by policy).
-	svc := s.accountService
+	// Direct mode: exchange code on the host, encrypt token with user's KEK.
+	kek, ok := s.requireKEK(w, r)
+	if !ok {
+		return
+	}
+	defer zeroBytes(kek)
 
-	_, err = svc.HandleCallback(r.Context(), provider, account.CallbackRequest{
+	encVault := vault.NewUserScopedVault(s.vault, kek)
+	providerSvc, provErr := s.accountService.ProviderFor(provider)
+	if provErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid_provider", provErr.Error())
+		return
+	}
+	scopedSvc := providerSvc.WithVault(encVault)
+
+	_, err = scopedSvc.HandleCallback(r.Context(), provider, account.CallbackRequest{
 		Code:        params.Code,
 		State:       params.State,
 		RedirectURL: redirectURL,

@@ -19,6 +19,7 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/config"
 	connectorpkg "github.com/ALRubinger/aileron/core/connector"
+	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/notify"
 	"github.com/ALRubinger/aileron/core/policy"
@@ -65,6 +66,7 @@ type apiServer struct {
 	users              store.UserStore        // nil when auth is disabled
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
 	userKeyMaterials   store.UserKeyMaterialStore  // nil when auth is disabled
+	kekSessionCache    *auth.KEKSessionCache       // nil when auth is disabled
 	enclaveClient      enclave.Client             // nil when TEE is disabled
 	enclaveVerifier    enclave.Verifier           // nil when TEE is disabled
 	teeCfg             *config.TEEConfig          // nil when TEE is disabled
@@ -770,12 +772,27 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Direct mode: decrypt credential in-process and execute.
-	// Encrypted credentials require TEE — the server never holds the KEK.
+	// Direct mode: decrypt credential in-process if encrypted.
+	credValue := secret.Value
 	if vault.IsEncrypted(secret.Metadata) {
-		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "encrypted credential execution requires TEE — configure a TEE provider")
-		writeError(w, http.StatusNotImplemented, "tee_required", "encrypted credential execution requires a TEE provider")
-		return
+		var execUserID string
+		if claims := auth.ClaimsFromContext(ctx); claims != nil {
+			execUserID = claims.Subject
+		}
+		kek := s.getUserKEK(execUserID)
+		if kek == nil {
+			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "vault locked — unlock to execute")
+			writeError(w, 423, "vault_locked", "vault is locked — unlock with POST /v1/users/me/passphrase/unlock")
+			return
+		}
+		plaintext, decErr := crypto.Decrypt(secret.Value, kek)
+		zeroBytes(kek)
+		if decErr != nil {
+			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential decryption failed")
+			writeError(w, http.StatusInternalServerError, "decryption_error", "failed to decrypt credential")
+			return
+		}
+		credValue = plaintext
 	}
 
 	result, err := conn.Execute(ctx, connectorpkg.ExecutionRequest{
@@ -785,7 +802,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		Parameters: params,
 		Credential: &connectorpkg.InjectedCredential{
 			Type:  secret.Metadata.Type,
-			Value: secret.Value,
+			Value: credValue,
 		},
 	})
 	if err != nil {

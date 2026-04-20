@@ -86,6 +86,13 @@ func NewSlackService(clientID, clientSecret string, accounts store.ConnectedAcco
 	}
 }
 
+// WithVault returns a shallow copy of the service that uses the given vault.
+func (s *SlackService) WithVault(v vault.Vault) ProviderService {
+	cp := *s
+	cp.vault = v
+	return &cp
+}
+
 // WithEndpoints returns a shallow copy with overridden OAuth endpoints for testing.
 func (s *SlackService) WithEndpoints(authorizeURL, tokenURL string) *SlackService {
 	cp := *s

@@ -13,16 +13,15 @@ import (
 const EncryptedLabel = "encrypted"
 
 // UserScopedVault is a decorator that applies per-user encryption to vault
-// operations. When a KEK is provided, Put encrypts values before storage and
-// Get decrypts them on retrieval. When KEK is nil, operations pass through
-// unchanged (for users who haven't set a passphrase yet).
+// operations. Put always encrypts values before storage (fails if no KEK).
+// Get decrypts encrypted values on retrieval (fails if encrypted and no KEK,
+// passes through unencrypted values for migration reads).
 //
 // Secrets encrypted by this vault are tagged with the metadata label
-// "encrypted": "true" so that downstream consumers (e.g. RunExecution)
-// can detect whether decryption is needed.
+// "encrypted": "true" so that downstream consumers can detect ciphertext.
 type UserScopedVault struct {
 	inner Vault
-	kek   []byte // nil means passthrough (no encryption)
+	kek   []byte // nil means read-only (Get passthrough for migration, Put rejects)
 }
 
 // NewUserScopedVault wraps a vault with optional per-user encryption.
@@ -56,11 +55,11 @@ func (v *UserScopedVault) Get(ctx context.Context, path string) (Secret, error) 
 	return secret, nil
 }
 
-// Put stores a secret. If a KEK is available, the value is encrypted before
-// storage and the metadata is tagged with "encrypted": "true".
+// Put stores a secret encrypted with the user's KEK. Refuses to store
+// plaintext — returns an error if no KEK is available.
 func (v *UserScopedVault) Put(ctx context.Context, path string, value []byte, meta Metadata) error {
 	if v.kek == nil {
-		return v.inner.Put(ctx, path, value, meta)
+		return fmt.Errorf("vault: refusing to store plaintext at %q — no KEK provided", path)
 	}
 
 	ciphertext, err := crypto.Encrypt(value, v.kek)

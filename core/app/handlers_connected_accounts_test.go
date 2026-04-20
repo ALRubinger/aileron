@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/auth"
+	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
@@ -31,6 +34,32 @@ func newConnectedAccountServerWithAuth() *apiServer {
 	srv := newConnectedAccountServer()
 	srv.users = &stubUserStore{}
 	return srv
+}
+
+// newConnectedAccountServerWithVault creates a server with auth, passphrase,
+// and an unlocked vault — required for tests that hit the direct-mode callback.
+// The KEK session is unlocked for userAClaims (usr_a).
+func newConnectedAccountServerWithVault() (*apiServer, []byte) {
+	srv := newConnectedAccountServerWithAuth()
+	srv.userKeyMaterials = mem.NewUserKeyMaterialStore()
+
+	// Set up passphrase for the test user (usr_a).
+	kek := make([]byte, 32)
+	for i := range kek {
+		kek[i] = byte(i + 1)
+	}
+	verification, _ := crypto.Encrypt([]byte("aileron-kek-ok"), kek)
+	srv.userKeyMaterials.Create(context.Background(), model.UserKeyMaterial{
+		UserID:          "usr_a",
+		Salt:            make([]byte, 16),
+		KEKVerification: verification,
+	})
+
+	cache := auth.NewKEKSessionCache(24 * time.Hour)
+	cache.Set("usr_a", kek)
+	srv.kekSessionCache = cache
+
+	return srv, kek
 }
 
 func newGoogleAccountRegistry(accounts store.ConnectedAccountStore, v vault.Vault) *account.Registry {
@@ -203,7 +232,7 @@ func TestDeleteConnectedAccount_WithAccountService(t *testing.T) {
 }
 
 func TestConnectAccountCallback_ValidStateButBadCode(t *testing.T) {
-	srv := newConnectedAccountServerWithAuth()
+	srv, _ := newConnectedAccountServerWithVault()
 	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
 
 	state := "test-state-123"
@@ -426,7 +455,7 @@ func TestConnectAccountCallback_RedirectsToReturnTo(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 
-	srv := newConnectedAccountServerWithAuth()
+	srv, _ := newConnectedAccountServerWithVault()
 	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
 		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
 	reg := account.NewRegistry()
@@ -469,7 +498,7 @@ func TestConnectAccountCallback_DefaultRedirectWhenNoReturnTo(t *testing.T) {
 	}))
 	defer tokenServer.Close()
 
-	srv := newConnectedAccountServerWithAuth()
+	srv, _ := newConnectedAccountServerWithVault()
 	slackSvc := account.NewSlackService("id", "secret", srv.connectedAccounts, srv.vault).
 		WithEndpoints("https://slack.com/oauth/v2/authorize", tokenServer.URL)
 	reg := account.NewRegistry()

@@ -46,6 +46,13 @@ func NewGitHubAccountService(clientID, clientSecret string, accounts store.Conne
 	}
 }
 
+// WithVault returns a shallow copy of the service that uses the given vault.
+func (s *GitHubAccountService) WithVault(v vault.Vault) ProviderService {
+	cp := *s
+	cp.vault = v
+	return &cp
+}
+
 // WithEndpoint returns a shallow copy with an overridden OAuth endpoint (for testing).
 func (s *GitHubAccountService) WithEndpoint(endpoint oauth2.Endpoint) *GitHubAccountService {
 	cp := *s

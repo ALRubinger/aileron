@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
@@ -205,6 +206,17 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.userAuthProviders = userAuthProviderStore
 		server.userKeyMaterials = userKeyMaterialStore
 		server.escrowTTL = authCfg.EscrowTTL()
+
+		// KEK session cache for Phase 2 encrypted-at-rest vault.
+		kekCache := auth.NewKEKSessionCache(authCfg.KEKSessionTTL())
+		server.kekSessionCache = kekCache
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				kekCache.EvictExpired()
+			}
+		}()
 
 		// Switch to Postgres-backed stores and vault now that the database is available.
 		pgConnectedAccountStore := postgres.NewConnectedAccountStore(db)
