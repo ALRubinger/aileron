@@ -54,7 +54,8 @@ export const navigation: NavItem[] = [
       { label: 'Google Integration', href: '/getting-started/google-integration' },
       { label: 'Slack Cloud Integration', href: '/getting-started/slack-cloud-integration' },
       { label: 'GitHub Integration', href: '/getting-started/github-integration' },
-      { label: 'Discord Integration', href: '/getting-started/discord-integration' }
+      { label: 'Discord Integration', href: '/getting-started/discord-integration' },
+      { label: 'Zero-Knowledge Enclave', href: '/getting-started/zero-knowledge-enclave' }
     ]
   },
   {
