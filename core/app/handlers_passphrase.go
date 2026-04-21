@@ -240,6 +240,18 @@ func (s *apiServer) GetVaultStatus(w http.ResponseWriter, r *http.Request) {
 	expiresAt := s.kekSessionCache.ExpiresAt(userID)
 	locked := expiresAt == nil
 
+	// In TEE mode, the enclave holds the KEK — check for an active TEE
+	// session instead of the server-side cache.
+	if locked && s.teeState != nil {
+		s.teeState.mu.Lock()
+		teeExpiry, hasTeeSession := s.teeState.userSessions[userID]
+		s.teeState.mu.Unlock()
+		if hasTeeSession && time.Now().Before(teeExpiry) {
+			locked = false
+			expiresAt = &teeExpiry
+		}
+	}
+
 	writeJSON(w, http.StatusOK, api.VaultStatusResponse{
 		Locked:        locked,
 		HasPassphrase: hasPassphrase,
