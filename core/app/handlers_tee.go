@@ -20,14 +20,14 @@ import (
 
 const jwksCacheTTL = 1 * time.Hour
 
-// confidentialSpaceDiscoveryURL is the OIDC discovery endpoint for Google
-// Confidential Space attestation tokens. It is a var (not const) so that
-// tests can override it with a local httptest server.
-var confidentialSpaceDiscoveryURL = "https://confidentialcomputing.googleapis.com/.well-known/openid-configuration"
+// googleDiscoveryURL is the OIDC discovery endpoint for Google account
+// tokens (which is what Confidential Space attestation tokens are issued
+// under). It is a var (not const) so that tests can override it.
+var googleDiscoveryURL = "https://accounts.google.com/.well-known/openid-configuration"
 
-// setConfidentialSpaceDiscoveryURL overrides the discovery URL (for testing).
-func setConfidentialSpaceDiscoveryURL(url string) {
-	confidentialSpaceDiscoveryURL = url
+// setGoogleDiscoveryURL overrides the discovery URL (for testing).
+func setGoogleDiscoveryURL(url string) {
+	googleDiscoveryURL = url
 }
 
 // teeState tracks attestation and session state for the host-side TEE flow.
@@ -130,7 +130,7 @@ func (s *apiServer) GetTeeJwks(w http.ResponseWriter, r *http.Request) {
 // fetchJWKSURL retrieves the jwks_uri from the Confidential Space OIDC
 // discovery document.
 func (s *apiServer) fetchJWKSURL(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, confidentialSpaceDiscoveryURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, googleDiscoveryURL, nil)
 	if err != nil {
 		return "", err
 	}

@@ -64,9 +64,9 @@ func TestGetTeeJwks_FetchesAndCaches(t *testing.T) {
 	defer discoveryServer.Close()
 
 	// Temporarily override the discovery URL.
-	origURL := confidentialSpaceDiscoveryURL
-	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
-	defer setConfidentialSpaceDiscoveryURL(origURL)
+	origURL := googleDiscoveryURL
+	setGoogleDiscoveryURL(discoveryServer.URL)
+	defer setGoogleDiscoveryURL(origURL)
 
 	s := &apiServer{
 		log:      slog.Default(),
@@ -111,9 +111,9 @@ func TestGetTeeJwks_UpstreamFailure(t *testing.T) {
 	}))
 	defer discoveryServer.Close()
 
-	origURL := confidentialSpaceDiscoveryURL
-	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
-	defer setConfidentialSpaceDiscoveryURL(origURL)
+	origURL := googleDiscoveryURL
+	setGoogleDiscoveryURL(discoveryServer.URL)
+	defer setGoogleDiscoveryURL(origURL)
 
 	s := &apiServer{
 		log:      slog.Default(),
@@ -142,9 +142,9 @@ func TestGetTeeJwks_JwksEndpointFailure(t *testing.T) {
 	}))
 	defer discoveryServer.Close()
 
-	origURL := confidentialSpaceDiscoveryURL
-	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
-	defer setConfidentialSpaceDiscoveryURL(origURL)
+	origURL := googleDiscoveryURL
+	setGoogleDiscoveryURL(discoveryServer.URL)
+	defer setGoogleDiscoveryURL(origURL)
 
 	s := &apiServer{
 		log:      slog.Default(),
@@ -168,9 +168,9 @@ func TestGetTeeJwks_DiscoveryMissingJwksUri(t *testing.T) {
 	}))
 	defer discoveryServer.Close()
 
-	origURL := confidentialSpaceDiscoveryURL
-	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
-	defer setConfidentialSpaceDiscoveryURL(origURL)
+	origURL := googleDiscoveryURL
+	setGoogleDiscoveryURL(discoveryServer.URL)
+	defer setGoogleDiscoveryURL(origURL)
 
 	s := &apiServer{
 		log:      slog.Default(),
@@ -194,9 +194,9 @@ func TestGetTeeJwks_DiscoveryInvalidJSON(t *testing.T) {
 	}))
 	defer discoveryServer.Close()
 
-	origURL := confidentialSpaceDiscoveryURL
-	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
-	defer setConfidentialSpaceDiscoveryURL(origURL)
+	origURL := googleDiscoveryURL
+	setGoogleDiscoveryURL(discoveryServer.URL)
+	defer setGoogleDiscoveryURL(origURL)
 
 	s := &apiServer{
 		log:      slog.Default(),
@@ -226,9 +226,9 @@ func TestGetTeeJwks_NoAuth(t *testing.T) {
 	}))
 	defer discoveryServer.Close()
 
-	origURL := confidentialSpaceDiscoveryURL
-	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
-	defer setConfidentialSpaceDiscoveryURL(origURL)
+	origURL := googleDiscoveryURL
+	setGoogleDiscoveryURL(discoveryServer.URL)
+	defer setGoogleDiscoveryURL(origURL)
 
 	s := &apiServer{
 		log:      slog.Default(),
