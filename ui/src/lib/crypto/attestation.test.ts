@@ -175,6 +175,27 @@ describe('verifyAttestation', () => {
 		});
 	});
 
+	it('throws on unsupported algorithm', async () => {
+		vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+			new Response(JSON.stringify({ keys: [{ kty: 'OKP', kid: 'ed-key' }] }), {
+				status: 200,
+				headers: { 'Content-Type': 'application/json' }
+			})
+		);
+
+		const claims = {
+			iss: 'https://confidentialcomputing.googleapis.com',
+			exp: Math.floor(Date.now() / 1000) + 3600
+		};
+		const header = base64UrlEncodeString(JSON.stringify({ alg: 'EdDSA', kid: 'ed-key' }));
+		const payload = base64UrlEncodeString(JSON.stringify(claims));
+		const token = `${header}.${payload}.fake-sig`;
+
+		await expect(verifyAttestation(token, enclavePublicKey, 'aud')).rejects.toThrow(
+			'Unsupported algorithm'
+		);
+	});
+
 	it('throws when JWKS fetch fails', async () => {
 		vi.spyOn(globalThis, 'fetch').mockResolvedValue(
 			new Response('Internal Server Error', { status: 500 })

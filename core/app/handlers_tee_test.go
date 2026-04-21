@@ -129,6 +129,89 @@ func TestGetTeeJwks_UpstreamFailure(t *testing.T) {
 	}
 }
 
+func TestGetTeeJwks_JwksEndpointFailure(t *testing.T) {
+	// Discovery succeeds but JWKS endpoint returns an error.
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer jwksServer.Close()
+
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"jwks_uri": jwksServer.URL})
+	}))
+	defer discoveryServer.Close()
+
+	origURL := confidentialSpaceDiscoveryURL
+	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
+	defer setConfidentialSpaceDiscoveryURL(origURL)
+
+	s := &apiServer{
+		log:      slog.Default(),
+		teeState: newTeeState(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	s.GetTeeJwks(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetTeeJwks_DiscoveryMissingJwksUri(t *testing.T) {
+	// Discovery returns valid JSON but no jwks_uri field.
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"issuer": "https://example.com"})
+	}))
+	defer discoveryServer.Close()
+
+	origURL := confidentialSpaceDiscoveryURL
+	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
+	defer setConfidentialSpaceDiscoveryURL(origURL)
+
+	s := &apiServer{
+		log:      slog.Default(),
+		teeState: newTeeState(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	s.GetTeeJwks(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetTeeJwks_DiscoveryInvalidJSON(t *testing.T) {
+	// Discovery returns invalid JSON.
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not json"))
+	}))
+	defer discoveryServer.Close()
+
+	origURL := confidentialSpaceDiscoveryURL
+	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
+	defer setConfidentialSpaceDiscoveryURL(origURL)
+
+	s := &apiServer{
+		log:      slog.Default(),
+		teeState: newTeeState(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	s.GetTeeJwks(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestGetTeeJwks_NoAuth(t *testing.T) {
 	// The JWKS endpoint must be accessible without authentication.
 	jwksBody := `{"keys":[]}`
