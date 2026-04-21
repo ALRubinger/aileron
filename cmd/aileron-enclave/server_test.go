@@ -703,6 +703,76 @@ func TestOAuthExchangeNoRefreshToken(t *testing.T) {
 	}
 }
 
+func TestOAuthExchangeSlackNestedUserToken(t *testing.T) {
+	// Slack oauth.v2.access returns the user token nested under authed_user,
+	// not at the top level. The enclave must extract the user token.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":          true,
+			"token_type":  "bot",
+			"bot_user_id": "U_BOT",
+			"authed_user": map[string]string{
+				"id":           "U_USER",
+				"access_token": "xoxp-user-token",
+				"scope":        "channels:history,channels:read",
+				"token_type":   "user",
+			},
+			"team": map[string]string{
+				"id":   "T001",
+				"name": "Test Workspace",
+			},
+		})
+	}))
+	defer tokenServer.Close()
+
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	resp := postJSON(t, server, "/oauth/exchange", enclave.OAuthExchangeRequest{
+		UserID:        "user-1",
+		Provider:      "slack",
+		Code:          "auth-code",
+		RedirectURI:   "http://localhost/cb",
+		ClientID:      "cid",
+		ClientSecret:  "csec",
+		TokenEndpoint: tokenServer.URL,
+	})
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	result := decodeResp[enclave.OAuthExchangeResponse](t, resp)
+	if result.TokenType != "user" {
+		t.Fatalf("expected token_type 'user', got %q", result.TokenType)
+	}
+
+	// Decrypt and verify the stored token is the normalized user token.
+	tokenJSON, err := crypto.Decrypt(result.EncryptedToken, userKEK)
+	if err != nil {
+		t.Fatalf("decrypting token: %v", err)
+	}
+	var tokenData map[string]string
+	if err := json.Unmarshal(tokenJSON, &tokenData); err != nil {
+		t.Fatalf("unmarshaling token: %v", err)
+	}
+	if tokenData["access_token"] != "xoxp-user-token" {
+		t.Fatalf("expected xoxp-user-token, got %q", tokenData["access_token"])
+	}
+	if tokenData["user_id"] != "U_USER" {
+		t.Fatalf("expected U_USER, got %q", tokenData["user_id"])
+	}
+	if tokenData["team_id"] != "T001" {
+		t.Fatalf("expected T001, got %q", tokenData["team_id"])
+	}
+}
+
 func TestOAuthExchangeAcceptJSON(t *testing.T) {
 	// GitHub-like provider: returns JSON only when Accept header is set.
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

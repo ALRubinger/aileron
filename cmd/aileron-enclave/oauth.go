@@ -50,16 +50,51 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tok
 		AccessToken  string `json:"access_token"`
 		TokenType    string `json:"token_type"`
 		RefreshToken string `json:"refresh_token"`
+		// Slack-specific: user token is nested under authed_user.
+		AuthedUser struct {
+			ID          string `json:"id"`
+			AccessToken string `json:"access_token"`
+			Scope       string `json:"scope"`
+			TokenType   string `json:"token_type"`
+		} `json:"authed_user"`
+		Team struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"team"`
 	}
 	if err := json.Unmarshal(body, &tokenData); err != nil {
 		return nil, "", "", fmt.Errorf("parsing token response: %w", err)
 	}
 
-	if tokenData.AccessToken == "" {
+	accessToken = tokenData.AccessToken
+	tokenType = tokenData.TokenType
+	storedJSON := body
+
+	// Slack's oauth.v2.access nests the user token under authed_user.
+	// Normalize to store only the user token fields, matching the direct
+	// (non-TEE) code path in SlackService.HandleCallback.
+	if req.Provider == "slack" && tokenData.AuthedUser.AccessToken != "" {
+		accessToken = tokenData.AuthedUser.AccessToken
+		tokenType = tokenData.AuthedUser.TokenType
+		normalized, err := json.Marshal(map[string]string{
+			"access_token": tokenData.AuthedUser.AccessToken,
+			"token_type":   tokenData.AuthedUser.TokenType,
+			"scope":        tokenData.AuthedUser.Scope,
+			"team_id":      tokenData.Team.ID,
+			"team_name":    tokenData.Team.Name,
+			"user_id":      tokenData.AuthedUser.ID,
+		})
+		if err != nil {
+			return nil, "", "", fmt.Errorf("marshalling normalized token: %w", err)
+		}
+		storedJSON = normalized
+	}
+
+	if accessToken == "" {
 		return nil, "", "", fmt.Errorf("no access token returned")
 	}
 
-	return body, tokenData.AccessToken, tokenData.TokenType, nil
+	return storedJSON, accessToken, tokenType, nil
 }
 
 // doFetchEmail retrieves the user's email from the userinfo endpoint.
