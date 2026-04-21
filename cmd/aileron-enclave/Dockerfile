@@ -10,6 +10,15 @@ COPY cmd/aileron-enclave/ cmd/aileron-enclave/
 WORKDIR /build/cmd/aileron-enclave
 RUN CGO_ENABLED=0 go build -o /aileron-enclave .
 
-FROM gcr.io/confidential-space-images/confidential-space:latest
+# Production: use Confidential Space base image (requires GCP auth to pull).
+# Build with: docker build --target production -f cmd/aileron-enclave/Dockerfile .
+FROM gcr.io/confidential-space-images/confidential-space:latest AS production
+COPY --from=builder /aileron-enclave /aileron-enclave
+ENTRYPOINT ["/aileron-enclave"]
+
+# Local/CI: minimal alpine image (no GCP auth needed).
+# This is the default target used by docker-compose and CI.
+FROM alpine:3.21 AS local
+RUN apk add --no-cache ca-certificates
 COPY --from=builder /aileron-enclave /aileron-enclave
 ENTRYPOINT ["/aileron-enclave"]

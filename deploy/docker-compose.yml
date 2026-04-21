@@ -21,6 +21,7 @@ services:
     build:
       context: ..
       dockerfile: cmd/aileron-enclave/Dockerfile
+      target: local
     restart: unless-stopped
     environment:
       AILERON_TEE_PROVIDER: "local"
