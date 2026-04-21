@@ -17,9 +17,8 @@ func TestVault_TokenStoredAndRetrievableViaAccountLifecycle(t *testing.T) {
 		"external_user_id": "U_VAULT_FULL",
 		"external_team_id": "T_VAULT_FULL",
 		"token": map[string]string{
-			"access_token":     "xoxp-test-vault-token",
-			"bot_access_token": "xoxb-test-vault-bot",
-			"token_type":       "user",
+			"access_token": "xoxp-test-vault-token",
+			"token_type":   "user",
 		},
 	})
 	defer resp.Body.Close()
@@ -72,8 +71,7 @@ func TestVault_GetViaDraftApprove(t *testing.T) {
 		"external_user_id": "U_VAULT_GET",
 		"external_team_id": "T_VAULT_GET",
 		"token": map[string]string{
-			"access_token":     "xoxp-vault-get-test",
-			"bot_access_token": "xoxb-vault-get-test",
+			"access_token": "xoxp-vault-get-test",
 		},
 	})
 	defer acctResp.Body.Close()
