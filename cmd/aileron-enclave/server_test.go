@@ -661,6 +661,107 @@ func TestOAuthExchangeEndpoint(t *testing.T) {
 	}
 }
 
+func TestOAuthExchangeNoRefreshToken(t *testing.T) {
+	// Slack-like provider: returns access_token but no refresh_token.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"access_token": "xoxu-slack-token",
+			"token_type":   "bearer",
+		})
+	}))
+	defer tokenServer.Close()
+
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	resp := postJSON(t, server, "/oauth/exchange", enclave.OAuthExchangeRequest{
+		UserID:        "user-1",
+		Provider:      "slack",
+		Code:          "auth-code",
+		RedirectURI:   "http://localhost/cb",
+		ClientID:      "cid",
+		ClientSecret:  "csec",
+		TokenEndpoint: tokenServer.URL,
+	})
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	result := decodeResp[enclave.OAuthExchangeResponse](t, resp)
+	if result.TokenType != "bearer" {
+		t.Fatalf("expected bearer, got %q", result.TokenType)
+	}
+	if len(result.EncryptedToken) == 0 {
+		t.Fatal("expected non-empty encrypted token")
+	}
+}
+
+func TestOAuthExchangeAcceptJSON(t *testing.T) {
+	// GitHub-like provider: returns JSON only when Accept header is set.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept := r.Header.Get("Accept")
+		if accept != "application/json" {
+			// GitHub returns form-encoded without Accept header.
+			w.Header().Set("Content-Type", "application/x-www-form-urlencoded")
+			w.Write([]byte("access_token=gho_xxx&token_type=bearer"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"access_token": "gho_xxx",
+			"token_type":   "bearer",
+		})
+	}))
+	defer tokenServer.Close()
+
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	resp := postJSON(t, server, "/oauth/exchange", enclave.OAuthExchangeRequest{
+		UserID:        "user-1",
+		Provider:      "github",
+		Code:          "auth-code",
+		RedirectURI:   "http://localhost/cb",
+		ClientID:      "cid",
+		ClientSecret:  "csec",
+		TokenEndpoint: tokenServer.URL,
+	})
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	result := decodeResp[enclave.OAuthExchangeResponse](t, resp)
+	if len(result.EncryptedToken) == 0 {
+		t.Fatal("expected non-empty encrypted token")
+	}
+
+	// Verify decrypted token has the right access_token.
+	tokenJSON, err := crypto.Decrypt(result.EncryptedToken, userKEK)
+	if err != nil {
+		t.Fatalf("decrypting token: %v", err)
+	}
+	var tokenData map[string]string
+	if err := json.Unmarshal(tokenJSON, &tokenData); err != nil {
+		t.Fatalf("unmarshaling token: %v", err)
+	}
+	if tokenData["access_token"] != "gho_xxx" {
+		t.Fatalf("expected gho_xxx, got %q", tokenData["access_token"])
+	}
+}
+
 func TestOAuthExchangeWithoutKEK(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
