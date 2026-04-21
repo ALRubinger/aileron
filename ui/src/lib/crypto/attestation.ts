@@ -1,3 +1,5 @@
+import { PUBLIC_API_BASE } from '$env/static/public';
+
 export interface AttestationResult {
 	verified: boolean;
 	enclavePublicKey: Uint8Array;
@@ -109,11 +111,11 @@ async function verifyConfidentialSpaceJWT(
 }
 
 /**
- * Fetches the JWKS from the server's proxy endpoint (same origin, no CORS
- * issues). The server caches upstream responses for 1 hour.
+ * Fetches the JWKS from the API server's proxy endpoint.
+ * The server caches upstream responses for 1 hour.
  */
 async function fetchJWKS(): Promise<JWKS> {
-	const resp = await fetch('/v1/tee/jwks');
+	const resp = await fetch(`${PUBLIC_API_BASE}/v1/tee/jwks`);
 	if (!resp.ok) {
 		throw new Error(`Failed to fetch JWKS: ${resp.status} ${resp.statusText}`);
 	}
