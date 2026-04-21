@@ -829,6 +829,33 @@ func TestGetVaultStatus_Unlocked(t *testing.T) {
 	}
 }
 
+func TestGetVaultStatus_TEESessionUnlocked(t *testing.T) {
+	// When TEE has an active session, vault should report unlocked even
+	// though the server-side KEK cache is empty.
+	srv := unlockServer()
+	// Don't put KEK in session cache — simulates TEE-only unlock.
+
+	// Set up active TEE session.
+	srv.teeState = newTeeState()
+	srv.teeState.userSessions[testClaims.Subject] = time.Now().Add(1 * time.Hour)
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", testClaims)
+	srv.GetVaultStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp api.VaultStatusResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Locked {
+		t.Error("expected locked=false with active TEE session")
+	}
+	if resp.ExpiresAt == nil {
+		t.Error("expected expires_at from TEE session")
+	}
+}
+
 func TestGetVaultStatus_NoPassphrase(t *testing.T) {
 	srv := passphraseServer()
 	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)

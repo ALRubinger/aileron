@@ -191,7 +191,20 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 	}
 
 	// Fail fast: require passphrase + unlocked vault before starting OAuth flow.
-	if s.kekSessionCache != nil {
+	// In TEE mode, the enclave holds the KEK — skip the server-side cache check
+	// and verify only that a passphrase exists.
+	if s.enclaveClient != nil {
+		userID, _, ok := s.requireAuth(w, r)
+		if !ok {
+			return
+		}
+		if s.userKeyMaterials != nil {
+			if _, err := s.userKeyMaterials.Get(r.Context(), userID); err != nil && isNotFound(err) {
+				writeError(w, http.StatusBadRequest, "passphrase_required", "set a vault passphrase before connecting accounts")
+				return
+			}
+		}
+	} else if s.kekSessionCache != nil {
 		kek, ok := s.requireKEK(w, r)
 		if !ok {
 			return

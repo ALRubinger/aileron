@@ -18,6 +18,8 @@ import (
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/ALRubinger/aileron/enclave"
+	"github.com/ALRubinger/aileron/enclave/local"
 )
 
 func newConnectedAccountServer() *apiServer {
@@ -433,6 +435,30 @@ func TestConnectAccount_VaultLocked(t *testing.T) {
 
 	if w.Code != 423 {
 		t.Fatalf("expected 423 vault_locked, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestConnectAccount_TEEMode_SkipsKEKCache(t *testing.T) {
+	// In TEE mode, ConnectAccount should not require the KEK in the
+	// server-side session cache — the enclave holds the KEK.
+	srv, _ := newConnectedAccountServerWithVault()
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
+	srv.kekSessionCache.Clear("usr_a") // vault "locked" in server cache
+
+	// Enable TEE mode.
+	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
+		return enclave.ExecuteResponse{Status: "succeeded"}, nil
+	}
+	srv.enclaveClient = local.New(executeFn)
+	srv.teeState = newTeeState()
+
+	w := httptest.NewRecorder()
+	r := mcpRequest("GET", "/v1/connect/gmail", "", userAClaims)
+	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
+
+	// Should redirect to Google OAuth, not return 423 vault_locked.
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
