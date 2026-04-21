@@ -79,13 +79,15 @@ func TestInteraction_ApproveDraft(t *testing.T) {
 		DraftBody:   "No, the claims stay the same.",
 	})
 
-	// Seed connected account + encrypted vault token for sending.
+	// Seed connected account + encrypted user token for sending.
 	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
 		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001TEST",
 	})
 	storeEncryptedToken(srv, "connected-accounts/usr_a/slack",
-		[]byte(`{"access_token":"xoxp-test","bot_access_token":"xoxb-test"}`))
+		[]byte(`{"access_token":"xoxp-test"}`))
+	// Workspace-level bot token (installed by admin).
+	srv.vault.Put(ctx, "slack-workspaces/T001TEST/bot-token", []byte("xoxb-test"), vault.Metadata{Type: "slack_bot_token"})
 
 	payload, _ := json.Marshal(map[string]any{
 		"type": "block_actions",

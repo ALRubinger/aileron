@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/account"
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
@@ -437,9 +438,9 @@ type slackCredentials struct {
 }
 
 // resolveSlackCredentials looks up the user's connected Slack account and
-// retrieves their bot token and Slack user ID from the vault.
-// If the user has an active KEK session, the vault is wrapped with
-// UserScopedVault for transparent decryption.
+// retrieves the workspace bot token and the user's Slack user ID.
+// The bot token is stored at the workspace level (keyed by team_id),
+// not per-user — it is installed once by a workspace admin.
 func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) (*slackCredentials, error) {
 	slackProvider := model.ConnectedAccountProviderSlack
 	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
@@ -452,25 +453,25 @@ func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) 
 
 	acct := accounts[0]
 
-	vlt := s.userVault(userID)
-	secret, err := vlt.Get(ctx, acct.VaultPath())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get vault token: %w", err)
-	}
-
-	var tokenData map[string]string
-	if err := json.Unmarshal(secret.Value, &tokenData); err != nil {
-		return nil, fmt.Errorf("failed to parse token: %w", err)
-	}
-
-	botToken := tokenData["bot_access_token"]
-	if botToken == "" {
-		return nil, fmt.Errorf("no bot token — Slack app needs chat:write bot scope")
-	}
-
 	slackUserID := acct.ExternalUserID
 	if slackUserID == "" {
 		return nil, fmt.Errorf("no slack user ID on connected account")
+	}
+
+	teamID := acct.ExternalTeamID
+	if teamID == "" {
+		return nil, fmt.Errorf("no team ID on connected account for user %s", userID)
+	}
+
+	// Look up the workspace-level bot token (installed by admin, not per-user).
+	botSecret, err := s.vault.Get(ctx, account.SlackBotTokenVaultPath(teamID))
+	if err != nil {
+		return nil, fmt.Errorf("no bot token for workspace %s — an admin must install the Slack app first", teamID)
+	}
+
+	botToken := string(botSecret.Value)
+	if botToken == "" {
+		return nil, fmt.Errorf("empty bot token for workspace %s", teamID)
 	}
 
 	return &slackCredentials{BotToken: botToken, SlackUserID: slackUserID}, nil
