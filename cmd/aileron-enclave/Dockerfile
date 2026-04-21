@@ -4,6 +4,8 @@ COPY go.work go.work.sum ./
 COPY cmd/aileron/go.mod cmd/aileron/go.mod
 COPY cmd/aileron-sh/go.mod cmd/aileron-sh/go.mod
 COPY cmd/aileron-mcp/go.mod cmd/aileron-mcp/go.mod
+COPY sdk/go/go.mod sdk/go/go.mod
+COPY test/integration/go.mod test/integration/go.mod
 COPY enclave/ enclave/
 COPY core/ core/
 COPY cmd/aileron-enclave/ cmd/aileron-enclave/
