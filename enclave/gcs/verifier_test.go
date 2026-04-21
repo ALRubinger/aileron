@@ -79,7 +79,7 @@ func TestVerifyValidToken(t *testing.T) {
 	nonceB64 := base64.RawURLEncoding.EncodeToString(nonce)
 
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":          "https://confidentialcomputing.googleapis.com",
+		"iss":          "https://accounts.google.com",
 		"exp":          time.Now().Add(time.Hour).Unix(),
 		"iat":          time.Now().Unix(),
 		"eat_nonce":    []string{nonceB64},
@@ -113,7 +113,7 @@ func TestVerifyExpiredToken(t *testing.T) {
 
 	nonce := []byte("nonce")
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":       "https://confidentialcomputing.googleapis.com",
+		"iss":       "https://accounts.google.com",
 		"exp":       time.Now().Add(-time.Hour).Unix(),
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
@@ -152,7 +152,7 @@ func TestVerifyNonceMismatch(t *testing.T) {
 	defer server.Close()
 
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":       "https://confidentialcomputing.googleapis.com",
+		"iss":       "https://accounts.google.com",
 		"exp":       time.Now().Add(time.Hour).Unix(),
 		"eat_nonce": []string{"wrong-nonce"},
 	})
@@ -172,7 +172,7 @@ func TestVerifyImageDigestMismatch(t *testing.T) {
 
 	nonce := []byte("nonce")
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":          "https://confidentialcomputing.googleapis.com",
+		"iss":          "https://accounts.google.com",
 		"exp":          time.Now().Add(time.Hour).Unix(),
 		"eat_nonce":    []string{base64.RawURLEncoding.EncodeToString(nonce)},
 		"image_digest": "sha256:wrong",
@@ -205,7 +205,7 @@ func TestVerifyProjectIDMismatch(t *testing.T) {
 
 	nonce := []byte("nonce")
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":          "https://confidentialcomputing.googleapis.com",
+		"iss":          "https://accounts.google.com",
 		"exp":          time.Now().Add(time.Hour).Unix(),
 		"eat_nonce":    []string{base64.RawURLEncoding.EncodeToString(nonce)},
 		"image_digest": "sha256:abc",
@@ -230,7 +230,7 @@ func TestVerifyKeyNotFound(t *testing.T) {
 	nonce := []byte("nonce")
 	// Token uses kid "other-key" which doesn't exist in JWKS.
 	token := buildTestJWT(t, key, "other-key", map[string]any{
-		"iss":       "https://confidentialcomputing.googleapis.com",
+		"iss":       "https://accounts.google.com",
 		"exp":       time.Now().Add(time.Hour).Unix(),
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
@@ -257,7 +257,7 @@ func TestVerifyWithNowFunc(t *testing.T) {
 
 	nonce := []byte("nonce")
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":       "https://confidentialcomputing.googleapis.com",
+		"iss":       "https://accounts.google.com",
 		"exp":       time.Now().Add(time.Hour).Unix(),
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
@@ -281,7 +281,7 @@ func TestVerifyWithCustomHTTPClient(t *testing.T) {
 
 	nonce := []byte("nonce")
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":       "https://confidentialcomputing.googleapis.com",
+		"iss":       "https://accounts.google.com",
 		"exp":       time.Now().Add(time.Hour).Unix(),
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
@@ -333,7 +333,7 @@ func TestVerifyES256Token(t *testing.T) {
 	// Build ES256 JWT.
 	header, _ := json.Marshal(map[string]string{"alg": "ES256", "kid": kid})
 	claims, _ := json.Marshal(map[string]any{
-		"iss":       "https://confidentialcomputing.googleapis.com",
+		"iss":       "https://accounts.google.com",
 		"exp":       time.Now().Add(time.Hour).Unix(),
 		"eat_nonce": []string{nonceB64},
 	})
@@ -391,7 +391,7 @@ func TestVerifyWrongSignature(t *testing.T) {
 
 	nonce := []byte("nonce")
 	token := buildTestJWT(t, key1, kid, map[string]any{
-		"iss":       "https://confidentialcomputing.googleapis.com",
+		"iss":       "https://accounts.google.com",
 		"exp":       time.Now().Add(time.Hour).Unix(),
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})

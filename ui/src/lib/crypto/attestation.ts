@@ -25,7 +25,7 @@ export async function verifyAttestation(
 
 // --- JWT verification internals ---
 
-const EXPECTED_ISSUER = 'https://confidentialcomputing.googleapis.com';
+const EXPECTED_ISSUER = 'https://accounts.google.com';
 
 interface JWTClaims {
 	iss: string;

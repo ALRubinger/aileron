@@ -101,7 +101,7 @@ func (v *Verifier) Verify(ctx context.Context, token string, nonce []byte) (encl
 	}
 
 	// Validate issuer.
-	if claims.Iss != "https://confidentialcomputing.googleapis.com" {
+	if claims.Iss != "https://accounts.google.com" {
 		return enclave.AttestationClaims{}, fmt.Errorf("gcs: unexpected issuer %q", claims.Iss)
 	}
 
