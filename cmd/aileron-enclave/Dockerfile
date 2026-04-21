@@ -17,4 +17,7 @@ RUN CGO_ENABLED=0 go build -o /aileron-enclave .
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /aileron-enclave /aileron-enclave
+ENV AILERON_TEE_PROVIDER=confidential-space
+ENV AILERON_ENCLAVE_PORT=8443
+EXPOSE 8443
 ENTRYPOINT ["/aileron-enclave"]
