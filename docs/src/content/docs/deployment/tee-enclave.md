@@ -81,7 +81,9 @@ Then build and push:
 ```sh
 export REGISTRY=$REGION-docker.pkg.dev/$GCP_PROJECT/aileron-enclave
 
-docker build -f cmd/aileron-enclave/Dockerfile -t $REGISTRY/aileron-enclave:latest .
+# --platform linux/amd64 is required when building on Apple Silicon (ARM64).
+# Confidential Space VMs run on AMD64.
+docker build --platform linux/amd64 -f cmd/aileron-enclave/Dockerfile -t $REGISTRY/aileron-enclave:latest .
 docker push $REGISTRY/aileron-enclave:latest
 ```
 
@@ -118,20 +120,21 @@ gcloud projects add-iam-policy-binding $GCP_PROJECT \
   --role="roles/confidentialcomputing.workloadUser"
 ```
 
-### 5. Create the Confidential Space VM
+### 5. Reserve a static IP for the enclave
+
+Reserve a static IP before creating the VM so it's assigned at boot and survives reboots:
 
 ```sh
-gcloud compute instances create aileron-enclave \
+gcloud compute addresses create aileron-enclave-ip \
+  --region=$REGION \
+  --project=$GCP_PROJECT
+
+export ENCLAVE_IP=$(gcloud compute addresses describe aileron-enclave-ip \
+  --region=$REGION \
   --project=$GCP_PROJECT \
-  --zone=$REGION-a \
-  --machine-type=n2d-standard-2 \
-  --confidential-compute-type=SEV \
-  --image-family=confidential-space \
-  --image-project=confidential-space-images \
-  --service-account=$ENCLAVE_SA \
-  --scopes=cloud-platform \
-  --metadata="tee-image-reference=$REGISTRY/aileron-enclave:latest,tee-container-log-redirect=true,tee-env-AILERON_TEE_PROVIDER=confidential-space,tee-env-AILERON_ENCLAVE_PORT=8443" \
-  --tags=aileron-enclave
+  --format='value(address)')
+
+echo "Enclave IP: $ENCLAVE_IP"
 ```
 
 ### 6. Configure firewall rules
@@ -151,41 +154,25 @@ Replace `<SERVER_EGRESS_IP>` with your Aileron server's static egress IP.
 
 > **Railway:** Enable static IPs on the server service (requires Pro plan). Find the IP in Railway dashboard → service → Settings → Networking → Static IPs.
 
-### 7. Assign a static external IP
-
-Reserve a static IP so the enclave address survives reboots:
+### 7. Create the Confidential Space VM
 
 ```sh
-gcloud compute addresses create aileron-enclave-ip \
-  --region=$REGION \
-  --project=$GCP_PROJECT
-
-export ENCLAVE_IP=$(gcloud compute addresses describe aileron-enclave-ip \
-  --region=$REGION \
+gcloud compute instances create aileron-enclave \
   --project=$GCP_PROJECT \
-  --format='value(address)')
-
-echo "Enclave IP: $ENCLAVE_IP"
+  --zone=$REGION-a \
+  --machine-type=n2d-standard-2 \
+  --confidential-compute-type=SEV \
+  --shielded-secure-boot \
+  --image-family=confidential-space \
+  --image-project=confidential-space-images \
+  --service-account=$ENCLAVE_SA \
+  --scopes=cloud-platform \
+  --metadata="tee-image-reference=$REGISTRY/aileron-enclave:latest" \
+  --tags=aileron-enclave \
+  --address=$ENCLAVE_IP
 ```
 
-Assign it to the VM:
-
-```sh
-# Remove the existing (empty) access config
-gcloud compute instances delete-access-config aileron-enclave \
-  --zone=$REGION-a \
-  --access-config-name="external-nat" \
-  --project=$GCP_PROJECT
-
-# Assign the static IP
-gcloud compute instances add-access-config aileron-enclave \
-  --zone=$REGION-a \
-  --access-config-name="external-nat" \
-  --address=$ENCLAVE_IP \
-  --project=$GCP_PROJECT
-```
-
-The `$ENCLAVE_IP` from this step is what you'll use for `AILERON_ENCLAVE_URL` in the next step. If your server runs **inside the same GCP VPC**, you can use the internal IP instead for lower latency and no egress charges:
+If your server runs **inside the same GCP VPC**, you can use the internal IP for `AILERON_ENCLAVE_URL` instead (lower latency, no egress charges):
 
 ```sh
 gcloud compute instances describe aileron-enclave \
