@@ -204,7 +204,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		sessionStore := postgres.NewSessionStore(db)
 		verificationCodeStore := postgres.NewVerificationCodeStore(db)
 
-		userKeyMaterialStore := mem.NewUserKeyMaterialStore()
+		userKeyMaterialStore := postgres.NewUserKeyMaterialStore(db)
 
 		// Wire stores into apiServer for /me endpoints.
 		server.enterprises = enterpriseStore
