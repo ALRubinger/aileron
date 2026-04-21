@@ -26,7 +26,7 @@ export async function verifyAttestation(
 // --- JWT verification internals ---
 
 const EXPECTED_ISSUER = 'https://confidentialcomputing.googleapis.com';
-const DISCOVERY_URL = 'https://accounts.google.com/.well-known/openid-configuration';
+const DISCOVERY_URL = 'https://confidentialcomputing.googleapis.com/.well-known/openid-configuration';
 
 interface JWTHeader {
 	alg: string;
