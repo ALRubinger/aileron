@@ -4,7 +4,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,7 +23,6 @@ import (
 	googleauth "github.com/ALRubinger/aileron/core/auth/google"
 	"github.com/ALRubinger/aileron/core/config"
 	"github.com/ALRubinger/aileron/core/connector"
-	"github.com/ALRubinger/aileron/core/crypto"
 	googlecalendar "github.com/ALRubinger/aileron/core/connector/calendar/google"
 	"github.com/ALRubinger/aileron/core/connector/git/github"
 	"github.com/ALRubinger/aileron/core/connector/payments/stripe"
@@ -70,16 +68,10 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// database is available. Even in local/dev mode, all secrets are encrypted
 	// at rest with an auto-generated KEK. This ensures a single code path for
 	// encryption — no plaintext bypass.
-	localKEK, err := crypto.GenerateRandomKEK()
+	v, err := newLocalEncryptedVault()
 	if err != nil {
-		return nil, fmt.Errorf("generating local vault KEK: %w", err)
+		return nil, err
 	}
-	var v vault.Vault
-	ev, err := vault.NewEncryptedVault(vault.NewMemVault(), localKEK)
-	if err != nil {
-		return nil, fmt.Errorf("creating encrypted vault: %w", err)
-	}
-	v = ev
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{
 			Type: "api_key",
