@@ -15,15 +15,34 @@ Google Confidential Space runs containers inside AMD SEV-SNP confidential VMs wh
 
 ### Prerequisites
 
-- A GCP project with billing enabled
-- `gcloud` CLI installed and authenticated
+- `gcloud` CLI installed and authenticated with `gcloud init`
 - Docker (for building and pushing the enclave image)
-- A container registry (Artifact Registry or Container Registry)
+
+### 0. Enable billing on the GCP project
+
+Compute Engine, Artifact Registry, and Confidential Computing APIs all require an active billing account. If you created a new project via `gcloud init`, billing is not enabled by default.
+
+1. Go to [console.cloud.google.com/billing](https://console.cloud.google.com/billing)
+2. Select your project — you'll see **"Set the billing account for project"**
+3. Choose or create a billing account and save
+
+Or via CLI:
+
+```sh
+# List available billing accounts
+gcloud billing accounts list
+
+# Link your project to a billing account
+gcloud billing projects link $GCP_PROJECT \
+  --billing-account=<BILLING_ACCOUNT_ID>
+```
 
 ### 1. Enable required GCP APIs
 
 ```sh
-export GCP_PROJECT=your-project-id
+# Uses the default project set by gcloud init.
+# If you skipped gcloud init, set this manually: export GCP_PROJECT=your-project-id
+export GCP_PROJECT=$(gcloud config get-value project)
 
 gcloud services enable \
   compute.googleapis.com \
@@ -34,8 +53,12 @@ gcloud services enable \
 
 ### 2. Create an Artifact Registry repository
 
+We use GCP Artifact Registry (not GitHub Container Registry or Docker Hub) because the Confidential Space VM pulls images natively from Artifact Registry using its service account — no extra auth configuration needed. The attestation token includes the image digest from this registry.
+
+Choose a region close to your Railway deployment. See [available Artifact Registry locations](https://docs.cloud.google.com/artifact-registry/docs/repositories/repo-locations) or run `gcloud artifacts locations list`.
+
 ```sh
-export REGION=us-central1
+export REGION=us-central1  # change to your preferred region
 
 gcloud artifacts repositories create aileron-enclave \
   --repository-format=docker \
@@ -45,12 +68,20 @@ gcloud artifacts repositories create aileron-enclave \
 
 ### 3. Build and push the enclave container image
 
+> These are the manual steps for initial setup. For ongoing deployments, this should be automated in CI on merge to main — see [issue #211](https://github.com/ALRubinger/aileron/issues/211).
+
+Configure Docker to authenticate with Artifact Registry for pushing:
+
+```sh
+gcloud auth configure-docker $REGION-docker.pkg.dev
+```
+
+Then build and push:
+
 ```sh
 export REGISTRY=$REGION-docker.pkg.dev/$GCP_PROJECT/aileron-enclave
 
-# The --target production flag selects the Confidential Space base image.
-# (The default target is "local" which uses alpine for dev/CI.)
-docker build --target production -f cmd/aileron-enclave/Dockerfile -t $REGISTRY/aileron-enclave:latest .
+docker build -f cmd/aileron-enclave/Dockerfile -t $REGISTRY/aileron-enclave:latest .
 docker push $REGISTRY/aileron-enclave:latest
 ```
 
@@ -94,8 +125,7 @@ gcloud compute instances create aileron-enclave \
   --project=$GCP_PROJECT \
   --zone=$REGION-a \
   --machine-type=n2d-standard-2 \
-  --confidential-compute \
-  --min-cpu-platform="AMD Milan" \
+  --confidential-compute-type=SEV \
   --image-family=confidential-space \
   --image-project=confidential-space-images \
   --service-account=$ENCLAVE_SA \
@@ -106,45 +136,80 @@ gcloud compute instances create aileron-enclave \
 
 ### 6. Configure firewall rules
 
+Restrict traffic to only your Aileron server's static egress IP. Do not open port 8443 to `0.0.0.0/0` — the enclave should only accept connections from your server.
+
 ```sh
 gcloud compute firewall-rules create allow-aileron-enclave \
   --project=$GCP_PROJECT \
   --allow=tcp:8443 \
   --target-tags=aileron-enclave \
-  --source-ranges=0.0.0.0/0 \
-  --description="Allow traffic to Aileron enclave"
+  --source-ranges=<SERVER_EGRESS_IP>/32 \
+  --description="Allow traffic to Aileron enclave from server only"
 ```
 
-For production, restrict `--source-ranges` to the IP range of your Aileron server.
+Replace `<SERVER_EGRESS_IP>` with your Aileron server's static egress IP.
 
-### 7. Get the enclave VM's internal IP
+> **Railway:** Enable static IPs on the server service (requires Pro plan). Find the IP in Railway dashboard → service → Settings → Networking → Static IPs.
+
+### 7. Assign a static external IP
+
+Reserve a static IP so the enclave address survives reboots:
 
 ```sh
-export ENCLAVE_IP=$(gcloud compute instances describe aileron-enclave \
-  --zone=$REGION-a \
-  --format='value(networkInterfaces[0].networkIP)' \
-  --project=$GCP_PROJECT)
+gcloud compute addresses create aileron-enclave-ip \
+  --region=$REGION \
+  --project=$GCP_PROJECT
 
-echo "Enclave URL: http://$ENCLAVE_IP:8443"
+export ENCLAVE_IP=$(gcloud compute addresses describe aileron-enclave-ip \
+  --region=$REGION \
+  --project=$GCP_PROJECT \
+  --format='value(address)')
+
+echo "Enclave IP: $ENCLAVE_IP"
 ```
 
-If the Aileron server runs outside the same VPC, use the external IP or set up a load balancer with TLS.
+Assign it to the VM:
+
+```sh
+# Remove the existing (empty) access config
+gcloud compute instances delete-access-config aileron-enclave \
+  --zone=$REGION-a \
+  --access-config-name="external-nat" \
+  --project=$GCP_PROJECT
+
+# Assign the static IP
+gcloud compute instances add-access-config aileron-enclave \
+  --zone=$REGION-a \
+  --access-config-name="external-nat" \
+  --address=$ENCLAVE_IP \
+  --project=$GCP_PROJECT
+```
+
+The `$ENCLAVE_IP` from this step is what you'll use for `AILERON_ENCLAVE_URL` in the next step. If your server runs **inside the same GCP VPC**, you can use the internal IP instead for lower latency and no egress charges:
+
+```sh
+gcloud compute instances describe aileron-enclave \
+  --zone=$REGION-a \
+  --format='value(networkInterfaces[0].networkIP)' \
+  --project=$GCP_PROJECT
+```
 
 ### 8. Configure the Aileron server
 
-Set these environment variables on the Aileron server service:
+Set these environment variables on your Aileron server (wherever it's hosted):
 
 | Variable | Value |
 |----------|-------|
 | `AILERON_TEE_PROVIDER` | `confidential-space` |
-| `AILERON_ENCLAVE_URL` | `http://<ENCLAVE_IP>:8443` (or internal DNS) |
-| `AILERON_ENCLAVE_IMAGE_DIGEST` | The `sha256:...` digest from step 3 |
-| `AILERON_GCP_PROJECT_ID` | Your GCP project ID |
+| `AILERON_ENCLAVE_URL` | `http://$ENCLAVE_IP:8443` (the static IP from step 7) |
+| `AILERON_ENCLAVE_IMAGE_DIGEST` | `$IMAGE_DIGEST` (captured in step 3) |
+| `AILERON_GCP_PROJECT_ID` | `$GCP_PROJECT` |
 
 ### 9. Verify
 
+The enclave is only reachable from the Aileron server (per the firewall rule in step 6), so verify through the server's TEE status endpoint:
+
 ```sh
-curl http://$ENCLAVE_IP:8443/health
 curl https://api.yourdomain.com/v1/tee/status
 ```
 
@@ -153,6 +218,8 @@ Expected response:
 ```json
 {"enabled":true,"provider":"confidential-space","attested":false,"session_active":false}
 ```
+
+`attested` and `session_active` become `true` after a user unlocks their vault.
 
 ## How attestation works
 
@@ -184,19 +251,15 @@ Expected response:
    ```
 5. The server will re-attest against the new image digest on its next attestation request.
 
-## Hybrid topology: Railway + GCP
+## Hybrid topology
 
-The recommended production topology keeps the Aileron server, UI, docs, and Postgres on Railway (preserving per-branch preview deployments and managed infrastructure), with only the enclave running on GCP Confidential Space.
+The enclave runs on GCP Confidential Space while your Aileron server, UI, and database remain on your preferred hosting platform. Only the enclave requires GCP — everything else stays where it is.
 
 ```
 Browser
   │
   ▼
-Railway (app.withaileron.ai)
-  ├─ server (API, auth, draft pipeline)
-  ├─ ui (SvelteKit)
-  ├─ docs (Astro)
-  └─ Postgres
+Your hosting platform (server, UI, database)
         │
         │  HTTPS (attestation, session, execute)
         ▼
@@ -212,33 +275,6 @@ GCP Confidential Space (enclave)
 Google, Slack, GitHub APIs
 ```
 
-### Firewall configuration
-
-Restrict the enclave VM to accept traffic only from Railway's egress IPs:
-
-```sh
-# Get Railway's egress IPs from their docs or support.
-# As of 2026, Railway uses a set of static egress IPs per region.
-
-gcloud compute firewall-rules update allow-aileron-enclave \
-  --project=$GCP_PROJECT \
-  --source-ranges=<RAILWAY_EGRESS_IP_1>/32,<RAILWAY_EGRESS_IP_2>/32 \
-  --allow=tcp:8443
-```
-
-Contact Railway support or check their [networking docs](https://docs.railway.com/reference/networking) for current egress IP ranges.
-
-### Railway server configuration
-
-Set these environment variables on the Railway server service:
-
-| Variable | Value |
-|----------|-------|
-| `AILERON_TEE_PROVIDER` | `confidential-space` |
-| `AILERON_ENCLAVE_URL` | `http://<ENCLAVE_INTERNAL_IP>:8443` |
-| `AILERON_ENCLAVE_IMAGE_DIGEST` | `sha256:...` (from step 3 above) |
-| `AILERON_GCP_PROJECT_ID` | Your GCP project ID |
-
-If the enclave VM is in a different VPC or region than Railway's egress, use the external IP with TLS (terminate at the enclave or use a load balancer).
+> **Railway note:** Railway supports this topology well — enable static IPs on the server service for the firewall rule, set the 4 TEE env vars, and the server connects to the GCP enclave over the public internet. You keep per-branch preview deployments, managed Postgres, and zero-config deploys.
 
 For design rationale, see [ADR-0010: Zero-Knowledge Vault](/adr/0010-zero-knowledge-vault-trust-model), [ADR-0011: TEE Provider SPI](/adr/0011-tee-provider-spi-and-confidential-space), and [ADR-0012: Auto-Escrow & Session Lifetimes](/adr/0012-auto-escrow-and-decoupled-session-lifetimes).
