@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/account"
@@ -98,11 +99,30 @@ func TestSlackService_AuthorizationURL(t *testing.T) {
 	if !contains(result.URL, "state123") {
 		t.Errorf("expected state in URL, got %s", result.URL)
 	}
-	if !contains(result.URL, "chat%3Awrite") || !contains(result.URL, "chat:write") {
-		// URL-encoded or not, the scope should be present
-		if !contains(result.URL, "chat") {
-			t.Errorf("expected user scopes in URL, got %s", result.URL)
-		}
+	if !contains(result.URL, "user_scope=") {
+		t.Errorf("expected user_scope parameter in URL, got %s", result.URL)
+	}
+}
+
+func TestSlackService_AuthorizationURL_NoBotScope(t *testing.T) {
+	// The user OAuth flow must NOT include the scope parameter (bot scopes).
+	// Omitting scope causes Slack to skip the bot install prompt and only
+	// ask for user consent.
+	svc := account.NewSlackService("test-client-id", "secret", mem.NewConnectedAccountStore(), vault.NewMemVault())
+	result, err := svc.AuthorizationURL(context.Background(), model.ConnectedAccountProviderSlack, "state123", "http://localhost/callback")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if contains(result.URL, "scope=") && !contains(result.URL, "user_scope=") {
+		t.Errorf("URL should not contain bare scope= parameter (bot scopes), got %s", result.URL)
+	}
+	// More precise: parse the URL and check there's no "scope" key
+	u, err := url.Parse(result.URL)
+	if err != nil {
+		t.Fatalf("failed to parse URL: %v", err)
+	}
+	if u.Query().Get("scope") != "" {
+		t.Errorf("expected no scope parameter (bot scopes), but found: %s", u.Query().Get("scope"))
 	}
 }
 
@@ -172,6 +192,17 @@ func TestSlackService_HandleCallback_Success(t *testing.T) {
 	}
 	if tokenData["team_id"] != "T001TEAM" {
 		t.Errorf("expected T001TEAM in token data, got %s", tokenData["team_id"])
+	}
+	// Bot token must NOT be stored per-user — it lives at the workspace level.
+	if tokenData["bot_access_token"] != "" {
+		t.Errorf("expected no bot_access_token in per-user token data, got %s", tokenData["bot_access_token"])
+	}
+}
+
+func TestSlackBotTokenVaultPath(t *testing.T) {
+	path := account.SlackBotTokenVaultPath("T001TEAM")
+	if path != "slack-workspaces/T001TEAM/bot-token" {
+		t.Errorf("expected slack-workspaces/T001TEAM/bot-token, got %s", path)
 	}
 }
 
