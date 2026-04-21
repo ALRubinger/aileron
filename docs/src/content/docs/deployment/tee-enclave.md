@@ -68,7 +68,7 @@ gcloud artifacts repositories create aileron-enclave \
 
 ### 3. Build and push the enclave container image
 
-> These are the manual steps for initial setup. For ongoing deployments, this should be automated in CI on merge to main — see [issue #211](https://github.com/ALRubinger/aileron/issues/211).
+> **CI handles this automatically.** The [Enclave Publish](https://github.com/ALRubinger/aileron/actions/workflows/enclave-publish.yml) workflow triggers when enclave-related code is merged to main (or via manual dispatch). It builds the image, pushes it to Artifact Registry, updates `AILERON_ENCLAVE_IMAGE_DIGEST` on Railway, and restarts the Confidential Space VM. The image digest is printed in the workflow run summary. The manual steps below are for initial setup or one-off builds.
 
 Configure Docker to authenticate with Artifact Registry for pushing:
 
@@ -229,15 +229,29 @@ Expected response:
 
 ## Updating the enclave
 
-1. Build and push the new image.
-2. Record the new image digest.
-3. Update `AILERON_ENCLAVE_IMAGE_DIGEST` on the Aileron server.
-4. Restart the Confidential Space VM:
+CI automates the full update cycle when enclave-related code is merged to main:
+
+1. Builds and pushes the new image to Artifact Registry.
+2. Captures the image digest.
+3. Updates `AILERON_ENCLAVE_IMAGE_DIGEST` on Railway via the Railway API.
+4. Restarts the Confidential Space VM (`gcloud compute instances reset`).
+5. The server re-attests against the new image digest on its next attestation request.
+
+You can also trigger the workflow manually from the [Actions tab](https://github.com/ALRubinger/aileron/actions/workflows/enclave-publish.yml) or via CLI:
+
+```sh
+gh workflow run enclave-publish.yml
+```
+
+For manual updates (e.g., without CI), the steps are:
+
+1. Build and push the new image (see step 3 above).
+2. Update `AILERON_ENCLAVE_IMAGE_DIGEST` on the Aileron server.
+3. Restart the Confidential Space VM:
    ```sh
-   gcloud compute instances stop aileron-enclave --zone=$REGION-a --project=$GCP_PROJECT
-   gcloud compute instances start aileron-enclave --zone=$REGION-a --project=$GCP_PROJECT
+   gcloud compute instances reset aileron-enclave --zone=$REGION-a --project=$GCP_PROJECT
    ```
-5. The server will re-attest against the new image digest on its next attestation request.
+4. The server will re-attest against the new image digest on its next attestation request.
 
 ## Hybrid topology
 
