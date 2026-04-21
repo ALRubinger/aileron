@@ -47,9 +47,13 @@ From **Basic Information**, note:
 - **Client Secret** → `SLACK_CLIENT_SECRET`
 - **Signing Secret** → `SLACK_SIGNING_SECRET`
 
-### Install to workspace
+### Install to workspace (admin, once per workspace)
 
-Sidebar → **Install App** → **Install to Workspace**. Authorize the requested scopes.
+A workspace admin installs the bot once. This grants the bot token (`xoxb-...`) used for ephemeral draft previews.
+
+Sidebar → **Install App** → **Install to Workspace**. Authorize the requested bot scopes.
+
+Individual users do **not** need to install the app — they only connect their own account (step 4), which requests user-level scopes without repeating the bot install prompt.
 
 ### Enable public distribution
 
@@ -113,6 +117,8 @@ The server must be running before this step — Slack sends verification challen
 Sidebar → **Install App** → **Reinstall to Workspace** if prompted.
 
 ## 4. Connect your Slack account
+
+Each user connects their own Slack account. This is a user-level OAuth flow — it only asks for user consent (the scopes listed under "User Token Scopes" above). It does **not** repeat the bot installation.
 
 Open in browser (must be logged into Aileron):
 
@@ -214,6 +220,6 @@ User approves → Aileron sends reply as user
 | url_verification fails | Server not running, wrong URL, signing secret mismatch |
 | No events arriving | App not installed, event subscriptions not saved, channel is private |
 | Events arrive but no draft | `ANTHROPIC_API_KEY` not set, check logs for `draft generation failed` |
-| Draft generated but no ephemeral | No bot token (reconnect Slack), bot not in channel, check `ephemeral:` errors |
+| Draft generated but no ephemeral | Bot not installed in workspace (admin must install first), bot not in channel, check `ephemeral:` errors |
 | Buttons don't work | Interactivity not enabled, wrong Request URL |
 | Duplicate key on reconnect | Disconnect first, then reconnect |
