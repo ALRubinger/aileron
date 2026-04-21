@@ -856,6 +856,46 @@ func TestGetVaultStatus_TEESessionUnlocked(t *testing.T) {
 	}
 }
 
+// TestGetVaultStatus_PassphraseSurvivesNewServerInstance verifies that a
+// passphrase set on one apiServer is visible from a second apiServer backed
+// by the same store. This is the contract that was broken when the
+// userKeyMaterialStore used an in-memory store in production wiring —
+// each server restart created a fresh empty store, so has_passphrase was
+// always false after a redeploy.
+func TestGetVaultStatus_PassphraseSurvivesNewServerInstance(t *testing.T) {
+	// Shared backing store — in production this is PostgreSQL.
+	sharedStore := mem.NewUserKeyMaterialStore()
+
+	// Server 1: user sets a passphrase.
+	srv1 := &apiServer{
+		userKeyMaterials: sharedStore,
+		kekSessionCache:  auth.NewKEKSessionCache(24 * time.Hour),
+	}
+	clientSetPassphrase(t, srv1, "correct horse battery staple")
+
+	// Server 2: simulate a restart — new apiServer, same backing store.
+	srv2 := &apiServer{
+		userKeyMaterials: sharedStore,
+		kekSessionCache:  auth.NewKEKSessionCache(24 * time.Hour),
+	}
+
+	w := httptest.NewRecorder()
+	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", testClaims)
+	srv2.GetVaultStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var resp api.VaultStatusResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if !resp.HasPassphrase {
+		t.Error("expected has_passphrase=true after server restart with same backing store")
+	}
+	if !resp.Locked {
+		t.Error("expected locked=true (KEK session cache is fresh)")
+	}
+}
+
 func TestGetVaultStatus_NoPassphrase(t *testing.T) {
 	srv := passphraseServer()
 	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
