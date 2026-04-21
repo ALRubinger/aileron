@@ -3,6 +3,9 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -15,6 +18,18 @@ import (
 	"github.com/ALRubinger/aileron/enclave"
 )
 
+const jwksCacheTTL = 1 * time.Hour
+
+// confidentialSpaceDiscoveryURL is the OIDC discovery endpoint for Google
+// Confidential Space attestation tokens. It is a var (not const) so that
+// tests can override it with a local httptest server.
+var confidentialSpaceDiscoveryURL = "https://confidentialcomputing.googleapis.com/.well-known/openid-configuration"
+
+// setConfidentialSpaceDiscoveryURL overrides the discovery URL (for testing).
+func setConfidentialSpaceDiscoveryURL(url string) {
+	confidentialSpaceDiscoveryURL = url
+}
+
 // teeState tracks attestation and session state for the host-side TEE flow.
 type teeState struct {
 	mu           sync.Mutex
@@ -22,6 +37,10 @@ type teeState struct {
 	nonce        []byte
 	attestResp   enclave.AttestationResponse
 	userSessions map[string]time.Time // userID -> session expiry
+
+	// JWKS cache
+	jwksData      []byte
+	jwksFetchedAt time.Time
 }
 
 func newTeeState() *teeState {
@@ -61,6 +80,103 @@ func (s *apiServer) GetTeeStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *apiServer) GetTeeJwks(w http.ResponseWriter, r *http.Request) {
+	if s.teeState == nil {
+		writeError(w, http.StatusNotImplemented, "tee_disabled", "TEE is not enabled")
+		return
+	}
+
+	s.teeState.mu.Lock()
+	cached := s.teeState.jwksData
+	fresh := time.Since(s.teeState.jwksFetchedAt) < jwksCacheTTL
+	s.teeState.mu.Unlock()
+
+	if fresh && cached != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(cached)
+		return
+	}
+
+	// Fetch JWKS URI from OIDC discovery document.
+	jwksURL, err := s.fetchJWKSURL(r.Context())
+	if err != nil {
+		s.log.Error("failed to fetch JWKS URL from OIDC discovery", "error", err)
+		writeError(w, http.StatusBadGateway, "upstream_error", "failed to fetch OIDC discovery document")
+		return
+	}
+
+	// Fetch the JWKS.
+	jwksData, err := s.fetchJWKS(r.Context(), jwksURL)
+	if err != nil {
+		s.log.Error("failed to fetch JWKS", "error", err)
+		writeError(w, http.StatusBadGateway, "upstream_error", "failed to fetch JWKS from upstream")
+		return
+	}
+
+	// Cache the response.
+	s.teeState.mu.Lock()
+	s.teeState.jwksData = jwksData
+	s.teeState.jwksFetchedAt = time.Now()
+	s.teeState.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(jwksData)
+}
+
+// fetchJWKSURL retrieves the jwks_uri from the Confidential Space OIDC
+// discovery document.
+func (s *apiServer) fetchJWKSURL(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, confidentialSpaceDiscoveryURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetching OIDC discovery: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("OIDC discovery returned status %d", resp.StatusCode)
+	}
+
+	var doc struct {
+		JWKSURI string `json:"jwks_uri"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		return "", fmt.Errorf("parsing OIDC discovery: %w", err)
+	}
+	if doc.JWKSURI == "" {
+		return "", fmt.Errorf("OIDC discovery document missing jwks_uri")
+	}
+	return doc.JWKSURI, nil
+}
+
+// fetchJWKS retrieves the raw JWKS JSON from the given URL.
+func (s *apiServer) fetchJWKS(ctx context.Context, jwksURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching JWKS: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("JWKS endpoint returned status %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading JWKS response: %w", err)
+	}
+	return data, nil
 }
 
 func (s *apiServer) InitiateAttestation(w http.ResponseWriter, r *http.Request) {

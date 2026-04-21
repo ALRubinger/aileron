@@ -1415,6 +1415,26 @@ paths:
         "501":
           description: TEE not enabled
 
+  /v1/tee/jwks:
+    get:
+      tags: [TEE]
+      summary: Get JWKS for attestation token verification
+      description: |
+        Proxies the Google Confidential Space JWKS endpoint so that browser
+        clients can verify attestation JWT signatures without CORS issues.
+        Keys are cached server-side for 1 hour.
+      operationId: getTeeJwks
+      security: []
+      responses:
+        "200":
+          description: JSON Web Key Set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Jwks"
+        "502":
+          description: Failed to fetch JWKS from upstream
+
   /v1/tee/session:
     post:
       tags: [TEE]
@@ -1537,6 +1557,38 @@ components:
             $ref: "#/components/schemas/Error"
 
   schemas:
+    Jwks:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/Jwk"
+
+    Jwk:
+      type: object
+      required: [kty, kid]
+      properties:
+        kty:
+          type: string
+        kid:
+          type: string
+        alg:
+          type: string
+        use:
+          type: string
+        n:
+          type: string
+        e:
+          type: string
+        crv:
+          type: string
+        x:
+          type: string
+        "y":
+          type: string
+
     HealthResponse:
       type: object
       required: [status, service, version, timestamp]

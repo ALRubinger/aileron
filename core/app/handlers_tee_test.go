@@ -32,6 +32,136 @@ func teeJSONRequest(t *testing.T, method, path string, body any) *http.Request {
 	return r
 }
 
+// --- JWKS proxy tests ---
+
+func TestGetTeeJwks_Disabled(t *testing.T) {
+	s := &apiServer{} // teeState is nil
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	s.GetTeeJwks(w, r)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetTeeJwks_FetchesAndCaches(t *testing.T) {
+	// Stand up fake JWKS and discovery endpoints.
+	jwksBody := `{"keys":[{"kty":"RSA","kid":"test-kid","n":"abc","e":"AQAB"}]}`
+	fetchCount := 0
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetchCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(jwksBody))
+	}))
+	defer jwksServer.Close()
+
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"jwks_uri": jwksServer.URL})
+	}))
+	defer discoveryServer.Close()
+
+	// Temporarily override the discovery URL.
+	origURL := confidentialSpaceDiscoveryURL
+	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
+	defer setConfidentialSpaceDiscoveryURL(origURL)
+
+	s := &apiServer{
+		log:      slog.Default(),
+		teeState: newTeeState(),
+	}
+
+	// First request: should fetch from upstream.
+	w1 := httptest.NewRecorder()
+	r1 := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	s.GetTeeJwks(w1, r1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w1.Code, w1.Body.String())
+	}
+	if w1.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("expected application/json, got %q", w1.Header().Get("Content-Type"))
+	}
+	if w1.Body.String() != jwksBody {
+		t.Fatalf("unexpected body: %s", w1.Body.String())
+	}
+	if fetchCount != 1 {
+		t.Fatalf("expected 1 upstream fetch, got %d", fetchCount)
+	}
+
+	// Second request: should serve from cache (no additional fetch).
+	w2 := httptest.NewRecorder()
+	r2 := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	s.GetTeeJwks(w2, r2)
+
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 from cache, got %d", w2.Code)
+	}
+	if fetchCount != 1 {
+		t.Fatalf("expected cache hit (still 1 fetch), got %d fetches", fetchCount)
+	}
+}
+
+func TestGetTeeJwks_UpstreamFailure(t *testing.T) {
+	// Discovery endpoint returns an error.
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer discoveryServer.Close()
+
+	origURL := confidentialSpaceDiscoveryURL
+	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
+	defer setConfidentialSpaceDiscoveryURL(origURL)
+
+	s := &apiServer{
+		log:      slog.Default(),
+		teeState: newTeeState(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	s.GetTeeJwks(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetTeeJwks_NoAuth(t *testing.T) {
+	// The JWKS endpoint must be accessible without authentication.
+	jwksBody := `{"keys":[]}`
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(jwksBody))
+	}))
+	defer jwksServer.Close()
+
+	discoveryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"jwks_uri": jwksServer.URL})
+	}))
+	defer discoveryServer.Close()
+
+	origURL := confidentialSpaceDiscoveryURL
+	setConfidentialSpaceDiscoveryURL(discoveryServer.URL)
+	defer setConfidentialSpaceDiscoveryURL(origURL)
+
+	s := &apiServer{
+		log:      slog.Default(),
+		teeState: newTeeState(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/jwks", nil)
+	// No auth claims — simulating an unauthenticated request.
+	s.GetTeeJwks(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 without auth, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestGetTeeStatusDisabled(t *testing.T) {
 	s := &apiServer{
 		teeCfg: &config.TEEConfig{},

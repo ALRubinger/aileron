@@ -43,6 +43,22 @@ interface JWTClaims {
 	};
 }
 
+interface JWK {
+	kty: string;
+	kid: string;
+	alg?: string;
+	use?: string;
+	n?: string;
+	e?: string;
+	crv?: string;
+	x?: string;
+	y?: string;
+}
+
+interface JWKS {
+	keys: JWK[];
+}
+
 async function verifyConfidentialSpaceJWT(
 	token: string,
 	_expectedAudience: string
@@ -52,12 +68,10 @@ async function verifyConfidentialSpaceJWT(
 		throw new Error('Invalid JWT: expected 3 parts');
 	}
 
+	// Decode header to extract key ID.
+	const header: { alg: string; kid: string } = JSON.parse(base64UrlDecode(parts[0]));
+
 	// Validate claims from the JWT payload.
-	// Note: JWKS signature verification is not possible from the browser
-	// because Google's JWKS endpoints do not set CORS headers. The server
-	// verifies the signature when it communicates with the enclave. The
-	// client validates claims as a defense-in-depth check that the token
-	// came from the expected issuer and is not expired.
 	const claims: JWTClaims = JSON.parse(base64UrlDecode(parts[1]));
 
 	if (claims.iss !== EXPECTED_ISSUER) {
@@ -69,7 +83,66 @@ async function verifyConfidentialSpaceJWT(
 		throw new Error('Token expired');
 	}
 
+	// Verify JWT signature using JWKS fetched from our proxy endpoint.
+	const jwks = await fetchJWKS();
+	const jwk = jwks.keys.find((k) => k.kid === header.kid);
+	if (!jwk) {
+		throw new Error(`Signing key ${header.kid} not found in JWKS`);
+	}
+
+	const signingInput = new TextEncoder().encode(parts[0] + '.' + parts[1]);
+	const signature = base64UrlToBytes(parts[2]);
+	const key = await importKey(jwk, header.alg);
+
+	const algorithm = getVerifyAlgorithm(header.alg);
+	const valid = await crypto.subtle.verify(algorithm, key, signature, signingInput);
+	if (!valid) {
+		throw new Error('JWT signature verification failed');
+	}
+
 	return true;
+}
+
+/**
+ * Fetches the JWKS from the server's proxy endpoint (same origin, no CORS
+ * issues). The server caches upstream responses for 1 hour.
+ */
+async function fetchJWKS(): Promise<JWKS> {
+	const resp = await fetch('/v1/tee/jwks');
+	if (!resp.ok) {
+		throw new Error(`Failed to fetch JWKS: ${resp.status} ${resp.statusText}`);
+	}
+	return resp.json();
+}
+
+/**
+ * Imports a JWK as a CryptoKey for signature verification.
+ */
+async function importKey(jwk: JWK, alg: string): Promise<CryptoKey> {
+	const algorithm = getImportAlgorithm(alg);
+	return crypto.subtle.importKey('jwk', jwk as JsonWebKey, algorithm, false, ['verify']);
+}
+
+function getImportAlgorithm(alg: string): RsaHashedImportParams | EcKeyImportParams {
+	switch (alg) {
+		case 'RS256':
+			return { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+		case 'ES256':
+			return { name: 'ECDSA', namedCurve: 'P-256' };
+		default:
+			throw new Error(`Unsupported algorithm: ${alg}`);
+	}
+}
+
+function getVerifyAlgorithm(alg: string): AlgorithmIdentifier | RsaPssParams | EcdsaParams {
+	switch (alg) {
+		case 'RS256':
+			return { name: 'RSASSA-PKCS1-v1_5' };
+		case 'ES256':
+			return { name: 'ECDSA', hash: 'SHA-256' };
+		default:
+			throw new Error(`Unsupported algorithm: ${alg}`);
+	}
 }
 
 // --- Base64url helpers ---

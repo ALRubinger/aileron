@@ -312,6 +312,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		skipPaths := map[string]bool{
 			"/v1/health":                        true,
 			"/v1/tee/status":                    true,
+			"/v1/tee/jwks":                      true,
 			"/v1/webhooks/slack/events":          true,
 			"/v1/webhooks/slack/interactions":    true,
 		}
