@@ -75,6 +75,30 @@ func TestGetTeeStatusEnabled(t *testing.T) {
 	}
 }
 
+func TestGetTeeStatus_PublicNoAuth(t *testing.T) {
+	// The TEE status endpoint must be accessible without authentication.
+	// This test verifies the handler returns 200 even with no claims in context.
+	s := &apiServer{
+		teeCfg:   &config.TEEConfig{Provider: "local"},
+		teeState: newTeeState(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/status", nil)
+	// No auth claims — simulating an unauthenticated request.
+	s.GetTeeStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 without auth, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var status api.TeeStatus
+	json.NewDecoder(w.Body).Decode(&status)
+	if !status.Enabled {
+		t.Fatal("expected enabled=true")
+	}
+}
+
 func TestGetTeeStatusConfidentialSpace(t *testing.T) {
 	s := &apiServer{
 		teeCfg:   &config.TEEConfig{Provider: "confidential-space"},
