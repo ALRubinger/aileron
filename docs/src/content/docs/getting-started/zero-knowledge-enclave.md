@@ -31,13 +31,17 @@ Browser
   ├─ 1. Derive KEK from passphrase (Argon2id, client-side)
   ├─ 2. Verify passphrase locally (decrypt verification blob)
   ├─ 3. Request attestation from enclave
-  ├─ 4. Verify enclave's identity (JWT from Google, image digest check)
+  ├─ 4. Verify enclave's identity:
+  │     a. Validate JWT claims (issuer, expiry)
+  │     b. Fetch JWKS from /v1/tee/jwks (server-proxied)
+  │     c. Verify JWT signature via Web Crypto
   ├─ 5. ECDH key exchange (establish encrypted channel)
   ├─ 6. Encrypt KEK with shared secret, send to enclave
   │
   ▼
 Aileron Server (Railway)
   │  Passes opaque blobs — cannot decrypt
+  │  Proxies Google JWKS for client verification
   ▼
 Enclave (GCP Confidential Space)
   ├─ Receives KEK via encrypted channel
