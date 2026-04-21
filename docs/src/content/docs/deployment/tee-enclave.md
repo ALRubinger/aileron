@@ -182,4 +182,61 @@ Expected response:
    ```
 5. The server will re-attest against the new image digest on its next attestation request.
 
+## Hybrid topology: Railway + GCP
+
+The recommended production topology keeps the Aileron server, UI, docs, and Postgres on Railway (preserving per-branch preview deployments and managed infrastructure), with only the enclave running on GCP Confidential Space.
+
+```
+Browser
+  │
+  ▼
+Railway (app.withaileron.ai)
+  ├─ server (API, auth, draft pipeline)
+  ├─ ui (SvelteKit)
+  ├─ docs (Astro)
+  └─ Postgres
+        │
+        │  HTTPS (attestation, session, execute)
+        ▼
+GCP Confidential Space (enclave)
+  ├─ AMD SEV-SNP hardware isolation
+  ├─ KEK storage (in encrypted memory)
+  ├─ OAuth token exchange
+  ├─ Connector execution
+  └─ Credential escrow
+        │
+        │  HTTPS (external API calls)
+        ▼
+Google, Slack, GitHub APIs
+```
+
+### Firewall configuration
+
+Restrict the enclave VM to accept traffic only from Railway's egress IPs:
+
+```sh
+# Get Railway's egress IPs from their docs or support.
+# As of 2026, Railway uses a set of static egress IPs per region.
+
+gcloud compute firewall-rules update allow-aileron-enclave \
+  --project=$GCP_PROJECT \
+  --source-ranges=<RAILWAY_EGRESS_IP_1>/32,<RAILWAY_EGRESS_IP_2>/32 \
+  --allow=tcp:8443
+```
+
+Contact Railway support or check their [networking docs](https://docs.railway.com/reference/networking) for current egress IP ranges.
+
+### Railway server configuration
+
+Set these environment variables on the Railway server service:
+
+| Variable | Value |
+|----------|-------|
+| `AILERON_TEE_PROVIDER` | `confidential-space` |
+| `AILERON_ENCLAVE_URL` | `http://<ENCLAVE_INTERNAL_IP>:8443` |
+| `AILERON_ENCLAVE_IMAGE_DIGEST` | `sha256:...` (from step 3 above) |
+| `AILERON_GCP_PROJECT_ID` | Your GCP project ID |
+
+If the enclave VM is in a different VPC or region than Railway's egress, use the external IP with TLS (terminate at the enclave or use a load balancer).
+
 For design rationale, see [ADR-0010: Zero-Knowledge Vault](/adr/0010-zero-knowledge-vault-trust-model), [ADR-0011: TEE Provider SPI](/adr/0011-tee-provider-spi-and-confidential-space), and [ADR-0012: Auto-Escrow & Session Lifetimes](/adr/0012-auto-escrow-and-decoupled-session-lifetimes).

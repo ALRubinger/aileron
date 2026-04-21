@@ -17,6 +17,17 @@ services:
       timeout: 5s
       retries: 5
 
+  enclave:
+    build:
+      context: ..
+      dockerfile: cmd/aileron-enclave/Dockerfile
+    restart: unless-stopped
+    environment:
+      AILERON_TEE_PROVIDER: "local"
+      AILERON_ENCLAVE_PORT: "8443"
+    ports:
+      - "8443:8443"
+
   server:
     build:
       context: ..
@@ -25,6 +36,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      enclave:
+        condition: service_started
     environment:
       AILERON_ADDR: ":8080"
       AILERON_DATABASE_URL: "postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable"
@@ -41,6 +54,8 @@ services:
       AILERON_OAUTH_CALLBACK_BASE_URL: "${AILERON_OAUTH_CALLBACK_BASE_URL:-}"
       AILERON_TRUSTED_ORIGINS: "${AILERON_TRUSTED_ORIGINS:-}"
       AILERON_TEE_PROVIDER: "${AILERON_TEE_PROVIDER:-local}"
+      AILERON_ENCLAVE_URL: "${AILERON_ENCLAVE_URL:-http://enclave:8443}"
+      AILERON_ESCROW_TTL: "${AILERON_ESCROW_TTL:-168h}"
     ports:
       - "8080:8080"
 
