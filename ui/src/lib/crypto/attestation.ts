@@ -73,7 +73,7 @@ async function verifyConfidentialSpaceJWT(
 	const signature = base64UrlToBytes(parts[2]);
 	const algorithm = getVerifyAlgorithm(header.alg, key);
 
-	const valid = await crypto.subtle.verify(algorithm, key, signature, signedContent);
+	const valid = await crypto.subtle.verify(algorithm, key, signature.buffer, signedContent.buffer);
 	if (!valid) {
 		throw new Error('JWT signature verification failed');
 	}
