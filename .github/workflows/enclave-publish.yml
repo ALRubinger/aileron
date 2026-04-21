@@ -110,7 +110,7 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          curl -sf -X POST https://backboard.railway.com/graphql/v2 \
+          RESPONSE=$(curl -sf -X POST https://backboard.railway.com/graphql/v2 \
             -H "Authorization: Bearer $RAILWAY_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{
@@ -124,7 +124,11 @@ jobs:
                   "value": "${{ steps.digest.outputs.digest }}"
                 }
               }
-            }'
+            }')
+          if echo "$RESPONSE" | grep -q '"errors"'; then
+            echo "Railway API error: $RESPONSE" >&2
+            exit 1
+          fi
 
       - name: Restart Confidential Space VM
         run: |
