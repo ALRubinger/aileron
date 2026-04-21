@@ -11,6 +11,32 @@ import (
 	"github.com/ALRubinger/aileron/core/crypto"
 )
 
+func TestTEE_Status_Public(t *testing.T) {
+	// GET /v1/tee/status is public (no auth required).
+	// Verifies the auth middleware skipPath is configured correctly.
+	resp := unauthGet(t, apiURL()+"/v1/tee/status")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 without auth, got %d: %s", resp.StatusCode, body)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+
+	var status map[string]any
+	if err := json.Unmarshal(body, &status); err != nil {
+		t.Fatalf("decoding body: %v", err)
+	}
+
+	if status["enabled"] != true {
+		t.Fatalf("expected enabled=true, got %v", status["enabled"])
+	}
+}
+
 func TestTEE_Status(t *testing.T) {
 	// GET /v1/tee/status should return the TEE configuration.
 	// When AILERON_TEE_PROVIDER=local (set in docker-compose), the

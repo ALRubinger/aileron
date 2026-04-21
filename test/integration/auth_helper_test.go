@@ -151,6 +151,16 @@ func authedPatch(t *testing.T, url string, body any) *http.Response {
 	return resp
 }
 
+// unauthGet sends a GET request without authentication.
+func unauthGet(t *testing.T, url string) *http.Response {
+	t.Helper()
+	resp, err := http.DefaultClient.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	return resp
+}
+
 // authedGet sends an authenticated GET request.
 func authedGet(t *testing.T, url string) *http.Response {
 	t.Helper()
