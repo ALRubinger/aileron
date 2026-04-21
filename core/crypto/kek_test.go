@@ -88,6 +88,45 @@ func TestDeriveKEK_DefaultParams(t *testing.T) {
 	}
 }
 
+func TestGenerateRandomKEK(t *testing.T) {
+	k1, err := GenerateRandomKEK()
+	if err != nil {
+		t.Fatalf("GenerateRandomKEK: %v", err)
+	}
+	if len(k1) != KEKLen {
+		t.Fatalf("KEK length = %d, want %d", len(k1), KEKLen)
+	}
+
+	k2, err := GenerateRandomKEK()
+	if err != nil {
+		t.Fatalf("GenerateRandomKEK: %v", err)
+	}
+	if bytes.Equal(k1, k2) {
+		t.Fatal("two generated KEKs should not be equal")
+	}
+}
+
+func TestGenerateRandomKEK_UsableForEncryption(t *testing.T) {
+	kek, err := GenerateRandomKEK()
+	if err != nil {
+		t.Fatalf("GenerateRandomKEK: %v", err)
+	}
+
+	plaintext := []byte("secret data")
+	ciphertext, err := Encrypt(plaintext, kek)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	decrypted, err := Decrypt(ciphertext, kek)
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if !bytes.Equal(plaintext, decrypted) {
+		t.Fatal("decrypted data doesn't match original")
+	}
+}
+
 func TestGenerateSalt(t *testing.T) {
 	s1, err := GenerateSalt()
 	if err != nil {

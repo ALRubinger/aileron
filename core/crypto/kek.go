@@ -42,6 +42,17 @@ func DeriveKEKWithParams(passphrase, salt []byte, time, memory uint32, threads u
 	return kek, nil
 }
 
+// GenerateRandomKEK returns a cryptographically random 256-bit key suitable
+// for use as a Key Encryption Key. Used by local/dev mode where there is no
+// user passphrase — the KEK lives only in process memory.
+func GenerateRandomKEK() ([]byte, error) {
+	kek := make([]byte, KEKLen)
+	if _, err := rand.Read(kek); err != nil {
+		return nil, fmt.Errorf("crypto: generating random KEK: %w", err)
+	}
+	return kek, nil
+}
+
 // GenerateSalt returns a cryptographically random salt for Argon2id key derivation.
 func GenerateSalt() ([]byte, error) {
 	salt := make([]byte, SaltLen)
