@@ -48,7 +48,9 @@ gcloud artifacts repositories create aileron-enclave \
 ```sh
 export REGISTRY=$REGION-docker.pkg.dev/$GCP_PROJECT/aileron-enclave
 
-docker build -f cmd/aileron-enclave/Dockerfile -t $REGISTRY/aileron-enclave:latest .
+# The --target production flag selects the Confidential Space base image.
+# (The default target is "local" which uses alpine for dev/CI.)
+docker build --target production -f cmd/aileron-enclave/Dockerfile -t $REGISTRY/aileron-enclave:latest .
 docker push $REGISTRY/aileron-enclave:latest
 ```
 
