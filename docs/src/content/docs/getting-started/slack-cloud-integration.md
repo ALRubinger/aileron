@@ -51,6 +51,16 @@ From **Basic Information**, note:
 
 Sidebar → **Install App** → **Install to Workspace**. Authorize the requested scopes.
 
+### Enable public distribution
+
+By default, a Slack app can only be installed in the workspace where it was created. To allow users from any workspace to connect:
+
+1. Sidebar → **Manage Distribution**
+2. Under "Share Your App with Other Workspaces", ensure all checklist items are complete (redirect URLs, bot user, app description)
+3. Click **Activate Public Distribution**
+
+Without this step, users outside the development workspace will see `invalid_team_for_non_distributed_app` when trying to connect.
+
 > **Do NOT configure Event Subscriptions or Interactivity yet.** The Aileron server must be running first. See step 3.
 
 ## 2. Configure environment variables
@@ -200,6 +210,7 @@ User approves → Aileron sends reply as user
 
 | Symptom | Likely cause |
 |---------|-------------|
+| `invalid_team_for_non_distributed_app` | Public distribution not enabled — see "Enable public distribution" above |
 | url_verification fails | Server not running, wrong URL, signing secret mismatch |
 | No events arriving | App not installed, event subscriptions not saved, channel is private |
 | Events arrive but no draft | `ANTHROPIC_API_KEY` not set, check logs for `draft generation failed` |
