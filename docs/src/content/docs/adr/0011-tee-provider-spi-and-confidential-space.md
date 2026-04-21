@@ -95,7 +95,7 @@ Both `core/` and `cmd/aileron-enclave/` import this module. It has no dependenci
 Unlike Nitro (vsock + COSE Sign1 + PCRs), Confidential Space uses:
 
 - **Standard HTTPS** for host-enclave communication (no vsock)
-- **OIDC JWT** for attestation (issued by `https://confidentialcomputing.googleapis.com`)
+- **OIDC JWT** for attestation (issued by `https://accounts.google.com`)
 - **Container image digest + GCP project ID** for workload identity (instead of PCR values)
 - **GCE metadata service** for attestation token retrieval inside the enclave
 
