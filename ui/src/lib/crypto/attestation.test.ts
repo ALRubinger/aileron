@@ -72,7 +72,7 @@ describe('verifyAttestation', () => {
 
 		it('verifies a valid RS256 JWT', async () => {
 			const claims = {
-				iss: 'https://confidentialcomputing.googleapis.com',
+				iss: 'https://accounts.google.com',
 				exp: Math.floor(Date.now() / 1000) + 3600
 			};
 			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
@@ -95,7 +95,7 @@ describe('verifyAttestation', () => {
 
 		it('throws on expired token', async () => {
 			const claims = {
-				iss: 'https://confidentialcomputing.googleapis.com',
+				iss: 'https://accounts.google.com',
 				exp: Math.floor(Date.now() / 1000) - 60
 			};
 			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
@@ -114,7 +114,7 @@ describe('verifyAttestation', () => {
 			);
 
 			const claims = {
-				iss: 'https://confidentialcomputing.googleapis.com',
+				iss: 'https://accounts.google.com',
 				exp: Math.floor(Date.now() / 1000) + 3600
 			};
 			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
@@ -126,14 +126,14 @@ describe('verifyAttestation', () => {
 
 		it('throws on tampered payload', async () => {
 			const claims = {
-				iss: 'https://confidentialcomputing.googleapis.com',
+				iss: 'https://accounts.google.com',
 				exp: Math.floor(Date.now() / 1000) + 3600
 			};
 			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
 
 			// Tamper with the payload.
 			const parts = token.split('.');
-			const tamperedClaims = { ...claims, iss: 'https://confidentialcomputing.googleapis.com', extra: 'tampered' };
+			const tamperedClaims = { ...claims, iss: 'https://accounts.google.com', extra: 'tampered' };
 			parts[1] = base64UrlEncodeString(JSON.stringify(tamperedClaims));
 			const tampered = parts.join('.');
 
@@ -165,7 +165,7 @@ describe('verifyAttestation', () => {
 
 		it('verifies a valid ES256 JWT', async () => {
 			const claims = {
-				iss: 'https://confidentialcomputing.googleapis.com',
+				iss: 'https://accounts.google.com',
 				exp: Math.floor(Date.now() / 1000) + 3600
 			};
 			const token = await createSignedJWT(claims, keyPair, kid, 'ES256');
@@ -184,7 +184,7 @@ describe('verifyAttestation', () => {
 		);
 
 		const claims = {
-			iss: 'https://confidentialcomputing.googleapis.com',
+			iss: 'https://accounts.google.com',
 			exp: Math.floor(Date.now() / 1000) + 3600
 		};
 		const header = base64UrlEncodeString(JSON.stringify({ alg: 'EdDSA', kid: 'ed-key' }));
@@ -202,7 +202,7 @@ describe('verifyAttestation', () => {
 		);
 
 		const claims = {
-			iss: 'https://confidentialcomputing.googleapis.com',
+			iss: 'https://accounts.google.com',
 			exp: Math.floor(Date.now() / 1000) + 3600
 		};
 		// Create a minimal JWT (signature won't matter since fetch fails before verify).
