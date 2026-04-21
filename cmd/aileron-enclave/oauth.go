@@ -28,6 +28,7 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tok
 		return nil, "", "", err
 	}
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Body = io.NopCloser(stringReader(form.Encode()))
 
 	resp, err := http.DefaultClient.Do(httpReq)
@@ -54,8 +55,8 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tok
 		return nil, "", "", fmt.Errorf("parsing token response: %w", err)
 	}
 
-	if tokenData.RefreshToken == "" {
-		return nil, "", "", fmt.Errorf("no refresh token returned; user may need to re-consent")
+	if tokenData.AccessToken == "" {
+		return nil, "", "", fmt.Errorf("no access token returned")
 	}
 
 	return body, tokenData.AccessToken, tokenData.TokenType, nil
