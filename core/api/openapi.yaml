@@ -1381,6 +1381,7 @@ paths:
       tags: [TEE]
       summary: Get TEE status
       operationId: getTeeStatus
+      security: []
       responses:
         "200":
           description: TEE configuration and session status
