@@ -9,8 +9,8 @@ Aileron's credential vault uses a zero-knowledge architecture. Your secrets are 
 
 1. You set a vault passphrase. Aileron derives a 256-bit Key Encryption Key (KEK) using Argon2id, stores only the salt and a verification blob, then discards the KEK from memory.
 2. When you store a secret, it's encrypted with AES-256-GCM using your KEK before storage. The database holds only ciphertext.
-3. To use credentials, you verify your passphrase to unlock a time-limited session (default: 24 hours). The KEK is held in memory only for the session duration.
-4. When an agent triggers an action that needs a credential, Aileron decrypts it, makes the call, and discards the plaintext.
+3. To use credentials, you verify your passphrase to unlock a time-limited session (default: 24 hours). When the [zero-knowledge enclave](/getting-started/zero-knowledge-enclave) is enabled, your KEK is transmitted via an end-to-end encrypted channel (ECDH) to hardware-isolated memory — the server never holds it. Without the enclave, the KEK is cached in server memory for the session duration.
+4. When an agent triggers an action that needs a credential, the enclave (or server) decrypts it, makes the call, and discards the plaintext.
 
 ## Managing secrets
 
