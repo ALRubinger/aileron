@@ -854,3 +854,44 @@ func TestPipeline_GenerateDraftStream_ResearchError(t *testing.T) {
 		t.Error("expected draft output despite research failure")
 	}
 }
+
+func TestRefineDraft(t *testing.T) {
+	mockClient := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "Revised: shorter version"},
+	}
+	p := draft.NewPipeline(
+		mockClient, mockClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		nil, vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+
+	result, err := p.RefineDraft(context.Background(), "usr_1",
+		"Original message text",
+		"Here is my previous long draft...",
+		"Make it more concise",
+	)
+	if err != nil {
+		t.Fatalf("RefineDraft: %v", err)
+	}
+	if result != "Revised: shorter version" {
+		t.Errorf("result = %q, want 'Revised: shorter version'", result)
+	}
+
+	// Verify the LLM received the right context.
+	if mockClient.lastRequest == nil {
+		t.Fatal("expected LLM call")
+	}
+	msg := mockClient.lastRequest.UserMessage
+	if !strings.Contains(msg, "Previous draft") {
+		t.Errorf("expected 'Previous draft' in prompt, got: %s", msg)
+	}
+	if !strings.Contains(msg, "Make it more concise") {
+		t.Errorf("expected feedback in prompt, got: %s", msg)
+	}
+	if !strings.Contains(msg, "Original message text") {
+		t.Errorf("expected original message in prompt, got: %s", msg)
+	}
+}

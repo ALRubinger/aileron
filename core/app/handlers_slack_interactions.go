@@ -40,7 +40,7 @@ type slackInteractionPayload struct {
 				Value string `json:"value"`
 			} `json:"values"`
 		} `json:"state"`
-	} `json:"view,omitempty"` // view_submission only
+	} `json:"view,omitempty"` // view_submission and modal block_actions
 	ResponseURL string `json:"response_url"`
 }
 
@@ -140,8 +140,93 @@ func (s *apiServer) processInteraction(actionID, actionValue string, payload sla
 			"channel", sendMeta.Channel,
 		)
 
+	case refineActionID:
+		s.processRefineDraft(ctx, payload)
+
 	default:
 		s.log.Debug("interaction: unknown action", "action_id", actionID)
+	}
+}
+
+// processRefineDraft handles the "Refine" button click in the draft modal.
+// It extracts the current draft and feedback from the view state, runs the
+// pipeline's RefineDraft method, and updates the modal with the revised draft.
+func (s *apiServer) processRefineDraft(ctx context.Context, payload slackInteractionPayload) {
+	if payload.View == nil {
+		s.log.Error("refine: no view in payload")
+		return
+	}
+
+	meta, err := parseDraftModalMeta(payload.View.PrivateMetadata)
+	if err != nil {
+		s.log.Error("refine: failed to parse metadata", "error", err)
+		return
+	}
+
+	// Extract current draft and feedback from view state.
+	var draftText, feedback string
+	if payload.View.State != nil {
+		if block, ok := payload.View.State.Values[draftInputBlockID]; ok {
+			if input, ok := block[draftInputActionID]; ok {
+				draftText = input.Value
+			}
+		}
+		if block, ok := payload.View.State.Values[instructionBlockID]; ok {
+			if input, ok := block[instructionActionID]; ok {
+				feedback = input.Value
+			}
+		}
+	}
+
+	if draftText == "" {
+		s.log.Warn("refine: empty draft text")
+		return
+	}
+	if feedback == "" {
+		s.log.Warn("refine: no feedback provided")
+		return
+	}
+
+	teamID := ""
+	if payload.Team != nil {
+		teamID = payload.Team.ID
+	}
+
+	botToken, err := s.resolveWorkspaceBotToken(ctx, teamID)
+	if err != nil {
+		s.log.Error("refine: failed to resolve bot token", "error", err)
+		return
+	}
+
+	// Show loading state while refining.
+	_ = updateDraftModalLoading(ctx, botToken, payload.View.ID, "Refining...", meta)
+
+	userID, err := s.resolveAileronUserBySlack(ctx, meta.UserID, teamID)
+	if err != nil {
+		s.log.Error("refine: failed to resolve user", "error", err)
+		_ = updateDraftModalError(ctx, botToken, payload.View.ID, "Could not find your Aileron account.", meta)
+		return
+	}
+
+	pipeline := s.resolvePipelineVault(userID)
+	if pipeline == nil {
+		if s.draftPipeline == nil {
+			_ = updateDraftModalError(ctx, botToken, payload.View.ID, "Draft generation is not configured.", meta)
+		} else {
+			_ = updateDraftModalError(ctx, botToken, payload.View.ID, s.vaultLockedMessage(), meta)
+		}
+		return
+	}
+
+	refined, err := pipeline.RefineDraft(ctx, userID, meta.OriginalMessage, draftText, feedback)
+	if err != nil {
+		s.log.Error("refine: pipeline error", "error", err)
+		_ = updateDraftModalError(ctx, botToken, payload.View.ID, "Refinement failed. Please try again.", meta)
+		return
+	}
+
+	if err := updateDraftModalWithDraft(ctx, botToken, payload.View.ID, refined, meta); err != nil {
+		s.log.Error("refine: failed to update modal", "error", err)
 	}
 }
 

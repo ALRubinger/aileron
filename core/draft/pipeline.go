@@ -353,6 +353,42 @@ func (p *Pipeline) GenerateDraftStream(ctx context.Context, userID string, msg c
 	return chunkCh, errCh
 }
 
+// RefineDraft revises a previously generated draft based on user feedback.
+// It skips the research round (context was already gathered for the original
+// draft) and runs only the ghostwrite round with the previous draft and
+// feedback as additional context.
+func (p *Pipeline) RefineDraft(ctx context.Context, userID string, originalMessage, previousDraft, feedback string) (string, error) {
+	_, synthesisClient := p.researchLLM, p.ghostwriteLLM
+	if p.clientResolver != nil {
+		var resolveErr error
+		_, synthesisClient, resolveErr = p.clientResolver.Resolve(ctx, userID)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolving LLM config: %w", resolveErr)
+		}
+	}
+
+	ghostwritePrompt, err := p.assembleSystemPrompt(ctx, userID)
+	if err != nil {
+		return "", fmt.Errorf("assembling system prompt: %w", err)
+	}
+
+	ghostwriteMessage := fmt.Sprintf(
+		"Original message:\n\n%s\n\n---\n\nPrevious draft:\n\n%s\n\n---\n\nUser feedback:\n\n%s\n\nRevise the draft based on the feedback. Output only the revised draft — no commentary.",
+		originalMessage, previousDraft, feedback,
+	)
+
+	resp, err := synthesisClient.GenerateWithTools(ctx, llm.GenerateRequest{
+		SystemPrompt: ghostwritePrompt,
+		UserMessage:  ghostwriteMessage,
+	})
+	if err != nil {
+		return "", fmt.Errorf("refine draft failed: %w", err)
+	}
+
+	p.log.Info("draft refined", "user_id", userID, "draft_length", len(resp.Text))
+	return resp.Text, nil
+}
+
 // assembleSystemPrompt builds the system prompt from the base prompt plus
 // the user's active instructions. Instructions are the highest-priority
 // context — they override learned patterns and behavioral model inferences.
