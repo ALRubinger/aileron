@@ -75,7 +75,8 @@ export const navigation: NavItem[] = [
     children: [
       { label: 'Cloud Deployment', href: '/deployment/cloud' },
       { label: 'Railway', href: '/deployment/railway' },
-      { label: 'TEE Enclave', href: '/deployment/tee-enclave' }
+      { label: 'TEE Enclave', href: '/deployment/tee-enclave' },
+      { label: 'CI/CD Pipeline', href: '/deployment/ci-cd' }
     ]
   },
   {
