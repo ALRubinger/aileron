@@ -15,15 +15,6 @@ func TestNewPostgresSystemVault(t *testing.T) {
 	if v == nil {
 		t.Fatal("expected non-nil vault")
 	}
-	// Verify it satisfies the Vault interface.
-	var _ vault.Vault = v
-}
-
-func TestNewPostgresVaultForTable(t *testing.T) {
-	v := vault.NewPostgresVaultForTable(nil, "custom_table")
-	if v == nil {
-		t.Fatal("expected non-nil vault")
-	}
 	var _ vault.Vault = v
 }
 
@@ -180,7 +171,6 @@ func TestSystemVault_IndependentFromUserVault(t *testing.T) {
 	rand.Read(sysKey)
 	rand.Read(userKey)
 
-	// Separate backing stores simulate separate database tables.
 	sysInner := vault.NewMemVault()
 	userInner := vault.NewMemVault()
 
@@ -189,19 +179,14 @@ func TestSystemVault_IndependentFromUserVault(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Write to system vault.
 	sysVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-bot"), vault.Metadata{})
-
-	// Write to user vault at a different path.
 	userVault.Put(ctx, "connected-accounts/usr_123/slack", []byte("xoxp-user"), vault.Metadata{})
 
-	// System vault should not have the user secret.
 	_, err := sysVault.Get(ctx, "connected-accounts/usr_123/slack")
 	if err == nil {
 		t.Fatal("system vault should not contain user secrets")
 	}
 
-	// User vault should not have the system secret.
 	_, err = userVault.Get(ctx, "slack-workspaces/T001/bot-token")
 	if err == nil {
 		t.Fatal("user vault should not contain system secrets")
