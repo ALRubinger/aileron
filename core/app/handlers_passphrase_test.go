@@ -61,6 +61,9 @@ func (c *mockEscrowClient) EscrowRetrieve(_ context.Context, req enclave.EscrowR
 	}
 	return enclave.EscrowRetrieveResponse{}, enclave.ErrEscrowNotFound
 }
+func (c *mockEscrowClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
+	return enclave.EscrowListResponse{}, nil
+}
 func (c *mockEscrowClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }

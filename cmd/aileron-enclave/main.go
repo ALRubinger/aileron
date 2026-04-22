@@ -36,6 +36,16 @@ func main() {
 		provider = "local"
 	}
 
+	dataDir := os.Getenv("AILERON_ENCLAVE_DATA_DIR")
+	if dataDir == "" {
+		if provider == "confidential-space" {
+			dataDir = "/data/enclave"
+		} else {
+			home, _ := os.UserHomeDir()
+			dataDir = home + "/.aileron/enclave"
+		}
+	}
+
 	// Build connector registry.
 	ctx := context.Background()
 	registry := connector.NewRegistry()
@@ -43,7 +53,11 @@ func main() {
 	registry.Register(ctx, googlecalendar.New())
 	registry.Register(ctx, github.New())
 
-	srv := newEnclaveServer(log, registry, provider)
+	srv, err := newEnclaveServer(log, registry, provider, dataDir)
+	if err != nil {
+		log.Error("failed to initialize enclave server", "error", err)
+		os.Exit(1)
+	}
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
 
@@ -53,6 +67,15 @@ func main() {
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
+
+	// Background escrow cleanup.
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			srv.escrow.EvictExpired()
+		}
+	}()
 
 	// Graceful shutdown.
 	done := make(chan os.Signal, 1)

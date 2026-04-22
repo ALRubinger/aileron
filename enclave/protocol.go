@@ -165,6 +165,18 @@ type EscrowRetrieveResponse struct {
 	Credential []byte `json:"credential"`
 }
 
+// EscrowListResponse contains metadata for all non-expired escrow entries.
+type EscrowListResponse struct {
+	Entries []EscrowListEntry `json:"entries"`
+}
+
+// EscrowListEntry is metadata for a single escrowed credential.
+type EscrowListEntry struct {
+	EscrowID  string `json:"escrow_id"`
+	GrantID   string `json:"grant_id"`
+	ExpiresAt string `json:"expires_at"` // RFC 3339
+}
+
 // EscrowRevokeRequest removes an escrowed credential from the enclave.
 type EscrowRevokeRequest struct {
 	EscrowID string `json:"escrow_id"`

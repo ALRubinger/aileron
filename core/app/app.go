@@ -226,7 +226,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 				kekCache.EvictExpired()
 			}
 		}()
-
 		// Switch to Postgres-backed stores and vault now that the database is available.
 		pgConnectedAccountStore := postgres.NewConnectedAccountStore(db)
 		server.connectedAccounts = pgConnectedAccountStore
@@ -236,6 +235,29 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.feedback = postgres.NewDraftFeedbackStore(db)
 		v = vault.NewPostgresVault(db.Pool)
 		server.vault = v
+		escrowIndexStore := postgres.NewEscrowIndexStore(db)
+		server.escrowIndexStore = escrowIndexStore
+
+		// Background cleanup of expired escrow index entries.
+		go func() {
+			ticker := time.NewTicker(10 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				if n, err := escrowIndexStore.DeleteExpired(context.Background()); err == nil && n > 0 {
+					log.Info("cleaned expired escrow index entries", "count", n)
+				}
+			}
+		}()
+
+		// Load persisted escrow index so async flows (Slack) work after restart.
+		if idx, err := escrowIndexStore.LoadAll(ctx); err == nil {
+			for path, id := range idx {
+				server.escrowIndex.Store(path, id)
+			}
+			if len(idx) > 0 {
+				log.Info("loaded escrow index from database", "entries", len(idx))
+			}
+		}
 		log.Info("using Postgres-backed stores and vault")
 
 		// System vault for infrastructure secrets (ADR-0020).

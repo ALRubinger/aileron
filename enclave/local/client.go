@@ -246,6 +246,11 @@ func (c *Client) EscrowRetrieve(_ context.Context, req enclave.EscrowRetrieveReq
 	return enclave.EscrowRetrieveResponse{Credential: plaintext}, nil
 }
 
+// EscrowList returns metadata for all non-expired escrow entries.
+func (c *Client) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
+	return enclave.EscrowListResponse{Entries: c.escrow.List()}, nil
+}
+
 // EscrowRevoke removes an escrowed credential and zeros its plaintext.
 func (c *Client) EscrowRevoke(_ context.Context, req enclave.EscrowRevokeRequest) error {
 	return c.escrow.Revoke(req.EscrowID, req.GrantID)

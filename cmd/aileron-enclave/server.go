@@ -33,14 +33,18 @@ type enclaveServer struct {
 	escrow     *escrowStore
 }
 
-func newEnclaveServer(log *slog.Logger, registry *connector.Registry, provider string) *enclaveServer {
+func newEnclaveServer(log *slog.Logger, registry *connector.Registry, provider, dataDir string) (*enclaveServer, error) {
+	escrow, err := newEscrowStore(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("initializing escrow store: %w", err)
+	}
 	return &enclaveServer{
 		log:      log,
 		registry: registry,
 		provider: provider,
 		keks:     newKEKStore(),
-		escrow:   newEscrowStore(),
-	}
+		escrow:   escrow,
+	}, nil
 }
 
 func (s *enclaveServer) registerRoutes(mux *http.ServeMux) {
@@ -51,6 +55,7 @@ func (s *enclaveServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /execute", s.handleExecute)
 	mux.HandleFunc("POST /escrow", s.handleEscrowStore)
 	mux.HandleFunc("POST /escrow/retrieve", s.handleEscrowRetrieve)
+	mux.HandleFunc("POST /escrow/list", s.handleEscrowList)
 	mux.HandleFunc("POST /escrow/revoke", s.handleEscrowRevoke)
 	mux.HandleFunc("GET /health", s.handleHealth)
 }
@@ -324,6 +329,11 @@ func (s *enclaveServer) handleEscrowRetrieve(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, enclave.EscrowRetrieveResponse{Credential: plaintext})
+}
+
+func (s *enclaveServer) handleEscrowList(w http.ResponseWriter, _ *http.Request) {
+	entries := s.escrow.List()
+	writeJSON(w, http.StatusOK, enclave.EscrowListResponse{Entries: entries})
 }
 
 func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Request) {

@@ -663,6 +663,9 @@ func (stubEscrowEnclaveClient) EscrowStore(_ context.Context, _ enclave.EscrowSt
 func (stubEscrowEnclaveClient) EscrowRetrieve(_ context.Context, req enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
 	return enclave.EscrowRetrieveResponse{Credential: []byte("escrow-plaintext")}, nil
 }
+func (stubEscrowEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
+	return enclave.EscrowListResponse{}, nil
+}
 func (stubEscrowEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }

@@ -37,7 +37,10 @@ func setupTestEnclaveServer(t *testing.T) (*httptest.Server, *enclaveServer) {
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	registry := connector.NewRegistry()
 	registry.Register(context.Background(), &stubConnector{})
-	srv := newEnclaveServer(log, registry, "local")
+	srv, err := newEnclaveServer(log, registry, "local", "")
+	if err != nil {
+		t.Fatalf("newEnclaveServer: %v", err)
+	}
 	mux := http.NewServeMux()
 	srv.registerRoutes(mux)
 	return httptest.NewServer(mux), srv

@@ -25,6 +25,7 @@ import (
 	"github.com/ALRubinger/aileron/core/policy"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
+	"github.com/ALRubinger/aileron/core/store/postgres"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/core/version"
 	"github.com/ALRubinger/aileron/enclave"
@@ -86,6 +87,7 @@ type apiServer struct {
 	teeState           *teeState                  // nil when TEE is disabled
 	escrowTTL          time.Duration              // TTL for auto-escrowed credentials
 	escrowIndex        sync.Map                   // vault path (string) -> escrow ID (string)
+	escrowIndexStore   *postgres.EscrowIndexStore // nil when auth is disabled; persists escrowIndex across restarts
 	uiBaseURL          string                     // base URL for the web UI (for constructing unlock links)
 	newID              func() string
 }

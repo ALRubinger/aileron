@@ -740,6 +740,37 @@ table "system_vault_secrets" {
   }
 }
 
+table "escrow_index" {
+  schema = schema.public
+  comment = "Server-side index mapping vault paths to TEE escrow IDs. Survives server restarts so async flows (Slack agent) can resolve escrowed credentials without re-unlock."
+
+  column "vault_path" {
+    type = varchar(512)
+    null = false
+  }
+  column "escrow_id" {
+    type = varchar(128)
+    null = false
+  }
+  column "user_id" {
+    type = varchar(64)
+    null = false
+  }
+  column "expires_at" {
+    type = timestamptz
+    null = false
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.vault_path]
+  }
+}
+
 table "llm_configs" {
   schema = schema.public
 
