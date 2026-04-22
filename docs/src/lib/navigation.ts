@@ -53,6 +53,8 @@ export const navigation: NavItem[] = [
       { label: 'Slack Integration', href: '/getting-started/slack-integration' },
       { label: 'Google Integration', href: '/getting-started/google-integration' },
       { label: 'Slack Cloud Integration', href: '/getting-started/slack-cloud-integration' },
+      { label: 'Slack App Install (Admin)', href: '/getting-started/slack-app-install' },
+      { label: 'Slack Connect (User)', href: '/getting-started/slack-connect' },
       { label: 'GitHub Integration', href: '/getting-started/github-integration' },
       { label: 'Discord Integration', href: '/getting-started/discord-integration' },
       { label: 'Zero-Knowledge Enclave', href: '/getting-started/zero-knowledge-enclave' }
