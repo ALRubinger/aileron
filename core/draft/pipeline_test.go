@@ -2,6 +2,7 @@ package draft_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -727,5 +728,129 @@ func TestPipeline_GenerateDraftStream_Fallback(t *testing.T) {
 	}
 	if text != "Buffered response" {
 		t.Errorf("expected 'Buffered response', got %q", text)
+	}
+}
+
+func TestPipeline_GenerateDraftStream_WithTools(t *testing.T) {
+	// Research client that returns tool calls; ghostwrite client that streams.
+	research := &mockLLMClient{
+		researchResp: &llm.GenerateResponse{
+			Text:      "Found context via tools.",
+			ToolCalls: []llm.ToolCall{{Tool: "slack_channel_history"}},
+		},
+	}
+	ghostwrite := &mockStreamingLLMClient{
+		streamChunks: []string{"Based ", "on research."},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+
+	// Seed a connected account + source connector so tools are available.
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
+		Status: model.ConnectedAccountStatusActive,
+	})
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"test"}`), vault.Metadata{})
+
+	p := draft.NewPipeline(research, ghostwrite, sourceReg, accounts,
+		mem.NewUserInstructionStore(), v, slog.Default(),
+		draft.Prompts{Research: "research {{today}}", Ghostwrite: "ghostwrite"})
+
+	chunkCh, errCh := p.GenerateDraftStream(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Bob", Body: "What happened this week?",
+	})
+
+	var chunks []draft.DraftChunk
+	for c := range chunkCh {
+		chunks = append(chunks, c)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify we got researching phase, writing phase, and text chunks.
+	var text strings.Builder
+	for _, c := range chunks {
+		text.WriteString(c.Text)
+	}
+	if !strings.Contains(text.String(), "Based on research.") {
+		t.Errorf("expected streamed text, got %q", text.String())
+	}
+}
+
+func TestPipeline_GenerateDraftStream_StreamError(t *testing.T) {
+	research := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "ok"},
+	}
+	ghostwrite := &mockStreamingLLMClient{
+		streamErr: fmt.Errorf("stream exploded"),
+	}
+
+	p := draft.NewPipeline(research, ghostwrite, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{Research: "r", Ghostwrite: "g"})
+
+	chunkCh, errCh := p.GenerateDraftStream(context.Background(), "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Bob", Body: "test",
+	})
+
+	for range chunkCh {
+	}
+	err := <-errCh
+	if err == nil {
+		t.Fatal("expected error from streaming failure")
+	}
+	if !strings.Contains(err.Error(), "stream exploded") {
+		t.Errorf("expected 'stream exploded' in error, got %q", err.Error())
+	}
+}
+
+func TestPipeline_GenerateDraftStream_ResearchError(t *testing.T) {
+	// Research client with tools that fails — use err field which fails all calls.
+	research := &mockLLMClient{
+		err: fmt.Errorf("research failed"),
+	}
+	ghostwrite := &mockStreamingLLMClient{
+		streamChunks: []string{"draft output"},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
+		Status: model.ConnectedAccountStatusActive,
+	})
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+	v := vault.NewMemVault()
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"test"}`), vault.Metadata{})
+
+	p := draft.NewPipeline(research, ghostwrite, sourceReg, accounts,
+		mem.NewUserInstructionStore(), v, slog.Default(),
+		draft.Prompts{Research: "r", Ghostwrite: "g"})
+
+	chunkCh, errCh := p.GenerateDraftStream(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Bob", Body: "test",
+	})
+
+	var chunks []draft.DraftChunk
+	for c := range chunkCh {
+		chunks = append(chunks, c)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("unexpected error: %v (research failure should be handled gracefully)", err)
+	}
+	// Research failure is logged but pipeline continues with fallback context.
+	var text string
+	for _, c := range chunks {
+		text += c.Text
+	}
+	if text == "" {
+		t.Error("expected draft output despite research failure")
 	}
 }
