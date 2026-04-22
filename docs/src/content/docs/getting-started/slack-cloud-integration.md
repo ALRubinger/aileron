@@ -33,11 +33,14 @@ Under **User Token Scopes**, add:
 - `search:read` — search message history for context
 - `users:read` — look up user names
 
-Under **Redirect URLs**, add:
+Under **Redirect URLs**, add both:
 
 ```
-https://api.withaileron.ai/v1/connect/slack/callback
+https://your-domain/v1/connect/slack/callback
+https://your-domain/v1/slack/install/callback
 ```
+
+The first handles user OAuth (connecting individual accounts). The second handles bot installation (when a workspace admin installs the app from the Slack App Directory).
 
 ### App Credentials
 
@@ -49,9 +52,12 @@ From **Basic Information**, note:
 
 ### Install to workspace (admin, once per workspace)
 
-A workspace admin installs the bot once. This grants the bot token (`xoxb-...`) used for ephemeral draft previews.
+A workspace admin installs the bot once. This grants the bot token (`xoxb-...`) needed for Aileron to respond in Slack. The admin can install via:
 
-Sidebar → **Install App** → **Install to Workspace**. Authorize the requested bot scopes.
+- **Slack App Directory** — if public distribution is enabled
+- **Sidebar → Install App → Install to Workspace** — for the development workspace
+
+When the admin authorizes the app, Slack redirects to `https://your-domain/v1/slack/install/callback`. Aileron exchanges the code for a bot token and stores it in the [system vault](/getting-started/credential-vault#system-vault) (encrypted at rest, keyed by workspace). The admin sees a success page and can close the tab.
 
 Individual users do **not** need to install the app — they only connect their own account (step 4), which requests user-level scopes without repeating the bot install prompt.
 
