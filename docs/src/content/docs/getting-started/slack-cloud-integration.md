@@ -76,6 +76,11 @@ SLACK_CLIENT_ID=your-client-id
 SLACK_CLIENT_SECRET=your-client-secret
 SLACK_SIGNING_SECRET=your-signing-secret
 
+# System vault key — encrypts infrastructure secrets (e.g. Slack bot tokens)
+# at rest. Generate a 32-byte random key, hex-encoded (64 characters):
+#   openssl rand -hex 32
+AILERON_SYSTEM_VAULT_KEY=your-64-char-hex-key
+
 # For AI-powered draft generation:
 ANTHROPIC_API_KEY=sk-ant-your-key
 

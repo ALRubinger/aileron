@@ -45,3 +45,20 @@ This means prompt injection can't leak what the agent doesn't have.
 - Hosting providers see only encrypted data.
 
 For the full trust model, see [How Aileron Works](/how-aileron-works) and [ADR-0010: Zero-Knowledge Vault](/adr/0010-zero-knowledge-vault-trust-model).
+
+## System vault
+
+Aileron also maintains a separate **system vault** for infrastructure secrets — credentials that the server must access autonomously without a user passphrase. Examples include Slack bot tokens (stored per workspace when an admin installs the app).
+
+The system vault is encrypted at rest with AES-256-GCM using a server-managed key, but is **not** zero-knowledge — the server can decrypt these secrets on its own. This is the correct trade-off: infrastructure secrets like bot tokens must be available immediately when a webhook arrives, with no human in the loop.
+
+Set the encryption key as an environment variable:
+
+```sh
+# Generate a 32-byte random key, hex-encoded (64 characters):
+openssl rand -hex 32
+
+AILERON_SYSTEM_VAULT_KEY=your-64-char-hex-key
+```
+
+For the full design, see [ADR-0020: System Vault](/adr/0020-system-vault).
