@@ -214,6 +214,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.userAuthProviders = userAuthProviderStore
 		server.userKeyMaterials = userKeyMaterialStore
 		server.escrowTTL = authCfg.EscrowTTL()
+		server.uiBaseURL = authCfg.UIBaseURL
 
 		// KEK session cache for Phase 2 encrypted-at-rest vault.
 		kekCache := auth.NewKEKSessionCache(authCfg.KEKSessionTTL())

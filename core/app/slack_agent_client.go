@@ -32,3 +32,7 @@ func (defaultSlackAgentClient) AppendStream(ctx context.Context, botToken, chann
 func (defaultSlackAgentClient) StopStream(ctx context.Context, botToken, channelID, ts string) error {
 	return comms.StopStream(ctx, botToken, channelID, ts)
 }
+
+func (defaultSlackAgentClient) PostMessage(ctx context.Context, botToken, channelID, threadTS, text string) error {
+	return comms.PostMessage(ctx, botToken, channelID, threadTS, text)
+}

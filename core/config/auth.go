@@ -70,6 +70,11 @@ type AuthConfig struct {
 	// Env: MAIL_FROM (default: "noreply@withaileron.ai")
 	MailFrom string
 
+	// UIBaseURL is the base URL of the Aileron web UI, used to construct
+	// user-facing links (e.g. vault unlock from Slack).
+	// Env: AILERON_UI_URL (default: "")
+	UIBaseURL string
+
 	// SystemVaultKey is the AES-256 encryption key for the system vault
 	// (ADR-0020). Infrastructure secrets (Slack bot tokens, webhook keys)
 	// are encrypted at rest with this key. 32 bytes, hex-encoded (64 chars).
@@ -105,6 +110,7 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		SlackClientID:      envTrimmed("SLACK_CLIENT_ID"),
 		SlackClientSecret:  envTrimmed("SLACK_CLIENT_SECRET"),
 		SlackSigningSecret: envTrimmed("SLACK_SIGNING_SECRET"),
+		UIBaseURL:          envTrimmed("AILERON_UI_URL"),
 		SystemVaultKey:     envTrimmed("AILERON_SYSTEM_VAULT_KEY"),
 		ResendAPIKey:       envTrimmed("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
