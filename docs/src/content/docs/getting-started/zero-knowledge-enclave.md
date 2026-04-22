@@ -77,6 +77,8 @@ After unlocking your vault, `attested` and `session_active` become `true`.
 
 When you unlock your vault, the server automatically escrows your connected account credentials into the enclave. This allows Aileron to process incoming Slack messages and generate drafts even when you're offline — the enclave has the credentials it needs without requiring an active browser session.
 
+Escrowed credentials are **durable** — they survive enclave and server restarts. The enclave persists them to disk encrypted with AES-256-GCM, so a routine restart or redeployment doesn't require users to re-unlock.
+
 Escrowed credentials expire after a configurable TTL (default 7 days, set via `AILERON_ESCROW_TTL`). After expiry, you must unlock again for Aileron to access your connected accounts.
 
 ## Deployment
@@ -94,4 +96,5 @@ For local development, set `AILERON_TEE_PROVIDER=local` on the server. This uses
 | Session expired | ECDH session has a 30-minute TTL. The client re-attests automatically on next vault operation. |
 | "Enclave unreachable" | Network connectivity between Railway and GCP. Check firewall rules and `AILERON_ENCLAVE_URL`. |
 | Escrowed credentials expired | User hasn't unlocked vault in >7 days. Unlock to re-escrow. |
+| Escrow lost after restart | `AILERON_ENCLAVE_DATA_DIR` points to an ephemeral disk. Attach persistent storage or set the var to a durable mount. See [TEE deployment guide](/deployment/tee-enclave#persistent-escrow-storage). |
 | 403 on direct unlock | Expected — when TEE is enabled, direct unlock is blocked. The UI uses the TEE path automatically. |

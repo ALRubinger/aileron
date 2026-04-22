@@ -191,6 +191,7 @@ Set these environment variables on your Aileron server (wherever it's hosted):
 | `AILERON_ENCLAVE_URL` | `http://$ENCLAVE_IP:8443` (the static IP from step 7) |
 | `AILERON_ENCLAVE_IMAGE_DIGEST` | `$IMAGE_DIGEST` (captured in step 3) |
 | `AILERON_GCP_PROJECT_ID` | `$GCP_PROJECT` |
+| `AILERON_ENCLAVE_DATA_DIR` | Directory for persistent escrow data (see [Persistent escrow storage](#persistent-escrow-storage) below) |
 
 ### 9. Verify
 
@@ -207,6 +208,37 @@ Expected response:
 ```
 
 `attested` and `session_active` become `true` after a user unlocks their vault.
+
+## Persistent escrow storage
+
+Escrowed credentials are persisted to disk so they survive enclave restarts. The enclave writes two files inside its data directory:
+
+| File | Purpose |
+|------|---------|
+| `escrow.key` | AES-256-GCM data encryption key (DEK), generated on first start |
+| `escrow.dat` | Encrypted escrow entries (credentials, grant IDs, expiry times) |
+
+The data directory is controlled by `AILERON_ENCLAVE_DATA_DIR`:
+
+| Provider | Default |
+|----------|---------|
+| `confidential-space` | `/data/enclave` |
+| `local` | `~/.aileron/enclave` |
+
+### When to set `AILERON_ENCLAVE_DATA_DIR`
+
+The defaults work for most deployments. Override the directory when:
+
+- **Mounted persistent disk** — Confidential Space VMs use ephemeral boot disks by default. To survive VM recreation (not just restarts), attach a persistent disk and point `AILERON_ENCLAVE_DATA_DIR` to its mount point (e.g. `/mnt/escrow`).
+- **Custom local paths** — If `~/.aileron/enclave` conflicts with another tool or you prefer a different location for local development.
+- **Shared filesystem** — If running multiple enclave replicas that need to share escrow state (not typical).
+
+### Security notes
+
+- The DEK (`escrow.key`) is a 32-byte random key stored in plaintext on disk. In production, the Confidential Space VM's memory and disk are hardware-encrypted by AMD SEV-SNP, so the key is protected at rest by the TEE.
+- `escrow.dat` is encrypted with AES-256-GCM using the DEK. Even if the file is exfiltrated without the key, the contents are unreadable.
+- If either file is corrupt or missing, the enclave starts fresh with an empty escrow store. Existing in-memory entries are not affected.
+- Expired entries are evicted on startup and periodically (every 10 minutes).
 
 ## How attestation works
 
