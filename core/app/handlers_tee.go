@@ -36,7 +36,8 @@ type teeState struct {
 	attested     bool
 	nonce        []byte
 	attestResp   enclave.AttestationResponse
-	userSessions map[string]time.Time // userID -> session expiry
+	claims       *enclave.AttestationClaims // verified claims from server-side verification
+	userSessions map[string]time.Time       // userID -> session expiry
 
 	// JWKS cache
 	jwksData      []byte
@@ -71,12 +72,31 @@ func (s *apiServer) GetTeeStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.teeState != nil {
 		s.teeState.mu.Lock()
 		attested := s.teeState.attested
+		claims := s.teeState.claims
 		s.teeState.mu.Unlock()
 
 		status.Attested = &attested
 		// Session is per-user; report aggregate active state.
 		sessionActive := false
 		status.SessionActive = &sessionActive
+
+		if claims != nil {
+			status.AttestationClaims = &struct {
+				ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+				Hwmodel     *string    `json:"hwmodel,omitempty"`
+				ImageDigest *string    `json:"image_digest,omitempty"`
+				IssuedAt    *time.Time `json:"issued_at,omitempty"`
+				Issuer      *string    `json:"issuer,omitempty"`
+				ProjectId   *string    `json:"project_id,omitempty"`
+			}{
+				ImageDigest: &claims.ImageDigest,
+				ProjectId:   &claims.ProjectID,
+				Issuer:      &claims.Issuer,
+				Hwmodel:     &claims.HWModel,
+				IssuedAt:    &claims.IssuedAt,
+				ExpiresAt:   &claims.ExpiresAt,
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, status)
@@ -212,11 +232,25 @@ func (s *apiServer) InitiateAttestation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Server-side verification to extract claims for the status endpoint.
+	// Best-effort: failure here does not block the attestation flow since
+	// the client independently verifies the token.
+	var verifiedClaims *enclave.AttestationClaims
+	if s.enclaveVerifier != nil {
+		c, verifyErr := s.enclaveVerifier.Verify(r.Context(), attestResp.Token, nonce)
+		if verifyErr != nil {
+			s.log.Warn("server-side attestation verification failed (non-fatal)", "error", verifyErr)
+		} else {
+			verifiedClaims = &c
+		}
+	}
+
 	// Store state for the session establishment step.
 	s.teeState.mu.Lock()
 	s.teeState.nonce = nonce
 	s.teeState.attestResp = attestResp
 	s.teeState.attested = true
+	s.teeState.claims = verifiedClaims
 	s.teeState.mu.Unlock()
 
 	// []byte fields are automatically base64-encoded by json.Marshal.

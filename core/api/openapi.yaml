@@ -3082,6 +3082,30 @@ components:
           type: string
           format: date-time
           description: When the current session expires
+        attestation_claims:
+          type: object
+          description: Verified attestation claims from the TEE (present only when attested)
+          properties:
+            image_digest:
+              type: string
+              description: Container image digest (e.g. "sha256:abc...")
+            project_id:
+              type: string
+              description: GCP project ID that owns the enclave workload
+            issuer:
+              type: string
+              description: Token issuer (e.g. "https://accounts.google.com")
+            hwmodel:
+              type: string
+              description: Hardware security model (e.g. "GCP_AMD_SEV")
+            issued_at:
+              type: string
+              format: date-time
+              description: When the attestation token was issued
+            expires_at:
+              type: string
+              format: date-time
+              description: When the attestation token expires
 
     TeeAttestationRequest:
       type: object

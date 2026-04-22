@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
@@ -326,6 +327,72 @@ func TestGetTeeStatusConfidentialSpace(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&status)
 	if status.Provider != api.ConfidentialSpace {
 		t.Fatalf("expected confidential-space, got %q", status.Provider)
+	}
+}
+
+func TestGetTeeStatus_WithAttestationClaims(t *testing.T) {
+	now := time.Now()
+	expires := now.Add(time.Hour)
+	state := newTeeState()
+	state.attested = true
+	state.claims = &enclave.AttestationClaims{
+		ImageDigest: "sha256:abc123",
+		ProjectID:   "my-project",
+		Issuer:      "https://accounts.google.com",
+		HWModel:     "GCP_AMD_SEV",
+		IssuedAt:    now,
+		ExpiresAt:   expires,
+	}
+
+	s := &apiServer{
+		teeCfg:   &config.TEEConfig{Provider: "confidential-space"},
+		teeState: state,
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/status", nil)
+	s.GetTeeStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var status api.TeeStatus
+	json.NewDecoder(w.Body).Decode(&status)
+	if status.AttestationClaims == nil {
+		t.Fatal("expected attestation_claims to be present")
+	}
+	if *status.AttestationClaims.ImageDigest != "sha256:abc123" {
+		t.Fatalf("expected image_digest sha256:abc123, got %q", *status.AttestationClaims.ImageDigest)
+	}
+	if *status.AttestationClaims.ProjectId != "my-project" {
+		t.Fatalf("expected project_id my-project, got %q", *status.AttestationClaims.ProjectId)
+	}
+	if *status.AttestationClaims.Issuer != "https://accounts.google.com" {
+		t.Fatalf("expected issuer https://accounts.google.com, got %q", *status.AttestationClaims.Issuer)
+	}
+	if *status.AttestationClaims.Hwmodel != "GCP_AMD_SEV" {
+		t.Fatalf("expected hwmodel GCP_AMD_SEV, got %q", *status.AttestationClaims.Hwmodel)
+	}
+}
+
+func TestGetTeeStatus_NoClaims(t *testing.T) {
+	state := newTeeState()
+	state.attested = false
+
+	s := &apiServer{
+		teeCfg:   &config.TEEConfig{Provider: "local"},
+		teeState: state,
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/status", nil)
+	s.GetTeeStatus(w, r)
+
+	var status api.TeeStatus
+	json.NewDecoder(w.Body).Decode(&status)
+	if status.AttestationClaims != nil {
+		t.Fatal("expected attestation_claims to be nil when not attested")
 	}
 }
 

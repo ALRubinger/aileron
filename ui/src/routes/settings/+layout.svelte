@@ -8,7 +8,8 @@
 		{ href: '/settings/profile', label: 'Profile' },
 		{ href: '/settings/organization', label: 'Organization' },
 		{ href: '/settings/connected-accounts', label: 'Connected Accounts' },
-		{ href: '/settings/llm', label: 'LLM Provider' }
+		{ href: '/settings/llm', label: 'LLM Provider' },
+		{ href: '/settings/security', label: 'Security' }
 	];
 </script>
 

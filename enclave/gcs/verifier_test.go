@@ -78,13 +78,16 @@ func TestVerifyValidToken(t *testing.T) {
 	nonce := []byte("test-nonce-123")
 	nonceB64 := base64.RawURLEncoding.EncodeToString(nonce)
 
+	now := time.Now()
+	expTime := now.Add(time.Hour)
 	token := buildTestJWT(t, key, kid, map[string]any{
 		"iss":          "https://accounts.google.com",
-		"exp":          time.Now().Add(time.Hour).Unix(),
-		"iat":          time.Now().Unix(),
+		"exp":          expTime.Unix(),
+		"iat":          now.Unix(),
 		"eat_nonce":    []string{nonceB64},
 		"image_digest": "sha256:abc123",
 		"project_id":   "my-project",
+		"hwmodel":      "GCP_AMD_SEV",
 	})
 
 	v := &Verifier{
@@ -102,6 +105,18 @@ func TestVerifyValidToken(t *testing.T) {
 	}
 	if claims.ProjectID != "my-project" {
 		t.Fatalf("expected my-project, got %q", claims.ProjectID)
+	}
+	if claims.Issuer != "https://accounts.google.com" {
+		t.Fatalf("expected issuer https://accounts.google.com, got %q", claims.Issuer)
+	}
+	if claims.HWModel != "GCP_AMD_SEV" {
+		t.Fatalf("expected hwmodel GCP_AMD_SEV, got %q", claims.HWModel)
+	}
+	if claims.IssuedAt.Unix() != now.Unix() {
+		t.Fatalf("expected IssuedAt %v, got %v", now.Unix(), claims.IssuedAt.Unix())
+	}
+	if claims.ExpiresAt.Unix() != expTime.Unix() {
+		t.Fatalf("expected ExpiresAt %v, got %v", expTime.Unix(), claims.ExpiresAt.Unix())
 	}
 }
 

@@ -134,6 +134,10 @@ func (v *Verifier) Verify(ctx context.Context, token string, nonce []byte) (encl
 	return enclave.AttestationClaims{
 		ImageDigest: claims.ImageDigest,
 		ProjectID:   claims.ProjectID,
+		Issuer:      claims.Iss,
+		HWModel:     claims.HWModel,
+		IssuedAt:    time.Unix(claims.Iat, 0),
+		ExpiresAt:   time.Unix(claims.Exp, 0),
 	}, nil
 }
 
