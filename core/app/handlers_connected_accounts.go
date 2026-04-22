@@ -7,6 +7,7 @@ import (
 
 	"github.com/ALRubinger/aileron/core/account"
 	api "github.com/ALRubinger/aileron/core/api/gen"
+	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/vault"
@@ -254,6 +255,20 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 }
 
 func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Request, providerStr string, params api.ConnectAccountCallbackParams) {
+	// Slack Marketplace and App Directory installs may redirect here instead
+	// of /v1/slack/install/callback (we don't control the redirect URL Slack
+	// chooses). Detect this case: provider is slack, no state cookie (the
+	// cookie is only set when a user starts the connect flow from Aileron's
+	// UI), and no authentication credentials.
+	if providerStr == "slack" {
+		if _, err := r.Cookie("aileron_connect_state"); err != nil {
+			if auth.ClaimsFromContext(r.Context()) == nil {
+				s.handleSlackInstall(w, r)
+				return
+			}
+		}
+	}
+
 	if s.accountService == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented", "connected accounts not configured")
 		return

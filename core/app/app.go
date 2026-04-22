@@ -341,7 +341,12 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			"/v1/webhooks/slack/commands":        true,
 			"/v1/slack/install/callback":         true,
 		}
-		handler = auth.Middleware(tokenIssuer, skipPaths)(handler)
+		handler = auth.MiddlewareWithConfig(tokenIssuer, auth.MiddlewareConfig{
+			SkipPaths: skipPaths,
+			OptionalAuthPrefixes: []string{
+				"/v1/connect/", // OAuth callbacks may be unauthenticated (e.g. Slack Marketplace installs)
+			},
+		})(handler)
 		log.Info("auth middleware enabled")
 	}
 

@@ -717,6 +717,77 @@ func TestConnectAccount_RedirectURL_HTTP_WithoutProxy(t *testing.T) {
 	}
 }
 
+func TestConnectAccountCallback_SlackInstallDelegation(t *testing.T) {
+	// When an unauthenticated Slack request hits the connect callback
+	// without a state cookie (e.g. Slack Marketplace install), it should
+	// delegate to handleSlackInstall instead of returning a 401 or CSRF error.
+	srv := newConnectedAccountServer()
+	srv.systemVault = vault.NewMemVault()
+	srv.slackClientID = "test-client-id"
+	srv.slackClientSecret = "test-client-secret"
+	srv.slackBotExchanger = func(clientID, clientSecret, code, redirectURI string) (*slackBotInstallResponse, error) {
+		if code != "marketplace-code" {
+			t.Errorf("code = %q, want marketplace-code", code)
+		}
+		return &slackBotInstallResponse{
+			OK:          true,
+			AccessToken: "xoxb-marketplace-token",
+			BotUserID:   "U_BOT",
+			Team: struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			}{"T_MKT", "marketplace-ws"},
+		}, nil
+	}
+	// Enable auth so requireAuth would reject unauthenticated requests.
+	srv.users = mem.NewUserStore()
+
+	// No auth cookies/headers, no state cookie — simulates a Slack Marketplace redirect.
+	req := httptest.NewRequest("GET", "/v1/connect/slack/callback?code=marketplace-code&state=", nil)
+	w := httptest.NewRecorder()
+	srv.ConnectAccountCallback(w, req, "slack", api.ConnectAccountCallbackParams{Code: "marketplace-code", State: ""})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (install success), got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify the bot token was stored.
+	secret, err := srv.systemVault.Get(context.Background(), "slack-workspaces/T_MKT/bot-token")
+	if err != nil {
+		t.Fatalf("expected bot token in system vault: %v", err)
+	}
+	if string(secret.Value) != "xoxb-marketplace-token" {
+		t.Errorf("stored token = %q, want xoxb-marketplace-token", secret.Value)
+	}
+}
+
+func TestConnectAccountCallback_SlackWithAuth_DoesNotDelegate(t *testing.T) {
+	// When an authenticated Slack request hits the connect callback with a
+	// state cookie, it should follow the normal user account connection flow,
+	// not the bot install flow.
+	srv := newConnectedAccountServer()
+	srv.systemVault = vault.NewMemVault()
+	srv.slackClientID = "test-client-id"
+	srv.slackClientSecret = "test-client-secret"
+	srv.slackBotExchanger = func(_, _, _, _ string) (*slackBotInstallResponse, error) {
+		t.Error("install handler should not be called for authenticated requests with state cookie")
+		return nil, nil
+	}
+	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
+
+	req := httptest.NewRequest("GET", "/v1/connect/slack/callback?code=user-code&state=valid-state", nil)
+	req.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: "valid-state"})
+	// Add auth claims to context (simulates authenticated user).
+	ctx := auth.ContextWithClaims(req.Context(), &auth.Claims{})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	srv.ConnectAccountCallback(w, req, "slack", api.ConnectAccountCallbackParams{Code: "user-code", State: "valid-state"})
+
+	// Should NOT have called the install exchanger — the state cookie is present,
+	// so it proceeds with the normal account connection flow.
+}
+
 func TestConnectedAccountToAPI(t *testing.T) {
 	acc := model.ConnectedAccount{
 		ID:             "conn_1",

@@ -135,6 +135,107 @@ func TestContextWithClaims_NilReturnsNil(t *testing.T) {
 	}
 }
 
+func TestMiddleware_OptionalAuth_NoCredentials(t *testing.T) {
+	issuer := NewTokenIssuer([]byte("test-secret-key-32-bytes-long!!!"), "test", 15*time.Minute)
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		claims := ClaimsFromContext(r.Context())
+		if claims != nil {
+			t.Error("expected no claims when no credentials provided")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := MiddlewareWithConfig(issuer, MiddlewareConfig{
+		OptionalAuthPrefixes: []string{"/v1/connect/"},
+	})(inner)
+	req := httptest.NewRequest(http.MethodGet, "/v1/connect/slack/callback?code=abc&state=", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !called {
+		t.Error("handler should be called for optional auth paths without credentials")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestMiddleware_OptionalAuth_WithValidCredentials(t *testing.T) {
+	issuer := NewTokenIssuer([]byte("test-secret-key-32-bytes-long!!!"), "test", 15*time.Minute)
+	token, _ := issuer.Issue("usr_1", "ent_1", "alice@example.com", "owner")
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims := ClaimsFromContext(r.Context())
+		if claims == nil {
+			t.Error("expected claims when valid credentials provided")
+			return
+		}
+		if claims.Subject != "usr_1" {
+			t.Errorf("Subject = %q, want %q", claims.Subject, "usr_1")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := MiddlewareWithConfig(issuer, MiddlewareConfig{
+		OptionalAuthPrefixes: []string{"/v1/connect/"},
+	})(inner)
+	req := httptest.NewRequest(http.MethodGet, "/v1/connect/slack/callback?code=abc&state=xyz", nil)
+	req.AddCookie(&http.Cookie{Name: "access_token", Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestMiddleware_OptionalAuth_WithInvalidCredentials(t *testing.T) {
+	issuer := NewTokenIssuer([]byte("test-secret-key-32-bytes-long!!!"), "test", 15*time.Minute)
+	called := false
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		claims := ClaimsFromContext(r.Context())
+		if claims != nil {
+			t.Error("expected no claims when invalid credentials provided")
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler := MiddlewareWithConfig(issuer, MiddlewareConfig{
+		OptionalAuthPrefixes: []string{"/v1/connect/"},
+	})(inner)
+	req := httptest.NewRequest(http.MethodGet, "/v1/connect/slack/callback?code=abc&state=", nil)
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !called {
+		t.Error("handler should be called even with invalid credentials on optional auth paths")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestMiddleware_OptionalAuth_NonMatchingPath(t *testing.T) {
+	issuer := NewTokenIssuer([]byte("test-secret-key-32-bytes-long!!!"), "test", 15*time.Minute)
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	})
+
+	handler := MiddlewareWithConfig(issuer, MiddlewareConfig{
+		OptionalAuthPrefixes: []string{"/v1/connect/"},
+	})(inner)
+	req := httptest.NewRequest(http.MethodGet, "/v1/intents", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestMiddleware_CookieToken(t *testing.T) {
 	issuer := NewTokenIssuer([]byte("test-secret-key-32-bytes-long!!!"), "test", 15*time.Minute)
 	token, _ := issuer.Issue("usr_1", "ent_1", "alice@example.com", "owner")
