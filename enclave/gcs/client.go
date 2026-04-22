@@ -110,6 +110,15 @@ func (c *Client) EscrowRetrieve(ctx context.Context, req enclave.EscrowRetrieveR
 	return resp, nil
 }
 
+// EscrowList returns metadata for all non-expired escrow entries.
+func (c *Client) EscrowList(ctx context.Context) (enclave.EscrowListResponse, error) {
+	var resp enclave.EscrowListResponse
+	if err := c.post(ctx, "/escrow/list", struct{}{}, &resp); err != nil {
+		return enclave.EscrowListResponse{}, fmt.Errorf("gcs: escrow list: %w", err)
+	}
+	return resp, nil
+}
+
 // EscrowRevoke sends an escrow revoke request to the enclave.
 func (c *Client) EscrowRevoke(ctx context.Context, req enclave.EscrowRevokeRequest) error {
 	if err := c.post(ctx, "/escrow/revoke", req, nil); err != nil {

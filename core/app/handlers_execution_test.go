@@ -58,6 +58,9 @@ func (e *stubEnclaveClient) EscrowStore(_ context.Context, _ enclave.EscrowStore
 func (e *stubEnclaveClient) EscrowRetrieve(_ context.Context, _ enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
 	return enclave.EscrowRetrieveResponse{}, nil
 }
+func (e *stubEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
+	return enclave.EscrowListResponse{}, nil
+}
 func (e *stubEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }

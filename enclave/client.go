@@ -44,6 +44,10 @@ type Client interface {
 	// actions should use Execute with EscrowID instead.
 	EscrowRetrieve(ctx context.Context, req EscrowRetrieveRequest) (EscrowRetrieveResponse, error)
 
+	// EscrowList returns metadata for all non-expired escrow entries.
+	// Used by the server to reconcile its escrow index on startup.
+	EscrowList(ctx context.Context) (EscrowListResponse, error)
+
 	// EscrowRevoke removes a previously escrowed credential and zeros the
 	// plaintext from enclave memory.
 	EscrowRevoke(ctx context.Context, req EscrowRevokeRequest) error

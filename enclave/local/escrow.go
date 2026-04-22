@@ -61,6 +61,26 @@ func (s *escrowStore) Get(escrowID string) ([]byte, error) {
 	return copyBytes(entry.credential), nil
 }
 
+// List returns metadata for all non-expired escrow entries.
+func (s *escrowStore) List() []enclave.EscrowListEntry {
+	now := time.Now()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var entries []enclave.EscrowListEntry
+	for id, entry := range s.entries {
+		if now.After(entry.expiresAt) {
+			continue
+		}
+		entries = append(entries, enclave.EscrowListEntry{
+			EscrowID:  id,
+			GrantID:   entry.grantID,
+			ExpiresAt: entry.expiresAt.Format(time.RFC3339),
+		})
+	}
+	return entries
+}
+
 // Revoke removes an escrow entry and zeros the credential bytes. The grantID
 // must match the original grant that created the escrow.
 func (s *escrowStore) Revoke(escrowID, grantID string) error {

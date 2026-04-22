@@ -36,6 +36,9 @@ func (m *mockEnclaveClient) EscrowStore(_ context.Context, _ enclave.EscrowStore
 func (m *mockEnclaveClient) EscrowRetrieve(_ context.Context, req enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
 	return m.retrieveResp, m.retrieveErr
 }
+func (m *mockEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
+	return enclave.EscrowListResponse{}, nil
+}
 func (m *mockEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }

@@ -333,6 +333,9 @@ func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) in
 		}
 
 		s.escrowIndex.Store(acc.VaultPath(), resp.EscrowID)
+		if s.escrowIndexStore != nil {
+			_ = s.escrowIndexStore.Upsert(ctx, acc.VaultPath(), resp.EscrowID, userID, expiresAt)
+		}
 		escrowed++
 	}
 	return escrowed
