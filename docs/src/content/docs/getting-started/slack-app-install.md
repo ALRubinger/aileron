@@ -11,9 +11,9 @@ For an overview of what Aileron does in Slack, see [Slack Cloud Integration](/ge
 
 ## Install from the Slack App Directory
 
-1. Visit the [Aileron app page](https://slack.com/apps) in the Slack App Directory
-2. Click **Install to Workspace**
-3. Review the requested permissions and click **Allow**
+[![Add to Slack](https://platform.slack-edge.com/img/add_to_slack.png)](https://slack.com/oauth/v2/authorize?client_id=10932208786550.10937893063812&scope=assistant:write,chat:write,im:history,commands&user_scope=search:read,channels:history,channels:read,chat:write,users:read)
+
+Click the button above, review the requested permissions, and click **Allow**.
 
 That's it. Aileron is now available in your workspace.
 
