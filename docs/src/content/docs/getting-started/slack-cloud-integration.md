@@ -1,29 +1,52 @@
 ---
 title: "Slack Cloud Integration"
-description: "Always-on Slack event ingestion and AI-drafted replies via cloud webhook"
+description: "Always-on Slack agent with streaming drafts, message shortcuts, and slash commands"
 ---
 
-The Slack cloud integration receives Slack messages at Aileron's cloud endpoint, generates AI-drafted replies with source context, and presents them for review as ephemeral messages in Slack. Always-on — no `aileron launch` required.
+The Slack cloud integration turns Aileron into a Slack agent. You can draft replies, ask questions, and write messages — all from within Slack. Always-on, no `aileron launch` required.
 
 This is separate from the [local Slack integration](/getting-started/slack-integration), which uses Socket Mode and requires an active terminal session. Both can coexist.
 
 ## How it works
 
-1. You connect your Slack account to Aileron via OAuth
-2. Slack sends message events to Aileron's webhook endpoint
-3. Aileron generates a context-aware draft reply using the LLM and source connector tools
-4. An ephemeral message appears in the Slack channel (visible only to you) with the draft and Approve/Edit/Discard buttons
-5. You click Approve — the reply is sent as you, not as a bot
+There are three ways to interact with Aileron in Slack:
+
+### Message shortcut
+
+Hover over any message → click `⋯` → **"Draft reply with Aileron"**. A modal opens in your current channel with the AI-generated draft. Edit it, add refinement instructions, and click **Send** — the reply is posted as you.
+
+### Agent DM
+
+Open the Aileron app in Slack and start a conversation. Aileron shows suggested prompts and streams responses in real time. You can iterate conversationally ("Make it shorter", "Add context about the deadline") and click **Send** when satisfied.
+
+### `/aileron` slash command
+
+Type `/aileron Draft me a weekly status update` in any channel. A modal opens with the generated draft. Or ask a question — `/aileron How many hours on calls today?` — and get an ephemeral answer.
+
+| Entry point | Best for | Response surface |
+|---|---|---|
+| Message shortcut (⋯ menu) | Replying to a specific message | Modal in current channel |
+| Agent DM | Free-form writing and conversation | Streaming DM thread |
+| `/aileron` command | Quick drafts or questions in context | Modal (drafts) or ephemeral (questions) |
+
+In all cases, replies are sent as **you** (via your user token), not as the bot.
 
 ## 1. Create a Slack App
 
 Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app from scratch.
 
+### Enable Agents & AI Apps
+
+Sidebar → **Agents & AI Apps** → toggle ON. This enables the agent DM experience with suggested prompts, thinking indicators, and streaming responses.
+
 ### OAuth & Permissions
 
 Under **Bot Token Scopes**, add:
 
-- `chat:write` — for posting ephemeral draft previews (visible only to you)
+- `assistant:write` — agent thread interactions (auto-added when Agents feature is enabled)
+- `chat:write` — post messages and stream responses
+- `im:history` — receive DM messages from users
+- `commands` — register slash commands
 
 Under **User Token Scopes**, add:
 
@@ -40,7 +63,7 @@ https://your-domain/v1/connect/slack/callback
 https://your-domain/v1/slack/install/callback
 ```
 
-The first handles user OAuth (connecting individual accounts). The second handles bot installation (when a workspace admin installs the app from the Slack App Directory).
+The first handles user OAuth (connecting individual accounts). The second handles bot installation (when a workspace admin installs the app).
 
 ### App Credentials
 
@@ -71,7 +94,7 @@ By default, a Slack app can only be installed in the workspace where it was crea
 
 Without this step, users outside the development workspace will see `invalid_team_for_non_distributed_app` when trying to connect.
 
-> **Do NOT configure Event Subscriptions or Interactivity yet.** The Aileron server must be running first. See step 3.
+> **Do NOT configure Event Subscriptions, Interactivity, or Slash Commands yet.** The Aileron server must be running first. See step 3.
 
 ## 2. Configure environment variables
 
@@ -99,10 +122,10 @@ Verify the server logs show:
 ```
 enabled Slack connected accounts and source connector
 enabled cloud draft generation  research_model=claude-haiku-4-5-20251001  synthesis_model=claude-sonnet-4-6
-enabled Slack Events API webhook and interaction endpoints
+enabled Slack Events API webhook, interaction, command, and install endpoints
 ```
 
-## 3. Enable Event Subscriptions and Interactivity
+## 3. Enable Event Subscriptions, Interactivity, and Slash Commands
 
 The server must be running before this step — Slack sends verification challenges immediately.
 
@@ -111,18 +134,34 @@ The server must be running before this step — Slack sends verification challen
 1. Sidebar → **Event Subscriptions** → toggle ON
 2. **Request URL:** `https://your-domain/v1/webhooks/slack/events`
 3. Wait for the green checkmark ✓
-4. Under **Subscribe to events on behalf of users**, add: `message.channels`
+4. Under **Subscribe to bot events**, add:
+   - `assistant_thread_started`
+   - `assistant_thread_context_changed`
+   - `message.im`
 5. Click **Save Changes**
 
-### Interactivity
+### Interactivity & Shortcuts
 
 1. Sidebar → **Interactivity & Shortcuts** → toggle ON
 2. **Request URL:** `https://your-domain/v1/webhooks/slack/interactions`
-3. Click **Save Changes**
+3. Under **Shortcuts**, create a **Message Shortcut**:
+   - **Name:** Draft reply with Aileron
+   - **Short Description:** Generate an AI-drafted reply to this message
+   - **Callback ID:** `draft_reply`
+4. Click **Save Changes**
+
+### Slash Commands
+
+1. Sidebar → **Slash Commands** → **Create New Command**
+2. **Command:** `/aileron`
+3. **Request URL:** `https://your-domain/v1/webhooks/slack/commands`
+4. **Short Description:** Draft messages or ask questions with AI
+5. **Usage Hint:** `[draft a reply | ask a question]`
+6. Click **Save**
 
 ### Reinstall
 
-Sidebar → **Install App** → **Reinstall to Workspace** if prompted.
+Sidebar → **Install App** → **Reinstall to Workspace** if prompted (required after adding new scopes or event subscriptions).
 
 ## 4. Connect your Slack account
 
@@ -143,23 +182,31 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Should show your Slack account with `status: active`.
 
-## 5. Invite the bot to channels
+## 5. Test it
 
-The bot must be a member of channels where you want to receive draft previews:
+### Message shortcut
 
-```
-/invite @Aileron
-```
+1. Find any message in a channel
+2. Hover → `⋯` → **Draft reply with Aileron**
+3. A modal opens showing "Researching..." → then the draft appears in an editable text area
+4. Edit the draft or add instructions → click **Send**
+5. The reply appears in the channel from your account
 
-The bot is silent — it only posts ephemeral messages (visible to you, invisible to teammates). Replies are sent via your user token.
+### Agent DM
 
-## 6. Test it
+1. Open the Aileron app in Slack (sidebar → Apps → Aileron)
+2. See suggested prompts: "Draft a reply", "Write a message", "What needs attention?"
+3. Click a prompt or type a message
+4. Watch the thinking status and streamed response
+5. Iterate: "Make it more concise" → refined draft streams back
 
-Have someone send a message in a channel. You should see:
+### Slash command
 
-1. Server logs: `draft pending review` and `ephemeral draft delivered`
-2. An ephemeral message in Slack with the draft and Approve/Edit/Discard buttons
-3. Click **Approve** → reply appears from your account
+1. In any channel, type: `/aileron Draft me a weekly status update`
+2. A modal opens with the generated draft
+3. Edit and click **Send**
+
+Or ask a question: `/aileron How many hours on calls today?` → ephemeral answer appears.
 
 ## Context retrieval tools
 
@@ -173,7 +220,7 @@ The LLM can call these tools during draft generation:
 
 ## Draft lifecycle API
 
-Drafts are also available via REST (fallback when ephemeral delivery fails):
+Drafts are also available via REST:
 
 | Endpoint | Description |
 |----------|-------------|
@@ -187,29 +234,41 @@ Drafts are also available via REST (fallback when ephemeral delivery fails):
 ```
 Slack workspace
     │
-    │  Events API (HTTP POST)
+    ├── Message shortcut (⋯ → "Draft reply")
+    ├── Agent DM (message.im)
+    ├── /aileron slash command
+    │
     ▼
-Aileron Cloud (/v1/webhooks/slack/events)
+Aileron Cloud
     │
     ├─ Verify HMAC-SHA256 signature
     ├─ Deduplicate by event_id
-    ├─ Look up (team_id, user_id) → ConnectedAccount
+    ├─ Route by event type:
+    │   ├─ assistant_thread_started → suggested prompts + title
+    │   ├─ message.im → agent handler (streaming draft)
+    │   ├─ message_action → open modal, generate draft
+    │   └─ /aileron command → modal (draft) or ephemeral (question)
     │
     ▼
 Draft Generation Pipeline
     │
-    ├─ Build system prompt + user instructions
-    ├─ Resolve available tools from connected accounts
-    ├─ Call LLM with tools
+    ├─ Round 1: Research — LLM gathers context via tools
     │   ├─ LLM may call tools (e.g. slack_channel_history)
     │   ├─ Aileron executes tools with user's OAuth token
-    │   └─ LLM generates draft from assembled context
+    │   └─ Output: structured context summary
+    │
+    ├─ Round 2: Ghostwrite — LLM composes the reply
+    │   ├─ Streaming: text deltas flow to Slack in real time
+    │   └─ Output: the draft
     │
     ▼
-Ephemeral message in Slack (Approve / Edit / Discard)
+Delivery
+    ├─ Agent DM: streamed via chat.startStream/appendStream/stopStream
+    ├─ Modal: views.update with editable draft + Send button
+    └─ Slash command question: ephemeral response via response_url
     │
     ▼
-User approves → Aileron sends reply as user
+User clicks Send → Aileron posts reply as user via xoxp- token
 ```
 
 ## Security
@@ -217,8 +276,8 @@ User approves → Aileron sends reply as user
 - **Signature verification:** HMAC-SHA256 with the signing secret. Invalid or stale (>5min) signatures rejected.
 - **No JWT auth on webhooks:** The webhook endpoints are excluded from Aileron's JWT middleware — Slack calls them directly. Signature verification provides authentication.
 - **Event deduplication:** In-memory TTL map by `event_id` (5 minutes).
-- **Token storage:** OAuth tokens stored in the vault (Postgres-backed, encrypted at rest in Phase 2).
-- **Read/write boundary (ADR-0019):** The LLM reads via tools. Aileron owns all writes (sending messages). User approval required.
+- **Token storage:** User OAuth tokens stored in the user vault (encrypted with per-user KEK). Bot tokens in the system vault (encrypted with system key).
+- **Read/write boundary (ADR-0019):** The LLM reads via tools. Aileron owns all writes (sending messages). User approval required via Send button.
 
 ## Troubleshooting
 
@@ -226,8 +285,10 @@ User approves → Aileron sends reply as user
 |---------|-------------|
 | `invalid_team_for_non_distributed_app` | Public distribution not enabled — see "Enable public distribution" above |
 | url_verification fails | Server not running, wrong URL, signing secret mismatch |
-| No events arriving | App not installed, event subscriptions not saved, channel is private |
-| Events arrive but no draft | `ANTHROPIC_API_KEY` not set, check logs for `draft generation failed` |
-| Draft generated but no ephemeral | Bot not installed in workspace (admin must install first), bot not in channel, check `ephemeral:` errors |
+| No events arriving | App not installed, event subscriptions not saved, Agents feature not enabled |
+| Agent DM shows no suggested prompts | `assistant_thread_started` event not subscribed, or bot token missing from system vault |
+| Message shortcut missing from menu | Shortcut not registered in Slack app settings, or callback_id mismatch |
+| `/aileron` command not found | Slash command not registered, wrong request URL |
+| Draft generated but modal doesn't update | `trigger_id` expired (>3s), check server logs for modal update errors |
 | Buttons don't work | Interactivity not enabled, wrong Request URL |
 | Duplicate key on reconnect | Disconnect first, then reconnect |
