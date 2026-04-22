@@ -45,11 +45,23 @@ Before this workflow can run, you need:
 - A Confidential Space VM (see [TEE Enclave — Production setup](/deployment/tee-enclave#production-google-confidential-space))
 - A Railway project with the Aileron server deployed (see [Railway](/deployment/railway))
 
+### Set variables
+
+All commands below reference these shell variables. Set them once before proceeding. Adjust the values to match your GitHub account, repository, and GCP project:
+
+```sh
+export GITHUB_OWNER="ALRubinger"                        # GitHub account or organization
+export GITHUB_REPO="${GITHUB_OWNER}/aileron"             # owner/repo on GitHub
+export PROJECT_ID=$(gcloud config get-value project)    # your GCP project ID
+export SA_NAME="aileron-enclave"                        # service account name
+export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+export WIF_POOL="github"                               # Workload Identity Pool name
+export WIF_PROVIDER="aileron"                           # OIDC provider name in the pool
+```
+
 ### 1. Enable required GCP APIs
 
 ```sh
-export PROJECT_ID=$(gcloud config get-value project)
-
 gcloud services enable \
   iamcredentials.googleapis.com \
   secretmanager.googleapis.com \
@@ -63,7 +75,7 @@ gcloud services enable \
 This allows GitHub Actions to authenticate to GCP without a service account key.
 
 ```sh
-gcloud iam workload-identity-pools create "github" \
+gcloud iam workload-identity-pools create "${WIF_POOL}" \
   --location="global" \
   --project="${PROJECT_ID}" \
   --display-name="GitHub Actions Pool"
@@ -72,24 +84,24 @@ gcloud iam workload-identity-pools create "github" \
 ### 3. Create an OIDC Provider in the pool
 
 ```sh
-gcloud iam workload-identity-pools providers create-oidc "aileron" \
-  --workload-identity-pool="github" \
+gcloud iam workload-identity-pools providers create-oidc "${WIF_PROVIDER}" \
+  --workload-identity-pool="${WIF_POOL}" \
   --location="global" \
   --project="${PROJECT_ID}" \
   --issuer-uri="https://token.actions.githubusercontent.com" \
   --display-name="Aileron GitHub Repo Provider" \
   --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner,attribute.actor=assertion.actor" \
-  --attribute-condition="assertion.repository == 'ALRubinger/aileron'"
+  --attribute-condition="assertion.repository == '${GITHUB_REPO}'"
 ```
 
-The attribute condition scopes the provider to this specific repository. Using `assertion.repository_owner == 'ALRubinger'` would allow any repo under the account — scope to the specific repo for tighter security.
+The attribute condition scopes the provider to this specific repository. Using `assertion.repository_owner == '${GITHUB_OWNER}'` would allow any repo under the account — scope to the specific repo for tighter security.
 
 ### 4. Create a service account
 
 Create (or reuse) a service account that the workflow will impersonate:
 
 ```sh
-gcloud iam service-accounts create aileron-enclave \
+gcloud iam service-accounts create "${SA_NAME}" \
   --display-name="Aileron Enclave CI" \
   --project="${PROJECT_ID}"
 ```
@@ -101,12 +113,12 @@ The service account needs permission to push images and manage the Confidential 
 ```sh
 # Push images to Artifact Registry
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-  --member="serviceAccount:aileron-enclave@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/artifactregistry.writer"
 
 # Reset the Confidential Space VM
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-  --member="serviceAccount:aileron-enclave@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/compute.instanceAdmin.v1"
 ```
 
@@ -117,14 +129,16 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
 This allows GitHub Actions tokens from this repo to impersonate the service account:
 
 ```sh
+export PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+
 gcloud iam service-accounts add-iam-policy-binding \
-  "aileron-enclave@${PROJECT_ID}.iam.gserviceaccount.com" \
+  "${SA_EMAIL}" \
   --project="${PROJECT_ID}" \
   --role="roles/iam.workloadIdentityUser" \
-  --member="principalSet://iam.googleapis.com/projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github/attribute.repository/ALRubinger/aileron"
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL}/attribute.repository/${GITHUB_REPO}"
 ```
 
-Replace `<PROJECT_NUMBER>` with your numeric project number (not the project ID). Find it with:
+If you need to look up the project number separately:
 
 ```sh
 gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)"
@@ -136,10 +150,10 @@ All values are stored as **secrets** (not variables) to avoid exposing infrastru
 
 | Secret | Description | Example |
 |--------|-------------|---------|
-| `GCP_PROJECT` | GCP project ID | `aileron-492321` |
+| `GCP_PROJECT` | GCP project ID | Value of `$PROJECT_ID` |
 | `GCP_REGION` | Artifact Registry region | `us-central1` |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full provider resource name | `projects/298373247853/locations/global/workloadIdentityPools/github/providers/aileron` |
-| `GCP_SERVICE_ACCOUNT` | Service account email | `aileron-enclave@aileron-492321.iam.gserviceaccount.com` |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full provider resource name | `projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$WIF_POOL/providers/$WIF_PROVIDER` |
+| `GCP_SERVICE_ACCOUNT` | Service account email | Value of `$SA_EMAIL` |
 | `GCP_ENCLAVE_ZONE` | Confidential Space VM zone | `us-central1-a` |
 | `GCP_ENCLAVE_INSTANCE` | Confidential Space VM instance name | `aileron-enclave` |
 | `RAILWAY_PROJECT_ID` | Railway project UUID | *(see below)* |
@@ -150,8 +164,8 @@ All values are stored as **secrets** (not variables) to avoid exposing infrastru
 #### Finding the Workload Identity Provider name
 
 ```sh
-gcloud iam workload-identity-pools providers describe aileron \
-  --workload-identity-pool="github" \
+gcloud iam workload-identity-pools providers describe "${WIF_PROVIDER}" \
+  --workload-identity-pool="${WIF_POOL}" \
   --location="global" \
   --project="${PROJECT_ID}" \
   --format="value(name)"
@@ -216,13 +230,13 @@ gcloud iam workload-identity-pools list \
 
 # List providers in a pool
 gcloud iam workload-identity-pools providers list \
-  --workload-identity-pool="github" \
+  --workload-identity-pool="${WIF_POOL}" \
   --location="global" --project="${PROJECT_ID}"
 
 # Check service account roles
 gcloud projects get-iam-policy "${PROJECT_ID}" \
   --flatten="bindings[].members" \
-  --filter="bindings.members:aileron-enclave@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --filter="bindings.members:${SA_EMAIL}" \
   --format="table(bindings.role)"
 ```
 
