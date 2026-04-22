@@ -338,6 +338,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			"/v1/tee/jwks":                      true,
 			"/v1/webhooks/slack/events":          true,
 			"/v1/webhooks/slack/interactions":    true,
+			"/v1/webhooks/slack/commands":        true,
 			"/v1/slack/install/callback":         true,
 		}
 		handler = auth.Middleware(tokenIssuer, skipPaths)(handler)
