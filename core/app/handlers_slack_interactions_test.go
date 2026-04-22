@@ -619,6 +619,138 @@ func TestInteraction_RespondToInteraction_ServerError(t *testing.T) {
 	srv.respondToInteraction(respServer.URL, "test message")
 }
 
+func TestInteraction_RefineAction_NoPipeline(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.systemVault = vault.NewMemVault()
+
+	// Store a bot token so resolveWorkspaceBotToken succeeds.
+	srv.systemVault.Put(context.Background(), "slack-workspaces/T001/bot-token",
+		[]byte("xoxb-test-bot-token"), vault.Metadata{Type: "bot_token"})
+
+	// Create connected account so resolveAileronUserBySlack succeeds.
+	srv.connectedAccounts.Create(context.Background(), model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U_ALICE", ExternalTeamID: "T001",
+	})
+
+	// No draftPipeline — should hit the "not configured" branch.
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:   "C0BACKEND",
+		OriginalMessage: "Original msg",
+		UserID:          "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{"value": "Draft text"},
+					},
+					instructionBlockID: map[string]any{
+						instructionActionID: map[string]any{"value": "Make shorter"},
+					},
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_UserNotFound(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.systemVault = vault.NewMemVault()
+
+	srv.systemVault.Put(context.Background(), "slack-workspaces/T001/bot-token",
+		[]byte("xoxb-test-bot-token"), vault.Metadata{Type: "bot_token"})
+
+	// No connected account — resolveAileronUserBySlack will fail.
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:   "C0BACKEND",
+		OriginalMessage: "Original msg",
+		UserID:          "U_UNKNOWN",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_UNKNOWN"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{"value": "Draft text"},
+					},
+					instructionBlockID: map[string]any{
+						instructionActionID: map[string]any{"value": "Feedback"},
+					},
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_BadMetadata(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": "not-valid-json",
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
 func TestInteraction_UnknownAction(t *testing.T) {
 	srv := newInteractionTestServer()
 
