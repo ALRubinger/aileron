@@ -210,6 +210,149 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	return draftResp.Text, nil
 }
 
+// DraftChunk is a piece of a streaming draft response.
+type DraftChunk struct {
+	Text  string // incremental text delta
+	Phase string // "researching" or "writing"
+}
+
+// GenerateDraftStream is like GenerateDraft but streams text chunks as
+// the ghostwrite LLM produces them. The research rounds run synchronously
+// (same as GenerateDraft). The returned channels are both closed when
+// generation is complete; errCh receives at most one value.
+func (p *Pipeline) GenerateDraftStream(ctx context.Context, userID string, msg comms.IncomingMessage) (<-chan DraftChunk, <-chan error) {
+	chunkCh := make(chan DraftChunk, 64)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(chunkCh)
+		defer close(errCh)
+
+		// Notify: research phase starting.
+		select {
+		case chunkCh <- DraftChunk{Phase: "researching"}:
+		case <-ctx.Done():
+			errCh <- ctx.Err()
+			return
+		}
+
+		// --- Reuse research logic from GenerateDraft ---
+		researchClient, synthesisClient := p.researchLLM, p.ghostwriteLLM
+		if p.clientResolver != nil {
+			var resolveErr error
+			researchClient, synthesisClient, resolveErr = p.clientResolver.Resolve(ctx, userID)
+			if resolveErr != nil {
+				errCh <- fmt.Errorf("resolving LLM config: %w", resolveErr)
+				return
+			}
+		}
+
+		accounts, err := p.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
+		if err != nil {
+			errCh <- fmt.Errorf("listing connected accounts: %w", err)
+			return
+		}
+
+		connectedProviders := make(map[string]bool)
+		for _, acct := range accounts {
+			if acct.Status == model.ConnectedAccountStatusActive {
+				connectedProviders[string(acct.Provider)] = true
+			}
+		}
+
+		var tools []source.ToolDefinition
+		if p.sourceRegistry != nil {
+			for _, provider := range p.sourceRegistry.Providers() {
+				if connectedProviders[provider] {
+					tools = append(tools, p.sourceRegistry.ToolsForProvider(provider)...)
+				}
+			}
+		}
+
+		executor := p.buildToolExecutor(ctx, userID, accounts)
+		now := p.clock()
+
+		var gatheredContext string
+		if len(tools) > 0 {
+			researchResp, err := researchClient.GenerateWithTools(ctx, llm.GenerateRequest{
+				SystemPrompt: strings.ReplaceAll(p.researchPrompt, "{{today}}", now.Format("2006-01-02 (Monday)")),
+				UserMessage: fmt.Sprintf(
+					"Find relevant context to help reply to this message from %s in %s:\n\n%s",
+					msg.Author, msg.Channel, msg.Body),
+				Tools:        tools,
+				ToolExecutor: executor,
+			})
+			if err != nil {
+				p.log.Error("research round failed", "user_id", userID, "error", err)
+				gatheredContext = "(No additional context available — tool search failed.)"
+			} else {
+				gatheredContext = researchResp.Text
+				gatheredContext = p.backwardPass(ctx, gatheredContext, msg.Body, now, researchResp.ToolCalls, executor, userID)
+			}
+		} else {
+			gatheredContext = "(No source connectors available — replying with general knowledge only.)"
+		}
+
+		// --- Ghostwrite round: stream if possible ---
+		ghostwritePrompt, err := p.assembleSystemPrompt(ctx, userID)
+		if err != nil {
+			errCh <- fmt.Errorf("assembling system prompt: %w", err)
+			return
+		}
+
+		ghostwriteMessage := fmt.Sprintf(
+			"Message from %s in %s:\n\n%s\n\n---\n\nContext gathered from connected sources:\n\n%s",
+			msg.Author, msg.Channel, msg.Body, gatheredContext,
+		)
+
+		// Notify: writing phase starting.
+		select {
+		case chunkCh <- DraftChunk{Phase: "writing"}:
+		case <-ctx.Done():
+			errCh <- ctx.Err()
+			return
+		}
+
+		// Try streaming if the ghostwrite client supports it.
+		if sc, ok := synthesisClient.(llm.StreamingClient); ok {
+			textCh, streamErrCh := sc.GenerateStream(ctx, llm.GenerateRequest{
+				SystemPrompt: ghostwritePrompt,
+				UserMessage:  ghostwriteMessage,
+			})
+			for text := range textCh {
+				select {
+				case chunkCh <- DraftChunk{Text: text, Phase: "writing"}:
+				case <-ctx.Done():
+					errCh <- ctx.Err()
+					return
+				}
+			}
+			if err := <-streamErrCh; err != nil {
+				errCh <- err
+			}
+			return
+		}
+
+		// Fallback: non-streaming ghostwrite.
+		draftResp, err := synthesisClient.GenerateWithTools(ctx, llm.GenerateRequest{
+			SystemPrompt: ghostwritePrompt,
+			UserMessage:  ghostwriteMessage,
+		})
+		if err != nil {
+			errCh <- fmt.Errorf("ghostwrite round failed: %w", err)
+			return
+		}
+
+		select {
+		case chunkCh <- DraftChunk{Text: draftResp.Text, Phase: "writing"}:
+		case <-ctx.Done():
+			errCh <- ctx.Err()
+		}
+	}()
+
+	return chunkCh, errCh
+}
+
 // assembleSystemPrompt builds the system prompt from the base prompt plus
 // the user's active instructions. Instructions are the highest-priority
 // context — they override learned patterns and behavioral model inferences.

@@ -35,6 +35,16 @@ type slackInteractionPayload struct {
 		ActionID string `json:"action_id"`
 		Value    string `json:"value"` // draft ID or JSON metadata
 	} `json:"actions"`
+	View *struct {
+		ID              string `json:"id"`
+		CallbackID      string `json:"callback_id"`
+		PrivateMetadata string `json:"private_metadata"`
+		State           *struct {
+			Values map[string]map[string]struct {
+				Value string `json:"value"`
+			} `json:"values"`
+		} `json:"state"`
+	} `json:"view,omitempty"` // view_submission only
 	ResponseURL string `json:"response_url"`
 }
 
@@ -98,7 +108,10 @@ func (s *apiServer) handleSlackInteraction(w http.ResponseWriter, r *http.Reques
 		go s.processInteraction(action.ActionID, action.Value, payload)
 
 	case "message_action":
-		go s.processMessageShortcut(payload)
+		go s.handleMessageShortcut(context.Background(), payload)
+
+	case "view_submission":
+		go s.processViewSubmission(payload)
 
 	default:
 		s.log.Debug("slack interaction: unhandled type", "type", payload.Type)
@@ -150,33 +163,80 @@ func (s *apiServer) processInteraction(actionID, draftID string, payload slackIn
 		s.respondToInteraction(payload.ResponseURL,
 			fmt.Sprintf("Edit and send manually:\n\n```%s```", draft.DraftBody))
 
+	case "send_draft_agent":
+		// Send button from agent DM — value is JSON with target info.
+		var sendMeta struct {
+			Channel  string `json:"channel"`
+			ThreadTS string `json:"thread_ts"`
+			Body     string `json:"body"`
+			UserID   string `json:"user_id"` // Aileron user ID
+		}
+		if err := json.Unmarshal([]byte(draftID), &sendMeta); err != nil {
+			s.log.Error("interaction: failed to parse send metadata", "error", err)
+			return
+		}
+		if err := s.sendDraftMessage(ctx, sendMeta.UserID, sendMeta.Channel, sendMeta.Body, sendMeta.ThreadTS); err != nil {
+			s.log.Error("interaction: failed to send from agent DM", "error", err)
+			return
+		}
+		s.log.Info("interaction: draft sent from agent DM",
+			"user_id", sendMeta.UserID,
+			"channel", sendMeta.Channel,
+		)
+
 	default:
 		s.log.Debug("interaction: unknown action", "action_id", actionID)
 	}
 }
 
-// processMessageShortcut handles a message_action interaction (message shortcut).
-// This is triggered when a user selects "Draft reply with Aileron" from a message's
-// ⋯ menu. Currently a stub — full implementation in PR 2.
-func (s *apiServer) processMessageShortcut(payload slackInteractionPayload) {
-	channelName := ""
-	if payload.Channel != nil {
-		channelName = payload.Channel.Name
+// processViewSubmission handles a modal submission (user clicked "Send").
+func (s *apiServer) processViewSubmission(payload slackInteractionPayload) {
+	if payload.View == nil || payload.View.CallbackID != draftModalCallbackID {
+		return
 	}
-	messagePreview := ""
-	if payload.Message != nil {
-		messagePreview = payload.Message.Text
-		if len(messagePreview) > 80 {
-			messagePreview = messagePreview[:80] + "..."
+
+	meta, err := parseDraftModalMeta(payload.View.PrivateMetadata)
+	if err != nil {
+		s.log.Error("view submission: failed to parse metadata", "error", err)
+		return
+	}
+
+	// Extract draft text from the modal state.
+	draftText := ""
+	if payload.View.State != nil {
+		if block, ok := payload.View.State.Values[draftInputBlockID]; ok {
+			if input, ok := block[draftInputActionID]; ok {
+				draftText = input.Value
+			}
 		}
 	}
-	s.log.Info("slack interaction: message shortcut received",
-		"callback_id", payload.CallbackID,
-		"user", payload.User.ID,
-		"channel", channelName,
-		"message_preview", messagePreview,
-		"trigger_id", payload.TriggerID,
-	)
+
+	if draftText == "" {
+		s.log.Warn("view submission: empty draft text")
+		return
+	}
+
+	// Resolve Aileron user from Slack user ID.
+	teamID := ""
+	if payload.Team != nil {
+		teamID = payload.Team.ID
+	}
+	userID, err := s.resolveAileronUserBySlack(context.Background(), meta.UserID, teamID)
+	if err != nil {
+		s.log.Error("view submission: failed to resolve user", "error", err)
+		return
+	}
+
+	// Send the draft as the user.
+	if err := s.sendDraftMessage(context.Background(), userID, meta.TargetChannel, draftText, meta.TargetThreadTS); err != nil {
+		s.log.Error("view submission: failed to send", "error", err)
+	} else {
+		s.log.Info("view submission: draft sent",
+			"user_id", userID,
+			"channel", meta.TargetChannel,
+			"draft_length", len(draftText),
+		)
+	}
 }
 
 // respondToInteraction sends a response to Slack's response_url,

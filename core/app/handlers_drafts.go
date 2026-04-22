@@ -437,6 +437,43 @@ type slackCredentials struct {
 	SlackUserID string
 }
 
+// resolveWorkspaceBotToken looks up the workspace-level bot token from the
+// system vault for the given Slack team ID. This is installed once by a
+// workspace admin and shared across all users.
+func (s *apiServer) resolveWorkspaceBotToken(ctx context.Context, teamID string) (string, error) {
+	if s.systemVault == nil {
+		return "", fmt.Errorf("system vault not configured — cannot resolve bot token for workspace %s", teamID)
+	}
+	botSecret, err := s.systemVault.Get(ctx, account.SlackBotTokenVaultPath(teamID))
+	if err != nil {
+		return "", fmt.Errorf("no bot token for workspace %s — an admin must install the Slack app first", teamID)
+	}
+	botToken := string(botSecret.Value)
+	if botToken == "" {
+		return "", fmt.Errorf("empty bot token for workspace %s", teamID)
+	}
+	return botToken, nil
+}
+
+// resolveAileronUserBySlack looks up the Aileron user ID from a Slack user ID
+// and team ID. Returns the user ID and connected account, or an error if not found.
+func (s *apiServer) resolveAileronUserBySlack(ctx context.Context, slackUserID, teamID string) (string, error) {
+	slackProvider := model.ConnectedAccountProviderSlack
+	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
+		Provider:       &slackProvider,
+		ExternalTeamID: teamID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to look up connected accounts: %w", err)
+	}
+	for _, acct := range accounts {
+		if acct.ExternalUserID == slackUserID {
+			return acct.UserID, nil
+		}
+	}
+	return "", fmt.Errorf("no Aileron user found for Slack user %s in team %s", slackUserID, teamID)
+}
+
 // resolveSlackCredentials looks up the user's connected Slack account and
 // retrieves the workspace bot token and the user's Slack user ID.
 // The bot token is stored at the workspace level (keyed by team_id),
@@ -463,18 +500,9 @@ func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) 
 		return nil, fmt.Errorf("no team ID on connected account for user %s", userID)
 	}
 
-	// Look up the workspace-level bot token (installed by admin, not per-user).
-	if s.systemVault == nil {
-		return nil, fmt.Errorf("system vault not configured — cannot resolve bot token for workspace %s", teamID)
-	}
-	botSecret, err := s.systemVault.Get(ctx, account.SlackBotTokenVaultPath(teamID))
+	botToken, err := s.resolveWorkspaceBotToken(ctx, teamID)
 	if err != nil {
-		return nil, fmt.Errorf("no bot token for workspace %s — an admin must install the Slack app first", teamID)
-	}
-
-	botToken := string(botSecret.Value)
-	if botToken == "" {
-		return nil, fmt.Errorf("empty bot token for workspace %s", teamID)
+		return nil, err
 	}
 
 	return &slackCredentials{BotToken: botToken, SlackUserID: slackUserID}, nil
