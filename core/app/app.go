@@ -298,12 +298,15 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		}
 
 		if authCfg.SlackEnabled() {
+			server.slackClientID = authCfg.SlackClientID
+			server.slackClientSecret = authCfg.SlackClientSecret
 			server.slackSigningSecret = authCfg.SlackSigningSecret
 			server.slackDedup = newSlackEventDedup()
 			server.onSlackMessage = server.handleIncomingSlackMessage
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
 			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
-			log.Info("enabled Slack Events API webhook and interaction endpoints")
+			mux.HandleFunc("GET /v1/slack/install/callback", server.handleSlackInstall)
+			log.Info("enabled Slack Events API webhook, interaction, and install endpoints")
 		}
 
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)
@@ -334,6 +337,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			"/v1/tee/jwks":                      true,
 			"/v1/webhooks/slack/events":          true,
 			"/v1/webhooks/slack/interactions":    true,
+			"/v1/slack/install/callback":         true,
 		}
 		handler = auth.Middleware(tokenIssuer, skipPaths)(handler)
 		log.Info("auth middleware enabled")

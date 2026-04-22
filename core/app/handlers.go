@@ -59,7 +59,11 @@ type apiServer struct {
 	ephemeralPoster    EphemeralPoster        // injectable for testing; defaults to comms.PostEphemeralDraft
 	ephemeralTextPoster EphemeralTextPoster   // injectable for testing; defaults to comms.PostEphemeralText
 	threadChecker      ThreadChecker          // injectable for testing; defaults to comms.SlackThreadHasReplies
+	slackClientID      string                  // Slack app client ID (for bot install OAuth exchange)
+	slackClientSecret  string                  // Slack app client secret (for bot install OAuth exchange)
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
+	slackBotExchanger  slackBotTokenExchanger  // injectable for testing; defaults to defaultSlackBotTokenExchange
+	slackTokenURL      string                  // overrides slackTokenURL const for testing
 	slackDedup         *slackEventDedup        // deduplication cache for Slack events
 	onSlackMessage     func(ctx context.Context, userID string, msg comms.IncomingMessage) // callback for incoming Slack messages
 	llmConfigs         store.LLMConfigStore   // per-user/per-org LLM provider config
