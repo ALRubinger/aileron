@@ -303,7 +303,6 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			server.slackSigningSecret = authCfg.SlackSigningSecret
 			server.slackDedup = newSlackEventDedup()
 			server.slackAgentClient = defaultSlackAgentClient{}
-			server.onSlackMessage = server.handleIncomingSlackMessage
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
 			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
 			mux.HandleFunc("POST /v1/webhooks/slack/commands", server.handleSlackCommand)

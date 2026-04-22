@@ -10,29 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/comms"
-	"github.com/ALRubinger/aileron/core/draft"
-	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/model"
-	"github.com/ALRubinger/aileron/core/source"
 	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 )
-
-// stubLLMClient returns a fixed response for all LLM calls.
-type stubLLMClient struct {
-	response *llm.GenerateResponse
-	err      error
-}
-
-func (s *stubLLMClient) GenerateWithTools(_ context.Context, _ llm.GenerateRequest) (*llm.GenerateResponse, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return s.response, nil
-}
 
 func newDraftsTestServer() *apiServer {
 	return &apiServer{
@@ -249,10 +232,6 @@ func newDraftsTestServerWithSend() *apiServer {
 	srv.slackSender = func(_ context.Context, token, channel, body, threadTS string) error {
 		return nil
 	}
-	// Mock ephemeral poster.
-	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
-		return nil
-	}
 	return srv
 }
 
@@ -321,67 +300,6 @@ func TestEditDraft_PassesThreadTS(t *testing.T) {
 	}
 	if capturedThreadTS != "1234567890.123456" {
 		t.Errorf("expected threadTS = %q, got %q", "1234567890.123456", capturedThreadTS)
-	}
-}
-
-func TestDeliverEphemeralDraft_ThreadTS_WhenRepliesExist(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	ctx := context.Background()
-
-	// Mock thread checker returns true — thread has replies.
-	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return true }
-
-	var capturedThreadTS string
-	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
-		capturedThreadTS = msg.ThreadTS
-		return nil
-	}
-
-	draft := model.Draft{
-		ID:        "dft_1",
-		UserID:    "usr_a",
-		Service:   "slack",
-		Channel:   "C0BACKEND",
-		Author:    "Sarah",
-		DraftBody: "Draft reply",
-		MessageTS: "1234567890.123456",
-	}
-	srv.deliverEphemeralDraft(ctx, "usr_a", draft)
-
-	if capturedThreadTS != "1234567890.123456" {
-		t.Errorf("expected ThreadTS when thread has replies, got %q", capturedThreadTS)
-	}
-}
-
-func TestDeliverEphemeralDraft_NoThreadTS_WhenNoReplies(t *testing.T) {
-	// Ephemeral drafts should NOT be posted in-thread when the thread has
-	// no replies yet — Slack silently drops them. ThreadTS should be empty
-	// so the ephemeral appears at channel level.
-	srv := newDraftsTestServerWithSend()
-	ctx := context.Background()
-
-	var capturedThreadTS string
-	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
-		capturedThreadTS = msg.ThreadTS
-		return nil
-	}
-
-	draft := model.Draft{
-		ID:        "dft_1",
-		UserID:    "usr_a",
-		Status:    model.DraftStatusPending,
-		Service:   "slack",
-		Channel:   "C0BACKEND",
-		Author:    "Sarah",
-		DraftBody: "Draft reply",
-		MessageTS: "1234567890.123456",
-	}
-	srv.deliverEphemeralDraft(ctx, "usr_a", draft)
-
-	// SlackThreadHasReplies returns false in tests (no real Slack API),
-	// so ThreadTS should be empty — ephemeral at channel level.
-	if capturedThreadTS != "" {
-		t.Errorf("expected empty ThreadTS (no thread replies), got %q", capturedThreadTS)
 	}
 }
 
@@ -652,142 +570,11 @@ func TestGetDraft_EmptyID(t *testing.T) {
 	}
 }
 
-func TestDeliverEphemeralDraft_Success(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	var posted bool
-	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
-		posted = true
-		if msg.BotToken != "xoxb-test" {
-			t.Errorf("expected bot token xoxb-test, got %s", msg.BotToken)
-		}
-		if msg.UserID != "U123ABC" {
-			t.Errorf("expected user ID U123ABC, got %s", msg.UserID)
-		}
-		if msg.DraftID != "dft_eph" {
-			t.Errorf("expected draft ID dft_eph, got %s", msg.DraftID)
-		}
-		return nil
-	}
-
-	ctx := context.Background()
-	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{
-		ID:        "dft_eph",
-		UserID:    "usr_a",
-		Channel:   "C0BACKEND",
-		Author:    "Sarah",
-		DraftBody: "Draft reply text",
-	})
-
-	if !posted {
-		t.Error("expected ephemeral to be posted")
-	}
-}
-
-func TestDeliverEphemeralDraft_NoBotToken(t *testing.T) {
-	srv := newDraftsTestServer()
-	enableVaultEncryption(srv, "usr_a")
-	ctx := context.Background()
-
-	// Connected account exists but no workspace-level bot token installed.
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001",
-	})
-	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`))
-	// No workspace bot token at slack-workspaces/T001/bot-token.
-
-	var posted bool
-	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
-		posted = true
-		return nil
-	}
-
-	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{ID: "dft_1", Channel: "C123", DraftBody: "test"})
-	if posted {
-		t.Error("should not post when workspace bot token missing")
-	}
-}
-
-func TestDeliverEphemeralDraft_NoSlackAccount(t *testing.T) {
-	srv := newDraftsTestServer()
-	var posted bool
-	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
-		posted = true
-		return nil
-	}
-
-	srv.deliverEphemeralDraft(context.Background(), "usr_a", model.Draft{ID: "dft_1"})
-	if posted {
-		t.Error("should not post when no slack account")
-	}
-}
-
-func TestDeliverEphemeralDraft_BadTokenJSON(t *testing.T) {
-	srv := newDraftsTestServer()
-	enableVaultEncryption(srv, "usr_a")
-	ctx := context.Background()
-
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
-	})
-	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte("not-json"))
-
-	var posted bool
-	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
-		posted = true
-		return nil
-	}
-
-	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{ID: "dft_1", Channel: "C123", DraftBody: "test"})
-	if posted {
-		t.Error("should not post when token JSON is invalid")
-	}
-}
-
-func TestDeliverEphemeralDraft_PosterError(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
-		return fmt.Errorf("slack API unavailable")
-	}
-
-	// Should not panic — just logs the error.
-	srv.deliverEphemeralDraft(context.Background(), "usr_a", model.Draft{
-		ID: "dft_1", Channel: "C0BACKEND", Author: "Sarah", DraftBody: "test",
-	})
-}
-
 func TestRecordFeedback_NilStore(t *testing.T) {
 	srv := newDraftsTestServer()
 	srv.feedback = nil
 	// Should not panic.
 	srv.recordFeedback(context.Background(), model.Draft{ID: "dft_1"}, model.FeedbackSignalApproved)
-}
-
-func TestDeliverEphemeralDraft_NoExternalUserID(t *testing.T) {
-	srv := newDraftsTestServer()
-	enableVaultEncryption(srv, "usr_a")
-	ctx := context.Background()
-
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive,
-		ExternalTeamID: "T001",
-		// ExternalUserID is empty
-	})
-	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp"}`))
-	srv.vault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb"), vault.Metadata{Type: "slack_bot_token"})
-
-	var posted bool
-	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
-		posted = true
-		return nil
-	}
-
-	srv.deliverEphemeralDraft(ctx, "usr_a", model.Draft{ID: "dft_1", Channel: "C123", DraftBody: "test"})
-	if posted {
-		t.Error("should not post when external user ID missing")
-	}
 }
 
 func TestExtractDraftID(t *testing.T) {
@@ -977,50 +764,6 @@ func TestListFeedback_Empty(t *testing.T) {
 	}
 }
 
-func TestPostDraftingIndicator_PostsEphemeralText(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
-
-	var capturedText, capturedChannel, capturedUserID string
-	srv.ephemeralTextPoster = func(_ context.Context, _, channel, userID, text, _ string) error {
-		capturedChannel = channel
-		capturedUserID = userID
-		capturedText = text
-		return nil
-	}
-
-	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
-	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "1234567890.123456")
-
-	if capturedChannel != "C0BACKEND" {
-		t.Errorf("expected channel C0BACKEND, got %s", capturedChannel)
-	}
-	if capturedUserID != "U123ABC" {
-		t.Errorf("expected user U123ABC, got %s", capturedUserID)
-	}
-	if capturedText == "" {
-		t.Error("expected non-empty indicator text")
-	}
-}
-
-func TestPostDraftingIndicator_ThreadTS_WhenRepliesExist(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return true }
-
-	var capturedThreadTS string
-	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, threadTS string) error {
-		capturedThreadTS = threadTS
-		return nil
-	}
-
-	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
-	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "1234567890.123456")
-
-	if capturedThreadTS != "1234567890.123456" {
-		t.Errorf("expected threadTS when thread has replies, got %q", capturedThreadTS)
-	}
-}
-
 func TestResolveSlackCredentials_Success(t *testing.T) {
 	srv := newDraftsTestServerWithSend()
 	creds, err := srv.resolveSlackCredentials(context.Background(), "usr_a")
@@ -1129,180 +872,6 @@ func TestResolveSlackCredentials_NilSystemVault(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when systemVault is nil")
 	}
-}
-
-func TestPostDraftingIndicator_NoMessageTS(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	var capturedThreadTS string
-	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, threadTS string) error {
-		capturedThreadTS = threadTS
-		return nil
-	}
-
-	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
-	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "")
-
-	if capturedThreadTS != "" {
-		t.Errorf("expected empty threadTS when messageTS is empty, got %q", capturedThreadTS)
-	}
-}
-
-func TestHandleIncomingSlackMessage_FullPipeline(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
-
-	mockLLM := &stubLLMClient{
-		response: &llm.GenerateResponse{Text: "Draft reply text"},
-	}
-	srv.draftPipeline = draft.NewPipeline(
-		mockLLM, mockLLM, source.NewRegistry(), srv.connectedAccounts,
-		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
-		draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"},
-	)
-
-	var indicatorPosted, draftPosted bool
-	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error {
-		indicatorPosted = true
-		return nil
-	}
-	srv.ephemeralPoster = func(_ context.Context, msg comms.SlackDraftMessage) error {
-		draftPosted = true
-		if msg.Draft != "Draft reply text" {
-			t.Errorf("expected draft text, got %q", msg.Draft)
-		}
-		return nil
-	}
-
-	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
-		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
-		Body: "What happened this week?",
-	})
-
-	if !indicatorPosted {
-		t.Error("expected drafting indicator to be posted")
-	}
-	if !draftPosted {
-		t.Error("expected draft ephemeral to be posted")
-	}
-
-	// Verify draft was stored.
-	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
-	if len(drafts) != 1 {
-		t.Fatalf("expected 1 draft in store, got %d", len(drafts))
-	}
-	if drafts[0].DraftBody != "Draft reply text" {
-		t.Errorf("unexpected stored draft body: %q", drafts[0].DraftBody)
-	}
-}
-
-func TestHandleIncomingSlackMessage_NoPipeline(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.draftPipeline = nil // no pipeline configured
-
-	called := false
-	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error {
-		called = true
-		return nil
-	}
-
-	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
-		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
-		Body: "Hello",
-	})
-
-	if called {
-		t.Error("should not post indicator when pipeline is nil")
-	}
-}
-
-func TestHandleIncomingSlackMessage_LLMError(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
-
-	mockLLM := &stubLLMClient{err: fmt.Errorf("LLM unavailable")}
-	srv.draftPipeline = draft.NewPipeline(
-		mockLLM, mockLLM, source.NewRegistry(), srv.connectedAccounts,
-		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
-		draft.Prompts{Research: "test", Ghostwrite: "test"},
-	)
-
-	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error { return nil }
-
-	var draftPosted bool
-	srv.ephemeralPoster = func(_ context.Context, _ comms.SlackDraftMessage) error {
-		draftPosted = true
-		return nil
-	}
-
-	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
-		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
-		Body: "Hello",
-	})
-
-	if draftPosted {
-		t.Error("should not post draft when LLM fails")
-	}
-
-	// Verify no draft was stored.
-	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
-	if len(drafts) != 0 {
-		t.Fatalf("expected 0 drafts after LLM error, got %d", len(drafts))
-	}
-}
-
-func TestHandleIncomingSlackMessage_NoSlackCredentials(t *testing.T) {
-	// User has no connected Slack account — indicator should be skipped
-	// but draft generation should still proceed.
-	srv := newDraftsTestServer() // no connected account
-	mockLLM := &stubLLMClient{
-		response: &llm.GenerateResponse{Text: "Draft without indicator"},
-	}
-	srv.draftPipeline = draft.NewPipeline(
-		mockLLM, mockLLM, source.NewRegistry(), srv.connectedAccounts,
-		mem.NewUserInstructionStore(), srv.vault, slog.Default(),
-		draft.Prompts{Research: "test", Ghostwrite: "test"},
-	)
-
-	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
-		ID: "123.456", Service: "slack", Channel: "C0BACKEND", Author: "Sarah",
-		Body: "Hello",
-	})
-
-	// Draft should still be stored even without credentials for indicator.
-	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
-	if len(drafts) != 1 {
-		t.Fatalf("expected 1 draft, got %d", len(drafts))
-	}
-}
-
-func TestHandleIncomingSlackMessage_VaultLocked_Skips(t *testing.T) {
-	srv := newDraftsTestServer()
-	// Enable vault encryption but DON'T unlock — KEK session is empty.
-	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
-	srv.draftPipeline = &draft.Pipeline{} // non-nil so we don't bail early
-
-	srv.handleIncomingSlackMessage(context.Background(), "usr_a", comms.IncomingMessage{
-		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah",
-		Body: "What happened this week?",
-	})
-
-	// No draft should be created because vault is locked.
-	drafts, _ := srv.drafts.List(context.Background(), store.DraftFilter{UserID: "usr_a"})
-	if len(drafts) != 0 {
-		t.Fatalf("expected 0 drafts when vault locked, got %d", len(drafts))
-	}
-}
-
-func TestPostDraftingIndicator_PosterError(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.threadChecker = func(_ context.Context, _, _, _ string) bool { return false }
-	srv.ephemeralTextPoster = func(_ context.Context, _, _, _, _, _ string) error {
-		return fmt.Errorf("slack API error")
-	}
-
-	creds := &slackCredentials{BotToken: "xoxb-test", SlackUserID: "U123ABC"}
-	// Should not panic — just logs the error.
-	srv.postDraftingIndicator(context.Background(), creds, "C0BACKEND", "1234567890.123456")
 }
 
 func TestListFeedback_NilStore(t *testing.T) {
