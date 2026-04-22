@@ -84,6 +84,37 @@ func TestHandleSlackInstall_Success(t *testing.T) {
 	}
 }
 
+func TestHandleSlackInstall_RedirectURIMatchesRequestPath(t *testing.T) {
+	// Regression: when handleSlackInstall is called via delegation from
+	// ConnectAccountCallback, the request path is /v1/connect/slack/callback,
+	// not /v1/slack/install/callback. The redirect_uri in the token exchange
+	// must match the actual request path.
+	srv := newInstallTestServer(t)
+	srv.slackBotExchanger = func(_, _, _, redirectURI string) (*slackBotInstallResponse, error) {
+		want := "http://api.example.com/v1/connect/slack/callback"
+		if redirectURI != want {
+			t.Errorf("redirectURI = %q, want %q", redirectURI, want)
+		}
+		return &slackBotInstallResponse{
+			OK:          true,
+			AccessToken: "xoxb-token",
+			BotUserID:   "U_BOT",
+			Team: struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			}{"T001", "ws"},
+		}, nil
+	}
+
+	req := httptest.NewRequest("GET", "http://api.example.com/v1/connect/slack/callback?code=test", nil)
+	w := httptest.NewRecorder()
+	srv.handleSlackInstall(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleSlackInstall_MissingCode(t *testing.T) {
 	srv := newInstallTestServer(t)
 

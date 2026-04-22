@@ -38,11 +38,11 @@ type slackBotInstallResponse struct {
 // slackBotTokenExchanger exchanges a code for a bot install response.
 type slackBotTokenExchanger func(clientID, clientSecret, code, redirectURI string) (*slackBotInstallResponse, error)
 
-// handleSlackInstall handles GET /v1/slack/install/callback.
-// This is the OAuth redirect endpoint for Slack bot installation. When a
-// workspace admin installs the Aileron app from the Slack App Directory,
-// Slack redirects here with an authorization code. We exchange it for a bot
-// token and store it in the system vault.
+// handleSlackInstall handles Slack bot installation. It may be called directly
+// via GET /v1/slack/install/callback or delegated from ConnectAccountCallback
+// when Slack redirects to /v1/connect/slack/callback without a state cookie.
+// It exchanges the authorization code for a bot token and stores it in the
+// system vault.
 //
 // This endpoint is unauthenticated — the admin may not have an Aileron account.
 func (s *apiServer) handleSlackInstall(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +63,7 @@ func (s *apiServer) handleSlackInstall(w http.ResponseWriter, r *http.Request) {
 		exchanger = s.defaultSlackBotTokenExchange
 	}
 
-	redirectURI := buildRedirectURI(r, "/v1/slack/install/callback")
+	redirectURI := buildRedirectURI(r, r.URL.Path)
 	resp, err := exchanger(s.slackClientID, s.slackClientSecret, code, redirectURI)
 	if err != nil {
 		s.log.Error("slack install: token exchange failed", "error", err)
