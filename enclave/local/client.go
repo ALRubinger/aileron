@@ -178,6 +178,8 @@ func (c *Client) OAuthExchange(ctx context.Context, req enclave.OAuthExchangeReq
 		EncryptedToken: encrypted,
 		Email:          email,
 		TokenType:      tokenResp.tokenType,
+		ExternalUserID: tokenResp.externalUserID,
+		ExternalTeamID: tokenResp.externalTeamID,
 	}, nil
 }
 
@@ -255,9 +257,11 @@ func (c *Client) Close() error {
 // --- OAuth helpers ---
 
 type oauthTokenResponse struct {
-	accessToken  string
-	tokenType    string
-	tokenJSON    []byte // full JSON for vault storage
+	accessToken    string
+	tokenType      string
+	tokenJSON      []byte // full JSON for vault storage
+	externalUserID string // provider-specific user ID (Slack: authed_user.id)
+	externalTeamID string // provider-specific team ID (Slack: team.id)
 }
 
 func exchangeOAuthCode(ctx context.Context, req enclave.OAuthExchangeRequest) (*oauthTokenResponse, error) {
@@ -289,24 +293,47 @@ func exchangeOAuthCode(ctx context.Context, req enclave.OAuthExchangeRequest) (*
 		return nil, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 
+	// Parse the token response. Slack uses a non-standard format with
+	// nested authed_user and team fields; standard OAuth uses top-level fields.
 	var tokenData struct {
+		OK           bool   `json:"ok"`                      // Slack-specific
 		AccessToken  string `json:"access_token"`
 		TokenType    string `json:"token_type"`
 		RefreshToken string `json:"refresh_token"`
+		AuthedUser   struct {
+			ID          string `json:"id"`
+			AccessToken string `json:"access_token"`
+			TokenType   string `json:"token_type"`
+		} `json:"authed_user"` // Slack-specific
+		Team struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"team"` // Slack-specific
 	}
 	if err := json.Unmarshal(body, &tokenData); err != nil {
 		return nil, fmt.Errorf("parsing token response: %w", err)
 	}
 
+	result := &oauthTokenResponse{
+		tokenJSON: body,
+	}
+
+	// Slack OAuth v2: user token is under authed_user, no refresh_token.
+	if tokenData.AuthedUser.AccessToken != "" {
+		result.accessToken = tokenData.AuthedUser.AccessToken
+		result.tokenType = tokenData.AuthedUser.TokenType
+		result.externalUserID = tokenData.AuthedUser.ID
+		result.externalTeamID = tokenData.Team.ID
+		return result, nil
+	}
+
+	// Standard OAuth: top-level access_token + refresh_token.
 	if tokenData.RefreshToken == "" {
 		return nil, fmt.Errorf("no refresh token returned; user may need to re-consent")
 	}
-
-	return &oauthTokenResponse{
-		accessToken: tokenData.AccessToken,
-		tokenType:   tokenData.TokenType,
-		tokenJSON:   body,
-	}, nil
+	result.accessToken = tokenData.AccessToken
+	result.tokenType = tokenData.TokenType
+	return result, nil
 }
 
 func fetchUserEmail(ctx context.Context, userinfoEndpoint, accessToken string) (string, error) {
