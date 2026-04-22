@@ -114,24 +114,9 @@ func (s *apiServer) handleSlackInteraction(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// deprecatedDraftActions are the old ephemeral draft button actions that have
-// been replaced by the agent framework.
-var deprecatedDraftActions = map[string]bool{
-	"approve_draft": true,
-	"edit_draft":    true,
-	"discard_draft": true,
-}
-
 // processInteraction handles block_actions button clicks.
 func (s *apiServer) processInteraction(actionID, actionValue string, payload slackInteractionPayload) {
 	ctx := context.Background()
-
-	// Old ephemeral draft buttons → graceful deprecation message.
-	if deprecatedDraftActions[actionID] {
-		s.respondToInteraction(payload.ResponseURL,
-			"This draft interface has been replaced. Message Aileron directly or use the message shortcut to draft replies.")
-		return
-	}
 
 	switch actionID {
 	case "send_draft_agent":

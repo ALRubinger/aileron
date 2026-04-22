@@ -60,89 +60,6 @@ func newMockResponseURLServer() *httptest.Server {
 	}))
 }
 
-func TestInteraction_ApproveDraft_Deprecated(t *testing.T) {
-	srv := newInteractionTestServer()
-
-	responseServer := newMockResponseURLServer()
-	defer responseServer.Close()
-
-	// Capture what gets posted to the response URL.
-	var mu sync.Mutex
-	var capturedBody string
-	responseServer.Close()
-	responseServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := json.Marshal(nil)
-		_ = body
-		raw := make([]byte, r.ContentLength)
-		r.Body.Read(raw)
-		mu.Lock()
-		capturedBody = string(raw)
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer responseServer.Close()
-
-	payload, _ := json.Marshal(map[string]any{
-		"type": "block_actions",
-		"user": map[string]any{"id": "U123"},
-		"actions": []map[string]any{
-			{"action_id": "approve_draft", "value": "dft_1"},
-		},
-		"response_url": responseServer.URL,
-	})
-
-	w := httptest.NewRecorder()
-	r, _ := signedInteractionRequest(string(payload))
-	srv.handleSlackInteraction(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-
-	time.Sleep(100 * time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.Contains(capturedBody, "replaced") {
-		t.Errorf("expected deprecation message containing 'replaced', got %q", capturedBody)
-	}
-}
-
-func TestInteraction_DiscardDraft_Deprecated(t *testing.T) {
-	srv := newInteractionTestServer()
-
-	var mu sync.Mutex
-	var capturedBody string
-	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw := make([]byte, r.ContentLength)
-		r.Body.Read(raw)
-		mu.Lock()
-		capturedBody = string(raw)
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer responseServer.Close()
-
-	payload, _ := json.Marshal(map[string]any{
-		"type":         "block_actions",
-		"user":         map[string]any{"id": "U123"},
-		"actions":      []map[string]any{{"action_id": "discard_draft", "value": "dft_1"}},
-		"response_url": responseServer.URL,
-	})
-
-	w := httptest.NewRecorder()
-	r, _ := signedInteractionRequest(string(payload))
-	srv.handleSlackInteraction(w, r)
-
-	time.Sleep(100 * time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.Contains(capturedBody, "replaced") {
-		t.Errorf("expected deprecation message containing 'replaced', got %q", capturedBody)
-	}
-}
-
 func TestInteraction_InvalidSignature(t *testing.T) {
 	srv := newInteractionTestServer()
 
@@ -208,25 +125,6 @@ func TestInteraction_NonBlockActions(t *testing.T) {
 	}
 }
 
-func TestInteraction_DraftNotFound(t *testing.T) {
-	srv := newInteractionTestServer()
-
-	payload, _ := json.Marshal(map[string]any{
-		"type":    "block_actions",
-		"user":    map[string]any{"id": "U123"},
-		"actions": []map[string]any{{"action_id": "approve_draft", "value": "nonexistent"}},
-	})
-
-	w := httptest.NewRecorder()
-	r, _ := signedInteractionRequest(string(payload))
-	srv.handleSlackInteraction(w, r)
-
-	// Should still return 200 (Slack requires it).
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-}
-
 func TestInteraction_RespondToInteraction_EmptyURL(t *testing.T) {
 	srv := newInteractionTestServer()
 	// Should not panic with empty response URL.
@@ -281,41 +179,6 @@ func TestInteraction_MessageAction_NoActions(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	time.Sleep(50 * time.Millisecond)
-}
-
-func TestInteraction_EditDraft_Deprecated(t *testing.T) {
-	srv := newInteractionTestServer()
-
-	var mu sync.Mutex
-	var capturedBody string
-	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw := make([]byte, r.ContentLength)
-		r.Body.Read(raw)
-		mu.Lock()
-		capturedBody = string(raw)
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer responseServer.Close()
-
-	payload, _ := json.Marshal(map[string]any{
-		"type":         "block_actions",
-		"user":         map[string]any{"id": "U123"},
-		"actions":      []map[string]any{{"action_id": "edit_draft", "value": "dft_1"}},
-		"response_url": responseServer.URL,
-	})
-
-	w := httptest.NewRecorder()
-	r, _ := signedInteractionRequest(string(payload))
-	srv.handleSlackInteraction(w, r)
-
-	time.Sleep(100 * time.Millisecond)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if !strings.Contains(capturedBody, "replaced") {
-		t.Errorf("expected deprecation message containing 'replaced', got %q", capturedBody)
-	}
 }
 
 func TestInteraction_ViewSubmission_SendsDraft(t *testing.T) {
