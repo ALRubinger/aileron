@@ -20,6 +20,7 @@ import (
 	"github.com/ALRubinger/aileron/core/source"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
+	"github.com/ALRubinger/aileron/enclave"
 )
 
 // mockSlackAgentClient records calls for assertions.
@@ -601,6 +602,71 @@ func TestBuildStreamingPipeline_WithPipeline(t *testing.T) {
 		t.Error("expected non-nil pipeline")
 	}
 }
+
+func TestResolvePipelineVault_EscrowTier(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("ctx", "draft")
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour) // auth enabled
+	// No KEK cached → tier 1 fails.
+
+	// Set up a mock enclave client that returns plaintext.
+	srv.enclaveClient = &stubEscrowEnclaveClient{}
+	// Populate escrow index with an entry.
+	srv.escrowIndex.Store("connected-accounts/usr_a/slack", "esc_test_1")
+
+	result := srv.resolvePipelineVault("usr_a")
+	if result == nil {
+		t.Fatal("expected non-nil pipeline from escrow tier")
+	}
+}
+
+func TestResolvePipelineVault_NilPipeline(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	// No pipeline configured.
+	result := srv.resolvePipelineVault("usr_a")
+	if result != nil {
+		t.Error("expected nil when draftPipeline is not configured")
+	}
+}
+
+func TestResolvePipelineVault_AuthDisabled(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("ctx", "draft")
+	// kekSessionCache is nil → auth disabled → should return base pipeline.
+	result := srv.resolvePipelineVault("usr_a")
+	if result == nil {
+		t.Error("expected non-nil pipeline when auth is disabled")
+	}
+}
+
+// stubEscrowEnclaveClient is a minimal enclave.Client for testing escrow resolution.
+type stubEscrowEnclaveClient struct{}
+
+func (stubEscrowEnclaveClient) Attest(_ context.Context, _ enclave.AttestationRequest) (enclave.AttestationResponse, error) {
+	return enclave.AttestationResponse{}, nil
+}
+func (stubEscrowEnclaveClient) EstablishSession(_ context.Context, _ enclave.SessionRequest) (enclave.SessionResponse, error) {
+	return enclave.SessionResponse{}, nil
+}
+func (stubEscrowEnclaveClient) TransmitKEK(_ context.Context, _ enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
+	return enclave.TransmitKEKResponse{}, nil
+}
+func (stubEscrowEnclaveClient) OAuthExchange(_ context.Context, _ enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
+	return enclave.OAuthExchangeResponse{}, nil
+}
+func (stubEscrowEnclaveClient) Execute(_ context.Context, _ enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
+	return enclave.ExecuteResponse{}, nil
+}
+func (stubEscrowEnclaveClient) EscrowStore(_ context.Context, _ enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
+	return enclave.EscrowStoreResponse{}, nil
+}
+func (stubEscrowEnclaveClient) EscrowRetrieve(_ context.Context, req enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
+	return enclave.EscrowRetrieveResponse{Credential: []byte("escrow-plaintext")}, nil
+}
+func (stubEscrowEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
+	return nil
+}
+func (stubEscrowEnclaveClient) Close() error { return nil }
 
 func TestProcessSlashCommandDraft_HappyPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
