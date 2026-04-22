@@ -3,7 +3,7 @@ title: "Connecting Your Slack Account"
 description: "Connect your Slack account to Aileron and start drafting"
 ---
 
-This guide is for **users** who want to use Aileron in Slack. A workspace admin must have already [installed the Aileron Slack app](/getting-started/slack-app-install) to your workspace.
+This guide is for **users** who want to use Aileron in Slack. A workspace admin must have already [installed Aileron from the Slack App Directory](/getting-started/slack-app-install) to your workspace.
 
 For an overview of what the integration does, see [Slack Cloud Integration](/getting-started/slack-cloud-integration).
 

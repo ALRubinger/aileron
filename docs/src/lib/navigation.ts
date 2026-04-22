@@ -65,7 +65,8 @@ export const navigation: NavItem[] = [
     children: [
       { label: 'Supported Agents', href: '/operations/supported-agents' },
       { label: 'Status & Audit', href: '/operations/status-and-audit' },
-      { label: 'Running Locally', href: '/operations/running-locally' }
+      { label: 'Running Locally', href: '/operations/running-locally' },
+      { label: 'Slack App Configuration', href: '/operations/slack-app-configuration' }
     ]
   },
   {

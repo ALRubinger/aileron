@@ -35,9 +35,9 @@ In all cases, replies are sent as **you** (via your user token), not as the bot.
 
 Setup has two parts, performed by different people:
 
-1. **[Installing the Aileron Slack App](/getting-started/slack-app-install)** — A workspace admin creates and configures the Slack app, sets up the Aileron server, and installs the bot to the workspace. Done once per workspace.
+1. **[Install Aileron to your workspace](/getting-started/slack-app-install)** — A workspace admin installs Aileron from the Slack App Directory. One click, done once per workspace.
 
-2. **[Connecting your Slack account](/getting-started/slack-connect)** — Each user connects their own Slack account to Aileron via OAuth. Takes under a minute.
+2. **[Connect your Slack account](/getting-started/slack-connect)** — Each user connects their own Slack account to Aileron via OAuth. Takes under a minute.
 
 ## Architecture
 
