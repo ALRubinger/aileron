@@ -9,6 +9,22 @@ import (
 	"testing"
 )
 
+func TestSystemVault_ServerStartsWithSystemVaultConfigured(t *testing.T) {
+	// When AILERON_SYSTEM_VAULT_KEY is set (see CI workflow), the server
+	// creates the system_vault_secrets table and wires the encrypted system
+	// vault. This test confirms the server started successfully with it.
+	// The system vault wiring code in app.go (hex decode, EncryptedVault
+	// creation, PostgresSystemVault) is exercised at server startup.
+	resp, err := http.Get(apiURL() + "/v1/health")
+	if err != nil {
+		t.Fatalf("health request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d — server may have failed to start with system vault", resp.StatusCode)
+	}
+}
+
 func TestVault_TokenStoredAndRetrievableViaAccountLifecycle(t *testing.T) {
 	// Create a connected account WITH a token — exercises vault.Put.
 	resp := authedPost(t, apiURL()+"/v1/connected-accounts", map[string]any{
