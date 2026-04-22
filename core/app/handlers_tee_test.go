@@ -730,7 +730,7 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 	r4.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
 	srv.ConnectAccountCallback(w4, r4, "gmail", api.ConnectAccountCallbackParams{
 		Code:  "test-code",
-		State: state,
+		State: &state,
 	})
 
 	if w4.Code != http.StatusFound {

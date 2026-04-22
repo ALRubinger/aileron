@@ -275,7 +275,11 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	}
 
 	cookie, err := r.Cookie("aileron_connect_state")
-	if err != nil || cookie.Value != params.State {
+	state := ""
+	if params.State != nil {
+		state = *params.State
+	}
+	if err != nil || cookie.Value != state {
 		writeError(w, http.StatusBadRequest, "invalid_state", "state mismatch; possible CSRF")
 		return
 	}
@@ -408,7 +412,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 
 	_, err = scopedSvc.HandleCallback(r.Context(), provider, account.CallbackRequest{
 		Code:        params.Code,
-		State:       params.State,
+		State:       state,
 		RedirectURL: redirectURL,
 		UserID:      userID,
 	})
