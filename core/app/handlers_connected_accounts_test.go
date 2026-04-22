@@ -763,6 +763,51 @@ func TestConnectAccountCallback_SlackInstallDelegation(t *testing.T) {
 	}
 }
 
+func TestConnectAccountCallback_SlackInstallDelegation_Authenticated(t *testing.T) {
+	// Regression: an admin logged into Aileron clicks the Slack-generated
+	// install URL. There's no state cookie (the flow wasn't started from
+	// Aileron's UI), but there ARE auth claims from the session. The handler
+	// must still delegate to handleSlackInstall.
+	srv := newConnectedAccountServer()
+	srv.systemVault = vault.NewMemVault()
+	srv.slackClientID = "test-client-id"
+	srv.slackClientSecret = "test-client-secret"
+	srv.slackBotExchanger = func(_, _, code, _ string) (*slackBotInstallResponse, error) {
+		if code != "admin-install-code" {
+			t.Errorf("code = %q, want admin-install-code", code)
+		}
+		return &slackBotInstallResponse{
+			OK:          true,
+			AccessToken: "xoxb-admin-install",
+			BotUserID:   "U_BOT",
+			Team: struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			}{"T_ADMIN", "admin-ws"},
+		}, nil
+	}
+
+	req := httptest.NewRequest("GET", "/v1/connect/slack/callback?code=admin-install-code", nil)
+	// Authenticated user — no state cookie.
+	ctx := auth.ContextWithClaims(req.Context(), &auth.Claims{})
+	req = req.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	srv.ConnectAccountCallback(w, req, "slack", api.ConnectAccountCallbackParams{Code: "admin-install-code", State: nil})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (install delegation), got %d: %s", w.Code, w.Body.String())
+	}
+
+	secret, err := srv.systemVault.Get(context.Background(), "slack-workspaces/T_ADMIN/bot-token")
+	if err != nil {
+		t.Fatalf("expected bot token in system vault: %v", err)
+	}
+	if string(secret.Value) != "xoxb-admin-install" {
+		t.Errorf("stored token = %q, want xoxb-admin-install", secret.Value)
+	}
+}
+
 func TestConnectAccountCallback_SlackWithAuth_DoesNotDelegate(t *testing.T) {
 	// When an authenticated Slack request hits the connect callback with a
 	// state cookie, it should follow the normal user account connection flow,
