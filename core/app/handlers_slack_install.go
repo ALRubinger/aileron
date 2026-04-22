@@ -6,10 +6,32 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/ALRubinger/aileron/core/account"
 	"github.com/ALRubinger/aileron/core/vault"
 )
+
+// slackBotScopes are the OAuth bot scopes requested during Slack app installation.
+var slackBotScopes = []string{
+	"assistant:write",
+	"chat:write",
+	"im:history",
+	"commands",
+}
+
+// slackInstallUserScopes are the OAuth user scopes requested during Slack app
+// installation. These are the same scopes used for per-user connected accounts.
+var slackInstallUserScopes = []string{
+	"channels:history",
+	"channels:read",
+	"chat:write",
+	"search:read",
+	"users:read",
+}
+
+// slackAuthorizeBaseURL is the Slack OAuth v2 authorization endpoint.
+const slackAuthorizeBaseURL = "https://slack.com/oauth/v2/authorize"
 
 // slackInstallResponse is the HTML page shown after a successful bot installation.
 const slackInstallSuccessHTML = `<!DOCTYPE html>
@@ -38,6 +60,44 @@ type slackBotInstallResponse struct {
 // slackBotTokenExchanger exchanges a code for a bot install response.
 type slackBotTokenExchanger func(clientID, clientSecret, code, redirectURI string) (*slackBotInstallResponse, error)
 
+// handleSlackInstallStart handles GET /v1/slack/install.
+// It generates an OAuth state parameter, stores it in a cookie, and redirects
+// the admin to Slack's OAuth authorize page. This prevents the "state is
+// required" error that Slack returns when the authorize URL has no state.
+//
+// This endpoint is unauthenticated — the admin may not have an Aileron account.
+func (s *apiServer) handleSlackInstallStart(w http.ResponseWriter, r *http.Request) {
+	state := s.newID()
+
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{
+		Name:     "aileron_slack_install_state",
+		Value:    state,
+		Path:     "/v1/slack/install",
+		MaxAge:   600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+	})
+
+	redirectURI := buildRedirectURI(r, "/v1/slack/install/callback")
+
+	authorizeBase := slackAuthorizeBaseURL
+	if s.slackAuthorizeURL != "" {
+		authorizeBase = s.slackAuthorizeURL
+	}
+
+	params := url.Values{
+		"client_id":    {s.slackClientID},
+		"scope":        {strings.Join(slackBotScopes, ",")},
+		"user_scope":   {strings.Join(slackInstallUserScopes, ",")},
+		"redirect_uri": {redirectURI},
+		"state":        {state},
+	}
+
+	http.Redirect(w, r, authorizeBase+"?"+params.Encode(), http.StatusFound)
+}
+
 // handleSlackInstall handles GET /v1/slack/install/callback.
 // This is the OAuth redirect endpoint for Slack bot installation. When a
 // workspace admin installs the Aileron app from the Slack App Directory,
@@ -50,6 +110,19 @@ func (s *apiServer) handleSlackInstall(w http.ResponseWriter, r *http.Request) {
 	if code == "" {
 		http.Error(w, "missing code parameter", http.StatusBadRequest)
 		return
+	}
+
+	// Validate state if a state cookie is present. The cookie is set by
+	// handleSlackInstallStart when the flow is initiated from Aileron's
+	// install page. Slack Marketplace installs may arrive without a cookie
+	// (the flow was not started by us), so we only enforce when the cookie
+	// exists.
+	if cookie, err := r.Cookie("aileron_slack_install_state"); err == nil {
+		state := r.URL.Query().Get("state")
+		if state == "" || state != cookie.Value {
+			http.Error(w, "state mismatch; possible CSRF", http.StatusBadRequest)
+			return
+		}
 	}
 
 	if s.systemVault == nil {

@@ -73,6 +73,7 @@ type apiServer struct {
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
 	slackBotExchanger  slackBotTokenExchanger  // injectable for testing; defaults to defaultSlackBotTokenExchange
 	slackTokenURL      string                  // overrides slackTokenURL const for testing
+	slackAuthorizeURL  string                  // overrides slackAuthorizeBaseURL const for testing
 	slackDedup         *slackEventDedup        // deduplication cache for Slack events
 	llmConfigs         store.LLMConfigStore   // per-user/per-org LLM provider config
 	enterprises        store.EnterpriseStore  // nil when auth is disabled
