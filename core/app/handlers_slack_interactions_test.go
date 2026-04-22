@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -362,9 +363,12 @@ func TestInteraction_ViewSubmission_SendsDraft(t *testing.T) {
 	storeEncryptedToken(srv, "connected-accounts/usr_a/slack",
 		[]byte(`{"access_token":"xoxp-test"}`))
 
+	var mu sync.Mutex
 	var sentBody string
 	srv.slackSender = func(_ context.Context, _, _, body, _ string) error {
+		mu.Lock()
 		sentBody = body
+		mu.Unlock()
 		return nil
 	}
 
@@ -404,8 +408,11 @@ func TestInteraction_ViewSubmission_SendsDraft(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if sentBody != "This is my edited draft" {
-		t.Errorf("expected draft text to be sent, got %q", sentBody)
+	mu.Lock()
+	got := sentBody
+	mu.Unlock()
+	if got != "This is my edited draft" {
+		t.Errorf("expected draft text to be sent, got %q", got)
 	}
 }
 
