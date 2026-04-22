@@ -106,20 +106,21 @@ Path conventions:
 
 ### Interface
 
-The system vault implements `vault.Vault`:
+The system vault is not a new type — it reuses the same building blocks as the user vault:
 
 ```go
-type SystemVault struct {
-    db  *sql.DB
-    key []byte // 32-byte AES-256 key from AILERON_SYSTEM_VAULT_KEY
-}
+// PostgresVault is parameterized by table name. Both vaults use the same code.
+userStore  := vault.NewPostgresVault(pool)                            // → vault_secrets
+sysStore   := vault.NewPostgresVaultForTable(pool, "system_vault_secrets") // → system_vault_secrets
 
-func (v *SystemVault) Get(ctx context.Context, path string) (Secret, error)
-func (v *SystemVault) Put(ctx context.Context, path string, value []byte, meta Metadata) error
-func (v *SystemVault) Delete(ctx context.Context, path string) error
+// Both are wrapped with EncryptedVault — same decorator, different keys.
+userVault, _ := vault.NewEncryptedVault(userStore, userKEK)     // user-derived KEK
+sysVault, _  := vault.NewEncryptedVault(sysStore, systemKey)    // server-managed key
 ```
 
-The `apiServer` struct gains a `systemVault vault.Vault` field alongside the existing `vault vault.Vault` (user vault). Code that needs infrastructure secrets reads from `s.systemVault`; code that needs user secrets reads from `s.vault` (or `s.userVault(userID)` for KEK-scoped access).
+A convenience constructor `NewPostgresSystemVault(pool)` wraps the table name detail.
+
+The `apiServer` struct gains a `systemVault vault.Vault` field alongside the existing `vault vault.Vault` (user vault). Code that needs infrastructure secrets reads from `s.systemVault`; code that needs user secrets reads from `s.vault` (or `s.userVault(userID)` for KEK-scoped access). Both fields have the same type — `vault.Vault` — so all existing code that accepts the interface works with either.
 
 ### Access control
 
@@ -155,7 +156,7 @@ Key rotation: when the key changes, existing secrets must be re-encrypted. This 
 
 ## Consequences
 
-- The `vault.Vault` SPI is unchanged. The system vault is a new implementation, not a modification to the interface. All existing code that accepts `vault.Vault` works with either vault.
+- The `vault.Vault` SPI is unchanged. The system vault reuses `PostgresVault` (parameterized by table name) and `EncryptedVault` (same decorator, different key). No new types implement the interface — the difference is configuration, not code.
 - `apiServer` gains a `systemVault vault.Vault` field. Handlers choose which vault to use based on whether the secret is user-scoped or infrastructure-scoped.
 - New database table: `system_vault_secrets`. Separate from the existing vault storage, with its own lifecycle.
 - New env var: `AILERON_SYSTEM_VAULT_KEY`. Required when the system vault is backed by PostgreSQL. Not required for in-memory (test) mode.
@@ -165,19 +166,19 @@ Key rotation: when the key changes, existing secrets must be re-encrypted. This 
 
 ## Relationship to other ADRs
 
-- **ADR-0010 (Zero-Knowledge Vault):** Referenced, not superseded. ADR-0010 governs user secrets. ADR-0020 governs infrastructure secrets. Both implement `vault.Vault`. The difference is key management: user-derived (zero-knowledge) vs. server-managed (encrypted at rest).
+- **ADR-0010 (Zero-Knowledge Vault):** Referenced, not superseded. ADR-0010 governs user secrets. ADR-0020 governs infrastructure secrets. Both use the same `PostgresVault` implementation and `EncryptedVault` decorator — the difference is the key source (user-derived KEK vs. server-managed key) and the database table (`vault_secrets` vs. `system_vault_secrets`).
 - **ADR-0009 (Execution Plane):** Unchanged. The execution plane owns all write operations. Infrastructure secrets (bot tokens) are used by the execution plane to send messages on behalf of users.
 - **ADR-0012 (Auto-Escrow):** Unaffected. Auto-escrow applies to user KEKs inside the TEE. The system vault key is a separate concern.
 
 ## Files
 
 ### New
-- `core/vault/system.go` — `SystemVault` implementation (PostgreSQL-backed, AES-256-GCM)
+- `core/vault/system.go` — `NewPostgresSystemVault` convenience constructor
 - `core/vault/system_test.go` — unit tests
-- `core/store/postgres/system_vault.go` — PostgreSQL operations (if separated from vault package)
 
 ### Modified
+- `core/vault/postgres.go` — `NewPostgresVaultForTable` constructor, parameterized table name
 - `core/app/handlers.go` — add `systemVault vault.Vault` field to `apiServer`
-- `core/app/app.go` — wire `SystemVault` from config
-- `core/config/auth.go` — `SystemVaultKey()` config accessor
+- `core/app/app.go` — wire `EncryptedVault(NewPostgresSystemVault(pool), sysKey)` from config
+- `core/config/auth.go` — `SystemVaultKey` field, `SystemVaultEnabled()` method
 - `core/schema/schema.hcl` — `system_vault_secrets` table definition
