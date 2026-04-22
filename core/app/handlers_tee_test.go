@@ -760,4 +760,14 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 	if secret.Metadata.Labels["encrypted"] != "true" {
 		t.Fatal("expected encrypted=true label on vault secret")
 	}
+
+	// Verify the credential was auto-escrowed for async access.
+	vaultPath := accounts[0].VaultPath()
+	escrowID, ok := srv.escrowIndex.Load(vaultPath)
+	if !ok {
+		t.Fatalf("expected escrow index entry for %q after connect", vaultPath)
+	}
+	if escrowID.(string) == "" {
+		t.Fatal("expected non-empty escrow ID")
+	}
 }

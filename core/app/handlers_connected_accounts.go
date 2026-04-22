@@ -380,6 +380,13 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
+		// Auto-escrow all credentials so async flows (Slack agent) work
+		// immediately without requiring a separate vault unlock step.
+		escrowed := s.autoEscrowCredentials(r.Context(), userID)
+		if escrowed > 0 {
+			s.log.Info("auto-escrowed credentials on connect", "user_id", userID, "count", escrowed)
+		}
+
 		http.Redirect(w, r, returnTo, http.StatusFound)
 		return
 	}
@@ -409,6 +416,14 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		s.log.Error("connected account callback failed", "error", err, "provider", providerStr)
 		writeError(w, http.StatusInternalServerError, "callback_error", "failed to connect account: "+err.Error())
 		return
+	}
+
+	// Auto-escrow in direct mode (no-op if enclaveClient is nil).
+	if s.enclaveClient != nil {
+		escrowed := s.autoEscrowCredentials(r.Context(), userID)
+		if escrowed > 0 {
+			s.log.Info("auto-escrowed credentials on connect", "user_id", userID, "count", escrowed)
+		}
 	}
 
 	http.Redirect(w, r, returnTo, http.StatusFound)
