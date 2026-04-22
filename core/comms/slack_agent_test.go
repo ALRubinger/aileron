@@ -197,6 +197,30 @@ func TestStopStream_Success(t *testing.T) {
 	}
 }
 
+func TestOpenConversation_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"channel": map[string]any{
+				"id": "D_DM_CHANNEL",
+			},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	channelID, err := comms.OpenConversation(context.Background(), "xoxb-test", "U_ALICE")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if channelID != "D_DM_CHANNEL" {
+		t.Errorf("expected D_DM_CHANNEL, got %q", channelID)
+	}
+}
+
 func TestOpenModal_EmptyToken(t *testing.T) {
 	_, err := comms.OpenModal(context.Background(), "", "trigger123", comms.EmptyModalView())
 	if err == nil {
