@@ -241,7 +241,7 @@ func TestConnectAccountCallback_ValidStateButBadCode(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail/callback?code=invalid&state="+state, "", userAClaims)
 	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
-	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "invalid", State: state})
+	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "invalid", State: &state})
 
 	// Should fail at the code exchange step (can't reach Google), returning 500.
 	if w.Code != http.StatusInternalServerError {
@@ -468,7 +468,8 @@ func TestConnectAccountCallback_NotConfigured(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail/callback?code=x&state=y", "", nil)
-	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "x", State: "y"})
+	yState := "y"
+	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "x", State: &yState})
 
 	if w.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501, got %d", w.Code)
@@ -482,7 +483,8 @@ func TestConnectAccountCallback_StateMismatch(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := mcpRequest("GET", "/v1/connect/gmail/callback?code=x&state=bad", "", nil)
 	// No cookie set, so state will mismatch.
-	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "x", State: "bad"})
+	badState := "bad"
+	srv.ConnectAccountCallback(w, r, "gmail", api.ConnectAccountCallbackParams{Code: "x", State: &badState})
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for state mismatch, got %d", w.Code)
@@ -522,7 +524,7 @@ func TestConnectAccountCallback_RedirectsToReturnTo(t *testing.T) {
 	r := mcpRequest("GET", "/v1/connect/slack/callback?code=valid&state="+state, "", userAClaims)
 	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
 	r.AddCookie(&http.Cookie{Name: "aileron_connect_return", Value: "https://app.withaileron.ai/settings/connected-accounts"})
-	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: state})
+	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: &state})
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d: %s", w.Code, w.Body.String())
@@ -565,7 +567,7 @@ func TestConnectAccountCallback_DefaultRedirectWhenNoReturnTo(t *testing.T) {
 	r := mcpRequest("GET", "/v1/connect/slack/callback?code=valid&state="+state, "", userAClaims)
 	r.AddCookie(&http.Cookie{Name: "aileron_connect_state", Value: state})
 	// No aileron_connect_return cookie — should use default.
-	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: state})
+	srv.ConnectAccountCallback(w, r, "slack", api.ConnectAccountCallbackParams{Code: "valid", State: &state})
 
 	if w.Code != http.StatusFound {
 		t.Fatalf("expected 302, got %d: %s", w.Code, w.Body.String())
@@ -745,7 +747,7 @@ func TestConnectAccountCallback_SlackInstallDelegation(t *testing.T) {
 	// No auth cookies/headers, no state cookie — simulates a Slack Marketplace redirect.
 	req := httptest.NewRequest("GET", "/v1/connect/slack/callback?code=marketplace-code&state=", nil)
 	w := httptest.NewRecorder()
-	srv.ConnectAccountCallback(w, req, "slack", api.ConnectAccountCallbackParams{Code: "marketplace-code", State: ""})
+	srv.ConnectAccountCallback(w, req, "slack", api.ConnectAccountCallbackParams{Code: "marketplace-code", State: nil})
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 (install success), got %d: %s", w.Code, w.Body.String())
@@ -782,7 +784,8 @@ func TestConnectAccountCallback_SlackWithAuth_DoesNotDelegate(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
-	srv.ConnectAccountCallback(w, req, "slack", api.ConnectAccountCallbackParams{Code: "user-code", State: "valid-state"})
+	validState := "valid-state"
+	srv.ConnectAccountCallback(w, req, "slack", api.ConnectAccountCallbackParams{Code: "user-code", State: &validState})
 
 	// Should NOT have called the install exchanger — the state cookie is present,
 	// so it proceeds with the normal account connection flow.
