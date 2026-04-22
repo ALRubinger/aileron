@@ -1,8 +1,18 @@
 import { PUBLIC_API_BASE } from '$env/static/public';
 
+export interface AttestationClaims {
+	issuer: string;
+	image_digest?: string;
+	project_id?: string;
+	hwmodel?: string;
+	issued_at?: number;
+	expires_at?: number;
+}
+
 export interface AttestationResult {
 	verified: boolean;
 	enclavePublicKey: Uint8Array;
+	claims?: AttestationClaims;
 }
 
 /**
@@ -17,12 +27,16 @@ export async function verifyAttestation(
 ): Promise<AttestationResult> {
 	if (token === 'dev-ok') {
 		// Local TEE provider — no real attestation.
-		return { verified: true, enclavePublicKey };
+		return {
+			verified: true,
+			enclavePublicKey,
+			claims: { issuer: 'local-dev', hwmodel: 'none' }
+		};
 	}
 
 	// Production: verify Google Confidential Space OIDC JWT.
-	const verified = await verifyConfidentialSpaceJWT(token, expectedAudience);
-	return { verified, enclavePublicKey };
+	const { verified, claims } = await verifyConfidentialSpaceJWT(token, expectedAudience);
+	return { verified, enclavePublicKey, claims };
 }
 
 // --- JWT verification internals ---
@@ -35,6 +49,7 @@ interface JWTClaims {
 	iat?: number;
 	aud?: string;
 	eat_nonce?: string[];
+	hwmodel?: string;
 	submods?: {
 		container?: {
 			image_digest?: string;
@@ -64,7 +79,7 @@ interface JWKS {
 async function verifyConfidentialSpaceJWT(
 	token: string,
 	_expectedAudience: string
-): Promise<boolean> {
+): Promise<{ verified: boolean; claims: AttestationClaims }> {
 	const parts = token.split('.');
 	if (parts.length !== 3) {
 		throw new Error('Invalid JWT: expected 3 parts');
@@ -74,14 +89,14 @@ async function verifyConfidentialSpaceJWT(
 	const header: { alg: string; kid: string } = JSON.parse(base64UrlDecode(parts[0]));
 
 	// Validate claims from the JWT payload.
-	const claims: JWTClaims = JSON.parse(base64UrlDecode(parts[1]));
+	const jwtClaims: JWTClaims = JSON.parse(base64UrlDecode(parts[1]));
 
-	if (claims.iss !== EXPECTED_ISSUER) {
-		throw new Error(`Unexpected issuer: ${claims.iss}`);
+	if (jwtClaims.iss !== EXPECTED_ISSUER) {
+		throw new Error(`Unexpected issuer: ${jwtClaims.iss}`);
 	}
 
 	const now = Math.floor(Date.now() / 1000);
-	if (claims.exp < now) {
+	if (jwtClaims.exp < now) {
 		throw new Error('Token expired');
 	}
 
@@ -107,7 +122,16 @@ async function verifyConfidentialSpaceJWT(
 		throw new Error('JWT signature verification failed');
 	}
 
-	return true;
+	const attestationClaims: AttestationClaims = {
+		issuer: jwtClaims.iss,
+		image_digest: jwtClaims.submods?.container?.image_digest,
+		project_id: jwtClaims.submods?.gce?.project_id,
+		hwmodel: jwtClaims.hwmodel,
+		issued_at: jwtClaims.iat,
+		expires_at: jwtClaims.exp
+	};
+
+	return { verified: true, claims: attestationClaims };
 }
 
 /**

@@ -1,6 +1,9 @@
 package enclave
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // AttestationClaims are the verified claims extracted from attestation
 // evidence. The exact contents depend on the TEE provider.
@@ -11,6 +14,14 @@ type AttestationClaims struct {
 	// ProjectID is the cloud project that owns the enclave workload.
 	// For the local dev provider this is "local".
 	ProjectID string
+	// Issuer is the token issuer (e.g. "https://accounts.google.com").
+	Issuer string
+	// HWModel is the hardware security model (e.g. "GCP_AMD_SEV").
+	HWModel string
+	// IssuedAt is when the attestation token was issued.
+	IssuedAt time.Time
+	// ExpiresAt is when the attestation token expires.
+	ExpiresAt time.Time
 }
 
 // Verifier validates attestation evidence from an enclave. Each TEE provider
