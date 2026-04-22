@@ -132,11 +132,11 @@ jobs:
 
       - name: Update and restart Confidential Space VM
         run: |
-          IMAGE=${{ env.REGISTRY }}/aileron-enclave@${{ steps.digest.outputs.digest }}
+          IMAGE="${{ env.REGISTRY }}/aileron-enclave@${{ steps.digest.outputs.digest }}"
           gcloud compute instances update ${{ secrets.GCP_ENCLAVE_INSTANCE }} \
             --zone=${{ secrets.GCP_ENCLAVE_ZONE }} \
             --project=${{ secrets.GCP_PROJECT }} \
-            --metadata=tee-image-reference=$IMAGE
+            --metadata="tee-image-reference=${IMAGE}"
           gcloud compute instances reset ${{ secrets.GCP_ENCLAVE_INSTANCE }} \
             --zone=${{ secrets.GCP_ENCLAVE_ZONE }} \
             --project=${{ secrets.GCP_PROJECT }}
