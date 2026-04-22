@@ -176,18 +176,18 @@ func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Reque
 	defer zeroBytes(kek)
 
 	// Exchange authorization code for tokens.
-	tokenJSON, accessToken, tokenType, err := doOAuthExchange(r.Context(), req)
+	oauthResult, err := doOAuthExchange(r.Context(), req)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "OAuth exchange failed: "+err.Error())
 		return
 	}
-	defer zeroBytes(tokenJSON)
+	defer zeroBytes(oauthResult.tokenJSON)
 
 	// Fetch user email.
-	email, _ := doFetchEmail(r.Context(), req.UserInfoEndpoint, accessToken)
+	email, _ := doFetchEmail(r.Context(), req.UserInfoEndpoint, oauthResult.accessToken)
 
 	// Encrypt token JSON with user's KEK.
-	encrypted, err := crypto.Encrypt(tokenJSON, kek)
+	encrypted, err := crypto.Encrypt(oauthResult.tokenJSON, kek)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "encrypting token: "+err.Error())
 		return
@@ -196,7 +196,9 @@ func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, enclave.OAuthExchangeResponse{
 		EncryptedToken: encrypted,
 		Email:          email,
-		TokenType:      tokenType,
+		TokenType:      oauthResult.tokenType,
+		ExternalUserID: oauthResult.externalUserID,
+		ExternalTeamID: oauthResult.externalTeamID,
 	})
 }
 

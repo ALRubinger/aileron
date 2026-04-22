@@ -14,7 +14,16 @@ import (
 // doOAuthExchange calls the provider's token endpoint to exchange an
 // authorization code for tokens. Returns the full token JSON (for encrypted
 // vault storage), the access token (for fetching user info), and the token type.
-func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tokenJSON []byte, accessToken, tokenType string, err error) {
+// oauthExchangeResult holds the results of an OAuth token exchange.
+type oauthExchangeResult struct {
+	tokenJSON      []byte
+	accessToken    string
+	tokenType      string
+	externalUserID string // provider-specific user ID (e.g. Slack authed_user.id)
+	externalTeamID string // provider-specific team ID (e.g. Slack team.id)
+}
+
+func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (*oauthExchangeResult, error) {
 	form := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {req.Code},
@@ -25,7 +34,7 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tok
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, req.TokenEndpoint, nil)
 	if err != nil {
-		return nil, "", "", err
+		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	httpReq.Header.Set("Accept", "application/json")
@@ -33,17 +42,17 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tok
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return nil, "", "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, "", "", err
+		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", "", fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("token endpoint returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var tokenData struct {
@@ -63,19 +72,23 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tok
 		} `json:"team"`
 	}
 	if err := json.Unmarshal(body, &tokenData); err != nil {
-		return nil, "", "", fmt.Errorf("parsing token response: %w", err)
+		return nil, fmt.Errorf("parsing token response: %w", err)
 	}
 
-	accessToken = tokenData.AccessToken
-	tokenType = tokenData.TokenType
-	storedJSON := body
+	result := &oauthExchangeResult{
+		accessToken: tokenData.AccessToken,
+		tokenType:   tokenData.TokenType,
+		tokenJSON:   body,
+	}
 
 	// Slack's oauth.v2.access nests the user token under authed_user.
 	// Normalize to store only the user token fields, matching the direct
 	// (non-TEE) code path in SlackService.HandleCallback.
 	if req.Provider == "slack" && tokenData.AuthedUser.AccessToken != "" {
-		accessToken = tokenData.AuthedUser.AccessToken
-		tokenType = tokenData.AuthedUser.TokenType
+		result.accessToken = tokenData.AuthedUser.AccessToken
+		result.tokenType = tokenData.AuthedUser.TokenType
+		result.externalUserID = tokenData.AuthedUser.ID
+		result.externalTeamID = tokenData.Team.ID
 		normalized, err := json.Marshal(map[string]string{
 			"access_token": tokenData.AuthedUser.AccessToken,
 			"token_type":   tokenData.AuthedUser.TokenType,
@@ -85,16 +98,16 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (tok
 			"user_id":      tokenData.AuthedUser.ID,
 		})
 		if err != nil {
-			return nil, "", "", fmt.Errorf("marshalling normalized token: %w", err)
+			return nil, fmt.Errorf("marshalling normalized token: %w", err)
 		}
-		storedJSON = normalized
+		result.tokenJSON = normalized
 	}
 
-	if accessToken == "" {
-		return nil, "", "", fmt.Errorf("no access token returned")
+	if result.accessToken == "" {
+		return nil, fmt.Errorf("no access token returned")
 	}
 
-	return storedJSON, accessToken, tokenType, nil
+	return result, nil
 }
 
 // doFetchEmail retrieves the user's email from the userinfo endpoint.
