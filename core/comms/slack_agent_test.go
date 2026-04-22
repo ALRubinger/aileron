@@ -221,6 +221,80 @@ func TestOpenConversation_Success(t *testing.T) {
 	}
 }
 
+func TestResolveSlackDisplayName_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"user": map[string]any{
+				"id":        "U_ALICE",
+				"real_name": "Alice Smith",
+				"profile": map[string]any{
+					"display_name": "alice",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	name := comms.ResolveSlackDisplayName(context.Background(), "xoxb-test", "U_ALICE")
+	if name != "alice" {
+		t.Errorf("expected 'alice', got %q", name)
+	}
+}
+
+func TestResolveSlackDisplayName_FallsBackToRealName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"user": map[string]any{
+				"id":        "U_BOB",
+				"real_name": "Bob Jones",
+				"profile": map[string]any{
+					"display_name": "",
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	name := comms.ResolveSlackDisplayName(context.Background(), "xoxb-test", "U_BOB")
+	if name != "Bob Jones" {
+		t.Errorf("expected 'Bob Jones', got %q", name)
+	}
+}
+
+func TestResolveSlackDisplayName_FallsBackToUserID(t *testing.T) {
+	// Empty token — can't call API, returns raw user ID.
+	name := comms.ResolveSlackDisplayName(context.Background(), "", "U_ALICE")
+	if name != "U_ALICE" {
+		t.Errorf("expected 'U_ALICE', got %q", name)
+	}
+}
+
+func TestResolveSlackDisplayName_APIError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "user_not_found"})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	name := comms.ResolveSlackDisplayName(context.Background(), "xoxb-test", "U_UNKNOWN")
+	if name != "U_UNKNOWN" {
+		t.Errorf("expected fallback to 'U_UNKNOWN', got %q", name)
+	}
+}
+
 func TestOpenModal_EmptyToken(t *testing.T) {
 	_, err := comms.OpenModal(context.Background(), "", "trigger123", comms.EmptyModalView())
 	if err == nil {

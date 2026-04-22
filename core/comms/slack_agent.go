@@ -152,3 +152,23 @@ func OpenConversation(ctx context.Context, botToken, userID string) (string, err
 	}
 	return channel.ID, nil
 }
+
+// ResolveSlackDisplayName looks up a Slack user's display name via users.info.
+// Returns the display name, or falls back to real_name, then the raw user ID.
+func ResolveSlackDisplayName(ctx context.Context, botToken, slackUserID string) string {
+	if botToken == "" || slackUserID == "" {
+		return slackUserID
+	}
+	client := newAgentClient(botToken)
+	user, err := client.GetUserInfoContext(ctx, slackUserID)
+	if err != nil {
+		return slackUserID
+	}
+	if user.Profile.DisplayName != "" {
+		return user.Profile.DisplayName
+	}
+	if user.RealName != "" {
+		return user.RealName
+	}
+	return slackUserID
+}

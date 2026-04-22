@@ -110,7 +110,8 @@ func (s *apiServer) processSlashCommandDraft(ctx context.Context, teamID, slackU
 		return
 	}
 
-	msg := comms.BuildIncomingMessage("", meta.TargetChannel, "", text)
+	displayName := comms.ResolveSlackDisplayName(ctx, botToken, slackUserID)
+	msg := comms.BuildIncomingMessage("", meta.TargetChannel, displayName, text)
 	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("slash command draft: generation failed", "error", err)
@@ -147,7 +148,9 @@ func (s *apiServer) processSlashCommandQuestion(ctx context.Context, teamID, sla
 		return
 	}
 
-	msg := comms.BuildIncomingMessage("", "", "", text)
+	botToken, _ := s.resolveWorkspaceBotToken(ctx, teamID)
+	displayName := comms.ResolveSlackDisplayName(ctx, botToken, slackUserID)
+	msg := comms.BuildIncomingMessage("", "", displayName, text)
 	answer, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("slash command question: generation failed", "error", err)

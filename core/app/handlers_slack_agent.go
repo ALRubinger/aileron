@@ -70,7 +70,8 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 	// Set status to "Researching..."
 	_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "Researching...")
 
-	msg := comms.BuildIncomingMessage("", channelID, slackUserID, text)
+	displayName := comms.ResolveSlackDisplayName(ctx, botToken, slackUserID)
+	msg := comms.BuildIncomingMessage("", "Agent DM", displayName, text)
 	chunkCh, errCh := pipeline.GenerateDraftStream(ctx, userID, msg)
 
 	var streamTS string
@@ -150,10 +151,12 @@ func (s *apiServer) handleMessageShortcut(ctx context.Context, payload slackInte
 	messageText := ""
 	messageTS := ""
 	messageThreadTS := ""
+	messageAuthorID := ""
 	if payload.Message != nil {
 		messageText = payload.Message.Text
 		messageTS = payload.Message.TS
 		messageThreadTS = payload.Message.ThreadTS
+		messageAuthorID = payload.Message.User
 	}
 	if messageThreadTS == "" {
 		messageThreadTS = messageTS
@@ -201,8 +204,9 @@ func (s *apiServer) handleMessageShortcut(ctx context.Context, payload slackInte
 	if len(preview) > 200 {
 		preview = preview[:200] + "..."
 	}
-	msg := comms.BuildIncomingMessage(messageTS, channelID, "", fmt.Sprintf(
-		"[Message from #%s]: %s", channelName, preview,
+	messageAuthor := comms.ResolveSlackDisplayName(ctx, botToken, messageAuthorID)
+	msg := comms.BuildIncomingMessage(messageTS, "#"+channelName, messageAuthor, fmt.Sprintf(
+		"[Message from %s in #%s]: %s", messageAuthor, channelName, preview,
 	))
 
 	// Generate draft (non-streaming for modal — we update once when done).
