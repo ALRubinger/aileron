@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ type mockSlackAgentClient struct {
 	startStreamCalls int
 	appendCalls     []string
 	stopStreamCalls  int
+	messageCalls    []string
 }
 
 func (m *mockSlackAgentClient) SetStatus(_ context.Context, _, _, _, status string) error {
@@ -71,6 +73,13 @@ func (m *mockSlackAgentClient) StopStream(_ context.Context, _, _, _ string) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopStreamCalls++
+	return nil
+}
+
+func (m *mockSlackAgentClient) PostMessage(_ context.Context, _, _, _, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messageCalls = append(m.messageCalls, text)
 	return nil
 }
 
@@ -1050,6 +1059,56 @@ func TestBuildStreamingPipeline_VaultLocked(t *testing.T) {
 	result := srv.buildStreamingPipeline("usr_a")
 	if result != nil {
 		t.Error("expected nil when vault is locked")
+	}
+}
+
+func TestHandleAssistantMessage_VaultLocked_PostsUnlockMessage(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newStreamingTestPipeline("ctx", []string{"Hello"})
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour) // auth enabled, but no KEK cached
+	srv.uiBaseURL = "https://app.withaileron.ai"
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "hi")
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	// Should have posted an unlock message.
+	if len(agent.messageCalls) != 1 {
+		t.Fatalf("expected 1 PostMessage call, got %d", len(agent.messageCalls))
+	}
+	msg := agent.messageCalls[0]
+	if !strings.Contains(msg, "Unlock your vault") {
+		t.Errorf("expected unlock link in message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "app.withaileron.ai") {
+		t.Errorf("expected UI URL in message, got: %s", msg)
+	}
+}
+
+func TestHandleAssistantMessage_VaultLocked_NoUIURL(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newStreamingTestPipeline("ctx", []string{"Hello"})
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	// No uiBaseURL set.
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "hi")
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	if len(agent.messageCalls) != 1 {
+		t.Fatalf("expected 1 PostMessage call, got %d", len(agent.messageCalls))
+	}
+	msg := agent.messageCalls[0]
+	if !strings.Contains(msg, "unlock your vault") {
+		t.Errorf("expected unlock instruction in message, got: %s", msg)
 	}
 }
 

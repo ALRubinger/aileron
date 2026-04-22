@@ -10,6 +10,56 @@ import (
 	"github.com/ALRubinger/aileron/core/vault"
 )
 
+// resolvePipelineVault returns the draft pipeline configured with the best
+// available credential source for the given user:
+//  1. KEK session (user recently unlocked vault) → UserScopedVault
+//  2. Escrow (credentials escrowed in TEE) → EscrowVault
+//  3. Neither available → returns nil
+func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
+	if s.draftPipeline == nil {
+		return nil
+	}
+
+	// Tier 1: KEK in session cache (vault unlocked).
+	if kek := s.getUserKEK(userID); kek != nil {
+		p := s.draftPipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
+		// Note: kek is copied by UserScopedVault; zeroing deferred by caller
+		// is not needed since the pipeline holds its own copy.
+		return p
+	}
+
+	// Tier 2: Escrowed credentials in TEE.
+	if s.enclaveClient != nil {
+		// Check if any escrow entries exist for this user by checking the index.
+		hasEscrow := false
+		s.escrowIndex.Range(func(_, _ any) bool {
+			hasEscrow = true
+			return false // stop after first entry
+		})
+		if hasEscrow {
+			escrowVault := vault.NewEscrowVault(s.enclaveClient, &s.escrowIndex, s.vault)
+			return s.draftPipeline.WithVault(escrowVault)
+		}
+	}
+
+	// Tier 3: Auth not enabled (local dev) — use base pipeline without vault.
+	if s.kekSessionCache == nil {
+		return s.draftPipeline
+	}
+
+	// No credentials available.
+	return nil
+}
+
+// vaultLockedMessage returns a user-facing message with a link to unlock
+// the vault. Uses Slack mrkdwn format for clickable links.
+func (s *apiServer) vaultLockedMessage() string {
+	if s.uiBaseURL != "" {
+		return ":lock: Your Aileron session has expired. <" + s.uiBaseURL + "/settings/vault|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
+	}
+	return ":lock: Your Aileron session has expired. Please unlock your vault in the Aileron app to reconnect your accounts."
+}
+
 // handleAssistantThreadStarted is called when a user opens the Aileron agent DM.
 // It sets suggested prompts and a thread title.
 func (s *apiServer) handleAssistantThreadStarted(ctx context.Context, teamID, channelID, threadTS string) {
@@ -50,19 +100,14 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 		return
 	}
 
-	if s.draftPipeline == nil {
-		s.log.Warn("agent message: draft pipeline not configured")
-		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
-		return
-	}
-
-	// Resolve user's KEK for vault decryption.
-	pipeline := s.draftPipeline
-	if kek := s.getUserKEK(userID); kek != nil {
-		pipeline = pipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
-		defer zeroBytes(kek)
-	} else if s.kekSessionCache != nil {
-		s.log.Warn("agent message: vault locked for user", "user_id", userID)
+	pipeline := s.resolvePipelineVault(userID)
+	if pipeline == nil {
+		if s.draftPipeline == nil {
+			s.log.Warn("agent message: draft pipeline not configured")
+		} else {
+			s.log.Warn("agent message: vault locked for user", "user_id", userID)
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedMessage())
+		}
 		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 		return
 	}
@@ -184,18 +229,13 @@ func (s *apiServer) handleMessageShortcut(ctx context.Context, payload slackInte
 		return
 	}
 
-	if s.draftPipeline == nil {
-		_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation is not configured.", meta)
-		return
-	}
-
-	// Resolve vault.
-	pipeline := s.draftPipeline
-	if kek := s.getUserKEK(userID); kek != nil {
-		pipeline = pipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
-		defer zeroBytes(kek)
-	} else if s.kekSessionCache != nil {
-		_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Your vault is locked. Please unlock it first.", meta)
+	pipeline := s.resolvePipelineVault(userID)
+	if pipeline == nil {
+		if s.draftPipeline == nil {
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation is not configured.", meta)
+		} else {
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedMessage(), meta)
+		}
 		return
 	}
 
@@ -231,16 +271,7 @@ func (s *apiServer) handleSlackAgentSend(ctx context.Context, userID, targetChan
 
 // buildStreamingPipeline resolves the user's vault and returns a configured pipeline.
 // Returns nil if the pipeline is not configured or the vault is locked.
+// Deprecated: use resolvePipelineVault instead.
 func (s *apiServer) buildStreamingPipeline(userID string) *draft.Pipeline {
-	if s.draftPipeline == nil {
-		return nil
-	}
-	pipeline := s.draftPipeline
-	if kek := s.getUserKEK(userID); kek != nil {
-		pipeline = pipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
-		// Note: kek is not zeroed here — caller must handle lifecycle.
-	} else if s.kekSessionCache != nil {
-		return nil
-	}
-	return pipeline
+	return s.resolvePipelineVault(userID)
 }

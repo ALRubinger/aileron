@@ -136,6 +136,22 @@ func EmptyModalView() slack.ModalViewRequest {
 	}
 }
 
+// PostMessage sends a text message to a Slack channel thread.
+func PostMessage(ctx context.Context, botToken, channelID, threadTS, text string) error {
+	if botToken == "" {
+		return fmt.Errorf("slack agent: bot token is required")
+	}
+	client := newAgentClient(botToken)
+	opts := []slack.MsgOption{
+		slack.MsgOptionText(text, false),
+	}
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	_, _, err := client.PostMessageContext(ctx, channelID, opts...)
+	return err
+}
+
 // OpenConversation opens or resumes a DM with the given user.
 // Returns the channel ID of the DM.
 func OpenConversation(ctx context.Context, botToken, userID string) (string, error) {

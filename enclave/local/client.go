@@ -237,6 +237,15 @@ func (c *Client) EscrowStore(_ context.Context, req enclave.EscrowStoreRequest) 
 	return enclave.EscrowStoreResponse{EscrowID: id}, nil
 }
 
+// EscrowRetrieve returns the plaintext credential for a given escrow ID.
+func (c *Client) EscrowRetrieve(_ context.Context, req enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
+	plaintext, err := c.escrow.Get(req.EscrowID)
+	if err != nil {
+		return enclave.EscrowRetrieveResponse{}, err
+	}
+	return enclave.EscrowRetrieveResponse{Credential: plaintext}, nil
+}
+
 // EscrowRevoke removes an escrowed credential and zeros its plaintext.
 func (c *Client) EscrowRevoke(_ context.Context, req enclave.EscrowRevokeRequest) error {
 	return c.escrow.Revoke(req.EscrowID, req.GrantID)

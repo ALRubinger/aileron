@@ -50,6 +50,7 @@ func (s *enclaveServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /oauth/exchange", s.handleOAuthExchange)
 	mux.HandleFunc("POST /execute", s.handleExecute)
 	mux.HandleFunc("POST /escrow", s.handleEscrowStore)
+	mux.HandleFunc("POST /escrow/retrieve", s.handleEscrowRetrieve)
 	mux.HandleFunc("POST /escrow/revoke", s.handleEscrowRevoke)
 	mux.HandleFunc("GET /health", s.handleHealth)
 }
@@ -307,6 +308,22 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 
 	id := s.escrow.Store(req.GrantID, plaintext, req.CredentialType, req.ActionTypes, expiresAt)
 	writeJSON(w, http.StatusOK, enclave.EscrowStoreResponse{EscrowID: id})
+}
+
+func (s *enclaveServer) handleEscrowRetrieve(w http.ResponseWriter, r *http.Request) {
+	var req enclave.EscrowRetrieveRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	plaintext, err := s.escrow.Get(req.EscrowID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, enclave.EscrowRetrieveResponse{Credential: plaintext})
 }
 
 func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Request) {

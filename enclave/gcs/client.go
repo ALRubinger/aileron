@@ -101,6 +101,15 @@ func (c *Client) OAuthExchange(ctx context.Context, req enclave.OAuthExchangeReq
 	return resp, nil
 }
 
+// EscrowRetrieve retrieves a plaintext credential from escrow.
+func (c *Client) EscrowRetrieve(ctx context.Context, req enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
+	var resp enclave.EscrowRetrieveResponse
+	if err := c.post(ctx, "/escrow/retrieve", req, &resp); err != nil {
+		return enclave.EscrowRetrieveResponse{}, fmt.Errorf("gcs: escrow retrieve: %w", err)
+	}
+	return resp, nil
+}
+
 // EscrowRevoke sends an escrow revoke request to the enclave.
 func (c *Client) EscrowRevoke(ctx context.Context, req enclave.EscrowRevokeRequest) error {
 	if err := c.post(ctx, "/escrow/revoke", req, nil); err != nil {

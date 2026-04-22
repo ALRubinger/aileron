@@ -38,6 +38,7 @@ type SlackAgentClient interface {
 	StartStream(ctx context.Context, botToken, channelID, threadTS string) (ts string, err error)
 	AppendStream(ctx context.Context, botToken, channelID, ts, text string) error
 	StopStream(ctx context.Context, botToken, channelID, ts string) error
+	PostMessage(ctx context.Context, botToken, channelID, threadTS, text string) error
 }
 
 // apiServer implements the generated api.ServerInterface.
@@ -85,6 +86,7 @@ type apiServer struct {
 	teeState           *teeState                  // nil when TEE is disabled
 	escrowTTL          time.Duration              // TTL for auto-escrowed credentials
 	escrowIndex        sync.Map                   // vault path (string) -> escrow ID (string)
+	uiBaseURL          string                     // base URL for the web UI (for constructing unlock links)
 	newID              func() string
 }
 

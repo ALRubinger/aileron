@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/ALRubinger/aileron/core/comms"
-	"github.com/ALRubinger/aileron/core/vault"
 )
 
 // draftKeywords are words that indicate the user wants a draft (not a question).
@@ -96,17 +95,13 @@ func (s *apiServer) processSlashCommandDraft(ctx context.Context, teamID, slackU
 		return
 	}
 
-	if s.draftPipeline == nil {
-		_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation is not configured.", meta)
-		return
-	}
-
-	pipeline := s.draftPipeline
-	if kek := s.getUserKEK(userID); kek != nil {
-		pipeline = pipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
-		defer zeroBytes(kek)
-	} else if s.kekSessionCache != nil {
-		_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Your vault is locked. Please unlock it first.", meta)
+	pipeline := s.resolvePipelineVault(userID)
+	if pipeline == nil {
+		if s.draftPipeline == nil {
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation is not configured.", meta)
+		} else {
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedMessage(), meta)
+		}
 		return
 	}
 
@@ -134,17 +129,13 @@ func (s *apiServer) processSlashCommandQuestion(ctx context.Context, teamID, sla
 		return
 	}
 
-	if s.draftPipeline == nil {
-		s.respondViaURL(responseURL, "Draft generation is not configured.")
-		return
-	}
-
-	pipeline := s.draftPipeline
-	if kek := s.getUserKEK(userID); kek != nil {
-		pipeline = pipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
-		defer zeroBytes(kek)
-	} else if s.kekSessionCache != nil {
-		s.respondViaURL(responseURL, "Your vault is locked. Please unlock it first.")
+	pipeline := s.resolvePipelineVault(userID)
+	if pipeline == nil {
+		if s.draftPipeline == nil {
+			s.respondViaURL(responseURL, "Draft generation is not configured.")
+		} else {
+			s.respondViaURL(responseURL, s.vaultLockedMessage())
+		}
 		return
 	}
 
