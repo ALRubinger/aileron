@@ -262,6 +262,50 @@ func TestEscrowRetrieve_NotFound(t *testing.T) {
 	}
 }
 
+func TestEscrowListViaClient(t *testing.T) {
+	c := New(nil)
+	defer c.Close()
+
+	ctx := context.Background()
+	sessionKey := establishSession(t, c)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitKEK(t, c, sessionKey, "user-1", userKEK)
+
+	// Empty list initially.
+	resp, err := c.EscrowList(ctx)
+	if err != nil {
+		t.Fatalf("EscrowList: %v", err)
+	}
+	if len(resp.Entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(resp.Entries))
+	}
+
+	// Store a credential, then list.
+	encrypted, _ := encryptAESGCM([]byte("test-cred"), userKEK)
+	storeResp, err := c.EscrowStore(ctx, enclave.EscrowStoreRequest{
+		UserID:              "user-1",
+		GrantID:             "g1",
+		EncryptedCredential: encrypted,
+		CredentialType:      "oauth_token",
+		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatalf("EscrowStore: %v", err)
+	}
+
+	resp, err = c.EscrowList(ctx)
+	if err != nil {
+		t.Fatalf("EscrowList: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(resp.Entries))
+	}
+	if resp.Entries[0].EscrowID != storeResp.EscrowID {
+		t.Fatalf("expected %q, got %q", storeResp.EscrowID, resp.Entries[0].EscrowID)
+	}
+}
+
 func TestEscrowRevoke(t *testing.T) {
 	c := New(func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
 		return enclave.ExecuteResponse{Status: "succeeded"}, nil

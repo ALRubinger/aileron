@@ -103,6 +103,41 @@ func TestEscrowEvictExpired(t *testing.T) {
 	}
 }
 
+func TestEscrowList(t *testing.T) {
+	s := newEscrowStore()
+
+	// Empty store returns nil/empty.
+	entries := s.List()
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(entries))
+	}
+
+	// Add a mix of live and expired entries.
+	s.Store("g1", []byte("cred-1"), "api_key", nil, time.Now().Add(time.Hour))
+	s.Store("g2", []byte("cred-2"), "oauth", nil, time.Now().Add(time.Hour))
+	s.Store("g3", []byte("cred-3"), "api_key", nil, time.Now().Add(-time.Second)) // expired
+
+	entries = s.List()
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 non-expired entries, got %d", len(entries))
+	}
+
+	// Verify grant IDs are present.
+	grants := map[string]bool{}
+	for _, e := range entries {
+		grants[e.GrantID] = true
+		if e.EscrowID == "" {
+			t.Fatal("EscrowID should not be empty")
+		}
+		if e.ExpiresAt == "" {
+			t.Fatal("ExpiresAt should not be empty")
+		}
+	}
+	if !grants["g1"] || !grants["g2"] {
+		t.Fatalf("expected grants g1 and g2, got %v", grants)
+	}
+}
+
 func TestEscrowClear(t *testing.T) {
 	s := newEscrowStore()
 	cred := []byte("clear-me")

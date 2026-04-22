@@ -241,6 +241,89 @@ func TestClientOAuthExchangeError(t *testing.T) {
 	}
 }
 
+func TestClientEscrowRetrieve(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/escrow/retrieve" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		var req enclave.EscrowRetrieveRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.EscrowID != "esc-456" {
+			t.Fatalf("expected escrow ID esc-456, got %q", req.EscrowID)
+		}
+		json.NewEncoder(w).Encode(enclave.EscrowRetrieveResponse{
+			Credential: []byte("plaintext-cred"),
+		})
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	resp, err := c.EscrowRetrieve(context.Background(), enclave.EscrowRetrieveRequest{
+		EscrowID: "esc-456",
+	})
+	if err != nil {
+		t.Fatalf("EscrowRetrieve: %v", err)
+	}
+	if string(resp.Credential) != "plaintext-cred" {
+		t.Fatalf("expected plaintext-cred, got %q", resp.Credential)
+	}
+}
+
+func TestClientEscrowRetrieveError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("not found"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.EscrowRetrieve(context.Background(), enclave.EscrowRetrieveRequest{EscrowID: "bad"})
+	if err == nil {
+		t.Fatal("expected error for 404 response on EscrowRetrieve")
+	}
+}
+
+func TestClientEscrowList(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/escrow/list" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(enclave.EscrowListResponse{
+			Entries: []enclave.EscrowListEntry{
+				{EscrowID: "esc-1", GrantID: "g1", ExpiresAt: "2026-12-31T00:00:00Z"},
+				{EscrowID: "esc-2", GrantID: "g2", ExpiresAt: "2026-12-31T00:00:00Z"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	resp, err := c.EscrowList(context.Background())
+	if err != nil {
+		t.Fatalf("EscrowList: %v", err)
+	}
+	if len(resp.Entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(resp.Entries))
+	}
+	if resp.Entries[0].EscrowID != "esc-1" {
+		t.Fatalf("expected esc-1, got %q", resp.Entries[0].EscrowID)
+	}
+}
+
+func TestClientEscrowListError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("list failed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.EscrowList(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 500 response on EscrowList")
+	}
+}
+
 func TestClientEscrowRevokeError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
