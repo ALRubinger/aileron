@@ -307,6 +307,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
 			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
 			mux.HandleFunc("POST /v1/webhooks/slack/commands", server.handleSlackCommand)
+			mux.HandleFunc("GET /v1/slack/install", server.handleSlackInstallStart)
 			mux.HandleFunc("GET /v1/slack/install/callback", server.handleSlackInstall)
 			log.Info("enabled Slack Events API webhook, interaction, command, and install endpoints")
 		}
@@ -340,6 +341,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			"/v1/webhooks/slack/events":          true,
 			"/v1/webhooks/slack/interactions":    true,
 			"/v1/webhooks/slack/commands":        true,
+			"/v1/slack/install":                  true,
 			"/v1/slack/install/callback":         true,
 		}
 		handler = auth.MiddlewareWithConfig(tokenIssuer, auth.MiddlewareConfig{

@@ -11,7 +11,7 @@ For an overview of what Aileron does in Slack, see [Slack Cloud Integration](/ge
 
 ## Install from the Slack App Directory
 
-[![Add to Slack](https://platform.slack-edge.com/img/add_to_slack.png)](https://slack.com/oauth/v2/authorize?client_id=10932208786550.10937893063812&scope=assistant:write,chat:write,im:history,commands&user_scope=search:read,channels:history,channels:read,chat:write,users:read)
+[![Add to Slack](https://platform.slack-edge.com/img/add_to_slack.png)](https://api.withaileron.ai/v1/slack/install)
 
 Click the button above, review the requested permissions, and click **Allow**.
 
