@@ -130,8 +130,9 @@ jobs:
             exit 1
           fi
 
-      - name: Restart Confidential Space VM
+      - name: Update and restart Confidential Space VM
         run: |
-          gcloud compute instances reset ${{ secrets.GCP_ENCLAVE_INSTANCE }} \
+          gcloud compute instances update-container ${{ secrets.GCP_ENCLAVE_INSTANCE }} \
             --zone=${{ secrets.GCP_ENCLAVE_ZONE }} \
-            --project=${{ secrets.GCP_PROJECT }}
+            --project=${{ secrets.GCP_PROJECT }} \
+            --container-image=${{ env.REGISTRY }}/aileron-enclave@${{ steps.digest.outputs.digest }}
