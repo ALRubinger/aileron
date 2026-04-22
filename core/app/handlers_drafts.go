@@ -12,7 +12,6 @@ import (
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
-	"github.com/ALRubinger/aileron/core/vault"
 )
 
 // handleCreateDraft creates a draft directly (for programmatic/admin use).
@@ -238,14 +237,6 @@ func (s *apiServer) getDraftForAction(w http.ResponseWriter, r *http.Request, dr
 
 	return draft, nil
 }
-
-// EphemeralPoster is the function used to post ephemeral draft messages.
-// Defaults to comms.PostEphemeralDraft. Override in tests.
-type EphemeralPoster func(ctx context.Context, msg comms.SlackDraftMessage) error
-
-// ThreadChecker checks if a Slack thread has replies.
-// Defaults to comms.SlackThreadHasReplies. Override in tests.
-type ThreadChecker func(ctx context.Context, botToken, channel, messageTS string) bool
 
 // SlackSender is the function used to send messages to Slack.
 // Defaults to comms.SendSlackMessage. Override in tests.
@@ -508,137 +499,6 @@ func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) 
 	return &slackCredentials{BotToken: botToken, SlackUserID: slackUserID}, nil
 }
 
-// EphemeralTextPoster posts a simple text ephemeral message.
-// Defaults to comms.PostEphemeralText. Override in tests.
-type EphemeralTextPoster func(ctx context.Context, botToken, channel, userID, text, threadTS string) error
-
-// postDraftingIndicator posts a transient "Drafting a reply..." ephemeral
-// message so the user gets immediate feedback while the LLM works.
-func (s *apiServer) postDraftingIndicator(ctx context.Context, creds *slackCredentials, channel, messageTS string) {
-	// Resolve thread safety: only post in-thread if thread has replies.
-	checker := s.threadChecker
-	if checker == nil {
-		checker = comms.SlackThreadHasReplies
-	}
-	threadTS := ""
-	if messageTS != "" {
-		if checker(ctx, creds.BotToken, channel, messageTS) {
-			threadTS = messageTS
-		}
-	}
-
-	poster := s.ephemeralTextPoster
-	if poster == nil {
-		poster = comms.PostEphemeralText
-	}
-	if err := poster(ctx, creds.BotToken, channel, creds.SlackUserID, ":writing_hand: Drafting a reply…", threadTS); err != nil {
-		s.log.Error("drafting indicator: failed to post", "error", err)
-	}
-}
-
-// deliverEphemeralDraft posts an ephemeral Block Kit message in the Slack
-// channel where the original message was, showing the draft with
-// approve/edit/discard buttons. Only the target user sees it.
-func (s *apiServer) deliverEphemeralDraft(ctx context.Context, userID string, draft model.Draft) {
-	creds, err := s.resolveSlackCredentials(ctx, userID)
-	if err != nil {
-		s.log.Error("ephemeral: "+err.Error(), "user_id", userID)
-		return
-	}
-
-	// Only post in-thread if the thread already has replies. Slack silently
-	// drops ephemeral messages in threads with no replies. If no thread
-	// exists yet, post at channel level so the user sees the draft.
-	checker := s.threadChecker
-	if checker == nil {
-		checker = comms.SlackThreadHasReplies
-	}
-	threadTS := ""
-	if draft.MessageTS != "" {
-		if checker(ctx, creds.BotToken, draft.Channel, draft.MessageTS) {
-			threadTS = draft.MessageTS
-		}
-	}
-
-	poster := s.ephemeralPoster
-	if poster == nil {
-		poster = comms.PostEphemeralDraft
-	}
-	err = poster(ctx, comms.SlackDraftMessage{
-		BotToken: creds.BotToken,
-		Channel:  draft.Channel,
-		UserID:   creds.SlackUserID,
-		DraftID:  draft.ID,
-		Author:   draft.Author,
-		Body:     draft.MessageBody,
-		Draft:    draft.DraftBody,
-		ThreadTS: threadTS,
-	})
-	if err != nil {
-		s.log.Error("ephemeral: failed to post", "user_id", userID, "draft_id", draft.ID, "error", err)
-		return
-	}
-
-	s.log.Info("ephemeral draft delivered",
-		"draft_id", draft.ID,
-		"user_id", userID,
-		"channel", draft.Channel)
-}
-
-// handleIncomingSlackMessage processes an incoming Slack message that mentions
-// the user. It posts a drafting indicator, generates a draft via the LLM
-// pipeline, stores it, and delivers an ephemeral preview with action buttons.
-func (s *apiServer) handleIncomingSlackMessage(ctx context.Context, userID string, msg comms.IncomingMessage) {
-	s.log.Info("slack cloud message received",
-		"user_id", userID,
-		"channel", msg.Channel,
-		"author", msg.Author,
-		"preview", msg.Body[:min(len(msg.Body), 80)])
-
-	if s.draftPipeline == nil {
-		return
-	}
-
-	// Resolve user's KEK for vault decryption. If locked, skip draft generation.
-	pipeline := s.draftPipeline
-	if kek := s.getUserKEK(userID); kek != nil {
-		pipeline = pipeline.WithVault(vault.NewUserScopedVault(s.vault, kek))
-		defer zeroBytes(kek)
-	} else if s.kekSessionCache != nil {
-		s.log.Warn("vault locked for user during draft generation — skipping",
-			"user_id", userID)
-		return
-	}
-
-	// Post immediate "drafting..." indicator so the user
-	// knows Aileron is working while the LLM runs.
-	creds, err := s.resolveSlackCredentials(ctx, userID)
-	if err != nil {
-		s.log.Error("failed to resolve slack credentials", "user_id", userID, "error", err)
-	} else {
-		s.postDraftingIndicator(ctx, creds, msg.Channel, msg.ID)
-	}
-
-	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
-	if err != nil {
-		s.log.Error("draft generation failed", "user_id", userID, "error", err)
-		return
-	}
-
-	d, err := s.createDraftFromMessage(ctx, userID, msg, draftText)
-	if err != nil {
-		s.log.Error("failed to store draft", "error", err)
-		return
-	}
-	s.log.Info("draft pending review",
-		"draft_id", d.ID,
-		"user_id", userID,
-		"channel", msg.Channel,
-		"draft_length", len(draftText))
-
-	// Post ephemeral draft preview in Slack.
-	s.deliverEphemeralDraft(ctx, userID, d)
-}
 
 // createDraftFromMessage stores a generated draft as pending in the draft store.
 // Extracted from the onSlackMessage closure so it can be unit tested.

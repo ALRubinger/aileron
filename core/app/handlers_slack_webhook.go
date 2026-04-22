@@ -11,13 +11,9 @@ import (
 	"math"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/ALRubinger/aileron/core/comms"
-	"github.com/ALRubinger/aileron/core/model"
-	"github.com/ALRubinger/aileron/core/store"
 )
 
 // slackEventDedup is a simple in-memory deduplication cache for Slack event IDs.
@@ -196,8 +192,10 @@ func (s *apiServer) processSlackEvent(payload slackWebhookPayload) {
 	}
 }
 
-// processSlackMessageEvent handles message events. It triggers draft generation
-// only for Aileron users who are @mentioned in the message.
+// processSlackMessageEvent handles message events. Only DM messages
+// (channel_type "im") are routed to the agent handler. Channel @mentions
+// no longer trigger auto-drafting — users interact via message shortcuts,
+// the /aileron command, or the agent DM.
 func (s *apiServer) processSlackMessageEvent(payload slackWebhookPayload) {
 	var evt slackMessageEvent
 	if err := json.Unmarshal(payload.Event, &evt); err != nil {
@@ -211,7 +209,7 @@ func (s *apiServer) processSlackMessageEvent(payload slackWebhookPayload) {
 		return
 	}
 
-	// Route DM messages (channel_type "im") to the agent handler.
+	// Route DM messages to the agent handler.
 	if evt.ChannelType == "im" {
 		threadTS := evt.ThreadTS
 		if threadTS == "" {
@@ -228,40 +226,8 @@ func (s *apiServer) processSlackMessageEvent(payload slackWebhookPayload) {
 		return
 	}
 
-	// Find all Aileron users connected to this Slack workspace.
-	slackProvider := model.ConnectedAccountProviderSlack
-	accounts, err := s.connectedAccounts.List(context.Background(), store.ConnectedAccountFilter{
-		Provider:       &slackProvider,
-		ExternalTeamID: payload.TeamID,
-	})
-	if err != nil {
-		s.log.Error("slack webhook: failed to look up connected accounts", "error", err)
-		return
-	}
-	if len(accounts) == 0 {
-		s.log.Debug("slack webhook: no connected accounts for team", "team_id", payload.TeamID)
-		return
-	}
-
-	msg := comms.BuildIncomingMessage(evt.TS, evt.Channel, evt.User, evt.Text)
-
-	// Notify each mentioned user. If the author @mentions themselves,
-	// they still get a draft — they explicitly asked for it.
-	// Only skip the author when they are NOT mentioned.
-	for _, acct := range accounts {
-		if !isSlackMention(evt.Text, acct.ExternalUserID) {
-			continue // only draft when the user is @mentioned
-		}
-		if s.onSlackMessage != nil {
-			s.onSlackMessage(context.Background(), acct.UserID, msg)
-		}
-	}
-}
-
-// isSlackMention reports whether the Slack message text contains an @mention
-// for the given user ID. Slack encodes mentions as <@UXXXXXX>.
-func isSlackMention(text, slackUserID string) bool {
-	return strings.Contains(text, "<@"+slackUserID+">")
+	// Non-DM messages are ignored — no auto-drafting on @mentions.
+	s.log.Debug("slack webhook: ignoring non-DM message", "channel", evt.Channel, "channel_type", evt.ChannelType)
 }
 
 // verifySlackSignature validates the HMAC-SHA256 signature from Slack.

@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/core/model"
-	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 )
@@ -61,34 +60,27 @@ func newMockResponseURLServer() *httptest.Server {
 	}))
 }
 
-func TestInteraction_ApproveDraft(t *testing.T) {
+func TestInteraction_ApproveDraft_Deprecated(t *testing.T) {
 	srv := newInteractionTestServer()
-	enableVaultEncryption(srv, "usr_a")
-	ctx := context.Background()
 
 	responseServer := newMockResponseURLServer()
 	defer responseServer.Close()
 
-	// Seed a pending draft.
-	srv.drafts.Create(ctx, model.Draft{
-		ID:          "dft_1",
-		UserID:      "usr_a",
-		Status:      model.DraftStatusPending,
-		Service:     "slack",
-		Channel:     "C0BACKEND",
-		Author:      "Sarah",
-		DraftBody:   "No, the claims stay the same.",
-	})
-
-	// Seed connected account + encrypted user token for sending.
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001TEST",
-	})
-	storeEncryptedToken(srv, "connected-accounts/usr_a/slack",
-		[]byte(`{"access_token":"xoxp-test"}`))
-	// Workspace-level bot token (installed by admin).
-	srv.vault.Put(ctx, "slack-workspaces/T001TEST/bot-token", []byte("xoxb-test"), vault.Metadata{Type: "slack_bot_token"})
+	// Capture what gets posted to the response URL.
+	var mu sync.Mutex
+	var capturedBody string
+	responseServer.Close()
+	responseServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := json.Marshal(nil)
+		_ = body
+		raw := make([]byte, r.ContentLength)
+		r.Body.Read(raw)
+		mu.Lock()
+		capturedBody = string(raw)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer responseServer.Close()
 
 	payload, _ := json.Marshal(map[string]any{
 		"type": "block_actions",
@@ -107,31 +99,29 @@ func TestInteraction_ApproveDraft(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	// Wait for async processing.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	draft, _ := srv.drafts.Get(ctx, "dft_1")
-	if draft.Status != model.DraftStatusApproved {
-		t.Errorf("expected approved, got %s", draft.Status)
-	}
-
-	fb, _ := srv.feedback.List(ctx, store.DraftFeedbackFilter{UserID: "usr_a"})
-	if len(fb) != 1 || fb[0].Signal != model.FeedbackSignalApproved {
-		t.Error("expected approved feedback signal")
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(capturedBody, "replaced") {
+		t.Errorf("expected deprecation message containing 'replaced', got %q", capturedBody)
 	}
 }
 
-func TestInteraction_DiscardDraft(t *testing.T) {
+func TestInteraction_DiscardDraft_Deprecated(t *testing.T) {
 	srv := newInteractionTestServer()
-	ctx := context.Background()
 
-	responseServer := newMockResponseURLServer()
+	var mu sync.Mutex
+	var capturedBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := make([]byte, r.ContentLength)
+		r.Body.Read(raw)
+		mu.Lock()
+		capturedBody = string(raw)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer responseServer.Close()
-
-	srv.drafts.Create(ctx, model.Draft{
-		ID: "dft_1", UserID: "usr_a", Status: model.DraftStatusPending,
-		DraftBody: "draft text",
-	})
 
 	payload, _ := json.Marshal(map[string]any{
 		"type":         "block_actions",
@@ -144,11 +134,12 @@ func TestInteraction_DiscardDraft(t *testing.T) {
 	r, _ := signedInteractionRequest(string(payload))
 	srv.handleSlackInteraction(w, r)
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	draft, _ := srv.drafts.Get(ctx, "dft_1")
-	if draft.Status != model.DraftStatusDiscarded {
-		t.Errorf("expected discarded, got %s", draft.Status)
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(capturedBody, "replaced") {
+		t.Errorf("expected deprecation message containing 'replaced', got %q", capturedBody)
 	}
 }
 
@@ -236,32 +227,6 @@ func TestInteraction_DraftNotFound(t *testing.T) {
 	}
 }
 
-func TestInteraction_AlreadyActioned(t *testing.T) {
-	srv := newInteractionTestServer()
-	ctx := context.Background()
-
-	srv.drafts.Create(ctx, model.Draft{
-		ID: "dft_1", UserID: "usr_a", Status: model.DraftStatusApproved,
-	})
-
-	payload, _ := json.Marshal(map[string]any{
-		"type":    "block_actions",
-		"user":    map[string]any{"id": "U123"},
-		"actions": []map[string]any{{"action_id": "approve_draft", "value": "dft_1"}},
-	})
-
-	w := httptest.NewRecorder()
-	r, _ := signedInteractionRequest(string(payload))
-	srv.handleSlackInteraction(w, r)
-
-	time.Sleep(50 * time.Millisecond)
-	// Draft status should remain approved, not re-processed.
-	draft, _ := srv.drafts.Get(ctx, "dft_1")
-	if draft.Status != model.DraftStatusApproved {
-		t.Errorf("expected status unchanged, got %s", draft.Status)
-	}
-}
-
 func TestInteraction_RespondToInteraction_EmptyURL(t *testing.T) {
 	srv := newInteractionTestServer()
 	// Should not panic with empty response URL.
@@ -318,17 +283,20 @@ func TestInteraction_MessageAction_NoActions(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
-func TestInteraction_EditDraft(t *testing.T) {
+func TestInteraction_EditDraft_Deprecated(t *testing.T) {
 	srv := newInteractionTestServer()
-	ctx := context.Background()
 
-	responseServer := newMockResponseURLServer()
+	var mu sync.Mutex
+	var capturedBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := make([]byte, r.ContentLength)
+		r.Body.Read(raw)
+		mu.Lock()
+		capturedBody = string(raw)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
 	defer responseServer.Close()
-
-	srv.drafts.Create(ctx, model.Draft{
-		ID: "dft_1", UserID: "usr_a", Status: model.DraftStatusPending,
-		DraftBody: "Draft text for editing",
-	})
 
 	payload, _ := json.Marshal(map[string]any{
 		"type":         "block_actions",
@@ -341,11 +309,12 @@ func TestInteraction_EditDraft(t *testing.T) {
 	r, _ := signedInteractionRequest(string(payload))
 	srv.handleSlackInteraction(w, r)
 
-	// Edit just shows the text — draft stays pending for now.
-	time.Sleep(50 * time.Millisecond)
-	draft, _ := srv.drafts.Get(ctx, "dft_1")
-	if draft.Status != model.DraftStatusPending {
-		t.Errorf("expected pending (edit shows text), got %s", draft.Status)
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(capturedBody, "replaced") {
+		t.Errorf("expected deprecation message containing 'replaced', got %q", capturedBody)
 	}
 }
 

@@ -1031,12 +1031,6 @@ func TestProcessSlackMessageEvent_DMRouting(t *testing.T) {
 	})
 	ts, sig := signSlackRequest(body, testSigningSecret)
 
-	// Ensure onSlackMessage is NOT called (DM should route to agent, not mentions).
-	called := false
-	srv.onSlackMessage = func(_ context.Context, _ string, _ comms.IncomingMessage) {
-		called = true
-	}
-
 	w := httptest.NewRecorder()
 	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
 
@@ -1046,10 +1040,6 @@ func TestProcessSlackMessageEvent_DMRouting(t *testing.T) {
 
 	// Give the async handler time to run.
 	<-waitFor(50)
-
-	if called {
-		t.Error("DM message should route to agent handler, not onSlackMessage")
-	}
 }
 
 func TestBuildStreamingPipeline_VaultLocked(t *testing.T) {
