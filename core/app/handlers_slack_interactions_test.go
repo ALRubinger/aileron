@@ -17,7 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/auth"
+	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/source"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 )
@@ -722,6 +725,191 @@ func TestInteraction_RefineAction_UserNotFound(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	time.Sleep(100 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_VaultLocked(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.systemVault = vault.NewMemVault()
+	srv.draftPipeline = newTestPipeline("context", "Draft reply")
+
+	// Bot token present.
+	srv.systemVault.Put(context.Background(), "slack-workspaces/T001/bot-token",
+		[]byte("xoxb-test-bot-token"), vault.Metadata{Type: "bot_token"})
+
+	// Set kekSessionCache so resolvePipelineVault doesn't fall through to
+	// tier 3 (no-auth local dev). Without a KEK for this user, it hits vault-locked.
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+
+	srv.connectedAccounts.Create(context.Background(), model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U_ALICE", ExternalTeamID: "T001",
+	})
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:   "C0BACKEND",
+		OriginalMessage: "Original msg",
+		UserID:          "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{"value": "My draft"},
+					},
+					instructionBlockID: map[string]any{
+						instructionActionID: map[string]any{"value": "Make shorter"},
+					},
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// processRefineDraft should hit the vaultLockedMessage branch (L216).
+	time.Sleep(100 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_FullPipeline(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.systemVault = vault.NewMemVault()
+	srv.draftPipeline = newTestPipeline("context", "Refined draft text")
+
+	// Bot token.
+	srv.systemVault.Put(context.Background(), "slack-workspaces/T001/bot-token",
+		[]byte("xoxb-test-bot-token"), vault.Metadata{Type: "bot_token"})
+
+	// Connected account.
+	srv.connectedAccounts.Create(context.Background(), model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U_ALICE", ExternalTeamID: "T001",
+	})
+
+	// Unlock vault so resolvePipelineVault returns a pipeline (tier 3: no auth).
+	// kekSessionCache=nil signals local dev mode where vault is not required.
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:   "C0BACKEND",
+		OriginalMessage: "Can you review this PR?",
+		UserID:          "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{"value": "Here is my draft review"},
+					},
+					instructionBlockID: map[string]any{
+						instructionActionID: map[string]any{"value": "Make it more professional"},
+					},
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Exercises L202 (updateDraftModalLoading), L221 (RefineDraft), L228 (updateDraftModalWithDraft).
+	time.Sleep(200 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_PipelineError(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.systemVault = vault.NewMemVault()
+
+	// Pipeline that always errors.
+	errClient := &mockLLMClient{err: fmt.Errorf("LLM down")}
+	srv.draftPipeline = draft.NewPipeline(
+		errClient, errClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "r", Ghostwrite: "g"},
+	)
+
+	srv.systemVault.Put(context.Background(), "slack-workspaces/T001/bot-token",
+		[]byte("xoxb-test-bot-token"), vault.Metadata{Type: "bot_token"})
+	srv.connectedAccounts.Create(context.Background(), model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U_ALICE", ExternalTeamID: "T001",
+	})
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:   "C0BACKEND",
+		OriginalMessage: "Original msg",
+		UserID:          "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{"value": "My draft"},
+					},
+					instructionBlockID: map[string]any{
+						instructionActionID: map[string]any{"value": "Feedback"},
+					},
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Exercises L221-226 (pipeline error → updateDraftModalError).
+	time.Sleep(200 * time.Millisecond)
 }
 
 func TestInteraction_RefineAction_BadMetadata(t *testing.T) {

@@ -5,8 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/crypto"
 	"github.com/ALRubinger/aileron/enclave"
 )
+
+func encryptForTest(data, key []byte) ([]byte, error) {
+	return crypto.Encrypt(data, key)
+}
 
 func mustNewEscrowStore(t *testing.T) *escrowStore {
 	t.Helper()
@@ -166,6 +171,64 @@ func TestEscrowPersistence_CorruptFile(t *testing.T) {
 	entries := s.List()
 	if len(entries) != 0 {
 		t.Errorf("expected 0 entries after corrupt file, got %d", len(entries))
+	}
+}
+
+func TestNewEscrowStore_MkdirFailure(t *testing.T) {
+	// Use a file as the "directory" path — MkdirAll will fail.
+	dir := t.TempDir()
+	blockingFile := dir + "/blocker"
+	os.WriteFile(blockingFile, []byte("x"), 0600)
+
+	_, err := newEscrowStore(blockingFile + "/subdir")
+	if err == nil {
+		t.Fatal("expected error when data dir path is blocked by a file")
+	}
+}
+
+func TestEscrowPersistence_ReadError(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a valid key.
+	enclave.LoadOrCreateKey(dir + "/escrow.key")
+
+	// Make escrow.dat a directory so ReadFile fails with a non-NotExist error.
+	os.Mkdir(dir+"/escrow.dat", 0700)
+
+	_, err := newEscrowStore(dir)
+	if err == nil {
+		t.Fatal("expected error when escrow.dat is a directory")
+	}
+}
+
+func TestEscrowPersistence_CorruptJSON(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create store and persist an entry to generate key + valid encrypted blob.
+	s1, err := newEscrowStore(dir)
+	if err != nil {
+		t.Fatalf("newEscrowStore: %v", err)
+	}
+	s1.Store("g1", []byte("cred"), "api_key", nil, time.Now().Add(time.Hour))
+
+	// Now overwrite escrow.dat with data that decrypts to invalid JSON.
+	// We use the existing key to encrypt garbage JSON.
+	key, _ := os.ReadFile(dir + "/escrow.key")
+	badJSON := []byte("{invalid json")
+	encrypted, err := encryptForTest(badJSON, key)
+	if err != nil {
+		t.Fatalf("encrypting bad JSON: %v", err)
+	}
+	os.WriteFile(dir+"/escrow.dat", encrypted, 0600)
+
+	// Should start fresh (not error).
+	s2, err := newEscrowStore(dir)
+	if err != nil {
+		t.Fatalf("newEscrowStore with corrupt JSON: %v", err)
+	}
+	entries := s2.List()
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
 	}
 }
 

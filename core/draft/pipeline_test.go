@@ -13,6 +13,7 @@ import (
 	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/source"
+	"github.com/ALRubinger/aileron/core/store"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 )
@@ -919,6 +920,96 @@ func TestWithClientResolver(t *testing.T) {
 		t.Fatal("WithClientResolver returned nil")
 	}
 }
+
+// failingInstructionStore always returns an error on List.
+type failingInstructionStore struct{}
+
+func (f *failingInstructionStore) Create(_ context.Context, _ model.UserInstruction) error {
+	return nil
+}
+func (f *failingInstructionStore) Get(_ context.Context, _ string) (model.UserInstruction, error) {
+	return model.UserInstruction{}, nil
+}
+func (f *failingInstructionStore) List(_ context.Context, _ store.UserInstructionFilter) ([]model.UserInstruction, error) {
+	return nil, fmt.Errorf("instruction store unavailable")
+}
+func (f *failingInstructionStore) Update(_ context.Context, _ model.UserInstruction) error {
+	return nil
+}
+func (f *failingInstructionStore) Delete(_ context.Context, _ string) error { return nil }
+
+func TestRefineDraft_AssemblePromptError(t *testing.T) {
+	mockClient := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "ok"},
+	}
+	p := draft.NewPipeline(
+		mockClient, mockClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		&failingInstructionStore{}, vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+
+	_, err := p.RefineDraft(context.Background(), "usr_1",
+		"Original", "Draft", "Feedback",
+	)
+	if err == nil {
+		t.Fatal("expected error from assembleSystemPrompt failure")
+	}
+	if !strings.Contains(err.Error(), "assembling system prompt") {
+		t.Errorf("expected 'assembling system prompt' in error, got: %v", err)
+	}
+}
+
+func TestRefineDraft_ClientResolverError(t *testing.T) {
+	mockClient := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "ok"},
+	}
+	p := draft.NewPipeline(
+		mockClient, mockClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		nil, vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+
+	// Create a resolver that will fail (no default API key, no per-user config).
+	resolver := llm.NewClientResolver(
+		mem.NewLLMConfigStore(),
+		&stubUserStoreForResolver{},
+		vault.NewMemVault(),
+		"", "", "", // empty defaults → will fail
+		slog.Default(),
+	)
+	p2 := p.WithClientResolver(resolver)
+
+	_, err := p2.RefineDraft(context.Background(), "usr_1",
+		"Original", "Draft", "Feedback",
+	)
+	if err == nil {
+		t.Fatal("expected error from client resolver")
+	}
+	if !strings.Contains(err.Error(), "resolving LLM config") {
+		t.Errorf("expected 'resolving LLM config' in error, got: %v", err)
+	}
+}
+
+// stubUserStoreForResolver satisfies store.UserStore for the resolver.
+type stubUserStoreForResolver struct{}
+
+func (s *stubUserStoreForResolver) Create(_ context.Context, _ model.User) error { return nil }
+func (s *stubUserStoreForResolver) Get(_ context.Context, _ string) (model.User, error) {
+	return model.User{}, nil
+}
+func (s *stubUserStoreForResolver) GetByEmail(_ context.Context, _ string) (model.User, error) {
+	return model.User{}, nil
+}
+func (s *stubUserStoreForResolver) List(_ context.Context, _ store.UserFilter) ([]model.User, error) {
+	return nil, nil
+}
+func (s *stubUserStoreForResolver) Update(_ context.Context, _ model.User) error { return nil }
 
 func TestRefineDraft(t *testing.T) {
 	mockClient := &mockLLMClient{
