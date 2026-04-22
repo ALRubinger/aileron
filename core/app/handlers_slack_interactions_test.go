@@ -438,3 +438,180 @@ func TestInteraction_ViewSubmission_WrongCallback(t *testing.T) {
 	// Should be ignored — no crash.
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestInteraction_ViewSubmission_EmptyDraft(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel: "C0BACKEND",
+		UserID:        "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{
+							"value": "", // empty draft
+						},
+					},
+				},
+			},
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+	// No crash, empty draft is logged and ignored.
+}
+
+func TestInteraction_ViewSubmission_NoState(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel: "C0BACKEND",
+		UserID:        "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			// no state field
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestInteraction_SendDraftAgent(t *testing.T) {
+	srv := newInteractionTestServer()
+	enableVaultEncryption(srv, "usr_a")
+	ctx := context.Background()
+
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U_ALICE", ExternalTeamID: "T001",
+	})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack",
+		[]byte(`{"access_token":"xoxp-test"}`))
+
+	var mu sync.Mutex
+	var sentBody, sentChannel string
+	srv.slackSender = func(_ context.Context, _, channel, body, _ string) error {
+		mu.Lock()
+		sentBody = body
+		sentChannel = channel
+		mu.Unlock()
+		return nil
+	}
+
+	sendMeta, _ := json.Marshal(map[string]any{
+		"channel":   "C_TARGET",
+		"thread_ts": "111.222",
+		"body":      "Draft from agent DM",
+		"user_id":   "usr_a",
+	})
+
+	// Create a pending draft so processInteraction doesn't bail on draft lookup.
+	srv.drafts.Create(ctx, model.Draft{
+		ID: string(sendMeta), UserID: "usr_a", Status: model.DraftStatusPending,
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":    "block_actions",
+		"user":    map[string]any{"id": "U_ALICE"},
+		"actions": []map[string]any{{"action_id": "send_draft_agent", "value": string(sendMeta)}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if sentBody != "Draft from agent DM" {
+		t.Errorf("expected 'Draft from agent DM', got %q", sentBody)
+	}
+	if sentChannel != "C_TARGET" {
+		t.Errorf("expected C_TARGET, got %q", sentChannel)
+	}
+}
+
+func TestInteraction_SendDraftAgent_BadJSON(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	// Create a draft with ID matching the bad JSON so processInteraction finds it.
+	srv.drafts.Create(context.Background(), model.Draft{
+		ID: "not-valid-json", UserID: "usr_a", Status: model.DraftStatusPending,
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":    "block_actions",
+		"user":    map[string]any{"id": "U_ALICE"},
+		"actions": []map[string]any{{"action_id": "send_draft_agent", "value": "not-valid-json"}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+	// No crash — bad JSON logged and returned.
+}
+
+func TestInteraction_UnknownAction(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	srv.drafts.Create(context.Background(), model.Draft{
+		ID: "dft_1", UserID: "usr_a", Status: model.DraftStatusPending,
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":    "block_actions",
+		"user":    map[string]any{"id": "U_ALICE"},
+		"actions": []map[string]any{{"action_id": "some_unknown_action", "value": "dft_1"}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}

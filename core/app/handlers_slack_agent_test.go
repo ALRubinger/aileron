@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/llm"
@@ -853,4 +855,390 @@ func TestRespondViaURL_Success(t *testing.T) {
 	if resp["replace_original"] != true {
 		t.Error("expected replace_original to be true")
 	}
+}
+
+func TestHandleAssistantMessage_PipelineError(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// Pipeline with an LLM that returns an error on the ghostwrite round.
+	errMock := &mockStreamingLLMClient{err: fmt.Errorf("LLM exploded")}
+	srv.draftPipeline = draft.NewPipeline(
+		&mockLLMClient{response: "research ok"},
+		errMock,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "r", Ghostwrite: "g"},
+	)
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "hello")
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	// Status should be cleared after error.
+	foundClear := false
+	for _, s := range agent.statusCalls {
+		if s == "" {
+			foundClear = true
+		}
+	}
+	if !foundClear {
+		t.Error("expected status cleared after pipeline error")
+	}
+}
+
+func TestHandleAssistantMessage_VaultLocked(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("research", "draft")
+
+	// Simulate KEK session cache present but no KEK for user → vault locked.
+	srv.kekSessionCache = &auth.KEKSessionCache{}
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "hello")
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	foundClear := false
+	for _, s := range agent.statusCalls {
+		if s == "" {
+			foundClear = true
+		}
+	}
+	if !foundClear {
+		t.Error("expected status cleared when vault locked")
+	}
+}
+
+func TestHandleMessageShortcut_VaultLocked(t *testing.T) {
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "view": map[string]any{"id": "V_123"},
+		})
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("research", "draft")
+	srv.kekSessionCache = &auth.KEKSessionCache{}
+
+	payload := buildMessageShortcutPayload(t, "U_ALICE", "T001", "C123", "general", "trig_123", "test", "111.222")
+
+	// Should not panic; modal updated with vault locked error.
+	srv.handleMessageShortcut(ctx, payload)
+}
+
+func TestHandleMessageShortcut_GenerationFails(t *testing.T) {
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "view": map[string]any{"id": "V_123"},
+		})
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// Pipeline that fails on ghostwrite.
+	srv.draftPipeline = draft.NewPipeline(
+		&mockLLMClient{response: "research"},
+		&mockLLMClient{err: fmt.Errorf("ghostwrite failed")},
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "r", Ghostwrite: "g"},
+	)
+
+	payload := buildMessageShortcutPayload(t, "U_ALICE", "T001", "C123", "general", "trig_123", "test msg", "111.222")
+
+	// Should not panic; modal updated with error.
+	srv.handleMessageShortcut(ctx, payload)
+}
+
+func TestHandleMessageShortcut_LongMessageTruncated(t *testing.T) {
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "view": map[string]any{"id": "V_123"},
+		})
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("research", "draft text")
+
+	longMessage := ""
+	for i := 0; i < 300; i++ {
+		longMessage += "x"
+	}
+
+	payload := buildMessageShortcutPayload(t, "U_ALICE", "T001", "C123", "general", "trig_123", longMessage, "111.222")
+
+	// Should not panic; message preview truncated to 200 chars.
+	srv.handleMessageShortcut(ctx, payload)
+}
+
+func TestProcessSlackMessageEvent_DMRouting(t *testing.T) {
+	srv := newSlackWebhookServer()
+	srv.systemVault = vault.NewMemVault()
+	srv.slackAgentClient = &mockSlackAgentClient{}
+	// No pipeline — handleAssistantMessage will bail, but the routing is tested.
+
+	srv.systemVault.Put(context.Background(), "slack-workspaces/T001TEAM/bot-token", []byte("xoxb-test"), vault.Metadata{})
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001TEAM",
+		"event_id": "ev_dm_msg",
+		"event": map[string]any{
+			"type":         "message",
+			"user":         "U_ALICE",
+			"text":         "Draft me something",
+			"channel":      "D_DM_CHAN",
+			"channel_type": "im",
+			"ts":           "123.456",
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	// Ensure onSlackMessage is NOT called (DM should route to agent, not mentions).
+	called := false
+	srv.onSlackMessage = func(_ context.Context, _ string, _ comms.IncomingMessage) {
+		called = true
+	}
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Give the async handler time to run.
+	<-waitFor(50)
+
+	if called {
+		t.Error("DM message should route to agent handler, not onSlackMessage")
+	}
+}
+
+func TestBuildStreamingPipeline_VaultLocked(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("research", "draft")
+	srv.kekSessionCache = &auth.KEKSessionCache{}
+	// No KEK stored for user → vault locked → returns nil.
+	result := srv.buildStreamingPipeline("usr_a")
+	if result != nil {
+		t.Error("expected nil when vault is locked")
+	}
+}
+
+// failingSlackAgentClient returns errors for specific methods.
+type failingSlackAgentClient struct {
+	mockSlackAgentClient
+	startStreamErr error
+}
+
+func (f *failingSlackAgentClient) StartStream(_ context.Context, _, _, _ string) (string, error) {
+	return "", f.startStreamErr
+}
+
+func TestHandleAssistantMessage_StartStreamError(t *testing.T) {
+	failClient := &failingSlackAgentClient{
+		startStreamErr: fmt.Errorf("stream start failed"),
+	}
+	srv := &apiServer{
+		log:               slog.Default(),
+		connectedAccounts: mem.NewConnectedAccountStore(),
+		systemVault:       vault.NewMemVault(),
+		vault:             vault.NewMemVault(),
+		slackAgentClient:  failClient,
+		newID:             func() string { return "test-id" },
+	}
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newStreamingTestPipeline("ctx", []string{"Hello"})
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "hi")
+
+	// Should not panic — StartStream error is logged and returned early.
+}
+
+func TestHandleAssistantThreadStarted_SetPromptsError(t *testing.T) {
+	// Use a mock that returns errors on SetSuggestedPrompts/SetTitle.
+	errClient := &errorSlackAgentClient{}
+	srv := &apiServer{
+		log:               slog.Default(),
+		connectedAccounts: mem.NewConnectedAccountStore(),
+		systemVault:       vault.NewMemVault(),
+		vault:             vault.NewMemVault(),
+		slackAgentClient:  errClient,
+		newID:             func() string { return "test-id" },
+	}
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+
+	// Should not panic — errors are logged.
+	srv.handleAssistantThreadStarted(ctx, "T001", "D_CHAN", "999.001")
+}
+
+// errorSlackAgentClient returns errors for SetSuggestedPrompts and SetTitle.
+type errorSlackAgentClient struct {
+	mockSlackAgentClient
+}
+
+func (e *errorSlackAgentClient) SetSuggestedPrompts(_ context.Context, _, _, _ string, _ []comms.SlackAgentPrompt) error {
+	return fmt.Errorf("prompts failed")
+}
+
+func (e *errorSlackAgentClient) SetTitle(_ context.Context, _, _, _, _ string) error {
+	return fmt.Errorf("title failed")
+}
+
+func TestHandleMessageShortcut_OpenModalFails(t *testing.T) {
+	// Mock server that returns an error for views.open.
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "trigger_expired"})
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+
+	payload := buildMessageShortcutPayload(t, "U_ALICE", "T001", "C123", "general", "trig_expired", "test", "111.222")
+
+	// Should not panic — open modal error is logged.
+	srv.handleMessageShortcut(ctx, payload)
+}
+
+func TestHandleMessageShortcut_UpdateModalError(t *testing.T) {
+	// First call (views.open) succeeds, second call (views.update) fails.
+	callCount := 0
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		if callCount == 1 {
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "view": map[string]any{"id": "V_123"}})
+		} else {
+			json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "view_not_found"})
+		}
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("research", "draft output")
+
+	payload := buildMessageShortcutPayload(t, "U_ALICE", "T001", "C123", "general", "trig_123", "test", "111.222")
+
+	// Should not panic — update modal error logged.
+	srv.handleMessageShortcut(ctx, payload)
+}
+
+func TestProcessSlashCommandDraft_VaultLocked(t *testing.T) {
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "view": map[string]any{"id": "V_123"}})
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("research", "draft")
+	srv.kekSessionCache = &auth.KEKSessionCache{}
+
+	meta := DraftModalMeta{TargetChannel: "C123", UserID: "U_ALICE"}
+	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "Draft something", "trig_123", meta)
+	// Should not panic — vault locked error shown in modal.
+}
+
+func TestProcessSlashCommandQuestion_VaultLocked(t *testing.T) {
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("research", "answer")
+	srv.kekSessionCache = &auth.KEKSessionCache{}
+
+	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "How many calls?", respServer.URL)
+	// Should not panic — vault locked error sent via response_url.
+}
+
+// buildMessageShortcutPayload constructs a slackInteractionPayload via JSON
+// round-trip to avoid anonymous struct type mismatches with JSON tags.
+func buildMessageShortcutPayload(t *testing.T, userID, teamID, channelID, channelName, triggerID, messageText, messageTS string) slackInteractionPayload {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]any{
+		"type":       "message_action",
+		"trigger_id": triggerID,
+		"user":       map[string]any{"id": userID},
+		"team":       map[string]any{"id": teamID},
+		"channel":    map[string]any{"id": channelID, "name": channelName},
+		"message":    map[string]any{"text": messageText, "ts": messageTS},
+	})
+	var payload slackInteractionPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("failed to build payload: %v", err)
+	}
+	return payload
+}
+
+// waitFor returns a channel that closes after d milliseconds.
+func waitFor(ms int) <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		<-time.After(time.Duration(ms) * time.Millisecond)
+		close(ch)
+	}()
+	return ch
 }

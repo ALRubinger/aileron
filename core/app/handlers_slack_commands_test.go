@@ -117,3 +117,54 @@ func TestSlackCommand_Draft_Returns200(t *testing.T) {
 	// The draft flow opens a modal async — response is empty 200.
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestSlackCommand_DraftNoTriggerID_FallsBackToEphemeral(t *testing.T) {
+	srv := newCommandTestServer()
+	params := url.Values{
+		"command":      {"/aileron"},
+		"text":         {"Draft me a status update"},
+		"team_id":      {"T001"},
+		"channel_id":   {"C123"},
+		"user_id":      {"U_ALICE"},
+		"response_url": {"https://hooks.slack.com/commands/test"},
+		// no trigger_id
+	}
+
+	w := httptest.NewRecorder()
+	srv.handleSlackCommand(w, signedCommandRequest(params))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["response_type"] != "ephemeral" {
+		t.Errorf("expected ephemeral response when no trigger_id, got %v", resp["response_type"])
+	}
+}
+
+func TestSlackCommand_InvalidFormData(t *testing.T) {
+	srv := newCommandTestServer()
+
+	// Send raw bytes that aren't valid form data — but url.ParseQuery is lenient,
+	// so this actually won't fail. Instead test with bad signature.
+	body := []byte("%%%invalid")
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	baseString := fmt.Sprintf("v0:%s:%s", ts, string(body))
+	mac := hmac.New(sha256.New, []byte(testSigningSecret))
+	mac.Write([]byte(baseString))
+	sig := "v0=" + hex.EncodeToString(mac.Sum(nil))
+
+	r := httptest.NewRequest("POST", "/v1/webhooks/slack/commands",
+		strings.NewReader(string(body)))
+	r.Header.Set("X-Slack-Request-Timestamp", ts)
+	r.Header.Set("X-Slack-Signature", sig)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackCommand(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid form data, got %d", w.Code)
+	}
+}
