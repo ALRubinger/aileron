@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -20,7 +19,6 @@ func newInstallTestServer(t *testing.T) *apiServer {
 		systemVault:       vault.NewMemVault(),
 		slackClientID:     "test-client-id",
 		slackClientSecret: "test-client-secret",
-		newID:             func() string { return "test-state-id" },
 	}
 }
 
@@ -198,160 +196,6 @@ func TestHandleSlackInstall_OverwritesExistingToken(t *testing.T) {
 	}
 	if string(secret.Value) != "xoxb-new" {
 		t.Errorf("token = %q, want xoxb-new", secret.Value)
-	}
-}
-
-func TestHandleSlackInstallStart_RedirectsWithState(t *testing.T) {
-	srv := newInstallTestServer(t)
-
-	req := httptest.NewRequest("GET", "http://api.example.com/v1/slack/install", nil)
-	req.Header.Set("X-Forwarded-Proto", "https")
-	w := httptest.NewRecorder()
-	srv.handleSlackInstallStart(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("expected 302, got %d", resp.StatusCode)
-	}
-
-	location := resp.Header.Get("Location")
-	u, err := url.Parse(location)
-	if err != nil {
-		t.Fatalf("failed to parse Location: %v", err)
-	}
-	if u.Host != "slack.com" || u.Path != "/oauth/v2/authorize" {
-		t.Errorf("unexpected redirect host/path: %s", location)
-	}
-
-	q := u.Query()
-	if q.Get("client_id") != "test-client-id" {
-		t.Errorf("client_id = %q, want test-client-id", q.Get("client_id"))
-	}
-	if q.Get("state") != "test-state-id" {
-		t.Errorf("state = %q, want test-state-id", q.Get("state"))
-	}
-	if q.Get("scope") == "" {
-		t.Error("expected bot scope parameter")
-	}
-	if q.Get("user_scope") == "" {
-		t.Error("expected user_scope parameter")
-	}
-	if q.Get("redirect_uri") != "https://api.example.com/v1/slack/install/callback" {
-		t.Errorf("redirect_uri = %q", q.Get("redirect_uri"))
-	}
-
-	// Verify state cookie is set.
-	var stateCookie *http.Cookie
-	for _, c := range resp.Cookies() {
-		if c.Name == "aileron_slack_install_state" {
-			stateCookie = c
-			break
-		}
-	}
-	if stateCookie == nil {
-		t.Fatal("expected aileron_slack_install_state cookie")
-	}
-	if stateCookie.Value != "test-state-id" {
-		t.Errorf("cookie value = %q, want test-state-id", stateCookie.Value)
-	}
-	if !stateCookie.HttpOnly {
-		t.Error("expected HttpOnly cookie")
-	}
-}
-
-func TestHandleSlackInstallStart_OverrideAuthorizeURL(t *testing.T) {
-	srv := newInstallTestServer(t)
-	srv.slackAuthorizeURL = "http://mock-slack.local/oauth"
-
-	req := httptest.NewRequest("GET", "http://localhost/v1/slack/install", nil)
-	w := httptest.NewRecorder()
-	srv.handleSlackInstallStart(w, req)
-
-	resp := w.Result()
-	location := resp.Header.Get("Location")
-	if !strings.HasPrefix(location, "http://mock-slack.local/oauth?") {
-		t.Errorf("expected override authorize URL, got %q", location)
-	}
-}
-
-func TestHandleSlackInstall_StateValidation(t *testing.T) {
-	srv := newInstallTestServer(t)
-	srv.slackBotExchanger = func(_, _, _, _ string) (*slackBotInstallResponse, error) {
-		return &slackBotInstallResponse{
-			OK:          true,
-			AccessToken: "xoxb-token",
-			BotUserID:   "U_BOT",
-			Team: struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			}{"T001", "ws"},
-		}, nil
-	}
-
-	// With matching state cookie and query param — should succeed.
-	req := httptest.NewRequest("GET", "/v1/slack/install/callback?code=test&state=good-state", nil)
-	req.AddCookie(&http.Cookie{Name: "aileron_slack_install_state", Value: "good-state"})
-	w := httptest.NewRecorder()
-	srv.handleSlackInstall(w, req)
-
-	if w.Code != http.StatusOK {
-		body, _ := io.ReadAll(w.Result().Body)
-		t.Fatalf("expected 200 with valid state, got %d: %s", w.Code, body)
-	}
-}
-
-func TestHandleSlackInstall_StateMismatchRejected(t *testing.T) {
-	srv := newInstallTestServer(t)
-
-	req := httptest.NewRequest("GET", "/v1/slack/install/callback?code=test&state=wrong", nil)
-	req.AddCookie(&http.Cookie{Name: "aileron_slack_install_state", Value: "correct"})
-	w := httptest.NewRecorder()
-	srv.handleSlackInstall(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for state mismatch, got %d", w.Code)
-	}
-	body, _ := io.ReadAll(w.Result().Body)
-	if !strings.Contains(string(body), "state mismatch") {
-		t.Errorf("expected state mismatch error, got: %s", body)
-	}
-}
-
-func TestHandleSlackInstall_MissingStateWithCookieRejected(t *testing.T) {
-	srv := newInstallTestServer(t)
-
-	// Cookie present but no state query param.
-	req := httptest.NewRequest("GET", "/v1/slack/install/callback?code=test", nil)
-	req.AddCookie(&http.Cookie{Name: "aileron_slack_install_state", Value: "some-state"})
-	w := httptest.NewRecorder()
-	srv.handleSlackInstall(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 when state cookie present but no state param, got %d", w.Code)
-	}
-}
-
-func TestHandleSlackInstall_NoCookieSkipsStateValidation(t *testing.T) {
-	srv := newInstallTestServer(t)
-	srv.slackBotExchanger = func(_, _, _, _ string) (*slackBotInstallResponse, error) {
-		return &slackBotInstallResponse{
-			OK:          true,
-			AccessToken: "xoxb-token",
-			BotUserID:   "U_BOT",
-			Team: struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-			}{"T001", "ws"},
-		}, nil
-	}
-
-	// No state cookie (Marketplace install) — should proceed without state check.
-	req := httptest.NewRequest("GET", "/v1/slack/install/callback?code=test", nil)
-	w := httptest.NewRecorder()
-	srv.handleSlackInstall(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 without state cookie (Marketplace flow), got %d", w.Code)
 	}
 }
 
