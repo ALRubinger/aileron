@@ -329,15 +329,25 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 
 		// Store the encrypted token in the vault — server never saw plaintext.
 		now := time.Now().UTC()
+
+		// Use provider-specific external IDs when available (e.g. Slack
+		// returns user ID + team ID in the token response). Fall back to
+		// email for providers that use standard OAuth (Google, etc.).
+		externalUserID := oauthResp.ExternalUserID
+		if externalUserID == "" {
+			externalUserID = oauthResp.Email
+		}
+
 		acct := model.ConnectedAccount{
-			ID:        "conn_" + s.newID(),
-			UserID:    userID,
+			ID:             "conn_" + s.newID(),
+			UserID:         userID,
 			Provider:       provider,
 			Scopes:         providerSvc.ScopesFor(provider),
-			ExternalUserID: oauthResp.Email,
-			Status:    model.ConnectedAccountStatusActive,
-			CreatedAt: now,
-			UpdatedAt: now,
+			ExternalUserID: externalUserID,
+			ExternalTeamID: oauthResp.ExternalTeamID,
+			Status:         model.ConnectedAccountStatusActive,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		}
 		if err := s.vault.Put(r.Context(), acct.VaultPath(), oauthResp.EncryptedToken, vault.Metadata{
 			Type: "oauth_refresh_token",

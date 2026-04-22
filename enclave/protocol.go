@@ -59,6 +59,12 @@ type OAuthExchangeResponse struct {
 	Email string `json:"email"`
 	// TokenType is the OAuth token type (typically "Bearer").
 	TokenType string `json:"token_type"`
+	// ExternalUserID is the provider-specific user ID (e.g. Slack user ID "U...").
+	// Only populated for providers that return this in the token response.
+	ExternalUserID string `json:"external_user_id,omitempty"`
+	// ExternalTeamID is the provider-specific workspace/team ID (e.g. Slack "T...").
+	// Only populated for providers that return this in the token response.
+	ExternalTeamID string `json:"external_team_id,omitempty"`
 }
 
 // ExecuteRequest is sent from the host to the enclave to execute a connector
