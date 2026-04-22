@@ -23,6 +23,8 @@ const (
 	draftInputActionID     = "draft_text"
 	instructionBlockID     = "instruction_input"
 	instructionActionID    = "instruction_text"
+	refineActionID         = "refine_draft"
+	refineBlockID          = "refine_actions"
 	maxModalTextLength     = 3000
 )
 
@@ -92,12 +94,21 @@ func updateDraftModalWithDraft(ctx context.Context, botToken, viewID, draftText 
 
 	instructionInputBlock := slack.NewInputBlock(
 		instructionBlockID,
-		slack.NewTextBlockObject(slack.PlainTextType, "Instructions (optional)", false, false),
+		slack.NewTextBlockObject(slack.PlainTextType, "Feedback (optional)", false, false),
 		nil,
 		instructionInput,
 	)
 	instructionInputBlock.Optional = true
 	blocks = append(blocks, instructionInputBlock)
+
+	// Refine button — triggers a block_actions callback to regenerate
+	// the draft using the feedback above.
+	refineBtn := slack.NewButtonBlockElement(
+		refineActionID,
+		"refine",
+		slack.NewTextBlockObject(slack.PlainTextType, "Refine", false, false),
+	)
+	blocks = append(blocks, slack.NewActionBlock(refineBlockID, refineBtn))
 
 	view := slack.ModalViewRequest{
 		Type:            slack.VTModal,
@@ -108,6 +119,29 @@ func updateDraftModalWithDraft(ctx context.Context, botToken, viewID, draftText 
 		PrivateMetadata: string(metaJSON),
 		Blocks: slack.Blocks{
 			BlockSet: blocks,
+		},
+	}
+
+	_, err := comms.UpdateModal(ctx, botToken, viewID, view)
+	return err
+}
+
+// updateDraftModalLoading updates the modal to show a loading state.
+func updateDraftModalLoading(ctx context.Context, botToken, viewID, message string, meta DraftModalMeta) error {
+	metaJSON, _ := json.Marshal(meta)
+
+	view := slack.ModalViewRequest{
+		Type:            slack.VTModal,
+		CallbackID:      draftModalCallbackID,
+		Title:           slack.NewTextBlockObject(slack.PlainTextType, "Draft with Aileron", false, false),
+		PrivateMetadata: string(metaJSON),
+		Blocks: slack.Blocks{
+			BlockSet: []slack.Block{
+				slack.NewSectionBlock(
+					slack.NewTextBlockObject(slack.MarkdownType, ":hourglass_flowing_sand: *"+message+"*", false, false),
+					nil, nil,
+				),
+			},
 		},
 	}
 
