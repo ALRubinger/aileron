@@ -223,6 +223,7 @@ jobs:
           AILERON_DATABASE_URL: postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable
           AILERON_JWT_SIGNING_KEY: ci-test-signing-key-not-for-production
           AILERON_AUTO_VERIFY_EMAIL: "true"
+          AILERON_SYSTEM_VAULT_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
       - name: Wait for healthy server
         run: |
