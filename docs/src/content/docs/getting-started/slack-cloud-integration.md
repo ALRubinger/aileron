@@ -31,15 +31,21 @@ Type `/aileron Draft me a weekly status update` in any channel. A modal opens wi
 
 In all cases, replies are sent as **you** (via your user token), not as the bot.
 
-## 1. Create a Slack App
+---
+
+## Admin setup
+
+These steps are performed once by a **workspace admin** or the developer deploying Aileron. Regular users skip to [User setup](#user-setup) below.
+
+### 1. Create a Slack App
 
 Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app from scratch.
 
-### Enable Agents & AI Apps
+#### Enable Agents & AI Apps
 
 Sidebar → **Agents & AI Apps** → toggle ON. This enables the agent DM experience with suggested prompts, thinking indicators, and streaming responses.
 
-### OAuth & Permissions
+#### OAuth & Permissions
 
 Under **Bot Token Scopes**, add:
 
@@ -63,9 +69,9 @@ https://your-domain/v1/connect/slack/callback
 https://your-domain/v1/slack/install/callback
 ```
 
-The first handles user OAuth (connecting individual accounts). The second handles bot installation (when a workspace admin installs the app).
+The first handles user OAuth (connecting individual accounts). The second handles bot installation (this step).
 
-### App Credentials
+#### App Credentials
 
 From **Basic Information**, note:
 
@@ -73,18 +79,7 @@ From **Basic Information**, note:
 - **Client Secret** → `SLACK_CLIENT_SECRET`
 - **Signing Secret** → `SLACK_SIGNING_SECRET`
 
-### Install to workspace (admin, once per workspace)
-
-A workspace admin installs the bot once. This grants the bot token (`xoxb-...`) needed for Aileron to respond in Slack. The admin can install via:
-
-- **Slack App Directory** — if public distribution is enabled
-- **Sidebar → Install App → Install to Workspace** — for the development workspace
-
-When the admin authorizes the app, Slack redirects to `https://your-domain/v1/slack/install/callback`. Aileron exchanges the code for a bot token and stores it in the [system vault](/getting-started/credential-vault#system-vault) (encrypted at rest, keyed by workspace). The admin sees a success page and can close the tab.
-
-Individual users do **not** need to install the app — they only connect their own account (step 4), which requests user-level scopes without repeating the bot install prompt.
-
-### Enable public distribution
+#### Enable public distribution
 
 By default, a Slack app can only be installed in the workspace where it was created. To allow users from any workspace to connect:
 
@@ -96,7 +91,7 @@ Without this step, users outside the development workspace will see `invalid_tea
 
 > **Do NOT configure Event Subscriptions, Interactivity, or Slash Commands yet.** The Aileron server must be running first. See step 3.
 
-## 2. Configure environment variables
+### 2. Configure environment variables
 
 Set these on your Aileron cloud server:
 
@@ -125,11 +120,11 @@ enabled cloud draft generation  research_model=claude-haiku-4-5-20251001  synthe
 enabled Slack Events API webhook, interaction, command, and install endpoints
 ```
 
-## 3. Enable Event Subscriptions, Interactivity, and Slash Commands
+### 3. Enable Event Subscriptions, Interactivity, and Slash Commands
 
 The server must be running before this step — Slack sends verification challenges immediately.
 
-### Event Subscriptions
+#### Event Subscriptions
 
 1. Sidebar → **Event Subscriptions** → toggle ON
 2. **Request URL:** `https://your-domain/v1/webhooks/slack/events`
@@ -140,7 +135,7 @@ The server must be running before this step — Slack sends verification challen
    - `message.im`
 5. Click **Save Changes**
 
-### Interactivity & Shortcuts
+#### Interactivity & Shortcuts
 
 1. Sidebar → **Interactivity & Shortcuts** → toggle ON
 2. **Request URL:** `https://your-domain/v1/webhooks/slack/interactions`
@@ -150,7 +145,7 @@ The server must be running before this step — Slack sends verification challen
    - **Callback ID:** `draft_reply`
 4. Click **Save Changes**
 
-### Slash Commands
+#### Slash Commands
 
 1. Sidebar → **Slash Commands** → **Create New Command**
 2. **Command:** `/aileron`
@@ -159,19 +154,31 @@ The server must be running before this step — Slack sends verification challen
 5. **Usage Hint:** `[draft a reply | ask a question]`
 6. Click **Save**
 
-### Reinstall
+### 4. Install to workspace
 
-Sidebar → **Install App** → **Reinstall to Workspace** if prompted (required after adding new scopes or event subscriptions).
+Install the bot to the workspace. This grants the bot token (`xoxb-...`) needed for Aileron to respond in Slack.
 
-## 4. Connect your Slack account
+- **Sidebar → Install App → Install to Workspace** (or **Reinstall** if updating an existing install)
 
-Each user connects their own Slack account. This is a user-level OAuth flow — it only asks for user consent (the scopes listed under "User Token Scopes" above). It does **not** repeat the bot installation.
+When you authorize the app, Slack redirects to `https://your-domain/v1/slack/install/callback`. Aileron exchanges the code for a bot token and stores it in the [system vault](/getting-started/credential-vault#system-vault) (encrypted at rest, keyed by workspace). You'll see a success page and can close the tab.
+
+Users do **not** need to repeat this step — they only connect their own account (see User setup below).
+
+---
+
+## User setup
+
+These steps are performed by **each user** who wants to use Aileron in Slack. The workspace admin must have completed the [Admin setup](#admin-setup) first.
+
+### Connect your Slack account
 
 Open in browser (must be logged into Aileron):
 
 ```
 https://your-domain/v1/connect/slack
 ```
+
+This is a user-level OAuth flow — it asks for your consent to the user token scopes listed above. It does **not** repeat the bot installation.
 
 Verify:
 
@@ -182,7 +189,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Should show your Slack account with `status: active`.
 
-## 5. Test it
+### Test it
 
 ### Message shortcut
 
