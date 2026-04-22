@@ -1000,6 +1000,66 @@ func TestOAuthExchangeBadJSON(t *testing.T) {
 	}
 }
 
+func TestEscrowListEndpoint(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	// Empty list.
+	resp, err := http.Post(server.URL+"/escrow/list", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatalf("POST /escrow/list: %v", err)
+	}
+	result := decodeResp[enclave.EscrowListResponse](t, resp)
+	if len(result.Entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(result.Entries))
+	}
+
+	// Store some entries, then list.
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("cred-1"), userKEK)
+	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		UserID:              "user-1",
+		GrantID:             "g1",
+		EncryptedCredential: encrypted,
+		CredentialType:      "oauth_token",
+		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
+	})
+	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
+
+	resp2, err := http.Post(server.URL+"/escrow/list", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatalf("POST /escrow/list: %v", err)
+	}
+	result2 := decodeResp[enclave.EscrowListResponse](t, resp2)
+	if len(result2.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(result2.Entries))
+	}
+	if result2.Entries[0].EscrowID != storeResult.EscrowID {
+		t.Fatalf("expected %q, got %q", storeResult.EscrowID, result2.Entries[0].EscrowID)
+	}
+	if result2.Entries[0].GrantID != "g1" {
+		t.Fatalf("expected grant g1, got %q", result2.Entries[0].GrantID)
+	}
+}
+
+func TestEscrowRetrieveBadJSON(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/escrow/retrieve", "application/json", bytes.NewReader([]byte("bad")))
+	if err != nil {
+		t.Fatalf("POST /escrow/retrieve: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
 func TestResolveConnectorID(t *testing.T) {
 	tests := []struct {
 		input      string

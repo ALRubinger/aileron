@@ -425,6 +425,200 @@ func TestInteraction_SendDraftAgent_BadJSON(t *testing.T) {
 	// No crash — bad JSON logged and returned.
 }
 
+func TestInteraction_RefineAction_RoutedCorrectly(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:   "C0BACKEND",
+		OriginalMessage: "Original msg",
+		UserID:          "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{
+							"value": "Current draft text",
+						},
+					},
+					instructionBlockID: map[string]any{
+						instructionActionID: map[string]any{
+							"value": "Make it shorter",
+						},
+					},
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// processRefineDraft runs async; it will fail on bot token resolution
+	// but the key assertion is that routing works and doesn't crash.
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_NoView(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+		// No view — processRefineDraft should log and return.
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_EmptyDraft(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel: "C0BACKEND",
+		UserID:        "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{
+							"value": "", // empty draft
+						},
+					},
+					instructionBlockID: map[string]any{
+						instructionActionID: map[string]any{
+							"value": "Some feedback",
+						},
+					},
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestInteraction_RefineAction_NoFeedback(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel: "C0BACKEND",
+		UserID:        "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{
+							"value": "Some draft",
+						},
+					},
+					// No feedback block
+				},
+			},
+		},
+		"actions": []map[string]any{{
+			"action_id": refineActionID,
+			"value":     "refine",
+		}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestInteraction_RespondToInteraction_Success(t *testing.T) {
+	var receivedBody string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		if text, ok := payload["text"].(string); ok {
+			receivedBody = text
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	srv := newInteractionTestServer()
+	srv.respondToInteraction(respServer.URL, "Draft sent!")
+
+	if receivedBody != "Draft sent!" {
+		t.Fatalf("expected 'Draft sent!', got %q", receivedBody)
+	}
+}
+
+func TestInteraction_RespondToInteraction_ServerError(t *testing.T) {
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer respServer.Close()
+
+	srv := newInteractionTestServer()
+	// Should not panic on error response.
+	srv.respondToInteraction(respServer.URL, "test message")
+}
+
 func TestInteraction_UnknownAction(t *testing.T) {
 	srv := newInteractionTestServer()
 
