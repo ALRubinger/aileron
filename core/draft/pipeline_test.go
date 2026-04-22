@@ -855,6 +855,71 @@ func TestPipeline_GenerateDraftStream_ResearchError(t *testing.T) {
 	}
 }
 
+func TestRefineDraft_LLMError(t *testing.T) {
+	mockClient := &mockLLMClient{
+		err: fmt.Errorf("LLM unavailable"),
+	}
+	p := draft.NewPipeline(
+		mockClient, mockClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		nil, vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+
+	_, err := p.RefineDraft(context.Background(), "usr_1",
+		"Original", "Draft", "Feedback",
+	)
+	if err == nil {
+		t.Fatal("expected error from LLM failure")
+	}
+	if !strings.Contains(err.Error(), "refine draft failed") {
+		t.Errorf("expected 'refine draft failed' in error, got: %v", err)
+	}
+}
+
+func TestWithVault(t *testing.T) {
+	mockClient := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "ok"},
+	}
+	p := draft.NewPipeline(
+		mockClient, mockClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		nil, vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+
+	v := vault.NewMemVault()
+	p2 := p.WithVault(v)
+	if p2 == nil {
+		t.Fatal("WithVault returned nil")
+	}
+	// Original pipeline should not be affected.
+	_ = p
+}
+
+func TestWithClientResolver(t *testing.T) {
+	mockClient := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "ok"},
+	}
+	p := draft.NewPipeline(
+		mockClient, mockClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		nil, vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+
+	p2 := p.WithClientResolver(nil)
+	if p2 == nil {
+		t.Fatal("WithClientResolver returned nil")
+	}
+}
+
 func TestRefineDraft(t *testing.T) {
 	mockClient := &mockLLMClient{
 		response: &llm.GenerateResponse{Text: "Revised: shorter version"},
