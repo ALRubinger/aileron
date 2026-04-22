@@ -4,6 +4,8 @@ package app
 
 import (
 	"context"
+	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -234,6 +236,23 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		v = vault.NewPostgresVault(db.Pool)
 		server.vault = v
 		log.Info("using Postgres-backed stores and vault")
+
+		// System vault for infrastructure secrets (ADR-0020).
+		if authCfg.SystemVaultEnabled() {
+			sysKey, err := hex.DecodeString(authCfg.SystemVaultKey)
+			if err != nil {
+				return nil, fmt.Errorf("AILERON_SYSTEM_VAULT_KEY: invalid hex: %w", err)
+			}
+			sysVault, err := vault.NewEncryptedVault(
+				vault.NewPostgresSystemVault(db.Pool),
+				sysKey,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("system vault: %w", err)
+			}
+			server.systemVault = sysVault
+			log.Info("enabled system vault for infrastructure secrets")
+		}
 
 		tokenIssuer := auth.NewTokenIssuer(
 			[]byte(authCfg.JWTSigningKey),
