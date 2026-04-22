@@ -3,12 +3,18 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
 	"github.com/ALRubinger/aileron/core/comms"
+	"github.com/ALRubinger/aileron/core/draft"
+	"github.com/ALRubinger/aileron/core/llm"
 	"github.com/ALRubinger/aileron/core/model"
+	"github.com/ALRubinger/aileron/core/source"
 	"github.com/ALRubinger/aileron/core/store/mem"
 	"github.com/ALRubinger/aileron/core/vault"
 )
@@ -242,5 +248,609 @@ func TestParseDraftModalMeta(t *testing.T) {
 	}
 	if parsed.UserID != "U_ALICE" {
 		t.Errorf("expected U_ALICE, got %q", parsed.UserID)
+	}
+}
+
+// --- Mock LLM clients for pipeline tests ---
+
+// mockLLMClient implements llm.Client and returns a fixed response.
+type mockLLMClient struct {
+	response string
+	err      error
+}
+
+func (m *mockLLMClient) GenerateWithTools(_ context.Context, _ llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &llm.GenerateResponse{Text: m.response}, nil
+}
+
+// mockStreamingLLMClient implements both llm.Client and llm.StreamingClient.
+type mockStreamingLLMClient struct {
+	response string
+	chunks   []string // if set, GenerateStream emits these chunks
+	err      error
+}
+
+func (m *mockStreamingLLMClient) GenerateWithTools(_ context.Context, _ llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &llm.GenerateResponse{Text: m.response}, nil
+}
+
+func (m *mockStreamingLLMClient) GenerateStream(_ context.Context, _ llm.GenerateRequest) (<-chan string, <-chan error) {
+	textCh := make(chan string, len(m.chunks)+1)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(textCh)
+		defer close(errCh)
+		if m.err != nil {
+			errCh <- m.err
+			return
+		}
+		if len(m.chunks) > 0 {
+			for _, c := range m.chunks {
+				textCh <- c
+			}
+		} else {
+			textCh <- m.response
+		}
+	}()
+	return textCh, errCh
+}
+
+// newTestPipeline creates a draft.Pipeline with mock LLM clients.
+func newTestPipeline(researchResp, ghostwriteResp string) *draft.Pipeline {
+	research := &mockLLMClient{response: researchResp}
+	ghostwrite := &mockLLMClient{response: ghostwriteResp}
+	return draft.NewPipeline(
+		research,
+		ghostwrite,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research prompt", Ghostwrite: "ghostwrite prompt"},
+	)
+}
+
+// newStreamingTestPipeline creates a pipeline with a streaming ghostwrite client.
+func newStreamingTestPipeline(researchResp string, chunks []string) *draft.Pipeline {
+	research := &mockLLMClient{response: researchResp}
+	ghostwrite := &mockStreamingLLMClient{chunks: chunks}
+	return draft.NewPipeline(
+		research,
+		ghostwrite,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research prompt", Ghostwrite: "ghostwrite prompt"},
+	)
+}
+
+// seedTestUser seeds a connected Slack account for the test server.
+func seedTestUser(ctx context.Context, srv *apiServer, slackUserID, teamID, aileronUserID string) {
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_" + aileronUserID, UserID: aileronUserID,
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+		ExternalUserID: slackUserID,
+		ExternalTeamID: teamID,
+	})
+}
+
+func TestHandleAssistantMessage_WithStreamingPipeline(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	ctx := context.Background()
+
+	// Seed bot token and user.
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// Configure pipeline with streaming ghostwrite.
+	srv.draftPipeline = newStreamingTestPipeline("context gathered", []string{"Hello ", "world!"})
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "Write me a message")
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	// Should have started a stream.
+	if agent.startStreamCalls != 1 {
+		t.Errorf("expected 1 StartStream call, got %d", agent.startStreamCalls)
+	}
+
+	// Should have appended chunks.
+	if len(agent.appendCalls) != 2 {
+		t.Errorf("expected 2 AppendStream calls, got %d: %v", len(agent.appendCalls), agent.appendCalls)
+	} else {
+		if agent.appendCalls[0] != "Hello " || agent.appendCalls[1] != "world!" {
+			t.Errorf("unexpected chunks: %v", agent.appendCalls)
+		}
+	}
+
+	// Should have stopped the stream.
+	if agent.stopStreamCalls != 1 {
+		t.Errorf("expected 1 StopStream call, got %d", agent.stopStreamCalls)
+	}
+
+	// Should have set status "Researching..." then "Writing..." then cleared.
+	foundResearching := false
+	foundWriting := false
+	foundClear := false
+	for _, s := range agent.statusCalls {
+		switch s {
+		case "Researching...":
+			foundResearching = true
+		case "Writing...":
+			foundWriting = true
+		case "":
+			foundClear = true
+		}
+	}
+	if !foundResearching {
+		t.Error("expected status 'Researching...'")
+	}
+	if !foundWriting {
+		t.Error("expected status 'Writing...'")
+	}
+	if !foundClear {
+		t.Error("expected status cleared")
+	}
+}
+
+func TestHandleAssistantMessage_NonStreamingFallback(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// Non-streaming pipeline (ghostwrite is plain llm.Client, not StreamingClient).
+	srv.draftPipeline = newTestPipeline("context", "Here is your draft.")
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "Draft something")
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	// Non-streaming: the pipeline emits a writing phase chunk then a single text chunk.
+	// Since startStream returns a ts, the text chunk is appended to the stream.
+	// The key assertion: no panic, status was set and cleared.
+	foundClear := false
+	for _, s := range agent.statusCalls {
+		if s == "" {
+			foundClear = true
+		}
+	}
+	if !foundClear {
+		t.Error("expected status to be cleared after non-streaming pipeline")
+	}
+}
+
+func TestHandleAssistantMessage_NoBotToken(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	// No bot token seeded — should bail early.
+	srv.handleAssistantMessage(context.Background(), "T_UNKNOWN", "D_CHAN", "999.001", "U_ALICE", "hello")
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.statusCalls) != 0 {
+		t.Errorf("expected no status calls when bot token missing, got %d", len(agent.statusCalls))
+	}
+}
+
+func TestHandleMessageShortcut_HappyPath(t *testing.T) {
+	// Set up a Slack API mock that handles views.open and views.update.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_123"},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	srv.draftPipeline = newTestPipeline("context", "Here is your draft reply.")
+
+	payload := slackInteractionPayload{
+		TriggerID: "trigger_123",
+	}
+	payload.User.ID = "U_ALICE"
+	payload.Team = &struct {
+		ID string `json:"id"`
+	}{ID: "T001"}
+	payload.Channel = &struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}{ID: "C_GENERAL", Name: "general"}
+	payload.Message = &slackActionMessage{
+		Text:     "Can someone help with the deploy?",
+		TS:       "111.222",
+		ThreadTS: "111.000",
+	}
+
+	// Should not panic; opens modal + updates with draft.
+	srv.handleMessageShortcut(ctx, payload)
+}
+
+func TestHandleMessageShortcut_NoPipeline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_123"},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// No pipeline — should open modal then update with error.
+	payload := slackInteractionPayload{TriggerID: "trig_1"}
+	payload.User.ID = "U_ALICE"
+	payload.Team = &struct {
+		ID string `json:"id"`
+	}{ID: "T001"}
+
+	srv.handleMessageShortcut(ctx, payload)
+	// No panic, modal updated with error.
+}
+
+func TestHandleMessageShortcut_NoBotToken(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	// No bot token — should bail.
+	payload := slackInteractionPayload{TriggerID: "trig_1"}
+	payload.User.ID = "U_ALICE"
+	payload.Team = &struct {
+		ID string `json:"id"`
+	}{ID: "T_MISSING"}
+
+	srv.handleMessageShortcut(context.Background(), payload)
+	// No panic.
+}
+
+func TestHandleMessageShortcut_NoUser(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_123"},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	// No user seeded — resolveAileronUserBySlack will fail.
+
+	payload := slackInteractionPayload{TriggerID: "trig_1"}
+	payload.User.ID = "U_MISSING"
+	payload.Team = &struct {
+		ID string `json:"id"`
+	}{ID: "T001"}
+
+	srv.handleMessageShortcut(ctx, payload)
+	// Should update modal with error, no panic.
+}
+
+func TestHandleSlackAgentSend(t *testing.T) {
+	// handleSlackAgentSend delegates to sendDraftMessage, which needs a connected
+	// account + vault credential + Slack API. We test that it returns an error
+	// when the user has no connected account (the error propagation path).
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	err := srv.handleSlackAgentSend(ctx, "usr_nobody", "C123", "111.222", "Hello!")
+	if err == nil {
+		t.Fatal("expected error when no connected account exists")
+	}
+}
+
+func TestBuildStreamingPipeline_NilPipeline(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	// No pipeline configured.
+	result := srv.buildStreamingPipeline("usr_a")
+	if result != nil {
+		t.Error("expected nil when draftPipeline is not configured")
+	}
+}
+
+func TestBuildStreamingPipeline_WithPipeline(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("ctx", "draft")
+
+	result := srv.buildStreamingPipeline("usr_a")
+	if result == nil {
+		t.Error("expected non-nil pipeline")
+	}
+}
+
+func TestProcessSlashCommandDraft_HappyPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_456"},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("context", "Draft: this is your message.")
+
+	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
+	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft a weekly update", "trig_1", meta)
+	// No panic; modal opened and updated with draft.
+}
+
+func TestProcessSlashCommandDraft_NoBotToken(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
+	// No token — should bail early.
+	srv.processSlashCommandDraft(context.Background(), "T_MISSING", "U_ALICE", "draft", "trig_1", meta)
+}
+
+func TestProcessSlashCommandDraft_NoUser(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_789"},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	// No user seeded.
+	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_NOBODY"}
+	srv.processSlashCommandDraft(ctx, "T001", "U_NOBODY", "draft something", "trig_1", meta)
+	// Should update modal with error.
+}
+
+func TestProcessSlashCommandDraft_NoPipeline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_789"},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	// No pipeline.
+	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
+	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft something", "trig_1", meta)
+}
+
+func TestProcessSlashCommandDraft_PipelineError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_789"},
+		})
+	}))
+	defer server.Close()
+
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// Pipeline with an error-returning ghostwrite client.
+	errClient := &mockLLMClient{err: fmt.Errorf("LLM unavailable")}
+	srv.draftPipeline = draft.NewPipeline(
+		&mockLLMClient{response: "context"},
+		errClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+
+	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
+	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft something", "trig_1", meta)
+	// Should update modal with error, no panic.
+}
+
+func TestProcessSlashCommandQuestion_HappyPath(t *testing.T) {
+	// Set up a response_url server to capture the final response.
+	var receivedBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		r.Body.Read(body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer responseServer.Close()
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("context", "The answer is 42.")
+
+	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "How many hours on calls?", responseServer.URL)
+
+	// Verify the response was sent to the response URL.
+	if receivedBody == "" {
+		t.Fatal("expected response sent to response_url")
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(receivedBody), &resp); err != nil {
+		t.Fatalf("failed to parse response body: %v", err)
+	}
+	if resp["text"] != "The answer is 42." {
+		t.Errorf("expected answer text, got %v", resp["text"])
+	}
+	if resp["response_type"] != "ephemeral" {
+		t.Errorf("expected ephemeral response type, got %v", resp["response_type"])
+	}
+}
+
+func TestProcessSlashCommandQuestion_NoUser(t *testing.T) {
+	var receivedBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		r.Body.Read(body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer responseServer.Close()
+
+	srv, _ := newAgentTestServer()
+	// No user seeded.
+	srv.processSlashCommandQuestion(context.Background(), "T001", "U_UNKNOWN", "question?", responseServer.URL)
+
+	if receivedBody == "" {
+		t.Fatal("expected error response sent to response_url")
+	}
+	var resp map[string]any
+	json.Unmarshal([]byte(receivedBody), &resp)
+	if text, ok := resp["text"].(string); !ok || text != "Could not find your Aileron account." {
+		t.Errorf("expected account error message, got %v", resp["text"])
+	}
+}
+
+func TestProcessSlashCommandQuestion_NoPipeline(t *testing.T) {
+	var receivedBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		r.Body.Read(body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer responseServer.Close()
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	// No pipeline.
+
+	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "question?", responseServer.URL)
+
+	var resp map[string]any
+	json.Unmarshal([]byte(receivedBody), &resp)
+	if text, ok := resp["text"].(string); !ok || text != "Draft generation is not configured." {
+		t.Errorf("expected pipeline not configured message, got %v", resp["text"])
+	}
+}
+
+func TestProcessSlashCommandQuestion_PipelineError(t *testing.T) {
+	var receivedBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		r.Body.Read(body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer responseServer.Close()
+
+	srv, _ := newAgentTestServer()
+	ctx := context.Background()
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	errClient := &mockLLMClient{err: fmt.Errorf("LLM down")}
+	srv.draftPipeline = draft.NewPipeline(
+		&mockLLMClient{response: "context"},
+		errClient,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "r", Ghostwrite: "g"},
+	)
+
+	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "question?", responseServer.URL)
+
+	var resp map[string]any
+	json.Unmarshal([]byte(receivedBody), &resp)
+	if text, ok := resp["text"].(string); !ok || text != "Something went wrong. Please try again." {
+		t.Errorf("expected error message, got %v", resp["text"])
+	}
+}
+
+func TestRespondViaURL_EmptyURL(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	// Should not panic with empty URL.
+	srv.respondViaURL("", "hello")
+}
+
+func TestRespondViaURL_Success(t *testing.T) {
+	var receivedBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, r.ContentLength)
+		r.Body.Read(body)
+		receivedBody = string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	srv, _ := newAgentTestServer()
+	srv.respondViaURL(server.URL, "test message")
+
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(receivedBody), &resp); err != nil {
+		t.Fatalf("failed to parse body: %v", err)
+	}
+	if resp["text"] != "test message" {
+		t.Errorf("expected 'test message', got %v", resp["text"])
+	}
+	if resp["replace_original"] != true {
+		t.Error("expected replace_original to be true")
 	}
 }
