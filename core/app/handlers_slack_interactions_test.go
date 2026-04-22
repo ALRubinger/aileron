@@ -267,6 +267,56 @@ func TestInteraction_RespondToInteraction_EmptyURL(t *testing.T) {
 	srv.respondToInteraction("", "test message")
 }
 
+func TestInteraction_MessageAction_Parsed(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":        "message_action",
+		"callback_id": "draft_reply",
+		"trigger_id":  "trig_12345",
+		"user":        map[string]any{"id": "U_ALICE"},
+		"team":        map[string]any{"id": "T001TEAM"},
+		"channel":     map[string]any{"id": "C0BACKEND", "name": "backend"},
+		"message": map[string]any{
+			"text":      "Can someone review PR #42?",
+			"user":      "U_BOB",
+			"ts":        "111.222",
+			"thread_ts": "111.000",
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Currently a stub — no panic, correct routing = pass.
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestInteraction_MessageAction_NoActions(t *testing.T) {
+	// message_action payloads have no actions array — ensure we don't crash.
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":        "message_action",
+		"callback_id": "draft_reply",
+		"trigger_id":  "trig_999",
+		"user":        map[string]any{"id": "U_ALICE"},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
 func TestInteraction_EditDraft(t *testing.T) {
 	srv := newInteractionTestServer()
 	ctx := context.Background()

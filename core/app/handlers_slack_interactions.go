@@ -13,18 +13,37 @@ import (
 	"github.com/ALRubinger/aileron/core/model"
 )
 
-// slackInteractionPayload is the payload Slack sends when a user clicks
-// a button or interacts with a Block Kit element.
+// slackInteractionPayload is the payload Slack sends for interactive events:
+// block_actions (button clicks), message_action (message shortcuts), and
+// view_submission (modal submits).
 type slackInteractionPayload struct {
-	Type string `json:"type"`
-	User struct {
+	Type       string `json:"type"` // "block_actions", "message_action", "view_submission"
+	CallbackID string `json:"callback_id,omitempty"` // message_action callback ID
+	TriggerID  string `json:"trigger_id,omitempty"`  // for opening modals
+	User       struct {
 		ID string `json:"id"`
 	} `json:"user"`
+	Team *struct {
+		ID string `json:"id"`
+	} `json:"team,omitempty"`
+	Channel *struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"channel,omitempty"`
+	Message *slackActionMessage `json:"message,omitempty"` // message_action only: the message acted on
 	Actions []struct {
 		ActionID string `json:"action_id"`
-		Value    string `json:"value"` // draft ID
+		Value    string `json:"value"` // draft ID or JSON metadata
 	} `json:"actions"`
 	ResponseURL string `json:"response_url"`
+}
+
+// slackActionMessage is the message that was acted on in a message_action.
+type slackActionMessage struct {
+	Text     string `json:"text"`
+	User     string `json:"user"`
+	TS       string `json:"ts"`
+	ThreadTS string `json:"thread_ts,omitempty"`
 }
 
 // handleSlackInteraction handles POST /v1/webhooks/slack/interactions.
@@ -67,19 +86,23 @@ func (s *apiServer) handleSlackInteraction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if payload.Type != "block_actions" || len(payload.Actions) == 0 {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	action := payload.Actions[0]
-	draftID := action.Value
-
 	// Return 200 immediately — Slack requires fast response.
 	w.WriteHeader(http.StatusOK)
 
-	// Process async.
-	go s.processInteraction(action.ActionID, draftID, payload)
+	switch payload.Type {
+	case "block_actions":
+		if len(payload.Actions) == 0 {
+			return
+		}
+		action := payload.Actions[0]
+		go s.processInteraction(action.ActionID, action.Value, payload)
+
+	case "message_action":
+		go s.processMessageShortcut(payload)
+
+	default:
+		s.log.Debug("slack interaction: unhandled type", "type", payload.Type)
+	}
 }
 
 // processInteraction handles a button click on a draft ephemeral message.
@@ -130,6 +153,30 @@ func (s *apiServer) processInteraction(actionID, draftID string, payload slackIn
 	default:
 		s.log.Debug("interaction: unknown action", "action_id", actionID)
 	}
+}
+
+// processMessageShortcut handles a message_action interaction (message shortcut).
+// This is triggered when a user selects "Draft reply with Aileron" from a message's
+// ⋯ menu. Currently a stub — full implementation in PR 2.
+func (s *apiServer) processMessageShortcut(payload slackInteractionPayload) {
+	channelName := ""
+	if payload.Channel != nil {
+		channelName = payload.Channel.Name
+	}
+	messagePreview := ""
+	if payload.Message != nil {
+		messagePreview = payload.Message.Text
+		if len(messagePreview) > 80 {
+			messagePreview = messagePreview[:80] + "..."
+		}
+	}
+	s.log.Info("slack interaction: message shortcut received",
+		"callback_id", payload.CallbackID,
+		"user", payload.User.ID,
+		"channel", channelName,
+		"message_preview", messagePreview,
+		"trigger_id", payload.TriggerID,
+	)
 }
 
 // respondToInteraction sends a response to Slack's response_url,

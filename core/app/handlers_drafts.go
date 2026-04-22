@@ -464,7 +464,10 @@ func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) 
 	}
 
 	// Look up the workspace-level bot token (installed by admin, not per-user).
-	botSecret, err := s.vault.Get(ctx, account.SlackBotTokenVaultPath(teamID))
+	if s.systemVault == nil {
+		return nil, fmt.Errorf("system vault not configured — cannot resolve bot token for workspace %s", teamID)
+	}
+	botSecret, err := s.systemVault.Get(ctx, account.SlackBotTokenVaultPath(teamID))
 	if err != nil {
 		return nil, fmt.Errorf("no bot token for workspace %s — an admin must install the Slack app first", teamID)
 	}

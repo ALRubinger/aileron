@@ -66,14 +66,35 @@ type slackWebhookPayload struct {
 	Event     json.RawMessage `json:"event,omitempty"`
 }
 
+// slackInnerEvent extracts the type from any Slack inner event.
+type slackInnerEvent struct {
+	Type string `json:"type"`
+}
+
 // slackMessageEvent is the inner event for message events.
 type slackMessageEvent struct {
-	Type    string `json:"type"`
-	User    string `json:"user"`
-	Text    string `json:"text"`
-	Channel string `json:"channel"`
-	TS      string `json:"ts"`
-	BotID   string `json:"bot_id,omitempty"`
+	Type        string `json:"type"`
+	User        string `json:"user"`
+	Text        string `json:"text"`
+	Channel     string `json:"channel"`
+	ChannelType string `json:"channel_type,omitempty"` // "im" for DMs, "channel"/"group" for channels
+	TS          string `json:"ts"`
+	ThreadTS    string `json:"thread_ts,omitempty"`
+	BotID       string `json:"bot_id,omitempty"`
+}
+
+// slackAssistantThreadEvent is the inner event for assistant_thread_started
+// and assistant_thread_context_changed events.
+type slackAssistantThreadEvent struct {
+	Type            string `json:"type"`
+	AssistantThread struct {
+		ChannelID string `json:"channel_id"`
+		ThreadTS  string `json:"thread_ts"`
+		Context   struct {
+			ChannelID string `json:"channel_id"`
+			TeamID    string `json:"team_id"`
+		} `json:"context"`
+	} `json:"assistant_thread"`
 }
 
 // handleSlackEvent handles POST /v1/webhooks/slack/events.
@@ -131,17 +152,55 @@ func (s *apiServer) handleSlackEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 // processSlackEvent handles a Slack event_callback payload asynchronously.
-// It triggers draft generation only for Aileron users who are @mentioned
-// in the message (and are not the message author).
+// It routes events to the appropriate handler based on the inner event type.
 func (s *apiServer) processSlackEvent(payload slackWebhookPayload) {
-	var evt slackMessageEvent
-	if err := json.Unmarshal(payload.Event, &evt); err != nil {
-		s.log.Debug("slack webhook: failed to parse inner event", "error", err)
+	// Peek at the event type to decide how to parse/route.
+	var inner slackInnerEvent
+	if err := json.Unmarshal(payload.Event, &inner); err != nil {
+		s.log.Debug("slack webhook: failed to parse inner event type", "error", err)
 		return
 	}
 
-	if evt.Type != "message" {
-		s.log.Debug("slack webhook: non-message event, ignoring", "type", evt.Type)
+	switch inner.Type {
+	case "message":
+		s.processSlackMessageEvent(payload)
+
+	case "assistant_thread_started":
+		var evt slackAssistantThreadEvent
+		if err := json.Unmarshal(payload.Event, &evt); err != nil {
+			s.log.Debug("slack webhook: failed to parse assistant_thread_started", "error", err)
+			return
+		}
+		s.log.Info("slack webhook: assistant_thread_started",
+			"channel_id", evt.AssistantThread.ChannelID,
+			"thread_ts", evt.AssistantThread.ThreadTS,
+			"team_id", payload.TeamID,
+		)
+
+	case "assistant_thread_context_changed":
+		var evt slackAssistantThreadEvent
+		if err := json.Unmarshal(payload.Event, &evt); err != nil {
+			s.log.Debug("slack webhook: failed to parse assistant_thread_context_changed", "error", err)
+			return
+		}
+		s.log.Info("slack webhook: assistant_thread_context_changed",
+			"channel_id", evt.AssistantThread.ChannelID,
+			"thread_ts", evt.AssistantThread.ThreadTS,
+			"context_channel", evt.AssistantThread.Context.ChannelID,
+			"team_id", payload.TeamID,
+		)
+
+	default:
+		s.log.Debug("slack webhook: unhandled event type", "type", inner.Type)
+	}
+}
+
+// processSlackMessageEvent handles message events. It triggers draft generation
+// only for Aileron users who are @mentioned in the message.
+func (s *apiServer) processSlackMessageEvent(payload slackWebhookPayload) {
+	var evt slackMessageEvent
+	if err := json.Unmarshal(payload.Event, &evt); err != nil {
+		s.log.Debug("slack webhook: failed to parse message event", "error", err)
 		return
 	}
 
