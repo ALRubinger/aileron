@@ -14,12 +14,21 @@ import (
 // vault persistence model (ADR-0010) — plaintext storage in Postgres.
 // Phase 2 layers EncryptedVault on top for at-rest encryption.
 type PostgresVault struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	table string
 }
 
 // NewPostgresVault creates a Postgres-backed vault using the given connection pool.
+// Secrets are stored in the vault_secrets table.
 func NewPostgresVault(pool *pgxpool.Pool) *PostgresVault {
-	return &PostgresVault{pool: pool}
+	return &PostgresVault{pool: pool, table: "vault_secrets"}
+}
+
+// NewPostgresVaultForTable creates a Postgres-backed vault that reads and writes
+// to the specified table. The table must have the same schema as vault_secrets
+// (path, value, metadata, created_at, updated_at).
+func NewPostgresVaultForTable(pool *pgxpool.Pool, table string) *PostgresVault {
+	return &PostgresVault{pool: pool, table: table}
 }
 
 func (v *PostgresVault) Get(ctx context.Context, path string) (Secret, error) {
@@ -27,12 +36,12 @@ func (v *PostgresVault) Get(ctx context.Context, path string) (Secret, error) {
 	var metaJSON []byte
 
 	err := v.pool.QueryRow(ctx,
-		`SELECT value, metadata FROM vault_secrets WHERE path = $1`, path,
+		fmt.Sprintf(`SELECT value, metadata FROM %s WHERE path = $1`, v.table), path,
 	).Scan(&value, &metaJSON)
 
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return Secret{}, fmt.Errorf("vault: secret not found: %s", path)
+			return Secret{}, &errNotFound{path: path}
 		}
 		return Secret{}, fmt.Errorf("vault: get failed: %w", err)
 	}
@@ -56,9 +65,9 @@ func (v *PostgresVault) Put(ctx context.Context, path string, value []byte, meta
 	}
 
 	_, err = v.pool.Exec(ctx,
-		`INSERT INTO vault_secrets (path, value, metadata)
+		fmt.Sprintf(`INSERT INTO %s (path, value, metadata)
 		 VALUES ($1, $2, $3)
-		 ON CONFLICT (path) DO UPDATE SET value = $2, metadata = $3, updated_at = now()`,
+		 ON CONFLICT (path) DO UPDATE SET value = $2, metadata = $3, updated_at = now()`, v.table),
 		path, value, metaJSON,
 	)
 	if err != nil {
@@ -69,7 +78,7 @@ func (v *PostgresVault) Put(ctx context.Context, path string, value []byte, meta
 
 func (v *PostgresVault) Delete(ctx context.Context, path string) error {
 	tag, err := v.pool.Exec(ctx,
-		`DELETE FROM vault_secrets WHERE path = $1`, path)
+		fmt.Sprintf(`DELETE FROM %s WHERE path = $1`, v.table), path)
 	if err != nil {
 		return fmt.Errorf("vault: delete failed: %w", err)
 	}

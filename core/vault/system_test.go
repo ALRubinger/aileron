@@ -10,15 +10,21 @@ import (
 	"github.com/ALRubinger/aileron/core/vault"
 )
 
-func TestPostgresSystemVault_ImplementsInterface(t *testing.T) {
-	var _ vault.Vault = (*vault.PostgresSystemVault)(nil)
-}
-
 func TestNewPostgresSystemVault(t *testing.T) {
 	v := vault.NewPostgresSystemVault(nil)
 	if v == nil {
-		t.Fatal("expected non-nil PostgresSystemVault")
+		t.Fatal("expected non-nil vault")
 	}
+	// Verify it satisfies the Vault interface.
+	var _ vault.Vault = v
+}
+
+func TestNewPostgresVaultForTable(t *testing.T) {
+	v := vault.NewPostgresVaultForTable(nil, "custom_table")
+	if v == nil {
+		t.Fatal("expected non-nil vault")
+	}
+	var _ vault.Vault = v
 }
 
 // TestSystemVault_EncryptedRoundTrip verifies that wrapping a MemVault with
