@@ -557,6 +557,67 @@ func TestSlackDedup_Expiry(t *testing.T) {
 	}
 }
 
+func TestSlackWebhook_AssistantThreadStarted(t *testing.T) {
+	srv := newSlackWebhookServer()
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001TEAM",
+		"event_id": "ev_thread_start",
+		"event": map[string]any{
+			"type": "assistant_thread_started",
+			"assistant_thread": map[string]any{
+				"channel_id": "D_DM_CHAN",
+				"thread_ts":  "999.001",
+				"context": map[string]any{
+					"channel_id": "C_ORIGINAL",
+					"team_id":    "T001TEAM",
+				},
+			},
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Currently a stub — no panic = pass. Will route to handler in PR 2.
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestSlackWebhook_AssistantThreadContextChanged(t *testing.T) {
+	srv := newSlackWebhookServer()
+
+	body, _ := json.Marshal(map[string]any{
+		"type":     "event_callback",
+		"team_id":  "T001TEAM",
+		"event_id": "ev_ctx_change",
+		"event": map[string]any{
+			"type": "assistant_thread_context_changed",
+			"assistant_thread": map[string]any{
+				"channel_id": "D_DM_CHAN",
+				"thread_ts":  "999.001",
+				"context": map[string]any{
+					"channel_id": "C_NEW_CHANNEL",
+					"team_id":    "T001TEAM",
+				},
+			},
+		},
+	})
+	ts, sig := signSlackRequest(body, testSigningSecret)
+
+	w := httptest.NewRecorder()
+	srv.handleSlackEvent(w, slackWebhookRequest(body, ts, sig))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	time.Sleep(50 * time.Millisecond)
+}
+
 func TestSlackWebhook_EventDeduplication(t *testing.T) {
 	srv := newSlackWebhookServer()
 	ctx := context.Background()

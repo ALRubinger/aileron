@@ -240,8 +240,9 @@ func newDraftsTestServerWithSend() *apiServer {
 		ExternalTeamID: "T001TEST",
 	})
 	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`))
-	// Store workspace-level bot token (installed by admin, not per-user).
-	srv.vault.Put(ctx, "slack-workspaces/T001TEST/bot-token", []byte("xoxb-test"), vault.Metadata{
+	// Store workspace-level bot token in the system vault (installed by admin).
+	srv.systemVault = vault.NewMemVault()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001TEST/bot-token", []byte("xoxb-test"), vault.Metadata{
 		Type: "slack_bot_token",
 	})
 	// Mock sender so we don't call real Slack.
@@ -1084,6 +1085,49 @@ func TestResolveSlackCredentials_NoTeamID(t *testing.T) {
 	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
 	if err == nil {
 		t.Fatal("expected error when team ID missing")
+	}
+}
+
+func TestResolveSlackCredentials_UsesSystemVault(t *testing.T) {
+	// Regression: bot token must come from systemVault, not vault (user vault).
+	// The install handler writes to systemVault; resolveSlackCredentials must read from there.
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001",
+	})
+
+	// Store bot token ONLY in systemVault, not in vault.
+	srv.systemVault = vault.NewMemVault()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-from-system"), vault.Metadata{
+		Type: "slack_bot_token",
+	})
+	// Ensure user vault does NOT have the bot token.
+	// (vault is already empty for this path)
+
+	creds, err := srv.resolveSlackCredentials(ctx, "usr_a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if creds.BotToken != "xoxb-from-system" {
+		t.Errorf("expected bot token from systemVault, got %q", creds.BotToken)
+	}
+}
+
+func TestResolveSlackCredentials_NilSystemVault(t *testing.T) {
+	srv := newDraftsTestServer()
+	ctx := context.Background()
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001",
+	})
+	// systemVault is nil — should return an error, not panic.
+	srv.systemVault = nil
+
+	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
+	if err == nil {
+		t.Fatal("expected error when systemVault is nil")
 	}
 }
 

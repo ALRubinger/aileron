@@ -30,6 +30,16 @@ import (
 	"github.com/ALRubinger/aileron/enclave"
 )
 
+// SlackAgentClient abstracts Slack's Agent/AI Apps API for testability.
+type SlackAgentClient interface {
+	SetStatus(ctx context.Context, botToken, channelID, threadTS, status string) error
+	SetSuggestedPrompts(ctx context.Context, botToken, channelID, threadTS string, prompts []comms.SlackAgentPrompt) error
+	SetTitle(ctx context.Context, botToken, channelID, threadTS, title string) error
+	StartStream(ctx context.Context, botToken, channelID, threadTS string) (ts string, err error)
+	AppendStream(ctx context.Context, botToken, channelID, ts, text string) error
+	StopStream(ctx context.Context, botToken, channelID, ts string) error
+}
+
 // apiServer implements the generated api.ServerInterface.
 type apiServer struct {
 	log            *slog.Logger
@@ -59,6 +69,7 @@ type apiServer struct {
 	ephemeralPoster    EphemeralPoster        // injectable for testing; defaults to comms.PostEphemeralDraft
 	ephemeralTextPoster EphemeralTextPoster   // injectable for testing; defaults to comms.PostEphemeralText
 	threadChecker      ThreadChecker          // injectable for testing; defaults to comms.SlackThreadHasReplies
+	slackAgentClient   SlackAgentClient        // injectable for testing; defaults to defaultSlackAgentClient
 	slackClientID      string                  // Slack app client ID (for bot install OAuth exchange)
 	slackClientSecret  string                  // Slack app client secret (for bot install OAuth exchange)
 	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
