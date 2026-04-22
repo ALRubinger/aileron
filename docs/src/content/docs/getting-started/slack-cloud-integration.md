@@ -76,11 +76,6 @@ SLACK_CLIENT_ID=your-client-id
 SLACK_CLIENT_SECRET=your-client-secret
 SLACK_SIGNING_SECRET=your-signing-secret
 
-# System vault key — encrypts infrastructure secrets (e.g. Slack bot tokens)
-# at rest. Generate a 32-byte random key, hex-encoded (64 characters):
-#   openssl rand -hex 32
-AILERON_SYSTEM_VAULT_KEY=your-64-char-hex-key
-
 # For AI-powered draft generation:
 ANTHROPIC_API_KEY=sk-ant-your-key
 
@@ -90,6 +85,8 @@ AILERON_LLM_MODEL_SYNTHESIS=claude-sonnet-4-6           # capable model for comp
 ```
 
 The draft pipeline uses two models: a fast model gathers context via tool calls (research), and a capable model composes the reply in your voice (synthesis). This keeps latency low without sacrificing quality.
+
+You also need `AILERON_SYSTEM_VAULT_KEY` configured — the Slack bot token (from workspace installation) is stored in the [system vault](/getting-started/credential-vault#system-vault), which requires this key for at-rest encryption.
 
 Verify the server logs show:
 
