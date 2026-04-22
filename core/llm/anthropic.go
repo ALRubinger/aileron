@@ -273,6 +273,62 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 	}, nil
 }
 
+// GenerateStream implements StreamingClient. It sends a prompt and streams
+// text chunks back as they arrive from the Anthropic API. This is used for
+// the ghostwrite round (no tools, text-only output).
+func (a *AnthropicClient) GenerateStream(ctx context.Context, req GenerateRequest) (<-chan string, <-chan error) {
+	textCh := make(chan string, 64)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(textCh)
+		defer close(errCh)
+
+		params := anthropic.MessageNewParams{
+			Model:     a.model,
+			MaxTokens: 4096,
+			Messages: []anthropic.MessageParam{
+				anthropic.NewUserMessage(anthropic.NewTextBlock(req.UserMessage)),
+			},
+		}
+		if req.SystemPrompt != "" {
+			params.System = []anthropic.TextBlockParam{
+				{Text: req.SystemPrompt},
+			}
+		}
+
+		stream := a.client.Messages.NewStreaming(ctx, params)
+		defer stream.Close()
+
+		for stream.Next() {
+			event := stream.Current()
+			if event.Type != "content_block_delta" {
+				continue
+			}
+			delta := event.AsContentBlockDelta()
+			if delta.Delta.Type != "text_delta" {
+				continue
+			}
+			text := delta.Delta.AsTextDelta().Text
+			if text == "" {
+				continue
+			}
+			select {
+			case textCh <- text:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
+		}
+
+		if err := stream.Err(); err != nil {
+			errCh <- fmt.Errorf("anthropic streaming error: %w", err)
+		}
+	}()
+
+	return textCh, errCh
+}
+
 // ConvertTools converts source.ToolDefinition to Anthropic ToolParam format.
 // Exported for testing schema structure.
 func ConvertTools(tools []source.ToolDefinition) []anthropic.ToolUnionParam {

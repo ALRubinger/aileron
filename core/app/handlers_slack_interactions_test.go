@@ -347,3 +347,87 @@ func TestInteraction_EditDraft(t *testing.T) {
 		t.Errorf("expected pending (edit shows text), got %s", draft.Status)
 	}
 }
+
+func TestInteraction_ViewSubmission_SendsDraft(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.systemVault = vault.NewMemVault()
+	enableVaultEncryption(srv, "usr_a")
+	ctx := context.Background()
+
+	// Seed connected account + encrypted user token.
+	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
+		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U_ALICE", ExternalTeamID: "T001",
+	})
+	storeEncryptedToken(srv, "connected-accounts/usr_a/slack",
+		[]byte(`{"access_token":"xoxp-test"}`))
+
+	var sentBody string
+	srv.slackSender = func(_ context.Context, _, _, body, _ string) error {
+		sentBody = body
+		return nil
+	}
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:  "C0BACKEND",
+		TargetThreadTS: "111.222",
+		UserID:         "U_ALICE",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_123",
+			"callback_id":      draftModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					draftInputBlockID: map[string]any{
+						draftInputActionID: map[string]any{
+							"value": "This is my edited draft",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if sentBody != "This is my edited draft" {
+		t.Errorf("expected draft text to be sent, got %q", sentBody)
+	}
+}
+
+func TestInteraction_ViewSubmission_WrongCallback(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id":          "V_123",
+			"callback_id": "some_other_modal",
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Should be ignored — no crash.
+	time.Sleep(50 * time.Millisecond)
+}

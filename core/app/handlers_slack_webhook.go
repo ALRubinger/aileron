@@ -171,10 +171,11 @@ func (s *apiServer) processSlackEvent(payload slackWebhookPayload) {
 			s.log.Debug("slack webhook: failed to parse assistant_thread_started", "error", err)
 			return
 		}
-		s.log.Info("slack webhook: assistant_thread_started",
-			"channel_id", evt.AssistantThread.ChannelID,
-			"thread_ts", evt.AssistantThread.ThreadTS,
-			"team_id", payload.TeamID,
+		s.handleAssistantThreadStarted(
+			context.Background(),
+			payload.TeamID,
+			evt.AssistantThread.ChannelID,
+			evt.AssistantThread.ThreadTS,
 		)
 
 	case "assistant_thread_context_changed":
@@ -207,6 +208,23 @@ func (s *apiServer) processSlackMessageEvent(payload slackWebhookPayload) {
 	// Skip bot messages.
 	if evt.BotID != "" {
 		s.log.Debug("slack webhook: skipping bot message", "bot_id", evt.BotID)
+		return
+	}
+
+	// Route DM messages (channel_type "im") to the agent handler.
+	if evt.ChannelType == "im" {
+		threadTS := evt.ThreadTS
+		if threadTS == "" {
+			threadTS = evt.TS
+		}
+		s.handleAssistantMessage(
+			context.Background(),
+			payload.TeamID,
+			evt.Channel,
+			threadTS,
+			evt.User,
+			evt.Text,
+		)
 		return
 	}
 

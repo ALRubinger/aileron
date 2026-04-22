@@ -610,3 +610,122 @@ func TestPipeline_GenerateDraft_LLMError(t *testing.T) {
 		t.Fatal("expected error from LLM failure")
 	}
 }
+
+// mockStreamingLLMClient implements both llm.Client and llm.StreamingClient.
+type mockStreamingLLMClient struct {
+	mockLLMClient
+	streamChunks []string
+	streamErr    error
+}
+
+func (m *mockStreamingLLMClient) GenerateStream(_ context.Context, req llm.GenerateRequest) (<-chan string, <-chan error) {
+	textCh := make(chan string, len(m.streamChunks))
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(textCh)
+		defer close(errCh)
+		for _, chunk := range m.streamChunks {
+			textCh <- chunk
+		}
+		if m.streamErr != nil {
+			errCh <- m.streamErr
+		}
+	}()
+
+	return textCh, errCh
+}
+
+func TestPipeline_GenerateDraftStream_Streaming(t *testing.T) {
+	researchMock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "No tools available."},
+	}
+	streamMock := &mockStreamingLLMClient{
+		streamChunks: []string{"Hello", " ", "world"},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+
+	p := draft.NewPipeline(researchMock, streamMock, source.NewRegistry(), accounts,
+		mem.NewUserInstructionStore(), v, slog.Default(),
+		draft.Prompts{Research: "test", Ghostwrite: "test"})
+
+	chunkCh, errCh := p.GenerateDraftStream(context.Background(), "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Bob", Body: "test",
+	})
+
+	var chunks []draft.DraftChunk
+	for chunk := range chunkCh {
+		chunks = append(chunks, chunk)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have: researching phase, writing phase, then 3 text chunks.
+	if len(chunks) < 5 {
+		t.Fatalf("expected at least 5 chunks (2 phase + 3 text), got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Phase != "researching" {
+		t.Errorf("expected first chunk phase=researching, got %q", chunks[0].Phase)
+	}
+
+	// Find the writing phase marker.
+	writingIdx := -1
+	for i, c := range chunks {
+		if c.Phase == "writing" && c.Text == "" {
+			writingIdx = i
+			break
+		}
+	}
+	if writingIdx < 0 {
+		t.Fatal("expected a writing phase marker chunk")
+	}
+
+	// Collect text after writing marker.
+	var text strings.Builder
+	for _, c := range chunks[writingIdx+1:] {
+		text.WriteString(c.Text)
+	}
+	if text.String() != "Hello world" {
+		t.Errorf("expected 'Hello world', got %q", text.String())
+	}
+}
+
+func TestPipeline_GenerateDraftStream_Fallback(t *testing.T) {
+	// Non-streaming client — should fall back to buffered output.
+	mock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "Buffered response"},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+
+	p := draft.NewPipeline(mock, mock, source.NewRegistry(), accounts,
+		mem.NewUserInstructionStore(), v, slog.Default(),
+		draft.Prompts{Research: "test", Ghostwrite: "test"})
+
+	chunkCh, errCh := p.GenerateDraftStream(context.Background(), "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Bob", Body: "test",
+	})
+
+	var chunks []draft.DraftChunk
+	for chunk := range chunkCh {
+		chunks = append(chunks, chunk)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should have: researching, writing marker, then one buffered text chunk.
+	var text string
+	for _, c := range chunks {
+		if c.Text != "" {
+			text += c.Text
+		}
+	}
+	if text != "Buffered response" {
+		t.Errorf("expected 'Buffered response', got %q", text)
+	}
+}

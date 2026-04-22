@@ -21,6 +21,17 @@ type Client interface {
 	GenerateWithTools(ctx context.Context, req GenerateRequest) (*GenerateResponse, error)
 }
 
+// StreamingClient generates text with real-time streaming output.
+// Implementations emit text chunks as they arrive from the LLM.
+// This is used for the ghostwrite round only (no tools).
+type StreamingClient interface {
+	// GenerateStream sends a prompt and streams text chunks back.
+	// The text channel emits incremental text deltas as they arrive.
+	// The error channel receives at most one value: nil on success or
+	// an error if generation failed. Both channels are closed when done.
+	GenerateStream(ctx context.Context, req GenerateRequest) (<-chan string, <-chan error)
+}
+
 // ToolExecutor is called when the LLM wants to invoke a tool.
 // The pipeline provides this — it handles credential lookup and connector execution.
 type ToolExecutor func(ctx context.Context, tool string, params map[string]any) (map[string]any, error)
