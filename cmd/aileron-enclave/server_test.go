@@ -771,6 +771,71 @@ func TestOAuthExchangeSlackNestedUserToken(t *testing.T) {
 	if tokenData["team_id"] != "T001" {
 		t.Fatalf("expected T001, got %q", tokenData["team_id"])
 	}
+
+	// Regression: ExternalUserID and ExternalTeamID must be populated in the
+	// response so the host can store them on the connected account. Without
+	// these, resolveAileronUserBySlack fails with "Could not find your
+	// Aileron account" on every slash command, message shortcut, and agent DM.
+	if result.ExternalUserID != "U_USER" {
+		t.Fatalf("expected ExternalUserID 'U_USER', got %q", result.ExternalUserID)
+	}
+	if result.ExternalTeamID != "T001" {
+		t.Fatalf("expected ExternalTeamID 'T001', got %q", result.ExternalTeamID)
+	}
+}
+
+func TestOAuthExchangeStandardProvider_NoExternalIDs(t *testing.T) {
+	// Standard OAuth providers (Google, GitHub) should NOT populate
+	// ExternalUserID/ExternalTeamID — those are Slack-specific.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "ya29-google-token",
+			"token_type":    "Bearer",
+			"refresh_token": "1//google-refresh",
+		})
+	}))
+	defer tokenServer.Close()
+
+	userinfoServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"email": "alice@example.com"})
+	}))
+	defer userinfoServer.Close()
+
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	resp := postJSON(t, server, "/oauth/exchange", enclave.OAuthExchangeRequest{
+		UserID:           "user-1",
+		Provider:         "google",
+		Code:             "auth-code",
+		RedirectURI:      "http://localhost/cb",
+		ClientID:         "cid",
+		ClientSecret:     "csec",
+		TokenEndpoint:    tokenServer.URL,
+		UserInfoEndpoint: userinfoServer.URL,
+	})
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	result := decodeResp[enclave.OAuthExchangeResponse](t, resp)
+	if result.Email != "alice@example.com" {
+		t.Fatalf("expected email 'alice@example.com', got %q", result.Email)
+	}
+	if result.ExternalUserID != "" {
+		t.Fatalf("expected empty ExternalUserID for Google, got %q", result.ExternalUserID)
+	}
+	if result.ExternalTeamID != "" {
+		t.Fatalf("expected empty ExternalTeamID for Google, got %q", result.ExternalTeamID)
+	}
 }
 
 func TestOAuthExchangeAcceptJSON(t *testing.T) {
