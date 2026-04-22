@@ -705,6 +705,41 @@ table "vault_secrets" {
   }
 }
 
+table "system_vault_secrets" {
+  schema = schema.public
+
+  column "path" {
+    type    = varchar(512)
+    null    = false
+    comment = "Vault path (e.g. slack-workspaces/T001/bot-token)"
+  }
+  column "value" {
+    type    = bytea
+    null    = false
+    comment = "AES-256-GCM encrypted secret value (nonce || ciphertext || tag)"
+  }
+  column "metadata" {
+    type    = jsonb
+    null    = false
+    default = "{}"
+    comment = "Non-secret attributes: type, labels"
+  }
+  column "created_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+  column "updated_at" {
+    type    = timestamptz
+    null    = false
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.path]
+  }
+}
+
 table "llm_configs" {
   schema = schema.public
 

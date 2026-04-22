@@ -70,6 +70,12 @@ type AuthConfig struct {
 	// Env: MAIL_FROM (default: "noreply@withaileron.ai")
 	MailFrom string
 
+	// SystemVaultKey is the AES-256 encryption key for the system vault
+	// (ADR-0020). Infrastructure secrets (Slack bot tokens, webhook keys)
+	// are encrypted at rest with this key. 32 bytes, hex-encoded (64 chars).
+	// Env: AILERON_SYSTEM_VAULT_KEY
+	SystemVaultKey string
+
 	// LLM configuration for cloud-hosted draft generation.
 	// Two models: research (fast, cheap — tool-call decisions) and synthesis
 	// (capable — composing the final reply in the user's voice).
@@ -99,6 +105,7 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		SlackClientID:      envTrimmed("SLACK_CLIENT_ID"),
 		SlackClientSecret:  envTrimmed("SLACK_CLIENT_SECRET"),
 		SlackSigningSecret: envTrimmed("SLACK_SIGNING_SECRET"),
+		SystemVaultKey:     envTrimmed("AILERON_SYSTEM_VAULT_KEY"),
 		ResendAPIKey:       envTrimmed("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
 		AnthropicAPIKey:    envTrimmed("ANTHROPIC_API_KEY"),
@@ -170,6 +177,12 @@ func (c *AuthConfig) LLMEnabled() bool {
 // ResendEnabled reports whether Resend email delivery is configured.
 func (c *AuthConfig) ResendEnabled() bool {
 	return c.ResendAPIKey != ""
+}
+
+// SystemVaultEnabled reports whether the system vault is configured.
+// Requires a 32-byte hex-encoded key (64 hex characters).
+func (c *AuthConfig) SystemVaultEnabled() bool {
+	return len(c.SystemVaultKey) == 64 // 32 bytes hex-encoded
 }
 
 // KEKSessionTTL returns the TTL for in-memory KEK sessions.

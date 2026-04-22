@@ -37,6 +37,7 @@ type apiServer struct {
 	policyEngine   *policy.RuleEngine
 	orchestrator   *approval.InMemoryOrchestrator
 	vault          vault.Vault
+	systemVault    vault.Vault // infrastructure secrets (ADR-0020); nil when not configured
 	notifier       notify.Notifier
 	intents        *mem.IntentStore
 	approvals      *mem.ApprovalStore

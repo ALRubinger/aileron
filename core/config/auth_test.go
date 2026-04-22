@@ -467,6 +467,41 @@ func TestLoadAuthConfig_TrimsWhitespace_DatabaseURL(t *testing.T) {
 	}
 }
 
+func TestSystemVaultEnabled(t *testing.T) {
+	// Valid 32-byte hex key (64 hex chars).
+	cfg := &AuthConfig{SystemVaultKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+	if !cfg.SystemVaultEnabled() {
+		t.Error("expected system vault enabled with valid 64-char hex key")
+	}
+}
+
+func TestSystemVaultDisabled_Empty(t *testing.T) {
+	cfg := &AuthConfig{SystemVaultKey: ""}
+	if cfg.SystemVaultEnabled() {
+		t.Error("expected system vault disabled when key empty")
+	}
+}
+
+func TestSystemVaultDisabled_WrongLength(t *testing.T) {
+	cfg := &AuthConfig{SystemVaultKey: "too-short"}
+	if cfg.SystemVaultEnabled() {
+		t.Error("expected system vault disabled when key wrong length")
+	}
+}
+
+func TestLoadAuthConfig_SystemVaultKey(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	t.Setenv("AILERON_SYSTEM_VAULT_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+	cfg, err := LoadAuthConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.SystemVaultEnabled() {
+		t.Error("expected system vault enabled")
+	}
+}
+
 func TestLoadAuthConfig_MailFromDefault(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("MAIL_FROM", "")
