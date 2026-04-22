@@ -302,8 +302,23 @@ func (s *apiServer) getUserKEK(userID string) []byte {
 // Returns a UserScopedVault if KEK is cached, or a nil-KEK vault that
 // will fail on any operation (forcing callers to handle the locked state).
 func (s *apiServer) userVault(userID string) vault.Vault {
-	kek := s.getUserKEK(userID)
-	return vault.NewUserScopedVault(s.vault, kek)
+	// Tier 1: KEK in session cache.
+	if kek := s.getUserKEK(userID); kek != nil {
+		return vault.NewUserScopedVault(s.vault, kek)
+	}
+	// Tier 2: Escrowed credentials in TEE.
+	if s.enclaveClient != nil {
+		hasEscrow := false
+		s.escrowIndex.Range(func(_, _ any) bool {
+			hasEscrow = true
+			return false
+		})
+		if hasEscrow {
+			return vault.NewEscrowVault(s.enclaveClient, &s.escrowIndex, s.vault)
+		}
+	}
+	// Tier 3: No KEK available — UserScopedVault will return a clear error.
+	return vault.NewUserScopedVault(s.vault, nil)
 }
 
 // zeroBytes overwrites a byte slice with zeros.
