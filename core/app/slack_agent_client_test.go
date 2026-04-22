@@ -103,3 +103,16 @@ func TestDefaultSlackAgentClient_StopStream(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestDefaultSlackAgentClient_PostMessage(t *testing.T) {
+	server := newTestSlackServer()
+	defer server.Close()
+	comms.SetAgentAPIURL(server.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	c := defaultSlackAgentClient{}
+	err := c.PostMessage(context.Background(), "xoxb-test", "C123", "999.001", "Hello, world!")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

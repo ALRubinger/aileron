@@ -541,6 +541,50 @@ func TestExecuteWithExpiredEscrow(t *testing.T) {
 	execResp.Body.Close()
 }
 
+func TestEscrowRetrieveEndpoint(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("my-token"), userKEK)
+	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
+		UserID:              "user-1",
+		GrantID:             "g1",
+		EncryptedCredential: encrypted,
+		CredentialType:      "oauth_token",
+		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
+	})
+	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
+
+	retrieveResp := postJSON(t, server, "/escrow/retrieve", enclave.EscrowRetrieveRequest{
+		EscrowID: storeResult.EscrowID,
+	})
+	if retrieveResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", retrieveResp.StatusCode)
+	}
+	result := decodeResp[enclave.EscrowRetrieveResponse](t, retrieveResp)
+	if string(result.Credential) != "my-token" {
+		t.Errorf("credential = %q, want my-token", result.Credential)
+	}
+}
+
+func TestEscrowRetrieveEndpoint_NotFound(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/escrow/retrieve", enclave.EscrowRetrieveRequest{
+		EscrowID: "nonexistent",
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestTransmitKEKEndpoint(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
