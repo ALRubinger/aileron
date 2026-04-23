@@ -13,6 +13,13 @@ ui/.svelte-kit/
 ui/build/
 ui/node_modules/
 
+# UI test artifacts
+ui/coverage/
+ui/coverage-e2e/
+ui/.nyc_output/
+ui/test-results/
+ui/playwright-report/
+
 # Docs build output
 docs/.astro/
 docs/dist/

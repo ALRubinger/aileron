@@ -1,6 +1,6 @@
 codecov:
   notify:
-    after_n_builds: 3
+    after_n_builds: 4
 
 coverage:
   status:
@@ -8,7 +8,7 @@ coverage:
       default:
         target: auto
         threshold: 2%
-        after_n_builds: 3
+        after_n_builds: 4
       ui:
         target: auto
         threshold: 5%
@@ -18,7 +18,7 @@ coverage:
       default:
         target: 80%
         threshold: 2%
-        after_n_builds: 3
+        after_n_builds: 4
 
 flags:
   unit:
@@ -40,6 +40,10 @@ flags:
     paths:
       - ui/src/
     carryforward: false
+  ui-e2e:
+    paths:
+      - ui/src/
+    carryforward: true
 
 ignore:
   - "core/api/gen/**"       # generated code (oapi-codegen) — DO NOT EDIT

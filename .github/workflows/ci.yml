@@ -130,9 +130,9 @@ jobs:
         working-directory: ui
         run: pnpm test
 
-      - name: Build for E2E
+      - name: Build for E2E (with coverage instrumentation)
         working-directory: ui
-        run: pnpm build
+        run: E2E_COVERAGE=1 pnpm build
 
       - name: Install Playwright browsers
         working-directory: ui
@@ -142,10 +142,19 @@ jobs:
         working-directory: ui
         run: pnpm test:e2e
 
+      - name: Generate E2E coverage report
+        if: ${{ !cancelled() }}
+        working-directory: ui
+        run: npx nyc report --reporter=lcov --temp-dir=.nyc_output --report-dir=coverage-e2e
+
       - name: Prefix lcov paths with ui/
         if: ${{ !cancelled() }}
         working-directory: ui
-        run: sed -i 's|^SF:|SF:ui/|' coverage/lcov.info
+        run: |
+          sed -i 's|^SF:|SF:ui/|' coverage/lcov.info
+          if [ -f coverage-e2e/lcov.info ]; then
+            sed -i 's|^SF:|SF:ui/|' coverage-e2e/lcov.info
+          fi
 
       - name: Upload UI coverage to Codecov
         if: ${{ !cancelled() }}
@@ -155,6 +164,15 @@ jobs:
           slug: ALRubinger/aileron
           files: ui/coverage/lcov.info
           flags: ui
+
+      - name: Upload UI E2E coverage to Codecov
+        if: ${{ !cancelled() && hashFiles('ui/coverage-e2e/lcov.info') }}
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron
+          files: ui/coverage-e2e/lcov.info
+          flags: ui-e2e
 
       - name: Upload UI test results to Codecov
         if: ${{ !cancelled() }}

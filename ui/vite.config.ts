@@ -1,9 +1,25 @@
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
+import istanbul from 'vite-plugin-istanbul';
 import { defineConfig } from 'vitest/config';
 
+const e2eCoverage = !!process.env.E2E_COVERAGE;
+
 export default defineConfig({
-	plugins: [tailwindcss(), sveltekit()],
+	plugins: [
+		tailwindcss(),
+		sveltekit(),
+		...(e2eCoverage
+			? [
+					istanbul({
+						include: 'src/**/*',
+						exclude: ['node_modules', 'src/tests/**'],
+						extension: ['.ts', '.svelte'],
+						forceBuildInstrument: true
+					})
+				]
+			: [])
+	],
 	test: {
 		environment: 'jsdom',
 		include: ['src/**/*.test.ts'],
