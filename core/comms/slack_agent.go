@@ -3,23 +3,33 @@ package comms
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/slack-go/slack"
 )
 
 // slackAgentAPIURL overrides the Slack API URL for testing.
-var slackAgentAPIURL string
+var (
+	slackAgentAPIURL string
+	slackAgentMu     sync.RWMutex
+)
 
 // SetAgentAPIURL sets the Slack API URL for agent functions. Call with empty string to reset.
 func SetAgentAPIURL(url string) {
+	slackAgentMu.Lock()
 	slackAgentAPIURL = url
+	slackAgentMu.Unlock()
 }
 
 // newAgentClient creates a one-shot Slack client for agent operations.
 func newAgentClient(botToken string) *slack.Client {
+	slackAgentMu.RLock()
+	apiURL := slackAgentAPIURL
+	slackAgentMu.RUnlock()
+
 	var opts []slack.Option
-	if slackAgentAPIURL != "" {
-		opts = append(opts, slack.OptionAPIURL(slackAgentAPIURL))
+	if apiURL != "" {
+		opts = append(opts, slack.OptionAPIURL(apiURL))
 	}
 	return slack.New(botToken, opts...)
 }
