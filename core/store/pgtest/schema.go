@@ -1,3 +1,5 @@
+//go:build integration
+
 package pgtest
 
 // FullSchema is the SQL DDL for the complete Aileron database schema.

@@ -1,3 +1,5 @@
+//go:build integration
+
 // Package pgtest provides a throwaway PostgreSQL container for integration tests.
 // It uses testcontainers-go to spin up a real Postgres instance, apply schema
 // migrations, and return a connected *postgres.DB handle.
