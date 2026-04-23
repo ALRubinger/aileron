@@ -280,8 +280,31 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
-      - name: Run integration tests
+      - name: Run Go integration tests
         run: gotestsum --junitfile junit-integration.xml -- -tags=integration -race -coverprofile=coverage-store.txt -coverpkg=./core/store/postgres/... ./test/integration/... ./core/store/postgres/...
+        env:
+          AILERON_API_URL: http://localhost:8080
+          AILERON_UI_URL: http://localhost:3000
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install Playwright dependencies
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Run Playwright integration E2E tests
+        working-directory: ui
+        run: pnpm test:e2e:integration
         env:
           AILERON_API_URL: http://localhost:8080
           AILERON_UI_URL: http://localhost:3000
@@ -308,7 +331,7 @@ jobs:
         uses: codecov/test-results-action@v1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          files: junit-integration.xml
+          files: junit-integration.xml,ui/test-results/junit-playwright-integration.xml
 
       - name: Dump logs on failure
         if: failure()
