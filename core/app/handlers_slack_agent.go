@@ -66,6 +66,16 @@ func (s *apiServer) vaultLockedMessage() string {
 	return ":lock: Your Aileron session has expired. Please unlock your vault in the Aileron app to reconnect your accounts."
 }
 
+// isVaultError checks whether err indicates that vault credentials are
+// unavailable (locked vault or stale escrow). When true it returns the
+// user-facing vault unlock message.
+func (s *apiServer) isVaultError(err error) (string, bool) {
+	if errors.Is(err, vault.ErrCredentialUnavailable) {
+		return s.vaultLockedMessage(), true
+	}
+	return "", false
+}
+
 // handleAssistantThreadStarted is called when a user opens the Aileron agent DM.
 // It sets suggested prompts and a thread title.
 func (s *apiServer) handleAssistantThreadStarted(ctx context.Context, teamID, channelID, threadTS string) {
@@ -156,8 +166,8 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 	// Check for pipeline errors.
 	if err := <-errCh; err != nil {
 		s.log.Error("agent message: pipeline error", "user_id", userID, "error", err)
-		if errors.Is(err, vault.ErrCredentialUnavailable) {
-			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedMessage())
+		if msg, ok := s.isVaultError(err); ok {
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, msg)
 		}
 		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 		return
@@ -264,8 +274,8 @@ func (s *apiServer) generateDraftFromInstructions(ctx context.Context, viewID st
 	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("draft from instructions: generation failed", "error", err)
-		if errors.Is(err, vault.ErrCredentialUnavailable) {
-			_ = updateDraftModalError(ctx, botToken, viewID, s.vaultLockedMessage(), meta)
+		if msg, ok := s.isVaultError(err); ok {
+			_ = updateDraftModalError(ctx, botToken, viewID, msg, meta)
 		} else {
 			_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation failed. Please try again.", meta)
 		}

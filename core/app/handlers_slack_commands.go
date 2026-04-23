@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/ALRubinger/aileron/core/comms"
-	"github.com/ALRubinger/aileron/core/vault"
 )
 
 // draftKeywords are words that indicate the user wants a draft (not a question).
@@ -113,8 +111,8 @@ func (s *apiServer) processSlashCommandDraft(ctx context.Context, teamID, slackU
 	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("slash command draft: generation failed", "error", err)
-		if errors.Is(err, vault.ErrCredentialUnavailable) {
-			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedMessage(), meta)
+		if msg, ok := s.isVaultError(err); ok {
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, msg, meta)
 		} else {
 			_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation failed. Please try again.", meta)
 		}
@@ -152,8 +150,8 @@ func (s *apiServer) processSlashCommandQuestion(ctx context.Context, teamID, sla
 	answer, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("slash command question: generation failed", "error", err)
-		if errors.Is(err, vault.ErrCredentialUnavailable) {
-			s.respondViaURL(responseURL, s.vaultLockedMessage())
+		if msg, ok := s.isVaultError(err); ok {
+			s.respondViaURL(responseURL, msg)
 		} else {
 			s.respondViaURL(responseURL, "> /aileron "+text+"\n\nSomething went wrong. Please try again.")
 		}
