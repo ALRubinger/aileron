@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -836,5 +838,133 @@ func TestConnectAccountCallbackTEEBranch(t *testing.T) {
 	}
 	if escrowID.(string) == "" {
 		t.Fatal("expected non-empty escrow ID")
+	}
+}
+
+// reconcileEnclaveClient is a minimal enclave.Client for reconcile tests.
+type reconcileEnclaveClient struct {
+	entries []enclave.EscrowListEntry
+	err     error
+}
+
+func (c *reconcileEnclaveClient) Attest(_ context.Context, _ enclave.AttestationRequest) (enclave.AttestationResponse, error) {
+	return enclave.AttestationResponse{}, nil
+}
+func (c *reconcileEnclaveClient) EstablishSession(_ context.Context, _ enclave.SessionRequest) (enclave.SessionResponse, error) {
+	return enclave.SessionResponse{}, nil
+}
+func (c *reconcileEnclaveClient) Execute(_ context.Context, _ enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
+	return enclave.ExecuteResponse{}, nil
+}
+func (c *reconcileEnclaveClient) EscrowStore(_ context.Context, _ enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
+	return enclave.EscrowStoreResponse{}, nil
+}
+func (c *reconcileEnclaveClient) TransmitKEK(_ context.Context, _ enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
+	return enclave.TransmitKEKResponse{}, nil
+}
+func (c *reconcileEnclaveClient) OAuthExchange(_ context.Context, _ enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
+	return enclave.OAuthExchangeResponse{}, nil
+}
+func (c *reconcileEnclaveClient) EscrowRetrieve(_ context.Context, _ enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
+	return enclave.EscrowRetrieveResponse{}, nil
+}
+func (c *reconcileEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
+	if c.err != nil {
+		return enclave.EscrowListResponse{}, c.err
+	}
+	return enclave.EscrowListResponse{Entries: c.entries}, nil
+}
+func (c *reconcileEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
+	return nil
+}
+func (c *reconcileEnclaveClient) Close() error { return nil }
+
+func TestReconcileEscrowIndex_PrunesStaleEntries(t *testing.T) {
+	var index sync.Map
+	loaded := map[string]string{
+		"connected-accounts/usr_1/slack":        "esc_valid",
+		"connected-accounts/usr_1/gmail":        "esc_stale",
+		"connected-accounts/usr_1/github_repos": "esc_also_stale",
+	}
+	for k, v := range loaded {
+		index.Store(k, v)
+	}
+
+	client := &reconcileEnclaveClient{
+		entries: []enclave.EscrowListEntry{
+			{EscrowID: "esc_valid", GrantID: "g1", ExpiresAt: "2026-12-31T00:00:00Z"},
+		},
+	}
+
+	reconcileEscrowIndex(context.Background(), slog.Default(), client, &index, nil, loaded)
+
+	// Valid entry should remain.
+	if _, ok := index.Load("connected-accounts/usr_1/slack"); !ok {
+		t.Fatal("expected valid entry to remain")
+	}
+
+	// Stale entries should be pruned.
+	if _, ok := index.Load("connected-accounts/usr_1/gmail"); ok {
+		t.Fatal("expected stale gmail entry to be pruned")
+	}
+	if _, ok := index.Load("connected-accounts/usr_1/github_repos"); ok {
+		t.Fatal("expected stale github entry to be pruned")
+	}
+}
+
+func TestReconcileEscrowIndex_AllValid(t *testing.T) {
+	var index sync.Map
+	loaded := map[string]string{
+		"connected-accounts/usr_1/slack": "esc_1",
+	}
+	index.Store("connected-accounts/usr_1/slack", "esc_1")
+
+	client := &reconcileEnclaveClient{
+		entries: []enclave.EscrowListEntry{
+			{EscrowID: "esc_1", GrantID: "g1", ExpiresAt: "2026-12-31T00:00:00Z"},
+		},
+	}
+
+	reconcileEscrowIndex(context.Background(), slog.Default(), client, &index, nil, loaded)
+
+	if _, ok := index.Load("connected-accounts/usr_1/slack"); !ok {
+		t.Fatal("expected entry to remain")
+	}
+}
+
+func TestReconcileEscrowIndex_EnclaveError(t *testing.T) {
+	var index sync.Map
+	loaded := map[string]string{"path": "esc_1"}
+	index.Store("path", "esc_1")
+
+	client := &reconcileEnclaveClient{err: fmt.Errorf("enclave unreachable")}
+
+	// Should not panic or prune anything.
+	reconcileEscrowIndex(context.Background(), slog.Default(), client, &index, nil, loaded)
+
+	if _, ok := index.Load("path"); !ok {
+		t.Fatal("expected entry to remain when enclave is unreachable")
+	}
+}
+
+func TestReconcileEscrowIndex_EmptyEnclave(t *testing.T) {
+	var index sync.Map
+	loaded := map[string]string{
+		"path1": "esc_1",
+		"path2": "esc_2",
+	}
+	for k, v := range loaded {
+		index.Store(k, v)
+	}
+
+	client := &reconcileEnclaveClient{entries: nil}
+
+	reconcileEscrowIndex(context.Background(), slog.Default(), client, &index, nil, loaded)
+
+	// All entries should be pruned.
+	count := 0
+	index.Range(func(_, _ any) bool { count++; return true })
+	if count != 0 {
+		t.Fatalf("expected all entries pruned, got %d remaining", count)
 	}
 }

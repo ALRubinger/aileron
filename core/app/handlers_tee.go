@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/ALRubinger/aileron/core/auth"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
+	"github.com/ALRubinger/aileron/core/store/postgres"
 	"github.com/ALRubinger/aileron/core/vault"
 	"github.com/ALRubinger/aileron/enclave"
 )
@@ -373,6 +375,39 @@ func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) in
 		escrowed++
 	}
 	return escrowed
+}
+
+// reconcileEscrowIndex prunes escrow index entries that the enclave no longer
+// has. This handles the case where the enclave restarted and lost its escrow
+// data but the server's PostgreSQL index still references the old entries.
+func reconcileEscrowIndex(ctx context.Context, log *slog.Logger, client enclave.Client, index *sync.Map, store *postgres.EscrowIndexStore, loaded map[string]string) {
+	enclaveResp, err := client.EscrowList(ctx)
+	if err != nil {
+		log.Warn("escrow reconcile: failed to list enclave entries, skipping", "error", err)
+		return
+	}
+
+	enclaveIDs := make(map[string]bool, len(enclaveResp.Entries))
+	for _, entry := range enclaveResp.Entries {
+		enclaveIDs[entry.EscrowID] = true
+	}
+
+	pruned := 0
+	for path, escrowID := range loaded {
+		if !enclaveIDs[escrowID] {
+			index.Delete(path)
+			if store != nil {
+				_ = store.Delete(ctx, path)
+			}
+			pruned++
+		}
+	}
+
+	if pruned > 0 {
+		log.Info("escrow reconcile: pruned stale entries", "pruned", pruned, "enclave_entries", len(enclaveResp.Entries))
+	} else {
+		log.Debug("escrow reconcile: all entries valid", "entries", len(loaded), "enclave_entries", len(enclaveResp.Entries))
+	}
 }
 
 // actionTypesForProvider returns the action types allowed for a connected

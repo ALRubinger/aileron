@@ -257,6 +257,11 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			if len(idx) > 0 {
 				log.Info("loaded escrow index from database", "entries", len(idx))
 			}
+
+			// Reconcile: prune index entries the enclave no longer has.
+			if enclaveClient != nil && len(idx) > 0 {
+				reconcileEscrowIndex(ctx, log, enclaveClient, &server.escrowIndex, escrowIndexStore, idx)
+			}
 		}
 		log.Info("using Postgres-backed stores and vault")
 
