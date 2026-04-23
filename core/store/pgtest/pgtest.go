@@ -19,12 +19,11 @@ import (
 // and returns a connected *postgres.DB. The container is torn down automatically
 // via t.Cleanup.
 //
-// If testing.Short() is set, the test is skipped.
-//
-//	db := pgtest.New(t, pgtest.EscrowIndexSchema)
-//	store := postgres.NewEscrowIndexStore(db)
+//	db := pgtest.New(t, pgtest.FullSchema)
+//	store := postgres.NewEnterpriseStore(db)
 func New(t *testing.T, migrations ...string) *postgres.DB {
 	t.Helper()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -64,12 +63,3 @@ func New(t *testing.T, migrations ...string) *postgres.DB {
 
 	return db
 }
-
-// EscrowIndexSchema is the SQL DDL for the escrow_index table.
-const EscrowIndexSchema = `CREATE TABLE escrow_index (
-	vault_path varchar(512) NOT NULL PRIMARY KEY,
-	escrow_id  varchar(128) NOT NULL,
-	user_id    varchar(64)  NOT NULL,
-	expires_at timestamptz  NOT NULL,
-	created_at timestamptz  NOT NULL DEFAULT now()
-);`
