@@ -39,3 +39,20 @@ task build:ui        # SvelteKit UI
 task build:docs      # Documentation site
 task build:docker    # Docker containers
 ```
+
+## Enclave production image
+
+Build and push the enclave container image to GCP Artifact Registry:
+
+```sh
+task build:enclave:production GCP_PROJECT=my-project GCP_REGION=us-central1
+```
+
+| Variable | Description |
+|----------|-------------|
+| `GCP_PROJECT` | GCP project ID (required) |
+| `GCP_REGION` | Artifact Registry region, must match the region of your enclave repository (required) |
+
+The task builds for `linux/amd64` (required by Confidential Space), pushes to Artifact Registry, and prints the image digest. You must have Docker running and `gcloud auth configure-docker` set up for the target region.
+
+This is for manual one-off builds. CI handles production builds automatically via the [Enclave Publish](https://github.com/ALRubinger/aileron/actions/workflows/enclave-publish.yml) workflow. See the [TEE Enclave deployment guide](/deployment/tee-enclave/#3-build-and-push-the-enclave-container-image) for full setup context.
