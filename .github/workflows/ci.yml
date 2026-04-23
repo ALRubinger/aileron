@@ -263,7 +263,7 @@ jobs:
         run: go install gotest.tools/gotestsum@latest
 
       - name: Run integration tests
-        run: gotestsum --junitfile junit-integration.xml -- -tags=integration -race ./test/integration/... ./core/store/postgres/...
+        run: gotestsum --junitfile junit-integration.xml -- -tags=integration -race -coverprofile=coverage-store.txt -coverpkg=./core/store/postgres/... ./test/integration/... ./core/store/postgres/...
         env:
           AILERON_API_URL: http://localhost:8080
           AILERON_UI_URL: http://localhost:3000
@@ -282,7 +282,7 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ALRubinger/aileron
-          files: coverage-integration.txt
+          files: coverage-integration.txt,coverage-store.txt
           flags: integration
 
       - name: Upload test results to Codecov
