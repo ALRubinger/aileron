@@ -83,7 +83,7 @@ func TestEscrowVault_Get_EscrowMiss_FallsThrough(t *testing.T) {
 	}
 }
 
-func TestEscrowVault_Get_EscrowExpired(t *testing.T) {
+func TestEscrowVault_Get_EscrowExpired_PrunesIndex(t *testing.T) {
 	client := &mockEnclaveClient{
 		retrieveErr: enclave.ErrEscrowExpired,
 	}
@@ -95,11 +95,67 @@ func TestEscrowVault_Get_EscrowExpired(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for expired escrow")
 	}
-	if !errors.Is(err, enclave.ErrEscrowExpired) {
-		// The error is wrapped, so check the message.
-		if !containsStr(err.Error(), "escrow") {
-			t.Errorf("error = %v, want escrow-related error", err)
-		}
+	if !errors.Is(err, ErrEscrowStale) {
+		t.Errorf("error = %v, want ErrEscrowStale", err)
+	}
+
+	// The stale index entry must be removed so subsequent lookups
+	// fall through to the fallback vault.
+	if _, ok := idx.Load("connected-accounts/usr_1/slack"); ok {
+		t.Error("stale index entry was not pruned after escrow retrieval failure")
+	}
+}
+
+func TestEscrowVault_Get_EscrowNotFound_PrunesIndex(t *testing.T) {
+	client := &mockEnclaveClient{
+		retrieveErr: enclave.ErrEscrowNotFound,
+	}
+	idx := &sync.Map{}
+	idx.Store("connected-accounts/usr_1/github_repos", "esc_gone")
+
+	v := NewEscrowVault(client, idx, NewMemVault())
+	_, err := v.Get(context.Background(), "connected-accounts/usr_1/github_repos")
+	if err == nil {
+		t.Fatal("expected error for missing escrow")
+	}
+	if !errors.Is(err, ErrEscrowStale) {
+		t.Errorf("error = %v, want ErrEscrowStale", err)
+	}
+
+	// Index entry must be pruned.
+	if _, ok := idx.Load("connected-accounts/usr_1/github_repos"); ok {
+		t.Error("stale index entry was not pruned after escrow not found")
+	}
+}
+
+// TestEscrowVault_Get_StaleEntry_FallsThrough_OnRetry verifies the full
+// self-healing cycle: after a stale escrow entry is pruned, a subsequent
+// Get for the same path falls through to the fallback vault.
+func TestEscrowVault_Get_StaleEntry_FallsThrough_OnRetry(t *testing.T) {
+	client := &mockEnclaveClient{
+		retrieveErr: enclave.ErrEscrowNotFound,
+	}
+	idx := &sync.Map{}
+	idx.Store("connected-accounts/usr_1/github_repos", "esc_gone")
+
+	inner := NewMemVault()
+	inner.Put(context.Background(), "connected-accounts/usr_1/github_repos", []byte("fallback-token"), Metadata{})
+
+	v := NewEscrowVault(client, idx, inner)
+
+	// First call: fails and prunes the stale entry.
+	_, err := v.Get(context.Background(), "connected-accounts/usr_1/github_repos")
+	if !errors.Is(err, ErrEscrowStale) {
+		t.Fatalf("first call: error = %v, want ErrEscrowStale", err)
+	}
+
+	// Second call: falls through to fallback vault.
+	secret, err := v.Get(context.Background(), "connected-accounts/usr_1/github_repos")
+	if err != nil {
+		t.Fatalf("second call: unexpected error: %v", err)
+	}
+	if string(secret.Value) != "fallback-token" {
+		t.Errorf("second call: Value = %q, want fallback-token", secret.Value)
 	}
 }
 

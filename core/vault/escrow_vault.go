@@ -33,6 +33,10 @@ func NewEscrowVault(client enclave.Client, escrowIndex *sync.Map, fallback Vault
 
 // Get retrieves a secret. If the path has an escrowed credential, it retrieves
 // the plaintext from the enclave. Otherwise it delegates to the fallback vault.
+//
+// If the enclave no longer has the escrow entry (restart, expiry, etc.), Get
+// removes the stale index entry so that future lookups fall through to the
+// fallback vault, and returns ErrEscrowStale.
 func (v *EscrowVault) Get(ctx context.Context, path string) (Secret, error) {
 	escrowID, ok := v.escrowIndex.Load(path)
 	if !ok {
@@ -43,7 +47,10 @@ func (v *EscrowVault) Get(ctx context.Context, path string) (Secret, error) {
 		EscrowID: escrowID.(string),
 	})
 	if err != nil {
-		return Secret{}, fmt.Errorf("vault: escrow retrieve for %q: %w", path, err)
+		// The enclave no longer has this entry — prune the stale index so
+		// subsequent requests don't repeat the failed lookup.
+		v.escrowIndex.Delete(path)
+		return Secret{}, fmt.Errorf("vault: escrow retrieve for %q: %w", path, ErrEscrowStale)
 	}
 
 	return Secret{

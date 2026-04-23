@@ -10,7 +10,16 @@
 // to HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager, etc.
 package vault
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrEscrowStale indicates that an escrow index entry pointed to an enclave
+// escrow ID that no longer exists (enclave restarted, entry expired, etc.).
+// The stale index entry has been removed; the caller should treat the
+// credential as unavailable and prompt the user to re-unlock their vault.
+var ErrEscrowStale = errors.New("vault: escrow entry is stale")
 
 // Vault stores and retrieves secrets by path.
 type Vault interface {
