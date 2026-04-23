@@ -264,7 +264,11 @@ func (s *apiServer) generateDraftFromInstructions(ctx context.Context, viewID st
 	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("draft from instructions: generation failed", "error", err)
-		_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation failed. Please try again.", meta)
+		if errors.Is(err, vault.ErrCredentialUnavailable) {
+			_ = updateDraftModalError(ctx, botToken, viewID, s.vaultLockedMessage(), meta)
+		} else {
+			_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation failed. Please try again.", meta)
+		}
 		return
 	}
 
