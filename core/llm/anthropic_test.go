@@ -438,6 +438,21 @@ func TestAnthropicClient_ParallelToolExecution_PartialError(t *testing.T) {
 	}
 }
 
+func TestToolFatalError(t *testing.T) {
+	inner := fmt.Errorf("vault session expired")
+	fatal := &llm.ToolFatalError{Err: inner}
+
+	// Error() delegates to the wrapped error.
+	if fatal.Error() != "vault session expired" {
+		t.Errorf("Error() = %q, want %q", fatal.Error(), "vault session expired")
+	}
+
+	// Unwrap() returns the inner error for errors.Is/As chains.
+	if fatal.Unwrap() != inner {
+		t.Errorf("Unwrap() = %v, want %v", fatal.Unwrap(), inner)
+	}
+}
+
 func TestAnthropicClient_ToolFatalError_AbortsLoop(t *testing.T) {
 	// When a tool executor returns a *ToolFatalError, GenerateWithTools should
 	// abort the loop immediately and return the unwrapped error — NOT feed it

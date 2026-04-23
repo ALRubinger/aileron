@@ -1214,8 +1214,8 @@ func TestHandleAssistantMessage_VaultLocked_PostsUnlockMessage(t *testing.T) {
 	if !strings.Contains(msg, "Unlock your vault") {
 		t.Errorf("expected unlock link in message, got: %s", msg)
 	}
-	if !strings.Contains(msg, "app.withaileron.ai") {
-		t.Errorf("expected UI URL in message, got: %s", msg)
+	if !strings.Contains(msg, "app.withaileron.ai/setup-vault") {
+		t.Errorf("expected setup-vault URL in message, got: %s", msg)
 	}
 }
 
