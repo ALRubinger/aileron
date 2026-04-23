@@ -177,8 +177,8 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 }
 
 // handleMessageShortcut handles the "Draft reply with Aileron" message shortcut.
-// It opens a modal immediately (within Slack's 3s trigger_id window), then
-// generates a draft asynchronously and updates the modal with the result.
+// It opens a modal prompting the user for drafting instructions, then generates
+// a draft asynchronously when the user submits.
 func (s *apiServer) handleMessageShortcut(ctx context.Context, payload slackInteractionPayload) {
 	teamID := ""
 	if payload.Team != nil {
@@ -192,79 +192,80 @@ func (s *apiServer) handleMessageShortcut(ctx context.Context, payload slackInte
 	}
 
 	channelID := ""
-	channelName := ""
 	if payload.Channel != nil {
 		channelID = payload.Channel.ID
-		channelName = payload.Channel.Name
 	}
 
 	messageText := ""
 	messageTS := ""
 	messageThreadTS := ""
-	messageAuthorID := ""
 	if payload.Message != nil {
 		messageText = payload.Message.Text
 		messageTS = payload.Message.TS
 		messageThreadTS = payload.Message.ThreadTS
-		messageAuthorID = payload.Message.User
 	}
 	if messageThreadTS == "" {
 		messageThreadTS = messageTS
 	}
 
 	meta := DraftModalMeta{
-		TargetChannel:  channelID,
-		TargetThreadTS: messageThreadTS,
+		TargetChannel:   channelID,
+		TargetThreadTS:  messageThreadTS,
 		OriginalMessage: messageText,
-		UserID:         payload.User.ID,
+		UserID:          payload.User.ID,
+		TeamID:          teamID,
 	}
 
-	// Open the modal immediately — must be within 3s of trigger_id.
-	viewResp, err := openDraftModal(ctx, botToken, payload.TriggerID, meta)
+	// Open the instructions modal — must be within 3s of trigger_id.
+	if _, err := openDraftInstructionsModal(ctx, botToken, payload.TriggerID, meta); err != nil {
+		s.log.Error("message shortcut: failed to open instructions modal", "error", err)
+	}
+}
+
+// generateDraftFromInstructions runs draft generation after the user submits
+// instructions from the message shortcut modal. It updates the modal with the
+// result (or an error).
+func (s *apiServer) generateDraftFromInstructions(ctx context.Context, viewID string, meta DraftModalMeta) {
+	botToken, err := s.resolveWorkspaceBotToken(ctx, meta.TeamID)
 	if err != nil {
-		s.log.Error("message shortcut: failed to open modal", "error", err)
+		s.log.Error("draft from instructions: failed to resolve bot token", "error", err)
 		return
 	}
 
-	// Resolve Aileron user.
-	userID, err := s.resolveAileronUserBySlack(ctx, payload.User.ID, teamID)
+	userID, err := s.resolveAileronUserBySlack(ctx, meta.UserID, meta.TeamID)
 	if err != nil {
-		s.log.Error("message shortcut: failed to resolve user", "error", err)
-		_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Could not find your Aileron account.", meta)
+		s.log.Error("draft from instructions: failed to resolve user", "error", err)
+		_ = updateDraftModalError(ctx, botToken, viewID, "Could not find your Aileron account.", meta)
 		return
 	}
 
 	pipeline := s.resolvePipelineVault(userID)
 	if pipeline == nil {
 		if s.draftPipeline == nil {
-			_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation is not configured.", meta)
+			_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation is not configured.", meta)
 		} else {
-			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedMessage(), meta)
+			_ = updateDraftModalError(ctx, botToken, viewID, s.vaultLockedMessage(), meta)
 		}
 		return
 	}
 
-	// Build message context.
-	preview := messageText
+	// Build message context with user instructions.
+	preview := meta.OriginalMessage
 	if len(preview) > 200 {
 		preview = preview[:200] + "..."
 	}
-	messageAuthor := comms.ResolveSlackDisplayName(ctx, botToken, messageAuthorID)
-	msg := comms.BuildIncomingMessage(messageTS, "#"+channelName, messageAuthor, fmt.Sprintf(
-		"[Message from %s in #%s]: %s", messageAuthor, channelName, preview,
-	))
+	messageContent := fmt.Sprintf("[Original message]: %s\n\n[User instructions]: %s", preview, meta.Instructions)
+	msg := comms.BuildIncomingMessage("", meta.TargetChannel, "", messageContent)
 
-	// Generate draft (non-streaming for modal — we update once when done).
 	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
-		s.log.Error("message shortcut: draft generation failed", "error", err)
-		_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation failed. Please try again.", meta)
+		s.log.Error("draft from instructions: generation failed", "error", err)
+		_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation failed. Please try again.", meta)
 		return
 	}
 
-	// Update the modal with the draft.
-	if err := updateDraftModalWithDraft(ctx, botToken, viewResp.ID, draftText, meta); err != nil {
-		s.log.Error("message shortcut: failed to update modal", "error", err)
+	if err := updateDraftModalWithDraft(ctx, botToken, viewID, draftText, meta); err != nil {
+		s.log.Error("draft from instructions: failed to update modal", "error", err)
 	}
 }
 

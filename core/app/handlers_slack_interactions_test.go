@@ -939,6 +939,91 @@ func TestInteraction_RefineAction_BadMetadata(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+func TestInteraction_InstructionsSubmission_ReturnsUpdateAction(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	meta, _ := json.Marshal(DraftModalMeta{
+		TargetChannel:   "C0BACKEND",
+		TargetThreadTS:  "111.222",
+		OriginalMessage: "Can someone review PR #42?",
+		UserID:          "U_ALICE",
+		TeamID:          "T001",
+	})
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"team": map[string]any{"id": "T001"},
+		"view": map[string]any{
+			"id":               "V_INSTR_123",
+			"callback_id":      instructionsModalCallbackID,
+			"private_metadata": string(meta),
+			"state": map[string]any{
+				"values": map[string]any{
+					instructionsInputBlockID: map[string]any{
+						instructionsInputActionID: map[string]any{
+							"value": "Politely decline and suggest next week",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Verify the response contains a response_action: "update" to keep the modal open.
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp["response_action"] != "update" {
+		t.Errorf("expected response_action 'update', got %v", resp["response_action"])
+	}
+
+	// Verify the updated view has the draft modal callback ID (loading state).
+	viewMap, ok := resp["view"].(map[string]any)
+	if !ok {
+		t.Fatal("expected view in response")
+	}
+	if viewMap["callback_id"] != draftModalCallbackID {
+		t.Errorf("expected callback_id %q, got %v", draftModalCallbackID, viewMap["callback_id"])
+	}
+
+	// The async generateDraftFromInstructions will fail (no bot token) but
+	// the key assertion is that the response_action flow works correctly.
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestInteraction_InstructionsSubmission_BadMetadata(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id":               "V_INSTR_123",
+			"callback_id":      instructionsModalCallbackID,
+			"private_metadata": "not-valid-json",
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// Bad metadata — should return 200 without crashing.
+}
+
 func TestInteraction_UnknownAction(t *testing.T) {
 	srv := newInteractionTestServer()
 

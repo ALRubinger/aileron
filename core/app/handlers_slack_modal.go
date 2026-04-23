@@ -14,18 +14,24 @@ type DraftModalMeta struct {
 	TargetChannel   string `json:"channel"`
 	TargetThreadTS  string `json:"thread_ts,omitempty"`
 	OriginalMessage string `json:"original_message,omitempty"`
-	UserID          string `json:"user_id"` // Slack user ID
+	UserID          string `json:"user_id"`               // Slack user ID
+	TeamID          string `json:"team_id,omitempty"`      // Slack workspace ID
+	Instructions    string `json:"instructions,omitempty"` // user's drafting instructions
 }
 
 const (
-	draftModalCallbackID   = "aileron_draft_modal"
-	draftInputBlockID      = "draft_input"
-	draftInputActionID     = "draft_text"
-	instructionBlockID     = "instruction_input"
-	instructionActionID    = "instruction_text"
-	refineActionID         = "refine_draft"
-	refineBlockID          = "refine_actions"
-	maxModalTextLength     = 3000
+	draftModalCallbackID        = "aileron_draft_modal"
+	instructionsModalCallbackID = "aileron_draft_instructions"
+	draftInputBlockID           = "draft_input"
+	draftInputActionID          = "draft_text"
+	instructionBlockID          = "instruction_input"
+	instructionActionID         = "instruction_text"
+	instructionsInputBlockID    = "instructions_prompt_input"
+	instructionsInputActionID   = "instructions_prompt_text"
+	messagePreviewBlockID       = "message_preview"
+	refineActionID              = "refine_draft"
+	refineBlockID               = "refine_actions"
+	maxModalTextLength          = 3000
 )
 
 // openDraftModal opens a modal in loading state. Must be called within 3s of
@@ -171,6 +177,74 @@ func updateDraftModalError(ctx context.Context, botToken, viewID, message string
 
 	_, err := comms.UpdateModal(ctx, botToken, viewID, view)
 	return err
+}
+
+// openDraftInstructionsModal opens a modal that prompts the user for drafting
+// instructions before generating a draft. Shows a preview of the original
+// message and a text input for the user's direction.
+func openDraftInstructionsModal(ctx context.Context, botToken, triggerID string, meta DraftModalMeta) (*slack.ViewResponse, error) {
+	metaJSON, _ := json.Marshal(meta)
+
+	preview := meta.OriginalMessage
+	if len(preview) > 200 {
+		preview = preview[:200] + "..."
+	}
+
+	blocks := []slack.Block{
+		slack.NewSectionBlock(
+			slack.NewTextBlockObject(slack.MarkdownType, "*Replying to:*\n> "+preview, false, false),
+			nil, nil,
+		),
+		slack.NewDividerBlock(),
+	}
+
+	instructionsInput := slack.NewPlainTextInputBlockElement(
+		slack.NewTextBlockObject(slack.PlainTextType, "e.g. Politely decline, suggest next week instead", false, false),
+		instructionsInputActionID,
+	)
+	instructionsInput.Multiline = true
+
+	blocks = append(blocks, slack.NewInputBlock(
+		instructionsInputBlockID,
+		slack.NewTextBlockObject(slack.PlainTextType, "What should the reply say?", false, false),
+		nil,
+		instructionsInput,
+	))
+
+	view := slack.ModalViewRequest{
+		Type:            slack.VTModal,
+		CallbackID:      instructionsModalCallbackID,
+		Title:           slack.NewTextBlockObject(slack.PlainTextType, "Draft with Aileron", false, false),
+		Submit:          slack.NewTextBlockObject(slack.PlainTextType, "Start Draft", false, false),
+		Close:           slack.NewTextBlockObject(slack.PlainTextType, "Cancel", false, false),
+		PrivateMetadata: string(metaJSON),
+		Blocks: slack.Blocks{
+			BlockSet: blocks,
+		},
+	}
+
+	return comms.OpenModal(ctx, botToken, triggerID, view)
+}
+
+// buildDraftLoadingView returns a modal view request showing a loading state.
+// Used as the response_action update when transitioning from instructions to draft generation.
+func buildDraftLoadingView(meta DraftModalMeta) slack.ModalViewRequest {
+	metaJSON, _ := json.Marshal(meta)
+
+	return slack.ModalViewRequest{
+		Type:            slack.VTModal,
+		CallbackID:      draftModalCallbackID,
+		Title:           slack.NewTextBlockObject(slack.PlainTextType, "Draft with Aileron", false, false),
+		PrivateMetadata: string(metaJSON),
+		Blocks: slack.Blocks{
+			BlockSet: []slack.Block{
+				slack.NewSectionBlock(
+					slack.NewTextBlockObject(slack.MarkdownType, ":hourglass_flowing_sand: *Researching...*", false, false),
+					nil, nil,
+				),
+			},
+		},
+	}
 }
 
 // parseDraftModalMeta extracts the DraftModalMeta from a view's private_metadata.
