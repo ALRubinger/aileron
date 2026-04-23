@@ -97,6 +97,7 @@ func (p *Pipeline) WithVault(v vault.Vault) *Pipeline {
 	return &cp
 }
 
+
 // GenerateDraft produces a draft reply using a two-round approach:
 //   Round 1: Research — LLM uses tools to gather context. Output is internal.
 //   Round 2: Ghostwrite — LLM writes the reply using the gathered context.
@@ -172,6 +173,9 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 			ToolExecutor: executor,
 		})
 		if err != nil {
+			if errors.Is(err, vault.ErrEscrowStale) {
+				return "", fmt.Errorf("research round: %w", err)
+			}
 			p.log.Error("research round failed", "user_id", userID, "error", err)
 			gatheredContext = "(No additional context available — tool search failed.)"
 		} else {
@@ -308,6 +312,10 @@ func (p *Pipeline) GenerateDraftStream(ctx context.Context, userID string, msg c
 				ToolExecutor: executor,
 			})
 			if err != nil {
+				if errors.Is(err, vault.ErrEscrowStale) {
+					errCh <- fmt.Errorf("research round: %w", err)
+					return
+				}
 				p.log.Error("research round failed", "user_id", userID, "error", err)
 				gatheredContext = "(No additional context available — tool search failed.)"
 			} else {
@@ -588,11 +596,9 @@ func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, account
 		secret, err := p.vault.Get(ctx, acct.VaultPath())
 		if err != nil {
 			if errors.Is(err, vault.ErrEscrowStale) {
-				return nil, fmt.Errorf(
-					"the user's %s credentials are unavailable because their vault session has expired; "+
-						"tell the user to open the Aileron app and unlock their vault to reconnect",
-					provider,
-				)
+				return nil, &llm.ToolFatalError{Err: fmt.Errorf(
+					"vault session expired for %s credentials: %w", provider, vault.ErrEscrowStale,
+				)}
 			}
 			return nil, fmt.Errorf("failed to retrieve %s credentials: %w", provider, err)
 		}

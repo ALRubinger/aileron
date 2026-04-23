@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -155,6 +156,9 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 	// Check for pipeline errors.
 	if err := <-errCh; err != nil {
 		s.log.Error("agent message: pipeline error", "user_id", userID, "error", err)
+		if errors.Is(err, vault.ErrEscrowStale) {
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedMessage())
+		}
 		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 		return
 	}

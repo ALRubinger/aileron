@@ -2,6 +2,7 @@ package draft_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -1090,8 +1091,8 @@ func (s *stubEnclaveClient) Close() error { return nil }
 
 func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 	// When the escrow vault returns ErrEscrowStale, the tool executor should
-	// return a user-actionable message telling Claude to ask the user to
-	// unlock their vault, rather than a raw error stack trace.
+	// return a ToolFatalError wrapping ErrEscrowStale so the LLM loop aborts
+	// and the caller (Slack handler) can post a direct unlock message.
 	mock := &mockLLMClient{
 		researchResp:   &llm.GenerateResponse{Text: "context gathered"},
 		ghostwriteResp: &llm.GenerateResponse{Text: "draft"},
@@ -1139,21 +1140,20 @@ func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 		t.Fatal("expected ToolExecutor in research round")
 	}
 
-	// Execute a tool — should fail with the user-actionable message.
+	// Execute a tool — should return a ToolFatalError wrapping ErrEscrowStale.
 	_, execErr := researchReq.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
 	if execErr == nil {
 		t.Fatal("expected error from stale escrow")
 	}
 
-	errMsg := execErr.Error()
-	if !strings.Contains(errMsg, "vault session has expired") {
-		t.Errorf("expected user-actionable 'vault session has expired' message, got: %s", errMsg)
+	// Must be a ToolFatalError so the LLM client aborts the loop.
+	var fatal *llm.ToolFatalError
+	if !errors.As(execErr, &fatal) {
+		t.Fatalf("expected *llm.ToolFatalError, got %T: %v", execErr, execErr)
 	}
-	if !strings.Contains(errMsg, "unlock their vault") {
-		t.Errorf("expected 'unlock their vault' guidance, got: %s", errMsg)
-	}
-	// Should NOT contain raw error wrapping that would confuse the LLM.
-	if strings.Contains(errMsg, "ErrEscrowStale") {
-		t.Error("error message should not expose internal sentinel error name")
+
+	// The wrapped error must chain to ErrEscrowStale so the handler can detect it.
+	if !errors.Is(fatal.Err, vault.ErrEscrowStale) {
+		t.Errorf("expected ToolFatalError to wrap ErrEscrowStale, got: %v", fatal.Err)
 	}
 }
