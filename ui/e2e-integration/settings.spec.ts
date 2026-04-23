@@ -1,14 +1,27 @@
 import { test, expect, API_URL } from './auth-fixture';
 
+/**
+ * Helper: navigate to a settings page and wait for it to settle.
+ * The app may redirect to /setup-vault if the user has no passphrase.
+ * Returns true if we reached the target page, false if redirected to vault setup.
+ */
+async function gotoSettings(page: import('@playwright/test').Page, path: string) {
+	await page.goto(path);
+
+	// Wait for the page to settle — either the target content or vault setup
+	const settled = page.getByText('Secure your vault').or(page.locator('main h1, [data-slot="card-title"]').first());
+	await expect(settled).toBeVisible({ timeout: 15000 });
+
+	return !page.url().includes('/setup-vault');
+}
+
 test.describe('Settings Pages', () => {
 	test('profile page shows current user or redirects to vault setup', async ({
 		authedPage: page
 	}) => {
-		await page.goto('/settings/profile');
-		await page.waitForURL(/\/(settings\/profile|setup-vault)/, { timeout: 10000 });
+		const reached = await gotoSettings(page, '/settings/profile');
 
-		if (page.url().includes('/setup-vault')) {
-			// Fresh user without passphrase — vault setup required first
+		if (!reached) {
 			await expect(page.getByText('Secure your vault')).toBeVisible();
 			return;
 		}
@@ -18,56 +31,45 @@ test.describe('Settings Pages', () => {
 	});
 
 	test('settings sidebar navigation works', async ({ authedPage: page }) => {
-		await page.goto('/settings/profile');
-		await page.waitForURL(/\/(settings\/profile|setup-vault)/, { timeout: 10000 });
+		const reached = await gotoSettings(page, '/settings/profile');
 
-		// If redirected to vault setup, skip sidebar test
-		if (page.url().includes('/setup-vault')) {
+		if (!reached) {
 			await expect(page.getByText('Secure your vault')).toBeVisible();
 			return;
 		}
 
 		// Navigate to Organization via sidebar
-		const orgLink = page.getByRole('link', { name: 'Organization' });
-		await expect(orgLink).toBeVisible();
-		await orgLink.click();
+		await page.getByRole('link', { name: 'Organization' }).click();
 		await expect(page).toHaveURL(/\/settings\/organization/);
 
 		// Navigate to Security via sidebar
-		const secLink = page.getByRole('link', { name: 'Security' });
-		await expect(secLink).toBeVisible();
-		await secLink.click();
+		await page.getByRole('link', { name: 'Security' }).click();
 		await expect(page).toHaveURL(/\/settings\/security/);
 
 		// Navigate to Connected Accounts via sidebar
-		const connLink = page.getByRole('link', { name: 'Connected Accounts' });
-		await expect(connLink).toBeVisible();
-		await connLink.click();
+		await page.getByRole('link', { name: 'Connected Accounts' }).click();
 		await expect(page).toHaveURL(/\/settings\/connected-accounts/);
 	});
 
 	test('connected accounts page loads or redirects to vault setup', async ({
 		authedPage: page
 	}) => {
-		await page.goto('/settings/connected-accounts');
-		await page.waitForURL(/\/(settings\/connected-accounts|setup-vault)/, { timeout: 10000 });
+		const reached = await gotoSettings(page, '/settings/connected-accounts');
 
-		if (page.url().includes('/setup-vault')) {
+		if (!reached) {
 			await expect(page.getByText('Secure your vault')).toBeVisible();
 			return;
 		}
 
-		// Page rendered — verify the card title (not sidebar link)
 		await expect(
 			page.locator('[data-slot="card-title"]', { hasText: 'Connected Accounts' })
 		).toBeVisible();
 	});
 
 	test('user profile display name is editable', async ({ authedPage: page }) => {
-		await page.goto('/settings/profile');
-		await page.waitForURL(/\/(settings\/profile|setup-vault)/, { timeout: 10000 });
+		const reached = await gotoSettings(page, '/settings/profile');
 
-		if (page.url().includes('/setup-vault')) {
+		if (!reached) {
 			await expect(page.getByText('Secure your vault')).toBeVisible();
 			return;
 		}
