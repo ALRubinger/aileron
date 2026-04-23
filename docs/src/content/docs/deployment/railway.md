@@ -40,6 +40,7 @@ Link the Postgres plugin to the server service.
 | `ANTHROPIC_API_KEY` | Anthropic API key for draft generation (optional) |
 | `AILERON_LLM_MODEL_RESEARCH` | Research model (default: `claude-haiku-4-5-20251001`) (optional) |
 | `AILERON_LLM_MODEL_SYNTHESIS` | Synthesis model (default: `claude-sonnet-4-6`) (optional) |
+| `AILERON_UI_URL` | `https://app.withaileron.ai` |
 
 **UI service:**
 
