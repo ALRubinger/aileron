@@ -69,6 +69,24 @@ tasks:
     cmds:
       - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron-enclave ./cmd/aileron-enclave
 
+  build:enclave:production:
+    desc: Build and push the enclave container image to GCP Artifact Registry
+    requires:
+      vars:
+        - GCP_PROJECT
+        - GCP_REGION
+    vars:
+      REGISTRY: '{{.GCP_REGION}}-docker.pkg.dev/{{.GCP_PROJECT}}/aileron-enclave'
+      IMAGE: '{{.REGISTRY}}/aileron-enclave:latest'
+    cmds:
+      - docker build --platform linux/amd64 -f cmd/aileron-enclave/Dockerfile -t {{.IMAGE}} .
+      - docker push {{.IMAGE}}
+      - |
+        DIGEST=$(gcloud artifacts docker images describe {{.IMAGE}} \
+          --format='value(image_summary.digest)' \
+          --project={{.GCP_PROJECT}})
+        echo "Image digest: $DIGEST"
+
   build:cli:
     desc: Build the aileron CLI binary locally
     vars:
