@@ -620,6 +620,60 @@ func TestResolvePipelineVault_EscrowTier(t *testing.T) {
 	}
 }
 
+func TestResolvePipelineVault_EscrowTier_OtherUserOnly(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("ctx", "draft")
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+
+	srv.enclaveClient = &stubEscrowEnclaveClient{}
+	// Only user B has escrow entries — user A should NOT match tier 2.
+	srv.escrowIndex.Store("connected-accounts/usr_b/slack", "esc_b_1")
+	srv.escrowIndex.Store("connected-accounts/usr_b/gmail", "esc_b_2")
+
+	result := srv.resolvePipelineVault("usr_a")
+	if result != nil {
+		t.Fatal("expected nil — user A has no escrow entries, should not match tier 2")
+	}
+}
+
+func TestResolvePipelineVault_EscrowTier_MixedUsers(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("ctx", "draft")
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+
+	srv.enclaveClient = &stubEscrowEnclaveClient{}
+	// Both users have escrow entries.
+	srv.escrowIndex.Store("connected-accounts/usr_a/slack", "esc_a_1")
+	srv.escrowIndex.Store("connected-accounts/usr_b/slack", "esc_b_1")
+
+	// User A should match tier 2.
+	resultA := srv.resolvePipelineVault("usr_a")
+	if resultA == nil {
+		t.Fatal("expected non-nil pipeline for user A (has escrow entries)")
+	}
+
+	// User B should also match tier 2.
+	resultB := srv.resolvePipelineVault("usr_b")
+	if resultB == nil {
+		t.Fatal("expected non-nil pipeline for user B (has escrow entries)")
+	}
+}
+
+func TestResolvePipelineVault_VaultLocked_AfterReconciliation(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("ctx", "draft")
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour) // auth enabled
+	srv.enclaveClient = &stubEscrowEnclaveClient{}
+
+	// Simulate post-reconciliation state: escrow index is empty
+	// (all stale entries pruned), KEK not in cache (server restarted).
+	// resolvePipelineVault should return nil → caller shows "vault locked".
+	result := srv.resolvePipelineVault("usr_a")
+	if result != nil {
+		t.Fatal("expected nil — no KEK, no escrow entries, auth enabled")
+	}
+}
+
 func TestResolvePipelineVault_NilPipeline(t *testing.T) {
 	srv, _ := newAgentTestServer()
 	// No pipeline configured.
