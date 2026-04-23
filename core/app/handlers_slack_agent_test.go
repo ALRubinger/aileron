@@ -1226,7 +1226,7 @@ func TestHandleAssistantMessage_VaultLocked_NoUIURL(t *testing.T) {
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 	srv.draftPipeline = newStreamingTestPipeline("ctx", []string{"Hello"})
 	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
-	// No uiBaseURL set.
+	// No uiBaseURL set — should fall back to production URL.
 
 	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "hi")
 
@@ -1237,8 +1237,11 @@ func TestHandleAssistantMessage_VaultLocked_NoUIURL(t *testing.T) {
 		t.Fatalf("expected 1 PostMessage call, got %d", len(agent.messageCalls))
 	}
 	msg := agent.messageCalls[0]
-	if !strings.Contains(msg, "unlock your vault") {
-		t.Errorf("expected unlock instruction in message, got: %s", msg)
+	if !strings.Contains(msg, "Unlock your vault") {
+		t.Errorf("expected unlock link in message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "app.withaileron.ai/setup-vault") {
+		t.Errorf("expected production setup-vault URL in message, got: %s", msg)
 	}
 }
 
