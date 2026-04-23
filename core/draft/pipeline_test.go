@@ -1158,3 +1158,73 @@ func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 		t.Errorf("expected ToolFatalError to wrap ErrCredentialUnavailable, got: %v", fatal.Err)
 	}
 }
+
+func TestPipeline_GenerateDraft_CredentialUnavailable_Propagates(t *testing.T) {
+	// When GenerateWithTools returns ErrCredentialUnavailable (e.g. from a
+	// ToolFatalError unwrapped by the LLM client), GenerateDraft should
+	// propagate it instead of swallowing it as a generic research failure.
+	mock := &mockLLMClient{
+		err: fmt.Errorf("vault: slack credentials unavailable: %w", vault.ErrCredentialUnavailable),
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
+		Status: model.ConnectedAccountStatusActive,
+	})
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+	v := vault.NewMemVault()
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"test"}`), vault.Metadata{})
+
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
+		v, slog.Default(), draft.Prompts{Research: "test", Ghostwrite: "test"})
+
+	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Alice", Body: "hi",
+	})
+	if err == nil {
+		t.Fatal("expected error from credential unavailable, got nil")
+	}
+	if !errors.Is(err, vault.ErrCredentialUnavailable) {
+		t.Errorf("expected error wrapping ErrCredentialUnavailable, got: %v", err)
+	}
+}
+
+func TestPipeline_GenerateDraftStream_CredentialUnavailable_Propagates(t *testing.T) {
+	// Same as above but for the streaming path: GenerateDraftStream should
+	// send ErrCredentialUnavailable on errCh, not swallow it.
+	mock := &mockLLMClient{
+		err: fmt.Errorf("vault: slack credentials unavailable: %w", vault.ErrCredentialUnavailable),
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
+		Status: model.ConnectedAccountStatusActive,
+	})
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+	v := vault.NewMemVault()
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"test"}`), vault.Metadata{})
+
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
+		v, slog.Default(), draft.Prompts{Research: "test", Ghostwrite: "test"})
+
+	chunkCh, errCh := p.GenerateDraftStream(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Alice", Body: "hi",
+	})
+
+	// Drain chunks.
+	for range chunkCh {
+	}
+	err := <-errCh
+	if err == nil {
+		t.Fatal("expected error from credential unavailable on errCh, got nil")
+	}
+	if !errors.Is(err, vault.ErrCredentialUnavailable) {
+		t.Errorf("expected error wrapping ErrCredentialUnavailable, got: %v", err)
+	}
+}
