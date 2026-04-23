@@ -209,10 +209,13 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 		for _, er := range execResults {
 			allToolCalls = append(allToolCalls, er.toolCall)
 			if er.err != nil {
-				toolResults = append(toolResults, anthropic.NewToolResultBlock(er.id, fmt.Sprintf("Error: %s", er.err.Error()), true))
+				errMsg := fmt.Sprintf("Error: %s", er.err.Error())
+				a.log.Debug("tool result error", "tool", er.toolCall.Tool, "error", er.err)
+				toolResults = append(toolResults, anthropic.NewToolResultBlock(er.id, errMsg, true))
 				continue
 			}
 			resultJSON, _ := json.Marshal(er.result)
+			a.log.Debug("tool result ok", "tool", er.toolCall.Tool, "result_bytes", len(resultJSON), "params", er.toolCall.Params)
 			toolResults = append(toolResults, anthropic.NewToolResultBlock(er.id, string(resultJSON), false))
 		}
 

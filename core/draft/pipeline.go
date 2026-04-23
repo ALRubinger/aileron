@@ -121,17 +121,30 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	for _, acct := range accounts {
 		if acct.Status == model.ConnectedAccountStatusActive {
 			connectedProviders[string(acct.Provider)] = true
+			p.log.Debug("connected account active", "provider", acct.Provider, "user_id", userID, "vault_path", acct.VaultPath())
 		}
 	}
 
+	var registeredProviders []string
 	var tools []source.ToolDefinition
 	if p.sourceRegistry != nil {
 		for _, provider := range p.sourceRegistry.Providers() {
+			registeredProviders = append(registeredProviders, provider)
 			if connectedProviders[provider] {
-				tools = append(tools, p.sourceRegistry.ToolsForProvider(provider)...)
+				providerTools := p.sourceRegistry.ToolsForProvider(provider)
+				tools = append(tools, providerTools...)
+				p.log.Debug("matched provider", "provider", provider, "tools", len(providerTools))
+			} else {
+				p.log.Debug("provider not connected", "provider", provider)
 			}
 		}
 	}
+	p.log.Debug("tool resolution",
+		"user_id", userID,
+		"connected_providers", fmt.Sprintf("%v", connectedProviders),
+		"registered_providers", fmt.Sprintf("%v", registeredProviders),
+		"total_tools", len(tools),
+	)
 
 	executor := p.buildToolExecutor(ctx, userID, accounts)
 
@@ -178,6 +191,12 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		gatheredContext = "(No source connectors available — replying with general knowledge only.)"
 	}
 
+	p.log.Debug("gathered context for ghostwriter",
+		"user_id", userID,
+		"context_length", len(gatheredContext),
+		"context_preview", truncate(gatheredContext, 500),
+	)
+
 	// --- Round 2: Ghostwrite ---
 	// The LLM writes the reply using AILERON.md instructions + user
 	// instructions + gathered context. NO tools — just text in, text out.
@@ -190,6 +209,11 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 	ghostwriteMessage := fmt.Sprintf(
 		"Message from %s in %s:\n\n%s\n\n---\n\nContext gathered from connected sources:\n\n%s",
 		msg.Author, msg.Channel, msg.Body, gatheredContext,
+	)
+	p.log.Debug("ghostwrite input",
+		"user_id", userID,
+		"message_length", len(ghostwriteMessage),
+		"system_prompt_length", len(ghostwritePrompt),
 	)
 
 	draftResp, err := synthesisClient.GenerateWithTools(ctx, llm.GenerateRequest{
@@ -565,7 +589,35 @@ func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, account
 			return nil, fmt.Errorf("failed to retrieve %s credentials: %w", provider, err)
 		}
 
-		p.log.Debug("executing tool", "tool", tool, "provider", provider, "user_id", userID)
-		return p.sourceRegistry.ExecuteTool(execCtx, tool, params, secret.Value)
+		credLen := len(secret.Value)
+		isEnc := vault.IsEncrypted(secret.Metadata)
+		p.log.Debug("tool credential retrieved",
+			"tool", tool,
+			"provider", provider,
+			"vault_path", acct.VaultPath(),
+			"credential_bytes", credLen,
+			"metadata_encrypted", isEnc,
+		)
+
+		result, execErr := p.sourceRegistry.ExecuteTool(execCtx, tool, params, secret.Value)
+		if execErr != nil {
+			p.log.Error("tool execution failed", "tool", tool, "provider", provider, "error", execErr)
+		} else {
+			resultSize := 0
+			if result != nil {
+				if b, err := json.Marshal(result); err == nil {
+					resultSize = len(b)
+				}
+			}
+			p.log.Debug("tool execution succeeded", "tool", tool, "provider", provider, "result_bytes", resultSize)
+		}
+		return result, execErr
 	}
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
