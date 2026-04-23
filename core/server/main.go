@@ -14,18 +14,7 @@ import (
 )
 
 func main() {
-	level := slog.LevelInfo
-	if l := os.Getenv("AILERON_LOG_LEVEL"); l != "" {
-		switch l {
-		case "debug":
-			level = slog.LevelDebug
-		case "warn":
-			level = slog.LevelWarn
-		case "error":
-			level = slog.LevelError
-		}
-	}
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	if err := run(log); err != nil {
 		log.Error("server exited with error", "error", err)
