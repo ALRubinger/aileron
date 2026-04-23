@@ -1091,7 +1091,7 @@ func (s *stubEnclaveClient) Close() error { return nil }
 
 func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 	// When the escrow vault returns ErrEscrowStale, the tool executor should
-	// return a ToolFatalError wrapping ErrEscrowStale so the LLM loop aborts
+	// return a ToolFatalError wrapping ErrCredentialUnavailable so the LLM loop aborts
 	// and the caller (Slack handler) can post a direct unlock message.
 	mock := &mockLLMClient{
 		researchResp:   &llm.GenerateResponse{Text: "context gathered"},
@@ -1140,7 +1140,7 @@ func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 		t.Fatal("expected ToolExecutor in research round")
 	}
 
-	// Execute a tool — should return a ToolFatalError wrapping ErrEscrowStale.
+	// Execute a tool — should return a ToolFatalError wrapping ErrCredentialUnavailable.
 	_, execErr := researchReq.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
 	if execErr == nil {
 		t.Fatal("expected error from stale escrow")
@@ -1152,8 +1152,9 @@ func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 		t.Fatalf("expected *llm.ToolFatalError, got %T: %v", execErr, execErr)
 	}
 
-	// The wrapped error must chain to ErrEscrowStale so the handler can detect it.
-	if !errors.Is(fatal.Err, vault.ErrEscrowStale) {
-		t.Errorf("expected ToolFatalError to wrap ErrEscrowStale, got: %v", fatal.Err)
+	// The wrapped error must chain to ErrCredentialUnavailable so the handler
+	// can detect it and post the vault-locked message directly to the user.
+	if !errors.Is(fatal.Err, vault.ErrCredentialUnavailable) {
+		t.Errorf("expected ToolFatalError to wrap ErrCredentialUnavailable, got: %v", fatal.Err)
 	}
 }

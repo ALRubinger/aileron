@@ -173,7 +173,7 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 			ToolExecutor: executor,
 		})
 		if err != nil {
-			if errors.Is(err, vault.ErrEscrowStale) {
+			if errors.Is(err, vault.ErrCredentialUnavailable) {
 				return "", fmt.Errorf("research round: %w", err)
 			}
 			p.log.Error("research round failed", "user_id", userID, "error", err)
@@ -312,7 +312,7 @@ func (p *Pipeline) GenerateDraftStream(ctx context.Context, userID string, msg c
 				ToolExecutor: executor,
 			})
 			if err != nil {
-				if errors.Is(err, vault.ErrEscrowStale) {
+				if errors.Is(err, vault.ErrCredentialUnavailable) {
 					errCh <- fmt.Errorf("research round: %w", err)
 					return
 				}
@@ -592,15 +592,15 @@ func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, account
 			return nil, fmt.Errorf("no connected %s account for user %s", provider, userID)
 		}
 
-		// Get the OAuth token from the vault.
+		// Get the OAuth token from the vault. Any failure here is fatal —
+		// the vault is either locked, the escrow is stale, or the KEK is
+		// wrong. All subsequent tool calls for this provider will fail too,
+		// so abort the LLM loop and let the handler tell the user directly.
 		secret, err := p.vault.Get(ctx, acct.VaultPath())
 		if err != nil {
-			if errors.Is(err, vault.ErrEscrowStale) {
-				return nil, &llm.ToolFatalError{Err: fmt.Errorf(
-					"vault session expired for %s credentials: %w", provider, vault.ErrEscrowStale,
-				)}
-			}
-			return nil, fmt.Errorf("failed to retrieve %s credentials: %w", provider, err)
+			return nil, &llm.ToolFatalError{Err: fmt.Errorf(
+				"%s: %w", err, vault.ErrCredentialUnavailable,
+			)}
 		}
 
 		credLen := len(secret.Value)

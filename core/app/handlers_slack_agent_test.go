@@ -1242,18 +1242,18 @@ func TestHandleAssistantMessage_VaultLocked_NoUIURL(t *testing.T) {
 	}
 }
 
-func TestHandleAssistantMessage_EscrowStale_PostsUnlockMessage(t *testing.T) {
-	// When the pipeline hits ErrEscrowStale mid-stream (tool execution finds
-	// stale escrow), the handler should post the vault-locked message directly
-	// to the user instead of letting the LLM paraphrase the error.
+func TestHandleAssistantMessage_CredentialUnavailable_PostsUnlockMessage(t *testing.T) {
+	// When the pipeline hits ErrCredentialUnavailable mid-stream (vault can't
+	// provide credentials), the handler should post the vault-locked message
+	// directly to the user instead of letting the LLM paraphrase the error.
 	srv, agent := newAgentTestServer()
 	ctx := context.Background()
 	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 	srv.uiBaseURL = "https://app.withaileron.ai"
 
-	// Use a research LLM that fails with ErrEscrowStale (simulates ToolFatalError
-	// being unwrapped by the LLM client and propagated as a pipeline error).
+	// Use a research LLM that fails with ErrCredentialUnavailable (simulates
+	// ToolFatalError being unwrapped by the LLM client and propagated).
 	accounts := mem.NewConnectedAccountStore()
 	accounts.Create(ctx, model.ConnectedAccount{
 		ID: "conn_a", UserID: "usr_a",
@@ -1264,7 +1264,7 @@ func TestHandleAssistantMessage_EscrowStale_PostsUnlockMessage(t *testing.T) {
 	sourceReg.Register(&stubSourceConnector{})
 
 	srv.draftPipeline = draft.NewPipeline(
-		&mockLLMClient{err: fmt.Errorf("vault session expired: %w", vault.ErrEscrowStale)},
+		&mockLLMClient{err: fmt.Errorf("vault: slack credentials unavailable: %w", vault.ErrCredentialUnavailable)},
 		&mockLLMClient{response: "draft"},
 		sourceReg,
 		accounts,
