@@ -34,7 +34,7 @@ test.describe('Authentication Flow', () => {
 
 		await page.getByLabel('Email').fill(EMAIL);
 		await page.getByLabel('Password').fill(PASSWORD);
-		await page.getByRole('button', { name: 'Sign in' }).click();
+		await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 
 		// After login, should redirect to vault setup or dashboard.
 		await expect(page).not.toHaveURL(/\/login/, { timeout: 10000 });

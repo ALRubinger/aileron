@@ -25,21 +25,20 @@ test.describe('Connected Accounts — Real API', () => {
 		expect(body).toHaveProperty('locked');
 	});
 
-	test('available integrations shown with correct providers', async ({ authedPage: page }) => {
-		// Navigate to connected accounts — may redirect to vault setup if
-		// passphrase isn't set. In that case the test still passes since we're
-		// validating the redirect behavior is correct.
+	test('available integrations shown or redirects to vault setup', async ({ authedPage: page }) => {
 		await page.goto('/settings/connected-accounts');
+		await page.waitForURL(/\/(settings\/connected-accounts|setup-vault)/, { timeout: 10000 });
 
-		// If redirected to vault setup, that's expected for a fresh user
-		const url = page.url();
-		if (url.includes('/setup-vault')) {
+		if (page.url().includes('/setup-vault')) {
+			// Fresh user without passphrase — vault setup required first
 			await expect(page.getByText('Secure your vault')).toBeVisible();
 			return;
 		}
 
 		// If we reach connected accounts, verify the page structure
-		await expect(page.getByText('Connected Accounts')).toBeVisible();
+		await expect(
+			page.locator('[data-slot="card-title"]', { hasText: 'Connected Accounts' })
+		).toBeVisible();
 		await expect(page.getByText('No accounts connected yet.')).toBeVisible();
 
 		// All four providers should be listed
