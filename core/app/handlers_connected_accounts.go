@@ -256,15 +256,14 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Request, providerStr string, params api.ConnectAccountCallbackParams) {
 	// Slack Marketplace and App Directory installs may redirect here instead
 	// of /v1/slack/install/callback (we don't control the redirect URL Slack
-	// chooses). Detect this case: provider is slack and no state cookie. The
-	// cookie is only set when a user starts the connect flow from Aileron's
-	// UI, so its absence means this is a bot install — even if the admin
-	// happens to be logged into Aileron.
-	if providerStr == "slack" {
-		if _, err := r.Cookie("aileron_connect_state"); err != nil {
-			s.handleSlackInstall(w, r)
-			return
-		}
+	// chooses). Detect this case: provider is slack and no state parameter.
+	// The user-connect flow always sends a state to Slack which echoes it
+	// back, so its absence in the callback means this is a bot install —
+	// even if the browser carries a stale aileron_connect_state cookie from
+	// an earlier connect attempt.
+	if providerStr == "slack" && (params.State == nil || *params.State == "") {
+		s.handleSlackInstall(w, r)
+		return
 	}
 
 	if s.accountService == nil {
