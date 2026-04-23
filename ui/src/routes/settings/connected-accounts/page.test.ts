@@ -73,6 +73,17 @@ describe('Connected Accounts Page', () => {
 		expect(screen.getByText('alrubinger')).toBeInTheDocument();
 	});
 
+	it('renders dates in UTC so midnight timestamps do not shift to the previous day', async () => {
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Slack')).toBeInTheDocument();
+		});
+		// Mock data has '2025-01-15T00:00:00Z' — without timeZone:'UTC', browsers
+		// west of UTC would render this as January 14, 2025.
+		expect(screen.getByText('Connected January 15, 2025')).toBeInTheDocument();
+		expect(screen.getByText('Connected February 20, 2025')).toBeInTheDocument();
+	});
+
 	it('shows status badges for each account', async () => {
 		render(Page);
 		await waitFor(() => {
