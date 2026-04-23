@@ -1,18 +1,25 @@
 import { test, expect, API_URL } from './auth-fixture';
 
 /**
- * Helper: navigate to a settings page and wait for it to settle.
+ * Helper: navigate to a settings page and wait for it to fully settle.
  * The app may redirect to /setup-vault if the user has no passphrase.
+ * The redirect is async (page renders, vault status API returns, then redirect),
+ * so we must wait for network activity to finish before checking the final URL.
  * Returns true if we reached the target page, false if redirected to vault setup.
  */
 async function gotoSettings(page: import('@playwright/test').Page, path: string) {
-	await page.goto(path);
+	await page.goto(path, { waitUntil: 'networkidle' });
 
-	// Wait for the page to settle — either the target content or vault setup
-	const settled = page.getByText('Secure your vault').or(page.locator('main h1, [data-slot="card-title"]').first());
-	await expect(settled).toBeVisible({ timeout: 15000 });
+	// Give the client-side redirect a chance to fire after the vault status response
+	await page.waitForTimeout(1000);
 
-	return !page.url().includes('/setup-vault');
+	// If the app redirected, wait for the vault setup page to render
+	if (page.url().includes('/setup-vault')) {
+		await expect(page.getByText('Secure your vault')).toBeVisible({ timeout: 5000 });
+		return false;
+	}
+
+	return true;
 }
 
 test.describe('Settings Pages', () => {
