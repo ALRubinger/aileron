@@ -2,7 +2,8 @@
 // It uses testcontainers-go to spin up a real Postgres instance, apply schema
 // migrations, and return a connected *postgres.DB handle.
 //
-// Tests using this helper require Docker and are skipped with -short.
+// Tests using this helper require Docker and should use the
+// //go:build integration build tag.
 package pgtest
 
 import (
@@ -24,10 +25,6 @@ import (
 //	store := postgres.NewEscrowIndexStore(db)
 func New(t *testing.T, migrations ...string) *postgres.DB {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping database test in -short mode")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 

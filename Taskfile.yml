@@ -194,7 +194,7 @@ tasks:
   test:integration:
     desc: Run integration tests against running services
     cmds:
-      - go test -tags=integration -race ./test/integration/...
+      - go test -tags=integration -race ./test/integration/... ./core/store/postgres/...
     env:
       AILERON_API_URL: http://localhost:8080
       AILERON_UI_URL: http://localhost:3000
@@ -204,7 +204,7 @@ tasks:
     cmds:
       - mkdir -p gocoverdir && chmod 777 gocoverdir
       - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml up -d --build --wait
-      - go test -tags=integration -race ./test/integration/...
+      - go test -tags=integration -race ./test/integration/... ./core/store/postgres/...
       - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml stop server
       - go tool covdata textfmt -i=gocoverdir -o=coverage-integration.txt
       - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml down -v

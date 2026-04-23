@@ -27,16 +27,19 @@ Postgres container, applies schema migrations, and tears down automatically.
 
 **Requirements:** Docker must be running.
 
-These tests are skipped with `-short`:
+These tests use the `//go:build integration` build tag and run in the integration test phase:
 
 ```sh
-go test -short ./...   # skips database tests
-go test ./store/postgres/ -v  # runs database tests (requires Docker)
+go test ./store/postgres/ -v                        # skips database tests (no build tag)
+go test -tags=integration ./store/postgres/ -v       # runs database tests (requires Docker)
+task test:integration                                # runs all integration tests including database
 ```
 
 The `core/store/pgtest` package provides the test helper:
 
 ```go
+//go:build integration
+
 func TestMyStore(t *testing.T) {
     db := pgtest.New(t, pgtest.EscrowIndexSchema) // starts container, migrates, returns *postgres.DB
     store := postgres.NewEscrowIndexStore(db)
