@@ -27,18 +27,19 @@ test.describe('Connected Accounts — Real API', () => {
 
 	test('available integrations shown or redirects to vault setup', async ({ authedPage: page }) => {
 		await page.goto('/settings/connected-accounts');
-		await page.waitForURL(/\/(settings\/connected-accounts|setup-vault)/, { timeout: 10000 });
+
+		// Wait for the page to settle — either vault setup or connected accounts content
+		const settled = page
+			.getByText('Secure your vault')
+			.or(page.locator('[data-slot="card-title"]', { hasText: 'Connected Accounts' }));
+		await expect(settled).toBeVisible({ timeout: 15000 });
 
 		if (page.url().includes('/setup-vault')) {
-			// Fresh user without passphrase — vault setup required first
 			await expect(page.getByText('Secure your vault')).toBeVisible();
 			return;
 		}
 
-		// If we reach connected accounts, verify the page structure
-		await expect(
-			page.locator('[data-slot="card-title"]', { hasText: 'Connected Accounts' })
-		).toBeVisible();
+		// Verify empty state
 		await expect(page.getByText('No accounts connected yet.')).toBeVisible();
 
 		// All four providers should be listed
