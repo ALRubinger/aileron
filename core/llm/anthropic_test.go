@@ -438,6 +438,114 @@ func TestAnthropicClient_ParallelToolExecution_PartialError(t *testing.T) {
 	}
 }
 
+func TestAnthropicClient_ToolFatalError_AbortsLoop(t *testing.T) {
+	// When a tool executor returns a *ToolFatalError, GenerateWithTools should
+	// abort the loop immediately and return the unwrapped error — NOT feed it
+	// back to the LLM as a tool result. This is used for unrecoverable
+	// conditions like expired vault credentials.
+	var callCount atomic.Int32
+	server := mockAnthropicServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		count := callCount.Add(1)
+		if count == 1 {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "tool_use",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "t1", "name": "slack_channel_history",
+						"input": map[string]any{"channel": "C123"}},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+		} else {
+			t.Error("LLM should not be called again after ToolFatalError")
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_2", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "end_turn",
+				"content": []map[string]any{{"type": "text", "text": "should not reach here"}},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+		}
+	})
+	defer server.Close()
+
+	client := llm.NewAnthropicClient("test-key", "claude-sonnet-4-6")
+	client.SetBaseURL(server.URL)
+
+	vaultErr := fmt.Errorf("vault session expired")
+	_, err := client.GenerateWithTools(context.Background(), llm.GenerateRequest{
+		SystemPrompt: "You are helpful.",
+		UserMessage:  "What happened?",
+		Tools: []source.ToolDefinition{
+			{Name: "slack_channel_history", Description: "Get channel messages",
+				Parameters: []source.ToolParam{{Name: "channel", Type: "string", Required: true}}},
+		},
+		ToolExecutor: func(_ context.Context, _ string, _ map[string]any) (map[string]any, error) {
+			return nil, &llm.ToolFatalError{Err: vaultErr}
+		},
+	})
+
+	if err == nil {
+		t.Fatal("expected error from ToolFatalError, got nil")
+	}
+	if err != vaultErr {
+		t.Errorf("expected unwrapped error %q, got %q", vaultErr, err)
+	}
+	if callCount.Load() != 1 {
+		t.Errorf("expected LLM called exactly once (then abort), got %d calls", callCount.Load())
+	}
+}
+
+func TestAnthropicClient_ToolFatalError_WithParallelTools(t *testing.T) {
+	// When multiple tools run in parallel and one returns a ToolFatalError,
+	// the loop should abort and return the fatal error.
+	var callCount atomic.Int32
+	server := mockAnthropicServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		count := callCount.Add(1)
+		if count == 1 {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "type": "message", "role": "assistant",
+				"model": "claude-sonnet-4-6", "stop_reason": "tool_use",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "t1", "name": "tool_ok", "input": map[string]any{}},
+					{"type": "tool_use", "id": "t2", "name": "tool_fatal", "input": map[string]any{}},
+				},
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 20},
+			})
+		} else {
+			t.Error("LLM should not be called again after ToolFatalError")
+		}
+	})
+	defer server.Close()
+
+	client := llm.NewAnthropicClient("test-key", "claude-sonnet-4-6")
+	client.SetBaseURL(server.URL)
+
+	fatalErr := fmt.Errorf("credentials expired")
+	_, err := client.GenerateWithTools(context.Background(), llm.GenerateRequest{
+		SystemPrompt: "You are helpful.",
+		UserMessage:  "Do things.",
+		Tools: []source.ToolDefinition{
+			{Name: "tool_ok", Description: "OK"},
+			{Name: "tool_fatal", Description: "Fatal"},
+		},
+		ToolExecutor: func(_ context.Context, tool string, _ map[string]any) (map[string]any, error) {
+			if tool == "tool_fatal" {
+				return nil, &llm.ToolFatalError{Err: fatalErr}
+			}
+			return map[string]any{"status": "ok"}, nil
+		},
+	})
+
+	if err == nil {
+		t.Fatal("expected error from ToolFatalError, got nil")
+	}
+	if err != fatalErr {
+		t.Errorf("expected unwrapped fatal error %q, got %q", fatalErr, err)
+	}
+}
+
 func TestAnthropicClient_DefaultModel(t *testing.T) {
 	server := mockAnthropicServer(anthropicTextResponse("ok"))
 	defer server.Close()
