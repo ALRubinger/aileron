@@ -30,11 +30,16 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 
 	// Tier 2: Escrowed credentials in TEE.
 	if s.enclaveClient != nil {
-		// Check if any escrow entries exist for this user by checking the index.
+		// Check if this specific user has escrowed credentials.
+		// Vault paths are "connected-accounts/{userID}/{provider}".
+		prefix := "connected-accounts/" + userID + "/"
 		hasEscrow := false
-		s.escrowIndex.Range(func(_, _ any) bool {
-			hasEscrow = true
-			return false // stop after first entry
+		s.escrowIndex.Range(func(key, _ any) bool {
+			if path, ok := key.(string); ok && strings.HasPrefix(path, prefix) {
+				hasEscrow = true
+				return false // found one, stop
+			}
+			return true // keep looking
 		})
 		if hasEscrow {
 			escrowVault := vault.NewEscrowVault(s.enclaveClient, &s.escrowIndex, s.vault)
