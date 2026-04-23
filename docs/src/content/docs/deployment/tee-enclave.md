@@ -76,7 +76,16 @@ Configure Docker to authenticate with Artifact Registry for pushing:
 gcloud auth configure-docker $REGION-docker.pkg.dev
 ```
 
-Then build and push:
+Then build and push using the Taskfile target:
+
+```sh
+task build:enclave:production GCP_PROJECT=$GCP_PROJECT GCP_REGION=$REGION
+```
+
+The task builds the image for `linux/amd64`, pushes it to Artifact Registry, and prints the image digest.
+
+<details>
+<summary>Manual commands (equivalent)</summary>
 
 ```sh
 export REGISTRY=$REGION-docker.pkg.dev/$GCP_PROJECT/aileron-enclave
@@ -97,6 +106,8 @@ export IMAGE_DIGEST=$(gcloud artifacts docker images describe \
 
 echo "Image digest: $IMAGE_DIGEST"
 ```
+
+</details>
 
 ### 4. Create a service account for the enclave VM
 
