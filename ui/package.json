@@ -13,7 +13,8 @@
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:e2e:coverage": "E2E_COVERAGE=1 pnpm build && playwright test && nyc report --reporter=lcov --temp-dir=.nyc_output --report-dir=coverage-e2e"
+    "test:e2e:coverage": "E2E_COVERAGE=1 pnpm build && playwright test && nyc report --reporter=lcov --temp-dir=.nyc_output --report-dir=coverage-e2e",
+    "test:e2e:integration": "playwright test --config playwright.integration.config.ts"
   },
   "dependencies": {
     "@sveltejs/adapter-node": "^5.5.0",

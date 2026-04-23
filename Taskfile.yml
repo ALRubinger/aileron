@@ -217,6 +217,17 @@ tasks:
       AILERON_API_URL: http://localhost:8080
       AILERON_UI_URL: http://localhost:3000
 
+  test:e2e:integration:
+    desc: Run Playwright E2E tests against running services
+    dir: ui
+    cmds:
+      - pnpm install
+      - pnpm exec playwright install --with-deps chromium
+      - pnpm test:e2e:integration
+    env:
+      AILERON_API_URL: http://localhost:8080
+      AILERON_UI_URL: http://localhost:3000
+
   test:integration:coverage:
     desc: Start a coverage-instrumented stack, run integration tests, and emit coverage-integration.txt
     cmds:
