@@ -1,3 +1,5 @@
+//go:build integration
+
 // Package storetest provides implementation-agnostic integration tests for
 // store interfaces. Tests are written against the store.* interfaces so they
 // work with any backend (Postgres, SQLite, etc.) — only the Harness wiring

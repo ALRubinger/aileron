@@ -43,8 +43,6 @@ flags:
 
 ignore:
   - "core/api/gen/**"       # generated code (oapi-codegen) — DO NOT EDIT
-  - "core/store/storetest/**" # test helper library — not production code
-  - "core/store/pgtest/**"    # test helper library — not production code
   - "ui/**"                  # tracked separately via ui flag
   - "docs/**"                # documentation and ADRs
 
