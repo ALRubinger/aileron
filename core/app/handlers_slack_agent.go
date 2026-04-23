@@ -60,7 +60,7 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 // the vault. Uses Slack mrkdwn format for clickable links.
 func (s *apiServer) vaultLockedMessage() string {
 	if s.uiBaseURL != "" {
-		return ":lock: Your Aileron session has expired. <" + s.uiBaseURL + "/settings/vault|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
+		return ":lock: Your Aileron session has expired. <" + s.uiBaseURL + "/setup-vault|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
 	}
 	return ":lock: Your Aileron session has expired. Please unlock your vault in the Aileron app to reconnect your accounts."
 }

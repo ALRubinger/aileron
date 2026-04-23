@@ -19,7 +19,16 @@
 			// otherwise the cookie-based auth will work for API calls.
 			// Store a marker so the auth store knows we're logged in.
 			await setAuth('cookie-auth');
-			goto('/');
+
+			// Redirect to the page the user was trying to reach before login
+			// (e.g. vault unlock from a Slack link).
+			let redirectTo = '/';
+			const stored = sessionStorage.getItem('aileron:redirectTo');
+			if (stored && stored.startsWith('/') && !stored.startsWith('//')) {
+				redirectTo = stored;
+				sessionStorage.removeItem('aileron:redirectTo');
+			}
+			goto(redirectTo);
 		} catch (err: any) {
 			error = err.message || 'Authentication failed';
 		}

@@ -31,7 +31,7 @@
 
 	onMount(async () => {
 		if (!isAuthenticated()) {
-			goto('/login');
+			goto('/login?redirectTo=/setup-vault');
 			return;
 		}
 

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import * as Card from '$lib/components/ui/card';
@@ -12,8 +13,18 @@
 	let error = $state('');
 	let loading = $state(false);
 
+	// Support redirectTo query param for post-login redirect (e.g. from vault unlock).
+	// Only allow relative paths to prevent open redirect.
+	function getRedirectTo(): string {
+		const raw = $page.url.searchParams.get('redirectTo');
+		if (raw && raw.startsWith('/') && !raw.startsWith('//')) {
+			return raw;
+		}
+		return '/';
+	}
+
 	onMount(() => {
-		if (isAuthenticated()) goto('/');
+		if (isAuthenticated()) goto(getRedirectTo());
 	});
 
 	async function handleSubmit(e: Event) {
@@ -24,7 +35,7 @@
 		try {
 			const data = await emailLogin(email, password);
 			await setAuth(data.access_token);
-			goto('/');
+			goto(getRedirectTo());
 		} catch (err: any) {
 			error = err.message || 'Login failed';
 		} finally {
@@ -33,10 +44,12 @@
 	}
 
 	function handleGoogleLogin() {
+		sessionStorage.setItem('aileron:redirectTo', getRedirectTo());
 		window.location.href = `${PUBLIC_API_BASE}/auth/google/login`;
 	}
 
 	function handleGitHubLogin() {
+		sessionStorage.setItem('aileron:redirectTo', getRedirectTo());
 		window.location.href = `${PUBLIC_API_BASE}/auth/github/login`;
 	}
 </script>
