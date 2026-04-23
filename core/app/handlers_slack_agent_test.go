@@ -867,8 +867,15 @@ func TestProcessSlashCommandQuestion_HappyPath(t *testing.T) {
 	if err := json.Unmarshal([]byte(receivedBody), &resp); err != nil {
 		t.Fatalf("failed to parse response body: %v", err)
 	}
-	if resp["text"] != "The answer is 42." {
-		t.Errorf("expected answer text, got %v", resp["text"])
+	text, _ := resp["text"].(string)
+	if !strings.Contains(text, "The answer is 42.") {
+		t.Errorf("expected answer text in response, got %v", text)
+	}
+	if !strings.Contains(text, "/aileron") {
+		t.Errorf("expected /aileron prefix in response, got %v", text)
+	}
+	if !strings.Contains(text, "How many hours on calls?") {
+		t.Errorf("expected question echoed in response, got %v", text)
 	}
 	if resp["response_type"] != "ephemeral" {
 		t.Errorf("expected ephemeral response type, got %v", resp["response_type"])
@@ -953,7 +960,7 @@ func TestProcessSlashCommandQuestion_PipelineError(t *testing.T) {
 
 	var resp map[string]any
 	json.Unmarshal([]byte(receivedBody), &resp)
-	if text, ok := resp["text"].(string); !ok || text != "Something went wrong. Please try again." {
+	if text, ok := resp["text"].(string); !ok || !strings.Contains(text, "Something went wrong. Please try again.") {
 		t.Errorf("expected error message, got %v", resp["text"])
 	}
 }

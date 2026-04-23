@@ -94,6 +94,13 @@ func TestSlackCommand_Question_Returns200(t *testing.T) {
 	if resp["response_type"] != "ephemeral" {
 		t.Errorf("expected ephemeral response, got %v", resp["response_type"])
 	}
+	text, _ := resp["text"].(string)
+	if !strings.Contains(text, "How many hours on calls today?") {
+		t.Errorf("expected ephemeral to echo user's question, got %q", text)
+	}
+	if !strings.Contains(text, "/aileron") {
+		t.Errorf("expected ephemeral to include /aileron prefix, got %q", text)
+	}
 }
 
 func TestSlackCommand_Draft_Returns200(t *testing.T) {
@@ -141,6 +148,10 @@ func TestSlackCommand_DraftNoTriggerID_FallsBackToEphemeral(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp)
 	if resp["response_type"] != "ephemeral" {
 		t.Errorf("expected ephemeral response when no trigger_id, got %v", resp["response_type"])
+	}
+	text, _ := resp["text"].(string)
+	if !strings.Contains(text, "Draft me a status update") {
+		t.Errorf("expected ephemeral to echo user's request, got %q", text)
 	}
 }
 

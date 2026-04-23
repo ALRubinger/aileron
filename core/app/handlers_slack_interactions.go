@@ -92,6 +92,38 @@ func (s *apiServer) handleSlackInteraction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Handle instructions modal submission specially — we need to return a
+	// response_action to update the view in-place before generating the draft.
+	if payload.Type == "view_submission" && payload.View != nil && payload.View.CallbackID == instructionsModalCallbackID {
+		meta, err := parseDraftModalMeta(payload.View.PrivateMetadata)
+		if err != nil {
+			s.log.Error("instructions submit: failed to parse metadata", "error", err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Extract the user's instructions from the modal state.
+		if payload.View.State != nil {
+			if block, ok := payload.View.State.Values[instructionsInputBlockID]; ok {
+				if input, ok := block[instructionsInputActionID]; ok {
+					meta.Instructions = input.Value
+				}
+			}
+		}
+
+		// Respond with an updated loading view — keeps the modal open.
+		loadingView := buildDraftLoadingView(meta)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"response_action": "update",
+			"view":            loadingView,
+		})
+
+		// Generate the draft asynchronously.
+		go s.generateDraftFromInstructions(context.Background(), payload.View.ID, meta)
+		return
+	}
+
 	// Return 200 immediately — Slack requires fast response.
 	w.WriteHeader(http.StatusOK)
 

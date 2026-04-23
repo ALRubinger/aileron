@@ -64,10 +64,11 @@ func (s *apiServer) handleSlackCommand(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Question or no trigger_id — respond ephemerally.
+	// Include the user's question so they have a record of what they asked.
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"response_type": "ephemeral",
-		"text":          ":hourglass_flowing_sand: Working on it...",
+		"text":          "> /aileron " + text + "\n\n:hourglass_flowing_sand: Working on it...",
 	})
 
 	go s.processSlashCommandQuestion(context.Background(), teamID, slackUserID, text, responseURL)
@@ -145,11 +146,11 @@ func (s *apiServer) processSlashCommandQuestion(ctx context.Context, teamID, sla
 	answer, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("slash command question: generation failed", "error", err)
-		s.respondViaURL(responseURL, "Something went wrong. Please try again.")
+		s.respondViaURL(responseURL, "> /aileron "+text+"\n\nSomething went wrong. Please try again.")
 		return
 	}
 
-	s.respondViaURL(responseURL, answer)
+	s.respondViaURL(responseURL, "> /aileron "+text+"\n\n"+answer)
 }
 
 // respondViaURL sends an ephemeral response update via Slack's response_url.
