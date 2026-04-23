@@ -263,7 +263,7 @@ jobs:
         run: go install gotest.tools/gotestsum@latest
 
       - name: Run integration tests
-        run: gotestsum --junitfile junit-integration.xml -- -tags=integration -race ./test/integration/...
+        run: gotestsum --junitfile junit-integration.xml -- -tags=integration -race ./test/integration/... ./core/store/postgres/...
         env:
           AILERON_API_URL: http://localhost:8080
           AILERON_UI_URL: http://localhost:3000
