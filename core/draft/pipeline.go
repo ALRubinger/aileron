@@ -15,6 +15,7 @@ package draft
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -586,6 +587,13 @@ func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, account
 		// Get the OAuth token from the vault.
 		secret, err := p.vault.Get(ctx, acct.VaultPath())
 		if err != nil {
+			if errors.Is(err, vault.ErrEscrowStale) {
+				return nil, fmt.Errorf(
+					"the user's %s credentials are unavailable because their vault session has expired; "+
+						"tell the user to open the Aileron app and unlock their vault to reconnect",
+					provider,
+				)
+			}
 			return nil, fmt.Errorf("failed to retrieve %s credentials: %w", provider, err)
 		}
 
