@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -204,11 +205,16 @@ func (a *AnthropicClient) GenerateWithTools(ctx context.Context, req GenerateReq
 			"duration_ms", time.Since(toolStart).Milliseconds(),
 		)
 
-		// Build tool results in original order.
+		// Build tool results in original order. If any tool returned a fatal
+		// error, abort the loop and propagate it to the caller.
 		var toolResults []anthropic.ContentBlockParamUnion
 		for _, er := range execResults {
 			allToolCalls = append(allToolCalls, er.toolCall)
 			if er.err != nil {
+				var fatal *ToolFatalError
+				if errors.As(er.err, &fatal) {
+					return nil, fatal.Err
+				}
 				errMsg := fmt.Sprintf("Error: %s", er.err.Error())
 				a.log.Debug("tool result error", "tool", er.toolCall.Tool, "error", er.err)
 				toolResults = append(toolResults, anthropic.NewToolResultBlock(er.id, errMsg, true))

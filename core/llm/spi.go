@@ -34,7 +34,18 @@ type StreamingClient interface {
 
 // ToolExecutor is called when the LLM wants to invoke a tool.
 // The pipeline provides this — it handles credential lookup and connector execution.
+// Return a *ToolFatalError to abort the LLM loop immediately.
 type ToolExecutor func(ctx context.Context, tool string, params map[string]any) (map[string]any, error)
+
+// ToolFatalError signals that tool execution hit an unrecoverable condition
+// (e.g. expired credentials) and the LLM loop should abort immediately
+// rather than feeding the error back to the model.
+type ToolFatalError struct {
+	Err error
+}
+
+func (e *ToolFatalError) Error() string { return e.Err.Error() }
+func (e *ToolFatalError) Unwrap() error { return e.Err }
 
 // GenerateRequest contains everything needed to generate a draft.
 type GenerateRequest struct {

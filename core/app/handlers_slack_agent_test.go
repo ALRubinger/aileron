@@ -1242,6 +1242,58 @@ func TestHandleAssistantMessage_VaultLocked_NoUIURL(t *testing.T) {
 	}
 }
 
+func TestHandleAssistantMessage_EscrowStale_PostsUnlockMessage(t *testing.T) {
+	// When the pipeline hits ErrEscrowStale mid-stream (tool execution finds
+	// stale escrow), the handler should post the vault-locked message directly
+	// to the user instead of letting the LLM paraphrase the error.
+	srv, agent := newAgentTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.uiBaseURL = "https://app.withaileron.ai"
+
+	// Use a research LLM that fails with ErrEscrowStale (simulates ToolFatalError
+	// being unwrapped by the LLM client and propagated as a pipeline error).
+	accounts := mem.NewConnectedAccountStore()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_a", UserID: "usr_a",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&stubSourceConnector{})
+
+	srv.draftPipeline = draft.NewPipeline(
+		&mockLLMClient{err: fmt.Errorf("vault session expired: %w", vault.ErrEscrowStale)},
+		&mockLLMClient{response: "draft"},
+		sourceReg,
+		accounts,
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+	// Ensure resolvePipelineVault returns the pipeline (not nil).
+	// Disable KEK check so it falls through to "auth not enabled" tier.
+	srv.kekSessionCache = nil
+
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "hi")
+
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+
+	if len(agent.messageCalls) != 1 {
+		t.Fatalf("expected 1 PostMessage call (vault unlock), got %d", len(agent.messageCalls))
+	}
+	msg := agent.messageCalls[0]
+	if !strings.Contains(msg, "Unlock your vault") {
+		t.Errorf("expected unlock link in message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "setup-vault") {
+		t.Errorf("expected setup-vault URL in message, got: %s", msg)
+	}
+}
+
 // failingSlackAgentClient returns errors for specific methods.
 type failingSlackAgentClient struct {
 	mockSlackAgentClient
