@@ -21,7 +21,7 @@ export default defineConfig({
 		? [['github'], ['junit', { outputFile: 'test-results/junit-playwright-integration.xml' }]]
 		: 'html',
 	use: {
-		baseURL: process.env.AILERON_UI_URL || 'http://localhost:3000',
+		baseURL: process.env.AILERON_UI_BASE_URL || 'http://localhost:3000',
 		trace: 'on-first-retry'
 	},
 	projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }]

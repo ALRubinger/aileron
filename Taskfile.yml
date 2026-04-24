@@ -215,7 +215,7 @@ tasks:
       - go test -tags=integration -race ./test/integration/... ./core/store/postgres/...
     env:
       AILERON_API_URL: http://localhost:8080
-      AILERON_UI_URL: http://localhost:3000
+      AILERON_UI_BASE_URL: http://localhost:3000
 
   test:e2e:integration:
     desc: Run Playwright E2E tests against running services
@@ -226,7 +226,7 @@ tasks:
       - pnpm test:e2e:integration
     env:
       AILERON_API_URL: http://localhost:8080
-      AILERON_UI_URL: http://localhost:3000
+      AILERON_UI_BASE_URL: http://localhost:3000
 
   test:integration:coverage:
     desc: Start a coverage-instrumented stack, run integration tests, and emit coverage-integration.txt
@@ -239,7 +239,7 @@ tasks:
       - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml down -v
     env:
       AILERON_API_URL: http://localhost:8080
-      AILERON_UI_URL: http://localhost:3000
+      AILERON_UI_BASE_URL: http://localhost:3000
 
   ci:
     desc: Run the full CI pipeline locally

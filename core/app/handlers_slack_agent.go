@@ -73,7 +73,7 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 }
 
 // vaultUnlockURL returns the URL to the vault unlock page, falling back
-// to the production URL when AILERON_UI_URL is not configured.
+// to the production URL when AILERON_UI_BASE_URL is not configured.
 func (s *apiServer) vaultUnlockURL() string {
 	base := s.uiBaseURL
 	if base == "" {

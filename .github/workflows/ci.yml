@@ -239,7 +239,7 @@ jobs:
         run: gotestsum --junitfile junit-integration.xml -- -tags=integration -race -coverprofile=coverage-store.txt -coverpkg=./core/store/postgres/... ./test/integration/... ./core/store/postgres/...
         env:
           AILERON_API_URL: http://localhost:8080
-          AILERON_UI_URL: http://localhost:3000
+          AILERON_UI_BASE_URL: http://localhost:3000
 
       - name: Stop server to flush coverage data
         if: ${{ !cancelled() }}
@@ -335,7 +335,7 @@ jobs:
         run: pnpm test:e2e:integration
         env:
           AILERON_API_URL: http://localhost:8080
-          AILERON_UI_URL: http://localhost:3000
+          AILERON_UI_BASE_URL: http://localhost:3000
 
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}

@@ -37,7 +37,7 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `AILERON_JWT_ISSUER` | No | `aileron` | `iss` claim in issued JWTs |
 | `AILERON_ACCESS_TOKEN_TTL` | No | `15m` | Access token lifetime |
 | `AILERON_REFRESH_TOKEN_TTL` | No | `168h` | Refresh token lifetime (7 days) |
-| `AILERON_UI_REDIRECT_URL` | No | `/` | Redirect destination after successful login |
+| `AILERON_UI_BASE_URL` | No | `/` | UI origin (e.g. `https://app.example.com`). Must not include any path — the server appends `/auth/callback` automatically. |
 | `AILERON_AUTO_VERIFY_EMAIL` | No | `false` | Skip email verification on signup. **Never enable in production.** |
 | `GOOGLE_SIGNIN_CLIENT_ID` | No | | Google OAuth client ID for sign-in |
 | `GOOGLE_SIGNIN_CLIENT_SECRET` | No | | Google OAuth client secret for sign-in |
@@ -58,7 +58,6 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `ANTHROPIC_API_KEY` | No | | Anthropic API key. Enables AI-powered draft generation when set |
 | `AILERON_LLM_MODEL_RESEARCH` | No | `claude-haiku-4-5-20251001` | Model for the research round (tool-call decisions, context gathering). Use a fast model — quality is less important than speed here. Any Anthropic model ID works |
 | `AILERON_LLM_MODEL_SYNTHESIS` | No | `claude-sonnet-4-6` | Model for the synthesis round (composing the final reply in the user's voice). Use a capable model — this is the quality-sensitive step |
-| `AILERON_UI_URL` | No | | Base URL of the web UI (e.g. `https://app.yourdomain.com`). Used to construct user-facing links such as the vault unlock link sent via Slack. No trailing slash |
 
 ### UI service
 
