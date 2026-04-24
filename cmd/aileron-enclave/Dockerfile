@@ -1,14 +1,22 @@
 FROM golang:1.25 AS builder
 WORKDIR /build
-COPY go.work go.work.sum ./
-COPY cmd/aileron/go.mod cmd/aileron/go.mod
-COPY cmd/aileron-sh/go.mod cmd/aileron-sh/go.mod
-COPY cmd/aileron-mcp/go.mod cmd/aileron-mcp/go.mod
-COPY sdk/go/go.mod sdk/go/go.mod
-COPY test/integration/go.mod test/integration/go.mod
+
+# Build outside the workspace so we only need the modules the enclave imports.
+ENV GOWORK=off
+
+# Copy module files first for layer caching.
+COPY cmd/aileron-enclave/go.mod cmd/aileron-enclave/go.sum cmd/aileron-enclave/
+COPY core/go.mod core/go.sum core/
+COPY enclave/go.mod enclave/
+
+WORKDIR /build/cmd/aileron-enclave
+RUN go mod download
+
+WORKDIR /build
 COPY enclave/ enclave/
 COPY core/ core/
 COPY cmd/aileron-enclave/ cmd/aileron-enclave/
+
 WORKDIR /build/cmd/aileron-enclave
 RUN CGO_ENABLED=0 go build -o /aileron-enclave .
 
