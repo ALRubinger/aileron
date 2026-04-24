@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/source"
 )
 
 // stubExecuteFn returns a fixed response and records the credential it received.
@@ -757,5 +758,105 @@ func TestClient_Ready(t *testing.T) {
 	c := New(nil)
 	if err := c.Ready(context.Background()); err != nil {
 		t.Fatalf("Ready: %v (local client should always be ready)", err)
+	}
+}
+
+func TestClient_SourceExecute_HappyPath(t *testing.T) {
+	executeFn := func(_ context.Context, tool string, params map[string]any, cred []byte) (map[string]any, error) {
+		if tool != "test_search" {
+			t.Errorf("expected tool test_search, got %s", tool)
+		}
+		return map[string]any{"results": []string{"found it"}}, nil
+	}
+	c := New(nil, WithSourceExecuteFn(executeFn))
+
+	// Store credential in escrow.
+	storeResp, err := c.EscrowStore(context.Background(), enclave.EscrowStoreRequest{
+		// EscrowStore needs encrypted credential + KEK — use a simpler approach:
+		// store directly via the internal escrow.
+	})
+	// EscrowStore requires KEK — let's store directly.
+	_ = storeResp
+	_ = err
+
+	// Use the escrow store directly since EscrowStore requires KEK decryption.
+	escrowID := c.escrow.Store("g1", []byte(`{"access_token":"test"}`), "oauth2", nil, time.Now().Add(time.Hour))
+
+	resp, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
+		EscrowID: escrowID,
+		Tool:     "test_search",
+		Params:   map[string]any{"query": "hello"},
+	})
+	if err != nil {
+		t.Fatalf("SourceExecute: %v", err)
+	}
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if resp.Result == nil {
+		t.Fatal("expected result, got nil")
+	}
+}
+
+func TestClient_SourceExecute_NotConfigured(t *testing.T) {
+	c := New(nil) // no WithSourceExecuteFn
+	_, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
+		EscrowID: "esc_123",
+		Tool:     "test_search",
+	})
+	if err == nil {
+		t.Fatal("expected error when SourceExecuteFn not configured")
+	}
+}
+
+func TestClient_SourceExecute_EscrowNotFound(t *testing.T) {
+	executeFn := func(_ context.Context, _ string, _ map[string]any, _ []byte) (map[string]any, error) {
+		return nil, nil
+	}
+	c := New(nil, WithSourceExecuteFn(executeFn))
+	_, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
+		EscrowID: "esc_nonexistent",
+		Tool:     "test_search",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-existent escrow ID")
+	}
+}
+
+func TestClient_SourceExecute_TokenRefresh(t *testing.T) {
+	// When the source executor triggers token refresh via the TokenSaver,
+	// the escrow should be updated with the new credential.
+	executeFn := func(ctx context.Context, _ string, _ map[string]any, _ []byte) (map[string]any, error) {
+		// Simulate token refresh by calling the TokenSaver.
+		saver := source.GetTokenSaver(ctx)
+		if saver == nil {
+			t.Fatal("expected TokenSaver in context")
+		}
+		newToken := []byte(`{"access_token":"refreshed","refresh_token":"new_r"}`)
+		if err := saver(ctx, newToken); err != nil {
+			t.Fatalf("TokenSaver: %v", err)
+		}
+		return map[string]any{"ok": true}, nil
+	}
+	c := New(nil, WithSourceExecuteFn(executeFn))
+
+	escrowID := c.escrow.Store("g1", []byte(`{"access_token":"old"}`), "oauth2", nil, time.Now().Add(time.Hour))
+
+	_, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
+		EscrowID: escrowID,
+		Tool:     "test_search",
+		Params:   map[string]any{"query": "hello"},
+	})
+	if err != nil {
+		t.Fatalf("SourceExecute: %v", err)
+	}
+
+	// Verify escrow was updated.
+	updated, err := c.escrow.Get(escrowID)
+	if err != nil {
+		t.Fatalf("escrow.Get: %v", err)
+	}
+	if string(updated) != `{"access_token":"refreshed","refresh_token":"new_r"}` {
+		t.Errorf("escrow not updated: got %q", updated)
 	}
 }

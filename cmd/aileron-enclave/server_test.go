@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
+	"fmt"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
@@ -33,12 +34,39 @@ func (s *stubConnector) Execute(_ context.Context, req connector.ExecutionReques
 	}, nil
 }
 
+// stubSourceConnector is a minimal source connector for testing.
+type stubSourceConnector struct {
+	result map[string]any
+	err    error
+}
+
+func (s *stubSourceConnector) Provider() string { return "test_provider" }
+func (s *stubSourceConnector) Tools() []source.ToolDefinition {
+	return []source.ToolDefinition{
+		{Name: "test_search", Description: "Test search tool",
+			Parameters: []source.ToolParam{{Name: "query", Type: "string", Required: true}}},
+	}
+}
+func (s *stubSourceConnector) Execute(_ context.Context, _ string, _ map[string]any, _ []byte) (map[string]any, error) {
+	return s.result, s.err
+}
+
 func setupTestEnclaveServer(t *testing.T) (*httptest.Server, *enclaveServer) {
+	return setupTestEnclaveServerWithSource(t, &stubSourceConnector{
+		result: map[string]any{"messages": []string{"hello"}},
+	})
+}
+
+func setupTestEnclaveServerWithSource(t *testing.T, sc source.SourceConnector) (*httptest.Server, *enclaveServer) {
 	t.Helper()
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	registry := connector.NewRegistry()
 	registry.Register(context.Background(), &stubConnector{})
-	srv, err := newEnclaveServer(log, registry, source.NewRegistry(), "local", "")
+	sourceReg := source.NewRegistry()
+	if sc != nil {
+		sourceReg.Register(sc)
+	}
+	srv, err := newEnclaveServer(log, registry, sourceReg, "local", "")
 	if err != nil {
 		t.Fatalf("newEnclaveServer: %v", err)
 	}
@@ -1077,5 +1105,68 @@ func TestResolveConnectorID(t *testing.T) {
 			t.Errorf("resolveConnectorID(%q) = (%q, %q), want (%q, %q)",
 				tt.input, connType, connProv, tt.wantType, tt.wantProv)
 		}
+	}
+}
+
+func TestSourceExecute_HappyPath(t *testing.T) {
+	server, srv := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	// Store a credential in escrow.
+	escrowID := srv.escrow.Store("g1", []byte(`{"access_token":"test"}`), "oauth2", nil, time.Now().Add(time.Hour))
+
+	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
+		EscrowID: escrowID,
+		Tool:     "test_search",
+		Params:   map[string]any{"query": "hello"},
+	})
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+
+	result := decodeResp[enclave.SourceExecuteResponse](t, resp)
+	if result.Error != "" {
+		t.Errorf("unexpected error: %s", result.Error)
+	}
+	if result.Result == nil {
+		t.Fatal("expected result, got nil")
+	}
+}
+
+func TestSourceExecute_EscrowNotFound(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
+		EscrowID: "esc_nonexistent",
+		Tool:     "test_search",
+		Params:   map[string]any{"query": "hello"},
+	})
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+}
+
+func TestSourceExecute_ToolError(t *testing.T) {
+	server, srv := setupTestEnclaveServerWithSource(t, &stubSourceConnector{
+		err: fmt.Errorf("gmail API error: 401 Invalid Credentials"),
+	})
+	defer server.Close()
+
+	escrowID := srv.escrow.Store("g1", []byte(`{"access_token":"test"}`), "oauth2", nil, time.Now().Add(time.Hour))
+
+	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
+		EscrowID: escrowID,
+		Tool:     "test_search",
+		Params:   map[string]any{"query": "hello"},
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 (error in body), got %d", resp.StatusCode)
+	}
+
+	result := decodeResp[enclave.SourceExecuteResponse](t, resp)
+	if result.Error == "" {
+		t.Error("expected error in response")
 	}
 }
