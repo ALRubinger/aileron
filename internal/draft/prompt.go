@@ -14,15 +14,16 @@ func PromptSource() string {
 	return promptSource
 }
 
-// Prompts holds the two prompts loaded from AILERON.md.
+// Prompts holds the prompts loaded from AILERON.md.
 type Prompts struct {
-	Research   string // Round 1: context gathering with tools
-	Ghostwrite string // Round 2: writing the reply in the user's voice
+	Research         string // Round 1: context gathering with tools
+	IntentResolution string // Round 2: classify intent and extract parameters
+	Ghostwrite       string // Round 3: writing the reply (informational only)
 }
 
-// LoadPrompts reads AILERON.md and splits it into research and ghostwrite
-// prompts. The file uses a "---" line separator between sections.
-// Research prompt comes first, ghostwrite prompt second.
+// LoadPrompts reads AILERON.md and splits it into research, intent resolution,
+// and ghostwrite prompts. The file uses "---" line separators between sections.
+// Order: research → intent resolution → ghostwrite.
 // Panics if the file is missing or empty.
 func LoadPrompts() Prompts {
 	path := os.Getenv("AILERON_PROMPT_FILE")
@@ -42,16 +43,26 @@ func LoadPrompts() Prompts {
 
 	promptSource = path
 
-	// Split on "---" separator between research and ghostwrite prompts.
-	parts := strings.SplitN(content, "\n---\n", 2)
-	if len(parts) != 2 {
-		// Single section — use as ghostwrite prompt, no research prompt.
-		return Prompts{Ghostwrite: content}
-	}
+	// Split on "---" separators. Supports 2 or 3 sections for backward compat.
+	parts := strings.Split(content, "\n---\n")
 
-	return Prompts{
-		Research:   strings.TrimSpace(parts[0]),
-		Ghostwrite: strings.TrimSpace(parts[1]),
+	switch len(parts) {
+	case 3:
+		// Full 3-section format: research → intent resolution → ghostwrite
+		return Prompts{
+			Research:         strings.TrimSpace(parts[0]),
+			IntentResolution: strings.TrimSpace(parts[1]),
+			Ghostwrite:       strings.TrimSpace(parts[2]),
+		}
+	case 2:
+		// Legacy 2-section format: research → ghostwrite (no intent resolution)
+		return Prompts{
+			Research:   strings.TrimSpace(parts[0]),
+			Ghostwrite: strings.TrimSpace(parts[1]),
+		}
+	default:
+		// Single section — use as ghostwrite prompt.
+		return Prompts{Ghostwrite: content}
 	}
 }
 

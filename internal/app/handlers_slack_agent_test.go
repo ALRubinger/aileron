@@ -358,7 +358,7 @@ func seedTestUser(ctx context.Context, srv *apiServer, slackUserID, teamID, aile
 	})
 }
 
-func TestHandleAssistantMessage_WithStreamingPipeline(t *testing.T) {
+func TestHandleAssistantMessage_InformationalIntent(t *testing.T) {
 	srv, agent := newAgentTestServer()
 	ctx := context.Background()
 
@@ -366,52 +366,43 @@ func TestHandleAssistantMessage_WithStreamingPipeline(t *testing.T) {
 	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 
-	// Configure pipeline with streaming ghostwrite.
-	srv.draftPipeline = newStreamingTestPipeline("context gathered", []string{"Hello ", "world!"})
+	// Configure pipeline with a ghostwrite client that returns text via
+	// GenerateWithTools (used by ResolveIntents for informational intents).
+	research := &mockLLMClient{response: "context gathered"}
+	ghostwrite := &mockStreamingLLMClient{response: "Hello world!", chunks: []string{"Hello ", "world!"}}
+	srv.draftPipeline = draft.NewPipeline(
+		research, ghostwrite,
+		source.NewRegistry(),
+		mem.NewConnectedAccountStore(),
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research prompt", Ghostwrite: "ghostwrite prompt"},
+	)
 
-	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "Write me a message")
+	srv.handleAssistantMessage(ctx, "T001", "D_CHAN", "999.001", "U_ALICE", "What's on my calendar?")
 
 	agent.mu.Lock()
 	defer agent.mu.Unlock()
 
-	// Should have started a stream.
-	if agent.startStreamCalls != 1 {
-		t.Errorf("expected 1 StartStream call, got %d", agent.startStreamCalls)
+	// Informational intents are posted via PostMessage, not streamed.
+	if len(agent.messageCalls) == 0 {
+		t.Error("expected at least 1 PostMessage call for informational response")
 	}
 
-	// Should have appended chunks.
-	if len(agent.appendCalls) != 2 {
-		t.Errorf("expected 2 AppendStream calls, got %d: %v", len(agent.appendCalls), agent.appendCalls)
-	} else {
-		if agent.appendCalls[0] != "Hello " || agent.appendCalls[1] != "world!" {
-			t.Errorf("unexpected chunks: %v", agent.appendCalls)
-		}
-	}
-
-	// Should have stopped the stream.
-	if agent.stopStreamCalls != 1 {
-		t.Errorf("expected 1 StopStream call, got %d", agent.stopStreamCalls)
-	}
-
-	// Should have set status "Researching..." then "Writing..." then cleared.
-	foundResearching := false
-	foundWriting := false
+	// Should have set status then cleared.
+	foundThinking := false
 	foundClear := false
 	for _, s := range agent.statusCalls {
 		switch s {
-		case "Researching...":
-			foundResearching = true
-		case "Writing...":
-			foundWriting = true
+		case "Thinking...":
+			foundThinking = true
 		case "":
 			foundClear = true
 		}
 	}
-	if !foundResearching {
-		t.Error("expected status 'Researching...'")
-	}
-	if !foundWriting {
-		t.Error("expected status 'Writing...'")
+	if !foundThinking {
+		t.Error("expected status 'Thinking...'")
 	}
 	if !foundClear {
 		t.Error("expected status cleared")
@@ -1757,5 +1748,86 @@ func TestNewEnclaveSourceExecutor_NilResult(t *testing.T) {
 	}
 	if result != nil {
 		t.Errorf("expected nil result, got %v", result)
+	}
+}
+
+// --- presentWriteAction tests ---
+
+func TestPresentWriteAction_EmailIntent(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	intent := draft.ResolvedIntent{
+		Type:    draft.IntentTypeEmailSend,
+		Summary: "Send email to Alice",
+		Action: &model.ActionIntent{
+			Type: "email.send", Summary: "Send email to Alice",
+			Domain: model.DomainAction{Email: &model.EmailAction{
+				To: []model.Recipient{{Name: "Alice", Email: "alice@example.com"}},
+				Subject: "Weekly Report", BodyText: "Here is the weekly summary.",
+			}},
+		},
+	}
+	srv.presentWriteAction(context.Background(), "xoxb-test", "D_CHAN", "999.001", "usr_a", intent)
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.messageCalls) < 1 {
+		t.Fatal("expected PostMessage call for preview")
+	}
+	preview := agent.messageCalls[0]
+	for _, want := range []string{"Send Email", "alice@example.com", "Weekly Report", "Here is the weekly summary."} {
+		if !strings.Contains(preview, want) {
+			t.Errorf("preview missing %q: %s", want, preview)
+		}
+	}
+}
+
+func TestPresentWriteAction_CalendarIntent(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	start := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
+	intent := draft.ResolvedIntent{
+		Type: draft.IntentTypeCalendarEventCreate, Summary: "Create meeting",
+		Action: &model.ActionIntent{Type: "calendar.event.create", Summary: "Create meeting",
+			Domain: model.DomainAction{Calendar: &model.CalendarAction{
+				Title: "Team Standup", StartTime: &start, EndTime: &end,
+				Location: "Room A", Attendees: []model.CalendarAttendee{{Name: "Bob", Email: "bob@example.com"}},
+			}},
+		},
+	}
+	srv.presentWriteAction(context.Background(), "xoxb-test", "D_CHAN", "999.001", "usr_a", intent)
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.messageCalls) < 1 {
+		t.Fatal("expected PostMessage call")
+	}
+	preview := agent.messageCalls[0]
+	for _, want := range []string{"Create Calendar Event", "Team Standup", "Room A", "Bob"} {
+		if !strings.Contains(preview, want) {
+			t.Errorf("preview missing %q: %s", want, preview)
+		}
+	}
+}
+
+func TestPresentWriteAction_GitIssueIntent(t *testing.T) {
+	srv, agent := newAgentTestServer()
+	intent := draft.ResolvedIntent{
+		Type: draft.IntentTypeGitIssueCreate, Summary: "Create issue",
+		Action: &model.ActionIntent{Type: "git.issue.create", Summary: "Create issue",
+			Domain: model.DomainAction{Git: &model.GitAction{
+				Repository: "acme/app", IssueTitle: "Login bug",
+				IssueBody: "Steps to reproduce.", IssueLabels: []string{"bug", "high-priority"},
+			}},
+		},
+	}
+	srv.presentWriteAction(context.Background(), "xoxb-test", "D_CHAN", "999.001", "usr_a", intent)
+	agent.mu.Lock()
+	defer agent.mu.Unlock()
+	if len(agent.messageCalls) < 1 {
+		t.Fatal("expected PostMessage call")
+	}
+	preview := agent.messageCalls[0]
+	for _, want := range []string{"Create GitHub Issue", "acme/app", "Login bug", "bug, high-priority"} {
+		if !strings.Contains(preview, want) {
+			t.Errorf("preview missing %q: %s", want, preview)
+		}
 	}
 }

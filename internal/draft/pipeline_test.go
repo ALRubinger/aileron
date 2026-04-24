@@ -1399,3 +1399,284 @@ func TestPipeline_WithSourceExecutor_BypassesVault(t *testing.T) {
 		t.Error("expected draft output")
 	}
 }
+
+// --- ResolveIntents tests ---
+
+func TestResolveIntents_InformationalRequest(t *testing.T) {
+	// When the user asks a question, ResolveIntents should return an
+	// informational intent with the ghostwritten text response.
+	// With no connected accounts, research round skips the LLM call.
+	// researchClient is called only once: for intent resolution.
+	researchMock := &multiResponseLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: `{"type": "informational"}`},
+		},
+	}
+	ghostwriteMock := &multiResponseLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: "You have 3 meetings tomorrow."},
+		},
+	}
+
+	p2 := draft.NewPipeline(researchMock, ghostwriteMock, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{
+			Research:         "research prompt",
+			IntentResolution: "classify intent",
+			Ghostwrite:       "ghostwrite prompt",
+		},
+	)
+
+	intents, err := p2.ResolveIntents(context.Background(), "usr_1", comms.IncomingMessage{
+		Body: "What's on my calendar tomorrow?",
+	})
+	if err != nil {
+		t.Fatalf("ResolveIntents: %v", err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("expected 1 intent, got %d", len(intents))
+	}
+	intent := intents[0]
+	if intent.IsWriteAction() {
+		t.Error("informational request should not be a write action")
+	}
+	if intent.ResponseText == "" {
+		t.Error("informational intent should have ResponseText")
+	}
+}
+
+func TestResolveIntents_WriteAction_EmailSend(t *testing.T) {
+	// When the user asks to send an email, ResolveIntents should return a
+	// write action intent with structured email parameters.
+	// No connected accounts → research skips LLM. researchClient is
+	// called once for intent resolution only.
+	researchMock := &multiResponseLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: `{"type":"email.send","to":[{"name":"Alice","email":"alice@example.com"}],"subject":"Hello","body_text":"Hi Alice!"}`},
+		},
+	}
+	ghostwriteMock := &mockLLMClient{response: &llm.GenerateResponse{Text: ""}}
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{
+			Research:         "research prompt",
+			IntentResolution: "classify intent",
+			Ghostwrite:       "ghostwrite prompt",
+		},
+	)
+
+	intents, err := p.ResolveIntents(context.Background(), "usr_1", comms.IncomingMessage{
+		Body: "Send an email to Alice about the meeting",
+	})
+	if err != nil {
+		t.Fatalf("ResolveIntents: %v", err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("expected 1 intent, got %d", len(intents))
+	}
+	intent := intents[0]
+	if !intent.IsWriteAction() {
+		t.Fatal("email.send should be a write action")
+	}
+	if intent.Action == nil {
+		t.Fatal("write action should have Action")
+	}
+	if intent.Action.Domain.Email == nil {
+		t.Fatal("email intent should have Email domain")
+	}
+	if intent.Action.Domain.Email.Subject != "Hello" {
+		t.Errorf("Subject = %q, want Hello", intent.Action.Domain.Email.Subject)
+	}
+	if len(intent.Action.Domain.Email.To) != 1 || intent.Action.Domain.Email.To[0].Email != "alice@example.com" {
+		t.Errorf("To = %+v", intent.Action.Domain.Email.To)
+	}
+	if intent.ResponseText != "" {
+		t.Error("write action should not have ResponseText")
+	}
+}
+
+func TestResolveIntents_WriteAction_GitIssue(t *testing.T) {
+	researchMock := &multiResponseLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: `{"type":"git.issue.create","repository":"acme/app","issue_title":"Login bug","issue_body":"Steps to reproduce..."}`},
+		},
+	}
+	ghostwriteMock := &mockLLMClient{response: &llm.GenerateResponse{Text: ""}}
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{
+			Research:         "research",
+			IntentResolution: "classify",
+			Ghostwrite:       "ghostwrite",
+		},
+	)
+
+	intents, err := p.ResolveIntents(context.Background(), "usr_1", comms.IncomingMessage{
+		Body: "File a bug for the login issue",
+	})
+	if err != nil {
+		t.Fatalf("ResolveIntents: %v", err)
+	}
+	intent := intents[0]
+	if intent.Type != draft.IntentTypeGitIssueCreate {
+		t.Errorf("Type = %q, want git.issue.create", intent.Type)
+	}
+	if intent.Action.Domain.Git.IssueTitle != "Login bug" {
+		t.Errorf("IssueTitle = %q", intent.Action.Domain.Git.IssueTitle)
+	}
+}
+
+func TestResolveIntents_FallbackWhenNoIntentPrompt(t *testing.T) {
+	// When no intent resolution prompt is configured (legacy 2-section
+	// AILERON.md), ResolveIntents should fall back to ghostwrite-only
+	// and return informational.
+	mock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "Here's your summary."},
+	}
+
+	p := draft.NewPipeline(mock, mock, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+		// No IntentResolution prompt
+	)
+
+	intents, err := p.ResolveIntents(context.Background(), "usr_1", comms.IncomingMessage{
+		Body: "What happened this week?",
+	})
+	if err != nil {
+		t.Fatalf("ResolveIntents: %v", err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("expected 1 intent, got %d", len(intents))
+	}
+	if intents[0].IsWriteAction() {
+		t.Error("fallback should produce informational intent")
+	}
+	if intents[0].ResponseText != "Here's your summary." {
+		t.Errorf("ResponseText = %q", intents[0].ResponseText)
+	}
+}
+
+func TestResolveIntents_InvalidIntentJSON_FallsBackToInformational(t *testing.T) {
+	// When intent resolution returns invalid JSON, the pipeline should
+	// fall back to informational and run ghostwrite.
+	researchMock := &multiResponseLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: "I'm not sure what to do with this request."},  // not JSON → fallback
+		},
+	}
+	ghostwriteMock := &multiResponseLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: "Let me help you with that."},
+		},
+	}
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{
+			Research:         "research",
+			IntentResolution: "classify",
+			Ghostwrite:       "ghostwrite",
+		},
+	)
+
+	intents, err := p.ResolveIntents(context.Background(), "usr_1", comms.IncomingMessage{
+		Body: "Something ambiguous",
+	})
+	if err != nil {
+		t.Fatalf("ResolveIntents: %v", err)
+	}
+	if intents[0].IsWriteAction() {
+		t.Error("invalid JSON should fall back to informational")
+	}
+	if intents[0].ResponseText == "" {
+		t.Error("fallback should produce ghostwritten text")
+	}
+}
+
+// multiResponseLLMClient returns responses in order for sequential calls.
+// Used when the pipeline makes multiple calls to the same client (e.g.
+// intent resolution then ghostwrite).
+type multiResponseLLMClient struct {
+	mu        sync.Mutex
+	responses []*llm.GenerateResponse
+	idx       int
+}
+
+func (m *multiResponseLLMClient) GenerateWithTools(_ context.Context, _ llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idx >= len(m.responses) {
+		return &llm.GenerateResponse{Text: ""}, nil
+	}
+	resp := m.responses[m.idx]
+	m.idx++
+	return resp, nil
+}
+
+func TestResolveIntents_WithConnectedAccounts(t *testing.T) {
+	// When connected accounts exist and source connectors are registered,
+	// the research LLM should be called with tools.
+	researchMock := &multiResponseLLMClient{
+		responses: []*llm.GenerateResponse{
+			{Text: "Found Slack messages about the deploy."},
+			{Text: `{"type": "informational"}`},
+		},
+	}
+	ghostwriteMock := &mockLLMClient{
+		response: &llm.GenerateResponse{Text: "The deploy completed Tuesday."},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	v := vault.NewMemVault()
+	ctx := context.Background()
+
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"xoxp-test"}`), vault.Metadata{})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+
+	p := draft.NewPipeline(researchMock, ghostwriteMock, sourceReg, accounts,
+		mem.NewUserInstructionStore(), v, slog.Default(),
+		draft.Prompts{
+			Research:         "research prompt",
+			IntentResolution: "classify intent",
+			Ghostwrite:       "ghostwrite prompt",
+		},
+	)
+
+	intents, err := p.ResolveIntents(ctx, "usr_1", comms.IncomingMessage{
+		Body: "What happened with the deploy?", Author: "Sarah", Channel: "#backend",
+	})
+	if err != nil {
+		t.Fatalf("ResolveIntents: %v", err)
+	}
+	if len(intents) != 1 {
+		t.Fatalf("expected 1 intent, got %d", len(intents))
+	}
+	if intents[0].IsWriteAction() {
+		t.Error("expected informational intent")
+	}
+	if intents[0].ResponseText != "The deploy completed Tuesday." {
+		t.Errorf("ResponseText = %q", intents[0].ResponseText)
+	}
+
+	// Research mock should have been called twice (research with tools + intent resolution).
+	researchMock.mu.Lock()
+	defer researchMock.mu.Unlock()
+	if researchMock.idx != 2 {
+		t.Errorf("expected 2 calls to researchClient, got %d", researchMock.idx)
+	}
+}

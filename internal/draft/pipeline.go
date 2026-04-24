@@ -46,8 +46,9 @@ type Pipeline struct {
 	vault             vault.Vault
 	sourceExecutor    SourceExecutor // optional; enclave-based source tool execution
 	log               *slog.Logger
-	researchPrompt    string
-	ghostwritePrompt  string
+	researchPrompt          string
+	intentResolutionPrompt  string
+	ghostwritePrompt        string
 	clock             func() time.Time // defaults to time.Now; override in tests
 }
 
@@ -65,16 +66,17 @@ func NewPipeline(
 	prompts Prompts,
 ) *Pipeline {
 	return &Pipeline{
-		researchLLM:       researchLLM,
-		ghostwriteLLM:     ghostwriteLLM,
-		sourceRegistry:    sourceReg,
-		connectedAccounts: accounts,
-		instructions:      instructions,
-		vault:             v,
-		log:               log,
-		researchPrompt:    prompts.Research,
-		ghostwritePrompt:  prompts.Ghostwrite,
-		clock:             time.Now,
+		researchLLM:            researchLLM,
+		ghostwriteLLM:          ghostwriteLLM,
+		sourceRegistry:         sourceReg,
+		connectedAccounts:      accounts,
+		instructions:           instructions,
+		vault:                  v,
+		log:                    log,
+		researchPrompt:         prompts.Research,
+		intentResolutionPrompt: prompts.IntentResolution,
+		ghostwritePrompt:       prompts.Ghostwrite,
+		clock:                  time.Now,
 	}
 }
 
@@ -115,6 +117,391 @@ func (p *Pipeline) WithSourceExecutor(e SourceExecutor) *Pipeline {
 	return &cp
 }
 
+
+// ResolveIntents determines what the user wants and returns structured intents.
+//
+// The flow is:
+//  1. Research — LLM gathers context using tools (same as GenerateDraft).
+//  2. Intent Resolution — LLM classifies the request and extracts parameters.
+//  3. For informational intents: Ghostwrite round produces the text response.
+//     For write actions: the structured intent is returned directly.
+func (p *Pipeline) ResolveIntents(ctx context.Context, userID string, msg comms.IncomingMessage) ([]ResolvedIntent, error) {
+	researchClient, synthesisClient := p.researchLLM, p.ghostwriteLLM
+	if p.clientResolver != nil {
+		var resolveErr error
+		researchClient, synthesisClient, resolveErr = p.clientResolver.Resolve(ctx, userID)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolving LLM config: %w", resolveErr)
+		}
+	}
+
+	// --- Research round (identical to GenerateDraft) ---
+	gatheredContext, err := p.runResearch(ctx, userID, msg, researchClient)
+	if err != nil {
+		return nil, err
+	}
+
+	// --- Intent Resolution round ---
+	if p.intentResolutionPrompt == "" {
+		// No intent resolution prompt — fall back to legacy ghostwrite-only path.
+		// Treat everything as informational.
+		ghostwritePrompt, err := p.assembleSystemPrompt(ctx, userID)
+		if err != nil {
+			return nil, fmt.Errorf("assembling system prompt: %w", err)
+		}
+		ghostwriteMessage := fmt.Sprintf(
+			"Message from %s in %s:\n\n%s\n\n---\n\nContext gathered from connected sources:\n\n%s",
+			msg.Author, msg.Channel, msg.Body, gatheredContext,
+		)
+		draftResp, err := synthesisClient.GenerateWithTools(ctx, llm.GenerateRequest{
+			SystemPrompt: ghostwritePrompt,
+			UserMessage:  ghostwriteMessage,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("ghostwrite round failed: %w", err)
+		}
+		return []ResolvedIntent{{
+			Type:         IntentTypeInformational,
+			Summary:      draftResp.Text,
+			ResponseText: draftResp.Text,
+		}}, nil
+	}
+
+	intentSysPrompt := strings.ReplaceAll(
+		p.intentResolutionPrompt,
+		"{{today}}",
+		p.clock().Format("2006-01-02 (Monday)"),
+	)
+	intentMessage := fmt.Sprintf(
+		"Message from %s in %s:\n\n%s\n\n---\n\nContext gathered from connected sources:\n\n%s",
+		msg.Author, msg.Channel, msg.Body, gatheredContext,
+	)
+
+	intentResp, err := researchClient.GenerateWithTools(ctx, llm.GenerateRequest{
+		SystemPrompt: intentSysPrompt,
+		UserMessage:  intentMessage,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("intent resolution failed: %w", err)
+	}
+
+	p.log.Info("intent resolution complete",
+		"user_id", userID,
+		"response_length", len(intentResp.Text),
+	)
+
+	// Parse the intent resolution response.
+	intent, err := parseIntentResponse(intentResp.Text)
+	if err != nil {
+		p.log.Warn("intent resolution parse failed, falling back to informational",
+			"user_id", userID,
+			"error", err,
+			"raw_response", intentResp.Text,
+		)
+		// Fall back to informational — run ghostwrite.
+		intent = &ResolvedIntent{Type: IntentTypeInformational}
+	}
+
+	// For informational intents, run the ghostwrite round.
+	if !intent.IsWriteAction() {
+		ghostwritePrompt, err := p.assembleSystemPrompt(ctx, userID)
+		if err != nil {
+			return nil, fmt.Errorf("assembling system prompt: %w", err)
+		}
+		ghostwriteMessage := fmt.Sprintf(
+			"Message from %s in %s:\n\n%s\n\n---\n\nContext gathered from connected sources:\n\n%s",
+			msg.Author, msg.Channel, msg.Body, gatheredContext,
+		)
+
+		draftResp, err := synthesisClient.GenerateWithTools(ctx, llm.GenerateRequest{
+			SystemPrompt: ghostwritePrompt,
+			UserMessage:  ghostwriteMessage,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("ghostwrite round failed: %w", err)
+		}
+		intent.Summary = draftResp.Text
+		intent.ResponseText = draftResp.Text
+	}
+
+	p.log.Info("intent resolved",
+		"user_id", userID,
+		"type", string(intent.Type),
+		"is_write", intent.IsWriteAction(),
+		"summary_length", len(intent.Summary),
+	)
+
+	return []ResolvedIntent{*intent}, nil
+}
+
+// runResearch executes the research round: LLM gathers context using tools.
+// Returns the gathered context string. Extracted from GenerateDraft for reuse.
+func (p *Pipeline) runResearch(ctx context.Context, userID string, msg comms.IncomingMessage, researchClient llm.Client) (string, error) {
+	accounts, err := p.connectedAccounts.List(ctx, store.ConnectedAccountFilter{UserID: userID})
+	if err != nil {
+		return "", fmt.Errorf("listing connected accounts: %w", err)
+	}
+
+	connectedProviders := make(map[string]bool)
+	for _, acct := range accounts {
+		if acct.Status == model.ConnectedAccountStatusActive {
+			connectedProviders[string(acct.Provider)] = true
+		}
+	}
+
+	var tools []source.ToolDefinition
+	if p.sourceRegistry != nil {
+		for _, provider := range p.sourceRegistry.Providers() {
+			if connectedProviders[provider] {
+				tools = append(tools, p.sourceRegistry.ToolsForProvider(provider)...)
+			}
+		}
+	}
+
+	authTracker := &authErrorTracker{}
+	executor := p.buildToolExecutor(ctx, userID, accounts, authTracker)
+	now := p.clock()
+
+	var gatheredContext string
+	if len(tools) > 0 {
+		researchSysPrompt := strings.ReplaceAll(
+			p.researchPrompt,
+			"{{today}}",
+			now.Format("2006-01-02 (Monday)"),
+		)
+		researchMessage := fmt.Sprintf(
+			"Find relevant context to help reply to this message from %s in %s:\n\n%s",
+			msg.Author, msg.Channel, msg.Body,
+		)
+		researchResp, err := researchClient.GenerateWithTools(ctx, llm.GenerateRequest{
+			SystemPrompt: researchSysPrompt,
+			UserMessage:  researchMessage,
+			Tools:        tools,
+			ToolExecutor: executor,
+		})
+		if err != nil {
+			if errors.Is(err, vault.ErrCredentialUnavailable) {
+				return "", fmt.Errorf("research round: %w", err)
+			}
+			p.log.Error("research round failed", "user_id", userID, "error", err)
+			gatheredContext = "(No additional context available — tool search failed.)"
+		} else {
+			gatheredContext = researchResp.Text
+			gatheredContext = p.backwardPass(ctx, gatheredContext, msg.Body, now, researchResp.ToolCalls, executor, userID)
+		}
+	} else {
+		gatheredContext = "(No source connectors available — replying with general knowledge only.)"
+	}
+
+	return gatheredContext, nil
+}
+
+// parseIntentResponse parses the JSON output from the intent resolution LLM call.
+func parseIntentResponse(raw string) (*ResolvedIntent, error) {
+	// Strip markdown code fences if the LLM wrapped the JSON.
+	text := strings.TrimSpace(raw)
+	if strings.HasPrefix(text, "```") {
+		lines := strings.Split(text, "\n")
+		// Remove first and last lines (the fences).
+		if len(lines) >= 3 {
+			text = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+		text = strings.TrimSpace(text)
+	}
+
+	var parsed struct {
+		Type string `json:"type"`
+
+		// Email fields
+		To       []model.Recipient `json:"to,omitempty"`
+		CC       []model.Recipient `json:"cc,omitempty"`
+		BCC      []model.Recipient `json:"bcc,omitempty"`
+		Subject  string            `json:"subject,omitempty"`
+		BodyText string            `json:"body_text,omitempty"`
+		BodyHTML string            `json:"body_html,omitempty"`
+		SendMode string            `json:"send_mode,omitempty"`
+		ThreadRef string           `json:"thread_ref,omitempty"`
+
+		// Calendar fields
+		Title          string                  `json:"title,omitempty"`
+		Description    string                  `json:"description,omitempty"`
+		StartTime      string                  `json:"start_time,omitempty"`
+		EndTime        string                  `json:"end_time,omitempty"`
+		Timezone       string                  `json:"timezone,omitempty"`
+		Location       string                  `json:"location,omitempty"`
+		Attendees      []model.CalendarAttendee `json:"attendees,omitempty"`
+		ConferenceType string                  `json:"conference_type,omitempty"`
+
+		// GitHub issue fields
+		Repository     string   `json:"repository,omitempty"`
+		IssueTitle     string   `json:"issue_title,omitempty"`
+		IssueBody      string   `json:"issue_body,omitempty"`
+		IssueLabels    []string `json:"issue_labels,omitempty"`
+		IssueAssignees []string `json:"issue_assignees,omitempty"`
+		IssueNumber    string   `json:"issue_number,omitempty"`
+		Body           string   `json:"body,omitempty"` // comment body or Slack message
+
+		// Slack fields
+		Channel string `json:"channel,omitempty"`
+	}
+
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		return nil, fmt.Errorf("parsing intent JSON: %w", err)
+	}
+
+	intentType := IntentType(parsed.Type)
+
+	switch intentType {
+	case IntentTypeInformational:
+		return &ResolvedIntent{Type: IntentTypeInformational}, nil
+
+	case IntentTypeEmailSend, IntentTypeEmailDraft:
+		summary := fmt.Sprintf("Send email to %s: %s", formatRecipientNames(parsed.To), parsed.Subject)
+		if intentType == IntentTypeEmailDraft {
+			summary = fmt.Sprintf("Draft email to %s: %s", formatRecipientNames(parsed.To), parsed.Subject)
+		}
+		sendMode := parsed.SendMode
+		if sendMode == "" {
+			if intentType == IntentTypeEmailDraft {
+				sendMode = "draft_only"
+			} else {
+				sendMode = "send_now"
+			}
+		}
+		return &ResolvedIntent{
+			Type:    intentType,
+			Summary: summary,
+			Action: &model.ActionIntent{
+				Type:    string(intentType),
+				Summary: summary,
+				Domain: model.DomainAction{
+					Email: &model.EmailAction{
+						To:       parsed.To,
+						CC:       parsed.CC,
+						BCC:      parsed.BCC,
+						Subject:  parsed.Subject,
+						BodyText: parsed.BodyText,
+						BodyHTML: parsed.BodyHTML,
+						SendMode: sendMode,
+						ThreadRef: parsed.ThreadRef,
+					},
+				},
+			},
+		}, nil
+
+	case IntentTypeCalendarEventCreate:
+		summary := fmt.Sprintf("Create calendar event: %s", parsed.Title)
+		action := &model.ActionIntent{
+			Type:    string(intentType),
+			Summary: summary,
+			Domain: model.DomainAction{
+				Calendar: &model.CalendarAction{
+					Title:          parsed.Title,
+					Description:    parsed.Description,
+					Timezone:       parsed.Timezone,
+					Location:       parsed.Location,
+					Attendees:      parsed.Attendees,
+					ConferenceType: parsed.ConferenceType,
+				},
+			},
+		}
+		if parsed.StartTime != "" {
+			t, err := time.Parse(time.RFC3339, parsed.StartTime)
+			if err != nil {
+				// Try without timezone.
+				t, err = time.Parse("2006-01-02T15:04:05", parsed.StartTime)
+			}
+			if err == nil {
+				action.Domain.Calendar.StartTime = &t
+			}
+		}
+		if parsed.EndTime != "" {
+			t, err := time.Parse(time.RFC3339, parsed.EndTime)
+			if err != nil {
+				t, err = time.Parse("2006-01-02T15:04:05", parsed.EndTime)
+			}
+			if err == nil {
+				action.Domain.Calendar.EndTime = &t
+			}
+		}
+		return &ResolvedIntent{
+			Type:    intentType,
+			Summary: summary,
+			Action:  action,
+		}, nil
+
+	case IntentTypeGitIssueCreate:
+		summary := fmt.Sprintf("Create issue in %s: %s", parsed.Repository, parsed.IssueTitle)
+		return &ResolvedIntent{
+			Type:    intentType,
+			Summary: summary,
+			Action: &model.ActionIntent{
+				Type:    string(intentType),
+				Summary: summary,
+				Domain: model.DomainAction{
+					Git: &model.GitAction{
+						Repository:     parsed.Repository,
+						IssueTitle:     parsed.IssueTitle,
+						IssueBody:      parsed.IssueBody,
+						IssueLabels:    parsed.IssueLabels,
+						IssueAssignees: parsed.IssueAssignees,
+					},
+				},
+			},
+		}, nil
+
+	case IntentTypeGitIssueComment:
+		summary := fmt.Sprintf("Comment on %s#%s", parsed.Repository, parsed.IssueNumber)
+		body := parsed.Body
+		return &ResolvedIntent{
+			Type:    intentType,
+			Summary: summary,
+			Action: &model.ActionIntent{
+				Type:    string(intentType),
+				Summary: summary,
+				Metadata: map[string]any{
+					"repository":   parsed.Repository,
+					"issue_number": parsed.IssueNumber,
+					"body":         body,
+				},
+			},
+		}, nil
+
+	case IntentTypeSlackSend:
+		summary := "Send Slack message"
+		body := parsed.Body
+		return &ResolvedIntent{
+			Type:    intentType,
+			Summary: summary,
+			Action: &model.ActionIntent{
+				Type:    string(intentType),
+				Summary: summary,
+				Metadata: map[string]any{
+					"channel": parsed.Channel,
+					"body":    body,
+				},
+			},
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unknown intent type: %q", parsed.Type)
+	}
+}
+
+func formatRecipientNames(recipients []model.Recipient) string {
+	if len(recipients) == 0 {
+		return "(no recipients)"
+	}
+	var names []string
+	for _, r := range recipients {
+		if r.Name != "" {
+			names = append(names, r.Name)
+		} else {
+			names = append(names, r.Email)
+		}
+	}
+	return strings.Join(names, ", ")
+}
 
 // GenerateDraft produces a draft reply using a two-round approach:
 //   Round 1: Research — LLM uses tools to gather context. Output is internal.

@@ -1067,6 +1067,168 @@ func (s *apiServer) emitTraceEvent(ctx context.Context, intentID, workspaceID, t
 	s.traces.Append(ctx, intentID, workspaceID, traceID, event)
 }
 
+// executeGrantResult is the outcome of an internal grant execution.
+type executeGrantResult struct {
+	ExecutionID string
+	Status      api.ExecutionStatus
+	Output      map[string]any
+	ReceiptRef  string
+	Error       string
+}
+
+// executeGrant runs an execution grant internally — used by both the HTTP
+// RunExecution handler and the Slack approve_intent flow. It validates the
+// grant, resolves the connector and credentials, and executes.
+func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*executeGrantResult, error) {
+	grant, err := s.grants.Get(ctx, grantID)
+	if err != nil {
+		return nil, fmt.Errorf("grant not found: %w", err)
+	}
+	if grant.Status != api.ExecutionGrantStatusActive {
+		return nil, fmt.Errorf("grant is not active (status: %s)", grant.Status)
+	}
+	if time.Now().UTC().After(grant.ExpiresAt) {
+		grant.Status = api.ExecutionGrantStatusExpired
+		s.grants.Update(ctx, grant)
+		return nil, fmt.Errorf("grant has expired")
+	}
+
+	intent, err := s.intents.Get(ctx, grant.IntentId)
+	if err != nil {
+		return nil, fmt.Errorf("intent not found: %w", err)
+	}
+
+	// Mark grant as consumed.
+	grant.Status = api.ExecutionGrantStatusConsumed
+	s.grants.Update(ctx, grant)
+
+	// Create execution record.
+	execID := "exe_" + s.newID()
+	now := time.Now().UTC()
+	exec := api.Execution{
+		ExecutionId: execID,
+		IntentId:    grant.IntentId,
+		Status:      api.ExecutionStatusRunning,
+		StartedAt:   now,
+	}
+	s.executions.Create(ctx, exec)
+
+	intent.Status = api.Executing
+	intent.UpdatedAt = now
+	s.intents.Update(ctx, intent)
+
+	// Determine connector.
+	connType, connProvider := resolveConnector(intent.Action.Type)
+	conn, ok := s.registry.Get(ctx, connType, connProvider)
+	if !ok {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "no connector for "+intent.Action.Type)
+		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "no connector"}, nil
+	}
+
+	// Build params.
+	params := buildConnectorParams(intent.Action)
+	if grant.BoundedParameters != nil {
+		for k, v := range *grant.BoundedParameters {
+			params[k] = v
+		}
+	}
+
+	// Resolve credential — inject userID into context for connected account lookup.
+	credCtx := ctx
+	if userID != "" {
+		credCtx = auth.ContextWithClaims(ctx, &auth.Claims{})
+		claims := auth.ClaimsFromContext(credCtx)
+		claims.Subject = userID
+	}
+	vaultPath := s.resolveCredentialVaultPath(credCtx, connProvider)
+	secret, err := s.vault.Get(ctx, vaultPath)
+	if err != nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential not found: "+vaultPath)
+		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "credential not found"}, nil
+	}
+
+	// TEE mode.
+	if s.enclaveClient != nil {
+		if err := s.enclaveClient.Ready(ctx); err != nil {
+			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "enclave not ready")
+			return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "enclave not ready"}, nil
+		}
+		execReq := enclave.ExecuteRequest{
+			RequestID:           execID,
+			UserID:              userID,
+			GrantID:             grant.GrantId,
+			IntentID:            grant.IntentId,
+			ActionType:          intent.Action.Type,
+			ConnectorID:         connType + "/" + connProvider,
+			Parameters:          params,
+			EncryptedCredential: secret.Value,
+			CredentialType:      secret.Metadata.Type,
+		}
+		if escrowID, ok := s.escrowIndex.Load(vaultPath); ok {
+			execReq.EscrowID = escrowID.(string)
+			execReq.EncryptedCredential = nil
+		}
+		enclaveResp, enclaveErr := s.enclaveClient.Execute(ctx, execReq)
+		if enclaveErr != nil {
+			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", enclaveErr.Error())
+			return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: enclaveErr.Error()}, nil
+		}
+		enclaveStatus := api.ExecutionStatusSucceeded
+		if enclaveResp.Status == "failed" {
+			enclaveStatus = api.ExecutionStatusFailed
+		}
+		finishExecution(s, ctx, exec, intent, enclaveStatus, &enclaveResp.Output, enclaveResp.ReceiptRef, enclaveResp.Error)
+		return &executeGrantResult{
+			ExecutionID: execID,
+			Status:      enclaveStatus,
+			Output:      enclaveResp.Output,
+			ReceiptRef:  enclaveResp.ReceiptRef,
+			Error:       enclaveResp.Error,
+		}, nil
+	}
+
+	// Direct mode.
+	kek := s.getUserKEK(userID)
+	if kek == nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "vault locked")
+		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "vault locked"}, nil
+	}
+	credValue, decErr := crypto.Decrypt(secret.Value, kek)
+	zeroBytes(kek)
+	if decErr != nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential decryption failed")
+		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "credential decryption failed"}, nil
+	}
+
+	result, err := conn.Execute(ctx, connectorpkg.ExecutionRequest{
+		GrantID:    grant.GrantId,
+		IntentID:   grant.IntentId,
+		ActionType: intent.Action.Type,
+		Parameters: params,
+		Credential: &connectorpkg.InjectedCredential{
+			Type:  secret.Metadata.Type,
+			Value: credValue,
+		},
+	})
+	if err != nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", err.Error())
+		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: err.Error()}, nil
+	}
+
+	status := api.ExecutionStatusSucceeded
+	if result.Status == connectorpkg.ExecutionStatusFailed {
+		status = api.ExecutionStatusFailed
+	}
+	finishExecution(s, ctx, exec, intent, status, &result.Output, result.ReceiptRef, result.Error)
+	return &executeGrantResult{
+		ExecutionID: execID,
+		Status:      status,
+		Output:      result.Output,
+		ReceiptRef:  result.ReceiptRef,
+		Error:       result.Error,
+	}, nil
+}
+
 func finishExecution(s *apiServer, ctx context.Context, exec api.Execution, intent api.IntentEnvelope, status api.ExecutionStatus, output *map[string]interface{}, receiptRef, errMsg string) {
 	now := time.Now().UTC()
 	exec.Status = status

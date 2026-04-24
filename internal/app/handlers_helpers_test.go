@@ -6,13 +6,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/auth"
+	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
+	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store/mem"
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 // setTestUserClaims returns a context with fake auth claims for testing.
@@ -566,5 +570,271 @@ func TestRequireEnclave_EnclaveDown(t *testing.T) {
 	}
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+// --- formatRecipientList tests ---
+
+func TestFormatRecipientList_Empty(t *testing.T) {
+	got := formatRecipientList(nil)
+	if got != "(no recipients)" {
+		t.Errorf("got %q, want (no recipients)", got)
+	}
+}
+
+func TestFormatRecipientList_WithNames(t *testing.T) {
+	recipients := []model.Recipient{
+		{Name: "Alice", Email: "alice@example.com"},
+		{Email: "bob@example.com"},
+	}
+	got := formatRecipientList(recipients)
+	if got != "Alice <alice@example.com>, bob@example.com" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// --- executeGrant tests ---
+
+func TestExecuteGrant_GrantNotFound(t *testing.T) {
+	s := newExecutionServer()
+	_, err := s.executeGrant(context.Background(), "nonexistent", "usr_test")
+	if err == nil {
+		t.Fatal("expected error for missing grant")
+	}
+}
+
+func TestExecuteGrant_ExpiredGrant(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+
+	s.intents.Create(ctx, api.IntentEnvelope{
+		IntentId: "int_exp", WorkspaceId: "ws_1", Status: api.Approved,
+		Action: api.ActionIntent{Type: "git.pull_request.create", Summary: "test"},
+	})
+	s.grants.Create(ctx, api.ExecutionGrant{
+		GrantId:   "grt_exp",
+		IntentId:  "int_exp",
+		Status:    api.ExecutionGrantStatusActive,
+		ExpiresAt: time.Now().Add(-1 * time.Minute),
+	})
+
+	_, err := s.executeGrant(ctx, "grt_exp", "usr_test")
+	if err == nil {
+		t.Fatal("expected error for expired grant")
+	}
+}
+
+func TestExecuteGrant_NoConnector(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	seedGrantAndIntent(ctx, s, "grt_nc", "int_nc")
+
+	result, err := s.executeGrant(ctx, "grt_nc", "usr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+}
+
+func TestExecuteGrant_SuccessWithConnector(t *testing.T) {
+	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_exec")
+	ctx := context.Background()
+
+	conn := &stubConnector{
+		result: connectorpkg.ExecutionResult{
+			Status:     connectorpkg.ExecutionStatusSucceeded,
+			ReceiptRef: "https://github.com/acme/app/pull/42",
+			Output:     map[string]any{"pr_url": "https://github.com/acme/app/pull/42"},
+		},
+	}
+	s.registry.Register(ctx, conn)
+	storeEncryptedToken(s, "connectors/github/default", []byte("token"))
+	seedGrantAndIntent(ctx, s, "grt_ok", "int_ok")
+
+	result, err := s.executeGrant(ctx, "grt_ok", "usr_exec")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusSucceeded {
+		t.Errorf("Status = %q, want succeeded; Error: %s", result.Status, result.Error)
+	}
+	if result.ReceiptRef != "https://github.com/acme/app/pull/42" {
+		t.Errorf("ReceiptRef = %q", result.ReceiptRef)
+	}
+}
+
+func TestExecuteGrant_ConnectorFails(t *testing.T) {
+	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_exec")
+	ctx := context.Background()
+
+	conn := &stubConnector{
+		result: connectorpkg.ExecutionResult{
+			Status: connectorpkg.ExecutionStatusFailed,
+			Error:  "API error 422",
+		},
+	}
+	s.registry.Register(ctx, conn)
+	storeEncryptedToken(s, "connectors/github/default", []byte("token"))
+	seedGrantAndIntent(ctx, s, "grt_fail", "int_fail")
+
+	result, err := s.executeGrant(ctx, "grt_fail", "usr_exec")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+}
+
+func TestExecuteGrant_CredentialNotFound(t *testing.T) {
+	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_nocred")
+	ctx := context.Background()
+
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+
+	// Seed grant and intent WITHOUT a vault credential.
+	s.intents.Create(ctx, api.IntentEnvelope{
+		IntentId: "int_nocred", WorkspaceId: "ws_1", Status: api.Approved,
+		Action:    api.ActionIntent{Type: "git.push", Summary: "push"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+	s.grants.Create(ctx, api.ExecutionGrant{
+		GrantId: "grt_nocred", IntentId: "int_nocred",
+		Status: api.ExecutionGrantStatusActive, ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	result, err := s.executeGrant(ctx, "grt_nocred", "usr_nocred")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed (no credential in vault)", result.Status)
+	}
+}
+
+func TestExecuteGrant_VaultLocked(t *testing.T) {
+	s := newExecutionServer()
+	// kekSessionCache is nil → vault locked
+	ctx := context.Background()
+
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+	s.vault.Put(ctx, "connectors/github/default", []byte("token"), vault.Metadata{})
+	seedGrantAndIntent(ctx, s, "grt_locked", "int_locked")
+
+	result, err := s.executeGrant(ctx, "grt_locked", "usr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if result.Error != "vault locked" {
+		t.Errorf("Error = %q, want 'vault locked'", result.Error)
+	}
+}
+
+func TestExecuteGrant_TEEMode_Success(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+	s.enclaveClient = &stubEnclaveClient{
+		resp: enclave.ExecuteResponse{
+			Status: "succeeded", ReceiptRef: "receipt_tee",
+			Output: map[string]any{"ok": true},
+		},
+	}
+	seedGrantAndIntent(ctx, s, "grt_tee", "int_tee")
+	result, err := s.executeGrant(ctx, "grt_tee", "usr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusSucceeded {
+		t.Errorf("Status = %q, want succeeded", result.Status)
+	}
+	if result.ReceiptRef != "receipt_tee" {
+		t.Errorf("ReceiptRef = %q", result.ReceiptRef)
+	}
+}
+
+func TestExecuteGrant_TEEMode_EnclaveNotReady(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+	s.enclaveClient = &failingEnclaveClient{}
+	seedGrantAndIntent(ctx, s, "grt_nr", "int_nr")
+	result, err := s.executeGrant(ctx, "grt_nr", "usr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(result.Error, "enclave not ready") {
+		t.Errorf("Error = %q", result.Error)
+	}
+}
+
+func TestExecuteGrant_TEEMode_ExecuteError(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+	s.enclaveClient = &stubEnclaveClient{err: fmt.Errorf("enclave unreachable")}
+	seedGrantAndIntent(ctx, s, "grt_ee", "int_ee")
+	result, err := s.executeGrant(ctx, "grt_ee", "usr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+}
+
+func TestExecuteGrant_TEEMode_ConnectorFailed(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+	s.enclaveClient = &stubEnclaveClient{
+		resp: enclave.ExecuteResponse{Status: "failed", Error: "permission denied"},
+	}
+	seedGrantAndIntent(ctx, s, "grt_tf", "int_tf")
+	result, err := s.executeGrant(ctx, "grt_tf", "usr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if result.Error != "permission denied" {
+		t.Errorf("Error = %q", result.Error)
+	}
+}
+
+func TestExecuteGrant_TEEMode_WithEscrowIndex(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	conn := &stubConnector{}
+	s.registry.Register(ctx, conn)
+	s.enclaveClient = &stubEnclaveClient{
+		resp: enclave.ExecuteResponse{Status: "succeeded", ReceiptRef: "receipt_esc"},
+	}
+	seedGrantAndIntent(ctx, s, "grt_esc", "int_esc")
+	s.escrowIndex.Store("connectors/github/default", "escrow_456")
+	result, err := s.executeGrant(ctx, "grt_esc", "usr_test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusSucceeded {
+		t.Errorf("Status = %q, want succeeded", result.Status)
 	}
 }
