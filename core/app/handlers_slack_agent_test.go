@@ -1193,6 +1193,36 @@ func TestBuildStreamingPipeline_VaultLocked(t *testing.T) {
 	}
 }
 
+func TestResolvePipelineVault_ActiveTEESession_NoEscrow(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("research", "draft")
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	srv.teeState = newTeeState()
+
+	// Simulate an active TEE session with no escrow entries.
+	srv.teeState.userSessions["usr_a"] = time.Now().Add(1 * time.Hour)
+
+	result := srv.resolvePipelineVault("usr_a")
+	if result == nil {
+		t.Error("expected non-nil pipeline when TEE session is active")
+	}
+}
+
+func TestResolvePipelineVault_ExpiredTEESession_ReturnsNil(t *testing.T) {
+	srv, _ := newAgentTestServer()
+	srv.draftPipeline = newTestPipeline("research", "draft")
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+	srv.teeState = newTeeState()
+
+	// Simulate an expired TEE session.
+	srv.teeState.userSessions["usr_a"] = time.Now().Add(-1 * time.Hour)
+
+	result := srv.resolvePipelineVault("usr_a")
+	if result != nil {
+		t.Error("expected nil when TEE session is expired")
+	}
+}
+
 func TestVaultUnlockURL_UsesConfiguredBase(t *testing.T) {
 	srv := &apiServer{uiBaseURL: "https://custom.example.com"}
 	url := srv.vaultUnlockURL()

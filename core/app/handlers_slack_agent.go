@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
@@ -15,7 +16,8 @@ import (
 // available credential source for the given user:
 //  1. KEK session (user recently unlocked vault) → UserScopedVault
 //  2. Escrow (credentials escrowed in TEE) → EscrowVault
-//  3. Neither available → returns nil
+//  3. Active TEE session (vault unlocked, no escrow entries) → base pipeline
+//  4. Neither available → returns nil
 func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 	if s.draftPipeline == nil {
 		return nil
@@ -48,7 +50,20 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 		}
 	}
 
-	// Tier 3: Auth not enabled (local dev) — use base pipeline without vault.
+	// Tier 3: Active TEE session but no escrow entries (e.g. enclave
+	// restarted, or user has no connected accounts with stored creds).
+	// The vault IS unlocked — return the base pipeline so the user isn't
+	// told to unlock when they already have.
+	if s.teeState != nil {
+		s.teeState.mu.Lock()
+		teeExpiry, hasTeeSession := s.teeState.userSessions[userID]
+		s.teeState.mu.Unlock()
+		if hasTeeSession && time.Now().Before(teeExpiry) {
+			return s.draftPipeline
+		}
+	}
+
+	// Tier 4: Auth not enabled (local dev) — use base pipeline without vault.
 	if s.kekSessionCache == nil {
 		return s.draftPipeline
 	}
