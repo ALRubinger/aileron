@@ -912,6 +912,57 @@ func TestSplitCSV(t *testing.T) {
 	}
 }
 
+func TestSplitAttendees(t *testing.T) {
+	got := splitAttendees("alice@example.com")
+	if len(got) != 1 || got[0]["email"] != "alice@example.com" {
+		t.Errorf("unexpected attendees: %v", got)
+	}
+	if splitAttendees("") != nil {
+		t.Error("expected nil for empty input")
+	}
+}
+
+func TestSubmitStructuredIntent_ConnectionError(t *testing.T) {
+	s := &server{aileronURL: "http://127.0.0.1:1", httpClient: &http.Client{}}
+	result := s.submitStructuredIntent(context.Background(), "email.send", "test", map[string]any{})
+	if !result.IsError {
+		t.Fatal("expected error for unreachable server")
+	}
+	if !contains(result.Content[0].Text, "failed to submit intent") {
+		t.Errorf("unexpected error: %s", result.Content[0].Text)
+	}
+}
+
+func TestSubmitStructuredIntent_NoURL(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.submitStructuredIntent(context.Background(), "email.send", "test", map[string]any{})
+	if !result.IsError {
+		t.Fatal("expected error without URL")
+	}
+	if !contains(result.Content[0].Text, "not configured") {
+		t.Errorf("unexpected error: %s", result.Content[0].Text)
+	}
+}
+
+func TestSubmitStructuredIntent_WithToken(t *testing.T) {
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"id": "int_1"})
+	}))
+	defer ts.Close()
+
+	s := &server{aileronURL: ts.URL, aileronToken: "my-token", httpClient: ts.Client()}
+	result := s.submitStructuredIntent(context.Background(), "email.send", "test", map[string]any{})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+	if gotAuth != "Bearer my-token" {
+		t.Errorf("expected Bearer my-token, got %s", gotAuth)
+	}
+}
+
 func TestSplitRecipients(t *testing.T) {
 	got := splitRecipients("alice@example.com, bob@example.com")
 	if len(got) != 2 {
