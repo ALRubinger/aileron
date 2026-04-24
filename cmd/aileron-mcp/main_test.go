@@ -65,11 +65,17 @@ func TestHandle_ToolsList_CloudOnly(t *testing.T) {
 		t.Fatal("expected map result")
 	}
 	tools, ok := result["tools"].([]toolDef)
-	if !ok || len(tools) != 1 {
-		t.Fatal("expected exactly one tool (submit_intent)")
+	if !ok || len(tools) != 5 {
+		t.Fatalf("expected 5 tools (submit_intent + 4 write tools), got %d", len(tools))
 	}
-	if tools[0].Name != "submit_intent" {
-		t.Errorf("expected submit_intent, got %s", tools[0].Name)
+	names := map[string]bool{}
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"submit_intent", "send_email", "create_calendar_event", "create_github_issue", "comment_on_github_issue"} {
+		if !names[want] {
+			t.Errorf("expected tool %s in list", want)
+		}
 	}
 }
 
@@ -103,8 +109,9 @@ func TestHandle_ToolsList_Both(t *testing.T) {
 	})
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]toolDef)
-	if len(tools) != 5 {
-		t.Fatalf("expected 5 tools, got %d", len(tools))
+	// 4 comms tools + 5 cloud tools (submit_intent + 4 write tools) = 9
+	if len(tools) != 9 {
+		t.Fatalf("expected 9 tools, got %d", len(tools))
 	}
 }
 
@@ -653,6 +660,273 @@ func TestDraftReply_MissingFields(t *testing.T) {
 	result := s.draftReply(map[string]any{})
 	if !result.IsError {
 		t.Error("expected error for missing fields")
+	}
+}
+
+// --- Write tool tests ---
+
+func TestSendEmail_MissingFields(t *testing.T) {
+	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{"empty", map[string]any{}},
+		{"missing subject", map[string]any{"to": "a@b.com", "body_text": "hi"}},
+		{"missing to", map[string]any{"subject": "hi", "body_text": "hi"}},
+		{"missing body", map[string]any{"to": "a@b.com", "subject": "hi"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := s.sendEmail(context.Background(), tt.args)
+			if !result.IsError {
+				t.Fatal("expected error for missing fields")
+			}
+		})
+	}
+}
+
+func TestSendEmail_Success(t *testing.T) {
+	var receivedBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"id": "int_email_1", "status": "pending_approval"})
+	}))
+	defer ts.Close()
+
+	s := &server{aileronURL: ts.URL, aileronToken: "tok", httpClient: ts.Client()}
+	result := s.sendEmail(context.Background(), map[string]any{
+		"to":        "alice@example.com, bob@example.com",
+		"cc":        "carol@example.com",
+		"subject":   "Weekly sync",
+		"body_text": "See you Thursday",
+		"send_mode": "draft_only",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	action, _ := receivedBody["action"].(map[string]any)
+	if action["type"] != "email.draft" {
+		t.Errorf("expected email.draft action type for draft_only, got %v", action["type"])
+	}
+	domain, _ := action["domain"].(map[string]any)
+	email, _ := domain["email"].(map[string]any)
+	to, _ := email["to"].([]any)
+	if len(to) != 2 {
+		t.Errorf("expected 2 recipients, got %d", len(to))
+	}
+}
+
+func TestSendEmail_NoURL(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.sendEmail(context.Background(), map[string]any{
+		"to": "a@b.com", "subject": "hi", "body_text": "hello",
+	})
+	if !result.IsError {
+		t.Fatal("expected error without AILERON_URL")
+	}
+}
+
+func TestCreateCalendarEvent_MissingFields(t *testing.T) {
+	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{"empty", map[string]any{}},
+		{"missing times", map[string]any{"title": "Standup"}},
+		{"missing title", map[string]any{"start_time": "2025-03-15T10:00:00Z", "end_time": "2025-03-15T11:00:00Z"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := s.createCalendarEvent(context.Background(), tt.args)
+			if !result.IsError {
+				t.Fatal("expected error for missing fields")
+			}
+		})
+	}
+}
+
+func TestCreateCalendarEvent_Success(t *testing.T) {
+	var receivedBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"id": "int_cal_1", "status": "pending_approval"})
+	}))
+	defer ts.Close()
+
+	s := &server{aileronURL: ts.URL, httpClient: ts.Client()}
+	result := s.createCalendarEvent(context.Background(), map[string]any{
+		"title":           "Standup",
+		"start_time":      "2025-03-15T10:00:00Z",
+		"end_time":        "2025-03-15T10:30:00Z",
+		"attendees":       "alice@example.com, bob@example.com",
+		"conference_type": "google_meet",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	action, _ := receivedBody["action"].(map[string]any)
+	if action["type"] != "calendar.event.create" {
+		t.Errorf("expected calendar.event.create, got %v", action["type"])
+	}
+	domain, _ := action["domain"].(map[string]any)
+	cal, _ := domain["calendar"].(map[string]any)
+	attendees, _ := cal["attendees"].([]any)
+	if len(attendees) != 2 {
+		t.Errorf("expected 2 attendees, got %d", len(attendees))
+	}
+}
+
+func TestCreateGithubIssue_MissingFields(t *testing.T) {
+	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{"empty", map[string]any{}},
+		{"missing title", map[string]any{"repository": "acme/app"}},
+		{"missing repo", map[string]any{"title": "Bug report"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := s.createGithubIssue(context.Background(), tt.args)
+			if !result.IsError {
+				t.Fatal("expected error for missing fields")
+			}
+		})
+	}
+}
+
+func TestCreateGithubIssue_Success(t *testing.T) {
+	var receivedBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"id": "int_gh_1", "status": "pending_approval"})
+	}))
+	defer ts.Close()
+
+	s := &server{aileronURL: ts.URL, httpClient: ts.Client()}
+	result := s.createGithubIssue(context.Background(), map[string]any{
+		"repository": "acme/backend",
+		"title":      "Fix login bug",
+		"body":       "Users can't log in after password reset",
+		"labels":     "bug, priority:high",
+		"assignees":  "alice",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	action, _ := receivedBody["action"].(map[string]any)
+	if action["type"] != "git.issue.create" {
+		t.Errorf("expected git.issue.create, got %v", action["type"])
+	}
+	domain, _ := action["domain"].(map[string]any)
+	git, _ := domain["git"].(map[string]any)
+	labels, _ := git["issue_labels"].([]any)
+	if len(labels) != 2 {
+		t.Errorf("expected 2 labels, got %d", len(labels))
+	}
+}
+
+func TestCommentOnGithubIssue_MissingFields(t *testing.T) {
+	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{"empty", map[string]any{}},
+		{"missing body", map[string]any{"repository": "acme/app", "issue_number": "42"}},
+		{"missing issue_number", map[string]any{"repository": "acme/app", "body": "LGTM"}},
+		{"missing repo", map[string]any{"issue_number": "42", "body": "LGTM"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := s.commentOnGithubIssue(context.Background(), tt.args)
+			if !result.IsError {
+				t.Fatal("expected error for missing fields")
+			}
+		})
+	}
+}
+
+func TestCommentOnGithubIssue_Success(t *testing.T) {
+	var receivedBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"id": "int_ghc_1", "status": "pending_approval"})
+	}))
+	defer ts.Close()
+
+	s := &server{aileronURL: ts.URL, httpClient: ts.Client()}
+	result := s.commentOnGithubIssue(context.Background(), map[string]any{
+		"repository":   "acme/backend",
+		"issue_number": "123",
+		"body":         "This is fixed in PR #456",
+	})
+	if result.IsError {
+		t.Fatalf("unexpected error: %s", result.Content[0].Text)
+	}
+
+	action, _ := receivedBody["action"].(map[string]any)
+	if action["type"] != "git.issue.comment" {
+		t.Errorf("expected git.issue.comment, got %v", action["type"])
+	}
+}
+
+func TestDispatchTool_WriteTools(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	tools := []string{"send_email", "create_calendar_event", "create_github_issue", "comment_on_github_issue"}
+	for _, tool := range tools {
+		t.Run(tool, func(t *testing.T) {
+			result := s.dispatchTool(context.Background(), tool, map[string]any{})
+			if !result.IsError {
+				t.Fatal("expected error (missing required fields or no AILERON_URL)")
+			}
+		})
+	}
+}
+
+func TestSplitCSV(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"", 0},
+		{"a", 1},
+		{"a, b, c", 3},
+		{"  a , b ,, c ", 3},
+	}
+	for _, tt := range tests {
+		got := splitCSV(tt.input)
+		if len(got) != tt.want {
+			t.Errorf("splitCSV(%q) = %d items, want %d", tt.input, len(got), tt.want)
+		}
+	}
+}
+
+func TestSplitRecipients(t *testing.T) {
+	got := splitRecipients("alice@example.com, bob@example.com")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 recipients, got %d", len(got))
+	}
+	if got[0]["email"] != "alice@example.com" {
+		t.Errorf("expected alice@example.com, got %s", got[0]["email"])
+	}
+	if got[1]["email"] != "bob@example.com" {
+		t.Errorf("expected bob@example.com, got %s", got[1]["email"])
+	}
+
+	empty := splitRecipients("")
+	if empty != nil {
+		t.Errorf("expected nil for empty input, got %v", empty)
 	}
 }
 
