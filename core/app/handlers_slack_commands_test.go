@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/comms"
 	"github.com/ALRubinger/aileron/core/draft"
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/source"
@@ -192,19 +194,7 @@ func TestSlashCommandQuestion_CredentialUnavailable_SendsVaultUnlockMessage(t *t
 		Provider: model.ConnectedAccountProviderSlack,
 		Status:   model.ConnectedAccountStatusActive,
 	})
-	sourceReg := source.NewRegistry()
-	sourceReg.Register(&stubSourceConnector{})
-
-	srv.draftPipeline = draft.NewPipeline(
-		&mockLLMClient{err: fmt.Errorf("vault: escrow retrieve: %w", vault.ErrCredentialUnavailable)},
-		&mockLLMClient{response: "draft"},
-		sourceReg,
-		accounts,
-		mem.NewUserInstructionStore(),
-		vault.NewMemVault(),
-		slog.Default(),
-		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
-	)
+	srv.draftPipeline = newVaultErrorPipeline(accounts)
 	// Disable KEK check so resolvePipelineVault falls through to tier 3.
 	srv.kekSessionCache = nil
 
@@ -223,6 +213,81 @@ func TestSlashCommandQuestion_CredentialUnavailable_SendsVaultUnlockMessage(t *t
 	// Should NOT contain the generic error message.
 	if strings.Contains(body, "Something went wrong") {
 		t.Errorf("should not contain generic error when vault is locked, got: %s", body)
+	}
+}
+
+// newVaultErrorPipeline returns a pipeline whose research LLM fails with
+// ErrCredentialUnavailable, simulating a stale escrow or locked vault.
+func newVaultErrorPipeline(accounts *mem.ConnectedAccountStore) *draft.Pipeline {
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&stubSourceConnector{})
+	return draft.NewPipeline(
+		&mockLLMClient{err: fmt.Errorf("vault: escrow retrieve: %w", vault.ErrCredentialUnavailable)},
+		&mockLLMClient{response: "draft"},
+		sourceReg,
+		accounts,
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+}
+
+func TestSlashCommandDraft_CredentialUnavailable_SendsVaultUnlockMessage(t *testing.T) {
+	// When GenerateDraft returns ErrCredentialUnavailable during draft
+	// generation, the modal should show the vault unlock message instead
+	// of "Draft generation failed."
+	var mu sync.Mutex
+	var modalMessage string
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		modalMessage = string(body)
+		mu.Unlock()
+		slackViewOK(w)
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv := newCommandTestServer()
+	srv.uiBaseURL = "https://app.withaileron.ai"
+	ctx := context.Background()
+
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+
+	accounts := mem.NewConnectedAccountStore()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_a", UserID: "usr_a",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	srv.draftPipeline = newVaultErrorPipeline(accounts)
+	srv.kekSessionCache = nil
+
+	meta := DraftModalMeta{
+		TargetChannel:   "C123",
+		OriginalMessage: "Help with PR",
+		UserID:          "U_ALICE",
+		TeamID:          "T001",
+	}
+
+	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft a reply", "trig_123", meta)
+
+	mu.Lock()
+	view := modalMessage
+	mu.Unlock()
+
+	if !strings.Contains(view, "Unlock your vault") {
+		t.Errorf("expected vault unlock message in modal, got: %s", view)
+	}
+	if !strings.Contains(view, "setup-vault") {
+		t.Errorf("expected setup-vault URL in modal, got: %s", view)
+	}
+	if strings.Contains(view, "Draft generation failed") {
+		t.Errorf("should not show generic error for vault issues, got: %s", view)
 	}
 }
 
