@@ -1253,6 +1253,15 @@ func TestIsVaultError_FalseForOtherErrors(t *testing.T) {
 	}
 }
 
+func TestIsVaultError_MatchesAuthFailed(t *testing.T) {
+	// Auth failures (e.g. expired OAuth tokens) should be treated as vault
+	// errors so the handler sends the unlock message to the user.
+	wrapped := fmt.Errorf("credentials expired for gmail: %w", source.ErrAuthFailed)
+	if !isVaultError(wrapped) {
+		t.Error("expected isVaultError to return true for wrapped ErrAuthFailed")
+	}
+}
+
 func TestHandleAssistantMessage_VaultLocked_PostsUnlockMessage(t *testing.T) {
 	srv, agent := newAgentTestServer()
 	ctx := context.Background()

@@ -1244,11 +1244,35 @@ func (m *authFailSourceConnector) Execute(_ context.Context, _ string, _ map[str
 	return nil, fmt.Errorf("googleapi: Error 401: Invalid Credentials: %w", source.ErrAuthFailed)
 }
 
-func TestPipeline_GenerateDraft_ToolExecutor_AuthFailed(t *testing.T) {
+// toolCallingLLMClient invokes the ToolExecutor for a configured tool name
+// during the research round, then returns the ghostwrite response.
+type toolCallingLLMClient struct {
+	toolName       string
+	toolParams     map[string]any
+	ghostwriteResp *llm.GenerateResponse
+}
+
+func (m *toolCallingLLMClient) GenerateWithTools(_ context.Context, req llm.GenerateRequest) (*llm.GenerateResponse, error) {
+	if len(req.Tools) > 0 && req.ToolExecutor != nil {
+		// Simulate the LLM requesting a tool call.
+		_, err := req.ToolExecutor(context.Background(), m.toolName, m.toolParams)
+		if err != nil {
+			// Non-fatal errors are fed back to the LLM in the real loop;
+			// here we just return whatever text we have.
+			return &llm.GenerateResponse{Text: "partial context"}, nil
+		}
+		return &llm.GenerateResponse{Text: "context gathered"}, nil
+	}
+	return m.ghostwriteResp, nil
+}
+
+func TestPipeline_GenerateDraft_AuthFailed_Propagates(t *testing.T) {
 	// When a source connector returns source.ErrAuthFailed (e.g. Google 401),
-	// the tool executor should return a ToolFatalError so the LLM loop aborts.
-	mock := &mockLLMClient{
-		researchResp:   &llm.GenerateResponse{Text: "context gathered"},
+	// the pipeline should propagate the error so the handler can tell the
+	// user to re-authenticate — not swallow it with a generic placeholder.
+	mock := &toolCallingLLMClient{
+		toolName:       "slack_channel_history",
+		toolParams:     map[string]any{"channel": "C123"},
 		ghostwriteResp: &llm.GenerateResponse{Text: "draft"},
 	}
 
@@ -1271,30 +1295,51 @@ func TestPipeline_GenerateDraft_ToolExecutor_AuthFailed(t *testing.T) {
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
 		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Alice", Body: "hi",
 	})
-	if err != nil {
-		t.Fatalf("unexpected top-level error: %v", err)
+	if err == nil {
+		t.Fatal("expected error from auth failure, got nil")
+	}
+	if !errors.Is(err, source.ErrAuthFailed) {
+		t.Errorf("expected error to wrap source.ErrAuthFailed, got: %v", err)
+	}
+}
+
+func TestPipeline_GenerateDraftStream_AuthFailed_Propagates(t *testing.T) {
+	// Streaming path: when a source connector returns ErrAuthFailed,
+	// the error should appear on errCh so the handler can notify the user.
+	mock := &toolCallingLLMClient{
+		toolName:       "slack_channel_history",
+		toolParams:     map[string]any{"channel": "C123"},
+		ghostwriteResp: &llm.GenerateResponse{Text: "draft"},
 	}
 
-	// Extract the tool executor from the research round.
-	if len(mock.requests) < 1 {
-		t.Fatal("expected at least 1 LLM call")
-	}
-	researchReq := mock.requests[0]
-	if researchReq.ToolExecutor == nil {
-		t.Fatal("expected ToolExecutor in research round")
-	}
+	accounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
+		Status: model.ConnectedAccountStatusActive,
+	})
 
-	// Execute a tool — should return a ToolFatalError wrapping ErrAuthFailed.
-	_, execErr := researchReq.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
-	if execErr == nil {
-		t.Fatal("expected error from auth failure")
-	}
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&authFailSourceConnector{})
 
-	var fatal *llm.ToolFatalError
-	if !errors.As(execErr, &fatal) {
-		t.Fatalf("expected *llm.ToolFatalError, got %T: %v", execErr, execErr)
+	v := vault.NewMemVault()
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"test"}`), vault.Metadata{})
+
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
+		v, slog.Default(), draft.Prompts{Research: "test", Ghostwrite: "test"})
+
+	chunkCh, errCh := p.GenerateDraftStream(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Alice", Body: "hi",
+	})
+
+	// Drain chunks.
+	for range chunkCh {
 	}
-	if !errors.Is(fatal.Err, source.ErrAuthFailed) {
-		t.Errorf("expected ToolFatalError to wrap ErrAuthFailed, got: %v", fatal.Err)
+	err := <-errCh
+	if err == nil {
+		t.Fatal("expected error from auth failure on errCh, got nil")
+	}
+	if !errors.Is(err, source.ErrAuthFailed) {
+		t.Errorf("expected error wrapping ErrAuthFailed, got: %v", err)
 	}
 }
