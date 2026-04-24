@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1192,6 +1193,35 @@ func TestBuildStreamingPipeline_VaultLocked(t *testing.T) {
 	}
 }
 
+func TestVaultUnlockURL_UsesConfiguredBase(t *testing.T) {
+	srv := &apiServer{uiBaseURL: "https://custom.example.com"}
+	url := srv.vaultUnlockURL()
+	if url != "https://custom.example.com/setup-vault" {
+		t.Errorf("expected custom URL, got %q", url)
+	}
+}
+
+func TestVaultUnlockURL_FallsBackToProduction(t *testing.T) {
+	srv := &apiServer{}
+	url := srv.vaultUnlockURL()
+	if url != "https://app.withaileron.ai/setup-vault" {
+		t.Errorf("expected production fallback URL, got %q", url)
+	}
+}
+
+func TestIsVaultError_MatchesCredentialUnavailable(t *testing.T) {
+	wrapped := fmt.Errorf("escrow retrieve: %w", vault.ErrCredentialUnavailable)
+	if !isVaultError(wrapped) {
+		t.Error("expected isVaultError to return true for wrapped ErrCredentialUnavailable")
+	}
+}
+
+func TestIsVaultError_FalseForOtherErrors(t *testing.T) {
+	if isVaultError(fmt.Errorf("network timeout")) {
+		t.Error("expected isVaultError to return false for unrelated error")
+	}
+}
+
 func TestHandleAssistantMessage_VaultLocked_PostsUnlockMessage(t *testing.T) {
 	srv, agent := newAgentTestServer()
 	ctx := context.Background()
@@ -1294,6 +1324,81 @@ func TestHandleAssistantMessage_CredentialUnavailable_PostsUnlockMessage(t *test
 	}
 	if !strings.Contains(msg, "setup-vault") {
 		t.Errorf("expected setup-vault URL in message, got: %s", msg)
+	}
+}
+
+func TestGenerateDraftFromInstructions_CredentialUnavailable_SendsVaultUnlockMessage(t *testing.T) {
+	// When the pipeline returns ErrCredentialUnavailable during draft
+	// generation from instructions, the modal should show the vault
+	// unlock message instead of "Draft generation failed."
+	var mu sync.Mutex
+	var modalMessage string
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		modalMessage = string(body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_MODAL_123"},
+		})
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv, _ := newAgentTestServer()
+	srv.uiBaseURL = "https://app.withaileron.ai"
+	ctx := context.Background()
+
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	accounts := mem.NewConnectedAccountStore()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_a", UserID: "usr_a",
+		Provider: model.ConnectedAccountProviderSlack,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&stubSourceConnector{})
+
+	srv.draftPipeline = draft.NewPipeline(
+		&mockLLMClient{err: fmt.Errorf("vault: escrow retrieve: %w", vault.ErrCredentialUnavailable)},
+		&mockLLMClient{response: "draft"},
+		sourceReg,
+		accounts,
+		mem.NewUserInstructionStore(),
+		vault.NewMemVault(),
+		slog.Default(),
+		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
+	)
+	srv.kekSessionCache = nil
+
+	meta := DraftModalMeta{
+		TargetChannel:   "C123",
+		OriginalMessage: "Can someone review PR #42?",
+		Instructions:    "Be polite",
+		UserID:          "U_ALICE",
+		TeamID:          "T001",
+	}
+
+	srv.generateDraftFromInstructions(ctx, "V_MODAL_123", meta)
+
+	mu.Lock()
+	view := modalMessage
+	mu.Unlock()
+
+	if !strings.Contains(view, "Unlock your vault") {
+		t.Errorf("expected vault unlock message in modal, got: %s", view)
+	}
+	if !strings.Contains(view, "setup-vault") {
+		t.Errorf("expected setup-vault URL in modal, got: %s", view)
+	}
+	if strings.Contains(view, "Draft generation failed") {
+		t.Errorf("should not show generic error for vault issues, got: %s", view)
 	}
 }
 
