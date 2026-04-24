@@ -38,11 +38,8 @@
 		try {
 			const status = await getVaultStatus();
 			if (status.has_passphrase && !status.locked) {
-				// Already set up and unlocked — go to dashboard.
-				goto('/');
-				return;
-			}
-			if (status.has_passphrase) {
+				step = 'done';
+			} else if (status.has_passphrase) {
 				step = 'unlock';
 			}
 		} catch {
@@ -100,8 +97,6 @@
 					setSessionExpiresAt(result.sessionExpiresAt);
 				}
 				step = 'done';
-				// Redirect to dashboard after brief success display.
-				setTimeout(() => goto('/'), 1500);
 			} else {
 				error = 'Incorrect passphrase';
 			}
@@ -115,7 +110,7 @@
 </script>
 
 <svelte:head>
-	<title>Set up vault — Aileron</title>
+	<title>Vault — Aileron</title>
 </svelte:head>
 
 <div class="flex items-center justify-center min-h-[70vh]">
@@ -212,9 +207,14 @@
 			<Card.Header>
 				<Card.Title class="text-xl">Vault unlocked</Card.Title>
 				<Card.Description>
-					Your vault is set up and ready. Redirecting to dashboard...
+					Your vault is set up and unlocked. Your encrypted credentials are available for this session.
 				</Card.Description>
 			</Card.Header>
+			<Card.Content>
+				<a href="/settings/connected-accounts">
+					<Button class="w-full">Manage connected services</Button>
+				</a>
+			</Card.Content>
 		</Card.Root>
 	{/if}
 </div>
