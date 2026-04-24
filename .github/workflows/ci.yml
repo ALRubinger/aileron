@@ -163,6 +163,35 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ui/test-results/junit-vitest.xml,ui/test-results/junit-playwright.xml
 
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build docs image
+        run: docker build -t aileron-docs -f docs/Dockerfile .
+
+      - name: Start docs container
+        run: docker run -d --name docs -p 3001:3000 aileron-docs
+
+      - name: Verify docs respond
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:3001; then
+              echo "Docs site healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Docs site did not respond"
+          docker logs docs
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f docs
+
   integration-go:
     name: Integration Tests (Go)
     runs-on: ubuntu-latest
