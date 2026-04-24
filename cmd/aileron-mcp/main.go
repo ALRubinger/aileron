@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/ALRubinger/aileron/internal/version"
@@ -161,6 +162,80 @@ var submitIntentTool = toolDef{
 	},
 }
 
+// --- Typed write tools ---
+// These submit structured intents to the Aileron execution plane.
+// The policy engine evaluates each one (write actions default to
+// RequireApproval), the human approves, and the connector executes.
+
+var sendEmailTool = toolDef{
+	Name:        "send_email",
+	Description: "Send an email or save a draft via Gmail. Requires human approval before sending. Use send_mode=draft_only to save without sending.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"to":        {Type: "string", Description: "Comma-separated recipient email addresses"},
+			"cc":        {Type: "string", Description: "Comma-separated CC email addresses (optional)"},
+			"bcc":       {Type: "string", Description: "Comma-separated BCC email addresses (optional)"},
+			"subject":   {Type: "string", Description: "Email subject line"},
+			"body_text": {Type: "string", Description: "Plain text email body"},
+			"body_html": {Type: "string", Description: "HTML email body (optional, overrides body_text for rich formatting)"},
+			"send_mode": {Type: "string", Description: "send_now (default) or draft_only"},
+			"thread_ref": {Type: "string", Description: "Thread/message ID to reply to (optional, for threading)"},
+		},
+		Required: []string{"to", "subject", "body_text"},
+	},
+}
+
+var createCalendarEventTool = toolDef{
+	Name:        "create_calendar_event",
+	Description: "Create a Google Calendar event. Requires human approval. Times must be RFC3339 format (e.g. 2025-03-15T10:00:00-05:00).",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"title":           {Type: "string", Description: "Event title"},
+			"description":     {Type: "string", Description: "Event description (optional)"},
+			"start_time":      {Type: "string", Description: "Start time in RFC3339 format"},
+			"end_time":        {Type: "string", Description: "End time in RFC3339 format"},
+			"timezone":        {Type: "string", Description: "IANA timezone (e.g. America/New_York). Defaults to UTC."},
+			"location":        {Type: "string", Description: "Event location (optional)"},
+			"attendees":       {Type: "string", Description: "Comma-separated attendee email addresses (optional)"},
+			"conference_type": {Type: "string", Description: "none (default), google_meet, or zoom"},
+			"calendar_id":     {Type: "string", Description: "Calendar ID (optional, defaults to primary)"},
+		},
+		Required: []string{"title", "start_time", "end_time"},
+	},
+}
+
+var createGithubIssueTool = toolDef{
+	Name:        "create_github_issue",
+	Description: "Create a GitHub issue. Requires human approval.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"repository": {Type: "string", Description: "Repository in owner/repo format (e.g. acme/backend)"},
+			"title":      {Type: "string", Description: "Issue title"},
+			"body":       {Type: "string", Description: "Issue body in Markdown (optional)"},
+			"labels":     {Type: "string", Description: "Comma-separated label names (optional)"},
+			"assignees":  {Type: "string", Description: "Comma-separated GitHub usernames to assign (optional)"},
+		},
+		Required: []string{"repository", "title"},
+	},
+}
+
+var commentOnGithubIssueTool = toolDef{
+	Name:        "comment_on_github_issue",
+	Description: "Add a comment to an existing GitHub issue or pull request. Requires human approval.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"repository":   {Type: "string", Description: "Repository in owner/repo format (e.g. acme/backend)"},
+			"issue_number": {Type: "string", Description: "Issue or PR number"},
+			"body":         {Type: "string", Description: "Comment body in Markdown"},
+		},
+		Required: []string{"repository", "issue_number", "body"},
+	},
+}
+
 func main() {
 	s := &server{
 		aileronURL:   os.Getenv("AILERON_URL"),
@@ -261,7 +336,13 @@ func (s *server) availableTools() []toolDef {
 		tools = append(tools, readMessagesTool, draftReplyTool, sendMessageTool, httpRequestTool)
 	}
 	if s.aileronURL != "" {
-		tools = append(tools, submitIntentTool)
+		tools = append(tools,
+			submitIntentTool,
+			sendEmailTool,
+			createCalendarEventTool,
+			createGithubIssueTool,
+			commentOnGithubIssueTool,
+		)
 	}
 	return tools
 }
@@ -278,6 +359,14 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 		return s.sendMessage(args)
 	case "http_request":
 		return s.httpRequest(args)
+	case "send_email":
+		return s.sendEmail(ctx, args)
+	case "create_calendar_event":
+		return s.createCalendarEvent(ctx, args)
+	case "create_github_issue":
+		return s.createGithubIssue(ctx, args)
+	case "comment_on_github_issue":
+		return s.commentOnGithubIssue(ctx, args)
 	default:
 		return errorResult("unknown tool: " + name)
 	}
@@ -471,6 +560,222 @@ func (s *server) submitIntent(ctx context.Context, args map[string]any) toolResu
 	}
 
 	return jsonResult(result)
+}
+
+// --- Write tool handlers ---
+
+func (s *server) sendEmail(ctx context.Context, args map[string]any) toolResult {
+	to, _ := args["to"].(string)
+	subject, _ := args["subject"].(string)
+	bodyText, _ := args["body_text"].(string)
+
+	if to == "" || subject == "" || bodyText == "" {
+		return errorResult("to, subject, and body_text are required")
+	}
+
+	cc, _ := args["cc"].(string)
+	bcc, _ := args["bcc"].(string)
+	bodyHTML, _ := args["body_html"].(string)
+	sendMode, _ := args["send_mode"].(string)
+	threadRef, _ := args["thread_ref"].(string)
+
+	if sendMode == "" {
+		sendMode = "send_now"
+	}
+
+	actionType := "email.send"
+	if sendMode == "draft_only" {
+		actionType = "email.draft"
+	}
+
+	return s.submitStructuredIntent(ctx, actionType,
+		fmt.Sprintf("Send email to %s: %s", to, subject),
+		map[string]any{
+			"email": map[string]any{
+				"to":         splitRecipients(to),
+				"cc":         splitRecipients(cc),
+				"bcc":        splitRecipients(bcc),
+				"subject":    subject,
+				"body_text":  bodyText,
+				"body_html":  bodyHTML,
+				"send_mode":  sendMode,
+				"thread_ref": threadRef,
+			},
+		},
+	)
+}
+
+func (s *server) createCalendarEvent(ctx context.Context, args map[string]any) toolResult {
+	title, _ := args["title"].(string)
+	startTime, _ := args["start_time"].(string)
+	endTime, _ := args["end_time"].(string)
+
+	if title == "" || startTime == "" || endTime == "" {
+		return errorResult("title, start_time, and end_time are required")
+	}
+
+	description, _ := args["description"].(string)
+	timezone, _ := args["timezone"].(string)
+	location, _ := args["location"].(string)
+	attendees, _ := args["attendees"].(string)
+	conferenceType, _ := args["conference_type"].(string)
+	calendarID, _ := args["calendar_id"].(string)
+
+	calendarDomain := map[string]any{
+		"provider":    "google_calendar",
+		"title":       title,
+		"description": description,
+		"start_time":  startTime,
+		"end_time":    endTime,
+		"timezone":    timezone,
+		"location":    location,
+		"calendar_id": calendarID,
+	}
+	if conferenceType != "" {
+		calendarDomain["conference_type"] = conferenceType
+	}
+	if attendees != "" {
+		calendarDomain["attendees"] = splitAttendees(attendees)
+	}
+
+	return s.submitStructuredIntent(ctx, "calendar.event.create",
+		fmt.Sprintf("Create calendar event: %s", title),
+		map[string]any{"calendar": calendarDomain},
+	)
+}
+
+func (s *server) createGithubIssue(ctx context.Context, args map[string]any) toolResult {
+	repository, _ := args["repository"].(string)
+	title, _ := args["title"].(string)
+
+	if repository == "" || title == "" {
+		return errorResult("repository and title are required")
+	}
+
+	body, _ := args["body"].(string)
+	labels, _ := args["labels"].(string)
+	assignees, _ := args["assignees"].(string)
+
+	return s.submitStructuredIntent(ctx, "git.issue.create",
+		fmt.Sprintf("Create GitHub issue in %s: %s", repository, title),
+		map[string]any{
+			"git": map[string]any{
+				"provider":        "github",
+				"repository":      repository,
+				"issue_title":     title,
+				"issue_body":      body,
+				"issue_labels":    splitCSV(labels),
+				"issue_assignees": splitCSV(assignees),
+			},
+		},
+	)
+}
+
+func (s *server) commentOnGithubIssue(ctx context.Context, args map[string]any) toolResult {
+	repository, _ := args["repository"].(string)
+	issueNumber, _ := args["issue_number"].(string)
+	body, _ := args["body"].(string)
+
+	if repository == "" || issueNumber == "" || body == "" {
+		return errorResult("repository, issue_number, and body are required")
+	}
+
+	return s.submitStructuredIntent(ctx, "git.issue.comment",
+		fmt.Sprintf("Comment on %s#%s", repository, issueNumber),
+		map[string]any{
+			"git": map[string]any{
+				"provider":   "github",
+				"repository": repository,
+				"issue_body": body,
+			},
+		},
+	)
+}
+
+// submitStructuredIntent posts a typed intent to the Aileron API.
+func (s *server) submitStructuredIntent(ctx context.Context, actionType, summary string, domain map[string]any) toolResult {
+	if s.aileronURL == "" {
+		return errorResult("Aileron API not configured (AILERON_URL not set)")
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"action": map[string]any{
+			"type":    actionType,
+			"summary": summary,
+			"domain":  domain,
+		},
+		"agent_id":     "aileron-mcp",
+		"workspace_id": "default",
+	})
+	if err != nil {
+		return errorResult("failed to encode request: " + err.Error())
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.aileronURL+"/v1/intents", bytes.NewReader(body))
+	if err != nil {
+		return errorResult("failed to create request: " + err.Error())
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.aileronToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return errorResult("failed to submit intent: " + err.Error())
+	}
+	defer resp.Body.Close()
+
+	var result any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return errorResult("failed to decode response: " + err.Error())
+	}
+
+	return jsonResult(result)
+}
+
+// splitCSV splits a comma-separated string into a slice, trimming whitespace.
+// Returns nil for empty input.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// splitRecipients converts a comma-separated list of email addresses into
+// the []Recipient format expected by the email domain model.
+func splitRecipients(s string) []map[string]string {
+	addrs := splitCSV(s)
+	if len(addrs) == 0 {
+		return nil
+	}
+	out := make([]map[string]string, len(addrs))
+	for i, addr := range addrs {
+		out[i] = map[string]string{"email": addr}
+	}
+	return out
+}
+
+// splitAttendees converts a comma-separated list of email addresses into
+// the []CalendarAttendee format expected by the calendar domain model.
+func splitAttendees(s string) []map[string]string {
+	addrs := splitCSV(s)
+	if len(addrs) == 0 {
+		return nil
+	}
+	out := make([]map[string]string, len(addrs))
+	for i, addr := range addrs {
+		out[i] = map[string]string{"email": addr}
+	}
+	return out
 }
 
 // --- Helpers ---

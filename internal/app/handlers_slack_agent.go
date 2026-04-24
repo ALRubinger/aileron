@@ -109,6 +109,9 @@ func (s *apiServer) handleAssistantThreadStarted(ctx context.Context, teamID, ch
 		{Title: "Draft a reply", Message: "Draft a reply to a message"},
 		{Title: "Write a message", Message: "Write a message for me"},
 		{Title: "What needs attention?", Message: "What needs my attention?"},
+		{Title: "Send an email", Message: "Send an email"},
+		{Title: "Create a calendar invite", Message: "Create a calendar invite"},
+		{Title: "File a GitHub issue", Message: "File a GitHub issue"},
 	}
 
 	if err := s.slackAgentClient.SetSuggestedPrompts(ctx, botToken, channelID, threadTS, prompts); err != nil {
