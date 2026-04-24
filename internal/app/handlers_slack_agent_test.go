@@ -724,6 +724,9 @@ func (stubEscrowEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowList
 func (stubEscrowEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
+func (stubEscrowEnclaveClient) SourceExecute(_ context.Context, _ enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
+	return enclave.SourceExecuteResponse{}, nil
+}
 func (stubEscrowEnclaveClient) Ready(_ context.Context) error { return nil }
 func (stubEscrowEnclaveClient) Close() error                  { return nil }
 

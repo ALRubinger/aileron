@@ -1087,6 +1087,9 @@ func (s *stubEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListRes
 func (s *stubEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
+func (s *stubEnclaveClient) SourceExecute(_ context.Context, _ enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
+	return enclave.SourceExecuteResponse{}, nil
+}
 func (s *stubEnclaveClient) Ready(_ context.Context) error { return nil }
 func (s *stubEnclaveClient) Close() error                  { return nil }
 
@@ -1341,5 +1344,58 @@ func TestPipeline_GenerateDraftStream_AuthFailed_Propagates(t *testing.T) {
 	}
 	if !errors.Is(err, source.ErrAuthFailed) {
 		t.Errorf("expected error wrapping ErrAuthFailed, got: %v", err)
+	}
+}
+
+func TestPipeline_WithSourceExecutor_BypassesVault(t *testing.T) {
+	// When a SourceExecutor is set, the pipeline should use it instead of
+	// retrieving credentials from the vault. This ensures zero-knowledge:
+	// credentials never leave the enclave.
+	executorCalled := false
+	executor := draft.SourceExecutor(func(_ context.Context, tool string, params map[string]any, vaultPath string) (map[string]any, error) {
+		executorCalled = true
+		if tool != "slack_channel_history" {
+			t.Errorf("expected tool slack_channel_history, got %s", tool)
+		}
+		if vaultPath != "connected-accounts/usr_1/slack" {
+			t.Errorf("expected vault path connected-accounts/usr_1/slack, got %s", vaultPath)
+		}
+		return map[string]any{"messages": []string{"hello"}}, nil
+	})
+
+	mock := &toolCallingLLMClient{
+		toolName:       "slack_channel_history",
+		toolParams:     map[string]any{"channel": "C123"},
+		ghostwriteResp: &llm.GenerateResponse{Text: "draft reply"},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
+		Status: model.ConnectedAccountStatusActive,
+	})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&mockSourceConnector{})
+
+	// Vault is empty — if the pipeline tries to use it, it will fail.
+	v := vault.NewMemVault()
+
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
+		v, slog.Default(), draft.Prompts{Research: "test", Ghostwrite: "test"}).
+		WithSourceExecutor(executor)
+
+	result, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Alice", Body: "hi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executorCalled {
+		t.Error("SourceExecutor was not called — vault was used instead")
+	}
+	if result == "" {
+		t.Error("expected draft output")
 	}
 }

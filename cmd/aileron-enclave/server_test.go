@@ -17,6 +17,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/source"
 )
 
 // stubConnector returns a fixed result for testing.
@@ -37,7 +38,7 @@ func setupTestEnclaveServer(t *testing.T) (*httptest.Server, *enclaveServer) {
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	registry := connector.NewRegistry()
 	registry.Register(context.Background(), &stubConnector{})
-	srv, err := newEnclaveServer(log, registry, "local", "")
+	srv, err := newEnclaveServer(log, registry, source.NewRegistry(), "local", "")
 	if err != nil {
 		t.Fatalf("newEnclaveServer: %v", err)
 	}

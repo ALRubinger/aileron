@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,34 +17,37 @@ import (
 	"github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/source"
 )
 
 const enclaveSessionTTL = 30 * time.Minute
 
 type enclaveServer struct {
-	log        *slog.Logger
-	registry   *connector.Registry
-	provider   string
-	mu         sync.Mutex
-	enclaveKey *ecdh.PrivateKey
-	sessionKey []byte
-	sessionID  string
-	expiresAt  time.Time
-	keks       *kekStore
-	escrow     *escrowStore
+	log            *slog.Logger
+	registry       *connector.Registry
+	sourceRegistry *source.Registry
+	provider       string
+	mu             sync.Mutex
+	enclaveKey     *ecdh.PrivateKey
+	sessionKey     []byte
+	sessionID      string
+	expiresAt      time.Time
+	keks           *kekStore
+	escrow         *escrowStore
 }
 
-func newEnclaveServer(log *slog.Logger, registry *connector.Registry, provider, dataDir string) (*enclaveServer, error) {
+func newEnclaveServer(log *slog.Logger, registry *connector.Registry, sourceReg *source.Registry, provider, dataDir string) (*enclaveServer, error) {
 	escrow, err := newEscrowStore(dataDir)
 	if err != nil {
 		return nil, fmt.Errorf("initializing escrow store: %w", err)
 	}
 	return &enclaveServer{
-		log:      log,
-		registry: registry,
-		provider: provider,
-		keks:     newKEKStore(),
-		escrow:   escrow,
+		log:            log,
+		registry:       registry,
+		sourceRegistry: sourceReg,
+		provider:       provider,
+		keks:           newKEKStore(),
+		escrow:         escrow,
 	}, nil
 }
 
@@ -57,6 +61,7 @@ func (s *enclaveServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /escrow/retrieve", s.handleEscrowRetrieve)
 	mux.HandleFunc("POST /escrow/list", s.handleEscrowList)
 	mux.HandleFunc("POST /escrow/revoke", s.handleEscrowRevoke)
+	mux.HandleFunc("POST /source/execute", s.handleSourceExecute)
 	mux.HandleFunc("GET /health", s.handleHealth)
 }
 
@@ -349,6 +354,48 @@ func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *enclaveServer) handleSourceExecute(w http.ResponseWriter, r *http.Request) {
+	var req enclave.SourceExecuteRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Resolve credential from escrow — plaintext stays inside the enclave.
+	credential, err := s.escrow.Get(req.EscrowID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Inject a TokenSaver that updates the escrowed credential when an
+	// OAuth token is refreshed. This keeps the escrow fresh without
+	// involving the host.
+	escrowID := req.EscrowID
+	ctx := source.WithTokenSaver(r.Context(), func(_ context.Context, newToken []byte) error {
+		s.log.Info("updating escrowed credential after token refresh",
+			"escrow_id", escrowID,
+			"tool", req.Tool,
+		)
+		return s.escrow.Update(escrowID, newToken)
+	})
+
+	result, execErr := s.sourceRegistry.ExecuteTool(ctx, req.Tool, req.Params, credential)
+
+	resp := enclave.SourceExecuteResponse{}
+	if execErr != nil {
+		resp.Error = execErr.Error()
+	} else if result != nil {
+		resultJSON, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			writeErr(w, http.StatusInternalServerError, "marshaling result: "+marshalErr.Error())
+			return
+		}
+		resp.Result = resultJSON
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *enclaveServer) handleHealth(w http.ResponseWriter, _ *http.Request) {

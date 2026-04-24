@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/source"
 )
 
 // ExecuteFn executes a connector action given the decrypted credential.
@@ -27,17 +28,23 @@ import (
 // on core/connector.
 type ExecuteFn func(ctx context.Context, req enclave.ExecuteRequest, credential []byte) (enclave.ExecuteResponse, error)
 
+// SourceExecuteFn executes a source connector tool given the decrypted
+// credential. Returns the tool result as a map. Like ExecuteFn, this is
+// injected to avoid coupling the enclave module to source connectors.
+type SourceExecuteFn func(ctx context.Context, tool string, params map[string]any, credential []byte) (map[string]any, error)
+
 // Client is an in-process enclave client for development and testing.
 type Client struct {
-	mu         sync.Mutex
-	executeFn  ExecuteFn
-	enclaveKey *ecdh.PrivateKey // enclave's ephemeral key, generated on Attest
-	sessionKey []byte           // derived shared secret after EstablishSession
-	sessionID  string
-	expiresAt  time.Time
-	sessionTTL time.Duration
-	keks       *kekStore   // per-user KEK storage
-	escrow     *escrowStore
+	mu              sync.Mutex
+	executeFn       ExecuteFn
+	sourceExecuteFn SourceExecuteFn
+	enclaveKey      *ecdh.PrivateKey // enclave's ephemeral key, generated on Attest
+	sessionKey      []byte           // derived shared secret after EstablishSession
+	sessionID       string
+	expiresAt       time.Time
+	sessionTTL      time.Duration
+	keks            *kekStore   // per-user KEK storage
+	escrow          *escrowStore
 }
 
 // Option configures a local enclave Client.
@@ -51,6 +58,11 @@ func WithSessionTTL(d time.Duration) Option {
 // WithKEKTTL sets the per-user KEK storage lifetime. Default: 24h.
 func WithKEKTTL(d time.Duration) Option {
 	return func(c *Client) { c.keks = newKEKStore(d) }
+}
+
+// WithSourceExecuteFn sets the function used to execute source connector tools.
+func WithSourceExecuteFn(fn SourceExecuteFn) Option {
+	return func(c *Client) { c.sourceExecuteFn = fn }
 }
 
 // New creates a local enclave client. The executeFn is called to perform
@@ -254,6 +266,40 @@ func (c *Client) EscrowList(_ context.Context) (enclave.EscrowListResponse, erro
 // EscrowRevoke removes an escrowed credential and zeros its plaintext.
 func (c *Client) EscrowRevoke(_ context.Context, req enclave.EscrowRevokeRequest) error {
 	return c.escrow.Revoke(req.EscrowID, req.GrantID)
+}
+
+// SourceExecute runs a source connector tool using an escrowed credential.
+// The credential stays in-process (never returned to the caller). If the
+// token is refreshed during execution, the escrowed copy is updated.
+func (c *Client) SourceExecute(ctx context.Context, req enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
+	if c.sourceExecuteFn == nil {
+		return enclave.SourceExecuteResponse{}, fmt.Errorf("local: no source execute function configured")
+	}
+
+	credential, err := c.escrow.Get(req.EscrowID)
+	if err != nil {
+		return enclave.SourceExecuteResponse{}, err
+	}
+
+	// Inject a TokenSaver that updates the escrowed credential on refresh.
+	escrowID := req.EscrowID
+	ctx = source.WithTokenSaver(ctx, func(_ context.Context, newToken []byte) error {
+		return c.escrow.Update(escrowID, newToken)
+	})
+
+	result, execErr := c.sourceExecuteFn(ctx, req.Tool, req.Params, credential)
+
+	resp := enclave.SourceExecuteResponse{}
+	if execErr != nil {
+		resp.Error = execErr.Error()
+	} else if result != nil {
+		resultJSON, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return enclave.SourceExecuteResponse{}, fmt.Errorf("local: marshaling result: %w", marshalErr)
+		}
+		resp.Result = resultJSON
+	}
+	return resp, nil
 }
 
 // Ready always returns nil for the local client since it runs in-process.

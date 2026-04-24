@@ -99,6 +99,24 @@ func (s *escrowStore) Revoke(escrowID, grantID string) error {
 	return nil
 }
 
+// Update replaces the credential for an existing escrow entry. The old
+// credential bytes are zeroed before replacement.
+func (s *escrowStore) Update(escrowID string, credential []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.entries[escrowID]
+	if !ok {
+		return enclave.ErrEscrowNotFound
+	}
+	if time.Now().After(entry.expiresAt) {
+		return enclave.ErrEscrowExpired
+	}
+	zeroBytes(entry.credential)
+	entry.credential = credential
+	return nil
+}
+
 // EvictExpired removes and zeros all expired entries.
 func (s *escrowStore) EvictExpired() {
 	now := time.Now()
