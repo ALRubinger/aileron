@@ -4,15 +4,6 @@ WORKDIR /build
 # Build outside the workspace so we only need the modules the enclave imports.
 ENV GOWORK=off
 
-# Copy module files first for layer caching.
-COPY cmd/aileron-enclave/go.mod cmd/aileron-enclave/go.sum cmd/aileron-enclave/
-COPY core/go.mod core/go.sum core/
-COPY enclave/go.mod enclave/
-
-WORKDIR /build/cmd/aileron-enclave
-RUN go mod download
-
-WORKDIR /build
 COPY enclave/ enclave/
 COPY core/ core/
 COPY cmd/aileron-enclave/ cmd/aileron-enclave/
