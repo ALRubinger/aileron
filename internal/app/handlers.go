@@ -1125,8 +1125,20 @@ func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*
 		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "no connector"}, nil
 	}
 
-	// Build params.
+	// Build params. If the intent was created from the Slack flow, the
+	// domain fields are in metadata (model types, not API types). Extract
+	// them directly.
 	params := buildConnectorParams(intent.Action)
+	if intent.Action.Metadata != nil {
+		if domainRaw, ok := (*intent.Action.Metadata)["_model_domain"]; ok {
+			if domainJSON, err := json.Marshal(domainRaw); err == nil {
+				var domain model.DomainAction
+				if json.Unmarshal(domainJSON, &domain) == nil {
+					params = buildModelDomainParams(intent.Action.Type, domain)
+				}
+			}
+		}
+	}
 	if grant.BoundedParameters != nil {
 		for k, v := range *grant.BoundedParameters {
 			params[k] = v
@@ -1319,6 +1331,68 @@ func (s *apiServer) requireEnclave(w http.ResponseWriter, r *http.Request) bool 
 		return false
 	}
 	return true
+}
+
+// buildModelDomainParams extracts connector parameters from a model.DomainAction.
+// Used when the intent was created internally (Slack flow) with model types
+// rather than API types.
+func buildModelDomainParams(actionType string, domain model.DomainAction) map[string]any {
+	params := map[string]any{"action_type": actionType}
+
+	if domain.Email != nil {
+		e := domain.Email
+		params["to"] = e.To
+		params["cc"] = e.CC
+		params["bcc"] = e.BCC
+		params["subject"] = e.Subject
+		params["body_text"] = e.BodyText
+		params["body_html"] = e.BodyHTML
+		params["send_mode"] = e.SendMode
+		params["thread_ref"] = e.ThreadRef
+	}
+	if domain.Calendar != nil {
+		c := domain.Calendar
+		params["title"] = c.Title
+		params["description"] = c.Description
+		params["timezone"] = c.Timezone
+		params["location"] = c.Location
+		params["calendar_id"] = c.CalendarID
+		params["conference_type"] = c.ConferenceType
+		params["visibility"] = c.Visibility
+		if c.StartTime != nil {
+			params["start_time"] = c.StartTime.Format("2006-01-02T15:04:05")
+		}
+		if c.EndTime != nil {
+			params["end_time"] = c.EndTime.Format("2006-01-02T15:04:05")
+		}
+		if len(c.Attendees) > 0 {
+			var attendees []map[string]any
+			for _, a := range c.Attendees {
+				attendees = append(attendees, map[string]any{
+					"email": a.Email, "name": a.Name, "optional": a.Optional,
+				})
+			}
+			params["attendees"] = attendees
+		}
+	}
+	if domain.Git != nil {
+		g := domain.Git
+		params["repository"] = g.Repository
+		params["branch"] = g.Branch
+		params["base_branch"] = g.BaseBranch
+		params["pr_title"] = g.PRTitle
+		params["pr_body"] = g.PRBody
+		params["issue_title"] = g.IssueTitle
+		params["issue_body"] = g.IssueBody
+		if len(g.IssueLabels) > 0 {
+			params["issue_labels"] = g.IssueLabels
+		}
+		if len(g.IssueAssignees) > 0 {
+			params["issue_assignees"] = g.IssueAssignees
+		}
+	}
+
+	return params
 }
 
 func resolveConnector(actionType string) (connType, provider string) {

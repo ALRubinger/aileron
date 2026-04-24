@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -198,7 +199,7 @@ func TestSlashCommandQuestion_CredentialUnavailable_SendsVaultUnlockMessage(t *t
 	// Disable KEK check so resolvePipelineVault falls through to tier 3.
 	srv.kekSessionCache = nil
 
-	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "what's in my email?", responseServer.URL)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "what's in my email?", "", responseServer.URL)
 
 	mu.Lock()
 	body := capturedBody
@@ -238,18 +239,6 @@ func TestSlashCommandDraft_CredentialUnavailable_SendsVaultUnlockMessage(t *test
 	// generation, the modal should show the vault unlock message instead
 	// of "Draft generation failed."
 	var mu sync.Mutex
-	var modalMessage string
-	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		modalMessage = string(body)
-		mu.Unlock()
-		slackViewOK(w)
-	}))
-	defer slackServer.Close()
-
-	comms.SetAgentAPIURL(slackServer.URL + "/")
-	defer comms.SetAgentAPIURL("")
 
 	srv := newCommandTestServer()
 	srv.uiBaseURL = "https://app.withaileron.ai"
@@ -267,27 +256,31 @@ func TestSlashCommandDraft_CredentialUnavailable_SendsVaultUnlockMessage(t *test
 	srv.draftPipeline = newVaultErrorPipeline(accounts)
 	srv.kekSessionCache = nil
 
-	meta := DraftModalMeta{
-		TargetChannel:   "C123",
-		OriginalMessage: "Help with PR",
-		UserID:          "U_ALICE",
-		TeamID:          "T001",
-	}
+	// New flow: vault locked errors go via response_url, not modal.
+	var responseBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		responseBody = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer responseServer.Close()
 
-	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft a reply", "trig_123", meta)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "draft a reply", "trig_123", responseServer.URL)
 
 	mu.Lock()
-	view := modalMessage
+	body := responseBody
 	mu.Unlock()
 
-	if !strings.Contains(view, "Unlock your vault") {
-		t.Errorf("expected vault unlock message in modal, got: %s", view)
+	if !strings.Contains(body, "Unlock your vault") {
+		t.Errorf("expected vault unlock message in response, got: %s", body)
 	}
-	if !strings.Contains(view, "vault") {
-		t.Errorf("expected vault URL in modal, got: %s", view)
+	if !strings.Contains(body, "vault") {
+		t.Errorf("expected vault URL in response, got: %s", body)
 	}
-	if strings.Contains(view, "Draft generation failed") {
-		t.Errorf("should not show generic error for vault issues, got: %s", view)
+	if strings.Contains(body, "Draft generation failed") {
+		t.Errorf("should not show generic error for vault issues, got: %s", body)
 	}
 }
 
@@ -314,4 +307,322 @@ func TestSlackCommand_InvalidFormData(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid form data, got %d", w.Code)
 	}
+}
+
+// --- formatIntentPreview tests ---
+
+func TestFormatIntentPreview_Email(t *testing.T) {
+	intent := draft.ResolvedIntent{
+		Type:    draft.IntentTypeEmailSend,
+		Summary: "Send email",
+		Action: &model.ActionIntent{
+			Type: "email.send",
+			Domain: model.DomainAction{Email: &model.EmailAction{
+				To:       []model.Recipient{{Name: "Alice", Email: "alice@example.com"}},
+				Subject:  "Weekly Report",
+				BodyText: "Here is the report.",
+			}},
+		},
+	}
+	preview := formatIntentPreview(intent)
+	for _, want := range []string{"alice@example.com", "Weekly Report", "Here is the report."} {
+		if !strings.Contains(preview, want) {
+			t.Errorf("preview missing %q: %s", want, preview)
+		}
+	}
+}
+
+func TestFormatIntentPreview_Calendar(t *testing.T) {
+	start := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
+	intent := draft.ResolvedIntent{
+		Type: draft.IntentTypeCalendarEventCreate,
+		Action: &model.ActionIntent{
+			Type: "calendar.event.create",
+			Domain: model.DomainAction{Calendar: &model.CalendarAction{
+				Title: "Standup", StartTime: &start, EndTime: &end,
+				Location: "Room A", Description: "Daily sync",
+			}},
+		},
+	}
+	preview := formatIntentPreview(intent)
+	for _, want := range []string{"Standup", "Room A", "Daily sync"} {
+		if !strings.Contains(preview, want) {
+			t.Errorf("preview missing %q: %s", want, preview)
+		}
+	}
+}
+
+func TestFormatIntentPreview_GitIssue(t *testing.T) {
+	intent := draft.ResolvedIntent{
+		Type: draft.IntentTypeGitIssueCreate,
+		Action: &model.ActionIntent{
+			Type: "git.issue.create",
+			Domain: model.DomainAction{Git: &model.GitAction{
+				Repository: "acme/app", IssueTitle: "Login bug", IssueBody: "Steps to reproduce.",
+			}},
+		},
+	}
+	preview := formatIntentPreview(intent)
+	for _, want := range []string{"acme/app", "Login bug", "Steps to reproduce."} {
+		if !strings.Contains(preview, want) {
+			t.Errorf("preview missing %q: %s", want, preview)
+		}
+	}
+}
+
+func TestFormatIntentPreview_NilAction(t *testing.T) {
+	intent := draft.ResolvedIntent{Type: draft.IntentTypeEmailSend, Summary: "fallback text"}
+	if got := formatIntentPreview(intent); got != "fallback text" {
+		t.Errorf("expected summary fallback, got %q", got)
+	}
+}
+
+// --- intentTypeLabel tests ---
+
+func TestIntentTypeLabel(t *testing.T) {
+	tests := []struct {
+		t    draft.IntentType
+		want string
+	}{
+		{draft.IntentTypeEmailSend, "Send Email"},
+		{draft.IntentTypeEmailDraft, "Save Email Draft"},
+		{draft.IntentTypeCalendarEventCreate, "Create Calendar Event"},
+		{draft.IntentTypeGitIssueCreate, "Create GitHub Issue"},
+		{draft.IntentTypeGitIssueComment, "Comment on GitHub Issue"},
+		{draft.IntentTypeSlackSend, "Send Slack Message"},
+		{draft.IntentType("custom.action"), "custom.action"},
+	}
+	for _, tt := range tests {
+		if got := intentTypeLabel(tt.t); got != tt.want {
+			t.Errorf("intentTypeLabel(%q) = %q, want %q", tt.t, got, tt.want)
+		}
+	}
+}
+
+// --- respondViaURL tests ---
+
+func TestCommandRespondViaURL_EmptyURL(t *testing.T) {
+	srv := newCommandTestServer()
+	// Should not panic with empty URL.
+	srv.respondViaURL("", "test")
+}
+
+func TestCommandRespondViaURL_SendsResponse(t *testing.T) {
+	var mu sync.Mutex
+	var body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	srv := newCommandTestServer()
+	srv.respondViaURL(server.URL, "hello world")
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+
+	if !strings.Contains(got, "hello world") {
+		t.Errorf("expected 'hello world' in body, got %s", got)
+	}
+	if !strings.Contains(got, "ephemeral") {
+		t.Errorf("expected ephemeral response type, got %s", got)
+	}
+}
+
+// --- processSlashCommand write action path ---
+
+func TestProcessSlashCommand_WriteAction_NoTriggerID_FallsBackToResponseURL(t *testing.T) {
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	srv := newCommandTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// Pipeline that returns an email.send intent.
+	research := &mockLLMClient{response: `{"type":"email.send","to":[{"email":"bob@example.com"}],"subject":"Hi","body_text":"Hello"}`}
+	srv.draftPipeline = draft.NewPipeline(research, research, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{Research: "r", IntentResolution: "i", Ghostwrite: "g"})
+
+	// No trigger_id → should fall back to response_url.
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "Send email to Bob", "", respServer.URL)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	// Should contain the email preview text.
+	if got == "" {
+		t.Error("expected response sent to response_url for write action without trigger_id")
+	}
+}
+
+func TestProcessSlashCommand_EnclaveNotReady(t *testing.T) {
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	srv := newCommandTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+	srv.draftPipeline = newTestPipeline("ctx", "answer")
+	srv.enclaveClient = &failingEnclaveClient{}
+	// Set kekSessionCache so Tier 4 (no-auth) doesn't bypass enclave check.
+	srv.kekSessionCache = auth.NewKEKSessionCache(24 * time.Hour)
+
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "question?", "", respServer.URL)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	if !strings.Contains(got, "starting up") {
+		t.Errorf("expected starting up message, got: %s", got)
+	}
+}
+
+func TestFormatIntentPreview_GitPR(t *testing.T) {
+	// Git action without issue fields → falls back to summary.
+	intent := draft.ResolvedIntent{
+		Type:    draft.IntentType("git.pull_request.create"),
+		Summary: "Create PR for feature",
+		Action: &model.ActionIntent{
+			Type: "git.pull_request.create",
+			Domain: model.DomainAction{Git: &model.GitAction{
+				Repository: "acme/app", Branch: "feat/x", BaseBranch: "main",
+			}},
+		},
+	}
+	got := formatIntentPreview(intent)
+	if got != "Create PR for feature" {
+		t.Errorf("expected summary fallback for PR, got %q", got)
+	}
+}
+
+func TestFormatIntentPreview_DefaultAction(t *testing.T) {
+	intent := draft.ResolvedIntent{
+		Type:    draft.IntentType("custom.action"),
+		Summary: "Do something custom",
+		Action:  &model.ActionIntent{Type: "custom.action", Summary: "Do something custom"},
+	}
+	got := formatIntentPreview(intent)
+	if got != "Do something custom" {
+		t.Errorf("expected summary fallback, got %q", got)
+	}
+}
+
+// --- openIntentModal test ---
+
+func TestOpenIntentModal_CallsSlackAPI(t *testing.T) {
+	var mu sync.Mutex
+	var receivedBody string
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		receivedBody = string(b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok":   true,
+			"view": map[string]any{"id": "V_MODAL"},
+		})
+	}))
+	defer slackServer.Close()
+
+	comms.SetAgentAPIURL(slackServer.URL + "/")
+	defer comms.SetAgentAPIURL("")
+
+	srv := newCommandTestServer()
+	intent := draft.ResolvedIntent{
+		Type:    draft.IntentTypeEmailSend,
+		Summary: "Send email",
+		Action: &model.ActionIntent{
+			Type: "email.send",
+			Domain: model.DomainAction{Email: &model.EmailAction{
+				To: []model.Recipient{{Email: "alice@example.com"}},
+				Subject: "Test", BodyText: "Hello",
+			}},
+		},
+	}
+
+	srv.openIntentModal(context.Background(), "xoxb-test", "trig_123", "usr_a", "C_CHAN", intent)
+
+	mu.Lock()
+	body := receivedBody
+	mu.Unlock()
+
+	if body == "" {
+		t.Fatal("expected Slack API call for modal")
+	}
+	if !strings.Contains(body, intentModalCallbackID) {
+		t.Errorf("expected callback_id in modal request, got: %s", body)
+	}
+	if !strings.Contains(body, "Review") {
+		t.Errorf("expected 'Review' title in modal, got: %s", body)
+	}
+}
+
+func TestProcessSlashCommand_EmptyIntents(t *testing.T) {
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	srv := newCommandTestServer()
+	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
+	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
+
+	// Pipeline returns empty intents.
+	emptyClient := &mockLLMClient{response: ""}
+	srv.draftPipeline = draft.NewPipeline(emptyClient, emptyClient, source.NewRegistry(),
+		mem.NewConnectedAccountStore(), mem.NewUserInstructionStore(),
+		vault.NewMemVault(), slog.Default(),
+		draft.Prompts{Research: "r", Ghostwrite: "g"})
+
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "something", "", respServer.URL)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	// Should get a response even with empty ghostwrite (informational with empty text).
+	if got == "" {
+		t.Error("expected response to response_url")
+	}
+}
+
+func TestCommandRespondViaURL_HTTPError(t *testing.T) {
+	srv := newCommandTestServer()
+	// URL that immediately closes connection.
+	srv.respondViaURL("http://127.0.0.1:1/bad", "test message")
+	// Should not panic — just logs the error.
 }

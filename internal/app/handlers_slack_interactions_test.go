@@ -1235,3 +1235,505 @@ func TestInteraction_ApproveIntent_CreatesIntentAndGrant(t *testing.T) {
 		t.Errorf("grant intent_id = %q", grant.IntentId)
 	}
 }
+
+// --- executeIntentFromModal tests ---
+
+func TestInteraction_IntentModalSubmit_CreatesIntentAndGrant(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.registry = connectorpkg.NewRegistry()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+
+	action := model.ActionIntent{
+		Type:    "git.issue.create",
+		Summary: "Create bug",
+		Domain: model.DomainAction{
+			Git: &model.GitAction{
+				Repository: "acme/app",
+				IssueTitle: "Login bug",
+			},
+		},
+	}
+	actionJSON, _ := json.Marshal(action)
+	meta := IntentModalMeta{
+		IntentType: "git.issue.create",
+		UserID:     "usr_a",
+		ChannelID:  "C_CHAN",
+		ActionJSON: string(actionJSON),
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id":               "view_123",
+			"callback_id":      intentModalCallbackID,
+			"private_metadata": string(metaJSON),
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	ctx := context.Background()
+	intent, err := srv.intents.Get(ctx, "int_test-id")
+	if err != nil {
+		t.Fatalf("expected intent created: %v", err)
+	}
+	if intent.Action.Type != "git.issue.create" {
+		t.Errorf("action type = %q", intent.Action.Type)
+	}
+
+	grant, err := srv.grants.Get(ctx, "grt_test-id")
+	if err != nil {
+		t.Fatalf("expected grant created: %v", err)
+	}
+	if grant.IntentId != "int_test-id" {
+		t.Errorf("grant intent_id = %q", grant.IntentId)
+	}
+}
+
+func TestInteraction_IntentModalSubmit_BadMetadata(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id":               "view_bad",
+			"callback_id":      intentModalCallbackID,
+			"private_metadata": "not-json",
+		},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	// Should not panic, just return 200.
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestInteraction_ApproveIntent_PolicyDeny(t *testing.T) {
+	srv := newInteractionTestServer()
+	policyStore := mem.NewPolicyStore()
+	// Create a deny policy for email.send.
+	denyEffect := api.PolicyRuleEffectDeny
+	actionField := "action.type"
+	eqOp := api.Eq
+	emailSend := "email.send"
+	condVal := api.PolicyCondition_Value{}
+	condVal.FromPolicyConditionValue0(emailSend)
+	priority := 100
+	desc := "deny email"
+	policyStore.Create(context.Background(), api.Policy{
+		PolicyId: "pol_deny", WorkspaceId: "default", Version: 1,
+		Status: api.PolicyStatusActive,
+		Rules: []api.PolicyRule{{
+			RuleId: "rule_deny", Effect: denyEffect, Priority: &priority,
+			Description: &desc,
+			Conditions: &[]api.PolicyCondition{{
+				Field: &actionField, Operator: &eqOp, Value: &condVal,
+			}},
+		}},
+	})
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.registry = connectorpkg.NewRegistry()
+	srv.policyEngine = policy.NewRuleEngine(policyStore)
+
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	actionValue, _ := json.Marshal(map[string]any{
+		"type": "email.send", "user_id": "usr_a",
+		"action": map[string]any{"type": "email.send", "summary": "Send email"},
+	})
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions", "user": map[string]any{"id": "U_ALICE"},
+		"response_url": respServer.URL,
+		"actions": []map[string]any{{"action_id": "approve_intent", "value": string(actionValue)}},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	if !strings.Contains(got, "Denied by policy") {
+		t.Errorf("expected denial message, got: %s", got)
+	}
+}
+
+func TestInteraction_ApproveIntent_ExecutionSucceeds(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+	enableVaultEncryption(srv, "usr_a")
+
+	conn := &stubConnector{
+		result: connectorpkg.ExecutionResult{
+			Status: connectorpkg.ExecutionStatusSucceeded, ReceiptRef: "https://example.com/done",
+		},
+	}
+	srv.registry = connectorpkg.NewRegistry()
+	srv.registry.Register(context.Background(), conn)
+	storeEncryptedToken(srv, "connectors/github/default", []byte("token"))
+
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	actionValue, _ := json.Marshal(map[string]any{
+		"type": "git.push", "user_id": "usr_a",
+		"action": map[string]any{"type": "git.push", "summary": "Push code"},
+	})
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions", "user": map[string]any{"id": "U_ALICE"},
+		"response_url": respServer.URL,
+		"actions": []map[string]any{{"action_id": "approve_intent", "value": string(actionValue)}},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	if !strings.Contains(got, "Done") {
+		t.Errorf("expected success message, got: %s", got)
+	}
+}
+
+func TestInteraction_ApproveIntent_ExecutionFails(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+	// No vault encryption → execution will fail with "vault locked"
+	srv.registry = connectorpkg.NewRegistry()
+	srv.registry.Register(context.Background(), &stubConnector{})
+	srv.vault.Put(context.Background(), "connectors/github/default", []byte("token"), vault.Metadata{})
+
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	actionValue, _ := json.Marshal(map[string]any{
+		"type": "git.push", "user_id": "usr_fail",
+		"action": map[string]any{"type": "git.push", "summary": "Push"},
+	})
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions", "user": map[string]any{"id": "U_ALICE"},
+		"response_url": respServer.URL,
+		"actions": []map[string]any{{"action_id": "approve_intent", "value": string(actionValue)}},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	if !strings.Contains(got, "Execution failed") {
+		t.Errorf("expected failure message, got: %s", got)
+	}
+}
+
+func TestInteraction_IntentModalSubmit_PolicyDeny(t *testing.T) {
+	srv := newInteractionTestServer()
+	policyStore := mem.NewPolicyStore()
+	denyEffect := api.PolicyRuleEffectDeny
+	actionField := "action.type"
+	eqOp := api.Eq
+	emailSend := "email.send"
+	condVal := api.PolicyCondition_Value{}
+	condVal.FromPolicyConditionValue0(emailSend)
+	priority := 100
+	desc := "deny email"
+	policyStore.Create(context.Background(), api.Policy{
+		PolicyId: "pol_deny", WorkspaceId: "default", Version: 1,
+		Status: api.PolicyStatusActive,
+		Rules: []api.PolicyRule{{
+			RuleId: "rule_deny", Effect: denyEffect, Priority: &priority,
+			Description: &desc,
+			Conditions: &[]api.PolicyCondition{{
+				Field: &actionField, Operator: &eqOp, Value: &condVal,
+			}},
+		}},
+	})
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.registry = connectorpkg.NewRegistry()
+	srv.policyEngine = policy.NewRuleEngine(policyStore)
+
+	action := model.ActionIntent{Type: "email.send", Summary: "Send email"}
+	actionJSON, _ := json.Marshal(action)
+	meta := IntentModalMeta{
+		IntentType: "email.send", UserID: "usr_a",
+		ChannelID: "C_CHAN", ActionJSON: string(actionJSON),
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id": "view_deny", "callback_id": intentModalCallbackID,
+			"private_metadata": string(metaJSON),
+		},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(200 * time.Millisecond)
+
+	intent, _ := srv.intents.Get(context.Background(), "int_test-id")
+	if intent.Status != api.Denied {
+		t.Errorf("intent status = %q, want denied", intent.Status)
+	}
+}
+
+func TestInteraction_IntentModalSubmit_ExecutionSucceeds(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+	enableVaultEncryption(srv, "usr_a")
+
+	conn := &stubConnector{
+		result: connectorpkg.ExecutionResult{
+			Status: connectorpkg.ExecutionStatusSucceeded,
+			ReceiptRef: "https://example.com/result",
+		},
+	}
+	srv.registry = connectorpkg.NewRegistry()
+	srv.registry.Register(context.Background(), conn)
+	storeEncryptedToken(srv, "connectors/github/default", []byte("token"))
+
+	action := model.ActionIntent{Type: "git.push", Summary: "Push code"}
+	actionJSON, _ := json.Marshal(action)
+	meta := IntentModalMeta{
+		IntentType: "git.push", UserID: "usr_a",
+		ChannelID: "C_CHAN", ActionJSON: string(actionJSON),
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id": "view_ok", "callback_id": intentModalCallbackID,
+			"private_metadata": string(metaJSON),
+		},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify execution record was created.
+	exec, err := srv.executions.Get(context.Background(), "exe_test-id")
+	if err != nil {
+		t.Fatalf("expected execution record: %v", err)
+	}
+	if exec.IntentId != "int_test-id" {
+		t.Errorf("execution intent_id = %q", exec.IntentId)
+	}
+}
+
+func TestInteraction_IntentModalSubmit_ExecutionFails(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+	// No vault encryption → vault locked error.
+	srv.registry = connectorpkg.NewRegistry()
+	srv.registry.Register(context.Background(), &stubConnector{})
+
+	action := model.ActionIntent{Type: "git.push", Summary: "Push"}
+	actionJSON, _ := json.Marshal(action)
+	meta := IntentModalMeta{
+		IntentType: "git.push", UserID: "usr_fail",
+		ChannelID: "C_CHAN", ActionJSON: string(actionJSON),
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id": "view_fail", "callback_id": intentModalCallbackID,
+			"private_metadata": string(metaJSON),
+		},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(300 * time.Millisecond)
+
+	// Intent should exist but execution should have failed.
+	intent, _ := srv.intents.Get(context.Background(), "int_test-id")
+	if intent.IntentId == "" {
+		t.Fatal("expected intent to be created")
+	}
+}
+
+func TestInteraction_RespondToInteraction_HTTPError(t *testing.T) {
+	srv := newInteractionTestServer()
+	// Unreachable URL — should not panic.
+	srv.respondToInteraction("http://127.0.0.1:1/bad", "test")
+}
+
+func TestInteraction_ApproveIntent_DenyWithEmptyReason(t *testing.T) {
+	srv := newInteractionTestServer()
+	policyStore := mem.NewPolicyStore()
+	// Deny policy with NO description → should use default "blocked by policy".
+	denyEffect := api.PolicyRuleEffectDeny
+	actionField := "action.type"
+	eqOp := api.Eq
+	condVal := api.PolicyCondition_Value{}
+	condVal.FromPolicyConditionValue0("email.send")
+	priority := 100
+	policyStore.Create(context.Background(), api.Policy{
+		PolicyId: "pol_deny", WorkspaceId: "default", Version: 1,
+		Status: api.PolicyStatusActive,
+		Rules: []api.PolicyRule{{
+			RuleId: "rule_deny", Effect: denyEffect, Priority: &priority,
+			// No Description field → empty denial reason.
+			Conditions: &[]api.PolicyCondition{{
+				Field: &actionField, Operator: &eqOp, Value: &condVal,
+			}},
+		}},
+	})
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.registry = connectorpkg.NewRegistry()
+	srv.policyEngine = policy.NewRuleEngine(policyStore)
+
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	actionValue, _ := json.Marshal(map[string]any{
+		"type": "email.send", "user_id": "usr_a",
+		"action": map[string]any{"type": "email.send", "summary": "Send"},
+	})
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions", "user": map[string]any{"id": "U_ALICE"},
+		"response_url": respServer.URL,
+		"actions": []map[string]any{{"action_id": "approve_intent", "value": string(actionValue)}},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	if !strings.Contains(got, "Denied by policy") {
+		t.Errorf("expected denial message, got: %s", got)
+	}
+}
+
+func TestInteraction_IntentModalSubmit_ExecutionError(t *testing.T) {
+	// executeIntentFromModal where executeGrant itself returns an error
+	// (not a failed result, but an actual Go error — e.g., grant expired).
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+	srv.registry = connectorpkg.NewRegistry()
+	// Don't seed any vault credentials — execution will fail.
+
+	action := model.ActionIntent{Type: "git.push", Summary: "Push"}
+	actionJSON, _ := json.Marshal(action)
+	meta := IntentModalMeta{
+		IntentType: "git.push", UserID: "usr_x",
+		ChannelID: "C_CHAN", ActionJSON: string(actionJSON),
+	}
+	metaJSON, _ := json.Marshal(meta)
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "view_submission",
+		"user": map[string]any{"id": "U_ALICE"},
+		"view": map[string]any{
+			"id": "view_err", "callback_id": intentModalCallbackID,
+			"private_metadata": string(metaJSON),
+		},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(300 * time.Millisecond)
+
+	// Should not panic. Intent should exist.
+	intent, _ := srv.intents.Get(context.Background(), "int_test-id")
+	if intent.IntentId == "" {
+		t.Fatal("expected intent to be created even if execution fails")
+	}
+}

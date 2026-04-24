@@ -176,27 +176,6 @@ func TestHandleAssistantMessage_NoUser(t *testing.T) {
 	}
 }
 
-func TestIsDraftRequest(t *testing.T) {
-	tests := []struct {
-		text string
-		want bool
-	}{
-		{"Draft me a weekly status update", true},
-		{"Write a message to the team", true},
-		{"Compose an email", true},
-		{"Reply to Sarah's question", true},
-		{"How many hours on calls today?", false},
-		{"What's the status of PR #42?", false},
-		{"Summarize the meeting", false},
-		{"", false},
-	}
-	for _, tt := range tests {
-		if got := isDraftRequest(tt.text); got != tt.want {
-			t.Errorf("isDraftRequest(%q) = %v, want %v", tt.text, got, tt.want)
-		}
-	}
-}
-
 func TestResolveAileronUserBySlack(t *testing.T) {
 	srv, _ := newAgentTestServer()
 	ctx := context.Background()
@@ -751,16 +730,14 @@ func TestProcessSlashCommandDraft_HappyPath(t *testing.T) {
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 	srv.draftPipeline = newTestPipeline("context", "Draft: this is your message.")
 
-	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
-	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft a weekly update", "trig_1", meta)
-	// No panic; modal opened and updated with draft.
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "draft a weekly update", "trig_1", "")
+	// No panic; intent resolved and presented.
 }
 
 func TestProcessSlashCommandDraft_NoBotToken(t *testing.T) {
 	srv, _ := newAgentTestServer()
-	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
 	// No token — should bail early.
-	srv.processSlashCommandDraft(context.Background(), "T_MISSING", "U_ALICE", "draft", "trig_1", meta)
+	srv.processSlashCommand(context.Background(), "T_MISSING", "C_CHAN", "U_ALICE", "draft", "trig_1", "")
 }
 
 func TestProcessSlashCommandDraft_NoUser(t *testing.T) {
@@ -781,8 +758,7 @@ func TestProcessSlashCommandDraft_NoUser(t *testing.T) {
 
 	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	// No user seeded.
-	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_NOBODY"}
-	srv.processSlashCommandDraft(ctx, "T001", "U_NOBODY", "draft something", "trig_1", meta)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "draft something", "trig_1", "")
 	// Should update modal with error.
 }
 
@@ -805,8 +781,7 @@ func TestProcessSlashCommandDraft_NoPipeline(t *testing.T) {
 	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 	// No pipeline.
-	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
-	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft something", "trig_1", meta)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "draft something", "trig_1", "")
 }
 
 func TestProcessSlashCommandDraft_PipelineError(t *testing.T) {
@@ -841,13 +816,11 @@ func TestProcessSlashCommandDraft_PipelineError(t *testing.T) {
 		draft.Prompts{Research: "research", Ghostwrite: "ghostwrite"},
 	)
 
-	meta := DraftModalMeta{TargetChannel: "C_GENERAL", UserID: "U_ALICE"}
-	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "draft something", "trig_1", meta)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "draft something", "trig_1", "")
 	// Should update modal with error, no panic.
 }
 
 func TestProcessSlashCommandQuestion_HappyPath(t *testing.T) {
-	// Set up a response_url server to capture the final response.
 	var receivedBody string
 	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
@@ -860,10 +833,11 @@ func TestProcessSlashCommandQuestion_HappyPath(t *testing.T) {
 	srv, _ := newAgentTestServer()
 	ctx := context.Background()
 
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 	srv.draftPipeline = newTestPipeline("context", "The answer is 42.")
 
-	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "How many hours on calls?", responseServer.URL)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "How many hours on calls?", "", responseServer.URL)
 
 	// Verify the response was sent to the response URL.
 	if receivedBody == "" {
@@ -899,15 +873,16 @@ func TestProcessSlashCommandQuestion_NoUser(t *testing.T) {
 	defer responseServer.Close()
 
 	srv, _ := newAgentTestServer()
+	srv.systemVault.Put(context.Background(), "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	// No user seeded.
-	srv.processSlashCommandQuestion(context.Background(), "T001", "U_UNKNOWN", "question?", responseServer.URL)
+	srv.processSlashCommand(context.Background(), "T001", "C_CHAN", "U_UNKNOWN", "question?", "", responseServer.URL)
 
 	if receivedBody == "" {
 		t.Fatal("expected error response sent to response_url")
 	}
 	var resp map[string]any
 	json.Unmarshal([]byte(receivedBody), &resp)
-	if text, ok := resp["text"].(string); !ok || text != "Could not find your Aileron account." {
+	if text, ok := resp["text"].(string); !ok || !strings.Contains(text, "Could not find your Aileron account") {
 		t.Errorf("expected account error message, got %v", resp["text"])
 	}
 }
@@ -924,14 +899,15 @@ func TestProcessSlashCommandQuestion_NoPipeline(t *testing.T) {
 
 	srv, _ := newAgentTestServer()
 	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 	// No pipeline.
 
-	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "question?", responseServer.URL)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "question?", "", responseServer.URL)
 
 	var resp map[string]any
 	json.Unmarshal([]byte(receivedBody), &resp)
-	if text, ok := resp["text"].(string); !ok || text != "Draft generation is not configured." {
+	if text, ok := resp["text"].(string); !ok || !strings.Contains(text, "not configured") {
 		t.Errorf("expected pipeline not configured message, got %v", resp["text"])
 	}
 }
@@ -948,6 +924,7 @@ func TestProcessSlashCommandQuestion_PipelineError(t *testing.T) {
 
 	srv, _ := newAgentTestServer()
 	ctx := context.Background()
+	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-test"), vault.Metadata{})
 	seedTestUser(ctx, srv, "U_ALICE", "T001", "usr_a")
 
 	errClient := &mockLLMClient{err: fmt.Errorf("LLM down")}
@@ -962,7 +939,7 @@ func TestProcessSlashCommandQuestion_PipelineError(t *testing.T) {
 		draft.Prompts{Research: "r", Ghostwrite: "g"},
 	)
 
-	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "question?", responseServer.URL)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "question?", "", responseServer.URL)
 
 	var resp map[string]any
 	json.Unmarshal([]byte(receivedBody), &resp)
@@ -1576,8 +1553,7 @@ func TestProcessSlashCommandDraft_VaultLocked(t *testing.T) {
 	srv.draftPipeline = newTestPipeline("research", "draft")
 	srv.kekSessionCache = &auth.KEKSessionCache{}
 
-	meta := DraftModalMeta{TargetChannel: "C123", UserID: "U_ALICE"}
-	srv.processSlashCommandDraft(ctx, "T001", "U_ALICE", "Draft something", "trig_123", meta)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "draft something", "trig_1", "")
 	// Should not panic — vault locked error shown in modal.
 }
 
@@ -1593,7 +1569,7 @@ func TestProcessSlashCommandQuestion_VaultLocked(t *testing.T) {
 	srv.draftPipeline = newTestPipeline("research", "answer")
 	srv.kekSessionCache = &auth.KEKSessionCache{}
 
-	srv.processSlashCommandQuestion(ctx, "T001", "U_ALICE", "How many calls?", respServer.URL)
+	srv.processSlashCommand(ctx, "T001", "C_CHAN", "U_ALICE", "How many calls?", "", respServer.URL)
 	// Should not panic — vault locked error sent via response_url.
 }
 
