@@ -50,7 +50,12 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 		})
 		if hasEscrow {
 			executor := s.newEnclaveSourceExecutor()
-			return s.draftPipeline.WithSourceExecutor(executor)
+			// Use DenyPlaintextVault as a safety net: if any code path
+			// accidentally tries to retrieve credentials from the vault
+			// instead of going through the enclave, it fails loudly.
+			return s.draftPipeline.
+				WithSourceExecutor(executor).
+				WithVault(vault.NewDenyPlaintextVault())
 		}
 	}
 

@@ -232,6 +232,75 @@ func TestEscrowPersistence_CorruptJSON(t *testing.T) {
 	}
 }
 
+func TestEscrowUpdate_HappyPath(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	original := []byte(`{"access_token":"old","refresh_token":"r1"}`)
+	id := s.Store("g1", original, "oauth2", nil, time.Now().Add(time.Hour))
+
+	updated := []byte(`{"access_token":"new","refresh_token":"r2"}`)
+	if err := s.Update(id, updated); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := s.Get(id)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if string(got) != string(updated) {
+		t.Errorf("got %q, want %q", got, updated)
+	}
+
+	// Original bytes should be zeroed.
+	for _, b := range original {
+		if b != 0 {
+			t.Fatal("original credential bytes should be zeroed after update")
+		}
+	}
+}
+
+func TestEscrowUpdate_NotFound(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	err := s.Update("esc_nonexistent", []byte("data"))
+	if err != enclave.ErrEscrowNotFound {
+		t.Errorf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestEscrowUpdate_Expired(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	id := s.Store("g1", []byte("cred"), "oauth2", nil, time.Now().Add(-time.Second))
+	err := s.Update(id, []byte("new"))
+	if err != enclave.ErrEscrowExpired {
+		t.Errorf("expected ErrEscrowExpired, got %v", err)
+	}
+}
+
+func TestEscrowUpdate_Persistence(t *testing.T) {
+	dir := t.TempDir()
+	s1, err := newEscrowStore(dir)
+	if err != nil {
+		t.Fatalf("newEscrowStore: %v", err)
+	}
+
+	id := s1.Store("g1", []byte("old"), "oauth2", nil, time.Now().Add(time.Hour))
+	if err := s1.Update(id, []byte("refreshed")); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Reload from disk.
+	s2, err := newEscrowStore(dir)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got, err := s2.Get(id)
+	if err != nil {
+		t.Fatalf("Get after reload: %v", err)
+	}
+	if string(got) != "refreshed" {
+		t.Errorf("persisted value = %q, want %q", got, "refreshed")
+	}
+}
+
 func TestEscrowList(t *testing.T) {
 	s := mustNewEscrowStore(t)
 	s.Store("g1", []byte("c1"), "oauth", nil, time.Now().Add(time.Hour))
