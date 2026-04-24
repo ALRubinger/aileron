@@ -21,8 +21,11 @@ import (
 const (
 	connectorType     = "git"
 	connectorProvider = "github"
-	githubAPI         = "https://api.github.com"
 )
+
+// githubAPI is the base URL for the GitHub API. It is a var (not const) so
+// tests can point it at a local httptest server.
+var githubAPI = "https://api.github.com"
 
 // Connector executes git actions via GitHub.
 type Connector struct{}
@@ -51,6 +54,10 @@ func (c *Connector) Execute(ctx context.Context, req connector.ExecutionRequest)
 		return c.mergePullRequest(ctx, req)
 	case "git.pull_request.close":
 		return c.closePullRequest(ctx, req)
+	case "git.issue.create":
+		return c.createIssue(ctx, req)
+	case "git.issue.comment":
+		return c.commentOnIssue(ctx, req)
 	default:
 		return connector.ExecutionResult{
 			Status: connector.ExecutionStatusFailed,
@@ -138,6 +145,74 @@ func (c *Connector) closePullRequest(ctx context.Context, req connector.Executio
 	return connector.ExecutionResult{
 		Status: connector.ExecutionStatusSucceeded,
 		Output: map[string]any{"closed": true},
+	}, nil
+}
+
+func (c *Connector) createIssue(ctx context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
+	repo := paramStr(req.Parameters, "repository")
+	title := paramStr(req.Parameters, "issue_title")
+	if repo == "" || title == "" {
+		return failResult("github: repository and issue_title parameters required"), nil
+	}
+
+	payload := map[string]interface{}{
+		"title": title,
+	}
+	if body := paramStr(req.Parameters, "issue_body"); body != "" {
+		payload["body"] = body
+	}
+	if labels, ok := req.Parameters["issue_labels"]; ok {
+		payload["labels"] = labels
+	}
+	if assignees, ok := req.Parameters["issue_assignees"]; ok {
+		payload["assignees"] = assignees
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/issues", githubAPI, repo)
+	result, err := githubPost(ctx, url, string(req.Credential.Value), payload)
+	if err != nil {
+		return failResult("github: " + err.Error()), nil
+	}
+
+	issueURL, _ := result["html_url"].(string)
+	issueNumber, _ := result["number"].(float64)
+
+	return connector.ExecutionResult{
+		Status:     connector.ExecutionStatusSucceeded,
+		ReceiptRef: issueURL,
+		Output: map[string]any{
+			"issue_url":    issueURL,
+			"issue_number": int(issueNumber),
+		},
+	}, nil
+}
+
+func (c *Connector) commentOnIssue(ctx context.Context, req connector.ExecutionRequest) (connector.ExecutionResult, error) {
+	repo := paramStr(req.Parameters, "repository")
+	issueNumber := paramStr(req.Parameters, "issue_number")
+	body := paramStr(req.Parameters, "body")
+	if repo == "" || issueNumber == "" || body == "" {
+		return failResult("github: repository, issue_number, and body parameters required"), nil
+	}
+
+	url := fmt.Sprintf("%s/repos/%s/issues/%s/comments", githubAPI, repo, issueNumber)
+	result, err := githubPost(ctx, url, string(req.Credential.Value), map[string]interface{}{
+		"body": body,
+	})
+	if err != nil {
+		return failResult("github: " + err.Error()), nil
+	}
+
+	commentURL, _ := result["html_url"].(string)
+	commentID, _ := result["id"].(float64)
+
+	return connector.ExecutionResult{
+		Status:     connector.ExecutionStatusSucceeded,
+		ReceiptRef: commentURL,
+		Output: map[string]any{
+			"comment_url": commentURL,
+			"comment_id":  int(commentID),
+		},
 	}, nil
 }
 

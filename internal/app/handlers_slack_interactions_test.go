@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -1022,6 +1023,69 @@ func TestInteraction_InstructionsSubmission_BadMetadata(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	// Bad metadata — should return 200 without crashing.
+}
+
+func TestInteraction_CancelDraft(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	// Set up a response URL server to capture the response.
+	var mu sync.Mutex
+	var responseBody string
+	responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		responseBody = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer responseServer.Close()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":         "block_actions",
+		"user":         map[string]any{"id": "U_ALICE"},
+		"response_url": responseServer.URL,
+		"actions":      []map[string]any{{"action_id": "cancel_draft", "value": ""}},
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Wait for async handler.
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	body := responseBody
+	mu.Unlock()
+	if !strings.Contains(body, "Draft cancelled") {
+		t.Errorf("expected 'Draft cancelled' in response, got %q", body)
+	}
+}
+
+func TestInteraction_CancelDraft_NoResponseURL(t *testing.T) {
+	srv := newInteractionTestServer()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type":    "block_actions",
+		"user":    map[string]any{"id": "U_ALICE"},
+		"actions": []map[string]any{{"action_id": "cancel_draft", "value": ""}},
+		// no response_url
+	})
+
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	// Should not panic with empty response URL.
+	time.Sleep(50 * time.Millisecond)
 }
 
 func TestInteraction_UnknownAction(t *testing.T) {

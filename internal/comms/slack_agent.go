@@ -21,8 +21,10 @@ func SetAgentAPIURL(url string) {
 	slackAgentMu.Unlock()
 }
 
-// newAgentClient creates a one-shot Slack client for agent operations.
-func newAgentClient(botToken string) *slack.Client {
+// NewAgentClient creates a one-shot Slack client for agent operations.
+// Exported so callers outside the comms package (e.g. handlers posting
+// Block Kit messages) can create a client with the test API URL override.
+func NewAgentClient(botToken string) *slack.Client {
 	slackAgentMu.RLock()
 	apiURL := slackAgentAPIURL
 	slackAgentMu.RUnlock()
@@ -46,7 +48,7 @@ func SetAssistantStatus(ctx context.Context, botToken, channelID, threadTS, stat
 	if botToken == "" {
 		return fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	return client.SetAssistantThreadsStatusContext(ctx, slack.AssistantThreadsSetStatusParameters{
 		ChannelID: channelID,
 		ThreadTS:  threadTS,
@@ -66,7 +68,7 @@ func SetAssistantSuggestedPrompts(ctx context.Context, botToken, channelID, thre
 	for _, p := range prompts {
 		params.AddPrompt(p.Title, p.Message)
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	return client.SetAssistantThreadsSuggestedPromptsContext(ctx, params)
 }
 
@@ -75,7 +77,7 @@ func SetAssistantTitle(ctx context.Context, botToken, channelID, threadTS, title
 	if botToken == "" {
 		return fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	return client.SetAssistantThreadsTitleContext(ctx, slack.AssistantThreadsSetTitleParameters{
 		ChannelID: channelID,
 		ThreadTS:  threadTS,
@@ -89,7 +91,7 @@ func StartStream(ctx context.Context, botToken, channelID, threadTS string) (str
 	if botToken == "" {
 		return "", fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	var opts []slack.MsgOption
 	if threadTS != "" {
 		opts = append(opts, slack.MsgOptionTS(threadTS))
@@ -103,7 +105,7 @@ func AppendStream(ctx context.Context, botToken, channelID, ts, text string) err
 	if botToken == "" {
 		return fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	_, _, err := client.AppendStreamContext(ctx, channelID, ts, slack.MsgOptionText(text, false))
 	return err
 }
@@ -114,7 +116,7 @@ func StopStream(ctx context.Context, botToken, channelID, ts string, opts ...sla
 	if botToken == "" {
 		return fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	_, _, err := client.StopStreamContext(ctx, channelID, ts, opts...)
 	return err
 }
@@ -125,7 +127,7 @@ func OpenModal(ctx context.Context, botToken, triggerID string, view slack.Modal
 	if botToken == "" {
 		return nil, fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	return client.OpenViewContext(ctx, triggerID, view)
 }
 
@@ -134,7 +136,7 @@ func UpdateModal(ctx context.Context, botToken, viewID string, view slack.ModalV
 	if botToken == "" {
 		return nil, fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	return client.UpdateViewContext(ctx, view, "", "", viewID)
 }
 
@@ -151,7 +153,7 @@ func PostMessage(ctx context.Context, botToken, channelID, threadTS, text string
 	if botToken == "" {
 		return fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	opts := []slack.MsgOption{
 		slack.MsgOptionText(text, false),
 	}
@@ -168,7 +170,7 @@ func OpenConversation(ctx context.Context, botToken, userID string) (string, err
 	if botToken == "" {
 		return "", fmt.Errorf("slack agent: bot token is required")
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	params := &slack.OpenConversationParameters{
 		Users: []string{userID},
 	}
@@ -185,7 +187,7 @@ func ResolveSlackDisplayName(ctx context.Context, botToken, slackUserID string) 
 	if botToken == "" || slackUserID == "" {
 		return slackUserID
 	}
-	client := newAgentClient(botToken)
+	client := NewAgentClient(botToken)
 	user, err := client.GetUserInfoContext(ctx, slackUserID)
 	if err != nil {
 		return slackUserID

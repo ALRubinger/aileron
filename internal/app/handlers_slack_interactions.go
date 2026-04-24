@@ -172,6 +172,13 @@ func (s *apiServer) processInteraction(actionID, actionValue string, payload sla
 			"channel", sendMeta.Channel,
 		)
 
+	case "cancel_draft":
+		// Cancel button — acknowledge with a response URL update if available.
+		if payload.ResponseURL != "" {
+			s.respondToInteraction(payload.ResponseURL, ":x: Draft cancelled.")
+		}
+		s.log.Info("interaction: draft cancelled", "user_id", payload.User.ID)
+
 	case refineActionID:
 		s.processRefineDraft(ctx, payload)
 

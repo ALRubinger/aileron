@@ -74,6 +74,10 @@ type GitAction struct {
 	Labels         []string `json:"labels"`
 	Reviewers      []string `json:"reviewers"`
 	ChecksRequired []string `json:"checks_required"`
+	IssueTitle     string   `json:"issue_title"`
+	IssueBody      string   `json:"issue_body"`
+	IssueLabels    []string `json:"issue_labels"`
+	IssueAssignees []string `json:"issue_assignees"`
 }
 
 // DeployAction carries deployment-specific intent fields.

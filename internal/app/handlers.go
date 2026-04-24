@@ -733,8 +733,9 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Resolve credential from vault.
-	vaultPath := fmt.Sprintf("connectors/%s/default", connProvider)
+	// Resolve credential from vault. Try connected account first (user-scoped
+	// OAuth token), fall back to infrastructure credential.
+	vaultPath := s.resolveCredentialVaultPath(ctx, connProvider)
 	secret, err := s.vault.Get(ctx, vaultPath)
 	if err != nil {
 		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential not found: "+vaultPath)
@@ -1079,8 +1080,49 @@ func finishExecution(s *apiServer, ctx context.Context, exec api.Execution, inte
 	})
 }
 
+// resolveCredentialVaultPath returns the vault path for execution credentials.
+// It first checks whether the authenticated user has a connected account for
+// the provider (user-scoped OAuth token), falling back to the infrastructure
+// credential path if none is found.
+func (s *apiServer) resolveCredentialVaultPath(ctx context.Context, connProvider string) string {
+	// Map connector provider to connected account provider.
+	var acctProvider model.ConnectedAccountProvider
+	switch connProvider {
+	case "gmail":
+		acctProvider = model.ConnectedAccountProviderGmail
+	case "google_calendar":
+		acctProvider = model.ConnectedAccountProviderGoogleCalendar
+	case "github":
+		acctProvider = model.ConnectedAccountProviderGitHub
+	}
+
+	if acctProvider != "" {
+		var userID string
+		if claims := auth.ClaimsFromContext(ctx); claims != nil {
+			userID = claims.Subject
+		}
+		if userID != "" && s.connectedAccounts != nil {
+			accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
+				UserID: userID,
+			})
+			if err == nil {
+				for _, acct := range accounts {
+					if acct.Provider == acctProvider && acct.Status == model.ConnectedAccountStatusActive {
+						return acct.VaultPath()
+					}
+				}
+			}
+		}
+	}
+
+	// Fall back to infrastructure credential.
+	return fmt.Sprintf("connectors/%s/default", connProvider)
+}
+
 func resolveConnector(actionType string) (connType, provider string) {
 	switch {
+	case len(actionType) >= 5 && actionType[:5] == "email":
+		return "email", "gmail"
 	case len(actionType) >= 3 && actionType[:3] == "git":
 		return "git", "github"
 	case len(actionType) >= 7 && actionType[:7] == "payment":
@@ -1121,6 +1163,18 @@ func buildConnectorParams(action api.ActionIntent) map[string]any {
 			if g.Reviewers != nil {
 				params["reviewers"] = *g.Reviewers
 			}
+			if g.IssueTitle != nil {
+				params["issue_title"] = *g.IssueTitle
+			}
+			if g.IssueBody != nil {
+				params["issue_body"] = *g.IssueBody
+			}
+			if g.IssueLabels != nil {
+				params["issue_labels"] = *g.IssueLabels
+			}
+			if g.IssueAssignees != nil {
+				params["issue_assignees"] = *g.IssueAssignees
+			}
 		}
 		if action.Domain.Payment != nil {
 			p := action.Domain.Payment
@@ -1130,6 +1184,66 @@ func buildConnectorParams(action api.ActionIntent) map[string]any {
 			}
 			if p.VendorName != nil {
 				params["vendor_name"] = *p.VendorName
+			}
+		}
+		if action.Domain.Email != nil {
+			e := action.Domain.Email
+			if e.To != nil {
+				params["to"] = *e.To
+			}
+			if e.Cc != nil {
+				params["cc"] = *e.Cc
+			}
+			if e.Bcc != nil {
+				params["bcc"] = *e.Bcc
+			}
+			if e.Subject != nil {
+				params["subject"] = *e.Subject
+			}
+			if e.BodyText != nil {
+				params["body_text"] = *e.BodyText
+			}
+			if e.BodyHtml != nil {
+				params["body_html"] = *e.BodyHtml
+			}
+			if e.SendMode != nil {
+				params["send_mode"] = string(*e.SendMode)
+			}
+			if e.ThreadRef != nil {
+				params["thread_ref"] = *e.ThreadRef
+			}
+		}
+		if action.Domain.Calendar != nil {
+			c := action.Domain.Calendar
+			if c.Title != nil {
+				params["title"] = *c.Title
+			}
+			if c.Description != nil {
+				params["description"] = *c.Description
+			}
+			if c.StartTime != nil {
+				params["start_time"] = *c.StartTime
+			}
+			if c.EndTime != nil {
+				params["end_time"] = *c.EndTime
+			}
+			if c.Timezone != nil {
+				params["timezone"] = *c.Timezone
+			}
+			if c.Location != nil {
+				params["location"] = *c.Location
+			}
+			if c.CalendarId != nil {
+				params["calendar_id"] = *c.CalendarId
+			}
+			if c.ConferenceType != nil {
+				params["conference_type"] = string(*c.ConferenceType)
+			}
+			if c.Attendees != nil {
+				params["attendees"] = *c.Attendees
+			}
+			if c.Visibility != nil {
+				params["visibility"] = string(*c.Visibility)
 			}
 		}
 	}
@@ -1179,6 +1293,18 @@ func apiActionToModel(action api.ActionIntent) model.ActionIntent {
 			if g.PrBody != nil {
 				mg.PRBody = *g.PrBody
 			}
+			if g.IssueTitle != nil {
+				mg.IssueTitle = *g.IssueTitle
+			}
+			if g.IssueBody != nil {
+				mg.IssueBody = *g.IssueBody
+			}
+			if g.IssueLabels != nil {
+				mg.IssueLabels = *g.IssueLabels
+			}
+			if g.IssueAssignees != nil {
+				mg.IssueAssignees = *g.IssueAssignees
+			}
 			m.Domain.Git = mg
 		}
 		if action.Domain.Payment != nil {
@@ -1198,17 +1324,94 @@ func apiActionToModel(action api.ActionIntent) model.ActionIntent {
 			}
 			m.Domain.Payment = mp
 		}
+		if action.Domain.Email != nil {
+			e := action.Domain.Email
+			me := &model.EmailAction{}
+			if e.Subject != nil {
+				me.Subject = *e.Subject
+			}
+			if e.BodyText != nil {
+				me.BodyText = *e.BodyText
+			}
+			if e.BodyHtml != nil {
+				me.BodyHTML = *e.BodyHtml
+			}
+			if e.SendMode != nil {
+				me.SendMode = string(*e.SendMode)
+			}
+			if e.ThreadRef != nil {
+				me.ThreadRef = *e.ThreadRef
+			}
+			if e.To != nil {
+				for _, r := range *e.To {
+					mr := model.Recipient{Email: string(r.Email)}
+					if r.Name != nil {
+						mr.Name = *r.Name
+					}
+					me.To = append(me.To, mr)
+				}
+			}
+			if e.Cc != nil {
+				for _, r := range *e.Cc {
+					mr := model.Recipient{Email: string(r.Email)}
+					if r.Name != nil {
+						mr.Name = *r.Name
+					}
+					me.CC = append(me.CC, mr)
+				}
+			}
+			if e.Bcc != nil {
+				for _, r := range *e.Bcc {
+					mr := model.Recipient{Email: string(r.Email)}
+					if r.Name != nil {
+						mr.Name = *r.Name
+					}
+					me.BCC = append(me.BCC, mr)
+				}
+			}
+			m.Domain.Email = me
+		}
 		if action.Domain.Calendar != nil {
 			c := action.Domain.Calendar
 			mc := &model.CalendarAction{}
 			if c.Title != nil {
 				mc.Title = *c.Title
 			}
+			if c.Description != nil {
+				mc.Description = *c.Description
+			}
+			if c.Provider != nil {
+				mc.Provider = string(*c.Provider)
+			}
+			if c.Timezone != nil {
+				mc.Timezone = *c.Timezone
+			}
+			if c.Location != nil {
+				mc.Location = *c.Location
+			}
+			if c.ConferenceType != nil {
+				mc.ConferenceType = string(*c.ConferenceType)
+			}
+			if c.CalendarId != nil {
+				mc.CalendarID = *c.CalendarId
+			}
+			if c.Visibility != nil {
+				mc.Visibility = string(*c.Visibility)
+			}
+			if c.StartTime != nil {
+				mc.StartTime = c.StartTime
+			}
+			if c.EndTime != nil {
+				mc.EndTime = c.EndTime
+			}
 			if c.Attendees != nil {
 				for _, a := range *c.Attendees {
 					attendee := model.CalendarAttendee{Email: string(a.Email)}
 					if a.Name != nil {
 						attendee.Name = *a.Name
+					}
+					if a.Optional != nil {
+						attendee.Optional = *a.Optional
 					}
 					mc.Attendees = append(mc.Attendees, attendee)
 				}

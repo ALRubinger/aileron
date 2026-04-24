@@ -1764,6 +1764,18 @@ components:
           type: array
           items:
             type: string
+        issue_title:
+          type: string
+        issue_body:
+          type: string
+        issue_labels:
+          type: array
+          items:
+            type: string
+        issue_assignees:
+          type: array
+          items:
+            type: string
 
     DeployAction:
       type: object
@@ -1990,9 +2002,12 @@ components:
           type: string
           examples:
             - git.pull_request.create
+            - git.issue.create
+            - git.issue.comment
             - deploy.release
             - cloud.resource.mutate
             - email.send
+            - email.draft
             - calendar.event.create
             - payment.charge
             - procurement.request.submit

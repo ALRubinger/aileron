@@ -26,6 +26,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/connector"
 	googlecalendar "github.com/ALRubinger/aileron/internal/connector/calendar/google"
+	gmailconnector "github.com/ALRubinger/aileron/internal/connector/email/gmail"
 	"github.com/ALRubinger/aileron/internal/connector/git/github"
 	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/internal/notify"
@@ -62,7 +63,10 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// --- Connector registry ---
 	registry := connector.NewRegistry()
 	registry.Register(ctx, stripe.New())
-	registry.Register(ctx, googlecalendar.New())
+	// Google Calendar connector — OAuth client credentials are loaded later
+	// from auth config. Empty strings here mean token refresh won't work
+	// until registerProviders re-registers with real credentials.
+	registry.Register(ctx, googlecalendar.New("", ""))
 	registry.Register(ctx, github.New())
 
 	// --- Vault ---
@@ -291,7 +295,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		authRegistry := auth.NewRegistry()
 		accountRegistry := account.NewRegistry()
 
-		registerProviders(authCfg, authRegistry, accountRegistry, sourceReg, pgConnectedAccountStore, v, log)
+		registerProviders(authCfg, authRegistry, accountRegistry, sourceReg, registry, pgConnectedAccountStore, v, log)
 
 		if len(accountRegistry.Providers()) > 0 {
 			server.accountService = accountRegistry
@@ -407,6 +411,7 @@ func registerProviders(
 	authReg *auth.Registry,
 	accountReg *account.Registry,
 	sourceReg *source.Registry,
+	connectorRegistry *connector.Registry,
 	accounts store.ConnectedAccountStore,
 	v vault.Vault,
 	log *slog.Logger,
@@ -428,7 +433,10 @@ func registerProviders(
 		))
 		sourceReg.Register(gmailsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
 		sourceReg.Register(calendarsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
-		log.Info("enabled Google connected accounts and source connectors (Gmail, Calendar)")
+		// Re-register execution connectors with OAuth credentials for token refresh.
+		connectorRegistry.Register(context.Background(), googlecalendar.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
+		connectorRegistry.Register(context.Background(), gmailconnector.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
+		log.Info("enabled Google connected accounts, source connectors, and execution connectors (Gmail, Calendar)")
 	}
 
 	if cfg.SlackEnabled() {
