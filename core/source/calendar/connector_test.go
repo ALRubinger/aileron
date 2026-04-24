@@ -3,12 +3,14 @@ package calendar_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/source"
 	calendarsource "github.com/ALRubinger/aileron/core/source/calendar"
 	"google.golang.org/api/option"
 )
@@ -299,5 +301,63 @@ func TestConnector_Events_RefreshesExpiredToken(t *testing.T) {
 	}
 	if events[0]["summary"] != "Team Standup" {
 		t.Errorf("expected Team Standup, got %v", events[0]["summary"])
+	}
+}
+
+func TestConnector_Events_AuthError_WrapsErrAuthFailed(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    401,
+				"message": "Invalid Credentials",
+			},
+		})
+	}))
+	defer apiServer.Close()
+
+	c := calendarsource.New("test-client-id", "test-client-secret").
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	_, err := c.Execute(context.Background(), "calendar_events", map[string]any{
+		"start": "2026-04-15T00:00:00Z",
+		"end":   "2026-04-16T00:00:00Z",
+	}, testToken())
+
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+	if !errors.Is(err, source.ErrAuthFailed) {
+		t.Errorf("expected error to wrap source.ErrAuthFailed, got: %v", err)
+	}
+}
+
+func TestConnector_FreeBusy_AuthError_WrapsErrAuthFailed(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    401,
+				"message": "Invalid Credentials",
+			},
+		})
+	}))
+	defer apiServer.Close()
+
+	c := calendarsource.New("test-client-id", "test-client-secret").
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	_, err := c.Execute(context.Background(), "calendar_free_busy", map[string]any{
+		"start": "2026-04-15T00:00:00Z",
+		"end":   "2026-04-16T00:00:00Z",
+	}, testToken())
+
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+	if !errors.Is(err, source.ErrAuthFailed) {
+		t.Errorf("expected error to wrap source.ErrAuthFailed, got: %v", err)
 	}
 }

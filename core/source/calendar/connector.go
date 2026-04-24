@@ -5,12 +5,15 @@ package calendar
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ALRubinger/aileron/core/source"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	cal "google.golang.org/api/calendar/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -78,17 +81,25 @@ func (c *Connector) Tools() []source.ToolDefinition {
 func (c *Connector) Execute(ctx context.Context, tool string, params map[string]any, token []byte) (map[string]any, error) {
 	svc, err := c.newService(ctx, token)
 	if err != nil {
+		if isAuthError(err) {
+			return nil, fmt.Errorf("%s: %w", err.Error(), source.ErrAuthFailed)
+		}
 		return nil, err
 	}
 
+	var result map[string]any
 	switch tool {
 	case "calendar_events":
-		return c.events(ctx, svc, params)
+		result, err = c.events(ctx, svc, params)
 	case "calendar_free_busy":
-		return c.freeBusy(ctx, svc, params)
+		result, err = c.freeBusy(ctx, svc, params)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", tool)
 	}
+	if err != nil && isAuthError(err) {
+		return nil, fmt.Errorf("%s: %w", err.Error(), source.ErrAuthFailed)
+	}
+	return result, err
 }
 
 func (c *Connector) newService(ctx context.Context, token []byte) (*cal.Service, error) {
@@ -209,6 +220,8 @@ func (c *Connector) freeBusy(ctx context.Context, svc *cal.Service, params map[s
 
 // tokenSource parses the stored OAuth token and returns a token source that
 // automatically refreshes expired access tokens using the OAuth client credentials.
+// If a TokenSaver is present in the context, the returned token source will
+// persist refreshed tokens back to the vault so rotated refresh tokens survive.
 func (c *Connector) tokenSource(ctx context.Context, tokenJSON []byte) (oauth2.TokenSource, error) {
 	var tok oauth2.Token
 	if err := json.Unmarshal(tokenJSON, &tok); err != nil {
@@ -217,7 +230,23 @@ func (c *Connector) tokenSource(ctx context.Context, tokenJSON []byte) (oauth2.T
 	if tok.RefreshToken == "" && tok.AccessToken == "" {
 		return nil, fmt.Errorf("token has neither access_token nor refresh_token")
 	}
-	return c.oauthConfig.TokenSource(ctx, &tok), nil
+	base := c.oauthConfig.TokenSource(ctx, &tok)
+	if saver := source.GetTokenSaver(ctx); saver != nil {
+		return source.NewPersistingTokenSource(base, &tok, saver, ctx), nil
+	}
+	return base, nil
+}
+
+// isAuthError reports whether err indicates invalid or expired credentials.
+func isAuthError(err error) bool {
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && (apiErr.Code == 401 || apiErr.Code == 403) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "oauth2: cannot fetch token") ||
+		strings.Contains(msg, "token has been revoked") ||
+		strings.Contains(msg, "invalid_grant")
 }
 
 func toInt64(v any, def int64) int64 {

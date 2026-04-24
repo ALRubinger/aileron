@@ -9,8 +9,10 @@ package gmail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/ALRubinger/aileron/core/source"
 	"golang.org/x/oauth2"
@@ -18,6 +20,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	driveapi "google.golang.org/api/drive/v3"
 	gmailapi "google.golang.org/api/gmail/v1"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -101,21 +104,29 @@ func (c *Connector) Tools() []source.ToolDefinition {
 func (c *Connector) Execute(ctx context.Context, tool string, params map[string]any, token []byte) (map[string]any, error) {
 	svc, err := c.newService(ctx, token)
 	if err != nil {
+		if isAuthError(err) {
+			return nil, fmt.Errorf("%s: %w", err.Error(), source.ErrAuthFailed)
+		}
 		return nil, err
 	}
 
+	var result map[string]any
 	switch tool {
 	case "gmail_search":
-		return c.search(ctx, svc, params)
+		result, err = c.search(ctx, svc, params)
 	case "gmail_get_thread":
-		return c.getThread(ctx, svc, params)
+		result, err = c.getThread(ctx, svc, params)
 	case "drive_search":
-		return c.driveSearch(ctx, token, params)
+		result, err = c.driveSearch(ctx, token, params)
 	case "drive_get_doc":
-		return c.driveGetDoc(ctx, token, params)
+		result, err = c.driveGetDoc(ctx, token, params)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", tool)
 	}
+	if err != nil && isAuthError(err) {
+		return nil, fmt.Errorf("%s: %w", err.Error(), source.ErrAuthFailed)
+	}
+	return result, err
 }
 
 func (c *Connector) newService(ctx context.Context, token []byte) (*gmailapi.Service, error) {
@@ -333,6 +344,8 @@ func (c *Connector) driveGetDoc(ctx context.Context, token []byte, params map[st
 
 // tokenSource parses the stored OAuth token and returns a token source that
 // automatically refreshes expired access tokens using the OAuth client credentials.
+// If a TokenSaver is present in the context, the returned token source will
+// persist refreshed tokens back to the vault so rotated refresh tokens survive.
 func (c *Connector) tokenSource(ctx context.Context, tokenJSON []byte) (oauth2.TokenSource, error) {
 	var tok oauth2.Token
 	if err := json.Unmarshal(tokenJSON, &tok); err != nil {
@@ -341,9 +354,23 @@ func (c *Connector) tokenSource(ctx context.Context, tokenJSON []byte) (oauth2.T
 	if tok.RefreshToken == "" && tok.AccessToken == "" {
 		return nil, fmt.Errorf("token has neither access_token nor refresh_token")
 	}
-	// ReuseTokenSourceWithExpiry returns the existing access token if still valid,
-	// and transparently refreshes via the oauth2.Config when it expires.
-	return c.oauthConfig.TokenSource(ctx, &tok), nil
+	base := c.oauthConfig.TokenSource(ctx, &tok)
+	if saver := source.GetTokenSaver(ctx); saver != nil {
+		return source.NewPersistingTokenSource(base, &tok, saver, ctx), nil
+	}
+	return base, nil
+}
+
+// isAuthError reports whether err indicates invalid or expired credentials.
+func isAuthError(err error) bool {
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && (apiErr.Code == 401 || apiErr.Code == 403) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "oauth2: cannot fetch token") ||
+		strings.Contains(msg, "token has been revoked") ||
+		strings.Contains(msg, "invalid_grant")
 }
 
 func toInt64(v any, def int64) int64 {

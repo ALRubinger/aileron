@@ -1228,3 +1228,72 @@ func TestPipeline_GenerateDraftStream_CredentialUnavailable_Propagates(t *testin
 		t.Errorf("expected error wrapping ErrCredentialUnavailable, got: %v", err)
 	}
 }
+
+// authFailSourceConnector returns source.ErrAuthFailed from Execute.
+type authFailSourceConnector struct{}
+
+func (m *authFailSourceConnector) Provider() string { return "slack" }
+func (m *authFailSourceConnector) Tools() []source.ToolDefinition {
+	return []source.ToolDefinition{
+		{Name: "slack_channel_history", Description: "Get channel messages",
+			Parameters: []source.ToolParam{{Name: "channel", Type: "string", Required: true}}},
+	}
+}
+func (m *authFailSourceConnector) Execute(_ context.Context, _ string, _ map[string]any, _ []byte) (map[string]any, error) {
+	return nil, fmt.Errorf("googleapi: Error 401: Invalid Credentials: %w", source.ErrAuthFailed)
+}
+
+func TestPipeline_GenerateDraft_ToolExecutor_AuthFailed(t *testing.T) {
+	// When a source connector returns source.ErrAuthFailed (e.g. Google 401),
+	// the tool executor should return a ToolFatalError so the LLM loop aborts.
+	mock := &mockLLMClient{
+		researchResp:   &llm.GenerateResponse{Text: "context gathered"},
+		ghostwriteResp: &llm.GenerateResponse{Text: "draft"},
+	}
+
+	accounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
+		Status: model.ConnectedAccountStatusActive,
+	})
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(&authFailSourceConnector{})
+
+	v := vault.NewMemVault()
+	v.Put(ctx, "connected-accounts/usr_1/slack", []byte(`{"access_token":"test"}`), vault.Metadata{})
+
+	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
+		v, slog.Default(), draft.Prompts{Research: "test", Ghostwrite: "test"})
+
+	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
+		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Alice", Body: "hi",
+	})
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+
+	// Extract the tool executor from the research round.
+	if len(mock.requests) < 1 {
+		t.Fatal("expected at least 1 LLM call")
+	}
+	researchReq := mock.requests[0]
+	if researchReq.ToolExecutor == nil {
+		t.Fatal("expected ToolExecutor in research round")
+	}
+
+	// Execute a tool — should return a ToolFatalError wrapping ErrAuthFailed.
+	_, execErr := researchReq.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
+	if execErr == nil {
+		t.Fatal("expected error from auth failure")
+	}
+
+	var fatal *llm.ToolFatalError
+	if !errors.As(execErr, &fatal) {
+		t.Fatalf("expected *llm.ToolFatalError, got %T: %v", execErr, execErr)
+	}
+	if !errors.Is(fatal.Err, source.ErrAuthFailed) {
+		t.Errorf("expected ToolFatalError to wrap ErrAuthFailed, got: %v", fatal.Err)
+	}
+}

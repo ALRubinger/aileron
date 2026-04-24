@@ -613,8 +613,24 @@ func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, account
 			"metadata_encrypted", isEnc,
 		)
 
+		// Inject a token saver so connectors can persist refreshed OAuth
+		// tokens (including rotated refresh tokens) back to the vault.
+		execCtx = source.WithTokenSaver(execCtx, func(saveCtx context.Context, newToken []byte) error {
+			p.log.Info("persisting refreshed OAuth token",
+				"provider", provider,
+				"vault_path", acct.VaultPath(),
+			)
+			return p.vault.Put(saveCtx, acct.VaultPath(), newToken, secret.Metadata)
+		})
+
 		result, execErr := p.sourceRegistry.ExecuteTool(execCtx, tool, params, secret.Value)
 		if execErr != nil {
+			// Auth failures are unrecoverable — every subsequent call will
+			// fail too. Wrap as fatal so the LLM loop aborts and the handler
+			// can tell the user to reconnect.
+			if errors.Is(execErr, source.ErrAuthFailed) {
+				return nil, &llm.ToolFatalError{Err: execErr}
+			}
 			p.log.Error("tool execution failed", "tool", tool, "provider", provider, "error", execErr)
 		} else {
 			resultSize := 0

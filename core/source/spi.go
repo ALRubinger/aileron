@@ -11,7 +11,10 @@
 // to any LLM's function calling format by a thin adapter layer.
 package source
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // SourceConnector retrieves context from an external system.
 type SourceConnector interface {
@@ -36,6 +39,31 @@ type ToolDefinition struct {
 
 	// Parameters describes the expected input parameters.
 	Parameters []ToolParam `json:"parameters"`
+}
+
+// ErrAuthFailed indicates that a connector's credentials are invalid, expired,
+// or revoked. The pipeline should treat this as fatal and abort the LLM loop
+// so the handler can tell the user to reconnect.
+var ErrAuthFailed = errors.New("source: authentication failed")
+
+// TokenSaver persists a refreshed OAuth token back to the vault.
+type TokenSaver func(ctx context.Context, newToken []byte) error
+
+type tokenSaverKey struct{}
+
+// WithTokenSaver returns a context carrying a TokenSaver callback. Connectors
+// that support automatic token refresh call the saver when the underlying
+// oauth2.TokenSource returns a new token.
+func WithTokenSaver(ctx context.Context, saver TokenSaver) context.Context {
+	return context.WithValue(ctx, tokenSaverKey{}, saver)
+}
+
+// GetTokenSaver retrieves the TokenSaver from the context, or nil if none.
+func GetTokenSaver(ctx context.Context) TokenSaver {
+	if s, ok := ctx.Value(tokenSaverKey{}).(TokenSaver); ok {
+		return s
+	}
+	return nil
 }
 
 // ToolParam describes a single parameter for a tool.
