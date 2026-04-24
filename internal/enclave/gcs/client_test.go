@@ -407,3 +407,62 @@ func TestClientReady_Unreachable(t *testing.T) {
 		t.Fatal("expected error for unreachable enclave")
 	}
 }
+
+func TestClientSourceExecute(t *testing.T) {
+	resultJSON, _ := json.Marshal(map[string]any{"messages": []string{"hello"}})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/source/execute" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected method %q", r.Method)
+		}
+
+		var req enclave.SourceExecuteRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.EscrowID != "esc_123" {
+			t.Errorf("expected escrow ID esc_123, got %q", req.EscrowID)
+		}
+		if req.Tool != "gmail_search" {
+			t.Errorf("expected tool gmail_search, got %q", req.Tool)
+		}
+
+		json.NewEncoder(w).Encode(enclave.SourceExecuteResponse{
+			Result: resultJSON,
+		})
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	resp, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
+		EscrowID: "esc_123",
+		Tool:     "gmail_search",
+		Params:   map[string]any{"query": "test"},
+	})
+	if err != nil {
+		t.Fatalf("SourceExecute: %v", err)
+	}
+	if resp.Error != "" {
+		t.Errorf("unexpected error: %s", resp.Error)
+	}
+	if resp.Result == nil {
+		t.Fatal("expected result, got nil")
+	}
+}
+
+func TestClientSourceExecute_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("enclave crashed"))
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	_, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
+		EscrowID: "esc_123",
+		Tool:     "gmail_search",
+	})
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+}
