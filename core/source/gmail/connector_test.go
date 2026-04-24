@@ -3,6 +3,7 @@ package gmail_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/core/source"
 	gmailsource "github.com/ALRubinger/aileron/core/source/gmail"
+	"golang.org/x/oauth2"
 	"google.golang.org/api/option"
 )
 
@@ -671,5 +674,198 @@ func TestConnector_Search_RefreshesExpiredToken(t *testing.T) {
 	messages := result["messages"].([]map[string]any)
 	if len(messages) != 1 {
 		t.Errorf("expected 1 message, got %d", len(messages))
+	}
+}
+
+func TestConnector_Search_PersistsRefreshedToken(t *testing.T) {
+	// When a token refresh occurs and a TokenSaver is in the context,
+	// the refreshed token (including any rotated refresh token) must be
+	// persisted back via the saver.
+
+	// Mock OAuth token endpoint — returns a fresh token with a rotated refresh token.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "fresh-access-token",
+			"refresh_token": "rotated-refresh-token",
+			"token_type":    "bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	// Mock Gmail API.
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/messages/") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "snippet": "Hello",
+				"payload": map[string]any{
+					"headers": []map[string]any{
+						{"name": "Subject", "value": "Test"},
+						{"name": "From", "value": "test@example.com"},
+						{"name": "Date", "value": "Mon, 20 Apr 2026"},
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":           []map[string]any{{"id": "msg_1", "threadId": "t_1"}},
+			"resultSizeEstimate": 1,
+		})
+	}))
+	defer apiServer.Close()
+
+	// Token with an expired access token.
+	expiredToken, _ := json.Marshal(map[string]any{
+		"access_token":  "expired-token",
+		"refresh_token": "original-refresh-token",
+		"token_type":    "bearer",
+		"expiry":        time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	})
+
+	var savedToken []byte
+	ctx := source.WithTokenSaver(context.Background(), func(_ context.Context, newToken []byte) error {
+		savedToken = newToken
+		return nil
+	})
+
+	c := gmailsource.New("test-client-id", "test-client-secret").
+		WithTokenEndpoint(tokenServer.URL).
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	_, err := c.Execute(ctx, "gmail_search", map[string]any{"query": "test"}, expiredToken)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+	if savedToken == nil {
+		t.Fatal("expected token saver to be called with refreshed token")
+	}
+
+	var parsed oauth2.Token
+	if err := json.Unmarshal(savedToken, &parsed); err != nil {
+		t.Fatalf("failed to parse saved token: %v", err)
+	}
+	if parsed.RefreshToken != "rotated-refresh-token" {
+		t.Errorf("expected rotated refresh token, got %s", parsed.RefreshToken)
+	}
+	if parsed.AccessToken != "fresh-access-token" {
+		t.Errorf("expected fresh access token, got %s", parsed.AccessToken)
+	}
+}
+
+func TestConnector_Search_NoSaveWithoutSaver(t *testing.T) {
+	// Without a TokenSaver in context, refresh still works but nothing is saved.
+	// This is the existing behavior — no regression.
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "fresh-access-token",
+			"token_type":   "bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenServer.Close()
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/messages/") {
+			json.NewEncoder(w).Encode(map[string]any{
+				"id": "msg_1", "snippet": "Hello",
+				"payload": map[string]any{
+					"headers": []map[string]any{
+						{"name": "Subject", "value": "Test"},
+						{"name": "From", "value": "test@example.com"},
+						{"name": "Date", "value": "Mon, 20 Apr 2026"},
+					},
+				},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"messages":           []map[string]any{{"id": "msg_1", "threadId": "t_1"}},
+			"resultSizeEstimate": 1,
+		})
+	}))
+	defer apiServer.Close()
+
+	expiredToken, _ := json.Marshal(map[string]any{
+		"access_token":  "expired-token",
+		"refresh_token": "valid-refresh-token",
+		"token_type":    "bearer",
+		"expiry":        time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	})
+
+	c := gmailsource.New("test-client-id", "test-client-secret").
+		WithTokenEndpoint(tokenServer.URL).
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	// Plain context without a saver — should succeed without panicking.
+	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{"query": "test"}, expiredToken)
+	if err != nil {
+		t.Fatalf("expected success, got: %v", err)
+	}
+}
+
+func TestConnector_Search_AuthError_WrapsErrAuthFailed(t *testing.T) {
+	// When the Gmail API returns 401, the error must wrap source.ErrAuthFailed.
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    401,
+				"message": "Invalid Credentials",
+				"errors": []map[string]any{
+					{"reason": "authError", "message": "Invalid Credentials"},
+				},
+			},
+		})
+	}))
+	defer apiServer.Close()
+
+	c := gmailsource.New("test-client-id", "test-client-secret").
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	_, err := c.Execute(context.Background(), "gmail_search", map[string]any{
+		"query": "test",
+	}, testToken())
+
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+	if !errors.Is(err, source.ErrAuthFailed) {
+		t.Errorf("expected error to wrap source.ErrAuthFailed, got: %v", err)
+	}
+}
+
+func TestConnector_GetThread_AuthError_WrapsErrAuthFailed(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    401,
+				"message": "Invalid Credentials",
+			},
+		})
+	}))
+	defer apiServer.Close()
+
+	c := gmailsource.New("test-client-id", "test-client-secret").
+		WithClientOption(option.WithEndpoint(apiServer.URL))
+
+	_, err := c.Execute(context.Background(), "gmail_get_thread", map[string]any{
+		"thread_id": "t_123",
+	}, testToken())
+
+	if err == nil {
+		t.Fatal("expected error for 401 response")
+	}
+	if !errors.Is(err, source.ErrAuthFailed) {
+		t.Errorf("expected error to wrap source.ErrAuthFailed, got: %v", err)
 	}
 }
