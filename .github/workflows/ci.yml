@@ -72,7 +72,13 @@ jobs:
         run: go install gotest.tools/gotestsum@latest
 
       - name: Run Go tests
-        run: gotestsum --junitfile junit.xml -- -race -coverprofile=coverage.txt ./internal/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./sdk/go/...
+        run: |
+          gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt ./internal/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./sdk/go/...
+          # Strip generated code (oapi-codegen) from the coverage profile.
+          # Codecov's ignore directive does not match paths under internal/,
+          # so we remove api/gen entries before upload.
+          grep -v '/api/gen/' coverage-raw.txt > coverage.txt
+          rm coverage-raw.txt
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
@@ -246,7 +252,11 @@ jobs:
 
       - name: Convert server coverage to text format
         if: ${{ !cancelled() }}
-        run: go tool covdata textfmt -i=gocoverdir -o=coverage-integration.txt
+        run: |
+          go tool covdata textfmt -i=gocoverdir -o=coverage-integration-raw.txt
+          # Strip generated code — see unit test step for rationale (Codecov ignore vs internal/).
+          grep -v '/api/gen/' coverage-integration-raw.txt > coverage-integration.txt
+          rm coverage-integration-raw.txt
 
       - name: Upload integration coverage to Codecov
         if: ${{ !cancelled() }}
