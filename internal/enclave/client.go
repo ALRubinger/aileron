@@ -52,6 +52,12 @@ type Client interface {
 	// plaintext from enclave memory.
 	EscrowRevoke(ctx context.Context, req EscrowRevokeRequest) error
 
+	// SourceExecute runs a source connector tool inside the enclave using
+	// an escrowed credential. The credential never leaves the enclave —
+	// only the tool results are returned. If the OAuth token is refreshed
+	// during execution, the enclave updates the escrowed copy internally.
+	SourceExecute(ctx context.Context, req SourceExecuteRequest) (SourceExecuteResponse, error)
+
 	// Ready checks whether the enclave is reachable and healthy.
 	// Returns nil if the enclave can accept requests, or an error describing
 	// why it cannot. Callers should check Ready before performing operations

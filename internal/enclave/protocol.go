@@ -7,6 +7,8 @@
 // each other's dependency trees.
 package enclave
 
+import "encoding/json"
+
 // TransmitKEKRequest sends a user's KEK to the enclave for secure storage.
 // The KEK is encrypted with the ECDH session key for transit. Once received,
 // the enclave holds the KEK in its hardware-isolated memory and uses it to
@@ -181,4 +183,25 @@ type EscrowListEntry struct {
 type EscrowRevokeRequest struct {
 	EscrowID string `json:"escrow_id"`
 	GrantID  string `json:"grant_id"`
+}
+
+// SourceExecuteRequest asks the enclave to execute a source connector tool
+// using an escrowed credential. The credential never leaves the enclave —
+// only the tool results are returned to the host.
+type SourceExecuteRequest struct {
+	// EscrowID identifies the escrowed credential to use.
+	EscrowID string `json:"escrow_id"`
+	// Tool is the source connector tool name, e.g. "gmail_search".
+	Tool string `json:"tool"`
+	// Params are the tool parameters (query, filters, etc.).
+	Params map[string]any `json:"params"`
+}
+
+// SourceExecuteResponse contains the tool execution results. The credential
+// is never included — only the search/query results.
+type SourceExecuteResponse struct {
+	// Result is the JSON-encoded tool output (search results, etc.).
+	Result json.RawMessage `json:"result,omitempty"`
+	// Error is set if the tool execution failed.
+	Error string `json:"error,omitempty"`
 }

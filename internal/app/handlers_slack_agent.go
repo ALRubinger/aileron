@@ -10,6 +10,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/draft"
+	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/slack-go/slack"
@@ -48,8 +49,8 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 			return true // keep looking
 		})
 		if hasEscrow {
-			escrowVault := vault.NewEscrowVault(s.enclaveClient, &s.escrowIndex, s.vault)
-			return s.draftPipeline.WithVault(escrowVault)
+			executor := s.newEnclaveSourceExecutor()
+			return s.draftPipeline.WithSourceExecutor(executor)
 		}
 	}
 
@@ -89,6 +90,44 @@ func (s *apiServer) vaultUnlockURL() string {
 // clickable link to unlock the vault.
 func (s *apiServer) vaultLockedSlackMessage() string {
 	return ":lock: Your Aileron session has expired. <" + s.vaultUnlockURL() + "|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
+}
+
+// newEnclaveSourceExecutor returns a SourceExecutor that delegates tool
+// execution to the TEE enclave. Credentials never leave the enclave —
+// only the tool results are returned to the host.
+func (s *apiServer) newEnclaveSourceExecutor() draft.SourceExecutor {
+	return func(ctx context.Context, tool string, params map[string]any, vaultPath string) (map[string]any, error) {
+		escrowIDVal, ok := s.escrowIndex.Load(vaultPath)
+		if !ok {
+			return nil, fmt.Errorf("no escrow entry for %s: %w", vaultPath, vault.ErrCredentialUnavailable)
+		}
+		escrowID := escrowIDVal.(string)
+
+		resp, err := s.enclaveClient.SourceExecute(ctx, enclave.SourceExecuteRequest{
+			EscrowID: escrowID,
+			Tool:     tool,
+			Params:   params,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("enclave source execute: %w", err)
+		}
+		if resp.Error != "" {
+			// Check for auth errors so the pipeline can surface them.
+			if strings.Contains(resp.Error, "authentication failed") ||
+				strings.Contains(resp.Error, "Invalid Credentials") {
+				return nil, fmt.Errorf("%s: %w", resp.Error, source.ErrAuthFailed)
+			}
+			return nil, fmt.Errorf("tool %s: %s", tool, resp.Error)
+		}
+		if resp.Result == nil {
+			return nil, nil
+		}
+		var result map[string]any
+		if err := json.Unmarshal(resp.Result, &result); err != nil {
+			return nil, fmt.Errorf("unmarshaling tool result: %w", err)
+		}
+		return result, nil
+	}
 }
 
 // isVaultError checks whether err indicates that vault credentials are

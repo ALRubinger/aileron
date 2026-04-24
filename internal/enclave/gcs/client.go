@@ -127,6 +127,16 @@ func (c *Client) EscrowRevoke(ctx context.Context, req enclave.EscrowRevokeReque
 	return nil
 }
 
+// SourceExecute sends a source connector tool execution request to the enclave.
+// The credential never leaves the enclave — only the tool results are returned.
+func (c *Client) SourceExecute(ctx context.Context, req enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
+	var resp enclave.SourceExecuteResponse
+	if err := c.post(ctx, "/source/execute", req, &resp); err != nil {
+		return enclave.SourceExecuteResponse{}, fmt.Errorf("gcs: source execute: %w", err)
+	}
+	return resp, nil
+}
+
 // Ready checks whether the enclave is reachable by calling GET /health.
 func (c *Client) Ready(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)

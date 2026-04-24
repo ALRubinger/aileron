@@ -21,6 +21,11 @@ import (
 	googlecalendar "github.com/ALRubinger/aileron/internal/connector/calendar/google"
 	"github.com/ALRubinger/aileron/internal/connector/git/github"
 	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
+	"github.com/ALRubinger/aileron/internal/source"
+	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
+	githubsource "github.com/ALRubinger/aileron/internal/source/github"
+	gmailsource "github.com/ALRubinger/aileron/internal/source/gmail"
+	slacksource "github.com/ALRubinger/aileron/internal/source/slack"
 )
 
 func main() {
@@ -46,14 +51,26 @@ func main() {
 		}
 	}
 
-	// Build connector registry.
+	// Build execution connector registry (write actions).
 	ctx := context.Background()
 	registry := connector.NewRegistry()
 	registry.Register(ctx, stripe.New())
 	registry.Register(ctx, googlecalendar.New("", ""))
 	registry.Register(ctx, github.New())
 
-	srv, err := newEnclaveServer(log, registry, provider, dataDir)
+	// Build source connector registry (read-only tools).
+	// Source connectors execute inside the enclave so credentials never
+	// leave the TEE. Google connectors need OAuth config for token refresh.
+	googleClientID := os.Getenv("GOOGLE_CONNECTOR_CLIENT_ID")
+	googleClientSecret := os.Getenv("GOOGLE_CONNECTOR_CLIENT_SECRET")
+
+	sourceReg := source.NewRegistry()
+	sourceReg.Register(gmailsource.New(googleClientID, googleClientSecret))
+	sourceReg.Register(calendarsource.New(googleClientID, googleClientSecret))
+	sourceReg.Register(slacksource.New())
+	sourceReg.Register(githubsource.New())
+
+	srv, err := newEnclaveServer(log, registry, sourceReg, provider, dataDir)
 	if err != nil {
 		log.Error("failed to initialize enclave server", "error", err)
 		os.Exit(1)

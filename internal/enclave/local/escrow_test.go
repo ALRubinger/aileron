@@ -138,6 +138,51 @@ func TestEscrowList(t *testing.T) {
 	}
 }
 
+func TestEscrowUpdate(t *testing.T) {
+	s := newEscrowStore()
+	original := []byte(`{"access_token":"old","refresh_token":"r1"}`)
+	id := s.Store("g1", original, "oauth2", nil, time.Now().Add(time.Hour))
+
+	// Update with refreshed token.
+	updated := []byte(`{"access_token":"new","refresh_token":"r2"}`)
+	if err := s.Update(id, updated); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	// Get should return the updated credential.
+	got, err := s.Get(id)
+	if err != nil {
+		t.Fatalf("Get after update: %v", err)
+	}
+	if string(got) != string(updated) {
+		t.Errorf("got %q, want %q", got, updated)
+	}
+
+	// Original bytes should be zeroed.
+	for _, b := range original {
+		if b != 0 {
+			t.Fatal("original credential bytes should be zeroed after update")
+		}
+	}
+}
+
+func TestEscrowUpdate_NotFound(t *testing.T) {
+	s := newEscrowStore()
+	err := s.Update("esc_nonexistent", []byte("data"))
+	if err != enclave.ErrEscrowNotFound {
+		t.Errorf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestEscrowUpdate_Expired(t *testing.T) {
+	s := newEscrowStore()
+	id := s.Store("g1", []byte("cred"), "oauth2", nil, time.Now().Add(-time.Second))
+	err := s.Update(id, []byte("new"))
+	if err != enclave.ErrEscrowExpired {
+		t.Errorf("expected ErrEscrowExpired, got %v", err)
+	}
+}
+
 func TestEscrowClear(t *testing.T) {
 	s := newEscrowStore()
 	cred := []byte("clear-me")
