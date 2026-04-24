@@ -101,7 +101,7 @@ func (s *apiServer) processSlashCommandDraft(ctx context.Context, teamID, slackU
 		if s.draftPipeline == nil {
 			_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation is not configured.", meta)
 		} else {
-			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedMessage(), meta)
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedSlackMessage(), meta)
 		}
 		return
 	}
@@ -111,8 +111,8 @@ func (s *apiServer) processSlashCommandDraft(ctx context.Context, teamID, slackU
 	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("slash command draft: generation failed", "error", err)
-		if msg, ok := s.isVaultError(err); ok {
-			_ = updateDraftModalError(ctx, botToken, viewResp.ID, msg, meta)
+		if isVaultError(err) {
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedSlackMessage(), meta)
 		} else {
 			_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation failed. Please try again.", meta)
 		}
@@ -139,7 +139,7 @@ func (s *apiServer) processSlashCommandQuestion(ctx context.Context, teamID, sla
 		if s.draftPipeline == nil {
 			s.respondViaURL(responseURL, "Draft generation is not configured.")
 		} else {
-			s.respondViaURL(responseURL, s.vaultLockedMessage())
+			s.respondViaURL(responseURL, s.vaultLockedSlackMessage())
 		}
 		return
 	}
@@ -150,8 +150,8 @@ func (s *apiServer) processSlashCommandQuestion(ctx context.Context, teamID, sla
 	answer, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("slash command question: generation failed", "error", err)
-		if msg, ok := s.isVaultError(err); ok {
-			s.respondViaURL(responseURL, msg)
+		if isVaultError(err) {
+			s.respondViaURL(responseURL, s.vaultLockedSlackMessage())
 		} else {
 			s.respondViaURL(responseURL, "> /aileron "+text+"\n\nSomething went wrong. Please try again.")
 		}

@@ -245,7 +245,7 @@ func (s *apiServer) processRefineDraft(ctx context.Context, payload slackInterac
 		if s.draftPipeline == nil {
 			_ = updateDraftModalError(ctx, botToken, payload.View.ID, "Draft generation is not configured.", meta)
 		} else {
-			_ = updateDraftModalError(ctx, botToken, payload.View.ID, s.vaultLockedMessage(), meta)
+			_ = updateDraftModalError(ctx, botToken, payload.View.ID, s.vaultLockedSlackMessage(), meta)
 		}
 		return
 	}
