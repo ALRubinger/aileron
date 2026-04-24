@@ -129,6 +129,31 @@ func (s *apiServer) handleSlackInteraction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Handle intent modal submission — user clicked "Send" on a write action preview.
+	if payload.Type == "view_submission" && payload.View != nil && payload.View.CallbackID == intentModalCallbackID {
+		var intentMeta IntentModalMeta
+		if err := json.Unmarshal([]byte(payload.View.PrivateMetadata), &intentMeta); err != nil {
+			s.log.Error("intent modal submit: failed to parse metadata", "error", err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Deserialize the action.
+		var action model.ActionIntent
+		if err := json.Unmarshal([]byte(intentMeta.ActionJSON), &action); err != nil {
+			s.log.Error("intent modal submit: failed to parse action", "error", err)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Close the modal.
+		w.WriteHeader(http.StatusOK)
+
+		// Submit the intent asynchronously.
+		go s.executeIntentFromModal(context.Background(), intentMeta, action)
+		return
+	}
+
 	// Return 200 immediately — Slack requires fast response.
 	w.WriteHeader(http.StatusOK)
 
@@ -491,6 +516,85 @@ func (s *apiServer) processApproveIntent(ctx context.Context, actionValue string
 			msg += " " + result.ReceiptRef
 		}
 		s.respondToInteraction(payload.ResponseURL, msg)
+	}
+}
+
+// executeIntentFromModal handles the submission of an intent modal. It creates
+// the intent, evaluates policy, issues a grant, and executes — same flow as
+// processApproveIntent but initiated from a modal submission.
+func (s *apiServer) executeIntentFromModal(ctx context.Context, meta IntentModalMeta, action model.ActionIntent) {
+	now := time.Now().UTC()
+	intentID := "int_" + s.newID()
+
+	apiAction := api.ActionIntent{
+		Type:    action.Type,
+		Summary: action.Summary,
+	}
+	apiAction.Metadata = &map[string]interface{}{
+		"_model_domain": action.Domain,
+	}
+
+	envelope := api.IntentEnvelope{
+		IntentId:    intentID,
+		WorkspaceId: "default",
+		Agent:       api.ActorRef{Id: "aileron_slack", Type: api.Agent},
+		Action:      apiAction,
+		Status:      api.PendingPolicy,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Decision:    api.Decision{Disposition: api.DecisionDispositionAllow, RiskLevel: api.Low},
+	}
+
+	if err := s.intents.Create(ctx, envelope); err != nil {
+		s.log.Error("intent modal: failed to create intent", "error", err)
+		return
+	}
+
+	decision, err := s.policyEngine.Evaluate(ctx, policy.EvaluationRequest{
+		WorkspaceID: "default",
+		AgentID:     "aileron_slack",
+		Action:      action,
+	})
+	if err != nil {
+		s.log.Error("intent modal: policy evaluation failed", "error", err)
+		return
+	}
+
+	if decision.Disposition == model.DispositionDeny {
+		envelope.Status = api.Denied
+		s.intents.Update(ctx, envelope)
+		s.log.Warn("intent modal: denied by policy", "intent_id", intentID, "reason", decision.DenialReason)
+		// TODO: Notify user via Slack DM that the action was denied.
+		return
+	}
+
+	grantID := "grt_" + s.newID()
+	s.grants.Create(ctx, api.ExecutionGrant{
+		GrantId:   grantID,
+		IntentId:  intentID,
+		Status:    api.ExecutionGrantStatusActive,
+		ExpiresAt: now.Add(5 * time.Minute),
+	})
+	envelope.Status = api.Approved
+	envelope.UpdatedAt = time.Now().UTC()
+	s.intents.Update(ctx, envelope)
+
+	result, execErr := s.executeGrant(ctx, grantID, meta.UserID)
+	if execErr != nil {
+		s.log.Error("intent modal: execution failed", "error", execErr)
+		return
+	}
+
+	if result.Status == api.ExecutionStatusFailed {
+		s.log.Error("intent modal: connector failed",
+			"execution_id", result.ExecutionID,
+			"error", result.Error,
+		)
+	} else {
+		s.log.Info("intent modal: execution succeeded",
+			"execution_id", result.ExecutionID,
+			"receipt_ref", result.ReceiptRef,
+		)
 	}
 }
 

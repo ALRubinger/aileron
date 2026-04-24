@@ -838,3 +838,156 @@ func TestExecuteGrant_TEEMode_WithEscrowIndex(t *testing.T) {
 		t.Errorf("Status = %q, want succeeded", result.Status)
 	}
 }
+
+// --- buildModelDomainParams tests ---
+
+func TestBuildModelDomainParams_Email(t *testing.T) {
+	domain := model.DomainAction{
+		Email: &model.EmailAction{
+			To:       []model.Recipient{{Name: "Alice", Email: "alice@example.com"}},
+			CC:       []model.Recipient{{Email: "bob@example.com"}},
+			Subject:  "Report",
+			BodyText: "Here it is.",
+			SendMode: "send_now",
+		},
+	}
+	params := buildModelDomainParams("email.send", domain)
+	if params["subject"] != "Report" {
+		t.Errorf("subject = %v", params["subject"])
+	}
+	if params["body_text"] != "Here it is." {
+		t.Errorf("body_text = %v", params["body_text"])
+	}
+	if params["send_mode"] != "send_now" {
+		t.Errorf("send_mode = %v", params["send_mode"])
+	}
+	if params["to"] == nil {
+		t.Error("to should not be nil")
+	}
+}
+
+func TestBuildModelDomainParams_Calendar(t *testing.T) {
+	start := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 4, 25, 10, 30, 0, 0, time.UTC)
+	domain := model.DomainAction{
+		Calendar: &model.CalendarAction{
+			Title:     "Standup",
+			StartTime: &start,
+			EndTime:   &end,
+			Timezone:  "America/New_York",
+			Location:  "Room B",
+			Attendees: []model.CalendarAttendee{{Email: "alice@example.com", Name: "Alice"}},
+		},
+	}
+	params := buildModelDomainParams("calendar.event.create", domain)
+	if params["title"] != "Standup" {
+		t.Errorf("title = %v", params["title"])
+	}
+	if params["timezone"] != "America/New_York" {
+		t.Errorf("timezone = %v", params["timezone"])
+	}
+	if params["location"] != "Room B" {
+		t.Errorf("location = %v", params["location"])
+	}
+	if params["start_time"] == nil {
+		t.Error("start_time should not be nil")
+	}
+	if params["attendees"] == nil {
+		t.Error("attendees should not be nil")
+	}
+}
+
+func TestBuildModelDomainParams_GitIssue(t *testing.T) {
+	domain := model.DomainAction{
+		Git: &model.GitAction{
+			Repository:     "acme/app",
+			IssueTitle:     "Bug report",
+			IssueBody:      "Details...",
+			IssueLabels:    []string{"bug"},
+			IssueAssignees: []string{"alice"},
+		},
+	}
+	params := buildModelDomainParams("git.issue.create", domain)
+	if params["repository"] != "acme/app" {
+		t.Errorf("repository = %v", params["repository"])
+	}
+	if params["issue_title"] != "Bug report" {
+		t.Errorf("issue_title = %v", params["issue_title"])
+	}
+	if params["issue_labels"] == nil {
+		t.Error("issue_labels should not be nil")
+	}
+}
+
+func TestBuildModelDomainParams_EmptyDomain(t *testing.T) {
+	params := buildModelDomainParams("unknown.action", model.DomainAction{})
+	if params["action_type"] != "unknown.action" {
+		t.Errorf("action_type = %v", params["action_type"])
+	}
+}
+
+func TestExecuteGrant_ConnectorReturnsError(t *testing.T) {
+	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_exec")
+	ctx := context.Background()
+
+	conn := &stubConnector{err: fmt.Errorf("connection refused")}
+	s.registry.Register(ctx, conn)
+	storeEncryptedToken(s, "connectors/github/default", []byte("token"))
+	seedGrantAndIntent(ctx, s, "grt_cerr", "int_cerr")
+
+	result, err := s.executeGrant(ctx, "grt_cerr", "usr_exec")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(result.Error, "connection refused") {
+		t.Errorf("Error = %q, want connection refused", result.Error)
+	}
+}
+
+func TestExecuteGrant_DecryptionFailure(t *testing.T) {
+	s := newExecutionServer()
+	enableVaultEncryption(s, "usr_dec")
+	ctx := context.Background()
+
+	conn := &stubConnector{result: connectorpkg.ExecutionResult{Status: connectorpkg.ExecutionStatusSucceeded}}
+	s.registry.Register(ctx, conn)
+	seedGrantAndIntent(ctx, s, "grt_dec", "int_dec")
+	// Overwrite the valid credential with garbage → decryption fails.
+	s.vault.Put(ctx, "connectors/github/default", []byte("not-encrypted-garbage"), vault.Metadata{
+		Type:   "api_key",
+		Labels: map[string]string{vault.EncryptedLabel: "true"},
+	})
+
+	result, err := s.executeGrant(ctx, "grt_dec", "usr_dec")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Errorf("Status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(result.Error, "credential decryption failed") {
+		t.Errorf("Error = %q, want credential decryption failed", result.Error)
+	}
+}
+
+func TestResolveCredentialVaultPath_GoogleCalendar(t *testing.T) {
+	accounts := mem.NewConnectedAccountStore()
+	ctx := context.Background()
+
+	accounts.Create(ctx, model.ConnectedAccount{
+		ID: "conn_cal", UserID: "usr_cal",
+		Provider: model.ConnectedAccountProviderGoogleCalendar,
+		Status:   model.ConnectedAccountStatusActive,
+	})
+
+	s := &apiServer{log: slog.Default(), connectedAccounts: accounts}
+	ctx = setTestUserClaims(ctx, "usr_cal")
+	path := s.resolveCredentialVaultPath(ctx, "google_calendar")
+	if path != "connected-accounts/usr_cal/google_calendar" {
+		t.Errorf("path = %q, want connected-accounts/usr_cal/google_calendar", path)
+	}
+}
