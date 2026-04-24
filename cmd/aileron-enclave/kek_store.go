@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ALRubinger/aileron/enclave"
+	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 const kekStoreTTL = 30 * time.Minute

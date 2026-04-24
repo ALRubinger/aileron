@@ -16,7 +16,7 @@ tasks:
 
   generate:api:
     desc: Generate Go types and server interface from OpenAPI spec
-    dir: core
+    dir: internal
     cmds:
       - go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
     sources:
@@ -49,7 +49,7 @@ tasks:
       COMMIT:
         sh: git rev-parse --short HEAD
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/server ./core/server
+      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/server ./internal/server
 
   build:mcp:
     desc: Build the Aileron MCP server binary locally
@@ -58,7 +58,7 @@ tasks:
       COMMIT:
         sh: git rev-parse --short HEAD
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
+      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
 
   build:enclave:
     desc: Build the enclave binary locally
@@ -67,7 +67,7 @@ tasks:
       COMMIT:
         sh: git rev-parse --short HEAD
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron-enclave ./cmd/aileron-enclave
+      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-enclave ./cmd/aileron-enclave
 
   build:enclave:production:
     desc: Build and push the enclave container image to GCP Artifact Registry
@@ -94,7 +94,7 @@ tasks:
       COMMIT:
         sh: git rev-parse --short HEAD
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/core/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/core/version.Commit={{.COMMIT}}" -o build/aileron ./cmd/aileron
+      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron ./cmd/aileron
 
   build:sh:
     desc: Build the aileron-sh shell shim binary locally
@@ -114,7 +114,7 @@ tasks:
     cmds:
       - pnpm install
       - mkdir -p public
-      - cp ../core/api/openapi.yaml public/openapi.yaml
+      - cp ../internal/api/openapi.yaml public/openapi.yaml
       - pnpm run build
 
   mcp:setup:
@@ -164,7 +164,7 @@ tasks:
     dir: docs
     cmds:
       - mkdir -p public
-      - cp ../core/api/openapi.yaml public/openapi.yaml
+      - cp ../internal/api/openapi.yaml public/openapi.yaml
       - pnpm dev
 
   lint:
@@ -177,7 +177,7 @@ tasks:
   lint:go:
     desc: Vet Go code
     cmds:
-      - go vet ./core/... ./enclave/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
+      - go vet ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
 
   lint:ui:
     desc: Check the UI for type errors
@@ -207,12 +207,12 @@ tasks:
   test:go:
     desc: Run Go tests
     cmds:
-      - go test ./core/... ./enclave/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
+      - go test ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
 
   test:integration:
     desc: Run integration tests against running services
     cmds:
-      - go test -tags=integration -race ./test/integration/... ./core/store/postgres/...
+      - go test -tags=integration -race ./test/integration/... ./internal/store/postgres/...
     env:
       AILERON_API_URL: http://localhost:8080
       AILERON_UI_BASE_URL: http://localhost:3000
@@ -233,7 +233,7 @@ tasks:
     cmds:
       - mkdir -p gocoverdir && chmod 777 gocoverdir
       - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml up -d --build --wait
-      - go test -tags=integration -race ./test/integration/... ./core/store/postgres/...
+      - go test -tags=integration -race ./test/integration/... ./internal/store/postgres/...
       - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml stop server
       - go tool covdata textfmt -i=gocoverdir -o=coverage-integration.txt
       - docker compose -f {{.COMPOSE_FILE}} -f deploy/docker-compose.coverage.yml down -v

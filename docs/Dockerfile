@@ -8,7 +8,7 @@ COPY docs/package.json docs/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY docs/ .
-COPY core/api/openapi.yaml ./public/openapi.yaml
+COPY internal/api/openapi.yaml ./public/openapi.yaml
 
 RUN pnpm run build
 

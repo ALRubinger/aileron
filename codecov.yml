@@ -23,16 +23,14 @@ coverage:
 flags:
   unit:
     paths:
-      - core/
-      - enclave/
+      - internal/
       - cmd/aileron-enclave/
       - cmd/aileron-mcp/
       - sdk/go/
     carryforward: false
   integration:
     paths:
-      - core/
-      - enclave/
+      - internal/
       - cmd/aileron-enclave/
       - cmd/aileron-mcp/
     carryforward: false
@@ -46,7 +44,7 @@ flags:
     carryforward: true
 
 ignore:
-  - "core/api/gen/**"       # generated code (oapi-codegen) — DO NOT EDIT
+  - "internal/api/gen/**"    # generated code (oapi-codegen) — DO NOT EDIT
   - "ui/**"                  # tracked separately via ui flag
   - "docs/**"                # documentation and ADRs
 

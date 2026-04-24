@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ALRubinger/aileron/core/crypto"
-	"github.com/ALRubinger/aileron/enclave"
+	"github.com/ALRubinger/aileron/internal/crypto"
+	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 type escrowEntry struct {

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/ALRubinger/aileron/enclave"
+	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 // doOAuthExchange calls the provider's token endpoint to exchange an

@@ -21,7 +21,7 @@ Requires a running server. Integration tests validate API behavior against the O
 
 ## Database tests (testcontainers)
 
-Packages under `core/store/postgres/` are tested against a real PostgreSQL instance using
+Packages under `internal/store/postgres/` are tested against a real PostgreSQL instance using
 [testcontainers-go](https://golang.testcontainers.org/). Each test spins up a throwaway
 Postgres container, applies schema migrations, and tears down automatically.
 
@@ -35,7 +35,7 @@ go test -tags=integration ./store/postgres/ -v       # runs database tests (requ
 task test:integration                                # runs all integration tests including database
 ```
 
-The `core/store/pgtest` package provides the test helper:
+The `internal/store/pgtest` package provides the test helper:
 
 ```go
 //go:build integration

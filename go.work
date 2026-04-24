@@ -5,8 +5,7 @@ use (
 	./cmd/aileron-enclave
 	./cmd/aileron-mcp
 	./cmd/aileron-sh
-	./core
-	./enclave
+	./internal
 	./sdk/go
 	./test/integration
 )

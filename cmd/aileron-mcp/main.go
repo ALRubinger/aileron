@@ -24,7 +24,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/ALRubinger/aileron/core/version"
+	"github.com/ALRubinger/aileron/internal/version"
 )
 
 // --- JSON-RPC types ---

@@ -9,7 +9,7 @@ Aileron is a set of standard Docker containers with no infrastructure-specific a
 
 | Service | Dockerfile | Port | Description |
 |---------|-----------|------|-------------|
-| **server** | `core/server/Dockerfile` | 8080 | API server and auth handler |
+| **server** | `internal/server/Dockerfile` | 8080 | API server and auth handler |
 | **enclave** | `cmd/aileron-enclave/Dockerfile` | 8443 | TEE enclave binary (optional, only for confidential computing) |
 | **ui** | `ui/Dockerfile` | 3000 | SvelteKit management UI |
 | **docs** | `docs/Dockerfile` | 80 | API documentation (Scalar) |
@@ -77,7 +77,7 @@ No configuration required.
 
 2. **Build the container images:**
    ```sh
-   docker build -f core/server/Dockerfile -t your-registry/aileron-server .
+   docker build -f internal/server/Dockerfile -t your-registry/aileron-server .
    docker build -f ui/Dockerfile -t your-registry/aileron-ui ui/
    docker build -f docs/Dockerfile -t your-registry/aileron-docs docs/
    docker build -f cmd/aileron-enclave/Dockerfile -t your-registry/aileron-enclave .  # optional

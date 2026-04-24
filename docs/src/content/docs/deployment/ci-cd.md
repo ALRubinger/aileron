@@ -27,7 +27,7 @@ No other configuration is needed. The workflow uses the `GITHUB_TOKEN` automatic
 
 ## Enclave Publish workflow
 
-The Enclave Publish workflow (`.github/workflows/enclave-publish.yml`) triggers on pushes to `main` that touch enclave-related paths (`cmd/aileron-enclave/**`, `enclave/**`, `core/**`, `go.work`, `go.work.sum`), or via manual dispatch. It:
+The Enclave Publish workflow (`.github/workflows/enclave-publish.yml`) triggers on pushes to `main` that touch enclave-related paths (`cmd/aileron-enclave/**`, `internal/enclave/`, `internal/`, `go.work`, `go.work.sum`), or via manual dispatch. It:
 
 1. Builds the enclave container image.
 2. Pushes it to GCP Artifact Registry.

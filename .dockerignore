@@ -20,6 +20,6 @@ test
 deploy
 saas
 
-# Documentation (docs service only needs docs/ and core/api/openapi.yaml)
+# Documentation (docs service only needs docs/ and internal/api/openapi.yaml)
 *.md
 !AILERON.md

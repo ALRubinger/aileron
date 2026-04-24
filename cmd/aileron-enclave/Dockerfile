@@ -4,8 +4,7 @@ WORKDIR /build
 # Build outside the workspace so we only need the modules the enclave imports.
 ENV GOWORK=off
 
-COPY enclave/ enclave/
-COPY core/ core/
+COPY internal/ internal/
 COPY cmd/aileron-enclave/ cmd/aileron-enclave/
 
 WORKDIR /build/cmd/aileron-enclave
