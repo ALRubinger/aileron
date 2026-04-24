@@ -163,51 +163,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ui/test-results/junit-vitest.xml,ui/test-results/junit-playwright.xml
 
-  build:
-    name: Build Docker Images
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build server image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: core/server/Dockerfile
-          push: false
-          load: true
-          tags: aileron-server:${{ github.sha }}
-          cache-from: type=gha,scope=server
-          cache-to: type=gha,mode=max,scope=server
-
-      - name: Build UI image
-        uses: docker/build-push-action@v7
-        with:
-          context: ./ui
-          file: ui/Dockerfile
-          push: false
-          load: true
-          tags: aileron-ui:${{ github.sha }}
-          cache-from: type=gha,scope=ui
-          cache-to: type=gha,mode=max,scope=ui
-
-      - name: Build docs image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docs/Dockerfile
-          push: false
-          load: true
-          tags: aileron-docs:${{ github.sha }}
-          cache-from: type=gha,scope=docs
-          cache-to: type=gha,mode=max,scope=docs
-
   integration-go:
     name: Integration Tests (Go)
-    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -289,7 +246,6 @@ jobs:
 
   integration-e2e:
     name: Integration Tests (E2E)
-    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
