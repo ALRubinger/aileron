@@ -7,6 +7,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/account"
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/config"
+	"github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -21,7 +22,7 @@ func TestRegisterProviders_GoogleSigninOnly(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	if _, ok := authReg.Get("google"); !ok {
 		t.Error("expected Google auth provider registered")
@@ -40,7 +41,7 @@ func TestRegisterProviders_GoogleConnectorOnly(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	if _, ok := authReg.Get("google"); ok {
 		t.Error("expected no Google auth provider when only connector is configured")
@@ -78,7 +79,7 @@ func TestRegisterProviders_GoogleBothSigninAndConnector(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	if _, ok := authReg.Get("google"); !ok {
 		t.Error("expected Google auth provider")
@@ -97,7 +98,7 @@ func TestRegisterProviders_GitHubSigninOnly(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	if _, ok := authReg.Get("github"); !ok {
 		t.Error("expected GitHub auth provider registered")
@@ -116,7 +117,7 @@ func TestRegisterProviders_GitHubConnectorOnly(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	if _, ok := authReg.Get("github"); ok {
 		t.Error("expected no GitHub auth provider when only connector is configured")
@@ -147,7 +148,7 @@ func TestRegisterProviders_GitHubBothSigninAndConnector(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	if _, ok := authReg.Get("github"); !ok {
 		t.Error("expected GitHub auth provider")
@@ -163,7 +164,7 @@ func TestRegisterProviders_NoneConfigured(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	if _, ok := authReg.Get("google"); ok {
 		t.Error("expected no Google auth provider")
@@ -186,7 +187,7 @@ func TestRegisterProviders_SlackConnector(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	providers := accountReg.Providers()
 	found := false
@@ -221,7 +222,7 @@ func TestRegisterProviders_AllProviders(t *testing.T) {
 	accountReg := account.NewRegistry()
 	sourceReg := source.NewRegistry()
 
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
+	registerProviders(cfg, authReg, accountReg, sourceReg, connector.NewRegistry(), mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
 
 	// Auth: google + github
 	if _, ok := authReg.Get("google"); !ok {

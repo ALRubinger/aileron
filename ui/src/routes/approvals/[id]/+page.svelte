@@ -122,7 +122,107 @@
 								<span>{(intent.action.domain.payment.amount.amount / 100).toFixed(2)} {intent.action.domain.payment.amount.currency}</span>
 							{/if}
 						{/if}
+
+						{#if intent.action.domain?.email}
+							{@const email = intent.action.domain.email}
+							<span class="text-muted-foreground">Send Mode:</span>
+							<span>
+								{#if email.send_mode === 'send_now'}
+									<span class="font-semibold text-destructive uppercase text-xs border border-destructive rounded px-1.5 py-0.5">Send Now</span>
+								{:else}
+									<span class="font-semibold text-muted-foreground uppercase text-xs border rounded px-1.5 py-0.5">Draft Only</span>
+								{/if}
+							</span>
+							{#if email.from}
+								<span class="text-muted-foreground">From:</span>
+								<span>{email.from.name ? `${email.from.name} <${email.from.email}>` : email.from.email}</span>
+							{/if}
+							<span class="text-muted-foreground">To:</span>
+							<span>{email.to?.map((r: any) => r.name ? `${r.name} <${r.email}>` : r.email).join(', ') || '-'}</span>
+							{#if email.cc?.length}
+								<span class="text-muted-foreground">CC:</span>
+								<span>{email.cc.map((r: any) => r.name ? `${r.name} <${r.email}>` : r.email).join(', ')}</span>
+							{/if}
+							{#if email.bcc?.length}
+								<span class="text-muted-foreground">BCC:</span>
+								<span>{email.bcc.map((r: any) => r.name ? `${r.name} <${r.email}>` : r.email).join(', ')}</span>
+							{/if}
+							<span class="text-muted-foreground">Subject:</span>
+							<span class="font-semibold">{email.subject || '-'}</span>
+							{#if email.thread_ref}
+								<span class="text-muted-foreground">Thread:</span>
+								<span class="font-mono text-xs">{email.thread_ref}</span>
+							{/if}
+							{#if email.attachments?.length}
+								<span class="text-muted-foreground">Attachments:</span>
+								<span>{email.attachments.map((a: any) => a.name).join(', ')}</span>
+							{/if}
+						{/if}
+
+						{#if intent.action.domain?.calendar}
+							{@const cal = intent.action.domain.calendar}
+							<span class="text-muted-foreground">Title:</span>
+							<span class="font-semibold">{cal.title || '-'}</span>
+							{#if cal.description}
+								<span class="text-muted-foreground">Description:</span>
+								<span>{cal.description}</span>
+							{/if}
+							{#if cal.start_time}
+								<span class="text-muted-foreground">Start:</span>
+								<span>{new Date(cal.start_time).toLocaleString()}{cal.timezone ? ` (${cal.timezone})` : ''}</span>
+							{/if}
+							{#if cal.end_time}
+								<span class="text-muted-foreground">End:</span>
+								<span>{new Date(cal.end_time).toLocaleString()}</span>
+							{/if}
+							{#if cal.location}
+								<span class="text-muted-foreground">Location:</span>
+								<span>{cal.location}</span>
+							{/if}
+							{#if cal.attendees?.length}
+								<span class="text-muted-foreground">Attendees:</span>
+								<span>{cal.attendees.map((a: any) => a.name ? `${a.name} <${a.email}>` : a.email).join(', ')}</span>
+							{/if}
+							{#if cal.conference_type && cal.conference_type !== 'none'}
+								<span class="text-muted-foreground">Conference:</span>
+								<span>{cal.conference_type}</span>
+							{/if}
+							{#if cal.visibility && cal.visibility !== 'default'}
+								<span class="text-muted-foreground">Visibility:</span>
+								<span>{cal.visibility}</span>
+							{/if}
+						{/if}
+
+						{#if intent.action.domain?.git?.issue_title}
+							{@const git = intent.action.domain.git}
+							<span class="text-muted-foreground">Repository:</span>
+							<span>{git.repository || '-'}</span>
+							<span class="text-muted-foreground">Issue Title:</span>
+							<span class="font-semibold">{git.issue_title}</span>
+							{#if git.issue_labels?.length}
+								<span class="text-muted-foreground">Labels:</span>
+								<span>{git.issue_labels.join(', ')}</span>
+							{/if}
+							{#if git.issue_assignees?.length}
+								<span class="text-muted-foreground">Assignees:</span>
+								<span>{git.issue_assignees.join(', ')}</span>
+							{/if}
+						{/if}
 					</div>
+
+					{#if intent.action.domain?.email?.body_text || intent.action.domain?.email?.body_html}
+						<div class="mt-4 border-t border-border pt-3">
+							<div class="font-semibold text-sm mb-2">Email Body</div>
+							<div class="bg-muted rounded-lg p-4 text-sm whitespace-pre-wrap">{intent.action.domain.email.body_text || intent.action.domain.email.body_html}</div>
+						</div>
+					{/if}
+
+					{#if intent.action.domain?.git?.issue_body}
+						<div class="mt-4 border-t border-border pt-3">
+							<div class="font-semibold text-sm mb-2">Issue Body</div>
+							<div class="bg-muted rounded-lg p-4 text-sm whitespace-pre-wrap">{intent.action.domain.git.issue_body}</div>
+						</div>
+					{/if}
 
 					{#if intent.decision.matched_policies?.length}
 						<div class="mt-4 border-t border-border pt-3">

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/vault"
+	"github.com/slack-go/slack"
 )
 
 // resolvePipelineVault returns the draft pipeline configured with the best
@@ -198,6 +200,11 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 		}
 	}
 
+	// Post Send/Refine action buttons below the draft.
+	if draftBody := fullText.String(); draftBody != "" {
+		s.postDraftActionButtons(ctx, botToken, channelID, threadTS, userID, draftBody)
+	}
+
 	// Clear status.
 	_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 
@@ -206,6 +213,43 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 		"channel", channelID,
 		"draft_length", fullText.Len(),
 	)
+}
+
+// postDraftActionButtons posts a follow-up message with Send/Refine action buttons
+// below a streamed draft in an agent DM. The Send button carries the draft body
+// and target info so the interactions handler can send it as the user.
+func (s *apiServer) postDraftActionButtons(ctx context.Context, botToken, channelID, threadTS, userID, draftBody string) {
+	sendMeta, _ := json.Marshal(map[string]string{
+		"channel":   channelID,
+		"thread_ts": threadTS,
+		"body":      draftBody,
+		"user_id":   userID,
+	})
+
+	sendBtn := slack.NewButtonBlockElement("send_draft_agent", string(sendMeta),
+		slack.NewTextBlockObject(slack.PlainTextType, "Send", true, false))
+	sendBtn.Style = slack.StylePrimary
+
+	cancelBtn := slack.NewButtonBlockElement("cancel_draft", "",
+		slack.NewTextBlockObject(slack.PlainTextType, "Cancel", false, false))
+	cancelBtn.Style = slack.StyleDanger
+
+	actionBlock := slack.NewActionBlock("draft_actions",
+		sendBtn,
+		cancelBtn,
+	)
+
+	client := comms.NewAgentClient(botToken)
+	opts := []slack.MsgOption{
+		slack.MsgOptionBlocks(actionBlock),
+	}
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+
+	if _, _, err := client.PostMessageContext(ctx, channelID, opts...); err != nil {
+		s.log.Error("agent message: failed to post action buttons", "error", err)
+	}
 }
 
 // handleMessageShortcut handles the "Draft reply with Aileron" message shortcut.

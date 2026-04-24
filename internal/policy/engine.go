@@ -64,7 +64,15 @@ func (e *RuleEngine) Evaluate(ctx context.Context, req EvaluationRequest) (model
 	}
 
 	if len(matches) == 0 {
-		// Default: allow with low risk when no rules match.
+		if isWriteAction(req.Action.Type) {
+			// Write actions default to requiring human approval.
+			// Users/orgs can override with explicit Allow policies.
+			return model.Decision{
+				Disposition: model.DispositionRequireApproval,
+				RiskLevel:   model.RiskLevelMedium,
+			}, nil
+		}
+		// Read-only actions default to allow.
 		return model.Decision{
 			Disposition: model.DispositionAllow,
 			RiskLevel:   model.RiskLevelLow,
@@ -116,6 +124,35 @@ func (e *RuleEngine) Evaluate(ctx context.Context, req EvaluationRequest) (model
 	}
 
 	return decision, nil
+}
+
+// writeActionPrefixes are action types whose default (no matching policy)
+// is RequireApproval rather than Allow. Users/orgs can override this
+// default with explicit policy rules at any granularity.
+var writeActionPrefixes = []string{
+	"email.",
+	"calendar.event.create",
+	"calendar.event.update",
+	"calendar.event.delete",
+	"git.issue.",
+	"git.pull_request.",
+	"comms.",
+	"payment.",
+	"deploy.",
+	"cloud.resource.mutate",
+	"procurement.",
+}
+
+// isWriteAction returns true if the action type is classified as a write
+// (irreversible) action. Write actions default to RequireApproval when no
+// policy matches, ensuring human review for consequential operations.
+func isWriteAction(actionType string) bool {
+	for _, prefix := range writeActionPrefixes {
+		if strings.HasPrefix(actionType, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // actionTypeMatches checks whether a rule applies to the given action type.
@@ -338,9 +375,29 @@ func flattenIntent(action model.ActionIntent, intentCtx model.IntentContext) map
 		fields["domain.payment.currency"] = p.Amount.Currency
 		fields["domain.payment.merchant_category"] = p.MerchantCategory
 	}
+	if action.Domain.Email != nil {
+		e := action.Domain.Email
+		fields["domain.email.subject"] = e.Subject
+		fields["domain.email.send_mode"] = e.SendMode
+		fields["domain.email.recipient_count"] = len(e.To) + len(e.CC) + len(e.BCC)
+		for i, r := range e.To {
+			fields[fmt.Sprintf("domain.email.to.%d", i)] = r.Email
+		}
+		for i, r := range e.CC {
+			fields[fmt.Sprintf("domain.email.cc.%d", i)] = r.Email
+		}
+		for i, r := range e.BCC {
+			fields[fmt.Sprintf("domain.email.bcc.%d", i)] = r.Email
+		}
+	}
 	if action.Domain.Calendar != nil {
 		c := action.Domain.Calendar
 		fields["domain.calendar.title"] = c.Title
+		fields["domain.calendar.provider"] = c.Provider
+		fields["domain.calendar.timezone"] = c.Timezone
+		fields["domain.calendar.location"] = c.Location
+		fields["domain.calendar.conference_type"] = c.ConferenceType
+		fields["domain.calendar.visibility"] = c.Visibility
 		if c.Attendees != nil {
 			fields["domain.calendar.attendee_count"] = len(c.Attendees)
 		}

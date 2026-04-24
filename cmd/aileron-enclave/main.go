@@ -50,7 +50,7 @@ func main() {
 	ctx := context.Background()
 	registry := connector.NewRegistry()
 	registry.Register(ctx, stripe.New())
-	registry.Register(ctx, googlecalendar.New())
+	registry.Register(ctx, googlecalendar.New("", ""))
 	registry.Register(ctx, github.New())
 
 	srv, err := newEnclaveServer(log, registry, provider, dataDir)

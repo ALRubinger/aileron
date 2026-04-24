@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 )
@@ -134,7 +135,7 @@ func TestEngine_ForcePushDenied(t *testing.T) {
 	}
 }
 
-func TestEngine_UnknownActionDefaultsToAllow(t *testing.T) {
+func TestEngine_WriteActionDefaultsToRequireApproval(t *testing.T) {
 	engine := seedAndEngine(t)
 	ctx := context.Background()
 
@@ -144,6 +145,29 @@ func TestEngine_UnknownActionDefaultsToAllow(t *testing.T) {
 		Action: model.ActionIntent{
 			Type:    "email.send",
 			Summary: "Send welcome email",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if decision.Disposition != model.DispositionRequireApproval {
+		t.Errorf("Disposition = %q, want %q", decision.Disposition, model.DispositionRequireApproval)
+	}
+	if decision.RiskLevel != model.RiskLevelMedium {
+		t.Errorf("RiskLevel = %q, want %q", decision.RiskLevel, model.RiskLevelMedium)
+	}
+}
+
+func TestEngine_ReadActionDefaultsToAllow(t *testing.T) {
+	engine := seedAndEngine(t)
+	ctx := context.Background()
+
+	decision, err := engine.Evaluate(ctx, EvaluationRequest{
+		WorkspaceID: "default",
+		AgentID:     "claude_code",
+		Action: model.ActionIntent{
+			Type:    "source.query",
+			Summary: "Search documents",
 		},
 	})
 	if err != nil {
@@ -257,8 +281,8 @@ func TestFlattenToolCall_EmptyArguments(t *testing.T) {
 	}
 }
 
-func TestEngine_NoPoliciesDefaultsToAllow(t *testing.T) {
-	// Empty policy store — no rules match.
+func TestEngine_NoPoliciesWriteActionDefaultsToRequireApproval(t *testing.T) {
+	// Empty policy store — no rules match, but write actions default to RequireApproval.
 	policies := mem.NewPolicyStore()
 	engine := NewRuleEngine(policies)
 	ctx := context.Background()
@@ -269,6 +293,28 @@ func TestEngine_NoPoliciesDefaultsToAllow(t *testing.T) {
 		Action: model.ActionIntent{
 			Type:    "git.pull_request.create",
 			Summary: "Create PR",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if decision.Disposition != model.DispositionRequireApproval {
+		t.Errorf("Disposition = %q, want %q", decision.Disposition, model.DispositionRequireApproval)
+	}
+}
+
+func TestEngine_NoPoliciesReadActionDefaultsToAllow(t *testing.T) {
+	// Empty policy store — no rules match, read actions default to Allow.
+	policies := mem.NewPolicyStore()
+	engine := NewRuleEngine(policies)
+	ctx := context.Background()
+
+	decision, err := engine.Evaluate(ctx, EvaluationRequest{
+		WorkspaceID: "default",
+		AgentID:     "agent_1",
+		Action: model.ActionIntent{
+			Type:    "source.query",
+			Summary: "Search documents",
 		},
 	})
 	if err != nil {
@@ -359,5 +405,254 @@ func TestFlattenIntent_NilMetadata(t *testing.T) {
 	// Should not panic with nil metadata.
 	if fields["action.type"] != "shell.exec" {
 		t.Errorf("action.type = %v", fields["action.type"])
+	}
+}
+
+func TestIsWriteAction(t *testing.T) {
+	tests := []struct {
+		actionType string
+		want       bool
+	}{
+		// Write actions
+		{"email.send", true},
+		{"email.draft", true},
+		{"calendar.event.create", true},
+		{"calendar.event.update", true},
+		{"calendar.event.delete", true},
+		{"git.issue.create", true},
+		{"git.issue.comment", true},
+		{"git.pull_request.create", true},
+		{"git.pull_request.merge", true},
+		{"comms.slack.send", true},
+		{"payment.charge", true},
+		{"deploy.release", true},
+		{"cloud.resource.mutate", true},
+		{"procurement.request.submit", true},
+
+		// Read-only actions
+		{"source.query", false},
+		{"git.status", false},
+		{"calendar.event.list", false},
+		{"shell.exec", false},
+		{"unknown.action", false},
+	}
+	for _, tt := range tests {
+		got := isWriteAction(tt.actionType)
+		if got != tt.want {
+			t.Errorf("isWriteAction(%q) = %v, want %v", tt.actionType, got, tt.want)
+		}
+	}
+}
+
+func TestEngine_ExplicitAllowOverridesWriteDefault(t *testing.T) {
+	// Create a policy that explicitly allows email.send.
+	// This should be respected — the org made a deliberate choice.
+	policies := mem.NewPolicyStore()
+	ctx := context.Background()
+
+	allowEffect := api.PolicyRuleEffectAllow
+	actionField := "action.type"
+	eqOp := api.Eq
+	emailSend := "email.send"
+	condVal := api.PolicyCondition_Value{}
+	condVal.FromPolicyConditionValue0(emailSend)
+	priority := 100
+	desc := "allow email sending"
+
+	policies.Create(ctx, api.Policy{
+		PolicyId:    "pol_allow_email",
+		WorkspaceId: "default",
+		Version:     1,
+		Status:      api.PolicyStatusActive,
+		Rules: []api.PolicyRule{
+			{
+				RuleId:   "rule_allow_email",
+				Effect:   allowEffect,
+				Priority: &priority,
+				Description: &desc,
+				Conditions: &[]api.PolicyCondition{
+					{
+						Field:    &actionField,
+						Operator: &eqOp,
+						Value:    &condVal,
+					},
+				},
+			},
+		},
+	})
+
+	engine := NewRuleEngine(policies)
+	decision, err := engine.Evaluate(ctx, EvaluationRequest{
+		WorkspaceID: "default",
+		Action: model.ActionIntent{
+			Type:    "email.send",
+			Summary: "Send quarterly report",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	// Explicit Allow policy should be respected for write actions.
+	if decision.Disposition != model.DispositionAllow {
+		t.Errorf("Disposition = %q, want %q (explicit Allow should override write default)",
+			decision.Disposition, model.DispositionAllow)
+	}
+}
+
+func TestEngine_ExplicitDenyRespectedForWriteAction(t *testing.T) {
+	policies := mem.NewPolicyStore()
+	ctx := context.Background()
+
+	denyEffect := api.PolicyRuleEffectDeny
+	actionField := "action.type"
+	eqOp := api.Eq
+	emailSend := "email.send"
+	condVal := api.PolicyCondition_Value{}
+	condVal.FromPolicyConditionValue0(emailSend)
+	priority := 100
+	desc := "deny email sending"
+
+	policies.Create(ctx, api.Policy{
+		PolicyId:    "pol_deny_email",
+		WorkspaceId: "default",
+		Version:     1,
+		Status:      api.PolicyStatusActive,
+		Rules: []api.PolicyRule{
+			{
+				RuleId:      "rule_deny_email",
+				Effect:      denyEffect,
+				Priority:    &priority,
+				Description: &desc,
+				Conditions: &[]api.PolicyCondition{
+					{
+						Field:    &actionField,
+						Operator: &eqOp,
+						Value:    &condVal,
+					},
+				},
+			},
+		},
+	})
+
+	engine := NewRuleEngine(policies)
+	decision, err := engine.Evaluate(ctx, EvaluationRequest{
+		WorkspaceID: "default",
+		Action: model.ActionIntent{
+			Type:    "email.send",
+			Summary: "Send spam",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if decision.Disposition != model.DispositionDeny {
+		t.Errorf("Disposition = %q, want %q", decision.Disposition, model.DispositionDeny)
+	}
+}
+
+func TestFlattenIntent_EmailFields(t *testing.T) {
+	action := model.ActionIntent{
+		Type:    "email.send",
+		Summary: "Send quarterly report",
+		Domain: model.DomainAction{
+			Email: &model.EmailAction{
+				To: []model.Recipient{
+					{Name: "Alice", Email: "alice@example.com"},
+					{Name: "Bob", Email: "bob@example.com"},
+				},
+				CC:       []model.Recipient{{Email: "manager@example.com"}},
+				BCC:      []model.Recipient{{Email: "audit@example.com"}},
+				Subject:  "Q4 Report",
+				SendMode: "send_now",
+			},
+		},
+	}
+	fields := flattenIntent(action, model.IntentContext{})
+
+	if fields["domain.email.subject"] != "Q4 Report" {
+		t.Errorf("domain.email.subject = %v, want Q4 Report", fields["domain.email.subject"])
+	}
+	if fields["domain.email.send_mode"] != "send_now" {
+		t.Errorf("domain.email.send_mode = %v, want send_now", fields["domain.email.send_mode"])
+	}
+	if fields["domain.email.recipient_count"] != 4 {
+		t.Errorf("domain.email.recipient_count = %v, want 4", fields["domain.email.recipient_count"])
+	}
+	if fields["domain.email.to.0"] != "alice@example.com" {
+		t.Errorf("domain.email.to.0 = %v", fields["domain.email.to.0"])
+	}
+	if fields["domain.email.to.1"] != "bob@example.com" {
+		t.Errorf("domain.email.to.1 = %v", fields["domain.email.to.1"])
+	}
+	if fields["domain.email.cc.0"] != "manager@example.com" {
+		t.Errorf("domain.email.cc.0 = %v", fields["domain.email.cc.0"])
+	}
+	if fields["domain.email.bcc.0"] != "audit@example.com" {
+		t.Errorf("domain.email.bcc.0 = %v", fields["domain.email.bcc.0"])
+	}
+}
+
+func TestFlattenIntent_CalendarFields(t *testing.T) {
+	action := model.ActionIntent{
+		Type:    "calendar.event.create",
+		Summary: "Team standup",
+		Domain: model.DomainAction{
+			Calendar: &model.CalendarAction{
+				Title:          "Daily Standup",
+				Provider:       "google_calendar",
+				Timezone:       "America/New_York",
+				Location:       "Conference Room B",
+				ConferenceType: "google_meet",
+				Visibility:     "default",
+				Attendees: []model.CalendarAttendee{
+					{Email: "alice@example.com"},
+					{Email: "bob@example.com"},
+				},
+			},
+		},
+	}
+	fields := flattenIntent(action, model.IntentContext{})
+
+	if fields["domain.calendar.title"] != "Daily Standup" {
+		t.Errorf("domain.calendar.title = %v", fields["domain.calendar.title"])
+	}
+	if fields["domain.calendar.provider"] != "google_calendar" {
+		t.Errorf("domain.calendar.provider = %v", fields["domain.calendar.provider"])
+	}
+	if fields["domain.calendar.timezone"] != "America/New_York" {
+		t.Errorf("domain.calendar.timezone = %v", fields["domain.calendar.timezone"])
+	}
+	if fields["domain.calendar.location"] != "Conference Room B" {
+		t.Errorf("domain.calendar.location = %v", fields["domain.calendar.location"])
+	}
+	if fields["domain.calendar.conference_type"] != "google_meet" {
+		t.Errorf("domain.calendar.conference_type = %v", fields["domain.calendar.conference_type"])
+	}
+	if fields["domain.calendar.visibility"] != "default" {
+		t.Errorf("domain.calendar.visibility = %v", fields["domain.calendar.visibility"])
+	}
+	if fields["domain.calendar.attendee_count"] != 2 {
+		t.Errorf("domain.calendar.attendee_count = %v, want 2", fields["domain.calendar.attendee_count"])
+	}
+}
+
+func TestEngine_CommsActionDefaultsToRequireApproval(t *testing.T) {
+	// comms.* actions (Slack messages, etc.) should default to RequireApproval.
+	policies := mem.NewPolicyStore()
+	engine := NewRuleEngine(policies)
+	ctx := context.Background()
+
+	decision, err := engine.Evaluate(ctx, EvaluationRequest{
+		WorkspaceID: "default",
+		Action: model.ActionIntent{
+			Type:    "comms.slack.send",
+			Summary: "Send Slack message",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if decision.Disposition != model.DispositionRequireApproval {
+		t.Errorf("Disposition = %q, want %q", decision.Disposition, model.DispositionRequireApproval)
 	}
 }
