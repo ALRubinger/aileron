@@ -47,7 +47,7 @@ type HandlerConfig struct {
 	VerificationCodes store.VerificationCodeStore
 	Mailer            Mailer
 	NewID             func() string
-	UIRedirect        string        // e.g. "http://localhost:5173"
+	UIRedirect        string        // UI base URL, e.g. "http://localhost:5173" or "/"
 	AutoVerifyEmail bool          // skip email verification (dev/CI only)
 	RefreshTTL      time.Duration // e.g. 7 * 24 * time.Hour
 	VerificationTTL time.Duration // e.g. 15 * time.Minute
@@ -362,7 +362,7 @@ issueTokens:
 	})
 
 	h.log.Info("user authenticated", "user_id", user.ID, "provider", providerName)
-	http.Redirect(w, r, h.uiRedirect, http.StatusTemporaryRedirect)
+	http.Redirect(w, r, strings.TrimRight(h.uiRedirect, "/")+"/auth/callback", http.StatusTemporaryRedirect)
 }
 
 // handleRefresh exchanges a refresh token for a new access token.
