@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/comms"
@@ -148,7 +149,8 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		"total_tools", len(tools),
 	)
 
-	executor := p.buildToolExecutor(ctx, userID, accounts)
+	authTracker := &authErrorTracker{}
+	executor := p.buildToolExecutor(ctx, userID, accounts, authTracker)
 
 	// --- Round 1: Research ---
 	// The LLM gathers context using tools. Its output is a structured
@@ -194,6 +196,17 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 		}
 	} else {
 		gatheredContext = "(No source connectors available — replying with general knowledge only.)"
+	}
+
+	// If any providers had auth failures, propagate so the handler can
+	// tell the user to re-authenticate — even if other providers succeeded.
+	if failedProviders := authTracker.failed(); len(failedProviders) > 0 {
+		p.log.Warn("providers with auth failures",
+			"user_id", userID,
+			"providers", failedProviders,
+		)
+		return "", fmt.Errorf("research round: credentials expired for %s: %w",
+			strings.Join(failedProviders, ", "), source.ErrAuthFailed)
 	}
 
 	p.log.Debug("gathered context for ghostwriter",
@@ -298,7 +311,8 @@ func (p *Pipeline) GenerateDraftStream(ctx context.Context, userID string, msg c
 			}
 		}
 
-		executor := p.buildToolExecutor(ctx, userID, accounts)
+		authTracker := &authErrorTracker{}
+		executor := p.buildToolExecutor(ctx, userID, accounts, authTracker)
 		now := p.clock()
 
 		var gatheredContext string
@@ -324,6 +338,18 @@ func (p *Pipeline) GenerateDraftStream(ctx context.Context, userID string, msg c
 			}
 		} else {
 			gatheredContext = "(No source connectors available — replying with general knowledge only.)"
+		}
+
+		// If any providers had auth failures, propagate so the handler can
+		// tell the user to re-authenticate.
+		if failedProviders := authTracker.failed(); len(failedProviders) > 0 {
+			p.log.Warn("providers with auth failures",
+				"user_id", userID,
+				"providers", failedProviders,
+			)
+			errCh <- fmt.Errorf("research round: credentials expired for %s: %w",
+				strings.Join(failedProviders, ", "), source.ErrAuthFailed)
+			return
 		}
 
 		// --- Ghostwrite round: stream if possible ---
@@ -567,7 +593,27 @@ func filterReplayable(calls []llm.ToolCall) []llm.ToolCall {
 
 // buildToolExecutor creates a closure that resolves credentials from the vault
 // and dispatches tool calls to the source connector registry.
-func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, accounts []model.ConnectedAccount) llm.ToolExecutor {
+// authErrorTracker records providers that returned authentication errors
+// during tool execution. This allows the research round to continue with
+// working providers while still surfacing the auth failures afterward.
+type authErrorTracker struct {
+	mu        sync.Mutex
+	providers []string // providers that returned ErrAuthFailed
+}
+
+func (t *authErrorTracker) record(provider string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.providers = append(t.providers, provider)
+}
+
+func (t *authErrorTracker) failed() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.providers...)
+}
+
+func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, accounts []model.ConnectedAccount, authTracker *authErrorTracker) llm.ToolExecutor {
 	return func(execCtx context.Context, tool string, params map[string]any) (map[string]any, error) {
 		if p.sourceRegistry == nil {
 			return nil, fmt.Errorf("no source registry configured")
@@ -625,11 +671,13 @@ func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, account
 
 		result, execErr := p.sourceRegistry.ExecuteTool(execCtx, tool, params, secret.Value)
 		if execErr != nil {
-			// Auth failures are unrecoverable — every subsequent call will
-			// fail too. Wrap as fatal so the LLM loop aborts and the handler
-			// can tell the user to reconnect.
 			if errors.Is(execErr, source.ErrAuthFailed) {
-				return nil, &llm.ToolFatalError{Err: execErr}
+				// Auth failure for this provider — record it so we can
+				// surface it to the user after research completes, but
+				// don't abort the loop. Other providers may still work.
+				authTracker.record(provider)
+				p.log.Warn("tool auth failed, continuing with other providers",
+					"tool", tool, "provider", provider, "error", execErr)
 			}
 			p.log.Error("tool execution failed", "tool", tool, "provider", provider, "error", execErr)
 		} else {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/draft"
+	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/slack-go/slack"
 )
@@ -91,9 +92,10 @@ func (s *apiServer) vaultLockedSlackMessage() string {
 }
 
 // isVaultError checks whether err indicates that vault credentials are
-// unavailable (locked vault or stale escrow).
+// unavailable (locked vault, stale escrow, or expired OAuth tokens).
 func isVaultError(err error) bool {
-	return errors.Is(err, vault.ErrCredentialUnavailable)
+	return errors.Is(err, vault.ErrCredentialUnavailable) ||
+		errors.Is(err, source.ErrAuthFailed)
 }
 
 // handleAssistantThreadStarted is called when a user opens the Aileron agent DM.
