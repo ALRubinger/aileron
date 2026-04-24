@@ -1,0 +1,25 @@
+# Git and CI
+.git
+.github
+.gitignore
+
+# Claude Code
+.claude
+
+# Build artifacts
+build
+
+# Node / UI (separate Railway service with its own root)
+ui
+node_modules
+
+# Test fixtures
+test
+
+# Deploy configs (not needed inside images)
+deploy
+saas
+
+# Documentation (docs service only needs docs/ and core/api/openapi.yaml)
+*.md
+!AILERON.md
