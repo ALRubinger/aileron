@@ -752,3 +752,10 @@ func TestNewDefaultTTLs(t *testing.T) {
 		t.Fatalf("default keks.ttl = %v, want 24h", c.keks.ttl)
 	}
 }
+
+func TestClient_Ready(t *testing.T) {
+	c := New(nil)
+	if err := c.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready: %v (local client should always be ready)", err)
+	}
+}

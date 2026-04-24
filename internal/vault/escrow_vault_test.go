@@ -42,7 +42,8 @@ func (m *mockEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListRes
 func (m *mockEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
-func (m *mockEnclaveClient) Close() error { return nil }
+func (m *mockEnclaveClient) Ready(_ context.Context) error { return nil }
+func (m *mockEnclaveClient) Close() error                  { return nil }
 
 func TestEscrowVault_Get_EscrowHit(t *testing.T) {
 	client := &mockEnclaveClient{

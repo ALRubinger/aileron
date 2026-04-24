@@ -67,7 +67,8 @@ func (c *mockEscrowClient) EscrowList(_ context.Context) (enclave.EscrowListResp
 func (c *mockEscrowClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
-func (c *mockEscrowClient) Close() error { return nil }
+func (c *mockEscrowClient) Ready(_ context.Context) error { return nil }
+func (c *mockEscrowClient) Close() error                  { return nil }
 
 // failingTransmitClient is an enclave client whose TransmitKEK always fails.
 type failingTransmitClient struct {
