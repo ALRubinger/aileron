@@ -26,7 +26,7 @@ func TestGenerateVerificationCode(t *testing.T) {
 
 func TestBcryptHashAndCompare(t *testing.T) {
 	password := "my-secure-password-123"
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
 	if err != nil {
 		t.Fatalf("GenerateFromPassword: %v", err)
 	}

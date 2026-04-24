@@ -13,6 +13,7 @@ import (
 
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Handler serves the authentication HTTP routes.
@@ -31,7 +32,9 @@ type Handler struct {
 	uiRedirect        string // URL to redirect to after successful auth
 	refreshTTL        time.Duration
 	verificationTTL   time.Duration
-	autoVerifyEmail bool
+	autoVerifyEmail   bool
+	bcryptCost        int    // bcrypt cost parameter (default 12)
+	dummyHash         string // pre-computed dummy hash for timing-safe rejection
 }
 
 // HandlerConfig configures the auth handler.
@@ -48,9 +51,10 @@ type HandlerConfig struct {
 	Mailer            Mailer
 	NewID             func() string
 	UIRedirect        string        // UI base URL, e.g. "http://localhost:5173" or "/"
-	AutoVerifyEmail bool          // skip email verification (dev/CI only)
-	RefreshTTL      time.Duration // e.g. 7 * 24 * time.Hour
-	VerificationTTL time.Duration // e.g. 15 * time.Minute
+	AutoVerifyEmail   bool          // skip email verification (dev/CI only)
+	RefreshTTL        time.Duration // e.g. 7 * 24 * time.Hour
+	VerificationTTL   time.Duration // e.g. 15 * time.Minute
+	BcryptCost        int           // bcrypt cost (default 12; use bcrypt.MinCost in tests)
 }
 
 // NewHandler creates an auth handler.
@@ -64,6 +68,14 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.UIRedirect == "" {
 		cfg.UIRedirect = "/"
 	}
+	if cfg.BcryptCost == 0 {
+		cfg.BcryptCost = 12
+	}
+
+	// Pre-compute a dummy hash at the configured cost for timing-safe rejection
+	// of logins for nonexistent users (prevents email enumeration via timing).
+	dummy, _ := bcrypt.GenerateFromPassword([]byte("dummy"), cfg.BcryptCost)
+
 	return &Handler{
 		log:               cfg.Log,
 		registry:          cfg.Registry,
@@ -79,7 +91,9 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		uiRedirect:        cfg.UIRedirect,
 		refreshTTL:        cfg.RefreshTTL,
 		verificationTTL:   cfg.VerificationTTL,
-		autoVerifyEmail: cfg.AutoVerifyEmail,
+		autoVerifyEmail:   cfg.AutoVerifyEmail,
+		bcryptCost:        cfg.BcryptCost,
+		dummyHash:         string(dummy),
 	}
 }
 

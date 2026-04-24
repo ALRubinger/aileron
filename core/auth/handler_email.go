@@ -49,8 +49,8 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash password with bcrypt (cost 12).
-	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), 12)
+	// Hash password with bcrypt.
+	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), h.bcryptCost)
 	if err != nil {
 		h.log.Error("failed to hash password", "error", err)
 		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
@@ -224,7 +224,7 @@ func (h *Handler) handleEmailLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := h.users.GetByEmail(ctx, body.Email)
 	if err != nil {
 		// Constant-time-ish: still run bcrypt comparison to prevent timing attacks.
-		bcrypt.CompareHashAndPassword([]byte("$2a$12$xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), []byte(body.Password))
+		bcrypt.CompareHashAndPassword([]byte(h.dummyHash), []byte(body.Password))
 		http.Error(w, `{"error":"invalid email or password"}`, http.StatusUnauthorized)
 		return
 	}

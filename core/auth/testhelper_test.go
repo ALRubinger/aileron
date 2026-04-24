@@ -11,6 +11,7 @@ import (
 
 	"github.com/ALRubinger/aileron/core/model"
 	"github.com/ALRubinger/aileron/core/store"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // --- Stub stores ---
@@ -370,6 +371,7 @@ func newTestEnv() *testEnv {
 		NewID:             idGen,
 		RefreshTTL:        7 * 24 * time.Hour,
 		VerificationTTL:   15 * time.Minute,
+		BcryptCost:        bcrypt.MinCost,
 	})
 
 	mux := http.NewServeMux()
