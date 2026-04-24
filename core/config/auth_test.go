@@ -51,7 +51,7 @@ func TestLoadAuthConfig_Defaults(t *testing.T) {
 	t.Setenv("AILERON_JWT_ISSUER", "")
 	t.Setenv("AILERON_ACCESS_TOKEN_TTL", "")
 	t.Setenv("AILERON_REFRESH_TOKEN_TTL", "")
-	t.Setenv("AILERON_UI_REDIRECT_URL", "")
+	t.Setenv("AILERON_UI_BASE_URL", "")
 
 	cfg, err := LoadAuthConfig()
 	if err != nil {
@@ -66,8 +66,8 @@ func TestLoadAuthConfig_Defaults(t *testing.T) {
 	if cfg.RefreshTokenTTL != 7*24*time.Hour {
 		t.Errorf("RefreshTokenTTL = %v, want 168h", cfg.RefreshTokenTTL)
 	}
-	if cfg.UIRedirectURL != "/" {
-		t.Errorf("UIRedirectURL = %q, want /", cfg.UIRedirectURL)
+	if cfg.UIBaseURL != "/" {
+		t.Errorf("UIBaseURL = %q, want /", cfg.UIBaseURL)
 	}
 }
 

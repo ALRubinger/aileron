@@ -354,7 +354,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			VerificationCodes: verificationCodeStore,
 			Mailer:            mailer,
 			NewID:             idGen,
-			UIRedirect:        authCfg.UIRedirectURL,
+			UIBaseURL:         authCfg.UIBaseURL,
 			RefreshTTL:        authCfg.RefreshTokenTTL,
 			AutoVerifyEmail: authCfg.AutoVerifyEmail,
 		})

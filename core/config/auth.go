@@ -31,9 +31,11 @@ type AuthConfig struct {
 	// Env: AILERON_REFRESH_TOKEN_TTL (default: "168h" = 7 days)
 	RefreshTokenTTL time.Duration
 
-	// UIRedirectURL is where users are sent after successful auth.
-	// Env: AILERON_UI_REDIRECT_URL (default: "/")
-	UIRedirectURL string
+	// UIBaseURL is the UI origin (e.g. "https://app.example.com"), used for
+	// post-auth redirects and constructing user-facing links (e.g. vault unlock).
+	// Must not include any path — the server appends paths automatically.
+	// Env: AILERON_UI_BASE_URL (default: "/")
+	UIBaseURL string
 
 	// AutoVerifyEmail skips email verification on signup, activating
 	// accounts immediately. For development and CI only.
@@ -70,11 +72,6 @@ type AuthConfig struct {
 	// Env: MAIL_FROM (default: "noreply@withaileron.ai")
 	MailFrom string
 
-	// UIBaseURL is the base URL of the Aileron web UI, used to construct
-	// user-facing links (e.g. vault unlock from Slack).
-	// Env: AILERON_UI_URL (default: "")
-	UIBaseURL string
-
 	// SystemVaultKey is the AES-256 encryption key for the system vault
 	// (ADR-0020). Infrastructure secrets (Slack bot tokens, webhook keys)
 	// are encrypted at rest with this key. 32 bytes, hex-encoded (64 chars).
@@ -97,7 +94,7 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		DatabaseURL:        envTrimmed("AILERON_DATABASE_URL"),
 		JWTSigningKey:      envTrimmed("AILERON_JWT_SIGNING_KEY"),
 		JWTIssuer:          envOrDefault("AILERON_JWT_ISSUER", "aileron"),
-		UIRedirectURL:      envOrDefault("AILERON_UI_REDIRECT_URL", "/"),
+		UIBaseURL:          envOrDefault("AILERON_UI_BASE_URL", "/"),
 		AutoVerifyEmail:    envTrimmed("AILERON_AUTO_VERIFY_EMAIL") == "true",
 		GoogleSigninClientID:        envTrimmed("GOOGLE_SIGNIN_CLIENT_ID"),
 		GoogleSigninClientSecret:    envTrimmed("GOOGLE_SIGNIN_CLIENT_SECRET"),
@@ -110,7 +107,6 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		SlackClientID:      envTrimmed("SLACK_CLIENT_ID"),
 		SlackClientSecret:  envTrimmed("SLACK_CLIENT_SECRET"),
 		SlackSigningSecret: envTrimmed("SLACK_SIGNING_SECRET"),
-		UIBaseURL:          envTrimmed("AILERON_UI_URL"),
 		SystemVaultKey:     envTrimmed("AILERON_SYSTEM_VAULT_KEY"),
 		ResendAPIKey:       envTrimmed("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),

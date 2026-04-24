@@ -29,7 +29,7 @@ type Handler struct {
 	verificationCodes store.VerificationCodeStore
 	mailer            Mailer
 	newID             func() string
-	uiRedirect        string // URL to redirect to after successful auth
+	uiBaseURL         string // UI origin, e.g. "https://app.example.com"
 	refreshTTL        time.Duration
 	verificationTTL   time.Duration
 	autoVerifyEmail   bool
@@ -50,7 +50,7 @@ type HandlerConfig struct {
 	VerificationCodes store.VerificationCodeStore
 	Mailer            Mailer
 	NewID             func() string
-	UIRedirect        string        // UI base URL, e.g. "http://localhost:5173" or "/"
+	UIBaseURL         string        // UI origin, e.g. "http://localhost:5173" or "/"
 	AutoVerifyEmail   bool          // skip email verification (dev/CI only)
 	RefreshTTL        time.Duration // e.g. 7 * 24 * time.Hour
 	VerificationTTL   time.Duration // e.g. 15 * time.Minute
@@ -65,8 +65,8 @@ func NewHandler(cfg HandlerConfig) *Handler {
 	if cfg.VerificationTTL == 0 {
 		cfg.VerificationTTL = 15 * time.Minute
 	}
-	if cfg.UIRedirect == "" {
-		cfg.UIRedirect = "/"
+	if cfg.UIBaseURL == "" {
+		cfg.UIBaseURL = "/"
 	}
 	if cfg.BcryptCost == 0 {
 		cfg.BcryptCost = 12
@@ -88,7 +88,7 @@ func NewHandler(cfg HandlerConfig) *Handler {
 		verificationCodes: cfg.VerificationCodes,
 		mailer:            cfg.Mailer,
 		newID:             cfg.NewID,
-		uiRedirect:        cfg.UIRedirect,
+		uiBaseURL:         cfg.UIBaseURL,
 		refreshTTL:        cfg.RefreshTTL,
 		verificationTTL:   cfg.VerificationTTL,
 		autoVerifyEmail:   cfg.AutoVerifyEmail,
@@ -376,7 +376,7 @@ issueTokens:
 	})
 
 	h.log.Info("user authenticated", "user_id", user.ID, "provider", providerName)
-	http.Redirect(w, r, strings.TrimRight(h.uiRedirect, "/")+"/auth/callback", http.StatusTemporaryRedirect)
+	http.Redirect(w, r, strings.TrimRight(h.uiBaseURL, "/")+"/auth/callback", http.StatusTemporaryRedirect)
 }
 
 // handleRefresh exchanges a refresh token for a new access token.
