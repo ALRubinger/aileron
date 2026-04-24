@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -481,5 +484,87 @@ func TestResolveCredentialVaultPath_UnknownProvider(t *testing.T) {
 	// Stripe has no connected account provider mapping.
 	if path != "connectors/stripe/default" {
 		t.Errorf("vaultPath = %q, want connectors/stripe/default", path)
+	}
+}
+
+// --- Enclave readiness tests ---
+
+type failingEnclaveClient struct {
+	stubEnclaveClient
+}
+
+func (f *failingEnclaveClient) Ready(_ context.Context) error {
+	return fmt.Errorf("enclave not reachable: connection refused")
+}
+
+func TestGetHealth_NoEnclave(t *testing.T) {
+	s := &apiServer{log: slog.Default()}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	s.GetHealth(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestGetHealth_EnclaveHealthy(t *testing.T) {
+	s := &apiServer{
+		log:           slog.Default(),
+		enclaveClient: &stubEnclaveClient{},
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	s.GetHealth(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestGetHealth_EnclaveNotReady(t *testing.T) {
+	s := &apiServer{
+		log:           slog.Default(),
+		enclaveClient: &failingEnclaveClient{},
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+	s.GetHealth(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestRequireEnclave_NoEnclave(t *testing.T) {
+	s := &apiServer{log: slog.Default()}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
+	if !s.requireEnclave(w, r) {
+		t.Error("requireEnclave should return true when no enclave configured")
+	}
+}
+
+func TestRequireEnclave_EnclaveHealthy(t *testing.T) {
+	s := &apiServer{
+		log:           slog.Default(),
+		enclaveClient: &stubEnclaveClient{},
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
+	if !s.requireEnclave(w, r) {
+		t.Error("requireEnclave should return true when enclave is healthy")
+	}
+}
+
+func TestRequireEnclave_EnclaveDown(t *testing.T) {
+	s := &apiServer{
+		log:           slog.Default(),
+		enclaveClient: &failingEnclaveClient{},
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
+	if s.requireEnclave(w, r) {
+		t.Error("requireEnclave should return false when enclave is down")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
 	}
 }

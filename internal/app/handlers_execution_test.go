@@ -64,7 +64,8 @@ func (e *stubEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListRes
 func (e *stubEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
-func (e *stubEnclaveClient) Close() error { return nil }
+func (e *stubEnclaveClient) Ready(_ context.Context) error { return nil }
+func (e *stubEnclaveClient) Close() error                  { return nil }
 
 func newExecutionServer() *apiServer {
 	return &apiServer{

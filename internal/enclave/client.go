@@ -52,6 +52,12 @@ type Client interface {
 	// plaintext from enclave memory.
 	EscrowRevoke(ctx context.Context, req EscrowRevokeRequest) error
 
+	// Ready checks whether the enclave is reachable and healthy.
+	// Returns nil if the enclave can accept requests, or an error describing
+	// why it cannot. Callers should check Ready before performing operations
+	// that depend on the enclave (OAuth exchange, execution, escrow).
+	Ready(ctx context.Context) error
+
 	// Close releases any resources held by this client.
 	Close() error
 }

@@ -34,7 +34,7 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 	}
 
 	// Tier 2: Escrowed credentials in TEE.
-	if s.enclaveClient != nil {
+	if s.enclaveClient != nil && s.enclaveReady(context.Background()) == nil {
 		// Check if this specific user has escrowed credentials.
 		// Vault paths are "connected-accounts/{userID}/{provider}".
 		prefix := "connected-accounts/" + userID + "/"
@@ -143,6 +143,10 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 	if pipeline == nil {
 		if s.draftPipeline == nil {
 			s.log.Warn("agent message: draft pipeline not configured")
+		} else if s.enclaveClient != nil && s.enclaveReady(ctx) != nil {
+			s.log.Warn("agent message: enclave not ready", "user_id", userID)
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS,
+				":warning: Aileron is still starting up. Please try again in about 30 seconds.")
 		} else {
 			s.log.Warn("agent message: vault locked for user", "user_id", userID)
 			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedSlackMessage())

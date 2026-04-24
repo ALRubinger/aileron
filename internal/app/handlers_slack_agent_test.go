@@ -724,7 +724,8 @@ func (stubEscrowEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowList
 func (stubEscrowEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
-func (stubEscrowEnclaveClient) Close() error { return nil }
+func (stubEscrowEnclaveClient) Ready(_ context.Context) error { return nil }
+func (stubEscrowEnclaveClient) Close() error                  { return nil }
 
 func TestProcessSlashCommandDraft_HappyPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

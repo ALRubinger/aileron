@@ -256,6 +256,11 @@ func (c *Client) EscrowRevoke(_ context.Context, req enclave.EscrowRevokeRequest
 	return c.escrow.Revoke(req.EscrowID, req.GrantID)
 }
 
+// Ready always returns nil for the local client since it runs in-process.
+func (c *Client) Ready(_ context.Context) error {
+	return nil
+}
+
 // Close zeros the session key, KEKs, and clears the escrow store.
 func (c *Client) Close() error {
 	c.mu.Lock()

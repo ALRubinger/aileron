@@ -314,6 +314,10 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 	// the code for tokens, encrypts them with the user's KEK, and returns
 	// only the ciphertext. The server never sees the plaintext tokens.
 	if s.enclaveClient != nil {
+		// Verify enclave is reachable before attempting OAuth exchange.
+		if !s.requireEnclave(w, r) {
+			return
+		}
 		// Verify passphrase exists (enclave has escrowed KEK).
 		if s.userKeyMaterials != nil {
 			if _, err := s.userKeyMaterials.Get(r.Context(), userID); err != nil && isNotFound(err) {

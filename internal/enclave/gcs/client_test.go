@@ -370,3 +370,40 @@ func TestClientEscrowRevoke(t *testing.T) {
 		t.Fatalf("EscrowRevoke: %v", err)
 	}
 }
+
+func TestClientReady_Healthy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" || r.Method != http.MethodGet {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	if err := client.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+}
+
+func TestClientReady_Unhealthy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("enclave error"))
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	err := client.Ready(context.Background())
+	if err == nil {
+		t.Fatal("expected error for unhealthy enclave")
+	}
+}
+
+func TestClientReady_Unreachable(t *testing.T) {
+	client := New(Config{BaseURL: "http://127.0.0.1:1"})
+	err := client.Ready(context.Background())
+	if err == nil {
+		t.Fatal("expected error for unreachable enclave")
+	}
+}

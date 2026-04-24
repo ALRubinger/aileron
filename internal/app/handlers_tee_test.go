@@ -877,7 +877,8 @@ func (c *reconcileEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowLi
 func (c *reconcileEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
-func (c *reconcileEnclaveClient) Close() error { return nil }
+func (c *reconcileEnclaveClient) Ready(_ context.Context) error { return nil }
+func (c *reconcileEnclaveClient) Close() error                  { return nil }
 
 func TestReconcileEscrowIndex_PrunesStaleEntries(t *testing.T) {
 	var index sync.Map

@@ -1087,7 +1087,8 @@ func (s *stubEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListRes
 func (s *stubEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
-func (s *stubEnclaveClient) Close() error { return nil }
+func (s *stubEnclaveClient) Ready(_ context.Context) error { return nil }
+func (s *stubEnclaveClient) Close() error                  { return nil }
 
 func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 	// When the escrow vault returns ErrEscrowStale, the tool executor should

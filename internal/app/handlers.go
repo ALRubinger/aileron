@@ -136,6 +136,20 @@ func isNotFound(err error) bool {
 // --- Health ---
 
 func (s *apiServer) GetHealth(w http.ResponseWriter, r *http.Request) {
+	// When TEE is configured, verify the enclave is reachable.
+	if s.enclaveClient != nil {
+		if err := s.enclaveClient.Ready(r.Context()); err != nil {
+			s.log.Warn("health check: enclave not ready", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, api.HealthResponse{
+				Status:    "enclave_not_ready",
+				Service:   "aileron",
+				Version:   version.Version,
+				Timestamp: time.Now().UTC(),
+			})
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, api.HealthResponse{
 		Status:    "ok",
 		Service:   "aileron",
@@ -747,6 +761,10 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 	// KEK-encrypted; only the enclave (which holds the user's KEK) can
 	// decrypt it. The server never sees the plaintext credential.
 	if s.enclaveClient != nil {
+		if !s.requireEnclave(w, r) {
+			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "enclave not ready")
+			return
+		}
 		var execUserID string
 		if claims := auth.ClaimsFromContext(ctx); claims != nil {
 			execUserID = claims.Subject
@@ -1117,6 +1135,28 @@ func (s *apiServer) resolveCredentialVaultPath(ctx context.Context, connProvider
 
 	// Fall back to infrastructure credential.
 	return fmt.Sprintf("connectors/%s/default", connProvider)
+}
+
+// enclaveReady checks whether the enclave is reachable. Returns nil if TEE
+// is not configured or the enclave is healthy. Returns an error if TEE is
+// configured but the enclave is unreachable.
+func (s *apiServer) enclaveReady(ctx context.Context) error {
+	if s.enclaveClient == nil {
+		return nil
+	}
+	return s.enclaveClient.Ready(ctx)
+}
+
+// requireEnclave checks enclave readiness and writes a 503 error if it's
+// unavailable. Returns true if the enclave is ready (or not configured).
+func (s *apiServer) requireEnclave(w http.ResponseWriter, r *http.Request) bool {
+	if err := s.enclaveReady(r.Context()); err != nil {
+		s.log.Error("enclave not ready", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "enclave_not_ready",
+			"Aileron is still starting up — please try again in a moment.")
+		return false
+	}
+	return true
 }
 
 func resolveConnector(actionType string) (connType, provider string) {

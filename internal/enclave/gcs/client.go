@@ -127,6 +127,24 @@ func (c *Client) EscrowRevoke(ctx context.Context, req enclave.EscrowRevokeReque
 	return nil
 }
 
+// Ready checks whether the enclave is reachable by calling GET /health.
+func (c *Client) Ready(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/health", nil)
+	if err != nil {
+		return fmt.Errorf("gcs: creating health request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("enclave not reachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("enclave health check failed (%d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
 // Close is a no-op for the HTTP client.
 func (c *Client) Close() error {
 	return nil
