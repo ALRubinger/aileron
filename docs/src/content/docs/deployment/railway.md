@@ -13,10 +13,18 @@ In the Railway dashboard, create three services and one database:
 |---------|----------------|----------------|
 | **server** | `core/server/Dockerfile` | `/` (repo root) |
 | **ui** | `ui/Dockerfile` | `ui/` |
-| **docs** | `docs/Dockerfile` | `docs/` |
+| **docs** | `docs/Dockerfile` | `/` (repo root) |
 | **Postgres** | -- (Railway-managed plugin) | -- |
 
 Link the Postgres plugin to the server service.
+
+Configure **watched paths** under each service's **Settings > Build > Watched Paths** so services only rebuild when relevant files change:
+
+| Service | Watched Paths |
+|---------|---------------|
+| **server** | `core/`, `enclave/`, `sdk/go/`, `AILERON.md`, `.dockerignore` |
+| **ui** | `ui/` |
+| **docs** | `docs/`, `core/api/openapi.yaml`, `.dockerignore` |
 
 ## 2. Set environment variables
 
