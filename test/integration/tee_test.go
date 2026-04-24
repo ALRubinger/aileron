@@ -8,7 +8,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/ALRubinger/aileron/core/crypto"
+	"github.com/ALRubinger/aileron/internal/crypto"
 )
 
 func TestTEE_Status_Public(t *testing.T) {

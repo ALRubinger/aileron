@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ALRubinger/aileron/core/crypto"
+	"github.com/ALRubinger/aileron/internal/crypto"
 )
 
 // kekVerificationConstant must match the client-side constant.

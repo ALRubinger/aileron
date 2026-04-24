@@ -3,7 +3,7 @@ version: 2
 builds:
   - id: aileron-server
     binary: aileron-server
-    main: ./core/server
+    main: ./internal/server
     env:
       - CGO_ENABLED=0
     goos:
@@ -18,8 +18,8 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w
-      - -X github.com/ALRubinger/aileron/core/version.Version={{.Version}}
-      - -X github.com/ALRubinger/aileron/core/version.Commit={{.Commit}}
+      - -X github.com/ALRubinger/aileron/internal/version.Version={{.Version}}
+      - -X github.com/ALRubinger/aileron/internal/version.Commit={{.Commit}}
 
   - id: aileron-mcp
     binary: aileron-mcp
@@ -38,8 +38,8 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w
-      - -X github.com/ALRubinger/aileron/core/version.Version={{.Version}}
-      - -X github.com/ALRubinger/aileron/core/version.Commit={{.Commit}}
+      - -X github.com/ALRubinger/aileron/internal/version.Version={{.Version}}
+      - -X github.com/ALRubinger/aileron/internal/version.Commit={{.Commit}}
 
   - id: aileron
     binary: aileron
@@ -58,8 +58,8 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w
-      - -X github.com/ALRubinger/aileron/core/version.Version={{.Version}}
-      - -X github.com/ALRubinger/aileron/core/version.Commit={{.Commit}}
+      - -X github.com/ALRubinger/aileron/internal/version.Version={{.Version}}
+      - -X github.com/ALRubinger/aileron/internal/version.Commit={{.Commit}}
 
   - id: aileron-sh
     binary: aileron-sh

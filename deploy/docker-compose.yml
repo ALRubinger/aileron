@@ -31,7 +31,7 @@ services:
   server:
     build:
       context: ..
-      dockerfile: core/server/Dockerfile
+      dockerfile: internal/server/Dockerfile
     restart: unless-stopped
     depends_on:
       postgres:

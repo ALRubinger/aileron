@@ -9,13 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ALRubinger/aileron/core/audit"
-	"github.com/ALRubinger/aileron/core/launch"
-	"github.com/ALRubinger/aileron/core/launch/agents"
-	"github.com/ALRubinger/aileron/core/model"
-	launchpolicy "github.com/ALRubinger/aileron/core/policy/launch"
-	"github.com/ALRubinger/aileron/core/vault"
-	"github.com/ALRubinger/aileron/core/version"
+	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/launch"
+	"github.com/ALRubinger/aileron/internal/launch/agents"
+	"github.com/ALRubinger/aileron/internal/model"
+	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
+	"github.com/ALRubinger/aileron/internal/vault"
+	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
 )
 

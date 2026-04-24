@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ALRubinger/aileron/core/crypto"
-	"github.com/ALRubinger/aileron/enclave"
+	"github.com/ALRubinger/aileron/internal/crypto"
+	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 func encryptForTest(data, key []byte) ([]byte, error) {

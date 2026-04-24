@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ALRubinger/aileron/core/audit"
-	"github.com/ALRubinger/aileron/core/launch"
-	"github.com/ALRubinger/aileron/core/launch/agents"
+	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/launch"
+	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
 
 func newTestRegistry() *launch.Registry {

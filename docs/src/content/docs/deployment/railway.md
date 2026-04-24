@@ -11,7 +11,7 @@ In the Railway dashboard, create three services and one database:
 
 | Service | Dockerfile Path | Root Directory |
 |---------|----------------|----------------|
-| **server** | `core/server/Dockerfile` | `/` (repo root) |
+| **server** | `internal/server/Dockerfile` | `/` (repo root) |
 | **ui** | `ui/Dockerfile` | `ui/` |
 | **docs** | `docs/Dockerfile` | `/` (repo root) |
 | **Postgres** | -- (Railway-managed plugin) | -- |
@@ -22,9 +22,9 @@ Configure **watched paths** under each service's **Settings > Build > Watched Pa
 
 | Service | Watched Paths |
 |---------|---------------|
-| **server** | `core/`, `enclave/`, `sdk/go/`, `AILERON.md`, `.dockerignore` |
+| **server** | `internal/`, `internal/enclave/`, `sdk/go/`, `AILERON.md`, `.dockerignore` |
 | **ui** | `ui/` |
-| **docs** | `docs/`, `core/api/openapi.yaml`, `.dockerignore` |
+| **docs** | `docs/`, `internal/api/openapi.yaml`, `.dockerignore` |
 
 ## 2. Set environment variables
 

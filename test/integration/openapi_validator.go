@@ -47,9 +47,9 @@ func specFilePath() string {
 	if p := os.Getenv("AILERON_OPENAPI_SPEC"); p != "" {
 		return p
 	}
-	// Default: relative to this source file -> ../../core/api/openapi.yaml
+	// Default: relative to this source file -> ../../internal/api/openapi.yaml
 	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "..", "..", "core", "api", "openapi.yaml")
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "internal", "api", "openapi.yaml")
 }
 
 // validateResponse checks that an HTTP response conforms to the OpenAPI spec.

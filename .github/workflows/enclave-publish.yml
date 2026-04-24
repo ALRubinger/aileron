@@ -29,8 +29,10 @@ on:
     branches: [main]
     paths:
       - "cmd/aileron-enclave/**"
-      - "enclave/**"
-      - "core/**"
+      - "internal/enclave/**"
+      - "internal/connector/**"
+      - "internal/crypto/**"
+      - "internal/model/**"
       - "go.work"
       - "go.work.sum"
   workflow_dispatch:

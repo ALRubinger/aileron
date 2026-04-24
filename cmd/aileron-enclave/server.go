@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ALRubinger/aileron/core/connector"
-	"github.com/ALRubinger/aileron/core/crypto"
-	"github.com/ALRubinger/aileron/enclave"
+	"github.com/ALRubinger/aileron/internal/connector"
+	"github.com/ALRubinger/aileron/internal/crypto"
+	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 const enclaveSessionTTL = 30 * time.Minute

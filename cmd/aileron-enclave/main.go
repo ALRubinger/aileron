@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ALRubinger/aileron/core/connector"
-	googlecalendar "github.com/ALRubinger/aileron/core/connector/calendar/google"
-	"github.com/ALRubinger/aileron/core/connector/git/github"
-	"github.com/ALRubinger/aileron/core/connector/payments/stripe"
+	"github.com/ALRubinger/aileron/internal/connector"
+	googlecalendar "github.com/ALRubinger/aileron/internal/connector/calendar/google"
+	"github.com/ALRubinger/aileron/internal/connector/git/github"
+	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
 )
 
 func main() {
