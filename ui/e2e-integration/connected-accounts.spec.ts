@@ -34,7 +34,7 @@ test.describe('Connected Accounts — Real API', () => {
 			.or(page.locator('[data-slot="card-title"]', { hasText: 'Connected Accounts' }));
 		await expect(settled).toBeVisible({ timeout: 15000 });
 
-		if (page.url().includes('/setup-vault')) {
+		if (page.url().includes('/vault')) {
 			await expect(page.getByText('Secure your vault')).toBeVisible();
 			return;
 		}

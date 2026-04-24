@@ -1196,7 +1196,7 @@ func TestBuildStreamingPipeline_VaultLocked(t *testing.T) {
 func TestVaultUnlockURL_UsesConfiguredBase(t *testing.T) {
 	srv := &apiServer{uiBaseURL: "https://custom.example.com"}
 	url := srv.vaultUnlockURL()
-	if url != "https://custom.example.com/setup-vault" {
+	if url != "https://custom.example.com/vault" {
 		t.Errorf("expected custom URL, got %q", url)
 	}
 }
@@ -1204,7 +1204,7 @@ func TestVaultUnlockURL_UsesConfiguredBase(t *testing.T) {
 func TestVaultUnlockURL_FallsBackToProduction(t *testing.T) {
 	srv := &apiServer{}
 	url := srv.vaultUnlockURL()
-	if url != "https://app.withaileron.ai/setup-vault" {
+	if url != "https://app.withaileron.ai/vault" {
 		t.Errorf("expected production fallback URL, got %q", url)
 	}
 }
@@ -1244,8 +1244,8 @@ func TestHandleAssistantMessage_VaultLocked_PostsUnlockMessage(t *testing.T) {
 	if !strings.Contains(msg, "Unlock your vault") {
 		t.Errorf("expected unlock link in message, got: %s", msg)
 	}
-	if !strings.Contains(msg, "app.withaileron.ai/setup-vault") {
-		t.Errorf("expected setup-vault URL in message, got: %s", msg)
+	if !strings.Contains(msg, "app.withaileron.ai/vault") {
+		t.Errorf("expected vault URL in message, got: %s", msg)
 	}
 }
 
@@ -1270,8 +1270,8 @@ func TestHandleAssistantMessage_VaultLocked_NoUIURL(t *testing.T) {
 	if !strings.Contains(msg, "Unlock your vault") {
 		t.Errorf("expected unlock link in message, got: %s", msg)
 	}
-	if !strings.Contains(msg, "app.withaileron.ai/setup-vault") {
-		t.Errorf("expected production setup-vault URL in message, got: %s", msg)
+	if !strings.Contains(msg, "app.withaileron.ai/vault") {
+		t.Errorf("expected production vault URL in message, got: %s", msg)
 	}
 }
 
@@ -1322,8 +1322,8 @@ func TestHandleAssistantMessage_CredentialUnavailable_PostsUnlockMessage(t *test
 	if !strings.Contains(msg, "Unlock your vault") {
 		t.Errorf("expected unlock link in message, got: %s", msg)
 	}
-	if !strings.Contains(msg, "setup-vault") {
-		t.Errorf("expected setup-vault URL in message, got: %s", msg)
+	if !strings.Contains(msg, "vault") {
+		t.Errorf("expected vault URL in message, got: %s", msg)
 	}
 }
 
@@ -1394,8 +1394,8 @@ func TestGenerateDraftFromInstructions_CredentialUnavailable_SendsVaultUnlockMes
 	if !strings.Contains(view, "Unlock your vault") {
 		t.Errorf("expected vault unlock message in modal, got: %s", view)
 	}
-	if !strings.Contains(view, "setup-vault") {
-		t.Errorf("expected setup-vault URL in modal, got: %s", view)
+	if !strings.Contains(view, "vault") {
+		t.Errorf("expected vault URL in modal, got: %s", view)
 	}
 	if strings.Contains(view, "Draft generation failed") {
 		t.Errorf("should not show generic error for vault issues, got: %s", view)

@@ -58,7 +58,8 @@
 		const path = page.url.pathname;
 		const isPublic = publicPaths.some((p) => path.startsWith(p));
 		if (!isPublic && !isAuthenticated()) {
-			goto('/login');
+			const redirect = path === '/' ? '' : `?redirectTo=${encodeURIComponent(path)}`;
+			goto(`/login${redirect}`);
 		}
 	});
 
@@ -67,12 +68,12 @@
 	$effect(() => {
 		if (!mounted || !isAuthenticated() || vaultChecked) return;
 		const path = page.url.pathname;
-		if (path === '/setup-vault') return;
+		if (path === '/vault') return;
 		vaultChecked = true;
 		getVaultStatus()
 			.then((status) => {
 				if (!status.has_passphrase) {
-					goto('/setup-vault');
+					goto('/vault');
 				}
 			})
 			.catch(() => {

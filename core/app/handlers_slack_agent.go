@@ -64,7 +64,7 @@ func (s *apiServer) vaultUnlockURL() string {
 	if base == "" {
 		base = "https://app.withaileron.ai"
 	}
-	return base + "/setup-vault"
+	return base + "/vault"
 }
 
 // vaultLockedSlackMessage returns a Slack mrkdwn-formatted message with a
