@@ -194,7 +194,7 @@ test.describe('Slack Agent — Vault Gating', () => {
 		await page.goto('/settings/connected-accounts');
 
 		// App redirects to the vault setup page when no passphrase is configured
-		await expect(page).toHaveURL(/\/setup-vault/);
+		await expect(page).toHaveURL(/\/vault/);
 		await expect(page.getByText('Secure your vault')).toBeVisible();
 	});
 

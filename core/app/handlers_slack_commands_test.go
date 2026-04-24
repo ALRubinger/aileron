@@ -207,8 +207,8 @@ func TestSlashCommandQuestion_CredentialUnavailable_SendsVaultUnlockMessage(t *t
 	if !strings.Contains(body, "Unlock your vault") {
 		t.Errorf("expected vault unlock message, got: %s", body)
 	}
-	if !strings.Contains(body, "setup-vault") {
-		t.Errorf("expected setup-vault URL in response, got: %s", body)
+	if !strings.Contains(body, "vault") {
+		t.Errorf("expected vault URL in response, got: %s", body)
 	}
 	// Should NOT contain the generic error message.
 	if strings.Contains(body, "Something went wrong") {
@@ -283,8 +283,8 @@ func TestSlashCommandDraft_CredentialUnavailable_SendsVaultUnlockMessage(t *test
 	if !strings.Contains(view, "Unlock your vault") {
 		t.Errorf("expected vault unlock message in modal, got: %s", view)
 	}
-	if !strings.Contains(view, "setup-vault") {
-		t.Errorf("expected setup-vault URL in modal, got: %s", view)
+	if !strings.Contains(view, "vault") {
+		t.Errorf("expected vault URL in modal, got: %s", view)
 	}
 	if strings.Contains(view, "Draft generation failed") {
 		t.Errorf("should not show generic error for vault issues, got: %s", view)

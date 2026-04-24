@@ -2,7 +2,7 @@ import { test, expect, API_URL } from './auth-fixture';
 
 /**
  * Helper: navigate to a settings page and wait for it to fully settle.
- * The app may redirect to /setup-vault if the user has no passphrase.
+ * The app may redirect to /vault if the user has no passphrase.
  * The redirect is async (page renders, vault status API returns, then redirect),
  * so we must wait for network activity to finish before checking the final URL.
  * Returns true if we reached the target page, false if redirected to vault setup.
@@ -14,7 +14,7 @@ async function gotoSettings(page: import('@playwright/test').Page, path: string)
 	await page.waitForTimeout(1000);
 
 	// If the app redirected, wait for the vault setup page to render
-	if (page.url().includes('/setup-vault')) {
+	if (page.url().includes('/vault')) {
 		await expect(page.getByText('Secure your vault')).toBeVisible({ timeout: 5000 });
 		return false;
 	}

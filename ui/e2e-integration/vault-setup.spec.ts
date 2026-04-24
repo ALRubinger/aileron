@@ -5,13 +5,13 @@ test.describe('Vault Setup Flow', () => {
 		// A fresh test user with no passphrase should be redirected to setup.
 		await page.goto('/settings/connected-accounts');
 
-		// The app should redirect to /setup-vault since no passphrase exists.
-		await expect(page).toHaveURL(/\/setup-vault/, { timeout: 10000 });
+		// The app should redirect to /vault since no passphrase exists.
+		await expect(page).toHaveURL(/\/vault/, { timeout: 10000 });
 		await expect(page.getByText('Secure your vault')).toBeVisible();
 	});
 
 	test('vault setup page has passphrase form', async ({ authedPage: page }) => {
-		await page.goto('/setup-vault');
+		await page.goto('/vault');
 
 		await expect(page.getByLabel('Vault passphrase')).toBeVisible();
 		await expect(page.getByLabel('Confirm passphrase')).toBeVisible();
@@ -19,7 +19,7 @@ test.describe('Vault Setup Flow', () => {
 	});
 
 	test('vault setup rejects short passphrase', async ({ authedPage: page }) => {
-		await page.goto('/setup-vault');
+		await page.goto('/vault');
 
 		await page.getByLabel('Vault passphrase').fill('short');
 		await page.getByLabel('Confirm passphrase').fill('short');
@@ -29,7 +29,7 @@ test.describe('Vault Setup Flow', () => {
 	});
 
 	test('vault setup rejects mismatched passphrases', async ({ authedPage: page }) => {
-		await page.goto('/setup-vault');
+		await page.goto('/vault');
 
 		await page.getByLabel('Vault passphrase').fill('secure-passphrase-1');
 		await page.getByLabel('Confirm passphrase').fill('secure-passphrase-2');
