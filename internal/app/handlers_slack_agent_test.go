@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -692,6 +693,18 @@ func TestResolvePipelineVault_AuthDisabled(t *testing.T) {
 	if result == nil {
 		t.Error("expected non-nil pipeline when auth is disabled")
 	}
+}
+
+// sourceExecuteEnclaveClient is a configurable enclave.Client for testing
+// newEnclaveSourceExecutor.
+type sourceExecuteEnclaveClient struct {
+	stubEscrowEnclaveClient
+	resp enclave.SourceExecuteResponse
+	err  error
+}
+
+func (c *sourceExecuteEnclaveClient) SourceExecute(_ context.Context, _ enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
+	return c.resp, c.err
 }
 
 // stubEscrowEnclaveClient is a minimal enclave.Client for testing escrow resolution.
@@ -1623,4 +1636,126 @@ func waitFor(ms int) <-chan struct{} {
 		close(ch)
 	}()
 	return ch
+}
+
+func TestNewEnclaveSourceExecutor_HappyPath(t *testing.T) {
+	resultJSON, _ := json.Marshal(map[string]any{"messages": []string{"hello"}})
+	client := &sourceExecuteEnclaveClient{
+		resp: enclave.SourceExecuteResponse{Result: resultJSON},
+	}
+	srv := &apiServer{
+		enclaveClient: client,
+	}
+	srv.escrowIndex.Store("connected-accounts/usr_1/gmail", "esc_gmail_123")
+
+	executor := srv.newEnclaveSourceExecutor()
+	result, err := executor(context.Background(), "gmail_search", map[string]any{"query": "test"}, "connected-accounts/usr_1/gmail")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	msgs, ok := result["messages"]
+	if !ok {
+		t.Fatal("expected 'messages' key in result")
+	}
+	arr, ok := msgs.([]any)
+	if !ok || len(arr) != 1 {
+		t.Fatalf("expected 1 message, got %v", msgs)
+	}
+}
+
+func TestNewEnclaveSourceExecutor_NoEscrowEntry(t *testing.T) {
+	srv := &apiServer{
+		enclaveClient: &sourceExecuteEnclaveClient{},
+	}
+	// escrowIndex is empty — no entry for this path.
+
+	executor := srv.newEnclaveSourceExecutor()
+	_, err := executor(context.Background(), "gmail_search", nil, "connected-accounts/usr_1/gmail")
+	if err == nil {
+		t.Fatal("expected error for missing escrow entry")
+	}
+	if !errors.Is(err, vault.ErrCredentialUnavailable) {
+		t.Errorf("expected ErrCredentialUnavailable, got: %v", err)
+	}
+}
+
+func TestNewEnclaveSourceExecutor_EnclaveError(t *testing.T) {
+	client := &sourceExecuteEnclaveClient{
+		err: fmt.Errorf("enclave unreachable"),
+	}
+	srv := &apiServer{
+		enclaveClient: client,
+	}
+	srv.escrowIndex.Store("connected-accounts/usr_1/gmail", "esc_gmail_123")
+
+	executor := srv.newEnclaveSourceExecutor()
+	_, err := executor(context.Background(), "gmail_search", nil, "connected-accounts/usr_1/gmail")
+	if err == nil {
+		t.Fatal("expected error when enclave fails")
+	}
+}
+
+func TestNewEnclaveSourceExecutor_AuthError(t *testing.T) {
+	client := &sourceExecuteEnclaveClient{
+		resp: enclave.SourceExecuteResponse{
+			Error: "googleapi: Error 401: Invalid Credentials: source: authentication failed",
+		},
+	}
+	srv := &apiServer{
+		enclaveClient: client,
+	}
+	srv.escrowIndex.Store("connected-accounts/usr_1/gmail", "esc_gmail_123")
+
+	executor := srv.newEnclaveSourceExecutor()
+	_, err := executor(context.Background(), "gmail_search", nil, "connected-accounts/usr_1/gmail")
+	if err == nil {
+		t.Fatal("expected error for auth failure")
+	}
+	if !errors.Is(err, source.ErrAuthFailed) {
+		t.Errorf("expected ErrAuthFailed, got: %v", err)
+	}
+}
+
+func TestNewEnclaveSourceExecutor_ToolError(t *testing.T) {
+	client := &sourceExecuteEnclaveClient{
+		resp: enclave.SourceExecuteResponse{
+			Error: "some tool error",
+		},
+	}
+	srv := &apiServer{
+		enclaveClient: client,
+	}
+	srv.escrowIndex.Store("connected-accounts/usr_1/slack", "esc_slack_123")
+
+	executor := srv.newEnclaveSourceExecutor()
+	_, err := executor(context.Background(), "slack_search", nil, "connected-accounts/usr_1/slack")
+	if err == nil {
+		t.Fatal("expected error for tool failure")
+	}
+	// Should NOT be ErrAuthFailed for non-auth errors.
+	if errors.Is(err, source.ErrAuthFailed) {
+		t.Error("non-auth tool error should not wrap ErrAuthFailed")
+	}
+}
+
+func TestNewEnclaveSourceExecutor_NilResult(t *testing.T) {
+	client := &sourceExecuteEnclaveClient{
+		resp: enclave.SourceExecuteResponse{}, // no result, no error
+	}
+	srv := &apiServer{
+		enclaveClient: client,
+	}
+	srv.escrowIndex.Store("connected-accounts/usr_1/slack", "esc_slack_123")
+
+	executor := srv.newEnclaveSourceExecutor()
+	result, err := executor(context.Background(), "slack_search", nil, "connected-accounts/usr_1/slack")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("expected nil result, got %v", result)
+	}
 }
