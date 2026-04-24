@@ -42,6 +42,9 @@ func (m *mockEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListRes
 func (m *mockEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
 	return nil
 }
+func (m *mockEnclaveClient) SourceExecute(_ context.Context, _ enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
+	return enclave.SourceExecuteResponse{}, nil
+}
 func (m *mockEnclaveClient) Ready(_ context.Context) error { return nil }
 func (m *mockEnclaveClient) Close() error                  { return nil }
 
