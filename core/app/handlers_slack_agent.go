@@ -57,24 +57,26 @@ func (s *apiServer) resolvePipelineVault(userID string) *draft.Pipeline {
 	return nil
 }
 
-// vaultLockedMessage returns a user-facing message with a link to unlock
-// the vault. Uses Slack mrkdwn format for clickable links.
-func (s *apiServer) vaultLockedMessage() string {
+// vaultUnlockURL returns the URL to the vault unlock page, falling back
+// to the production URL when AILERON_UI_URL is not configured.
+func (s *apiServer) vaultUnlockURL() string {
 	base := s.uiBaseURL
 	if base == "" {
 		base = "https://app.withaileron.ai"
 	}
-	return ":lock: Your Aileron session has expired. <" + base + "/setup-vault|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
+	return base + "/setup-vault"
+}
+
+// vaultLockedSlackMessage returns a Slack mrkdwn-formatted message with a
+// clickable link to unlock the vault.
+func (s *apiServer) vaultLockedSlackMessage() string {
+	return ":lock: Your Aileron session has expired. <" + s.vaultUnlockURL() + "|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
 }
 
 // isVaultError checks whether err indicates that vault credentials are
-// unavailable (locked vault or stale escrow). When true it returns the
-// user-facing vault unlock message.
-func (s *apiServer) isVaultError(err error) (string, bool) {
-	if errors.Is(err, vault.ErrCredentialUnavailable) {
-		return s.vaultLockedMessage(), true
-	}
-	return "", false
+// unavailable (locked vault or stale escrow).
+func isVaultError(err error) bool {
+	return errors.Is(err, vault.ErrCredentialUnavailable)
 }
 
 // handleAssistantThreadStarted is called when a user opens the Aileron agent DM.
@@ -123,7 +125,7 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 			s.log.Warn("agent message: draft pipeline not configured")
 		} else {
 			s.log.Warn("agent message: vault locked for user", "user_id", userID)
-			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedMessage())
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedSlackMessage())
 		}
 		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 		return
@@ -167,8 +169,8 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 	// Check for pipeline errors.
 	if err := <-errCh; err != nil {
 		s.log.Error("agent message: pipeline error", "user_id", userID, "error", err)
-		if msg, ok := s.isVaultError(err); ok {
-			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, msg)
+		if isVaultError(err) {
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedSlackMessage())
 		}
 		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 		return
@@ -259,7 +261,7 @@ func (s *apiServer) generateDraftFromInstructions(ctx context.Context, viewID st
 		if s.draftPipeline == nil {
 			_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation is not configured.", meta)
 		} else {
-			_ = updateDraftModalError(ctx, botToken, viewID, s.vaultLockedMessage(), meta)
+			_ = updateDraftModalError(ctx, botToken, viewID, s.vaultLockedSlackMessage(), meta)
 		}
 		return
 	}
@@ -275,8 +277,8 @@ func (s *apiServer) generateDraftFromInstructions(ctx context.Context, viewID st
 	draftText, err := pipeline.GenerateDraft(ctx, userID, msg)
 	if err != nil {
 		s.log.Error("draft from instructions: generation failed", "error", err)
-		if msg, ok := s.isVaultError(err); ok {
-			_ = updateDraftModalError(ctx, botToken, viewID, msg, meta)
+		if isVaultError(err) {
+			_ = updateDraftModalError(ctx, botToken, viewID, s.vaultLockedSlackMessage(), meta)
 		} else {
 			_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation failed. Please try again.", meta)
 		}

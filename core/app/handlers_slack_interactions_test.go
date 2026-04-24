@@ -783,7 +783,7 @@ func TestInteraction_RefineAction_VaultLocked(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
-	// processRefineDraft should hit the vaultLockedMessage branch (L216).
+	// processRefineDraft should hit the vaultLockedSlackMessage branch.
 	time.Sleep(100 * time.Millisecond)
 }
 
