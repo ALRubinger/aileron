@@ -18,9 +18,12 @@ import (
 	"testing"
 	"time"
 
+	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/auth"
+	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/policy"
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -1061,8 +1064,8 @@ func TestInteraction_CancelDraft(t *testing.T) {
 	mu.Lock()
 	body := responseBody
 	mu.Unlock()
-	if !strings.Contains(body, "Draft cancelled") {
-		t.Errorf("expected 'Draft cancelled' in response, got %q", body)
+	if !strings.Contains(body, "Cancelled") {
+		t.Errorf("expected 'Cancelled' in response, got %q", body)
 	}
 }
 
@@ -1109,4 +1112,126 @@ func TestInteraction_UnknownAction(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	time.Sleep(50 * time.Millisecond)
+}
+
+// --- processApproveIntent tests ---
+
+func TestInteraction_ApproveIntent_InvalidJSON(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.registry = connectorpkg.NewRegistry()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions", "user": map[string]any{"id": "U_ALICE"},
+		"response_url": respServer.URL,
+		"actions":      []map[string]any{{"action_id": "approve_intent", "value": "not-json"}},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	if !strings.Contains(got, "Failed to process approval") {
+		t.Errorf("expected error response, got: %s", got)
+	}
+}
+
+func TestInteraction_ApproveIntent_NoAction(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.registry = connectorpkg.NewRegistry()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+
+	var mu sync.Mutex
+	var body string
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer respServer.Close()
+
+	actionValue, _ := json.Marshal(map[string]any{"type": "email.send", "user_id": "usr_a"})
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions", "user": map[string]any{"id": "U_ALICE"},
+		"response_url": respServer.URL,
+		"actions":      []map[string]any{{"action_id": "approve_intent", "value": string(actionValue)}},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(100 * time.Millisecond)
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+	if !strings.Contains(got, "No action to execute") {
+		t.Errorf("expected 'No action to execute', got: %s", got)
+	}
+}
+
+func TestInteraction_ApproveIntent_CreatesIntentAndGrant(t *testing.T) {
+	srv := newInteractionTestServer()
+	srv.intents = mem.NewIntentStore()
+	srv.grants = mem.NewGrantStore()
+	srv.executions = mem.NewExecutionStore()
+	srv.traces = mem.NewTraceStore()
+	srv.registry = connectorpkg.NewRegistry()
+	srv.policyEngine = policy.NewRuleEngine(mem.NewPolicyStore())
+
+	actionValue, _ := json.Marshal(map[string]any{
+		"type": "git.issue.create", "user_id": "usr_a",
+		"action": map[string]any{
+			"type": "git.issue.create", "summary": "Create bug report",
+		},
+	})
+	payload, _ := json.Marshal(map[string]any{
+		"type": "block_actions", "user": map[string]any{"id": "U_ALICE"},
+		"actions": []map[string]any{{"action_id": "approve_intent", "value": string(actionValue)}},
+	})
+	w := httptest.NewRecorder()
+	r, _ := signedInteractionRequest(string(payload))
+	srv.handleSlackInteraction(w, r)
+	time.Sleep(200 * time.Millisecond)
+
+	ctx := context.Background()
+	intent, err := srv.intents.Get(ctx, "int_test-id")
+	if err != nil {
+		t.Fatalf("expected intent in store: %v", err)
+	}
+	// Intent progresses through approved → executing → completed/failed.
+	// We verify it was created and processed (not still pending_policy).
+	if intent.Status == api.PendingPolicy {
+		t.Errorf("intent should have been processed, still %q", intent.Status)
+	}
+	grant, err := srv.grants.Get(ctx, "grt_test-id")
+	if err != nil {
+		t.Fatalf("expected grant in store: %v", err)
+	}
+	if grant.IntentId != "int_test-id" {
+		t.Errorf("grant intent_id = %q", grant.IntentId)
+	}
 }

@@ -7,6 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
+
+	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/policy"
 )
 
 // slackInteractionPayload is the payload Slack sends for interactive events:
@@ -172,10 +177,15 @@ func (s *apiServer) processInteraction(actionID, actionValue string, payload sla
 			"channel", sendMeta.Channel,
 		)
 
+	case "approve_intent":
+		// Approve button from intent resolution — submit structured intent
+		// for policy evaluation and execution.
+		s.processApproveIntent(ctx, actionValue, payload)
+
 	case "cancel_draft":
 		// Cancel button — acknowledge with a response URL update if available.
 		if payload.ResponseURL != "" {
-			s.respondToInteraction(payload.ResponseURL, ":x: Draft cancelled.")
+			s.respondToInteraction(payload.ResponseURL, ":x: Cancelled.")
 		}
 		s.log.Info("interaction: draft cancelled", "user_id", payload.User.ID)
 
@@ -316,6 +326,171 @@ func (s *apiServer) processViewSubmission(payload slackInteractionPayload) {
 			"channel", meta.TargetChannel,
 			"draft_length", len(draftText),
 		)
+	}
+}
+
+// processApproveIntent handles the approve_intent button click from the
+// Slack agent DM. It submits the structured intent to the policy engine,
+// auto-approves if policy requires approval (since the human already clicked
+// Send), issues an execution grant, and runs the execution.
+func (s *apiServer) processApproveIntent(ctx context.Context, actionValue string, payload slackInteractionPayload) {
+	var intentMeta struct {
+		Type   string              `json:"type"`
+		UserID string              `json:"user_id"`
+		Action *model.ActionIntent `json:"action"`
+	}
+	if err := json.Unmarshal([]byte(actionValue), &intentMeta); err != nil {
+		s.log.Error("approve_intent: failed to parse metadata", "error", err)
+		if payload.ResponseURL != "" {
+			s.respondToInteraction(payload.ResponseURL, ":x: Failed to process approval.")
+		}
+		return
+	}
+
+	if intentMeta.Action == nil {
+		s.log.Error("approve_intent: no action in metadata")
+		if payload.ResponseURL != "" {
+			s.respondToInteraction(payload.ResponseURL, ":x: No action to execute.")
+		}
+		return
+	}
+
+	// Acknowledge immediately.
+	if payload.ResponseURL != "" {
+		s.respondToInteraction(payload.ResponseURL,
+			":hourglass_flowing_sand: Submitting for execution...")
+	}
+
+	// Create the intent, evaluate policy, and execute.
+	now := time.Now().UTC()
+	intentID := "int_" + s.newID()
+
+	// Convert model action to API action for the intent envelope.
+	apiAction := api.ActionIntent{
+		Type:    intentMeta.Action.Type,
+		Summary: intentMeta.Action.Summary,
+	}
+	// Carry domain through metadata for now — the execution handler
+	// uses buildConnectorParams which reads from api.ActionIntent.Domain.
+	// Full model→API domain conversion would be ideal but is mechanical.
+	apiAction.Metadata = &map[string]interface{}{
+		"_model_domain": intentMeta.Action.Domain,
+	}
+
+	envelope := api.IntentEnvelope{
+		IntentId:    intentID,
+		WorkspaceId: "default",
+		Agent: api.ActorRef{
+			Id:   "aileron_slack",
+			Type: api.Agent,
+		},
+		Action:    apiAction,
+		Status:    api.PendingPolicy,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Decision: api.Decision{
+			Disposition: api.DecisionDispositionAllow,
+			RiskLevel:   api.Low,
+		},
+	}
+
+	if err := s.intents.Create(ctx, envelope); err != nil {
+		s.log.Error("approve_intent: failed to create intent", "error", err)
+		return
+	}
+
+	// Evaluate policy.
+	decision, err := s.policyEngine.Evaluate(ctx, policy.EvaluationRequest{
+		WorkspaceID: "default",
+		AgentID:     "aileron_slack",
+		Action:      *intentMeta.Action,
+	})
+	if err != nil {
+		s.log.Error("approve_intent: policy evaluation failed", "error", err)
+		return
+	}
+
+	s.log.Info("approve_intent: policy evaluated",
+		"intent_id", intentID,
+		"disposition", string(decision.Disposition),
+		"risk_level", string(decision.RiskLevel),
+	)
+
+	// For Slack-initiated intents, the human already approved by clicking Send.
+	// If policy says Allow or RequireApproval, we proceed. Only Deny blocks.
+	if decision.Disposition == model.DispositionDeny {
+		envelope.Status = api.Denied
+		s.intents.Update(ctx, envelope)
+		if payload.ResponseURL != "" {
+			reason := decision.DenialReason
+			if reason == "" {
+				reason = "blocked by policy"
+			}
+			s.respondToInteraction(payload.ResponseURL,
+				":no_entry: Denied by policy: "+reason)
+		}
+		return
+	}
+
+	// Issue execution grant.
+	grantID := "grt_" + s.newID()
+	grant := api.ExecutionGrant{
+		GrantId:   grantID,
+		IntentId:  intentID,
+		Status:    api.ExecutionGrantStatusActive,
+		ExpiresAt: now.Add(5 * time.Minute),
+	}
+	s.grants.Create(ctx, grant)
+
+	envelope.Status = api.Approved
+	envelope.UpdatedAt = time.Now().UTC()
+	s.intents.Update(ctx, envelope)
+
+	s.log.Info("approve_intent: grant issued, executing",
+		"intent_id", intentID,
+		"grant_id", grantID,
+		"action_type", intentMeta.Action.Type,
+		"user_id", intentMeta.UserID,
+	)
+
+	// Execute the grant — this resolves credentials, calls the connector,
+	// and records the execution result.
+	result, execErr := s.executeGrant(ctx, grantID, intentMeta.UserID)
+	if execErr != nil {
+		s.log.Error("approve_intent: execution failed", "error", execErr)
+		if payload.ResponseURL != "" {
+			s.respondToInteraction(payload.ResponseURL,
+				":x: Execution failed: "+execErr.Error())
+		}
+		return
+	}
+
+	if result.Status == api.ExecutionStatusFailed {
+		s.log.Error("approve_intent: connector execution failed",
+			"execution_id", result.ExecutionID,
+			"error", result.Error,
+		)
+		if payload.ResponseURL != "" {
+			errMsg := result.Error
+			if errMsg == "" {
+				errMsg = "unknown error"
+			}
+			s.respondToInteraction(payload.ResponseURL,
+				":x: Execution failed: "+errMsg)
+		}
+		return
+	}
+
+	s.log.Info("approve_intent: execution succeeded",
+		"execution_id", result.ExecutionID,
+		"receipt_ref", result.ReceiptRef,
+	)
+	if payload.ResponseURL != "" {
+		msg := ":white_check_mark: Done!"
+		if result.ReceiptRef != "" {
+			msg += " " + result.ReceiptRef
+		}
+		s.respondToInteraction(payload.ResponseURL, msg)
 	}
 }
 

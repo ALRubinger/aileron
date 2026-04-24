@@ -105,3 +105,23 @@ func TestLoadPrompts_SingleSection(t *testing.T) {
 		t.Errorf("expected single section as ghostwrite, got %q", prompts.Ghostwrite)
 	}
 }
+
+func TestLoadPrompts_ThreeSections(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AILERON.md")
+	content := "# Research\n\nGather context.\n\n---\n\n# Intent Resolution\n\nClassify the intent.\n\n---\n\n# Ghostwrite\n\nWrite the reply."
+	os.WriteFile(path, []byte(content), 0644)
+
+	t.Setenv("AILERON_PROMPT_FILE", path)
+
+	prompts := LoadPrompts()
+	if prompts.Research != "# Research\n\nGather context." {
+		t.Errorf("unexpected research prompt: %q", prompts.Research)
+	}
+	if prompts.IntentResolution != "# Intent Resolution\n\nClassify the intent." {
+		t.Errorf("unexpected intent resolution prompt: %q", prompts.IntentResolution)
+	}
+	if prompts.Ghostwrite != "# Ghostwrite\n\nWrite the reply." {
+		t.Errorf("unexpected ghostwrite prompt: %q", prompts.Ghostwrite)
+	}
+}

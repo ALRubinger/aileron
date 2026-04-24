@@ -11,6 +11,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/slack-go/slack"
@@ -205,40 +206,13 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 	_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "Researching...")
 
 	displayName := comms.ResolveSlackDisplayName(ctx, botToken, slackUserID)
-	msg := comms.BuildIncomingMessage("", "Agent DM", displayName, text)
-	chunkCh, errCh := pipeline.GenerateDraftStream(ctx, userID, msg)
+	msg := comms.BuildIncomingMessage("", channelID, displayName, text)
 
-	var streamTS string
-	var fullText strings.Builder
-
-	for chunk := range chunkCh {
-		switch {
-		case chunk.Phase == "writing" && chunk.Text == "" && streamTS == "":
-			// Phase transition to writing — start the stream.
-			_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "Writing...")
-			ts, err := s.slackAgentClient.StartStream(ctx, botToken, channelID, threadTS)
-			if err != nil {
-				s.log.Error("agent message: failed to start stream", "error", err)
-				return
-			}
-			streamTS = ts
-
-		case chunk.Text != "" && streamTS != "":
-			// Append text to the stream.
-			fullText.WriteString(chunk.Text)
-			if err := s.slackAgentClient.AppendStream(ctx, botToken, channelID, streamTS, chunk.Text); err != nil {
-				s.log.Error("agent message: failed to append stream", "error", err)
-			}
-
-		case chunk.Text != "" && streamTS == "":
-			// Non-streaming fallback: accumulate text, we'll post at the end.
-			fullText.WriteString(chunk.Text)
-		}
-	}
-
-	// Check for pipeline errors.
-	if err := <-errCh; err != nil {
-		s.log.Error("agent message: pipeline error", "user_id", userID, "error", err)
+	// Resolve intents — this does research + intent classification.
+	_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "Thinking...")
+	intents, err := pipeline.ResolveIntents(ctx, userID, msg)
+	if err != nil {
+		s.log.Error("agent message: intent resolution failed", "user_id", userID, "error", err)
 		if isVaultError(err) {
 			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedSlackMessage())
 		}
@@ -246,26 +220,136 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 		return
 	}
 
-	// Stop the stream.
-	if streamTS != "" {
-		if err := s.slackAgentClient.StopStream(ctx, botToken, channelID, streamTS); err != nil {
-			s.log.Error("agent message: failed to stop stream", "error", err)
-		}
+	if len(intents) == 0 {
+		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
+		return
 	}
 
-	// Post Send/Refine action buttons below the draft.
-	if draftBody := fullText.String(); draftBody != "" {
-		s.postDraftActionButtons(ctx, botToken, channelID, threadTS, userID, draftBody)
+	// Process the first intent (multi-intent support is designed in but
+	// we handle one at a time for now).
+	intent := intents[0]
+
+	if intent.IsWriteAction() {
+		// Write action — present structured preview with action buttons.
+		s.presentWriteAction(ctx, botToken, channelID, threadTS, userID, intent)
+	} else {
+		// Informational — post the text response.
+		if intent.ResponseText != "" {
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, intent.ResponseText)
+		}
 	}
 
 	// Clear status.
 	_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 
-	s.log.Info("agent message: draft delivered",
+	s.log.Info("agent message: intent delivered",
 		"user_id", userID,
 		"channel", channelID,
-		"draft_length", fullText.Len(),
+		"type", string(intent.Type),
+		"is_write", intent.IsWriteAction(),
 	)
+}
+
+// presentWriteAction posts a structured preview of a write action intent
+// with Send/Cancel buttons for the user to approve or dismiss.
+func (s *apiServer) presentWriteAction(ctx context.Context, botToken, channelID, threadTS, userID string, intent draft.ResolvedIntent) {
+	// Build the preview text based on intent type.
+	var previewText string
+	if intent.Action != nil {
+		switch {
+		case intent.Action.Domain.Email != nil:
+			e := intent.Action.Domain.Email
+			previewText = fmt.Sprintf("*Send Email*\n*To:* %s\n*Subject:* %s\n\n%s",
+				formatRecipientList(e.To), e.Subject, e.BodyText)
+		case intent.Action.Domain.Calendar != nil:
+			c := intent.Action.Domain.Calendar
+			previewText = fmt.Sprintf("*Create Calendar Event*\n*Title:* %s", c.Title)
+			if c.StartTime != nil {
+				previewText += fmt.Sprintf("\n*When:* %s", c.StartTime.Format("Mon Jan 2, 3:04 PM"))
+				if c.EndTime != nil {
+					previewText += fmt.Sprintf(" – %s", c.EndTime.Format("3:04 PM"))
+				}
+			}
+			if c.Location != "" {
+				previewText += fmt.Sprintf("\n*Location:* %s", c.Location)
+			}
+			if len(c.Attendees) > 0 {
+				var names []string
+				for _, a := range c.Attendees {
+					if a.Name != "" {
+						names = append(names, a.Name)
+					} else {
+						names = append(names, a.Email)
+					}
+				}
+				previewText += fmt.Sprintf("\n*Attendees:* %s", strings.Join(names, ", "))
+			}
+			if c.Description != "" {
+				previewText += fmt.Sprintf("\n\n%s", c.Description)
+			}
+		case intent.Action.Domain.Git != nil:
+			g := intent.Action.Domain.Git
+			if g.IssueTitle != "" {
+				previewText = fmt.Sprintf("*Create GitHub Issue*\n*Repo:* %s\n*Title:* %s",
+					g.Repository, g.IssueTitle)
+				if len(g.IssueLabels) > 0 {
+					previewText += fmt.Sprintf("\n*Labels:* %s", strings.Join(g.IssueLabels, ", "))
+				}
+				if g.IssueBody != "" {
+					previewText += fmt.Sprintf("\n\n%s", g.IssueBody)
+				}
+			}
+		default:
+			previewText = intent.Summary
+		}
+	}
+	if previewText == "" {
+		previewText = intent.Summary
+	}
+
+	// Post the preview text.
+	_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, previewText)
+
+	// Post action buttons.
+	intentJSON, _ := json.Marshal(map[string]any{
+		"type":    string(intent.Type),
+		"user_id": userID,
+		"action":  intent.Action,
+	})
+
+	sendBtn := slack.NewButtonBlockElement("approve_intent", string(intentJSON),
+		slack.NewTextBlockObject(slack.PlainTextType, "Send", true, false))
+	sendBtn.Style = slack.StylePrimary
+
+	cancelBtn := slack.NewButtonBlockElement("cancel_draft", "",
+		slack.NewTextBlockObject(slack.PlainTextType, "Cancel", false, false))
+	cancelBtn.Style = slack.StyleDanger
+
+	actionBlock := slack.NewActionBlock("intent_actions", sendBtn, cancelBtn)
+
+	client := comms.NewAgentClient(botToken)
+	opts := []slack.MsgOption{slack.MsgOptionBlocks(actionBlock)}
+	if threadTS != "" {
+		opts = append(opts, slack.MsgOptionTS(threadTS))
+	}
+	if _, _, err := client.PostMessageContext(ctx, channelID, opts...); err != nil {
+		s.log.Error("agent message: failed to post intent action buttons", "error", err)
+	}
+}
+
+func formatRecipientList(recipients []model.Recipient) string {
+	var parts []string
+	for _, r := range recipients {
+		if r.Name != "" {
+			parts = append(parts, fmt.Sprintf("%s <%s>", r.Name, r.Email))
+		} else {
+			parts = append(parts, r.Email)
+		}
+	}
+	if len(parts) == 0 {
+		return "(no recipients)"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // postDraftActionButtons posts a follow-up message with Send/Refine action buttons
