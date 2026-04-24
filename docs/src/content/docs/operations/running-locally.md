@@ -9,7 +9,9 @@ For the full server/UI stack:
 task up
 ```
 
-This starts the API server, management UI, API documentation, and PostgreSQL. The API is available at `http://localhost:8080`, the UI at `http://localhost:3000`.
+This starts PostgreSQL, the enclave, the API server, and the management UI. The API is available at `http://localhost:8080`, the UI at `http://localhost:3000`.
+
+To run the docs site locally, use `task dev:docs` (available at `http://localhost:4321`).
 
 On first run, `task up` copies `deploy/.env.example` to `deploy/.env` with safe local defaults (including `AILERON_JWT_SIGNING_KEY`). No manual setup needed.
 
