@@ -39,11 +39,6 @@ type Client interface {
 	// enclave memory.
 	EscrowStore(ctx context.Context, req EscrowStoreRequest) (EscrowStoreResponse, error)
 
-	// EscrowRetrieve returns the plaintext credential for a given escrow ID.
-	// Used by source (read-only) connectors that run on the host. Write
-	// actions should use Execute with EscrowID instead.
-	EscrowRetrieve(ctx context.Context, req EscrowRetrieveRequest) (EscrowRetrieveResponse, error)
-
 	// EscrowList returns metadata for all non-expired escrow entries.
 	// Used by the server to reconcile its escrow index on startup.
 	EscrowList(ctx context.Context) (EscrowListResponse, error)

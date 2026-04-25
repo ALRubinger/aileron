@@ -865,9 +865,6 @@ func (c *reconcileEnclaveClient) TransmitKEK(_ context.Context, _ enclave.Transm
 func (c *reconcileEnclaveClient) OAuthExchange(_ context.Context, _ enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
 	return enclave.OAuthExchangeResponse{}, nil
 }
-func (c *reconcileEnclaveClient) EscrowRetrieve(_ context.Context, _ enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
-	return enclave.EscrowRetrieveResponse{}, nil
-}
 func (c *reconcileEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
 	if c.err != nil {
 		return enclave.EscrowListResponse{}, c.err

@@ -15,12 +15,6 @@ import (
 	"errors"
 )
 
-// ErrEscrowStale indicates that an escrow index entry pointed to an enclave
-// escrow ID that no longer exists (enclave restarted, entry expired, etc.).
-// The stale index entry has been removed; the caller should treat the
-// credential as unavailable and prompt the user to re-unlock their vault.
-var ErrEscrowStale = errors.New("vault: escrow entry is stale")
-
 // ErrCredentialUnavailable indicates that a credential could not be retrieved
 // from the vault — the vault session may be locked, the escrow stale, or the
 // KEK invalid. Callers should prompt the user to unlock their vault.

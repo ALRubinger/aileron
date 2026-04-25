@@ -306,7 +306,9 @@ func (s *apiServer) userVault(userID string) vault.Vault {
 	if kek := s.getUserKEK(userID); kek != nil {
 		return vault.NewUserScopedVault(s.vault, kek)
 	}
-	// Tier 2: Escrowed credentials in TEE.
+	// Tier 2: Escrowed credentials in TEE — credential access must go
+	// through SourceExecute inside the enclave. DenyPlaintextVault ensures
+	// any host-side credential retrieval fails loudly.
 	if s.enclaveClient != nil {
 		hasEscrow := false
 		s.escrowIndex.Range(func(_, _ any) bool {
@@ -314,7 +316,7 @@ func (s *apiServer) userVault(userID string) vault.Vault {
 			return false
 		})
 		if hasEscrow {
-			return vault.NewEscrowVault(s.enclaveClient, &s.escrowIndex, s.vault)
+			return vault.NewDenyPlaintextVault()
 		}
 	}
 	// Tier 3: No KEK available — UserScopedVault will return a clear error.

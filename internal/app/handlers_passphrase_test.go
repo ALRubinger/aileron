@@ -26,9 +26,8 @@ var testVerificationConstant = []byte("aileron-kek-verification-ok")
 
 // mockEscrowClient records EscrowStore calls for testing auto-escrow.
 type mockEscrowClient struct {
-	escrowCalls  []enclave.EscrowStoreRequest
-	escrowErr    error
-	retrieveData map[string][]byte // escrow ID → plaintext credential
+	escrowCalls []enclave.EscrowStoreRequest
+	escrowErr   error
 }
 
 func (c *mockEscrowClient) Attest(_ context.Context, _ enclave.AttestationRequest) (enclave.AttestationResponse, error) {
@@ -52,14 +51,6 @@ func (c *mockEscrowClient) EscrowStore(_ context.Context, req enclave.EscrowStor
 	}
 	c.escrowCalls = append(c.escrowCalls, req)
 	return enclave.EscrowStoreResponse{EscrowID: "esc_test_" + req.GrantID}, nil
-}
-func (c *mockEscrowClient) EscrowRetrieve(_ context.Context, req enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
-	if c.retrieveData != nil {
-		if data, ok := c.retrieveData[req.EscrowID]; ok {
-			return enclave.EscrowRetrieveResponse{Credential: data}, nil
-		}
-	}
-	return enclave.EscrowRetrieveResponse{}, enclave.ErrEscrowNotFound
 }
 func (c *mockEscrowClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
 	return enclave.EscrowListResponse{}, nil
@@ -1022,35 +1013,31 @@ func TestRequireKEK_InternalError(t *testing.T) {
 	}
 }
 
-func TestUserVault_EscrowFallback(t *testing.T) {
-	// Tier 2: KEK session cache exists but is empty for this user (vault
-	// locked). Escrow index has an entry and the enclave client can retrieve
-	// the plaintext. userVault should return an EscrowVault that succeeds.
-	plaintext := []byte(`{"access_token":"xoxp-escrowed"}`)
-	escrowID := "esc_test_slack"
+func TestUserVault_EscrowDeniesPlaintext(t *testing.T) {
+	// Tier 2: KEK session cache is empty (vault locked), escrow index has
+	// entries. userVault should return a DenyPlaintextVault that refuses
+	// credential access — credentials must be accessed via SourceExecute
+	// inside the enclave, never retrieved as plaintext to the host.
 	vaultPath := "connected-accounts/usr_escrow/slack"
 
-	mockClient := &mockEscrowClient{
-		retrieveData: map[string][]byte{escrowID: plaintext},
-	}
+	mockClient := &mockEscrowClient{}
 
 	srv := &apiServer{
 		vault:           vault.NewMemVault(),
-		kekSessionCache: auth.NewKEKSessionCache(24 * time.Hour), // auth enabled, no KEK cached
+		kekSessionCache: auth.NewKEKSessionCache(24 * time.Hour),
 		enclaveClient:   mockClient,
 	}
-	// Populate escrow index.
-	srv.escrowIndex.Store(vaultPath, escrowID)
+	srv.escrowIndex.Store(vaultPath, "esc_test_slack")
 
 	vlt := srv.userVault("usr_escrow")
 
-	// Get should retrieve the credential from escrow, not the vault.
-	secret, err := vlt.Get(context.Background(), vaultPath)
-	if err != nil {
-		t.Fatalf("userVault.Get: %v", err)
+	// Get must fail — DenyPlaintextVault blocks all credential retrieval.
+	_, err := vlt.Get(context.Background(), vaultPath)
+	if err == nil {
+		t.Fatal("expected error from DenyPlaintextVault, got nil")
 	}
-	if string(secret.Value) != string(plaintext) {
-		t.Errorf("Value = %q, want %q", secret.Value, plaintext)
+	if !errors.Is(err, vault.ErrCredentialUnavailable) {
+		t.Errorf("expected ErrCredentialUnavailable, got: %v", err)
 	}
 }
 
