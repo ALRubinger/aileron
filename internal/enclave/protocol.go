@@ -155,18 +155,6 @@ type EscrowStoreResponse struct {
 	EscrowID string `json:"escrow_id"`
 }
 
-// EscrowRetrieveRequest asks the enclave to return the plaintext credential
-// for a given escrow ID. Used by source (read-only) connectors that run on
-// the host. Write actions should use Execute with EscrowID instead.
-type EscrowRetrieveRequest struct {
-	EscrowID string `json:"escrow_id"`
-}
-
-// EscrowRetrieveResponse contains the plaintext credential from escrow.
-type EscrowRetrieveResponse struct {
-	Credential []byte `json:"credential"`
-}
-
 // EscrowListResponse contains metadata for all non-expired escrow entries.
 type EscrowListResponse struct {
 	Entries []EscrowListEntry `json:"entries"`

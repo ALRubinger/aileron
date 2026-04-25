@@ -215,54 +215,6 @@ func TestEscrowStoreAndExecute(t *testing.T) {
 	}
 }
 
-func TestEscrowRetrieve(t *testing.T) {
-	c := New(nil)
-	defer c.Close()
-
-	sessionKey := establishSession(t, c)
-	userKEK := make([]byte, 32)
-	rand.Read(userKEK)
-	transmitKEK(t, c, sessionKey, "user-1", userKEK)
-
-	ctx := context.Background()
-	plainCred := []byte("my-oauth-token")
-	encrypted, _ := encryptAESGCM(plainCred, userKEK)
-
-	storeResp, err := c.EscrowStore(ctx, enclave.EscrowStoreRequest{
-		UserID:              "user-1",
-		GrantID:             "grant-1",
-		EncryptedCredential: encrypted,
-		CredentialType:      "oauth_token",
-		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
-	})
-	if err != nil {
-		t.Fatalf("EscrowStore: %v", err)
-	}
-
-	// Retrieve the plaintext.
-	resp, err := c.EscrowRetrieve(ctx, enclave.EscrowRetrieveRequest{
-		EscrowID: storeResp.EscrowID,
-	})
-	if err != nil {
-		t.Fatalf("EscrowRetrieve: %v", err)
-	}
-	if string(resp.Credential) != string(plainCred) {
-		t.Errorf("credential = %q, want %q", resp.Credential, plainCred)
-	}
-}
-
-func TestEscrowRetrieve_NotFound(t *testing.T) {
-	c := New(nil)
-	defer c.Close()
-
-	_, err := c.EscrowRetrieve(context.Background(), enclave.EscrowRetrieveRequest{
-		EscrowID: "nonexistent",
-	})
-	if err != enclave.ErrEscrowNotFound {
-		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
-	}
-}
-
 func TestEscrowListViaClient(t *testing.T) {
 	c := New(nil)
 	defer c.Close()

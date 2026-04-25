@@ -18,7 +18,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 // mockLLMClient records requests and returns configured responses.
@@ -1055,47 +1054,10 @@ func TestRefineDraft(t *testing.T) {
 	}
 }
 
-// stubEnclaveClient implements enclave.Client for testing stale escrow in the pipeline.
-type stubEnclaveClient struct {
-	retrieveErr error
-}
-
-func (s *stubEnclaveClient) Attest(_ context.Context, _ enclave.AttestationRequest) (enclave.AttestationResponse, error) {
-	return enclave.AttestationResponse{}, nil
-}
-func (s *stubEnclaveClient) EstablishSession(_ context.Context, _ enclave.SessionRequest) (enclave.SessionResponse, error) {
-	return enclave.SessionResponse{}, nil
-}
-func (s *stubEnclaveClient) TransmitKEK(_ context.Context, _ enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
-	return enclave.TransmitKEKResponse{}, nil
-}
-func (s *stubEnclaveClient) OAuthExchange(_ context.Context, _ enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
-	return enclave.OAuthExchangeResponse{}, nil
-}
-func (s *stubEnclaveClient) Execute(_ context.Context, _ enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
-	return enclave.ExecuteResponse{}, nil
-}
-func (s *stubEnclaveClient) EscrowStore(_ context.Context, _ enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
-	return enclave.EscrowStoreResponse{}, nil
-}
-func (s *stubEnclaveClient) EscrowRetrieve(_ context.Context, _ enclave.EscrowRetrieveRequest) (enclave.EscrowRetrieveResponse, error) {
-	return enclave.EscrowRetrieveResponse{}, s.retrieveErr
-}
-func (s *stubEnclaveClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
-	return enclave.EscrowListResponse{}, nil
-}
-func (s *stubEnclaveClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
-	return nil
-}
-func (s *stubEnclaveClient) SourceExecute(_ context.Context, _ enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
-	return enclave.SourceExecuteResponse{}, nil
-}
-func (s *stubEnclaveClient) Ready(_ context.Context) error { return nil }
-func (s *stubEnclaveClient) Close() error                  { return nil }
-
-func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
-	// When the escrow vault returns ErrEscrowStale, the tool executor should
-	// return a ToolFatalError wrapping ErrCredentialUnavailable so the LLM loop aborts
+func TestPipeline_GenerateDraft_ToolExecutor_DenyPlaintextVault(t *testing.T) {
+	// When the pipeline uses DenyPlaintextVault (enclave mode with escrowed
+	// credentials), any host-side credential access should return a
+	// ToolFatalError wrapping ErrCredentialUnavailable so the LLM loop aborts
 	// and the caller (Slack handler) can post a direct unlock message.
 	mock := &mockLLMClient{
 		researchResp:   &llm.GenerateResponse{Text: "context gathered"},
@@ -1112,20 +1074,11 @@ func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 		Status:   model.ConnectedAccountStatusActive,
 	})
 
-	// Build an EscrowVault with a failing enclave client and a stale index entry.
-	idx := &sync.Map{}
-	idx.Store("connected-accounts/usr_1/slack", "esc_stale_123")
-	escrowVault := vault.NewEscrowVault(
-		&stubEnclaveClient{retrieveErr: enclave.ErrEscrowNotFound},
-		idx,
-		vault.NewMemVault(),
-	)
-
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(&mockSourceConnector{})
 
 	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
-		escrowVault, slog.Default(),
+		vault.NewDenyPlaintextVault(), slog.Default(),
 		draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
 
 	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
@@ -1147,7 +1100,7 @@ func TestPipeline_GenerateDraft_ToolExecutor_StaleEscrow(t *testing.T) {
 	// Execute a tool — should return a ToolFatalError wrapping ErrCredentialUnavailable.
 	_, execErr := researchReq.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
 	if execErr == nil {
-		t.Fatal("expected error from stale escrow")
+		t.Fatal("expected error from DenyPlaintextVault")
 	}
 
 	// Must be a ToolFatalError so the LLM client aborts the loop.
