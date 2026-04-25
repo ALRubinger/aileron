@@ -112,7 +112,7 @@ func (s *apiServer) processSlashCommandDraft(ctx context.Context, teamID, slackU
 	if err != nil {
 		s.log.Error("slash command draft: generation failed", "error", err)
 		if isVaultError(err) {
-			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.vaultLockedSlackMessage(), meta)
+			_ = updateDraftModalError(ctx, botToken, viewResp.ID, s.credentialErrorMessage(err), meta)
 		} else {
 			_ = updateDraftModalError(ctx, botToken, viewResp.ID, "Draft generation failed. Please try again.", meta)
 		}
@@ -151,7 +151,7 @@ func (s *apiServer) processSlashCommandQuestion(ctx context.Context, teamID, sla
 	if err != nil {
 		s.log.Error("slash command question: generation failed", "error", err)
 		if isVaultError(err) {
-			s.respondViaURL(responseURL, s.vaultLockedSlackMessage())
+			s.respondViaURL(responseURL, s.credentialErrorMessage(err))
 		} else {
 			s.respondViaURL(responseURL, "> /aileron "+text+"\n\nSomething went wrong. Please try again.")
 		}

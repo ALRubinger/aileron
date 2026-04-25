@@ -98,6 +98,22 @@ func (s *apiServer) vaultLockedSlackMessage() string {
 	return ":lock: Your Aileron session has expired. <" + s.vaultUnlockURL() + "|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
 }
 
+// authExpiredSlackMessage returns a message telling the user to reconnect
+// their account when OAuth tokens have been revoked or expired at the
+// provider (e.g. Google's 7-day testing mode limit).
+func (s *apiServer) authExpiredSlackMessage() string {
+	return ":warning: One or more connected accounts have expired credentials. Please <" + s.vaultUnlockURL() + "|visit your connected accounts> and reconnect the affected service."
+}
+
+// credentialErrorMessage returns the appropriate Slack message for a
+// credential-related error: vault-locked vs. auth-expired.
+func (s *apiServer) credentialErrorMessage(err error) string {
+	if errors.Is(err, source.ErrAuthFailed) {
+		return s.authExpiredSlackMessage()
+	}
+	return s.vaultLockedSlackMessage()
+}
+
 // newEnclaveSourceExecutor returns a SourceExecutor that delegates tool
 // execution to the TEE enclave. Credentials never leave the enclave —
 // only the tool results are returned to the host.
@@ -214,7 +230,7 @@ func (s *apiServer) handleAssistantMessage(ctx context.Context, teamID, channelI
 	if err != nil {
 		s.log.Error("agent message: intent resolution failed", "user_id", userID, "error", err)
 		if isVaultError(err) {
-			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.vaultLockedSlackMessage())
+			_ = s.slackAgentClient.PostMessage(ctx, botToken, channelID, threadTS, s.credentialErrorMessage(err))
 		}
 		_ = s.slackAgentClient.SetStatus(ctx, botToken, channelID, threadTS, "")
 		return
@@ -474,7 +490,7 @@ func (s *apiServer) generateDraftFromInstructions(ctx context.Context, viewID st
 	if err != nil {
 		s.log.Error("draft from instructions: generation failed", "error", err)
 		if isVaultError(err) {
-			_ = updateDraftModalError(ctx, botToken, viewID, s.vaultLockedSlackMessage(), meta)
+			_ = updateDraftModalError(ctx, botToken, viewID, s.credentialErrorMessage(err), meta)
 		} else {
 			_ = updateDraftModalError(ctx, botToken, viewID, "Draft generation failed. Please try again.", meta)
 		}
