@@ -1638,6 +1638,64 @@ func waitFor(ms int) <-chan struct{} {
 	return ch
 }
 
+func TestExtractExpiredServices(t *testing.T) {
+	tests := []struct {
+		name string
+		err  string
+		want string
+	}{
+		{
+			name: "single provider",
+			err:  "research round: credentials expired for gmail: source: authentication failed",
+			want: "Gmail",
+		},
+		{
+			name: "two providers deduplicated",
+			err:  "research round: credentials expired for gmail, gmail, google_calendar: source: authentication failed",
+			want: "Gmail and Google Calendar",
+		},
+		{
+			name: "three providers",
+			err:  "research round: credentials expired for gmail, slack, github_repos: source: authentication failed",
+			want: "Gmail, Slack, and GitHub",
+		},
+		{
+			name: "no match",
+			err:  "some other error",
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractExpiredServices(tt.err)
+			if got != tt.want {
+				t.Errorf("extractExpiredServices(%q) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCredentialErrorMessage_AuthFailed(t *testing.T) {
+	srv := &apiServer{uiBaseURL: "https://app.test"}
+	err := fmt.Errorf("research round: credentials expired for gmail, google_calendar: %w", source.ErrAuthFailed)
+	msg := srv.credentialErrorMessage(err)
+	if !strings.Contains(msg, "Gmail and Google Calendar") {
+		t.Errorf("expected message to mention services, got: %s", msg)
+	}
+	if !strings.Contains(msg, "reconnect") {
+		t.Errorf("expected message to say reconnect, got: %s", msg)
+	}
+}
+
+func TestCredentialErrorMessage_VaultLocked(t *testing.T) {
+	srv := &apiServer{uiBaseURL: "https://app.test"}
+	err := fmt.Errorf("vault locked: %w", vault.ErrCredentialUnavailable)
+	msg := srv.credentialErrorMessage(err)
+	if !strings.Contains(msg, "Unlock your vault") {
+		t.Errorf("expected vault-locked message, got: %s", msg)
+	}
+}
+
 func TestNewEnclaveSourceExecutor_HappyPath(t *testing.T) {
 	resultJSON, _ := json.Marshal(map[string]any{"messages": []string{"hello"}})
 	client := &sourceExecuteEnclaveClient{
