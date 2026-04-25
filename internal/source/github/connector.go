@@ -7,11 +7,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/ALRubinger/aileron/internal/source"
 	gh "github.com/google/go-github/v69/github"
 	"golang.org/x/oauth2"
+)
+
+const (
+	searchPerPage  = 100 // GitHub Search API maximum
+	searchMaxPages = 5   // ceiling: 500 results
 )
 
 // Connector implements source.SourceConnector for GitHub.
@@ -124,23 +130,44 @@ func (c *Connector) searchCode(ctx context.Context, client *gh.Client, params ma
 		query = query + " repo:" + repo
 	}
 
-	result, _, err := client.Search.Code(ctx, query, &gh.SearchOptions{
-		ListOptions: gh.ListOptions{PerPage: 10},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("github API error: %w", err)
+	opts := &gh.SearchOptions{
+		ListOptions: gh.ListOptions{PerPage: searchPerPage, Page: 1},
+	}
+	var items []map[string]any
+	var total int
+	for {
+		result, resp, err := client.Search.Code(ctx, query, opts)
+		if err != nil {
+			return nil, fmt.Errorf("github API error: %w", err)
+		}
+		total = result.GetTotal()
+
+		for _, r := range result.CodeResults {
+			items = append(items, map[string]any{
+				"repo": r.GetRepository().GetFullName(),
+				"path": r.GetPath(),
+				"name": r.GetName(),
+			})
+		}
+
+		if resp.NextPage == 0 || opts.ListOptions.Page >= searchMaxPages {
+			break
+		}
+		opts.ListOptions.Page = resp.NextPage
 	}
 
-	items := make([]map[string]any, 0, len(result.CodeResults))
-	for _, r := range result.CodeResults {
-		items = append(items, map[string]any{
-			"repo": r.GetRepository().GetFullName(),
-			"path": r.GetPath(),
-			"name": r.GetName(),
-		})
-	}
+	slog.Debug("github_search_code results",
+		"query", query,
+		"api_total", total,
+		"returned", len(items),
+	)
 
-	return map[string]any{"results": items, "total": result.GetTotal()}, nil
+	return map[string]any{
+		"results":   items,
+		"total":     total,
+		"returned":  len(items),
+		"truncated": len(items) < total,
+	}, nil
 }
 
 func (c *Connector) searchIssues(ctx context.Context, client *gh.Client, params map[string]any) (map[string]any, error) {
@@ -159,29 +186,50 @@ func (c *Connector) searchIssues(ctx context.Context, client *gh.Client, params 
 		query += " updated:<=" + before
 	}
 
-	result, _, err := client.Search.Issues(ctx, query, &gh.SearchOptions{
-		ListOptions: gh.ListOptions{PerPage: 10},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("github API error: %w", err)
+	opts := &gh.SearchOptions{
+		ListOptions: gh.ListOptions{PerPage: searchPerPage, Page: 1},
+	}
+	var items []map[string]any
+	var total int
+	for {
+		result, resp, err := client.Search.Issues(ctx, query, opts)
+		if err != nil {
+			return nil, fmt.Errorf("github API error: %w", err)
+		}
+		total = result.GetTotal()
+
+		for _, issue := range result.Issues {
+			item := map[string]any{
+				"number": issue.GetNumber(),
+				"title":  issue.GetTitle(),
+				"state":  issue.GetState(),
+				"author": issue.GetUser().GetLogin(),
+				"url":    issue.GetHTMLURL(),
+			}
+			if issue.PullRequestLinks != nil {
+				item["is_pr"] = true
+			}
+			items = append(items, item)
+		}
+
+		if resp.NextPage == 0 || opts.ListOptions.Page >= searchMaxPages {
+			break
+		}
+		opts.ListOptions.Page = resp.NextPage
 	}
 
-	items := make([]map[string]any, 0, len(result.Issues))
-	for _, issue := range result.Issues {
-		item := map[string]any{
-			"number": issue.GetNumber(),
-			"title":  issue.GetTitle(),
-			"state":  issue.GetState(),
-			"author": issue.GetUser().GetLogin(),
-			"url":    issue.GetHTMLURL(),
-		}
-		if issue.PullRequestLinks != nil {
-			item["is_pr"] = true
-		}
-		items = append(items, item)
-	}
+	slog.Debug("github_search_issues results",
+		"query", query,
+		"api_total", total,
+		"returned", len(items),
+	)
 
-	return map[string]any{"results": items, "total": result.GetTotal()}, nil
+	return map[string]any{
+		"results":   items,
+		"total":     total,
+		"returned":  len(items),
+		"truncated": len(items) < total,
+	}, nil
 }
 
 func (c *Connector) getPR(ctx context.Context, client *gh.Client, params map[string]any) (map[string]any, error) {
