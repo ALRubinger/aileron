@@ -902,3 +902,33 @@ func TestConnectedAccountToAPI(t *testing.T) {
 	}
 }
 
+func TestCreateConnectedAccount_EnclaveMode_TokenForbidden(t *testing.T) {
+	srv := newConnectedAccountServer()
+	srv.enclaveClient = &toolsEnclaveClient{} // enclave active
+
+	body := `{"provider":"slack","token":{"access_token":"xoxp-test"}}`
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/connected-accounts", body, userAClaims)
+	srv.handleCreateConnectedAccount(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateConnectedAccount_EnclaveMode_NoToken_Allowed(t *testing.T) {
+	// Creating a connected account WITHOUT a token should still work
+	// in enclave mode — only plaintext credential ingress is blocked.
+	srv := newConnectedAccountServer()
+	srv.enclaveClient = &toolsEnclaveClient{} // enclave active
+
+	body := `{"provider":"slack","external_user_id":"U123"}`
+	w := httptest.NewRecorder()
+	r := mcpRequest("POST", "/v1/connected-accounts", body, userAClaims)
+	srv.handleCreateConnectedAccount(w, r)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+}
+

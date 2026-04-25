@@ -748,3 +748,34 @@ func TestHandleDeleteEnterpriseLLMConfig_BadPath(t *testing.T) {
 		t.Fatalf("expected 400, got %d", w.Code)
 	}
 }
+
+func TestHandleUpsertUserLLMConfig_EnclaveMode_Forbidden(t *testing.T) {
+	s := newTestLLMConfigServer()
+	s.enclaveClient = &toolsEnclaveClient{} // enclave active
+
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-test"}`
+	req := httptest.NewRequest("PUT", "/v1/llm-config", bytes.NewBufferString(body))
+	w := httptest.NewRecorder()
+	s.handleUpsertUserLLMConfig(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("enclave_mode")) {
+		t.Errorf("expected enclave_mode error code, got %s", w.Body.String())
+	}
+}
+
+func TestHandleUpsertEnterpriseLLMConfig_EnclaveMode_Forbidden(t *testing.T) {
+	s := newTestEnterpriseLLMConfigServer()
+	s.enclaveClient = &toolsEnclaveClient{} // enclave active
+
+	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-test"}`
+	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
+	w := httptest.NewRecorder()
+	s.handleUpsertEnterpriseLLMConfig(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+}
