@@ -609,8 +609,9 @@ func (p *Pipeline) GenerateDraft(ctx context.Context, userID string, msg comms.I
 			"user_id", userID,
 			"providers", failedProviders,
 		)
-		return "", fmt.Errorf("research round: credentials expired for %s: %w",
-			strings.Join(failedProviders, ", "), source.ErrAuthFailed)
+		return "", fmt.Errorf("research round: %w", &source.AuthFailedError{
+			Providers: dedupStrings(failedProviders),
+		})
 	}
 
 	p.log.Debug("gathered context for ghostwriter",
@@ -751,8 +752,9 @@ func (p *Pipeline) GenerateDraftStream(ctx context.Context, userID string, msg c
 				"user_id", userID,
 				"providers", failedProviders,
 			)
-			errCh <- fmt.Errorf("research round: credentials expired for %s: %w",
-				strings.Join(failedProviders, ", "), source.ErrAuthFailed)
+			errCh <- fmt.Errorf("research round: %w", &source.AuthFailedError{
+				Providers: dedupStrings(failedProviders),
+			})
 			return
 		}
 
@@ -1129,4 +1131,16 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func dedupStrings(ss []string) []string {
+	seen := make(map[string]bool, len(ss))
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }

@@ -14,6 +14,8 @@ package source
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 )
 
 // SourceConnector retrieves context from an external system.
@@ -42,9 +44,21 @@ type ToolDefinition struct {
 }
 
 // ErrAuthFailed indicates that a connector's credentials are invalid, expired,
-// or revoked. The pipeline should treat this as fatal and abort the LLM loop
-// so the handler can tell the user to reconnect.
+// or revoked. Used as a sentinel for errors.Is checks.
 var ErrAuthFailed = errors.New("source: authentication failed")
+
+// AuthFailedError is a structured error that carries the names of providers
+// whose credentials failed. Use errors.Is(err, ErrAuthFailed) to detect it,
+// then errors.As(err, &authErr) to extract the provider list.
+type AuthFailedError struct {
+	Providers []string // deduplicated provider names that failed
+}
+
+func (e *AuthFailedError) Error() string {
+	return fmt.Sprintf("credentials expired for %s: %s", strings.Join(e.Providers, ", "), ErrAuthFailed)
+}
+
+func (e *AuthFailedError) Unwrap() error { return ErrAuthFailed }
 
 // TokenSaver persists a refreshed OAuth token back to the vault.
 type TokenSaver func(ctx context.Context, newToken []byte) error
