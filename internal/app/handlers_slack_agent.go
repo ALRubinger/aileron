@@ -98,20 +98,67 @@ func (s *apiServer) vaultLockedSlackMessage() string {
 	return ":lock: Your Aileron session has expired. <" + s.vaultUnlockURL() + "|Unlock your vault> to reconnect your accounts (takes 10 seconds, lasts 7 days)."
 }
 
-// authExpiredSlackMessage returns a message telling the user to reconnect
-// their account when OAuth tokens have been revoked or expired at the
-// provider (e.g. Google's 7-day testing mode limit).
-func (s *apiServer) authExpiredSlackMessage() string {
-	return ":warning: One or more connected accounts have expired credentials. Please <" + s.vaultUnlockURL() + "|visit your connected accounts> and reconnect the affected service."
-}
-
 // credentialErrorMessage returns the appropriate Slack message for a
 // credential-related error: vault-locked vs. auth-expired.
 func (s *apiServer) credentialErrorMessage(err error) string {
 	if errors.Is(err, source.ErrAuthFailed) {
-		return s.authExpiredSlackMessage()
+		services := extractExpiredServices(err.Error())
+		if services != "" {
+			return ":warning: Your " + services + " connection has expired. Please <" + s.vaultUnlockURL() + "|reconnect it> in your connected accounts."
+		}
+		return ":warning: One or more connected accounts have expired credentials. Please <" + s.vaultUnlockURL() + "|reconnect them> in your connected accounts."
 	}
 	return s.vaultLockedSlackMessage()
+}
+
+// providerDisplayNames maps internal provider names to user-facing names.
+var providerDisplayNames = map[string]string{
+	"gmail":           "Gmail",
+	"google_calendar": "Google Calendar",
+	"slack":           "Slack",
+	"github_repos":    "GitHub",
+}
+
+// extractExpiredServices parses provider names from an error like
+// "credentials expired for gmail, gmail, google_calendar: source: ..."
+// and returns a deduplicated, human-readable string like "Gmail and Google Calendar".
+func extractExpiredServices(errMsg string) string {
+	const prefix = "credentials expired for "
+	idx := strings.Index(errMsg, prefix)
+	if idx < 0 {
+		return ""
+	}
+	rest := errMsg[idx+len(prefix):]
+	if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
+		rest = rest[:colonIdx]
+	}
+
+	// Deduplicate and map to display names.
+	seen := make(map[string]bool)
+	var names []string
+	for _, p := range strings.Split(rest, ", ") {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if display, ok := providerDisplayNames[p]; ok {
+			names = append(names, display)
+		} else {
+			names = append(names, p)
+		}
+	}
+
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + ", and " + names[len(names)-1]
+	}
 }
 
 // newEnclaveSourceExecutor returns a SourceExecutor that delegates tool
