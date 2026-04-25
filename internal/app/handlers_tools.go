@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store"
@@ -108,14 +109,51 @@ func (s *apiServer) handleExecuteTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get the OAuth token from the vault.
-	secret, err := s.vault.Get(r.Context(), acct.VaultPath())
+	vaultPath := acct.VaultPath()
+
+	// Enclave path: if the credential is escrowed in the TEE, execute the
+	// tool inside the enclave so plaintext never reaches the host.
+	if s.enclaveClient != nil {
+		if escrowIDVal, ok := s.escrowIndex.Load(vaultPath); ok {
+			resp, err := s.enclaveClient.SourceExecute(r.Context(), enclave.SourceExecuteRequest{
+				EscrowID: escrowIDVal.(string),
+				Tool:     req.Tool,
+				Params:   req.Params,
+			})
+			if err != nil {
+				s.log.Error("enclave tool execution failed", "tool", req.Tool, "error", err)
+				writeError(w, http.StatusInternalServerError, "execution_error", err.Error())
+				return
+			}
+			if resp.Error != "" {
+				writeError(w, http.StatusInternalServerError, "execution_error", resp.Error)
+				return
+			}
+			if resp.Result == nil {
+				writeJSON(w, http.StatusOK, map[string]any{})
+				return
+			}
+			var result map[string]any
+			if err := json.Unmarshal(resp.Result, &result); err != nil {
+				writeError(w, http.StatusInternalServerError, "execution_error", "failed to parse tool result")
+				return
+			}
+			writeJSON(w, http.StatusOK, result)
+			return
+		}
+
+		// Enclave is active but no escrow entry — vault is locked.
+		writeError(w, http.StatusForbidden, "vault_locked", "credentials are not available; unlock your vault to escrow them into the enclave")
+		return
+	}
+
+	// Non-enclave path: read credentials from the vault on the host.
+	secret, err := s.vault.Get(r.Context(), vaultPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "vault_error", "failed to retrieve credentials")
 		return
 	}
 
-	// Execute the tool.
 	result, err := s.sourceRegistry.ExecuteTool(r.Context(), req.Tool, req.Params, secret.Value)
 	if err != nil {
 		s.log.Error("tool execution failed", "tool", req.Tool, "error", err)
