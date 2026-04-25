@@ -1638,52 +1638,49 @@ func waitFor(ms int) <-chan struct{} {
 	return ch
 }
 
-func TestExtractExpiredServices(t *testing.T) {
+func TestFormatProviderNames(t *testing.T) {
 	tests := []struct {
-		name string
-		err  string
-		want string
+		name      string
+		providers []string
+		want      string
 	}{
-		{
-			name: "single provider",
-			err:  "research round: credentials expired for gmail: source: authentication failed",
-			want: "Gmail",
-		},
-		{
-			name: "two providers deduplicated",
-			err:  "research round: credentials expired for gmail, gmail, google_calendar: source: authentication failed",
-			want: "Gmail and Google Calendar",
-		},
-		{
-			name: "three providers",
-			err:  "research round: credentials expired for gmail, slack, github_repos: source: authentication failed",
-			want: "Gmail, Slack, and GitHub",
-		},
-		{
-			name: "no match",
-			err:  "some other error",
-			want: "",
-		},
+		{"single", []string{"gmail"}, "Gmail"},
+		{"two", []string{"gmail", "google_calendar"}, "Gmail and Google Calendar"},
+		{"three", []string{"gmail", "slack", "github_repos"}, "Gmail, Slack, and GitHub"},
+		{"unknown", []string{"some_new_provider"}, "some_new_provider"},
+		{"empty", nil, "unknown service"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractExpiredServices(tt.err)
+			got := formatProviderNames(tt.providers)
 			if got != tt.want {
-				t.Errorf("extractExpiredServices(%q) = %q, want %q", tt.err, got, tt.want)
+				t.Errorf("formatProviderNames(%v) = %q, want %q", tt.providers, got, tt.want)
 			}
 		})
 	}
 }
 
-func TestCredentialErrorMessage_AuthFailed(t *testing.T) {
+func TestCredentialErrorMessage_AuthFailedWithProviders(t *testing.T) {
 	srv := &apiServer{uiBaseURL: "https://app.test"}
-	err := fmt.Errorf("research round: credentials expired for gmail, google_calendar: %w", source.ErrAuthFailed)
+	err := fmt.Errorf("research round: %w", &source.AuthFailedError{
+		Providers: []string{"gmail", "google_calendar"},
+	})
 	msg := srv.credentialErrorMessage(err)
 	if !strings.Contains(msg, "Gmail and Google Calendar") {
 		t.Errorf("expected message to mention services, got: %s", msg)
 	}
 	if !strings.Contains(msg, "reconnect") {
 		t.Errorf("expected message to say reconnect, got: %s", msg)
+	}
+}
+
+func TestCredentialErrorMessage_AuthFailedSentinel(t *testing.T) {
+	// Bare ErrAuthFailed without AuthFailedError — fallback message.
+	srv := &apiServer{uiBaseURL: "https://app.test"}
+	err := fmt.Errorf("something: %w", source.ErrAuthFailed)
+	msg := srv.credentialErrorMessage(err)
+	if !strings.Contains(msg, "One or more") {
+		t.Errorf("expected generic auth message, got: %s", msg)
 	}
 }
 

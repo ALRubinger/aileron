@@ -100,11 +100,12 @@ func (s *apiServer) vaultLockedSlackMessage() string {
 // credentialErrorMessage returns the appropriate Slack message for a
 // credential-related error: vault-locked vs. auth-expired.
 func (s *apiServer) credentialErrorMessage(err error) string {
+	var authErr *source.AuthFailedError
+	if errors.As(err, &authErr) {
+		services := formatProviderNames(authErr.Providers)
+		return ":warning: Your " + services + " connection has expired. Please <" + s.vaultUnlockURL() + "|reconnect it> in your connected accounts."
+	}
 	if errors.Is(err, source.ErrAuthFailed) {
-		services := extractExpiredServices(err.Error())
-		if services != "" {
-			return ":warning: Your " + services + " connection has expired. Please <" + s.vaultUnlockURL() + "|reconnect it> in your connected accounts."
-		}
 		return ":warning: One or more connected accounts have expired credentials. Please <" + s.vaultUnlockURL() + "|reconnect them> in your connected accounts."
 	}
 	return s.vaultLockedSlackMessage()
@@ -118,29 +119,11 @@ var providerDisplayNames = map[string]string{
 	"github_repos":    "GitHub",
 }
 
-// extractExpiredServices parses provider names from an error like
-// "credentials expired for gmail, gmail, google_calendar: source: ..."
-// and returns a deduplicated, human-readable string like "Gmail and Google Calendar".
-func extractExpiredServices(errMsg string) string {
-	const prefix = "credentials expired for "
-	idx := strings.Index(errMsg, prefix)
-	if idx < 0 {
-		return ""
-	}
-	rest := errMsg[idx+len(prefix):]
-	if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
-		rest = rest[:colonIdx]
-	}
-
-	// Deduplicate and map to display names.
-	seen := make(map[string]bool)
-	var names []string
-	for _, p := range strings.Split(rest, ", ") {
-		p = strings.TrimSpace(p)
-		if p == "" || seen[p] {
-			continue
-		}
-		seen[p] = true
+// formatProviderNames converts provider IDs to a human-readable string
+// like "Gmail and Google Calendar".
+func formatProviderNames(providers []string) string {
+	names := make([]string, 0, len(providers))
+	for _, p := range providers {
 		if display, ok := providerDisplayNames[p]; ok {
 			names = append(names, display)
 		} else {
@@ -150,7 +133,7 @@ func extractExpiredServices(errMsg string) string {
 
 	switch len(names) {
 	case 0:
-		return ""
+		return "unknown service"
 	case 1:
 		return names[0]
 	case 2:
