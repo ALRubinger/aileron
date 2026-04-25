@@ -173,6 +173,168 @@ func TestConnector_SearchIssues(t *testing.T) {
 	}
 }
 
+func TestConnector_SearchIssues_PaginatesMultiplePages(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		page := r.URL.Query().Get("page")
+
+		var items []map[string]any
+		switch page {
+		case "", "1":
+			for i := 1; i <= 3; i++ {
+				items = append(items, map[string]any{
+					"number":   i,
+					"title":    "PR " + strings.Repeat("x", i),
+					"state":    "closed",
+					"html_url": "https://github.com/owner/repo/pull/" + strings.Repeat("x", i),
+					"user":     map[string]any{"login": "alice"},
+					"pull_request": map[string]any{
+						"url": "https://api.github.com/repos/owner/repo/pulls/" + strings.Repeat("x", i),
+					},
+				})
+			}
+			// Simulate Link header for next page.
+			w.Header().Set("Link", `<`+r.URL.Path+`?page=2>; rel="next"`)
+		case "2":
+			for i := 4; i <= 5; i++ {
+				items = append(items, map[string]any{
+					"number":   i,
+					"title":    "PR " + strings.Repeat("x", i),
+					"state":    "closed",
+					"html_url": "https://github.com/owner/repo/pull/" + strings.Repeat("x", i),
+					"user":     map[string]any{"login": "alice"},
+					"pull_request": map[string]any{
+						"url": "https://api.github.com/repos/owner/repo/pulls/" + strings.Repeat("x", i),
+					},
+				})
+			}
+			// No Link header — last page.
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 5,
+			"items":       items,
+		})
+	}))
+	defer server.Close()
+
+	c := githubsource.New().WithBaseURL(server.URL + "/")
+	result, err := c.Execute(context.Background(), "github_search_issues", map[string]any{
+		"query": "is:pr is:merged",
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	results := result["results"].([]map[string]any)
+	if len(results) != 5 {
+		t.Errorf("expected 5 results across 2 pages, got %d", len(results))
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 API calls (2 pages), got %d", callCount)
+	}
+	if result["total"] != 5 {
+		t.Errorf("expected total=5, got %v", result["total"])
+	}
+	if result["returned"] != 5 {
+		t.Errorf("expected returned=5, got %v", result["returned"])
+	}
+	if result["truncated"] != false {
+		t.Errorf("expected truncated=false, got %v", result["truncated"])
+	}
+}
+
+func TestConnector_SearchCode_PaginatesMultiplePages(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		page := r.URL.Query().Get("page")
+
+		var items []map[string]any
+		switch page {
+		case "", "1":
+			items = append(items, map[string]any{
+				"name": "a.go",
+				"path": "pkg/a.go",
+				"repository": map[string]any{
+					"full_name": "owner/repo",
+				},
+			})
+			w.Header().Set("Link", `<`+r.URL.Path+`?page=2>; rel="next"`)
+		case "2":
+			items = append(items, map[string]any{
+				"name": "b.go",
+				"path": "pkg/b.go",
+				"repository": map[string]any{
+					"full_name": "owner/repo",
+				},
+			})
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 2,
+			"items":       items,
+		})
+	}))
+	defer server.Close()
+
+	c := githubsource.New().WithBaseURL(server.URL + "/")
+	result, err := c.Execute(context.Background(), "github_search_code", map[string]any{
+		"query": "func main",
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	results := result["results"].([]map[string]any)
+	if len(results) != 2 {
+		t.Errorf("expected 2 results across 2 pages, got %d", len(results))
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 API calls, got %d", callCount)
+	}
+	if result["truncated"] != false {
+		t.Errorf("expected truncated=false, got %v", result["truncated"])
+	}
+}
+
+func TestConnector_SearchIssues_TruncatedField(t *testing.T) {
+	// Return total_count higher than items to simulate truncation.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"total_count": 999,
+			"items": []map[string]any{
+				{
+					"number":   1,
+					"title":    "PR 1",
+					"state":    "open",
+					"html_url": "https://github.com/owner/repo/pull/1",
+					"user":     map[string]any{"login": "alice"},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	c := githubsource.New().WithBaseURL(server.URL + "/")
+	result, err := c.Execute(context.Background(), "github_search_issues", map[string]any{
+		"query": "is:pr",
+	}, testToken())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result["total"] != 999 {
+		t.Errorf("expected total=999, got %v", result["total"])
+	}
+	if result["returned"] != 1 {
+		t.Errorf("expected returned=1, got %v", result["returned"])
+	}
+	if result["truncated"] != true {
+		t.Errorf("expected truncated=true, got %v", result["truncated"])
+	}
+}
+
 func TestConnector_SearchIssues_WithDateFilters(t *testing.T) {
 	var gotQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
