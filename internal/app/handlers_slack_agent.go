@@ -154,11 +154,15 @@ func (s *apiServer) newEnclaveSourceExecutor() draft.SourceExecutor {
 			return nil, fmt.Errorf("no escrow entry for %s: %w", vaultPath, vault.ErrCredentialUnavailable)
 		}
 		escrowID := escrowIDVal.(string)
+		userID, provider := escrowScopeFromVaultPath(vaultPath)
 
 		resp, err := s.enclaveClient.SourceExecute(ctx, enclave.SourceExecuteRequest{
-			EscrowID: escrowID,
-			Tool:     tool,
-			Params:   params,
+			EscrowID:  escrowID,
+			UserID:    userID,
+			VaultPath: vaultPath,
+			Provider:  provider,
+			Tool:      tool,
+			Params:    params,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("enclave source execute: %w", err)

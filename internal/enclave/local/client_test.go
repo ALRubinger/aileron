@@ -190,6 +190,8 @@ func TestEscrowStoreAndExecute(t *testing.T) {
 	storeResp, err := c.EscrowStore(ctx, enclave.EscrowStoreRequest{
 		UserID:              "user-1",
 		GrantID:             "grant-1",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: kekEncrypted,
 		CredentialType:      "api_key",
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -201,8 +203,14 @@ func TestEscrowStoreAndExecute(t *testing.T) {
 
 	// Execute using the escrowed credential.
 	resp, err := c.Execute(ctx, enclave.ExecuteRequest{
-		RequestID: "exec-escrow",
-		EscrowID:  storeResp.EscrowID,
+		RequestID:      "exec-escrow",
+		UserID:         "user-1",
+		GrantID:        "grant-1",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		ActionType:     "payment.charge",
+		CredentialType: "api_key",
+		EscrowID:       storeResp.EscrowID,
 	})
 	if err != nil {
 		t.Fatalf("Execute with escrow: %v", err)
@@ -239,6 +247,8 @@ func TestEscrowListViaClient(t *testing.T) {
 	storeResp, err := c.EscrowStore(ctx, enclave.EscrowStoreRequest{
 		UserID:              "user-1",
 		GrantID:             "g1",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: encrypted,
 		CredentialType:      "oauth_token",
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -276,6 +286,8 @@ func TestEscrowRevoke(t *testing.T) {
 	storeResp, err := c.EscrowStore(ctx, enclave.EscrowStoreRequest{
 		UserID:              "user-1",
 		GrantID:             "grant-1",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: encrypted,
 		CredentialType:      "api_key",
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
@@ -579,7 +591,11 @@ func TestEscrowStoreWithoutKEK(t *testing.T) {
 
 	_, err := c.EscrowStore(context.Background(), enclave.EscrowStoreRequest{
 		UserID:              "no-kek",
+		GrantID:             "grant-1",
+		VaultPath:           "connected-accounts/no-kek/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: []byte("data"),
+		CredentialType:      "api_key",
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
 	})
 	if err != enclave.ErrNoKEK {
@@ -598,7 +614,11 @@ func TestEscrowStoreBadDecryption(t *testing.T) {
 
 	_, err := c.EscrowStore(context.Background(), enclave.EscrowStoreRequest{
 		UserID:              "user-1",
+		GrantID:             "grant-1",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: []byte("bad-ciphertext"),
+		CredentialType:      "api_key",
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
 	})
 	if err == nil {
@@ -618,7 +638,11 @@ func TestEscrowStoreBadExpiry(t *testing.T) {
 	encrypted, _ := encryptAESGCM([]byte("cred"), userKEK)
 	_, err := c.EscrowStore(context.Background(), enclave.EscrowStoreRequest{
 		UserID:              "user-1",
+		GrantID:             "grant-1",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
 		ExpiresAt:           "not-a-date",
 	})
 	if err == nil {
@@ -732,12 +756,15 @@ func TestClient_SourceExecute_HappyPath(t *testing.T) {
 	_ = err
 
 	// Use the escrow store directly since EscrowStore requires KEK decryption.
-	escrowID := c.escrow.Store("g1", []byte(`{"access_token":"test"}`), "oauth2", nil, time.Now().Add(time.Hour))
+	escrowID := c.escrow.Store(testEscrowRequest("g1", "oauth2", nil), []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
 
 	resp, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
-		EscrowID: escrowID,
-		Tool:     "test_search",
-		Params:   map[string]any{"query": "hello"},
+		EscrowID:  escrowID,
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "test_search",
+		Params:    map[string]any{"query": "hello"},
 	})
 	if err != nil {
 		t.Fatalf("SourceExecute: %v", err)
@@ -792,12 +819,15 @@ func TestClient_SourceExecute_TokenRefresh(t *testing.T) {
 	}
 	c := New(nil, WithSourceExecuteFn(executeFn))
 
-	escrowID := c.escrow.Store("g1", []byte(`{"access_token":"old"}`), "oauth2", nil, time.Now().Add(time.Hour))
+	escrowID := c.escrow.Store(testEscrowRequest("g1", "oauth2", nil), []byte(`{"access_token":"old"}`), time.Now().Add(time.Hour))
 
 	_, err := c.SourceExecute(context.Background(), enclave.SourceExecuteRequest{
-		EscrowID: escrowID,
-		Tool:     "test_search",
-		Params:   map[string]any{"query": "hello"},
+		EscrowID:  escrowID,
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "gmail_search",
+		Params:    map[string]any{"query": "hello"},
 	})
 	if err != nil {
 		t.Fatalf("SourceExecute: %v", err)

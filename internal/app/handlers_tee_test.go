@@ -18,12 +18,13 @@ import (
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/crypto"
+	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/enclave/local"
 	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
-	"github.com/ALRubinger/aileron/internal/enclave/local"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -879,6 +880,59 @@ func (c *reconcileEnclaveClient) SourceExecute(_ context.Context, _ enclave.Sour
 }
 func (c *reconcileEnclaveClient) Ready(_ context.Context) error { return nil }
 func (c *reconcileEnclaveClient) Close() error                  { return nil }
+
+func TestSourceToolsForProvider(t *testing.T) {
+	registry := source.NewRegistry()
+	registry.Register(&stubSourceConnector{})
+
+	providerTests := map[model.ConnectedAccountProvider]string{
+		model.ConnectedAccountProviderGmail:          "gmail",
+		model.ConnectedAccountProviderGoogleCalendar: "calendar",
+		model.ConnectedAccountProviderSlack:          "slack",
+		model.ConnectedAccountProviderGitHub:         "github",
+		model.ConnectedAccountProviderOutlook:        "",
+	}
+	for provider, want := range providerTests {
+		if got := sourceProviderForConnectedAccount(provider); got != want {
+			t.Fatalf("sourceProviderForConnectedAccount(%q) = %q, want %q", provider, got, want)
+		}
+	}
+
+	got := sourceToolsForProvider(registry, model.ConnectedAccountProviderSlack)
+	want := []string{"slack_channel_history", "slack_search_messages"}
+	if len(got) != len(want) {
+		t.Fatalf("sourceToolsForProvider = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sourceToolsForProvider[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	if tools := sourceToolsForProvider(nil, model.ConnectedAccountProviderSlack); tools != nil {
+		t.Fatalf("nil registry tools = %v, want nil", tools)
+	}
+	if tools := sourceToolsForProvider(registry, model.ConnectedAccountProviderOutlook); tools != nil {
+		t.Fatalf("unsupported provider tools = %v, want nil", tools)
+	}
+}
+
+func TestEscrowScopeFromVaultPath(t *testing.T) {
+	userID, provider := escrowScopeFromVaultPath("connected-accounts/usr_1/gmail")
+	if userID != "usr_1" || provider != "gmail" {
+		t.Fatalf("scope = (%q, %q), want (usr_1, gmail)", userID, provider)
+	}
+
+	userID, provider = escrowScopeFromVaultPath("system/payments/stripe")
+	if userID != "" || provider != "" {
+		t.Fatalf("non-connected scope = (%q, %q), want empty", userID, provider)
+	}
+
+	userID, provider = escrowScopeFromVaultPath("connected-accounts/usr_1")
+	if userID != "" || provider != "" {
+		t.Fatalf("malformed connected scope = (%q, %q), want empty", userID, provider)
+	}
+}
 
 func TestReconcileEscrowIndex_PrunesStaleEntries(t *testing.T) {
 	var index sync.Map

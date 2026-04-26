@@ -43,7 +43,7 @@ type Client struct {
 	sessionID       string
 	expiresAt       time.Time
 	sessionTTL      time.Duration
-	keks            *kekStore   // per-user KEK storage
+	keks            *kekStore // per-user KEK storage
 	escrow          *escrowStore
 }
 
@@ -200,7 +200,7 @@ func (c *Client) OAuthExchange(ctx context.Context, req enclave.OAuthExchangeReq
 func (c *Client) Execute(ctx context.Context, req enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
 	// If EscrowID is set, use the escrowed credential instead.
 	if req.EscrowID != "" {
-		credential, err := c.escrow.Get(req.EscrowID)
+		credential, err := c.escrow.GetForExecute(req)
 		if err != nil {
 			return enclave.ExecuteResponse{}, err
 		}
@@ -228,6 +228,22 @@ func (c *Client) Execute(ctx context.Context, req enclave.ExecuteRequest) (encla
 // EscrowStore decrypts the credential using the user's KEK and stores it
 // in the in-memory escrow.
 func (c *Client) EscrowStore(_ context.Context, req enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
+	if req.UserID == "" {
+		return enclave.EscrowStoreResponse{}, fmt.Errorf("local: user_id required")
+	}
+	if req.GrantID == "" {
+		return enclave.EscrowStoreResponse{}, fmt.Errorf("local: grant_id required")
+	}
+	if req.VaultPath == "" {
+		return enclave.EscrowStoreResponse{}, fmt.Errorf("local: vault_path required")
+	}
+	if req.Provider == "" {
+		return enclave.EscrowStoreResponse{}, fmt.Errorf("local: provider required")
+	}
+	if req.CredentialType == "" {
+		return enclave.EscrowStoreResponse{}, fmt.Errorf("local: credential_type required")
+	}
+
 	kek, err := c.keks.Get(req.UserID)
 	if err != nil {
 		return enclave.EscrowStoreResponse{}, err
@@ -245,7 +261,7 @@ func (c *Client) EscrowStore(_ context.Context, req enclave.EscrowStoreRequest) 
 		return enclave.EscrowStoreResponse{}, fmt.Errorf("local: parsing escrow expiry: %w", err)
 	}
 
-	id := c.escrow.Store(req.GrantID, plaintext, req.CredentialType, req.ActionTypes, expiresAt)
+	id := c.escrow.Store(req, plaintext, expiresAt)
 	return enclave.EscrowStoreResponse{EscrowID: id}, nil
 }
 
@@ -267,7 +283,7 @@ func (c *Client) SourceExecute(ctx context.Context, req enclave.SourceExecuteReq
 		return enclave.SourceExecuteResponse{}, fmt.Errorf("local: no source execute function configured")
 	}
 
-	credential, err := c.escrow.Get(req.EscrowID)
+	credential, err := c.escrow.GetForSource(req)
 	if err != nil {
 		return enclave.SourceExecuteResponse{}, err
 	}
@@ -352,7 +368,7 @@ func exchangeOAuthCode(ctx context.Context, req enclave.OAuthExchangeRequest) (*
 	// Parse the token response. Slack uses a non-standard format with
 	// nested authed_user and team fields; standard OAuth uses top-level fields.
 	var tokenData struct {
-		OK           bool   `json:"ok"`                      // Slack-specific
+		OK           bool   `json:"ok"` // Slack-specific
 		AccessToken  string `json:"access_token"`
 		TokenType    string `json:"token_type"`
 		RefreshToken string `json:"refresh_token"`
@@ -476,11 +492,18 @@ func copyBytes(b []byte) []byte {
 	return c
 }
 
-type stringReaderType struct{ s string; i int }
+type stringReaderType struct {
+	s string
+	i int
+}
 
 func (r *stringReaderType) Read(b []byte) (int, error) {
-	if r.i >= len(r.s) { return 0, io.EOF }
-	n := copy(b, r.s[r.i:]); r.i += n; return n, nil
+	if r.i >= len(r.s) {
+		return 0, io.EOF
+	}
+	n := copy(b, r.s[r.i:])
+	r.i += n
+	return n, nil
 }
 
 func stringReader(s string) io.Reader { return &stringReaderType{s: s} }

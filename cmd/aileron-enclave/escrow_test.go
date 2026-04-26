@@ -22,10 +22,23 @@ func mustNewEscrowStore(t *testing.T) *escrowStore {
 	return s
 }
 
+func testEscrowRequest(grantID, credType string, actionTypes []string) enclave.EscrowStoreRequest {
+	return enclave.EscrowStoreRequest{
+		UserID:         "user-1",
+		GrantID:        grantID,
+		EnforceGrantID: true,
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: credType,
+		ActionTypes:    actionTypes,
+		SourceTools:    []string{"test_search", "gmail_search"},
+	}
+}
+
 func TestEscrowStoreAndGet(t *testing.T) {
 	s := mustNewEscrowStore(t)
 	cred := []byte("test-cred")
-	id := s.Store("grant-1", cred, "api_key", []string{"action"}, time.Now().Add(time.Hour))
+	id := s.Store(testEscrowRequest("grant-1", "api_key", []string{"action"}), cred, time.Now().Add(time.Hour))
 
 	got, err := s.Get(id)
 	if err != nil {
@@ -43,6 +56,90 @@ func TestEscrowStoreAndGet(t *testing.T) {
 	}
 }
 
+func TestEscrowGetForExecuteEnforcesScope(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	req := testEscrowRequest("grant-1", "api_key", []string{"email.send"})
+	req.AllowedParameters = map[string]any{"to": "a@example.com"}
+	id := s.Store(req, []byte("scoped-cred"), time.Now().Add(time.Hour))
+
+	valid := enclave.ExecuteRequest{
+		EscrowID:       id,
+		UserID:         "user-1",
+		GrantID:        "grant-1",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "api_key",
+		ActionType:     "email.send",
+		Parameters:     map[string]any{"to": "a@example.com"},
+	}
+	if _, err := s.GetForExecute(valid); err != nil {
+		t.Fatalf("GetForExecute valid scope: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*enclave.ExecuteRequest)
+	}{
+		{"user", func(r *enclave.ExecuteRequest) { r.UserID = "user-2" }},
+		{"grant", func(r *enclave.ExecuteRequest) { r.GrantID = "grant-2" }},
+		{"vault", func(r *enclave.ExecuteRequest) { r.VaultPath = "connected-accounts/user-2/gmail" }},
+		{"provider", func(r *enclave.ExecuteRequest) { r.Provider = "slack" }},
+		{"credential type", func(r *enclave.ExecuteRequest) { r.CredentialType = "oauth2" }},
+		{"action", func(r *enclave.ExecuteRequest) { r.ActionType = "email.delete" }},
+		{"params", func(r *enclave.ExecuteRequest) { r.Parameters = map[string]any{"to": "b@example.com"} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := valid
+			tt.mutate(&candidate)
+			_, err := s.GetForExecute(candidate)
+			if err != enclave.ErrEscrowScopeMismatch {
+				t.Fatalf("expected ErrEscrowScopeMismatch, got %v", err)
+			}
+		})
+	}
+}
+
+func TestEscrowGetForSourceEnforcesScope(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	req := testEscrowRequest("grant-1", "oauth2", nil)
+	req.AllowedParameters = map[string]any{"query": "from:boss"}
+	id := s.Store(req, []byte("token"), time.Now().Add(time.Hour))
+
+	valid := enclave.SourceExecuteRequest{
+		EscrowID:  id,
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "gmail_search",
+		Params:    map[string]any{"query": "from:boss"},
+	}
+	if _, err := s.GetForSource(valid); err != nil {
+		t.Fatalf("GetForSource valid scope: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*enclave.SourceExecuteRequest)
+	}{
+		{"user", func(r *enclave.SourceExecuteRequest) { r.UserID = "user-2" }},
+		{"vault", func(r *enclave.SourceExecuteRequest) { r.VaultPath = "connected-accounts/user-2/gmail" }},
+		{"provider", func(r *enclave.SourceExecuteRequest) { r.Provider = "slack" }},
+		{"tool", func(r *enclave.SourceExecuteRequest) { r.Tool = "gmail_delete_everything" }},
+		{"params", func(r *enclave.SourceExecuteRequest) { r.Params = map[string]any{"query": "to:boss"} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := valid
+			tt.mutate(&candidate)
+			_, err := s.GetForSource(candidate)
+			if err != enclave.ErrEscrowScopeMismatch {
+				t.Fatalf("expected ErrEscrowScopeMismatch, got %v", err)
+			}
+		})
+	}
+}
+
 func TestEscrowNotFound(t *testing.T) {
 	s := mustNewEscrowStore(t)
 	_, err := s.Get("nonexistent")
@@ -53,7 +150,7 @@ func TestEscrowNotFound(t *testing.T) {
 
 func TestEscrowExpired(t *testing.T) {
 	s := mustNewEscrowStore(t)
-	id := s.Store("g1", []byte("dead"), "api_key", nil, time.Now().Add(-time.Second))
+	id := s.Store(testEscrowRequest("g1", "api_key", nil), []byte("dead"), time.Now().Add(-time.Second))
 	_, err := s.Get(id)
 	if err != enclave.ErrEscrowExpired {
 		t.Fatalf("expected ErrEscrowExpired, got %v", err)
@@ -62,7 +159,7 @@ func TestEscrowExpired(t *testing.T) {
 
 func TestEscrowRevokeWrongGrant(t *testing.T) {
 	s := mustNewEscrowStore(t)
-	id := s.Store("grant-1", []byte("cred"), "api_key", nil, time.Now().Add(time.Hour))
+	id := s.Store(testEscrowRequest("grant-1", "api_key", nil), []byte("cred"), time.Now().Add(time.Hour))
 	err := s.Revoke(id, "wrong-grant")
 	if err != enclave.ErrEscrowNotFound {
 		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
@@ -73,8 +170,8 @@ func TestEscrowEvictExpired(t *testing.T) {
 	s := mustNewEscrowStore(t)
 	live := []byte("live")
 	dead := []byte("dead")
-	liveID := s.Store("g1", live, "api_key", nil, time.Now().Add(time.Hour))
-	s.Store("g2", dead, "api_key", nil, time.Now().Add(-time.Second))
+	liveID := s.Store(testEscrowRequest("g1", "api_key", nil), live, time.Now().Add(time.Hour))
+	s.Store(testEscrowRequest("g2", "api_key", nil), dead, time.Now().Add(-time.Second))
 
 	s.EvictExpired()
 
@@ -105,8 +202,8 @@ func TestEscrowPersistence_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newEscrowStore: %v", err)
 	}
-	id1 := s1.Store("grant-1", []byte("cred-one"), "oauth", nil, time.Now().Add(time.Hour))
-	id2 := s1.Store("grant-2", []byte("cred-two"), "api_key", []string{"email.send"}, time.Now().Add(2*time.Hour))
+	id1 := s1.Store(testEscrowRequest("grant-1", "oauth", nil), []byte("cred-one"), time.Now().Add(time.Hour))
+	id2 := s1.Store(testEscrowRequest("grant-2", "api_key", []string{"email.send"}), []byte("cred-two"), time.Now().Add(2*time.Hour))
 
 	// Create a new escrow store from the same directory — simulates restart.
 	s2, err := newEscrowStore(dir)
@@ -139,7 +236,7 @@ func TestEscrowPersistence_ExpiredNotLoaded(t *testing.T) {
 		t.Fatalf("newEscrowStore: %v", err)
 	}
 	// Store an already-expired entry.
-	id := s1.Store("g1", []byte("expired-cred"), "oauth", nil, time.Now().Add(-time.Second))
+	id := s1.Store(testEscrowRequest("g1", "oauth", nil), []byte("expired-cred"), time.Now().Add(-time.Second))
 
 	// Restart — expired entry should be evicted on load.
 	s2, err := newEscrowStore(dir)
@@ -209,7 +306,7 @@ func TestEscrowPersistence_CorruptJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newEscrowStore: %v", err)
 	}
-	s1.Store("g1", []byte("cred"), "api_key", nil, time.Now().Add(time.Hour))
+	s1.Store(testEscrowRequest("g1", "api_key", nil), []byte("cred"), time.Now().Add(time.Hour))
 
 	// Now overwrite escrow.dat with data that decrypts to invalid JSON.
 	// We use the existing key to encrypt garbage JSON.
@@ -235,7 +332,7 @@ func TestEscrowPersistence_CorruptJSON(t *testing.T) {
 func TestEscrowUpdate_HappyPath(t *testing.T) {
 	s := mustNewEscrowStore(t)
 	original := []byte(`{"access_token":"old","refresh_token":"r1"}`)
-	id := s.Store("g1", original, "oauth2", nil, time.Now().Add(time.Hour))
+	id := s.Store(testEscrowRequest("g1", "oauth2", nil), original, time.Now().Add(time.Hour))
 
 	updated := []byte(`{"access_token":"new","refresh_token":"r2"}`)
 	if err := s.Update(id, updated); err != nil {
@@ -268,7 +365,7 @@ func TestEscrowUpdate_NotFound(t *testing.T) {
 
 func TestEscrowUpdate_Expired(t *testing.T) {
 	s := mustNewEscrowStore(t)
-	id := s.Store("g1", []byte("cred"), "oauth2", nil, time.Now().Add(-time.Second))
+	id := s.Store(testEscrowRequest("g1", "oauth2", nil), []byte("cred"), time.Now().Add(-time.Second))
 	err := s.Update(id, []byte("new"))
 	if err != enclave.ErrEscrowExpired {
 		t.Errorf("expected ErrEscrowExpired, got %v", err)
@@ -282,7 +379,7 @@ func TestEscrowUpdate_Persistence(t *testing.T) {
 		t.Fatalf("newEscrowStore: %v", err)
 	}
 
-	id := s1.Store("g1", []byte("old"), "oauth2", nil, time.Now().Add(time.Hour))
+	id := s1.Store(testEscrowRequest("g1", "oauth2", nil), []byte("old"), time.Now().Add(time.Hour))
 	if err := s1.Update(id, []byte("refreshed")); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -303,9 +400,9 @@ func TestEscrowUpdate_Persistence(t *testing.T) {
 
 func TestEscrowList(t *testing.T) {
 	s := mustNewEscrowStore(t)
-	s.Store("g1", []byte("c1"), "oauth", nil, time.Now().Add(time.Hour))
-	s.Store("g2", []byte("c2"), "api_key", nil, time.Now().Add(time.Hour))
-	s.Store("g3", []byte("expired"), "api_key", nil, time.Now().Add(-time.Second))
+	s.Store(testEscrowRequest("g1", "oauth", nil), []byte("c1"), time.Now().Add(time.Hour))
+	s.Store(testEscrowRequest("g2", "api_key", nil), []byte("c2"), time.Now().Add(time.Hour))
+	s.Store(testEscrowRequest("g3", "api_key", nil), []byte("expired"), time.Now().Add(-time.Second))
 
 	entries := s.List()
 	if len(entries) != 2 {
