@@ -37,7 +37,7 @@ async function exportJWK(key: CryptoKey, kid: string): Promise<JsonWebKey & { ki
 
 // Pre-compute the pubkey nonce for the test key so JWT claims can include it.
 async function pubkeyNonceB64(pubkey: Uint8Array): Promise<string> {
-	const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', pubkey));
+	const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', (pubkey as Uint8Array<ArrayBuffer>).buffer));
 	const binary = String.fromCharCode(...hash);
 	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
