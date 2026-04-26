@@ -139,13 +139,20 @@ type SessionRequest struct {
 // SessionResponse confirms that the session is established and credentials
 // can be transmitted.
 type SessionResponse struct {
-	SessionID string `json:"session_id"`
-	ExpiresAt string `json:"expires_at"` // RFC 3339
+	SessionID      string `json:"session_id"`
+	ExpiresAt      string `json:"expires_at"` // RFC 3339
+	RequestAuthKey []byte `json:"request_auth_key,omitempty"`
 }
 
 // HeaderSessionID binds post-attestation enclave requests to the active
 // ECDH session established by SessionRequest/SessionResponse.
 const HeaderSessionID = "X-Session-ID"
+
+const (
+	HeaderRequestTimestamp = "X-Request-Timestamp"
+	HeaderRequestNonce     = "X-Request-Nonce"
+	HeaderRequestMAC       = "X-Request-MAC"
+)
 
 // EscrowStoreRequest asks the enclave to escrow a credential for
 // asynchronous or scheduled execution when the user is offline.

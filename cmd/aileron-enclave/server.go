@@ -21,7 +21,11 @@ import (
 	"github.com/ALRubinger/aileron/internal/source"
 )
 
-const enclaveSessionTTL = 30 * time.Minute
+const (
+	enclaveSessionTTL     = 30 * time.Minute
+	requestAuthMaxSkew    = 5 * time.Minute
+	requestAuthNonceBytes = 32
+)
 
 type enclaveServer struct {
 	log            *slog.Logger
@@ -31,8 +35,10 @@ type enclaveServer struct {
 	mu             sync.Mutex
 	enclaveKey     *ecdh.PrivateKey
 	sessionKey     []byte
+	requestAuthKey []byte
 	sessionID      string
 	expiresAt      time.Time
+	seenNonces     map[string]time.Time
 	keks           *kekStore
 	escrow         *escrowStore
 }
@@ -47,6 +53,7 @@ func newEnclaveServer(log *slog.Logger, registry *connector.Registry, sourceReg 
 		registry:       registry,
 		sourceRegistry: sourceReg,
 		provider:       provider,
+		seenNonces:     make(map[string]time.Time),
 		keks:           newKEKStore(),
 		escrow:         escrow,
 	}, nil
@@ -134,29 +141,41 @@ func (s *enclaveServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 	h := sha256.Sum256(raw)
 
-	// Zero previous session key.
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		writeErr(w, http.StatusInternalServerError, "generating session ID")
+		return
+	}
+
+	requestAuthKey := make([]byte, requestAuthNonceBytes)
+	if _, err := rand.Read(requestAuthKey); err != nil {
+		writeErr(w, http.StatusInternalServerError, "generating request auth key")
+		return
+	}
+
+	// Zero previous session material only after the new session is ready.
 	zeroBytes(s.sessionKey)
+	zeroBytes(s.requestAuthKey)
 
 	s.sessionKey = h[:]
+	s.requestAuthKey = requestAuthKey
 	s.expiresAt = time.Now().Add(enclaveSessionTTL)
-
-	b := make([]byte, 16)
-	rand.Read(b)
 	s.sessionID = hex.EncodeToString(b)
+	clear(s.seenNonces)
 
 	writeJSON(w, http.StatusOK, enclave.SessionResponse{
-		SessionID: s.sessionID,
-		ExpiresAt: s.expiresAt.Format(time.RFC3339),
+		SessionID:      s.sessionID,
+		ExpiresAt:      s.expiresAt.Format(time.RFC3339),
+		RequestAuthKey: copyBytes(s.requestAuthKey),
 	})
 }
 
 func (s *enclaveServer) handleTransmitKEK(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSession(w, r) {
-		return
-	}
-
 	var req enclave.TransmitKEKRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+		if err == errResponseWritten {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -186,12 +205,11 @@ func (s *enclaveServer) handleTransmitKEK(w http.ResponseWriter, r *http.Request
 }
 
 func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSession(w, r) {
-		return
-	}
-
 	var req enclave.OAuthExchangeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+		if err == errResponseWritten {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -232,12 +250,11 @@ func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSession(w, r) {
-		return
-	}
-
 	var req enclave.ExecuteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+		if err == errResponseWritten {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -311,12 +328,11 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSession(w, r) {
-		return
-	}
-
 	var req enclave.EscrowStoreRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+		if err == errResponseWritten {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -367,7 +383,7 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 }
 
 func (s *enclaveServer) handleEscrowList(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSession(w, r) {
+	if _, ok := s.requireAuthenticatedRequest(w, r); !ok {
 		return
 	}
 
@@ -376,12 +392,11 @@ func (s *enclaveServer) handleEscrowList(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSession(w, r) {
-		return
-	}
-
 	var req enclave.EscrowRevokeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+		if err == errResponseWritten {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -395,12 +410,11 @@ func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *enclaveServer) handleSourceExecute(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSession(w, r) {
-		return
-	}
-
 	var req enclave.SourceExecuteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+		if err == errResponseWritten {
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -452,27 +466,90 @@ func (s *enclaveServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *enclaveServer) requireSession(w http.ResponseWriter, r *http.Request) bool {
+func (s *enclaveServer) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	body, ok := s.requireAuthenticatedRequest(w, r)
+	if !ok {
+		return errResponseWritten
+	}
+	return json.Unmarshal(body, v)
+}
+
+var errResponseWritten = fmt.Errorf("response already written")
+
+func (s *enclaveServer) requireAuthenticatedRequest(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "reading body: "+err.Error())
+		return nil, false
+	}
+	defer r.Body.Close()
+
 	sid := r.Header.Get(enclave.HeaderSessionID)
+	timestamp := r.Header.Get(enclave.HeaderRequestTimestamp)
+	nonce := r.Header.Get(enclave.HeaderRequestNonce)
+	reqMAC := r.Header.Get(enclave.HeaderRequestMAC)
 
 	s.mu.Lock()
 	activeID := s.sessionID
-	hasActiveSession := s.sessionKey != nil && time.Now().Before(s.expiresAt)
+	authKey := copyBytes(s.requestAuthKey)
+	expiresAt := s.expiresAt
+	hasActiveSession := s.sessionKey != nil && len(s.requestAuthKey) > 0 && time.Now().Before(s.expiresAt)
 	s.mu.Unlock()
+	defer zeroBytes(authKey)
 
 	if !hasActiveSession {
 		writeErr(w, http.StatusPreconditionFailed, "no active session")
-		return false
+		return nil, false
 	}
 	if sid == "" {
 		writeErr(w, http.StatusUnauthorized, "missing session")
-		return false
+		return nil, false
 	}
 	if sid != activeID {
 		writeErr(w, http.StatusUnauthorized, "invalid session")
-		return false
+		return nil, false
 	}
-	return true
+	if timestamp == "" || nonce == "" || reqMAC == "" {
+		writeErr(w, http.StatusUnauthorized, "missing request authentication")
+		return nil, false
+	}
+
+	requestTime, err := time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "invalid request timestamp")
+		return nil, false
+	}
+	now := time.Now()
+	if requestTime.Before(now.Add(-requestAuthMaxSkew)) || requestTime.After(now.Add(requestAuthMaxSkew)) || requestTime.After(expiresAt) {
+		writeErr(w, http.StatusUnauthorized, "stale request")
+		return nil, false
+	}
+	if !enclave.VerifyRequestMAC(authKey, r.Method, r.URL.Path, body, sid, timestamp, nonce, reqMAC) {
+		writeErr(w, http.StatusUnauthorized, "invalid request authentication")
+		return nil, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionID != sid || s.sessionKey == nil || time.Now().After(s.expiresAt) {
+		writeErr(w, http.StatusPreconditionFailed, "no active session")
+		return nil, false
+	}
+	pruneSeenNonces(s.seenNonces, now.Add(-requestAuthMaxSkew))
+	if _, ok := s.seenNonces[nonce]; ok {
+		writeErr(w, http.StatusUnauthorized, "replayed request")
+		return nil, false
+	}
+	s.seenNonces[nonce] = now
+	return body, true
+}
+
+func pruneSeenNonces(seen map[string]time.Time, before time.Time) {
+	for nonce, seenAt := range seen {
+		if seenAt.Before(before) {
+			delete(seen, nonce)
+		}
+	}
 }
 
 // resolveConnectorID splits "type/provider" into its components.

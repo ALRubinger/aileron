@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,7 +23,12 @@ import (
 	"github.com/ALRubinger/aileron/internal/source"
 )
 
-var testSessionIDs sync.Map
+type testSessionAuth struct {
+	sessionID string
+	authKey   []byte
+}
+
+var testSessions sync.Map
 
 // stubConnector returns a fixed result for testing.
 type stubConnector struct{}
@@ -81,19 +87,7 @@ func setupTestEnclaveServerWithSource(t *testing.T, sc source.SourceConnector) (
 func postJSON(t *testing.T, server *httptest.Server, path string, body any) *http.Response {
 	t.Helper()
 	payload, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(payload))
-	if err != nil {
-		t.Fatalf("creating POST %s: %v", path, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if sid, ok := testSessionIDs.Load(server.URL); ok {
-		req.Header.Set(enclave.HeaderSessionID, sid.(string))
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
-	}
-	return resp
+	return postRaw(t, server, path, payload, true)
 }
 
 func postJSONWithoutSession(t *testing.T, server *httptest.Server, path string, body any) *http.Response {
@@ -104,7 +98,38 @@ func postJSONWithoutSession(t *testing.T, server *httptest.Server, path string, 
 func postJSONWithSessionID(t *testing.T, server *httptest.Server, path string, body any, sessionID string) *http.Response {
 	t.Helper()
 	payload, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(payload))
+	return postRawWithExplicitSessionID(t, server, path, payload, sessionID)
+}
+
+func postRawWithSession(t *testing.T, server *httptest.Server, path string, body []byte) *http.Response {
+	t.Helper()
+	return postRaw(t, server, path, body, true)
+}
+
+func postRaw(t *testing.T, server *httptest.Server, path string, body []byte, sign bool) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("creating POST %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if sessAny, ok := testSessions.Load(server.URL); ok {
+		sess := sessAny.(testSessionAuth)
+		req.Header.Set(enclave.HeaderSessionID, sess.sessionID)
+		if sign {
+			signTestRequest(t, req, path, body, sess)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+func postRawWithExplicitSessionID(t *testing.T, server *httptest.Server, path string, body []byte, sessionID string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("creating POST %s: %v", path, err)
 	}
@@ -119,21 +144,44 @@ func postJSONWithSessionID(t *testing.T, server *httptest.Server, path string, b
 	return resp
 }
 
-func postRawWithSession(t *testing.T, server *httptest.Server, path string, body []byte) *http.Response {
+func signTestRequest(t *testing.T, req *http.Request, path string, body []byte, sess testSessionAuth) string {
+	t.Helper()
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		t.Fatalf("generating nonce: %v", err)
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	signTestRequestWith(t, req, path, body, sess, timestamp, nonce)
+	return nonce
+}
+
+func signTestRequestWith(t *testing.T, req *http.Request, path string, body []byte, sess testSessionAuth, timestamp, nonce string) {
+	t.Helper()
+	req.Header.Set(enclave.HeaderRequestTimestamp, timestamp)
+	req.Header.Set(enclave.HeaderRequestNonce, nonce)
+	req.Header.Set(enclave.HeaderRequestMAC, enclave.RequestMAC(sess.authKey, req.Method, path, body, sess.sessionID, timestamp, nonce))
+}
+
+func signedTestRequest(t *testing.T, server *httptest.Server, path string, body []byte, sess testSessionAuth) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("creating POST %s: %v", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if sid, ok := testSessionIDs.Load(server.URL); ok {
-		req.Header.Set(enclave.HeaderSessionID, sid.(string))
-	}
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set(enclave.HeaderSessionID, sess.sessionID)
+	signTestRequest(t, req, path, body, sess)
+	return req
+}
+
+func mustJSON(t *testing.T, body any) []byte {
+	t.Helper()
+	payload, err := json.Marshal(body)
 	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
+		t.Fatalf("marshaling JSON: %v", err)
 	}
-	return resp
+	return payload
 }
 
 func decodeResp[T any](t *testing.T, resp *http.Response) T {
@@ -185,9 +233,15 @@ func establishTestSession(t *testing.T, server *httptest.Server) []byte {
 	if sessResult.SessionID == "" {
 		t.Fatal("empty session ID")
 	}
-	testSessionIDs.Store(server.URL, sessResult.SessionID)
+	if len(sessResult.RequestAuthKey) == 0 {
+		t.Fatal("empty request auth key")
+	}
+	testSessions.Store(server.URL, testSessionAuth{
+		sessionID: sessResult.SessionID,
+		authKey:   sessResult.RequestAuthKey,
+	})
 	t.Cleanup(func() {
-		testSessionIDs.Delete(server.URL)
+		testSessions.Delete(server.URL)
 	})
 
 	// Derive shared secret.
@@ -775,6 +829,146 @@ func TestSensitiveEndpointsRequireMatchingSession(t *testing.T) {
 		t.Fatalf("expected 412 after valid session reaches KEK check, got %d", matching.StatusCode)
 	}
 	matching.Body.Close()
+}
+
+func TestSensitiveEndpointsRequireRequestAuthentication(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	body := enclave.ExecuteRequest{
+		UserID:              "user-1",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("data"),
+	}
+
+	unsigned := postRaw(t, server, "/execute", mustJSON(t, body), false)
+	if unsigned.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unsigned request, got %d", unsigned.StatusCode)
+	}
+	unsigned.Body.Close()
+}
+
+func TestSensitiveEndpointsRejectTamperedRequest(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	originalBody := []byte(`{"user_id":"user-1","connector_id":"test/stub","encrypted_credential":"ZGF0YQ=="}`)
+	tamperedBody := []byte(`{"user_id":"user-2","connector_id":"test/stub","encrypted_credential":"ZGF0YQ=="}`)
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/execute", bytes.NewReader(tamperedBody))
+	if err != nil {
+		t.Fatalf("creating request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	sessAny, _ := testSessions.Load(server.URL)
+	sess := sessAny.(testSessionAuth)
+	req.Header.Set(enclave.HeaderSessionID, sess.sessionID)
+	signTestRequest(t, req, "/execute", originalBody, sess)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /execute: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for tampered body, got %d", resp.StatusCode)
+	}
+}
+
+func TestSensitiveEndpointsRejectReplay(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	body := mustJSON(t, enclave.ExecuteRequest{
+		UserID:              "user-1",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("data"),
+	})
+	sessAny, _ := testSessions.Load(server.URL)
+	sess := sessAny.(testSessionAuth)
+	req1 := signedTestRequest(t, server, "/execute", body, sess)
+
+	first, err := http.DefaultClient.Do(req1)
+	if err != nil {
+		t.Fatalf("POST /execute: %v", err)
+	}
+	first.Body.Close()
+	if first.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected first request to pass auth and fail at KEK check with 412, got %d", first.StatusCode)
+	}
+
+	req2 := signedTestRequest(t, server, "/execute", body, sess)
+	req2.Header.Set(enclave.HeaderRequestTimestamp, req1.Header.Get(enclave.HeaderRequestTimestamp))
+	req2.Header.Set(enclave.HeaderRequestNonce, req1.Header.Get(enclave.HeaderRequestNonce))
+	req2.Header.Set(enclave.HeaderRequestMAC, req1.Header.Get(enclave.HeaderRequestMAC))
+	second, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("POST /execute replay: %v", err)
+	}
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for replay, got %d", second.StatusCode)
+	}
+}
+
+func TestSensitiveEndpointsRejectInvalidAndStaleTimestamps(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	body := mustJSON(t, enclave.ExecuteRequest{
+		UserID:              "user-1",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("data"),
+	})
+	sessAny, _ := testSessions.Load(server.URL)
+	sess := sessAny.(testSessionAuth)
+
+	invalid := signedTestRequest(t, server, "/execute", body, sess)
+	invalid.Header.Set(enclave.HeaderRequestTimestamp, "not-a-time")
+	resp, err := http.DefaultClient.Do(invalid)
+	if err != nil {
+		t.Fatalf("POST /execute invalid timestamp: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for invalid timestamp, got %d", resp.StatusCode)
+	}
+
+	stale := signedTestRequest(t, server, "/execute", body, sess)
+	staleTime := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339)
+	signTestRequestWith(t, stale, "/execute", body, sess, staleTime, "stale-nonce")
+	resp, err = http.DefaultClient.Do(stale)
+	if err != nil {
+		t.Fatalf("POST /execute stale timestamp: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for stale timestamp, got %d", resp.StatusCode)
+	}
+}
+
+func TestPruneSeenNonces(t *testing.T) {
+	now := time.Now()
+	seen := map[string]time.Time{
+		"old":    now.Add(-10 * time.Minute),
+		"recent": now,
+	}
+
+	pruneSeenNonces(seen, now.Add(-5*time.Minute))
+
+	if _, ok := seen["old"]; ok {
+		t.Fatal("expected old nonce to be pruned")
+	}
+	if _, ok := seen["recent"]; !ok {
+		t.Fatal("expected recent nonce to remain")
+	}
 }
 
 func TestTransmitKEKBadDecryption(t *testing.T) {

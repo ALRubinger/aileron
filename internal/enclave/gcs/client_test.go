@@ -3,6 +3,7 @@ package gcs
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -45,11 +46,40 @@ func TestClientAttest(t *testing.T) {
 	}
 }
 
+func TestClientDoesNotSignUnauthenticatedEndpoints(t *testing.T) {
+	authKey := []byte("01234567890123456789012345678901")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(enclave.HeaderRequestMAC) != "" {
+			t.Fatal("did not expect request MAC on attestation request")
+		}
+		if r.Header.Get(enclave.HeaderRequestTimestamp) != "" {
+			t.Fatal("did not expect request timestamp on attestation request")
+		}
+		if r.Header.Get(enclave.HeaderRequestNonce) != "" {
+			t.Fatal("did not expect request nonce on attestation request")
+		}
+		json.NewEncoder(w).Encode(enclave.AttestationResponse{
+			Token:     "test-token",
+			PublicKey: []byte("test-pubkey"),
+		})
+	}))
+	defer server.Close()
+
+	c := New(Config{BaseURL: server.URL})
+	c.sessionID = "sess-abc"
+	c.authKey = authKey
+
+	if _, err := c.Attest(context.Background(), enclave.AttestationRequest{}); err != nil {
+		t.Fatalf("Attest: %v", err)
+	}
+}
+
 func TestClientEstablishSession(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(enclave.SessionResponse{
-			SessionID: "sess-123",
-			ExpiresAt: "2026-12-31T23:59:59Z",
+			SessionID:      "sess-123",
+			ExpiresAt:      "2026-12-31T23:59:59Z",
+			RequestAuthKey: []byte("request-auth-key"),
 		})
 	}))
 	defer server.Close()
@@ -64,13 +94,30 @@ func TestClientEstablishSession(t *testing.T) {
 	if resp.SessionID != "sess-123" {
 		t.Fatalf("expected sess-123, got %q", resp.SessionID)
 	}
+	if string(c.authKey) != "request-auth-key" {
+		t.Fatalf("expected request auth key to be stored")
+	}
 }
 
 func TestClientExecute(t *testing.T) {
+	authKey := []byte("01234567890123456789012345678901")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify session header is sent after session establishment.
 		if sid := r.Header.Get(enclave.HeaderSessionID); sid != "sess-abc" {
 			t.Fatalf("expected session ID sess-abc, got %q", sid)
+		}
+		timestamp := r.Header.Get(enclave.HeaderRequestTimestamp)
+		nonce := r.Header.Get(enclave.HeaderRequestNonce)
+		mac := r.Header.Get(enclave.HeaderRequestMAC)
+		if timestamp == "" || nonce == "" || mac == "" {
+			t.Fatalf("expected request authentication headers")
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading body: %v", err)
+		}
+		if !enclave.VerifyRequestMAC(authKey, r.Method, r.URL.Path, body, "sess-abc", timestamp, nonce, mac) {
+			t.Fatalf("request MAC did not verify")
 		}
 		json.NewEncoder(w).Encode(enclave.ExecuteResponse{
 			RequestID:  "exec-1",
@@ -84,6 +131,7 @@ func TestClientExecute(t *testing.T) {
 	c := New(Config{BaseURL: server.URL})
 	// Set session ID manually for this test.
 	c.sessionID = "sess-abc"
+	c.authKey = authKey
 
 	resp, err := c.Execute(context.Background(), enclave.ExecuteRequest{
 		RequestID: "exec-1",
@@ -93,6 +141,32 @@ func TestClientExecute(t *testing.T) {
 	}
 	if resp.Status != "succeeded" {
 		t.Fatalf("expected succeeded, got %q", resp.Status)
+	}
+}
+
+func TestRequiresRequestAuth(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: "/kek", want: true},
+		{path: "/oauth/exchange", want: true},
+		{path: "/execute", want: true},
+		{path: "/escrow", want: true},
+		{path: "/escrow/list", want: true},
+		{path: "/escrow/revoke", want: true},
+		{path: "/source/execute", want: true},
+		{path: "/attest", want: false},
+		{path: "/session", want: false},
+		{path: "/health", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := requiresRequestAuth(tt.path); got != tt.want {
+				t.Fatalf("requiresRequestAuth(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -107,6 +181,22 @@ func TestClientErrorResponse(t *testing.T) {
 	_, err := c.Attest(context.Background(), enclave.AttestationRequest{})
 	if err == nil {
 		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestClientCloseClearsSessionAuth(t *testing.T) {
+	c := New(Config{BaseURL: "http://example.test"})
+	c.sessionID = "sess-abc"
+	c.authKey = []byte("01234567890123456789012345678901")
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if c.sessionID != "" {
+		t.Fatalf("expected session ID to be cleared")
+	}
+	if c.authKey != nil {
+		t.Fatalf("expected auth key to be cleared")
 	}
 }
 

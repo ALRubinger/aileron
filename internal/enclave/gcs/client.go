@@ -6,11 +6,14 @@ package gcs
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/enclave"
 )
@@ -22,6 +25,7 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	sessionID  string
+	authKey    []byte
 }
 
 // Config holds configuration for the GCS enclave client.
@@ -61,6 +65,7 @@ func (c *Client) EstablishSession(ctx context.Context, req enclave.SessionReques
 	}
 	c.mu.Lock()
 	c.sessionID = resp.SessionID
+	c.authKey = copyBytes(resp.RequestAuthKey)
 	c.mu.Unlock()
 	return resp, nil
 }
@@ -146,8 +151,13 @@ func (c *Client) Ready(ctx context.Context) error {
 	return nil
 }
 
-// Close is a no-op for the HTTP client.
+// Close clears session-bound request authentication material.
 func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	zeroBytes(c.authKey)
+	c.authKey = nil
+	c.sessionID = ""
 	return nil
 }
 
@@ -166,10 +176,22 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 
 	c.mu.Lock()
 	sid := c.sessionID
+	authKey := copyBytes(c.authKey)
 	c.mu.Unlock()
 	if sid != "" {
 		req.Header.Set(enclave.HeaderSessionID, sid)
 	}
+	if sid != "" && len(authKey) > 0 && requiresRequestAuth(path) {
+		timestamp := time.Now().UTC().Format(time.RFC3339)
+		nonce, err := randomNonce()
+		if err != nil {
+			return fmt.Errorf("generating request nonce: %w", err)
+		}
+		req.Header.Set(enclave.HeaderRequestTimestamp, timestamp)
+		req.Header.Set(enclave.HeaderRequestNonce, nonce)
+		req.Header.Set(enclave.HeaderRequestMAC, enclave.RequestMAC(authKey, http.MethodPost, path, payload, sid, timestamp, nonce))
+	}
+	zeroBytes(authKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -188,4 +210,36 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 		}
 	}
 	return nil
+}
+
+func requiresRequestAuth(path string) bool {
+	switch path {
+	case "/kek", "/oauth/exchange", "/execute", "/escrow", "/escrow/list", "/escrow/revoke", "/source/execute":
+		return true
+	default:
+		return false
+	}
+}
+
+func randomNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+func copyBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
+}
+
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
