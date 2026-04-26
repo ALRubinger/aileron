@@ -12,6 +12,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/account"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -904,7 +905,8 @@ func TestConnectedAccountToAPI(t *testing.T) {
 
 func TestCreateConnectedAccount_EnclaveMode_TokenForbidden(t *testing.T) {
 	srv := newConnectedAccountServer()
-	srv.enclaveClient = &toolsEnclaveClient{} // enclave active
+	srv.enclaveClient = &toolsEnclaveClient{}
+	srv.teeCfg = &config.TEEConfig{Provider: "confidential-space"}
 
 	body := `{"provider":"slack","token":{"access_token":"xoxp-test"}}`
 	w := httptest.NewRecorder()

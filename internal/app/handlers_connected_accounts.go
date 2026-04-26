@@ -56,10 +56,11 @@ func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.
 
 	// Store token in vault if provided.
 	if len(req.Token) > 0 {
-		// Enclave mode: reject plaintext token ingress. In TEE deployments,
-		// credentials must flow through the OAuth callback which routes
-		// through the enclave for KEK-encrypted storage.
-		if s.enclaveClient != nil {
+		// Production enclave mode: reject plaintext token ingress. In TEE
+		// deployments, credentials must flow through the OAuth callback
+		// which routes through the enclave for KEK-encrypted storage.
+		// The local dev provider is exempt since it has no real isolation.
+		if s.enclaveClient != nil && s.teeCfg != nil && s.teeCfg.Provider != "local" {
 			writeError(w, http.StatusForbidden, "enclave_mode", "plaintext token submission is not permitted in enclave mode; use the OAuth connect flow")
 			return
 		}

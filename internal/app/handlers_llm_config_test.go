@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/auth"
+	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store"
@@ -751,7 +752,8 @@ func TestHandleDeleteEnterpriseLLMConfig_BadPath(t *testing.T) {
 
 func TestHandleUpsertUserLLMConfig_EnclaveMode_Forbidden(t *testing.T) {
 	s := newTestLLMConfigServer()
-	s.enclaveClient = &toolsEnclaveClient{} // enclave active
+	s.enclaveClient = &toolsEnclaveClient{}
+	s.teeCfg = &config.TEEConfig{Provider: "confidential-space"}
 
 	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-test"}`
 	req := httptest.NewRequest("PUT", "/v1/llm-config", bytes.NewBufferString(body))
@@ -768,7 +770,8 @@ func TestHandleUpsertUserLLMConfig_EnclaveMode_Forbidden(t *testing.T) {
 
 func TestHandleUpsertEnterpriseLLMConfig_EnclaveMode_Forbidden(t *testing.T) {
 	s := newTestEnterpriseLLMConfigServer()
-	s.enclaveClient = &toolsEnclaveClient{} // enclave active
+	s.enclaveClient = &toolsEnclaveClient{}
+	s.teeCfg = &config.TEEConfig{Provider: "confidential-space"}
 
 	body := `{"provider":"anthropic","model_research":"haiku","model_synthesis":"sonnet","api_key":"sk-test"}`
 	req := withAdminAuth(httptest.NewRequest("PUT", "/v1/enterprises/ent_1/llm-config", bytes.NewBufferString(body)))
