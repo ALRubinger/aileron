@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -234,24 +236,46 @@ func (s *apiServer) InitiateAttestation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Server-side verification to extract claims for the status endpoint.
-	// Best-effort: failure here does not block the attestation flow since
-	// the client independently verifies the token.
+	// Server-side verification: validate the attestation token's signature,
+	// claims, nonce, and (when configured) image digest and project ID.
+	// This is mandatory — if verification fails, the attestation is rejected.
 	var verifiedClaims *enclave.AttestationClaims
 	if s.enclaveVerifier != nil {
 		c, verifyErr := s.enclaveVerifier.Verify(r.Context(), attestResp.Token, nonce)
 		if verifyErr != nil {
-			s.log.Warn("server-side attestation verification failed (non-fatal)", "error", verifyErr)
-		} else {
-			verifiedClaims = &c
+			s.log.Error("server-side attestation verification failed", "error", verifyErr)
+			writeError(w, http.StatusBadGateway, "attestation_failed", "enclave attestation verification failed: "+verifyErr.Error())
+			return
 		}
+
+		// Verify the ECDH public key is bound to the attestation token:
+		// the enclave includes SHA-256(public_key) as an eat_nonce entry.
+		// Skip this check for dev verifiers that don't produce nonces.
+		if len(c.Nonces) > 0 {
+			pubkeyHash := sha256.Sum256(attestResp.PublicKey)
+			pubkeyNonce := base64.RawURLEncoding.EncodeToString(pubkeyHash[:])
+			pubkeyBound := false
+			for _, n := range c.Nonces {
+				if n == pubkeyNonce {
+					pubkeyBound = true
+					break
+				}
+			}
+			if !pubkeyBound {
+				s.log.Error("ECDH public key is not bound to attestation evidence")
+				writeError(w, http.StatusBadGateway, "attestation_failed", "enclave public key is not cryptographically bound to attestation evidence")
+				return
+			}
+		}
+
+		verifiedClaims = &c
 	}
 
 	// Store state for the session establishment step.
 	s.teeState.mu.Lock()
 	s.teeState.nonce = nonce
 	s.teeState.attestResp = attestResp
-	s.teeState.attested = true
+	s.teeState.attested = verifiedClaims != nil || s.enclaveVerifier == nil
 	s.teeState.claims = verifiedClaims
 	s.teeState.mu.Unlock()
 

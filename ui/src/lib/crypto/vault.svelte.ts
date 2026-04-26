@@ -112,10 +112,12 @@ async function unlockViaTee(
 	const attestResp = await initiateAttestation();
 	const enclavePublicKey = base64ToBytes(attestResp.public_key);
 
+	const nonce = attestResp.nonce ? base64ToBytes(attestResp.nonce) : undefined;
 	const attResult = await verifyAttestation(
 		attestResp.token,
 		enclavePublicKey,
-		'aileron-enclave'
+		'aileron-enclave',
+		nonce
 	);
 	if (!attResult.verified) {
 		throw new Error('Enclave attestation verification failed');

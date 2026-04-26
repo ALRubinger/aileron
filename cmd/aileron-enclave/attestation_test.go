@@ -7,7 +7,7 @@ import (
 )
 
 func TestFetchAttestationTokenLocal(t *testing.T) {
-	token, err := fetchAttestationToken("local", "test-audience")
+	token, err := fetchAttestationToken("local", "test-audience", nil)
 	if err != nil {
 		t.Fatalf("fetchAttestationToken: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestFetchAttestationTokenGCE(t *testing.T) {
 	metadataBaseURL = mockServer.URL
 	defer func() { metadataBaseURL = orig }()
 
-	token, err := fetchAttestationToken("confidential-space", "my-audience")
+	token, err := fetchAttestationToken("confidential-space", "my-audience", nil)
 	if err != nil {
 		t.Fatalf("fetchAttestationToken: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestFetchAttestationTokenGCEDefaultAudience(t *testing.T) {
 	metadataBaseURL = mockServer.URL
 	defer func() { metadataBaseURL = orig }()
 
-	token, err := fetchAttestationToken("confidential-space", "")
+	token, err := fetchAttestationToken("confidential-space", "", nil)
 	if err != nil {
 		t.Fatalf("fetchAttestationToken: %v", err)
 	}
@@ -78,9 +78,32 @@ func TestFetchAttestationTokenGCEError(t *testing.T) {
 	metadataBaseURL = mockServer.URL
 	defer func() { metadataBaseURL = orig }()
 
-	_, err := fetchAttestationToken("confidential-space", "test")
+	_, err := fetchAttestationToken("confidential-space", "test", nil)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestFetchAttestationTokenWithNonces(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonces := r.URL.Query().Get("nonces")
+		if nonces != "nonce1,nonce2" {
+			t.Errorf("expected nonces=nonce1,nonce2, got %q", nonces)
+		}
+		w.Write([]byte("token-with-nonces"))
+	}))
+	defer mockServer.Close()
+
+	orig := metadataBaseURL
+	metadataBaseURL = mockServer.URL
+	defer func() { metadataBaseURL = orig }()
+
+	token, err := fetchAttestationToken("confidential-space", "aud", []string{"nonce1", "nonce2"})
+	if err != nil {
+		t.Fatalf("fetchAttestationToken: %v", err)
+	}
+	if token != "token-with-nonces" {
+		t.Fatalf("expected token-with-nonces, got %q", token)
 	}
 }
 
@@ -89,7 +112,7 @@ func TestFetchAttestationTokenGCEUnreachable(t *testing.T) {
 	metadataBaseURL = "http://127.0.0.1:1" // unreachable
 	defer func() { metadataBaseURL = orig }()
 
-	_, err := fetchAttestationToken("confidential-space", "test")
+	_, err := fetchAttestationToken("confidential-space", "test", nil)
 	if err == nil {
 		t.Fatal("expected error for unreachable server")
 	}
