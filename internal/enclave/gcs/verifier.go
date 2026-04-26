@@ -82,17 +82,23 @@ func (v *Verifier) Verify(ctx context.Context, token string, nonce []byte) (encl
 		return enclave.AttestationClaims{}, fmt.Errorf("gcs: decoding JWT claims: %w", err)
 	}
 	var claims struct {
-		Iss          string   `json:"iss"`
-		Exp          int64    `json:"exp"`
-		Iat          int64    `json:"iat"`
-		EatNonce     []string `json:"eat_nonce"`
-		ImageDigest  string   `json:"image_digest"`
-		ProjectID    string   `json:"project_id"`
-		HWModel      string   `json:"hwmodel"`
-		SwName       string   `json:"swname"`
+		Iss         string   `json:"iss"`
+		Exp         int64    `json:"exp"`
+		Iat         int64    `json:"iat"`
+		EatNonce    []string `json:"eat_nonce"`
+		ImageDigest string   `json:"image_digest"`
+		ProjectID   string   `json:"project_id"`
+		HWModel     string   `json:"hwmodel"`
+		SwName      string   `json:"swname"`
 	}
 	if err := json.Unmarshal(claimsBytes, &claims); err != nil {
 		return enclave.AttestationClaims{}, fmt.Errorf("gcs: parsing JWT claims: %w", err)
+	}
+	if v.ExpectedImageDigest == "" {
+		return enclave.AttestationClaims{}, errors.New("gcs: expected image digest is required")
+	}
+	if v.ExpectedProjectID == "" {
+		return enclave.AttestationClaims{}, errors.New("gcs: expected project ID is required")
 	}
 
 	now := time.Now()
@@ -124,10 +130,10 @@ func (v *Verifier) Verify(ctx context.Context, token string, nonce []byte) (encl
 	}
 
 	// Validate workload identity.
-	if v.ExpectedImageDigest != "" && claims.ImageDigest != v.ExpectedImageDigest {
+	if claims.ImageDigest != v.ExpectedImageDigest {
 		return enclave.AttestationClaims{}, fmt.Errorf("gcs: image digest mismatch: got %q, want %q", claims.ImageDigest, v.ExpectedImageDigest)
 	}
-	if v.ExpectedProjectID != "" && claims.ProjectID != v.ExpectedProjectID {
+	if claims.ProjectID != v.ExpectedProjectID {
 		return enclave.AttestationClaims{}, fmt.Errorf("gcs: project ID mismatch: got %q, want %q", claims.ProjectID, v.ExpectedProjectID)
 	}
 

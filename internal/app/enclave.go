@@ -29,6 +29,12 @@ func newEnclaveClient(cfg *config.TEEConfig, log *slog.Logger, registry *connect
 		if cfg.EnclaveURL == "" {
 			return nil, nil, fmt.Errorf("AILERON_ENCLAVE_URL required for confidential-space provider")
 		}
+		if cfg.ImageDigest == "" {
+			return nil, nil, fmt.Errorf("AILERON_ENCLAVE_IMAGE_DIGEST required for confidential-space provider")
+		}
+		if cfg.ProjectID == "" {
+			return nil, nil, fmt.Errorf("AILERON_GCP_PROJECT_ID required for confidential-space provider")
+		}
 		log.Info("TEE provider: Google Confidential Space", "url", cfg.EnclaveURL)
 		client := gcs.New(gcs.Config{BaseURL: cfg.EnclaveURL})
 		verifier := &gcs.Verifier{
