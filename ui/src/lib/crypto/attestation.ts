@@ -155,7 +155,7 @@ async function verifyConfidentialSpaceJWT(
 	// this check.
 	if (enclavePublicKey && enclavePublicKey.length > 0 && jwtClaims.eat_nonce && jwtClaims.eat_nonce.length > 0) {
 		const pubkeyHash = new Uint8Array(
-			await crypto.subtle.digest('SHA-256', enclavePublicKey)
+			await crypto.subtle.digest('SHA-256', (enclavePublicKey as Uint8Array<ArrayBuffer>).buffer)
 		);
 		const pubkeyNonce = bytesToBase64Url(pubkeyHash);
 		if (!jwtClaims.eat_nonce.includes(pubkeyNonce)) {
