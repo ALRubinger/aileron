@@ -100,6 +100,9 @@ type ExecuteRequest struct {
 	// EscrowID, if set, tells the enclave to use an escrowed credential
 	// instead of EncryptedCredential.
 	EscrowID string `json:"escrow_id,omitempty"`
+	// Capability is a signed, scoped grant envelope the enclave verifies
+	// before using credentials for this operation.
+	Capability *SignedGrantCapability `json:"capability,omitempty"`
 }
 
 // ExecuteResponse is returned by the enclave after connector execution.
@@ -157,17 +160,18 @@ const (
 // EscrowStoreRequest asks the enclave to escrow a credential for
 // asynchronous or scheduled execution when the user is offline.
 type EscrowStoreRequest struct {
-	UserID              string         `json:"user_id"`
-	GrantID             string         `json:"grant_id"`
-	EnforceGrantID      bool           `json:"enforce_grant_id,omitempty"`
-	VaultPath           string         `json:"vault_path"`
-	Provider            string         `json:"provider"`
-	EncryptedCredential []byte         `json:"encrypted_credential"`
-	CredentialType      string         `json:"credential_type"`
-	ExpiresAt           string         `json:"expires_at"` // RFC 3339
-	ActionTypes         []string       `json:"action_types"`
-	SourceTools         []string       `json:"source_tools,omitempty"`
-	AllowedParameters   map[string]any `json:"allowed_parameters,omitempty"`
+	UserID              string                 `json:"user_id"`
+	GrantID             string                 `json:"grant_id"`
+	EnforceGrantID      bool                   `json:"enforce_grant_id,omitempty"`
+	VaultPath           string                 `json:"vault_path"`
+	Provider            string                 `json:"provider"`
+	EncryptedCredential []byte                 `json:"encrypted_credential"`
+	CredentialType      string                 `json:"credential_type"`
+	ExpiresAt           string                 `json:"expires_at"` // RFC 3339
+	ActionTypes         []string               `json:"action_types"`
+	SourceTools         []string               `json:"source_tools,omitempty"`
+	AllowedParameters   map[string]any         `json:"allowed_parameters,omitempty"`
+	Capability          *SignedGrantCapability `json:"capability,omitempty"`
 }
 
 // EscrowStoreResponse confirms that the credential has been escrowed.
@@ -212,6 +216,9 @@ type SourceExecuteRequest struct {
 	Tool string `json:"tool"`
 	// Params are the tool parameters (query, filters, etc.).
 	Params map[string]any `json:"params"`
+	// Capability is a signed, scoped grant envelope the enclave verifies
+	// before using credentials for this operation.
+	Capability *SignedGrantCapability `json:"capability,omitempty"`
 }
 
 // SourceExecuteResponse contains the tool execution results. The credential

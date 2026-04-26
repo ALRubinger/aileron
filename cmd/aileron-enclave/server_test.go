@@ -86,6 +86,9 @@ func setupTestEnclaveServerWithSource(t *testing.T, sc source.SourceConnector) (
 
 func postJSON(t *testing.T, server *httptest.Server, path string, body any) *http.Response {
 	t.Helper()
+	if sessAny, ok := testSessions.Load(server.URL); ok {
+		body = attachTestCapability(t, path, body, sessAny.(testSessionAuth))
+	}
 	payload, _ := json.Marshal(body)
 	return postRaw(t, server, path, payload, true)
 }
@@ -161,6 +164,40 @@ func signTestRequestWith(t *testing.T, req *http.Request, path string, body []by
 	req.Header.Set(enclave.HeaderRequestTimestamp, timestamp)
 	req.Header.Set(enclave.HeaderRequestNonce, nonce)
 	req.Header.Set(enclave.HeaderRequestMAC, enclave.RequestMAC(sess.authKey, req.Method, path, body, sess.sessionID, timestamp, nonce))
+}
+
+func attachTestCapability(t *testing.T, path string, body any, sess testSessionAuth) any {
+	t.Helper()
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		t.Fatalf("generating capability nonce: %v", err)
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	switch req := body.(type) {
+	case enclave.ExecuteRequest:
+		capability, err := enclave.SignGrantCapability(sess.authKey, enclave.ExecuteGrantCapability(req, nonce))
+		if err != nil {
+			t.Fatalf("signing execute capability: %v", err)
+		}
+		req.Capability = capability
+		return req
+	case enclave.EscrowStoreRequest:
+		capability, err := enclave.SignGrantCapability(sess.authKey, enclave.EscrowStoreGrantCapability(req, nonce))
+		if err != nil {
+			t.Fatalf("signing escrow capability: %v", err)
+		}
+		req.Capability = capability
+		return req
+	case enclave.SourceExecuteRequest:
+		capability, err := enclave.SignGrantCapability(sess.authKey, enclave.SourceExecuteGrantCapability(req, nonce))
+		if err != nil {
+			t.Fatalf("signing source capability: %v", err)
+		}
+		req.Capability = capability
+		return req
+	default:
+		return body
+	}
 }
 
 func signedTestRequest(t *testing.T, server *httptest.Server, path string, body []byte, sess testSessionAuth) *http.Request {
@@ -850,21 +887,47 @@ func TestSensitiveEndpointsRequireRequestAuthentication(t *testing.T) {
 	unsigned.Body.Close()
 }
 
+func TestExecuteRejectsMissingGrantCapability(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	body := mustJSON(t, enclave.ExecuteRequest{
+		UserID:              "user-1",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("data"),
+	})
+
+	resp := postRaw(t, server, "/execute", body, true)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing capability, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestSensitiveEndpointsRejectTamperedRequest(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
 	establishTestSession(t, server)
 
-	originalBody := []byte(`{"user_id":"user-1","connector_id":"test/stub","encrypted_credential":"ZGF0YQ=="}`)
-	tamperedBody := []byte(`{"user_id":"user-2","connector_id":"test/stub","encrypted_credential":"ZGF0YQ=="}`)
+	sessAny, _ := testSessions.Load(server.URL)
+	sess := sessAny.(testSessionAuth)
+	originalReq := attachTestCapability(t, "/execute", enclave.ExecuteRequest{
+		UserID:              "user-1",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("data"),
+	}, sess).(enclave.ExecuteRequest)
+	tamperedReq := originalReq
+	tamperedReq.UserID = "user-2"
+	originalBody := mustJSON(t, originalReq)
+	tamperedBody := mustJSON(t, tamperedReq)
 	req, err := http.NewRequest(http.MethodPost, server.URL+"/execute", bytes.NewReader(tamperedBody))
 	if err != nil {
 		t.Fatalf("creating request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	sessAny, _ := testSessions.Load(server.URL)
-	sess := sessAny.(testSessionAuth)
 	req.Header.Set(enclave.HeaderSessionID, sess.sessionID)
 	signTestRequest(t, req, "/execute", originalBody, sess)
 
@@ -884,13 +947,13 @@ func TestSensitiveEndpointsRejectReplay(t *testing.T) {
 
 	establishTestSession(t, server)
 
-	body := mustJSON(t, enclave.ExecuteRequest{
+	sessAny, _ := testSessions.Load(server.URL)
+	sess := sessAny.(testSessionAuth)
+	body := mustJSON(t, attachTestCapability(t, "/execute", enclave.ExecuteRequest{
 		UserID:              "user-1",
 		ConnectorID:         "test/stub",
 		EncryptedCredential: []byte("data"),
-	})
-	sessAny, _ := testSessions.Load(server.URL)
-	sess := sessAny.(testSessionAuth)
+	}, sess))
 	req1 := signedTestRequest(t, server, "/execute", body, sess)
 
 	first, err := http.DefaultClient.Do(req1)
@@ -922,13 +985,13 @@ func TestSensitiveEndpointsRejectInvalidAndStaleTimestamps(t *testing.T) {
 
 	establishTestSession(t, server)
 
-	body := mustJSON(t, enclave.ExecuteRequest{
+	sessAny, _ := testSessions.Load(server.URL)
+	sess := sessAny.(testSessionAuth)
+	body := mustJSON(t, attachTestCapability(t, "/execute", enclave.ExecuteRequest{
 		UserID:              "user-1",
 		ConnectorID:         "test/stub",
 		EncryptedCredential: []byte("data"),
-	})
-	sessAny, _ := testSessions.Load(server.URL)
-	sess := sessAny.(testSessionAuth)
+	}, sess))
 
 	invalid := signedTestRequest(t, server, "/execute", body, sess)
 	invalid.Header.Set(enclave.HeaderRequestTimestamp, "not-a-time")
