@@ -67,6 +67,48 @@ func TestNewEnclaveClient_ConfidentialSpaceNoURL(t *testing.T) {
 	}
 }
 
+func TestNewEnclaveClient_ConfidentialSpaceRequiresImageDigest(t *testing.T) {
+	cfg := &config.TEEConfig{
+		Provider:   "confidential-space",
+		EnclaveURL: "https://enclave.example.com:8443",
+		ProjectID:  "my-project",
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry := connector.NewRegistry()
+
+	client, verifier, err := newEnclaveClient(cfg, log, registry)
+	if err == nil {
+		t.Fatal("expected error for confidential-space without ImageDigest")
+	}
+	if client != nil {
+		t.Fatal("expected nil client on error")
+	}
+	if verifier != nil {
+		t.Fatal("expected nil verifier on error")
+	}
+}
+
+func TestNewEnclaveClient_ConfidentialSpaceRequiresProjectID(t *testing.T) {
+	cfg := &config.TEEConfig{
+		Provider:    "confidential-space",
+		EnclaveURL:  "https://enclave.example.com:8443",
+		ImageDigest: "sha256:abc123",
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry := connector.NewRegistry()
+
+	client, verifier, err := newEnclaveClient(cfg, log, registry)
+	if err == nil {
+		t.Fatal("expected error for confidential-space without ProjectID")
+	}
+	if client != nil {
+		t.Fatal("expected nil client on error")
+	}
+	if verifier != nil {
+		t.Fatal("expected nil verifier on error")
+	}
+}
+
 func TestNewEnclaveClient_ConfidentialSpaceWithURL(t *testing.T) {
 	cfg := &config.TEEConfig{
 		Provider:    "confidential-space",

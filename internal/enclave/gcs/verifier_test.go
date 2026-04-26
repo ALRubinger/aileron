@@ -16,6 +16,11 @@ import (
 	"time"
 )
 
+const (
+	testImageDigest = "sha256:abc123"
+	testProjectID   = "my-project"
+)
+
 // buildTestJWT creates a signed JWT for testing.
 func buildTestJWT(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {
 	t.Helper()
@@ -85,14 +90,14 @@ func TestVerifyValidToken(t *testing.T) {
 		"exp":          expTime.Unix(),
 		"iat":          now.Unix(),
 		"eat_nonce":    []string{nonceB64},
-		"image_digest": "sha256:abc123",
-		"project_id":   "my-project",
+		"image_digest": testImageDigest,
+		"project_id":   testProjectID,
 		"hwmodel":      "GCP_AMD_SEV",
 	})
 
 	v := &Verifier{
-		ExpectedImageDigest: "sha256:abc123",
-		ExpectedProjectID:   "my-project",
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
 		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
 	}
 
@@ -120,6 +125,56 @@ func TestVerifyValidToken(t *testing.T) {
 	}
 }
 
+func TestVerifyRequiresExpectedImageDigest(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	kid := "test-key-1"
+	server := setupTestServer(t, &key.PublicKey, kid)
+	defer server.Close()
+
+	nonce := []byte("nonce")
+	token := buildTestJWT(t, key, kid, map[string]any{
+		"iss":          "https://accounts.google.com",
+		"exp":          time.Now().Add(time.Hour).Unix(),
+		"eat_nonce":    []string{base64.RawURLEncoding.EncodeToString(nonce)},
+		"image_digest": testImageDigest,
+		"project_id":   testProjectID,
+	})
+
+	v := &Verifier{
+		ExpectedProjectID: testProjectID,
+		DiscoveryURL:      server.URL + "/.well-known/openid-configuration",
+	}
+	_, err := v.Verify(context.Background(), token, nonce)
+	if err == nil {
+		t.Fatal("expected error for missing expected image digest")
+	}
+}
+
+func TestVerifyRequiresExpectedProjectID(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	kid := "test-key-1"
+	server := setupTestServer(t, &key.PublicKey, kid)
+	defer server.Close()
+
+	nonce := []byte("nonce")
+	token := buildTestJWT(t, key, kid, map[string]any{
+		"iss":          "https://accounts.google.com",
+		"exp":          time.Now().Add(time.Hour).Unix(),
+		"eat_nonce":    []string{base64.RawURLEncoding.EncodeToString(nonce)},
+		"image_digest": testImageDigest,
+		"project_id":   testProjectID,
+	})
+
+	v := &Verifier{
+		ExpectedImageDigest: testImageDigest,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+	}
+	_, err := v.Verify(context.Background(), token, nonce)
+	if err == nil {
+		t.Fatal("expected error for missing expected project ID")
+	}
+}
+
 func TestVerifyExpiredToken(t *testing.T) {
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	kid := "test-key-1"
@@ -133,7 +188,11 @@ func TestVerifyExpiredToken(t *testing.T) {
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
 
-	v := &Verifier{DiscoveryURL: server.URL + "/.well-known/openid-configuration"}
+	v := &Verifier{
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+	}
 	_, err := v.Verify(context.Background(), token, nonce)
 	if err == nil {
 		t.Fatal("expected error for expired token")
@@ -153,7 +212,11 @@ func TestVerifyWrongIssuer(t *testing.T) {
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
 
-	v := &Verifier{DiscoveryURL: server.URL + "/.well-known/openid-configuration"}
+	v := &Verifier{
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+	}
 	_, err := v.Verify(context.Background(), token, nonce)
 	if err == nil {
 		t.Fatal("expected error for wrong issuer")
@@ -172,7 +235,11 @@ func TestVerifyNonceMismatch(t *testing.T) {
 		"eat_nonce": []string{"wrong-nonce"},
 	})
 
-	v := &Verifier{DiscoveryURL: server.URL + "/.well-known/openid-configuration"}
+	v := &Verifier{
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+	}
 	_, err := v.Verify(context.Background(), token, []byte("correct-nonce"))
 	if err == nil {
 		t.Fatal("expected error for nonce mismatch")
@@ -196,6 +263,7 @@ func TestVerifyImageDigestMismatch(t *testing.T) {
 
 	v := &Verifier{
 		ExpectedImageDigest: "sha256:correct",
+		ExpectedProjectID:   testProjectID,
 		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
 	}
 	_, err := v.Verify(context.Background(), token, nonce)
@@ -228,8 +296,9 @@ func TestVerifyProjectIDMismatch(t *testing.T) {
 	})
 
 	v := &Verifier{
-		ExpectedProjectID: "my-project",
-		DiscoveryURL:      server.URL + "/.well-known/openid-configuration",
+		ExpectedImageDigest: "sha256:abc",
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
 	}
 	_, err := v.Verify(context.Background(), token, nonce)
 	if err == nil {
@@ -250,7 +319,11 @@ func TestVerifyKeyNotFound(t *testing.T) {
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
 
-	v := &Verifier{DiscoveryURL: server.URL + "/.well-known/openid-configuration"}
+	v := &Verifier{
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+	}
 	_, err := v.Verify(context.Background(), token, nonce)
 	if err == nil {
 		t.Fatal("expected error for key not found")
@@ -279,8 +352,10 @@ func TestVerifyWithNowFunc(t *testing.T) {
 
 	// Use NowFunc to simulate time far in the future (expired).
 	v := &Verifier{
-		DiscoveryURL: server.URL + "/.well-known/openid-configuration",
-		NowFunc:      func() time.Time { return time.Now().Add(2 * time.Hour) },
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+		NowFunc:             func() time.Time { return time.Now().Add(2 * time.Hour) },
 	}
 	_, err := v.Verify(context.Background(), token, nonce)
 	if err == nil {
@@ -296,14 +371,18 @@ func TestVerifyWithCustomHTTPClient(t *testing.T) {
 
 	nonce := []byte("nonce")
 	token := buildTestJWT(t, key, kid, map[string]any{
-		"iss":       "https://accounts.google.com",
-		"exp":       time.Now().Add(time.Hour).Unix(),
-		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
+		"iss":          "https://accounts.google.com",
+		"exp":          time.Now().Add(time.Hour).Unix(),
+		"eat_nonce":    []string{base64.RawURLEncoding.EncodeToString(nonce)},
+		"image_digest": testImageDigest,
+		"project_id":   testProjectID,
 	})
 
 	v := &Verifier{
-		DiscoveryURL: server.URL + "/.well-known/openid-configuration",
-		HTTPClient:   &http.Client{Timeout: 5 * time.Second},
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+		HTTPClient:          &http.Client{Timeout: 5 * time.Second},
 	}
 	_, err := v.Verify(context.Background(), token, nonce)
 	if err != nil {
@@ -348,9 +427,11 @@ func TestVerifyES256Token(t *testing.T) {
 	// Build ES256 JWT.
 	header, _ := json.Marshal(map[string]string{"alg": "ES256", "kid": kid})
 	claims, _ := json.Marshal(map[string]any{
-		"iss":       "https://accounts.google.com",
-		"exp":       time.Now().Add(time.Hour).Unix(),
-		"eat_nonce": []string{nonceB64},
+		"iss":          "https://accounts.google.com",
+		"exp":          time.Now().Add(time.Hour).Unix(),
+		"eat_nonce":    []string{nonceB64},
+		"image_digest": testImageDigest,
+		"project_id":   testProjectID,
 	})
 	headerB64 := base64.RawURLEncoding.EncodeToString(header)
 	claimsB64 := base64.RawURLEncoding.EncodeToString(claims)
@@ -365,7 +446,11 @@ func TestVerifyES256Token(t *testing.T) {
 	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
 	token := signingInput + "." + sigB64
 
-	v := &Verifier{DiscoveryURL: server.URL + "/.well-known/openid-configuration"}
+	v := &Verifier{
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+	}
 	_, err = v.Verify(context.Background(), token, nonce)
 	if err != nil {
 		t.Fatalf("Verify ES256: %v", err)
@@ -411,7 +496,11 @@ func TestVerifyWrongSignature(t *testing.T) {
 		"eat_nonce": []string{base64.RawURLEncoding.EncodeToString(nonce)},
 	})
 
-	v := &Verifier{DiscoveryURL: server.URL + "/.well-known/openid-configuration"}
+	v := &Verifier{
+		ExpectedImageDigest: testImageDigest,
+		ExpectedProjectID:   testProjectID,
+		DiscoveryURL:        server.URL + "/.well-known/openid-configuration",
+	}
 	_, err := v.Verify(context.Background(), token, nonce)
 	if err == nil {
 		t.Fatal("expected error for wrong signature")
