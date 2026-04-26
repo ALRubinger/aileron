@@ -151,6 +151,10 @@ func (s *enclaveServer) handleSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *enclaveServer) handleTransmitKEK(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+
 	var req enclave.TransmitKEKRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -182,6 +186,10 @@ func (s *enclaveServer) handleTransmitKEK(w http.ResponseWriter, r *http.Request
 }
 
 func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+
 	var req enclave.OAuthExchangeRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -224,6 +232,10 @@ func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+
 	var req enclave.ExecuteRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -299,6 +311,10 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+
 	var req enclave.EscrowStoreRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -350,12 +366,20 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, enclave.EscrowStoreResponse{EscrowID: id})
 }
 
-func (s *enclaveServer) handleEscrowList(w http.ResponseWriter, _ *http.Request) {
+func (s *enclaveServer) handleEscrowList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+
 	entries := s.escrow.List()
 	writeJSON(w, http.StatusOK, enclave.EscrowListResponse{Entries: entries})
 }
 
 func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+
 	var req enclave.EscrowRevokeRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -371,6 +395,10 @@ func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *enclaveServer) handleSourceExecute(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSession(w, r) {
+		return
+	}
+
 	var req enclave.SourceExecuteRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -422,6 +450,29 @@ func (s *enclaveServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"provider":       s.provider,
 		"session_active": hasSession,
 	})
+}
+
+func (s *enclaveServer) requireSession(w http.ResponseWriter, r *http.Request) bool {
+	sid := r.Header.Get(enclave.HeaderSessionID)
+
+	s.mu.Lock()
+	activeID := s.sessionID
+	hasActiveSession := s.sessionKey != nil && time.Now().Before(s.expiresAt)
+	s.mu.Unlock()
+
+	if !hasActiveSession {
+		writeErr(w, http.StatusPreconditionFailed, "no active session")
+		return false
+	}
+	if sid == "" {
+		writeErr(w, http.StatusUnauthorized, "missing session")
+		return false
+	}
+	if sid != activeID {
+		writeErr(w, http.StatusUnauthorized, "invalid session")
+		return false
+	}
+	return true
 }
 
 // resolveConnectorID splits "type/provider" into its components.

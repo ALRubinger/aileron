@@ -69,7 +69,7 @@ func TestClientEstablishSession(t *testing.T) {
 func TestClientExecute(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify session header is sent after session establishment.
-		if sid := r.Header.Get("X-Session-ID"); sid != "sess-abc" {
+		if sid := r.Header.Get(enclave.HeaderSessionID); sid != "sess-abc" {
 			t.Fatalf("expected session ID sess-abc, got %q", sid)
 		}
 		json.NewEncoder(w).Encode(enclave.ExecuteResponse{

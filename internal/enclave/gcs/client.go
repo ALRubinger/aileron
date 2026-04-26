@@ -168,7 +168,7 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 	sid := c.sessionID
 	c.mu.Unlock()
 	if sid != "" {
-		req.Header.Set("X-Session-ID", sid)
+		req.Header.Set(enclave.HeaderSessionID, sid)
 	}
 
 	resp, err := c.httpClient.Do(req)

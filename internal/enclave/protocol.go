@@ -143,6 +143,10 @@ type SessionResponse struct {
 	ExpiresAt string `json:"expires_at"` // RFC 3339
 }
 
+// HeaderSessionID binds post-attestation enclave requests to the active
+// ECDH session established by SessionRequest/SessionResponse.
+const HeaderSessionID = "X-Session-ID"
+
 // EscrowStoreRequest asks the enclave to escrow a credential for
 // asynchronous or scheduled execution when the user is offline.
 type EscrowStoreRequest struct {
