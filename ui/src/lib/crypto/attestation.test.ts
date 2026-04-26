@@ -35,6 +35,13 @@ async function exportJWK(key: CryptoKey, kid: string): Promise<JsonWebKey & { ki
 	return { ...jwk, kid };
 }
 
+// Pre-compute the pubkey nonce for the test key so JWT claims can include it.
+async function pubkeyNonceB64(pubkey: Uint8Array): Promise<string> {
+	const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', pubkey));
+	const binary = String.fromCharCode(...hash);
+	return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 describe('verifyAttestation', () => {
 	const enclavePublicKey = new Uint8Array([1, 2, 3, 4]);
 
@@ -71,9 +78,11 @@ describe('verifyAttestation', () => {
 		});
 
 		it('verifies a valid RS256 JWT', async () => {
+			const pkNonce = await pubkeyNonceB64(enclavePublicKey);
 			const claims = {
 				iss: 'https://accounts.google.com',
-				exp: Math.floor(Date.now() / 1000) + 3600
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				eat_nonce: [pkNonce]
 			};
 			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
 
@@ -164,9 +173,11 @@ describe('verifyAttestation', () => {
 		});
 
 		it('verifies a valid ES256 JWT', async () => {
+			const pkNonce = await pubkeyNonceB64(enclavePublicKey);
 			const claims = {
 				iss: 'https://accounts.google.com',
-				exp: Math.floor(Date.now() / 1000) + 3600
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				eat_nonce: [pkNonce]
 			};
 			const token = await createSignedJWT(claims, keyPair, kid, 'ES256');
 
@@ -213,5 +224,53 @@ describe('verifyAttestation', () => {
 		await expect(verifyAttestation(token, enclavePublicKey, 'aud')).rejects.toThrow(
 			'Failed to fetch JWKS'
 		);
+	});
+
+	describe('pubkey binding', () => {
+		let keyPair: CryptoKeyPair;
+		const kid = 'bind-test';
+
+		beforeEach(async () => {
+			keyPair = await crypto.subtle.generateKey(
+				{ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+				true,
+				['sign', 'verify']
+			);
+			const jwk = await exportJWK(keyPair.publicKey, kid);
+			vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+				new Response(JSON.stringify({ keys: [jwk] }), {
+					status: 200,
+					headers: { 'Content-Type': 'application/json' }
+				})
+			);
+		});
+
+		it('rejects when pubkey hash is missing from eat_nonce', async () => {
+			const claims = {
+				iss: 'https://accounts.google.com',
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				eat_nonce: ['some-other-nonce']
+			};
+			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
+
+			await expect(verifyAttestation(token, enclavePublicKey, 'aud')).rejects.toThrow(
+				'ECDH public key is not bound to attestation evidence'
+			);
+		});
+
+		it('rejects when audience does not match', async () => {
+			const pkNonce = await pubkeyNonceB64(enclavePublicKey);
+			const claims = {
+				iss: 'https://accounts.google.com',
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				aud: 'wrong-audience',
+				eat_nonce: [pkNonce]
+			};
+			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
+
+			await expect(verifyAttestation(token, enclavePublicKey, 'aileron-enclave')).rejects.toThrow(
+				'Unexpected audience'
+			);
+		});
 	});
 });

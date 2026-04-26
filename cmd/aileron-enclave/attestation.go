@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // metadataBaseURL is the GCE metadata endpoint for fetching attestation
@@ -13,8 +14,10 @@ var metadataBaseURL = "http://metadata.google.internal/computeMetadata/v1/instan
 
 // fetchAttestationToken retrieves an attestation token appropriate for the
 // TEE provider. For Confidential Space, it fetches an OIDC token from the
-// GCE metadata service. For local dev, it returns a static dev token.
-func fetchAttestationToken(provider, audience string) (string, error) {
+// GCE metadata service. Nonces are included in the token's eat_nonce claim
+// and can be used to bind the ECDH public key to the attestation evidence.
+// For local dev, it returns a static dev token.
+func fetchAttestationToken(provider, audience string, nonces []string) (string, error) {
 	if provider == "local" {
 		return "dev-ok", nil
 	}
@@ -23,10 +26,15 @@ func fetchAttestationToken(provider, audience string) (string, error) {
 		audience = "aileron-enclave"
 	}
 
-	u := metadataBaseURL + "?" + url.Values{
+	params := url.Values{
 		"audience": {audience},
 		"format":   {"full"},
-	}.Encode()
+	}
+	if len(nonces) > 0 {
+		params.Set("nonces", strings.Join(nonces, ","))
+	}
+
+	u := metadataBaseURL + "?" + params.Encode()
 
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
