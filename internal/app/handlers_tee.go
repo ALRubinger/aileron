@@ -15,11 +15,12 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/auth"
+	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/postgres"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 const jwksCacheTTL = 1 * time.Hour
@@ -383,10 +384,13 @@ func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) in
 		resp, err := s.enclaveClient.EscrowStore(ctx, enclave.EscrowStoreRequest{
 			UserID:              userID,
 			GrantID:             grantID,
+			VaultPath:           acc.VaultPath(),
+			Provider:            string(acc.Provider),
 			EncryptedCredential: secret.Value,
 			CredentialType:      secret.Metadata.Type,
 			ExpiresAt:           expiresAt.Format(time.RFC3339),
 			ActionTypes:         actionTypesForProvider(acc.Provider),
+			SourceTools:         sourceToolsForProvider(s.sourceRegistry, acc.Provider),
 		})
 		if err != nil {
 			continue
@@ -399,6 +403,51 @@ func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) in
 		escrowed++
 	}
 	return escrowed
+}
+
+func sourceToolsForProvider(registry *source.Registry, provider model.ConnectedAccountProvider) []string {
+	if registry == nil {
+		return nil
+	}
+	sourceProvider := sourceProviderForConnectedAccount(provider)
+	if sourceProvider == "" {
+		return nil
+	}
+	tools := registry.ToolsForProvider(sourceProvider)
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+func sourceProviderForConnectedAccount(provider model.ConnectedAccountProvider) string {
+	switch provider {
+	case model.ConnectedAccountProviderGmail:
+		return "gmail"
+	case model.ConnectedAccountProviderGoogleCalendar:
+		return "calendar"
+	case model.ConnectedAccountProviderSlack:
+		return "slack"
+	case model.ConnectedAccountProviderGitHub:
+		return "github"
+	default:
+		return ""
+	}
+}
+
+func escrowScopeFromVaultPath(vaultPath string) (userID string, provider string) {
+	const prefix = "connected-accounts/"
+	if len(vaultPath) <= len(prefix) || vaultPath[:len(prefix)] != prefix {
+		return "", ""
+	}
+	rest := vaultPath[len(prefix):]
+	for i, c := range rest {
+		if c == '/' {
+			return rest[:i], rest[i+1:]
+		}
+	}
+	return "", ""
 }
 
 // reconcileEscrowIndex prunes escrow index entries that the enclave no longer

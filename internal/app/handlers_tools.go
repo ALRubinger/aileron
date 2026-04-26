@@ -116,9 +116,12 @@ func (s *apiServer) handleExecuteTool(w http.ResponseWriter, r *http.Request) {
 	if s.enclaveClient != nil {
 		if escrowIDVal, ok := s.escrowIndex.Load(vaultPath); ok {
 			resp, err := s.enclaveClient.SourceExecute(r.Context(), enclave.SourceExecuteRequest{
-				EscrowID: escrowIDVal.(string),
-				Tool:     req.Tool,
-				Params:   req.Params,
+				EscrowID:  escrowIDVal.(string),
+				UserID:    acct.UserID,
+				VaultPath: vaultPath,
+				Provider:  string(acct.Provider),
+				Tool:      req.Tool,
+				Params:    req.Params,
 			})
 			if err != nil {
 				s.log.Error("enclave tool execution failed", "tool", req.Tool, "error", err)

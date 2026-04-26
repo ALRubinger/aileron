@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
-	"fmt"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -93,6 +93,21 @@ func decodeResp[T any](t *testing.T, resp *http.Response) T {
 		t.Fatalf("decoding response: %v", err)
 	}
 	return v
+}
+
+func validEscrowStoreRequest(encrypted []byte) enclave.EscrowStoreRequest {
+	return enclave.EscrowStoreRequest{
+		UserID:              "user-1",
+		GrantID:             "grant-1",
+		EnforceGrantID:      true,
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
+		ActionTypes:         []string{"test.action"},
+		SourceTools:         []string{"test_search"},
+	}
 }
 
 // establishTestSession performs attest → session and returns the session key.
@@ -263,13 +278,7 @@ func TestEscrowFlow(t *testing.T) {
 	encrypted, _ := crypto.Encrypt([]byte("escrowed-cred"), userKEK)
 
 	// Store.
-	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
-		UserID:              "user-1",
-		GrantID:             "grant-1",
-		EncryptedCredential: encrypted,
-		CredentialType:      "api_key",
-		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
-	})
+	storeResp := postJSON(t, server, "/escrow", validEscrowStoreRequest(encrypted))
 	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
 	if storeResult.EscrowID == "" {
 		t.Fatal("empty escrow ID")
@@ -277,9 +286,15 @@ func TestEscrowFlow(t *testing.T) {
 
 	// Execute with escrow.
 	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
-		RequestID:   "exec-escrow",
-		ConnectorID: "test/stub",
-		EscrowID:    storeResult.EscrowID,
+		RequestID:      "exec-escrow",
+		UserID:         "user-1",
+		GrantID:        "grant-1",
+		ActionType:     "test.action",
+		ConnectorID:    "test/stub",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "api_key",
+		EscrowID:       storeResult.EscrowID,
 	})
 	execResult := decodeResp[enclave.ExecuteResponse](t, execResp)
 	if execResult.Status != "succeeded" {
@@ -298,13 +313,49 @@ func TestEscrowFlow(t *testing.T) {
 
 	// Execute after revoke should fail.
 	execResp2 := postJSON(t, server, "/execute", enclave.ExecuteRequest{
-		ConnectorID: "test/stub",
-		EscrowID:    storeResult.EscrowID,
+		UserID:         "user-1",
+		GrantID:        "grant-1",
+		ActionType:     "test.action",
+		ConnectorID:    "test/stub",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "api_key",
+		EscrowID:       storeResult.EscrowID,
 	})
 	if execResp2.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 after revoke, got %d", execResp2.StatusCode)
 	}
 	execResp2.Body.Close()
+}
+
+func TestExecuteWithEscrowRejectsScopeMismatch(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("escrowed-cred"), userKEK)
+	storeResp := postJSON(t, server, "/escrow", validEscrowStoreRequest(encrypted))
+	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
+
+	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		RequestID:      "exec-escrow",
+		UserID:         "user-2",
+		GrantID:        "grant-1",
+		ActionType:     "test.action",
+		ConnectorID:    "test/stub",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "api_key",
+		EscrowID:       storeResult.EscrowID,
+	})
+	if execResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for scope mismatch, got %d", execResp.StatusCode)
+	}
+	execResp.Body.Close()
 }
 
 func TestAttestEndpoint(t *testing.T) {
@@ -386,13 +437,45 @@ func TestEscrowStoreWithoutKEK(t *testing.T) {
 	establishTestSession(t, server)
 
 	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
-		UserID:  "no-kek-user",
-		GrantID: "g1",
+		UserID:         "no-kek-user",
+		GrantID:        "g1",
+		VaultPath:      "connected-accounts/no-kek-user/gmail",
+		Provider:       "gmail",
+		CredentialType: "api_key",
 	})
 	if resp.StatusCode != http.StatusPreconditionFailed {
 		t.Fatalf("expected 412, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestEscrowStoreRequiresScopeFields(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	base := validEscrowStoreRequest([]byte("encrypted"))
+	tests := []struct {
+		name   string
+		mutate func(*enclave.EscrowStoreRequest)
+	}{
+		{"user_id", func(r *enclave.EscrowStoreRequest) { r.UserID = "" }},
+		{"grant_id", func(r *enclave.EscrowStoreRequest) { r.GrantID = "" }},
+		{"vault_path", func(r *enclave.EscrowStoreRequest) { r.VaultPath = "" }},
+		{"provider", func(r *enclave.EscrowStoreRequest) { r.Provider = "" }},
+		{"credential_type", func(r *enclave.EscrowStoreRequest) { r.CredentialType = "" }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := base
+			tt.mutate(&req)
+			resp := postJSON(t, server, "/escrow", req)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", resp.StatusCode)
+			}
+			resp.Body.Close()
+		})
+	}
 }
 
 func TestEscrowStoreBadDecryption(t *testing.T) {
@@ -407,7 +490,10 @@ func TestEscrowStoreBadDecryption(t *testing.T) {
 	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
 		UserID:              "user-1",
 		GrantID:             "g1",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: []byte("bad"),
+		CredentialType:      "api_key",
 		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
 	})
 	if resp.StatusCode != http.StatusBadRequest {
@@ -429,7 +515,10 @@ func TestEscrowStoreBadExpiry(t *testing.T) {
 	resp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
 		UserID:              "user-1",
 		GrantID:             "g1",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
 		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
 		ExpiresAt:           "not-a-date",
 	})
 	if resp.StatusCode != http.StatusBadRequest {
@@ -552,20 +641,23 @@ func TestExecuteWithExpiredEscrow(t *testing.T) {
 	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
 
 	// Store with past expiry.
-	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
-		UserID:              "user-1",
-		GrantID:             "g1",
-		EncryptedCredential: encrypted,
-		CredentialType:      "api_key",
-		ExpiresAt:           time.Now().Add(-time.Second).Format(time.RFC3339),
-	})
+	expiredReq := validEscrowStoreRequest(encrypted)
+	expiredReq.GrantID = "g1"
+	expiredReq.ExpiresAt = time.Now().Add(-time.Second).Format(time.RFC3339)
+	storeResp := postJSON(t, server, "/escrow", expiredReq)
 	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
 
 	// Execute with expired escrow.
 	_ = srv // keep reference
 	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
-		ConnectorID: "test/stub",
-		EscrowID:    storeResult.EscrowID,
+		UserID:         "user-1",
+		GrantID:        "g1",
+		ActionType:     "test.action",
+		ConnectorID:    "test/stub",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "api_key",
+		EscrowID:       storeResult.EscrowID,
 	})
 	if execResp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for expired escrow, got %d", execResp.StatusCode)
@@ -1006,13 +1098,10 @@ func TestEscrowListEndpoint(t *testing.T) {
 	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
 
 	encrypted, _ := crypto.Encrypt([]byte("cred-1"), userKEK)
-	storeResp := postJSON(t, server, "/escrow", enclave.EscrowStoreRequest{
-		UserID:              "user-1",
-		GrantID:             "g1",
-		EncryptedCredential: encrypted,
-		CredentialType:      "oauth_token",
-		ExpiresAt:           time.Now().Add(time.Hour).Format(time.RFC3339),
-	})
+	listReq := validEscrowStoreRequest(encrypted)
+	listReq.GrantID = "g1"
+	listReq.CredentialType = "oauth_token"
+	storeResp := postJSON(t, server, "/escrow", listReq)
 	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
 
 	resp2, err := http.Post(server.URL+"/escrow/list", "application/json", bytes.NewReader([]byte("{}")))
@@ -1033,9 +1122,9 @@ func TestEscrowListEndpoint(t *testing.T) {
 
 func TestResolveConnectorID(t *testing.T) {
 	tests := []struct {
-		input      string
-		wantType   string
-		wantProv   string
+		input    string
+		wantType string
+		wantProv string
 	}{
 		{"payments/stripe", "payments", "stripe"},
 		{"git/github", "git", "github"},
@@ -1055,12 +1144,16 @@ func TestSourceExecute_HappyPath(t *testing.T) {
 	defer server.Close()
 
 	// Store a credential in escrow.
-	escrowID := srv.escrow.Store("g1", []byte(`{"access_token":"test"}`), "oauth2", nil, time.Now().Add(time.Hour))
+	escrowReq := testEscrowRequest("g1", "oauth2", nil)
+	escrowID := srv.escrow.Store(escrowReq, []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
 
 	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
-		EscrowID: escrowID,
-		Tool:     "test_search",
-		Params:   map[string]any{"query": "hello"},
+		EscrowID:  escrowID,
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "test_search",
+		Params:    map[string]any{"query": "hello"},
 	})
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
@@ -1090,18 +1183,43 @@ func TestSourceExecute_EscrowNotFound(t *testing.T) {
 	}
 }
 
+func TestSourceExecute_RejectsScopeMismatch(t *testing.T) {
+	server, srv := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	escrowReq := testEscrowRequest("g1", "oauth2", nil)
+	escrowID := srv.escrow.Store(escrowReq, []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
+
+	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
+		EscrowID:  escrowID,
+		UserID:    "user-2",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "test_search",
+		Params:    map[string]any{"query": "hello"},
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestSourceExecute_ToolError(t *testing.T) {
 	server, srv := setupTestEnclaveServerWithSource(t, &stubSourceConnector{
 		err: fmt.Errorf("gmail API error: 401 Invalid Credentials"),
 	})
 	defer server.Close()
 
-	escrowID := srv.escrow.Store("g1", []byte(`{"access_token":"test"}`), "oauth2", nil, time.Now().Add(time.Hour))
+	escrowReq := testEscrowRequest("g1", "oauth2", nil)
+	escrowID := srv.escrow.Store(escrowReq, []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
 
 	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
-		EscrowID: escrowID,
-		Tool:     "test_search",
-		Params:   map[string]any{"query": "hello"},
+		EscrowID:  escrowID,
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "test_search",
+		Params:    map[string]any{"query": "hello"},
 	})
 	if resp.StatusCode != 200 {
 		t.Fatalf("expected 200 (error in body), got %d", resp.StatusCode)

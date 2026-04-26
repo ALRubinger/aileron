@@ -59,7 +59,7 @@ func (s *enclaveServer) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /oauth/exchange", s.handleOAuthExchange)
 	mux.HandleFunc("POST /execute", s.handleExecute)
 	mux.HandleFunc("POST /escrow", s.handleEscrowStore)
-mux.HandleFunc("POST /escrow/list", s.handleEscrowList)
+	mux.HandleFunc("POST /escrow/list", s.handleEscrowList)
 	mux.HandleFunc("POST /escrow/revoke", s.handleEscrowRevoke)
 	mux.HandleFunc("POST /source/execute", s.handleSourceExecute)
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -233,9 +233,9 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	// Resolve credential.
 	var credential []byte
 	if req.EscrowID != "" {
-		cred, err := s.escrow.Get(req.EscrowID)
+		cred, err := s.escrow.GetForExecute(req)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			writeEscrowErr(w, err)
 			return
 		}
 		credential = cred
@@ -304,6 +304,26 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.UserID == "" {
+		writeErr(w, http.StatusBadRequest, "user_id required")
+		return
+	}
+	if req.GrantID == "" {
+		writeErr(w, http.StatusBadRequest, "grant_id required")
+		return
+	}
+	if req.VaultPath == "" {
+		writeErr(w, http.StatusBadRequest, "vault_path required")
+		return
+	}
+	if req.Provider == "" {
+		writeErr(w, http.StatusBadRequest, "provider required")
+		return
+	}
+	if req.CredentialType == "" {
+		writeErr(w, http.StatusBadRequest, "credential_type required")
+		return
+	}
 
 	// Decrypt credential with user's KEK.
 	kek, err := s.keks.Get(req.UserID)
@@ -326,7 +346,7 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	id := s.escrow.Store(req.GrantID, plaintext, req.CredentialType, req.ActionTypes, expiresAt)
+	id := s.escrow.Store(req, plaintext, expiresAt)
 	writeJSON(w, http.StatusOK, enclave.EscrowStoreResponse{EscrowID: id})
 }
 
@@ -358,9 +378,9 @@ func (s *enclaveServer) handleSourceExecute(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Resolve credential from escrow — plaintext stays inside the enclave.
-	credential, err := s.escrow.Get(req.EscrowID)
+	credential, err := s.escrow.GetForSource(req)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		writeEscrowErr(w, err)
 		return
 	}
 
@@ -431,6 +451,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func writeEscrowErr(w http.ResponseWriter, err error) {
+	status := http.StatusNotFound
+	if err == enclave.ErrEscrowScopeMismatch {
+		status = http.StatusForbidden
+	}
+	writeErr(w, status, err.Error())
 }
 
 func zeroBytes(b []byte) {

@@ -16,6 +16,10 @@ var (
 	// ErrEscrowExpired indicates that the escrow entry has passed its expiry time.
 	ErrEscrowExpired = errors.New("enclave: escrow entry expired")
 
+	// ErrEscrowScopeMismatch indicates that the requested credential use does
+	// not match the ownership or scope bound to the escrow entry.
+	ErrEscrowScopeMismatch = errors.New("enclave: escrow scope mismatch")
+
 	// ErrNoKEK indicates that no KEK has been transmitted for the given user.
 	ErrNoKEK = errors.New("enclave: no KEK stored for user")
 )

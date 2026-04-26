@@ -86,6 +86,10 @@ type ExecuteRequest struct {
 	ActionType string `json:"action_type"`
 	// ConnectorID is "<type>/<provider>", e.g. "payments/stripe".
 	ConnectorID string `json:"connector_id"`
+	// VaultPath is the vault path whose credential is being used.
+	VaultPath string `json:"vault_path,omitempty"`
+	// Provider is the connected-account or connector provider for scope checks.
+	Provider string `json:"provider,omitempty"`
 	// Parameters are the bounded, approved parameters for execution.
 	Parameters map[string]any `json:"parameters"`
 	// EncryptedCredential is the KEK-encrypted ciphertext from the vault.
@@ -142,12 +146,17 @@ type SessionResponse struct {
 // EscrowStoreRequest asks the enclave to escrow a credential for
 // asynchronous or scheduled execution when the user is offline.
 type EscrowStoreRequest struct {
-	UserID              string   `json:"user_id"`
-	GrantID             string   `json:"grant_id"`
-	EncryptedCredential []byte   `json:"encrypted_credential"`
-	CredentialType      string   `json:"credential_type"`
-	ExpiresAt           string   `json:"expires_at"` // RFC 3339
-	ActionTypes         []string `json:"action_types"`
+	UserID              string         `json:"user_id"`
+	GrantID             string         `json:"grant_id"`
+	EnforceGrantID      bool           `json:"enforce_grant_id,omitempty"`
+	VaultPath           string         `json:"vault_path"`
+	Provider            string         `json:"provider"`
+	EncryptedCredential []byte         `json:"encrypted_credential"`
+	CredentialType      string         `json:"credential_type"`
+	ExpiresAt           string         `json:"expires_at"` // RFC 3339
+	ActionTypes         []string       `json:"action_types"`
+	SourceTools         []string       `json:"source_tools,omitempty"`
+	AllowedParameters   map[string]any `json:"allowed_parameters,omitempty"`
 }
 
 // EscrowStoreResponse confirms that the credential has been escrowed.
@@ -164,6 +173,9 @@ type EscrowListResponse struct {
 type EscrowListEntry struct {
 	EscrowID  string `json:"escrow_id"`
 	GrantID   string `json:"grant_id"`
+	UserID    string `json:"user_id,omitempty"`
+	VaultPath string `json:"vault_path,omitempty"`
+	Provider  string `json:"provider,omitempty"`
 	ExpiresAt string `json:"expires_at"` // RFC 3339
 }
 
@@ -179,6 +191,12 @@ type EscrowRevokeRequest struct {
 type SourceExecuteRequest struct {
 	// EscrowID identifies the escrowed credential to use.
 	EscrowID string `json:"escrow_id"`
+	// UserID identifies the user requesting escrowed credential use.
+	UserID string `json:"user_id,omitempty"`
+	// VaultPath is the vault path whose credential is being used.
+	VaultPath string `json:"vault_path,omitempty"`
+	// Provider is the source connector provider for scope checks.
+	Provider string `json:"provider,omitempty"`
 	// Tool is the source connector tool name, e.g. "gmail_search".
 	Tool string `json:"tool"`
 	// Params are the tool parameters (query, filters, etc.).

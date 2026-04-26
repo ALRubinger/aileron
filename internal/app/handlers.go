@@ -12,17 +12,17 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/account"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
-	"github.com/ALRubinger/aileron/internal/comms"
-	"github.com/ALRubinger/aileron/internal/draft"
-	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/auth"
+	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/crypto"
+	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
+	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/store/postgres"
@@ -776,6 +776,8 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 			IntentID:            grant.IntentId,
 			ActionType:          intent.Action.Type,
 			ConnectorID:         connType + "/" + connProvider,
+			VaultPath:           vaultPath,
+			Provider:            connProvider,
 			Parameters:          params,
 			EncryptedCredential: secret.Value,
 			CredentialType:      secret.Metadata.Type,
@@ -1172,6 +1174,8 @@ func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*
 			IntentID:            grant.IntentId,
 			ActionType:          intent.Action.Type,
 			ConnectorID:         connType + "/" + connProvider,
+			VaultPath:           vaultPath,
+			Provider:            connProvider,
 			Parameters:          params,
 			EncryptedCredential: secret.Value,
 			CredentialType:      secret.Metadata.Type,
