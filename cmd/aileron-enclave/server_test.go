@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/source"
 )
+
+var testSessionIDs sync.Map
 
 // stubConnector returns a fixed result for testing.
 type stubConnector struct{}
@@ -78,7 +81,55 @@ func setupTestEnclaveServerWithSource(t *testing.T, sc source.SourceConnector) (
 func postJSON(t *testing.T, server *httptest.Server, path string, body any) *http.Response {
 	t.Helper()
 	payload, _ := json.Marshal(body)
-	resp, err := http.Post(server.URL+path, "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("creating POST %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if sid, ok := testSessionIDs.Load(server.URL); ok {
+		req.Header.Set(enclave.HeaderSessionID, sid.(string))
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+func postJSONWithoutSession(t *testing.T, server *httptest.Server, path string, body any) *http.Response {
+	t.Helper()
+	return postJSONWithSessionID(t, server, path, body, "")
+}
+
+func postJSONWithSessionID(t *testing.T, server *httptest.Server, path string, body any, sessionID string) *http.Response {
+	t.Helper()
+	payload, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("creating POST %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if sessionID != "" {
+		req.Header.Set(enclave.HeaderSessionID, sessionID)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+func postRawWithSession(t *testing.T, server *httptest.Server, path string, body []byte) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("creating POST %s: %v", path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if sid, ok := testSessionIDs.Load(server.URL); ok {
+		req.Header.Set(enclave.HeaderSessionID, sid.(string))
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
 	}
@@ -134,6 +185,10 @@ func establishTestSession(t *testing.T, server *httptest.Server) []byte {
 	if sessResult.SessionID == "" {
 		t.Fatal("empty session ID")
 	}
+	testSessionIDs.Store(server.URL, sessResult.SessionID)
+	t.Cleanup(func() {
+		testSessionIDs.Delete(server.URL)
+	})
 
 	// Derive shared secret.
 	enclavePub, _ := ecdh.P256().NewPublicKey(attestResult.PublicKey)
@@ -453,6 +508,8 @@ func TestEscrowStoreRequiresScopeFields(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
+	establishTestSession(t, server)
+
 	base := validEscrowStoreRequest([]byte("encrypted"))
 	tests := []struct {
 		name   string
@@ -531,6 +588,8 @@ func TestEscrowRevokeNotFoundViaHTTP(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
+	establishTestSession(t, server)
+
 	resp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{
 		EscrowID: "nonexistent",
 		GrantID:  "g1",
@@ -591,10 +650,9 @@ func TestExecuteBadJSON(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/execute", "application/json", bytes.NewReader([]byte("bad")))
-	if err != nil {
-		t.Fatalf("POST /execute: %v", err)
-	}
+	establishTestSession(t, server)
+
+	resp := postRawWithSession(t, server, "/execute", []byte("bad"))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
@@ -605,10 +663,9 @@ func TestEscrowStoreBadJSON(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/escrow", "application/json", bytes.NewReader([]byte("[")))
-	if err != nil {
-		t.Fatalf("POST /escrow: %v", err)
-	}
+	establishTestSession(t, server)
+
+	resp := postRawWithSession(t, server, "/escrow", []byte("["))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
@@ -619,10 +676,9 @@ func TestEscrowRevokeBadJSON(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/escrow/revoke", "application/json", bytes.NewReader([]byte("}")))
-	if err != nil {
-		t.Fatalf("POST /escrow/revoke: %v", err)
-	}
+	establishTestSession(t, server)
+
+	resp := postRawWithSession(t, server, "/escrow/revoke", []byte("}"))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
@@ -690,6 +746,37 @@ func TestTransmitKEKWithoutSession(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestSensitiveEndpointsRequireMatchingSession(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	body := enclave.ExecuteRequest{
+		UserID:              "user-1",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: []byte("data"),
+	}
+
+	missing := postJSONWithoutSession(t, server, "/execute", body)
+	if missing.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing session, got %d", missing.StatusCode)
+	}
+	missing.Body.Close()
+
+	wrong := postJSONWithSessionID(t, server, "/execute", body, "wrong-session")
+	if wrong.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong session, got %d", wrong.StatusCode)
+	}
+	wrong.Body.Close()
+
+	matching := postJSON(t, server, "/execute", body)
+	if matching.StatusCode != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 after valid session reaches KEK check, got %d", matching.StatusCode)
+	}
+	matching.Body.Close()
+}
+
 func TestTransmitKEKBadDecryption(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
@@ -710,10 +797,9 @@ func TestTransmitKEKBadJSON(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/kek", "application/json", bytes.NewReader([]byte("bad")))
-	if err != nil {
-		t.Fatalf("POST /kek: %v", err)
-	}
+	establishTestSession(t, server)
+
+	resp := postRawWithSession(t, server, "/kek", []byte("bad"))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
@@ -1067,10 +1153,9 @@ func TestOAuthExchangeBadJSON(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
-	resp, err := http.Post(server.URL+"/oauth/exchange", "application/json", bytes.NewReader([]byte("bad")))
-	if err != nil {
-		t.Fatalf("POST /oauth/exchange: %v", err)
-	}
+	establishTestSession(t, server)
+
+	resp := postRawWithSession(t, server, "/oauth/exchange", []byte("bad"))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.StatusCode)
@@ -1081,11 +1166,10 @@ func TestEscrowListEndpoint(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
+	establishTestSession(t, server)
+
 	// Empty list.
-	resp, err := http.Post(server.URL+"/escrow/list", "application/json", bytes.NewReader([]byte("{}")))
-	if err != nil {
-		t.Fatalf("POST /escrow/list: %v", err)
-	}
+	resp := postRawWithSession(t, server, "/escrow/list", []byte("{}"))
 	result := decodeResp[enclave.EscrowListResponse](t, resp)
 	if len(result.Entries) != 0 {
 		t.Fatalf("expected 0 entries, got %d", len(result.Entries))
@@ -1104,10 +1188,7 @@ func TestEscrowListEndpoint(t *testing.T) {
 	storeResp := postJSON(t, server, "/escrow", listReq)
 	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
 
-	resp2, err := http.Post(server.URL+"/escrow/list", "application/json", bytes.NewReader([]byte("{}")))
-	if err != nil {
-		t.Fatalf("POST /escrow/list: %v", err)
-	}
+	resp2 := postRawWithSession(t, server, "/escrow/list", []byte("{}"))
 	result2 := decodeResp[enclave.EscrowListResponse](t, resp2)
 	if len(result2.Entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(result2.Entries))
@@ -1143,6 +1224,8 @@ func TestSourceExecute_HappyPath(t *testing.T) {
 	server, srv := setupTestEnclaveServer(t)
 	defer server.Close()
 
+	establishTestSession(t, server)
+
 	// Store a credential in escrow.
 	escrowReq := testEscrowRequest("g1", "oauth2", nil)
 	escrowID := srv.escrow.Store(escrowReq, []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
@@ -1173,6 +1256,8 @@ func TestSourceExecute_EscrowNotFound(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
+	establishTestSession(t, server)
+
 	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
 		EscrowID: "esc_nonexistent",
 		Tool:     "test_search",
@@ -1186,6 +1271,8 @@ func TestSourceExecute_EscrowNotFound(t *testing.T) {
 func TestSourceExecute_RejectsScopeMismatch(t *testing.T) {
 	server, srv := setupTestEnclaveServer(t)
 	defer server.Close()
+
+	establishTestSession(t, server)
 
 	escrowReq := testEscrowRequest("g1", "oauth2", nil)
 	escrowID := srv.escrow.Store(escrowReq, []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
@@ -1209,6 +1296,8 @@ func TestSourceExecute_ToolError(t *testing.T) {
 		err: fmt.Errorf("gmail API error: 401 Invalid Credentials"),
 	})
 	defer server.Close()
+
+	establishTestSession(t, server)
 
 	escrowReq := testEscrowRequest("g1", "oauth2", nil)
 	escrowID := srv.escrow.Store(escrowReq, []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
