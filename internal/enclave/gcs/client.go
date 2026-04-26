@@ -163,6 +163,20 @@ func (c *Client) Close() error {
 
 // post sends a JSON POST request to the enclave and decodes the response.
 func (c *Client) post(ctx context.Context, path string, body any, result any) error {
+	c.mu.Lock()
+	sid := c.sessionID
+	authKey := copyBytes(c.authKey)
+	c.mu.Unlock()
+	defer zeroBytes(authKey)
+
+	if len(authKey) > 0 {
+		var err error
+		body, err = attachGrantCapability(body, authKey)
+		if err != nil {
+			return err
+		}
+	}
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshalling request: %w", err)
@@ -174,10 +188,6 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	c.mu.Lock()
-	sid := c.sessionID
-	authKey := copyBytes(c.authKey)
-	c.mu.Unlock()
 	if sid != "" {
 		req.Header.Set(enclave.HeaderSessionID, sid)
 	}
@@ -191,7 +201,6 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 		req.Header.Set(enclave.HeaderRequestNonce, nonce)
 		req.Header.Set(enclave.HeaderRequestMAC, enclave.RequestMAC(authKey, http.MethodPost, path, payload, sid, timestamp, nonce))
 	}
-	zeroBytes(authKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -210,6 +219,38 @@ func (c *Client) post(ctx context.Context, path string, body any, result any) er
 		}
 	}
 	return nil
+}
+
+func attachGrantCapability(body any, authKey []byte) (any, error) {
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, fmt.Errorf("generating grant capability nonce: %w", err)
+	}
+	switch req := body.(type) {
+	case enclave.ExecuteRequest:
+		capability, err := enclave.SignGrantCapability(authKey, enclave.ExecuteGrantCapability(req, nonce))
+		if err != nil {
+			return nil, fmt.Errorf("signing execute capability: %w", err)
+		}
+		req.Capability = capability
+		return req, nil
+	case enclave.EscrowStoreRequest:
+		capability, err := enclave.SignGrantCapability(authKey, enclave.EscrowStoreGrantCapability(req, nonce))
+		if err != nil {
+			return nil, fmt.Errorf("signing escrow capability: %w", err)
+		}
+		req.Capability = capability
+		return req, nil
+	case enclave.SourceExecuteRequest:
+		capability, err := enclave.SignGrantCapability(authKey, enclave.SourceExecuteGrantCapability(req, nonce))
+		if err != nil {
+			return nil, fmt.Errorf("signing source capability: %w", err)
+		}
+		req.Capability = capability
+		return req, nil
+	default:
+		return body, nil
+	}
 }
 
 func requiresRequestAuth(path string) bool {

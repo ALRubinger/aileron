@@ -119,6 +119,13 @@ func TestClientExecute(t *testing.T) {
 		if !enclave.VerifyRequestMAC(authKey, r.Method, r.URL.Path, body, "sess-abc", timestamp, nonce, mac) {
 			t.Fatalf("request MAC did not verify")
 		}
+		var req enclave.ExecuteRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatalf("unmarshaling request: %v", err)
+		}
+		if !enclave.VerifyExecuteCapability(authKey, req) {
+			t.Fatalf("execute capability did not verify")
+		}
 		json.NewEncoder(w).Encode(enclave.ExecuteResponse{
 			RequestID:  "exec-1",
 			Status:     "succeeded",
@@ -167,6 +174,70 @@ func TestRequiresRequestAuth(t *testing.T) {
 				t.Fatalf("requiresRequestAuth(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAttachGrantCapability(t *testing.T) {
+	authKey := []byte("01234567890123456789012345678901")
+
+	execute, err := attachGrantCapability(enclave.ExecuteRequest{
+		GrantID:        "grant-1",
+		IntentID:       "intent-1",
+		UserID:         "user-1",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "oauth2",
+		ActionType:     "email.send",
+		Parameters:     map[string]any{"to": "a@example.com"},
+	}, authKey)
+	if err != nil {
+		t.Fatalf("attach execute capability: %v", err)
+	}
+	executeReq := execute.(enclave.ExecuteRequest)
+	if !enclave.VerifyExecuteCapability(authKey, executeReq) {
+		t.Fatal("expected execute capability to verify")
+	}
+
+	escrow, err := attachGrantCapability(enclave.EscrowStoreRequest{
+		GrantID:           "grant-1",
+		UserID:            "user-1",
+		VaultPath:         "connected-accounts/user-1/gmail",
+		Provider:          "gmail",
+		CredentialType:    "oauth2",
+		ExpiresAt:         "2026-04-26T09:00:00Z",
+		ActionTypes:       []string{"email.send"},
+		SourceTools:       []string{"gmail_search"},
+		AllowedParameters: map[string]any{"to": "a@example.com"},
+	}, authKey)
+	if err != nil {
+		t.Fatalf("attach escrow capability: %v", err)
+	}
+	escrowReq := escrow.(enclave.EscrowStoreRequest)
+	if !enclave.VerifyEscrowStoreCapability(authKey, escrowReq) {
+		t.Fatal("expected escrow capability to verify")
+	}
+
+	source, err := attachGrantCapability(enclave.SourceExecuteRequest{
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "gmail_search",
+		Params:    map[string]any{"query": "from:a@example.com"},
+	}, authKey)
+	if err != nil {
+		t.Fatalf("attach source capability: %v", err)
+	}
+	sourceReq := source.(enclave.SourceExecuteRequest)
+	if !enclave.VerifySourceExecuteCapability(authKey, sourceReq) {
+		t.Fatal("expected source capability to verify")
+	}
+
+	unchanged, err := attachGrantCapability(enclave.TransmitKEKRequest{UserID: "user-1"}, authKey)
+	if err != nil {
+		t.Fatalf("attach unsupported capability: %v", err)
+	}
+	if _, ok := unchanged.(enclave.TransmitKEKRequest); !ok {
+		t.Fatalf("expected unsupported request type to be returned unchanged")
 	}
 }
 

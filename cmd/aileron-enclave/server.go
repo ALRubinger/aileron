@@ -172,13 +172,15 @@ func (s *enclaveServer) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *enclaveServer) handleTransmitKEK(w http.ResponseWriter, r *http.Request) {
 	var req enclave.TransmitKEKRequest
-	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+	authKey, err := s.decodeAuthenticatedJSON(w, r, &req)
+	if err != nil {
 		if err == errResponseWritten {
 			return
 		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	zeroBytes(authKey)
 
 	s.mu.Lock()
 	sessionKey := copyBytes(s.sessionKey)
@@ -206,13 +208,15 @@ func (s *enclaveServer) handleTransmitKEK(w http.ResponseWriter, r *http.Request
 
 func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Request) {
 	var req enclave.OAuthExchangeRequest
-	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+	authKey, err := s.decodeAuthenticatedJSON(w, r, &req)
+	if err != nil {
 		if err == errResponseWritten {
 			return
 		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	zeroBytes(authKey)
 
 	// Get user's KEK.
 	kek, err := s.keks.Get(req.UserID)
@@ -251,11 +255,17 @@ func (s *enclaveServer) handleOAuthExchange(w http.ResponseWriter, r *http.Reque
 
 func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	var req enclave.ExecuteRequest
-	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+	authKey, err := s.decodeAuthenticatedJSON(w, r, &req)
+	if err != nil {
 		if err == errResponseWritten {
 			return
 		}
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer zeroBytes(authKey)
+	if !enclave.VerifyExecuteCapability(authKey, req) {
+		writeErr(w, http.StatusForbidden, "invalid grant capability")
 		return
 	}
 
@@ -329,11 +339,17 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request) {
 	var req enclave.EscrowStoreRequest
-	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+	authKey, err := s.decodeAuthenticatedJSON(w, r, &req)
+	if err != nil {
 		if err == errResponseWritten {
 			return
 		}
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer zeroBytes(authKey)
+	if !enclave.VerifyEscrowStoreCapability(authKey, req) {
+		writeErr(w, http.StatusForbidden, "invalid grant capability")
 		return
 	}
 	if req.UserID == "" {
@@ -383,9 +399,11 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 }
 
 func (s *enclaveServer) handleEscrowList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAuthenticatedRequest(w, r); !ok {
+	_, authKey, ok := s.requireAuthenticatedRequest(w, r)
+	if !ok {
 		return
 	}
+	zeroBytes(authKey)
 
 	entries := s.escrow.List()
 	writeJSON(w, http.StatusOK, enclave.EscrowListResponse{Entries: entries})
@@ -393,13 +411,15 @@ func (s *enclaveServer) handleEscrowList(w http.ResponseWriter, r *http.Request)
 
 func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Request) {
 	var req enclave.EscrowRevokeRequest
-	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+	authKey, err := s.decodeAuthenticatedJSON(w, r, &req)
+	if err != nil {
 		if err == errResponseWritten {
 			return
 		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	zeroBytes(authKey)
 
 	if err := s.escrow.Revoke(req.EscrowID, req.GrantID); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
@@ -411,11 +431,17 @@ func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Reques
 
 func (s *enclaveServer) handleSourceExecute(w http.ResponseWriter, r *http.Request) {
 	var req enclave.SourceExecuteRequest
-	if err := s.decodeAuthenticatedJSON(w, r, &req); err != nil {
+	authKey, err := s.decodeAuthenticatedJSON(w, r, &req)
+	if err != nil {
 		if err == errResponseWritten {
 			return
 		}
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer zeroBytes(authKey)
+	if !enclave.VerifySourceExecuteCapability(authKey, req) {
+		writeErr(w, http.StatusForbidden, "invalid grant capability")
 		return
 	}
 
@@ -466,21 +492,25 @@ func (s *enclaveServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (s *enclaveServer) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request, v any) error {
-	body, ok := s.requireAuthenticatedRequest(w, r)
+func (s *enclaveServer) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request, v any) ([]byte, error) {
+	body, authKey, ok := s.requireAuthenticatedRequest(w, r)
 	if !ok {
-		return errResponseWritten
+		return nil, errResponseWritten
 	}
-	return json.Unmarshal(body, v)
+	if err := json.Unmarshal(body, v); err != nil {
+		zeroBytes(authKey)
+		return nil, err
+	}
+	return authKey, nil
 }
 
 var errResponseWritten = fmt.Errorf("response already written")
 
-func (s *enclaveServer) requireAuthenticatedRequest(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+func (s *enclaveServer) requireAuthenticatedRequest(w http.ResponseWriter, r *http.Request) ([]byte, []byte, bool) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "reading body: "+err.Error())
-		return nil, false
+		return nil, nil, false
 	}
 	defer r.Body.Close()
 
@@ -499,49 +529,49 @@ func (s *enclaveServer) requireAuthenticatedRequest(w http.ResponseWriter, r *ht
 
 	if !hasActiveSession {
 		writeErr(w, http.StatusPreconditionFailed, "no active session")
-		return nil, false
+		return nil, nil, false
 	}
 	if sid == "" {
 		writeErr(w, http.StatusUnauthorized, "missing session")
-		return nil, false
+		return nil, nil, false
 	}
 	if sid != activeID {
 		writeErr(w, http.StatusUnauthorized, "invalid session")
-		return nil, false
+		return nil, nil, false
 	}
 	if timestamp == "" || nonce == "" || reqMAC == "" {
 		writeErr(w, http.StatusUnauthorized, "missing request authentication")
-		return nil, false
+		return nil, nil, false
 	}
 
 	requestTime, err := time.Parse(time.RFC3339, timestamp)
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "invalid request timestamp")
-		return nil, false
+		return nil, nil, false
 	}
 	now := time.Now()
 	if requestTime.Before(now.Add(-requestAuthMaxSkew)) || requestTime.After(now.Add(requestAuthMaxSkew)) || requestTime.After(expiresAt) {
 		writeErr(w, http.StatusUnauthorized, "stale request")
-		return nil, false
+		return nil, nil, false
 	}
 	if !enclave.VerifyRequestMAC(authKey, r.Method, r.URL.Path, body, sid, timestamp, nonce, reqMAC) {
 		writeErr(w, http.StatusUnauthorized, "invalid request authentication")
-		return nil, false
+		return nil, nil, false
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessionID != sid || s.sessionKey == nil || time.Now().After(s.expiresAt) {
 		writeErr(w, http.StatusPreconditionFailed, "no active session")
-		return nil, false
+		return nil, nil, false
 	}
 	pruneSeenNonces(s.seenNonces, now.Add(-requestAuthMaxSkew))
 	if _, ok := s.seenNonces[nonce]; ok {
 		writeErr(w, http.StatusUnauthorized, "replayed request")
-		return nil, false
+		return nil, nil, false
 	}
 	s.seenNonces[nonce] = now
-	return body, true
+	return body, copyBytes(authKey), true
 }
 
 func pruneSeenNonces(seen map[string]time.Time, before time.Time) {
