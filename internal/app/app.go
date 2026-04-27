@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -14,12 +15,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/account"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
-	"github.com/ALRubinger/aileron/internal/draft"
-	"github.com/ALRubinger/aileron/internal/source"
-	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
-	githubsource "github.com/ALRubinger/aileron/internal/source/github"
-	gmailsource "github.com/ALRubinger/aileron/internal/source/gmail"
-	slacksource "github.com/ALRubinger/aileron/internal/source/slack"
 	"github.com/ALRubinger/aileron/internal/auth"
 	githubauth "github.com/ALRubinger/aileron/internal/auth/github"
 	googleauth "github.com/ALRubinger/aileron/internal/auth/google"
@@ -29,13 +24,19 @@ import (
 	gmailconnector "github.com/ALRubinger/aileron/internal/connector/email/gmail"
 	"github.com/ALRubinger/aileron/internal/connector/git/github"
 	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
+	"github.com/ALRubinger/aileron/internal/draft"
+	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
+	"github.com/ALRubinger/aileron/internal/source"
+	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
+	githubsource "github.com/ALRubinger/aileron/internal/source/github"
+	gmailsource "github.com/ALRubinger/aileron/internal/source/gmail"
+	slacksource "github.com/ALRubinger/aileron/internal/source/slack"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/store/postgres"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/google/uuid"
 )
 
@@ -99,6 +100,10 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// --- Approval orchestrator ---
 	idGen := func() string { return uuid.New().String() }
 	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
+	grantCapabilityKey := make([]byte, 32)
+	if _, err := rand.Read(grantCapabilityKey); err != nil {
+		return nil, fmt.Errorf("grant capability key: %w", err)
+	}
 
 	// --- Notifier ---
 	notifier := notify.NewLogNotifier(log)
@@ -122,31 +127,32 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	sourceReg := source.NewRegistry()
 
 	server := &apiServer{
-		log:            log,
-		registry:       registry,
-		policyEngine:   policyEngine,
-		orchestrator:   orchestrator,
-		vault:          v,
-		notifier:       notifier,
-		intents:        intentStore,
-		approvals:      approvalStore,
-		policies:       policyStore,
-		grants:         grantStore,
-		executions:     executionStore,
-		connectors:     connectorStore,
-		connectedAccounts: connectedAccountStore,
-		drafts:            draftStore,
-		instructions:      instructionStore,
-		feedback:          feedbackStore,
-		credentials:       credentialStore,
-		fundingSources:    fundingSourceStore,
-		llmConfigs:        llmConfigStore,
-		traces:            traceStore,
-		sourceRegistry:    sourceReg,
-		enclaveClient:     enclaveClient,
-		enclaveVerifier:   enclaveVerifier,
-		teeCfg:            teeCfg,
-		newID:             idGen,
+		log:                log,
+		registry:           registry,
+		policyEngine:       policyEngine,
+		orchestrator:       orchestrator,
+		vault:              v,
+		notifier:           notifier,
+		intents:            intentStore,
+		approvals:          approvalStore,
+		policies:           policyStore,
+		grants:             grantStore,
+		executions:         executionStore,
+		connectors:         connectorStore,
+		connectedAccounts:  connectedAccountStore,
+		drafts:             draftStore,
+		instructions:       instructionStore,
+		feedback:           feedbackStore,
+		credentials:        credentialStore,
+		fundingSources:     fundingSourceStore,
+		llmConfigs:         llmConfigStore,
+		traces:             traceStore,
+		sourceRegistry:     sourceReg,
+		enclaveClient:      enclaveClient,
+		enclaveVerifier:    enclaveVerifier,
+		teeCfg:             teeCfg,
+		grantCapabilityKey: grantCapabilityKey,
+		newID:              idGen,
 	}
 	if teeCfg.TEEEnabled() {
 		server.teeState = newTeeState()
@@ -360,18 +366,18 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			NewID:             idGen,
 			UIBaseURL:         authCfg.UIBaseURL,
 			RefreshTTL:        authCfg.RefreshTokenTTL,
-			AutoVerifyEmail: authCfg.AutoVerifyEmail,
+			AutoVerifyEmail:   authCfg.AutoVerifyEmail,
 		})
 		authHandler.RegisterRoutes(mux)
 
 		skipPaths := map[string]bool{
-			"/v1/health":                        true,
-			"/v1/tee/status":                    true,
-			"/v1/tee/jwks":                      true,
-			"/v1/webhooks/slack/events":          true,
-			"/v1/webhooks/slack/interactions":    true,
-			"/v1/webhooks/slack/commands":        true,
-			"/v1/slack/install/callback":         true,
+			"/v1/health":                      true,
+			"/v1/tee/status":                  true,
+			"/v1/tee/jwks":                    true,
+			"/v1/webhooks/slack/events":       true,
+			"/v1/webhooks/slack/interactions": true,
+			"/v1/webhooks/slack/commands":     true,
+			"/v1/slack/install/callback":      true,
 		}
 		handler = auth.MiddlewareWithConfig(tokenIssuer, auth.MiddlewareConfig{
 			SkipPaths: skipPaths,

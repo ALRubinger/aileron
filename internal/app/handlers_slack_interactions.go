@@ -18,7 +18,7 @@ import (
 // block_actions (button clicks), message_action (message shortcuts), and
 // view_submission (modal submits).
 type slackInteractionPayload struct {
-	Type       string `json:"type"` // "block_actions", "message_action", "view_submission"
+	Type       string `json:"type"`                  // "block_actions", "message_action", "view_submission"
 	CallbackID string `json:"callback_id,omitempty"` // message_action callback ID
 	TriggerID  string `json:"trigger_id,omitempty"`  // for opening modals
 	User       struct {
@@ -459,13 +459,15 @@ func (s *apiServer) processApproveIntent(ctx context.Context, actionValue string
 
 	// Issue execution grant.
 	grantID := "grt_" + s.newID()
-	grant := api.ExecutionGrant{
-		GrantId:   grantID,
-		IntentId:  intentID,
-		Status:    api.ExecutionGrantStatusActive,
-		ExpiresAt: now.Add(5 * time.Minute),
+	grant, err := s.newExecutionGrant(ctx, envelope, grantID, now.Add(5*time.Minute), nil, intentMeta.UserID)
+	if err != nil {
+		s.log.Error("approve_intent: failed to issue grant capability", "error", err)
+		return
 	}
-	s.grants.Create(ctx, grant)
+	if err := s.grants.Create(ctx, grant); err != nil {
+		s.log.Error("approve_intent: failed to create grant", "error", err)
+		return
+	}
 
 	envelope.Status = api.Approved
 	envelope.UpdatedAt = time.Now().UTC()
@@ -569,12 +571,15 @@ func (s *apiServer) executeIntentFromModal(ctx context.Context, meta IntentModal
 	}
 
 	grantID := "grt_" + s.newID()
-	s.grants.Create(ctx, api.ExecutionGrant{
-		GrantId:   grantID,
-		IntentId:  intentID,
-		Status:    api.ExecutionGrantStatusActive,
-		ExpiresAt: now.Add(5 * time.Minute),
-	})
+	grant, err := s.newExecutionGrant(ctx, envelope, grantID, now.Add(5*time.Minute), nil, meta.UserID)
+	if err != nil {
+		s.log.Error("intent modal: failed to issue grant capability", "error", err)
+		return
+	}
+	if err := s.grants.Create(ctx, grant); err != nil {
+		s.log.Error("intent modal: failed to create grant", "error", err)
+		return
+	}
 	envelope.Status = api.Approved
 	envelope.UpdatedAt = time.Now().UTC()
 	s.intents.Update(ctx, envelope)

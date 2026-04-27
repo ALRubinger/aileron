@@ -19,6 +19,7 @@ import (
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/draft"
+	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
@@ -28,7 +29,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/store/postgres"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
-	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 // SlackAgentClient abstracts Slack's Agent/AI Apps API for testability.
@@ -44,51 +44,52 @@ type SlackAgentClient interface {
 
 // apiServer implements the generated api.ServerInterface.
 type apiServer struct {
-	log            *slog.Logger
-	registry       *connectorpkg.Registry
-	policyEngine   *policy.RuleEngine
-	orchestrator   *approval.InMemoryOrchestrator
-	vault          vault.Vault
-	systemVault    vault.Vault // infrastructure secrets (ADR-0020); nil when not configured
-	notifier       notify.Notifier
-	intents        *mem.IntentStore
-	approvals      *mem.ApprovalStore
-	policies       *mem.PolicyStore
-	grants         *mem.GrantStore
-	executions     *mem.ExecutionStore
-	connectors     *mem.ConnectorStore
-	credentials    *mem.CredentialStore
-	fundingSources *mem.FundingSourceStore
-	traces         *mem.TraceStore
+	log                *slog.Logger
+	registry           *connectorpkg.Registry
+	policyEngine       *policy.RuleEngine
+	orchestrator       *approval.InMemoryOrchestrator
+	vault              vault.Vault
+	systemVault        vault.Vault // infrastructure secrets (ADR-0020); nil when not configured
+	notifier           notify.Notifier
+	intents            *mem.IntentStore
+	approvals          *mem.ApprovalStore
+	policies           *mem.PolicyStore
+	grants             *mem.GrantStore
+	executions         *mem.ExecutionStore
+	connectors         *mem.ConnectorStore
+	credentials        *mem.CredentialStore
+	fundingSources     *mem.FundingSourceStore
+	traces             *mem.TraceStore
 	connectedAccounts  store.ConnectedAccountStore
-	accountService     *account.Registry      // nil when no account providers configured
-	sourceRegistry     *source.Registry       // read-only source connectors for context retrieval
-	draftPipeline      *draft.Pipeline        // nil when LLM not configured
-	drafts             store.DraftStore       // draft lifecycle store
-	instructions       store.UserInstructionStore // user instructions for context store
-	feedback           store.DraftFeedbackStore  // draft feedback signals for behavioral model
-	slackSender        SlackSender            // injectable for testing; defaults to comms.SendSlackMessage
-	slackAgentClient   SlackAgentClient        // injectable for testing; defaults to defaultSlackAgentClient
-	slackClientID      string                  // Slack app client ID (for bot install OAuth exchange)
-	slackClientSecret  string                  // Slack app client secret (for bot install OAuth exchange)
-	slackSigningSecret string                  // Slack Events API signing secret for webhook verification
-	slackBotExchanger  slackBotTokenExchanger  // injectable for testing; defaults to defaultSlackBotTokenExchange
-	slackTokenURL      string                  // overrides slackTokenURL const for testing
-	slackDedup         *slackEventDedup        // deduplication cache for Slack events
-	llmConfigs         store.LLMConfigStore   // per-user/per-org LLM provider config
-	enterprises        store.EnterpriseStore  // nil when auth is disabled
-	users              store.UserStore        // nil when auth is disabled
+	accountService     *account.Registry           // nil when no account providers configured
+	sourceRegistry     *source.Registry            // read-only source connectors for context retrieval
+	draftPipeline      *draft.Pipeline             // nil when LLM not configured
+	drafts             store.DraftStore            // draft lifecycle store
+	instructions       store.UserInstructionStore  // user instructions for context store
+	feedback           store.DraftFeedbackStore    // draft feedback signals for behavioral model
+	slackSender        SlackSender                 // injectable for testing; defaults to comms.SendSlackMessage
+	slackAgentClient   SlackAgentClient            // injectable for testing; defaults to defaultSlackAgentClient
+	slackClientID      string                      // Slack app client ID (for bot install OAuth exchange)
+	slackClientSecret  string                      // Slack app client secret (for bot install OAuth exchange)
+	slackSigningSecret string                      // Slack Events API signing secret for webhook verification
+	slackBotExchanger  slackBotTokenExchanger      // injectable for testing; defaults to defaultSlackBotTokenExchange
+	slackTokenURL      string                      // overrides slackTokenURL const for testing
+	slackDedup         *slackEventDedup            // deduplication cache for Slack events
+	llmConfigs         store.LLMConfigStore        // per-user/per-org LLM provider config
+	enterprises        store.EnterpriseStore       // nil when auth is disabled
+	users              store.UserStore             // nil when auth is disabled
 	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
 	userKeyMaterials   store.UserKeyMaterialStore  // nil when auth is disabled
 	kekSessionCache    *auth.KEKSessionCache       // nil when auth is disabled
-	enclaveClient      enclave.Client             // nil when TEE is disabled
-	enclaveVerifier    enclave.Verifier           // nil when TEE is disabled
-	teeCfg             *config.TEEConfig          // nil when TEE is disabled
-	teeState           *teeState                  // nil when TEE is disabled
-	escrowTTL          time.Duration              // TTL for auto-escrowed credentials
-	escrowIndex        sync.Map                   // vault path (string) -> escrow ID (string)
-	escrowIndexStore   *postgres.EscrowIndexStore // nil when auth is disabled; persists escrowIndex across restarts
-	uiBaseURL          string                     // base URL for the web UI (for constructing unlock links)
+	enclaveClient      enclave.Client              // nil when TEE is disabled
+	enclaveVerifier    enclave.Verifier            // nil when TEE is disabled
+	teeCfg             *config.TEEConfig           // nil when TEE is disabled
+	teeState           *teeState                   // nil when TEE is disabled
+	escrowTTL          time.Duration               // TTL for auto-escrowed credentials
+	grantCapabilityKey []byte                      // HMAC key for durable grant capabilities
+	escrowIndex        sync.Map                    // vault path (string) -> escrow ID (string)
+	escrowIndexStore   *postgres.EscrowIndexStore  // nil when auth is disabled; persists escrowIndex across restarts
+	uiBaseURL          string                      // base URL for the web UI (for constructing unlock links)
 	newID              func() string
 }
 
@@ -238,13 +239,15 @@ func (s *apiServer) CreateIntent(w http.ResponseWriter, r *http.Request) {
 	case model.DispositionAllow:
 		// Auto-approve: issue grant immediately.
 		grantID := "grt_" + s.newID()
-		grant := api.ExecutionGrant{
-			GrantId:   grantID,
-			IntentId:  intentID,
-			Status:    api.ExecutionGrantStatusActive,
-			ExpiresAt: now.Add(5 * time.Minute),
+		grant, err := s.newExecutionGrant(ctx, envelope, grantID, now.Add(5*time.Minute), nil, userIDFromContext(ctx))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "grant_error", err.Error())
+			return
 		}
-		s.grants.Create(ctx, grant)
+		if err := s.grants.Create(ctx, grant); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+			return
+		}
 		apiDecision.ExecutionGrantId = &grantID
 
 		envelope.Status = api.Approved
@@ -414,20 +417,25 @@ func (s *apiServer) ApproveRequest(w http.ResponseWriter, r *http.Request, appro
 
 	// Issue execution grant.
 	grantID := "grt_" + s.newID()
-	grant := api.ExecutionGrant{
-		GrantId:   grantID,
-		IntentId:  apr.IntentID,
-		Status:    api.ExecutionGrantStatusActive,
-		ExpiresAt: time.Now().UTC().Add(5 * time.Minute),
-	}
-	s.grants.Create(ctx, grant)
 
 	// Update intent status.
 	if intent, err := s.intents.Get(ctx, apr.IntentID); err == nil {
+		grant, err := s.newExecutionGrant(ctx, intent, grantID, time.Now().UTC().Add(5*time.Minute), nil, userIDFromContext(ctx))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "grant_error", err.Error())
+			return
+		}
+		if err := s.grants.Create(ctx, grant); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+			return
+		}
 		intent.Status = api.Approved
 		intent.Decision.ExecutionGrantId = &grantID
 		intent.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, intent)
+	} else {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
 	}
 
 	// Emit audit events.
@@ -512,20 +520,24 @@ func (s *apiServer) ModifyRequest(w http.ResponseWriter, r *http.Request, approv
 
 	// Issue execution grant with bounded parameters.
 	grantID := "grt_" + s.newID()
-	grant := api.ExecutionGrant{
-		GrantId:           grantID,
-		IntentId:          apr.IntentID,
-		Status:            api.ExecutionGrantStatusActive,
-		ExpiresAt:         time.Now().UTC().Add(5 * time.Minute),
-		BoundedParameters: &req.Modifications,
-	}
-	s.grants.Create(ctx, grant)
 
 	if intent, err := s.intents.Get(ctx, apr.IntentID); err == nil {
+		grant, err := s.newExecutionGrant(ctx, intent, grantID, time.Now().UTC().Add(5*time.Minute), &req.Modifications, userIDFromContext(ctx))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "grant_error", err.Error())
+			return
+		}
+		if err := s.grants.Create(ctx, grant); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+			return
+		}
 		intent.Status = api.Approved
 		intent.Decision.ExecutionGrantId = &grantID
 		intent.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, intent)
+	} else {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
 	}
 
 	modifiedStatus := api.ApprovalStatusModified
@@ -746,6 +758,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 			params[k] = v
 		}
 	}
+	execUserID := userIDFromContext(ctx)
 
 	// Resolve credential from vault. Try connected account first (user-scoped
 	// OAuth token), fall back to infrastructure credential.
@@ -756,6 +769,12 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "vault_error", "failed to resolve credential")
 		return
 	}
+	issuedCapability, err := s.verifyExecutionGrantCapability(grant, intent, params, execUserID, vaultPath, connProvider, secret.Metadata.Type)
+	if err != nil && s.enclaveClient != nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", err.Error())
+		writeError(w, http.StatusForbidden, "invalid_grant_capability", err.Error())
+		return
+	}
 
 	// TEE mode: delegate execution to enclave. The credential stays
 	// KEK-encrypted; only the enclave (which holds the user's KEK) can
@@ -764,10 +783,6 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		if !s.requireEnclave(w, r) {
 			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "enclave not ready")
 			return
-		}
-		var execUserID string
-		if claims := auth.ClaimsFromContext(ctx); claims != nil {
-			execUserID = claims.Subject
 		}
 		execReq := enclave.ExecuteRequest{
 			RequestID:           execID,
@@ -781,6 +796,10 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 			Parameters:          params,
 			EncryptedCredential: secret.Value,
 			CredentialType:      secret.Metadata.Type,
+		}
+		if issuedCapability != nil {
+			applyIssuedCapabilityToExecuteRequest(&execReq, issuedCapability.Capability)
+			execReq.Capability = issuedCapability
 		}
 		// If credential is escrowed in TEE memory, use the escrow ID
 		// instead of sending the encrypted credential. This allows
@@ -810,10 +829,6 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Direct mode: all credentials are encrypted — decrypt with user's KEK.
-	var execUserID string
-	if claims := auth.ClaimsFromContext(ctx); claims != nil {
-		execUserID = claims.Subject
-	}
 	kek := s.getUserKEK(execUserID)
 	if kek == nil {
 		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "vault locked — unlock to execute")
@@ -1150,15 +1165,18 @@ func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*
 	// Resolve credential — inject userID into context for connected account lookup.
 	credCtx := ctx
 	if userID != "" {
-		credCtx = auth.ContextWithClaims(ctx, &auth.Claims{})
-		claims := auth.ClaimsFromContext(credCtx)
-		claims.Subject = userID
+		credCtx = contextWithUser(ctx, userID)
 	}
 	vaultPath := s.resolveCredentialVaultPath(credCtx, connProvider)
 	secret, err := s.vault.Get(ctx, vaultPath)
 	if err != nil {
 		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential not found: "+vaultPath)
 		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "credential not found"}, nil
+	}
+	issuedCapability, err := s.verifyExecutionGrantCapability(grant, intent, params, userID, vaultPath, connProvider, secret.Metadata.Type)
+	if err != nil && s.enclaveClient != nil {
+		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", err.Error())
+		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: err.Error()}, nil
 	}
 
 	// TEE mode.
@@ -1179,6 +1197,10 @@ func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*
 			Parameters:          params,
 			EncryptedCredential: secret.Value,
 			CredentialType:      secret.Metadata.Type,
+		}
+		if issuedCapability != nil {
+			applyIssuedCapabilityToExecuteRequest(&execReq, issuedCapability.Capability)
+			execReq.Capability = issuedCapability
 		}
 		if escrowID, ok := s.escrowIndex.Load(vaultPath); ok {
 			execReq.EscrowID = escrowID.(string)

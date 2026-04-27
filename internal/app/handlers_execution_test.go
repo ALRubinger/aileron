@@ -11,12 +11,14 @@ import (
 	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/auth"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/crypto"
+	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 // stubConnector implements connectorpkg.Connector for tests.
@@ -33,8 +35,9 @@ func (c *stubConnector) Execute(_ context.Context, _ connectorpkg.ExecutionReque
 
 // stubEnclaveClient implements enclave.Client for tests.
 type stubEnclaveClient struct {
-	resp enclave.ExecuteResponse
-	err  error
+	resp    enclave.ExecuteResponse
+	err     error
+	execute enclave.ExecuteRequest
 }
 
 func (e *stubEnclaveClient) Attest(_ context.Context, _ enclave.AttestationRequest) (enclave.AttestationResponse, error) {
@@ -49,7 +52,8 @@ func (e *stubEnclaveClient) TransmitKEK(_ context.Context, _ enclave.TransmitKEK
 func (e *stubEnclaveClient) OAuthExchange(_ context.Context, _ enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
 	return enclave.OAuthExchangeResponse{}, nil
 }
-func (e *stubEnclaveClient) Execute(_ context.Context, _ enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
+func (e *stubEnclaveClient) Execute(_ context.Context, req enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
+	e.execute = req
 	return e.resp, e.err
 }
 func (e *stubEnclaveClient) EscrowStore(_ context.Context, _ enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
@@ -69,14 +73,15 @@ func (e *stubEnclaveClient) Close() error                  { return nil }
 
 func newExecutionServer() *apiServer {
 	return &apiServer{
-		log:        slog.Default(),
-		registry:   connectorpkg.NewRegistry(),
-		intents:    mem.NewIntentStore(),
-		grants:     mem.NewGrantStore(),
-		executions: mem.NewExecutionStore(),
-		traces:     mem.NewTraceStore(),
-		vault:      vault.NewMemVault(),
-		newID:      func() string { return "test-id" },
+		log:                slog.Default(),
+		registry:           connectorpkg.NewRegistry(),
+		intents:            mem.NewIntentStore(),
+		grants:             mem.NewGrantStore(),
+		executions:         mem.NewExecutionStore(),
+		traces:             mem.NewTraceStore(),
+		vault:              vault.NewMemVault(),
+		grantCapabilityKey: []byte("01234567890123456789012345678901"),
+		newID:              func() string { return "test-id" },
 	}
 }
 
@@ -92,17 +97,22 @@ func seedGrantAndIntent(ctx context.Context, s *apiServer, grantID, intentID str
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	})
-	s.grants.Create(ctx, api.ExecutionGrant{
-		GrantId:   grantID,
-		IntentId:  intentID,
-		Status:    api.ExecutionGrantStatusActive,
-		ExpiresAt: time.Now().UTC().Add(time.Hour),
-	})
 	ciphertext, _ := crypto.Encrypt([]byte("ghp_token"), testKEK)
 	s.vault.Put(ctx, "connectors/github/default", ciphertext, vault.Metadata{
 		Type:   "api_key",
 		Labels: map[string]string{vault.EncryptedLabel: "true"},
 	})
+	intent, err := s.intents.Get(ctx, intentID)
+	if err != nil {
+		panic(err)
+	}
+	grant, err := s.newExecutionGrant(ctx, intent, grantID, time.Now().UTC().Add(time.Hour), nil, "")
+	if err != nil {
+		panic(err)
+	}
+	if err := s.grants.Create(ctx, grant); err != nil {
+		panic(err)
+	}
 }
 
 func execRequest(grantID string) *http.Request {
@@ -153,13 +163,14 @@ func TestRunExecution_TEEMode_Success(t *testing.T) {
 
 	conn := &stubConnector{}
 	s.registry.Register(ctx, conn)
-	s.enclaveClient = &stubEnclaveClient{
+	enclaveClient := &stubEnclaveClient{
 		resp: enclave.ExecuteResponse{
 			Status:     "succeeded",
 			Output:     map[string]any{"sha": "def456"},
 			ReceiptRef: "receipt_2",
 		},
 	}
+	s.enclaveClient = enclaveClient
 
 	seedGrantAndIntent(ctx, s, "grant_2", "int_2")
 
@@ -177,6 +188,387 @@ func TestRunExecution_TEEMode_Success(t *testing.T) {
 	if resp.Status != api.Accepted {
 		t.Errorf("expected status 'accepted', got %s", resp.Status)
 	}
+	if enclaveClient.execute.Capability == nil {
+		t.Fatal("expected issued capability to be forwarded to enclave client")
+	}
+	if enclaveClient.execute.GrantID != "grant_2" {
+		t.Fatalf("enclave grant ID = %q, want grant_2", enclaveClient.execute.GrantID)
+	}
+	if enclaveClient.execute.VaultPath != "connectors/github/default" {
+		t.Fatalf("enclave vault path = %q, want connectors/github/default", enclaveClient.execute.VaultPath)
+	}
+}
+
+func TestNewExecutionGrant_IssuesCapabilityForApprovedScope(t *testing.T) {
+	s := newExecutionServer()
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(0)
+	s.vault.Put(ctx, "connectors/github/default", []byte("ciphertext"), vault.Metadata{Type: "api_key"})
+	intent := api.IntentEnvelope{
+		IntentId:    "int_cap",
+		WorkspaceId: "ws_1",
+		Status:      api.Approved,
+		Action: api.ActionIntent{
+			Type:    "git.issue.create",
+			Summary: "file issue",
+			Domain:  &api.DomainAction{Git: &api.GitAction{}},
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	bounded := map[string]any{"issue_title": "approved title"}
+
+	grant, err := s.newExecutionGrant(ctx, intent, "grant_cap", expiresAt, &bounded, "usr_a")
+	if err != nil {
+		t.Fatalf("newExecutionGrant: %v", err)
+	}
+	if grant.Capability == nil {
+		t.Fatal("expected grant capability")
+	}
+
+	var signed enclave.SignedGrantCapability
+	capabilityJSON, err := json.Marshal(grant.Capability)
+	if err != nil {
+		t.Fatalf("marshal capability: %v", err)
+	}
+	if err := json.Unmarshal(capabilityJSON, &signed); err != nil {
+		t.Fatalf("unmarshal capability: %v", err)
+	}
+	expected := enclave.GrantCapability{
+		GrantID:        "grant_cap",
+		IntentID:       "int_cap",
+		UserID:         "usr_a",
+		VaultPath:      "connectors/github/default",
+		Provider:       "github",
+		CredentialType: "api_key",
+		ActionType:     "git.issue.create",
+		Parameters:     map[string]any{"action_type": "git.issue.create", "summary": "file issue", "issue_title": "approved title"},
+		ExpiresAt:      expiresAt.UTC().Format(time.RFC3339),
+		Nonce:          signed.Capability.Nonce,
+	}
+	if !enclave.VerifySignedGrantCapability(s.grantSigningKey(), &signed, expected) {
+		t.Fatal("expected issued grant capability to match approved scope")
+	}
+}
+
+func TestApproveRequest_IssuesGrantCapability(t *testing.T) {
+	s := newExecutionServer()
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s.approvals = mem.NewApprovalStore()
+	s.orchestrator = approval.NewInMemoryOrchestrator(s.approvals, func() string { return "approval-id" })
+	s.vault.Put(ctx, "connectors/github/default", []byte("ciphertext"), vault.Metadata{Type: "api_key"})
+	intent := api.IntentEnvelope{
+		IntentId:    "int_approve",
+		WorkspaceId: "ws_1",
+		Status:      api.PendingApproval,
+		Action:      api.ActionIntent{Type: "git.push", Summary: "push"},
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	if err := s.intents.Create(ctx, intent); err != nil {
+		t.Fatalf("Create intent: %v", err)
+	}
+	apr, err := s.orchestrator.Request(ctx, approval.ApprovalRequest{
+		IntentID:    intent.IntentId,
+		WorkspaceID: intent.WorkspaceId,
+		Rationale:   "test",
+	})
+	if err != nil {
+		t.Fatalf("Request approval: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/approve", strings.NewReader(`{}`))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.ApproveRequest(w, req, apr.ApprovalID)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp api.ApprovalActionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ExecutionGrantId == nil {
+		t.Fatal("expected execution grant ID")
+	}
+	grant, err := s.grants.Get(ctx, *resp.ExecutionGrantId)
+	if err != nil {
+		t.Fatalf("Get grant: %v", err)
+	}
+	if grant.Capability == nil {
+		t.Fatal("expected issued grant capability")
+	}
+	var signed enclave.SignedGrantCapability
+	capabilityJSON, err := json.Marshal(grant.Capability)
+	if err != nil {
+		t.Fatalf("marshal capability: %v", err)
+	}
+	if err := json.Unmarshal(capabilityJSON, &signed); err != nil {
+		t.Fatalf("unmarshal capability: %v", err)
+	}
+	if signed.Capability.UserID != "usr_a" {
+		t.Fatalf("capability user = %q, want usr_a", signed.Capability.UserID)
+	}
+	if signed.Capability.ActionType != "git.push" {
+		t.Fatalf("capability action = %q, want git.push", signed.Capability.ActionType)
+	}
+}
+
+func TestApproveRequest_MissingIntentAfterApproval(t *testing.T) {
+	s := newExecutionServer()
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s.approvals = mem.NewApprovalStore()
+	s.orchestrator = approval.NewInMemoryOrchestrator(s.approvals, func() string { return "approval-id" })
+	apr, err := s.orchestrator.Request(ctx, approval.ApprovalRequest{
+		IntentID:    "missing_intent",
+		WorkspaceID: "ws_1",
+		Rationale:   "test",
+	})
+	if err != nil {
+		t.Fatalf("Request approval: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/approve", strings.NewReader(`{}`))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.ApproveRequest(w, req, apr.ApprovalID)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestModifyRequest_IssuesBoundedGrantCapability(t *testing.T) {
+	s := newExecutionServer()
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s.approvals = mem.NewApprovalStore()
+	s.orchestrator = approval.NewInMemoryOrchestrator(s.approvals, func() string { return "approval-id" })
+	s.vault.Put(ctx, "connectors/github/default", []byte("ciphertext"), vault.Metadata{Type: "api_key"})
+	intent := api.IntentEnvelope{
+		IntentId:    "int_modify",
+		WorkspaceId: "ws_1",
+		Status:      api.PendingApproval,
+		Action:      api.ActionIntent{Type: "git.issue.create", Summary: "file issue"},
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	if err := s.intents.Create(ctx, intent); err != nil {
+		t.Fatalf("Create intent: %v", err)
+	}
+	apr, err := s.orchestrator.Request(ctx, approval.ApprovalRequest{
+		IntentID:    intent.IntentId,
+		WorkspaceID: intent.WorkspaceId,
+		Rationale:   "test",
+	})
+	if err != nil {
+		t.Fatalf("Request approval: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/modify", strings.NewReader(`{"modifications":{"issue_title":"approved"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.ModifyRequest(w, req, apr.ApprovalID)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp api.ApprovalActionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ExecutionGrantId == nil {
+		t.Fatal("expected execution grant ID")
+	}
+	grant, err := s.grants.Get(ctx, *resp.ExecutionGrantId)
+	if err != nil {
+		t.Fatalf("Get grant: %v", err)
+	}
+	signed := decodeGrantCapability(t, grant)
+	if signed.Capability.Parameters["issue_title"] != "approved" {
+		t.Fatalf("capability bounded issue_title = %v, want approved", signed.Capability.Parameters["issue_title"])
+	}
+}
+
+func TestModifyRequest_MissingIntentAfterApproval(t *testing.T) {
+	s := newExecutionServer()
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s.approvals = mem.NewApprovalStore()
+	s.orchestrator = approval.NewInMemoryOrchestrator(s.approvals, func() string { return "approval-id" })
+	apr, err := s.orchestrator.Request(ctx, approval.ApprovalRequest{
+		IntentID:    "missing_intent",
+		WorkspaceID: "ws_1",
+		Rationale:   "test",
+	})
+	if err != nil {
+		t.Fatalf("Request approval: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/modify", strings.NewReader(`{"modifications":{"issue_title":"approved"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.ModifyRequest(w, req, apr.ApprovalID)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestNewExecutionGrant_UsesModelDomainParameters(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(0)
+	domain := model.DomainAction{
+		Git: &model.GitAction{
+			Repository: "acme/project",
+			IssueTitle: "from model domain",
+		},
+	}
+	intent := api.IntentEnvelope{
+		IntentId:    "int_model_domain",
+		WorkspaceId: "ws_1",
+		Status:      api.Approved,
+		Action: api.ActionIntent{
+			Type:    "git.issue.create",
+			Summary: "file issue",
+			Metadata: &map[string]interface{}{
+				"_model_domain": domain,
+			},
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	s.vault.Put(ctx, "connectors/github/default", []byte("ciphertext"), vault.Metadata{Type: "api_key"})
+
+	grant, err := s.newExecutionGrant(ctx, intent, "grant_model_domain", expiresAt, nil, "")
+	if err != nil {
+		t.Fatalf("newExecutionGrant: %v", err)
+	}
+	signed := decodeGrantCapability(t, grant)
+	if signed.Capability.Parameters["repository"] != "acme/project" {
+		t.Fatalf("repository = %v, want acme/project", signed.Capability.Parameters["repository"])
+	}
+	if signed.Capability.Parameters["issue_title"] != "from model domain" {
+		t.Fatalf("issue_title = %v, want from model domain", signed.Capability.Parameters["issue_title"])
+	}
+}
+
+func TestVerifyExecutionGrantCapabilityFailures(t *testing.T) {
+	s := newExecutionServer()
+	intent := api.IntentEnvelope{
+		IntentId: "int_verify",
+		Action:   api.ActionIntent{Type: "git.push", Summary: "push"},
+	}
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(0)
+	params := map[string]any{"action_type": "git.push", "summary": "push"}
+	grant, err := s.newExecutionGrant(context.Background(), intent, "grant_verify", expiresAt, nil, "usr_a")
+	if err != nil {
+		t.Fatalf("newExecutionGrant: %v", err)
+	}
+
+	if _, err := s.verifyExecutionGrantCapability(api.ExecutionGrant{}, intent, params, "usr_a", "connectors/github/default", "github", ""); err == nil {
+		t.Fatal("expected missing capability to fail")
+	}
+	if _, err := s.verifyExecutionGrantCapability(grant, intent, params, "usr_b", "connectors/github/default", "github", ""); err == nil {
+		t.Fatal("expected user mismatch to fail")
+	}
+	tampered := grant
+	tampered.Capability = &map[string]interface{}{"capability": "not-an-object", "signature": "sig"}
+	if _, err := s.verifyExecutionGrantCapability(tampered, intent, params, "usr_a", "connectors/github/default", "github", ""); err == nil {
+		t.Fatal("expected malformed capability to fail")
+	}
+}
+
+func TestGrantSigningKeyInitializesWhenMissing(t *testing.T) {
+	s := &apiServer{}
+	key := s.grantSigningKey()
+	if len(key) != 32 {
+		t.Fatalf("key length = %d, want 32", len(key))
+	}
+	if &key[0] != &s.grantCapabilityKey[0] {
+		t.Fatal("expected generated key to be stored on server")
+	}
+}
+
+func TestCloneParamsNil(t *testing.T) {
+	if cloneParams(nil) != nil {
+		t.Fatal("expected nil params to clone to nil")
+	}
+}
+
+func TestRunExecution_TEEMode_RejectsCapabilityScopeMismatch(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	s.registry.Register(ctx, &stubConnector{})
+	enclaveClient := &stubEnclaveClient{resp: enclave.ExecuteResponse{Status: "succeeded"}}
+	s.enclaveClient = enclaveClient
+	seedGrantAndIntent(ctx, s, "grant_badcap", "int_badcap")
+
+	grant, err := s.grants.Get(ctx, "grant_badcap")
+	if err != nil {
+		t.Fatalf("Get grant: %v", err)
+	}
+	bounded := map[string]any{"summary": "tampered after approval"}
+	grant.BoundedParameters = &bounded
+	if err := s.grants.Update(ctx, grant); err != nil {
+		t.Fatalf("Update grant: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	s.RunExecution(w, execRequest("grant_badcap"))
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if enclaveClient.execute.RequestID != "" {
+		t.Fatal("expected enclave Execute not to be called")
+	}
+}
+
+func TestExecuteGrant_TEEMode_RejectsCapabilityScopeMismatch(t *testing.T) {
+	s := newExecutionServer()
+	ctx := context.Background()
+	s.registry.Register(ctx, &stubConnector{})
+	s.enclaveClient = &stubEnclaveClient{resp: enclave.ExecuteResponse{Status: "succeeded"}}
+	seedGrantAndIntent(ctx, s, "grant_internal_badcap", "int_internal_badcap")
+	grant, err := s.grants.Get(ctx, "grant_internal_badcap")
+	if err != nil {
+		t.Fatalf("Get grant: %v", err)
+	}
+	bounded := map[string]any{"summary": "tampered after approval"}
+	grant.BoundedParameters = &bounded
+	if err := s.grants.Update(ctx, grant); err != nil {
+		t.Fatalf("Update grant: %v", err)
+	}
+
+	result, err := s.executeGrant(ctx, "grant_internal_badcap", "")
+	if err != nil {
+		t.Fatalf("executeGrant: %v", err)
+	}
+	if result.Status != api.ExecutionStatusFailed {
+		t.Fatalf("status = %q, want failed", result.Status)
+	}
+	if !strings.Contains(result.Error, "issued grant capability") {
+		t.Fatalf("error = %q, want issued grant capability error", result.Error)
+	}
+}
+
+func decodeGrantCapability(t *testing.T, grant api.ExecutionGrant) enclave.SignedGrantCapability {
+	t.Helper()
+	if grant.Capability == nil {
+		t.Fatal("expected grant capability")
+	}
+	capabilityJSON, err := json.Marshal(grant.Capability)
+	if err != nil {
+		t.Fatalf("marshal capability: %v", err)
+	}
+	var signed enclave.SignedGrantCapability
+	if err := json.Unmarshal(capabilityJSON, &signed); err != nil {
+		t.Fatalf("unmarshal capability: %v", err)
+	}
+	return signed
 }
 
 func TestRunExecution_InvalidBody(t *testing.T) {
