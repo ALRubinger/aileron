@@ -2510,6 +2510,10 @@ components:
         bounded_parameters:
           type: object
           additionalProperties: true
+        capability:
+          type: object
+          additionalProperties: true
+          description: Durable signed grant capability issued from the approved grant scope.
         expires_at:
           type: string
           format: date-time

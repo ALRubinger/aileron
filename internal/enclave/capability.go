@@ -68,6 +68,10 @@ func VerifySourceExecuteCapability(key []byte, req SourceExecuteRequest) bool {
 	return verifyGrantCapability(key, req.Capability, expected)
 }
 
+func VerifySignedGrantCapability(key []byte, signed *SignedGrantCapability, expected GrantCapability) bool {
+	return verifyGrantCapability(key, signed, expected)
+}
+
 func ExecuteGrantCapability(req ExecuteRequest, nonce string) GrantCapability {
 	return GrantCapability{
 		GrantID:        req.GrantID,
