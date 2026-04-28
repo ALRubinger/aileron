@@ -6,7 +6,7 @@ order: 1
 
 Aileron sits between your agent and your LLM, intercepting requests and running deterministic actions when intent is clear. The result: your existing agent — Claude Code, Cursor, Continue, anything that speaks `chat/completions` — becomes capable of doing things it could not do reliably before. This document shows what those things look like in practice.
 
-> **Companion document:** for the strategy, architecture, and business model behind Aileron, see [The Deterministic Layer for AI Agents](/pivot/the-deterministic-layer).
+> **Companion documents:** for the pitch and architectural insight, see [Overview](/pivot/overview). For the load-bearing decisions, see [Architecture](/pivot/architecture/). For who this is for, see [The Customer](/pivot/customer).
 
 Two heroes lead the document. Both are five-minute wins. Both deliver the moment where the agent does something it could not do before. They cover two developer contexts:
 
@@ -191,4 +191,4 @@ That is the unlock: the agent the developer already uses, every day, becomes cap
 
 ---
 
-> **For the architectural and strategic picture:** see [The Deterministic Layer for AI Agents](/pivot/the-deterministic-layer).
+> **For the architectural and strategic picture:** see [Overview](/pivot/overview), [Aileron Runtime](/pivot/runtime), [Aileron Control](/pivot/control), and the [Architecture](/pivot/architecture/) section.

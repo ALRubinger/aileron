@@ -37,7 +37,32 @@ export const navigation: NavItem[] = [
   {
     label: 'Pivot',
     children: [
-      { label: 'The Deterministic Layer', href: '/pivot/the-deterministic-layer' },
+      { label: 'Overview', href: '/pivot/overview' },
+      { label: 'The Problem', href: '/pivot/the-problem' },
+      { label: 'Aileron Runtime', href: '/pivot/runtime' },
+      { label: 'Aileron Control', href: '/pivot/control' },
+      {
+        label: 'Architecture',
+        children: [
+          { label: 'Overview', href: '/pivot/architecture/' },
+          { label: 'Connector Model', href: '/pivot/architecture/connector-model' },
+          { label: 'Capability Model', href: '/pivot/architecture/capability-model' },
+          { label: 'Action Model', href: '/pivot/architecture/action-model' },
+          { label: 'Intent Matching', href: '/pivot/architecture/intent-matching' },
+          { label: 'Install Consent', href: '/pivot/architecture/install-consent' },
+          { label: 'Capability Binding', href: '/pivot/architecture/capability-binding' },
+          { label: 'Distribution Mechanics', href: '/pivot/architecture/distribution-mechanics' },
+          { label: 'Sandboxing', href: '/pivot/architecture/sandboxing' },
+          { label: 'User Channel', href: '/pivot/architecture/user-channel' },
+          { label: 'Failure Handling', href: '/pivot/architecture/failure-handling' },
+          { label: 'Project Portability', href: '/pivot/architecture/project-portability' },
+          { label: 'Manifest Format', href: '/pivot/architecture/manifest-format' }
+        ]
+      },
+      { label: 'Why This Is Defensible', href: '/pivot/why-defensible' },
+      { label: 'The Customer', href: '/pivot/customer' },
+      { label: 'The Business', href: '/pivot/business' },
+      { label: 'What Aileron Is Not', href: '/pivot/not' },
       { label: 'What Your Agent Can Now Do', href: '/pivot/what-your-agent-can-do' },
       { label: 'Aileron vs Tool Calling vs MCP', href: '/pivot/tool-calling-mcp-comparison' },
       { label: 'Competitive Landscape', href: '/pivot/competitive-landscape' }
