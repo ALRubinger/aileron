@@ -61,6 +61,7 @@ export const navigation: NavItem[] = [
       },
       { label: 'Why This Is Defensible', href: '/pivot/why-defensible' },
       { label: 'The Customer', href: '/pivot/customer' },
+      { label: 'Enterprise — Addressed Later', href: '/pivot/enterprise-later' },
       { label: 'The Business', href: '/pivot/business' },
       { label: 'What Aileron Is Not', href: '/pivot/not' },
       { label: 'What Your Agent Can Now Do', href: '/pivot/what-your-agent-can-do' },
