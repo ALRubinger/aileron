@@ -13,7 +13,7 @@ It is two layers:
 
 These layers are unified by architecture, not marketing. The LLM endpoint is the only seam in the agent stack where you can guarantee, simultaneously: zero SDK integration, credentials never leaked to the model, deterministic action execution regardless of how the LLM coordinated the call, tamper-resistant user consent for consequential actions, and a complete audit trail. Every other interception point has a structural compromise.
 
-> **Companion document:** for concrete hero use cases and the developer experience, see [What Your Agent Can Now Do](/pivot/what-your-agent-can-do). This document covers the strategy, architecture, and business model.
+> **Companion documents:** for concrete hero use cases and the developer experience, see [What Your Agent Can Now Do](/pivot/what-your-agent-can-do). For an at-a-glance contrast with adjacent approaches, see [Aileron vs Tool Calling vs MCP](/pivot/tool-calling-mcp-comparison) and the deeper [Competitive Landscape](/pivot/competitive-landscape). This document covers the strategy, architecture, and business model.
 
 ---
 
