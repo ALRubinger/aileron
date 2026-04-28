@@ -123,6 +123,10 @@ func (c *Client) EstablishSession(_ context.Context, req enclave.SessionRequest)
 	zeroBytes(c.sessionKey)
 
 	c.sessionKey = h[:]
+	grantCapabilityKey := copyBytes(req.GrantCapabilityKey)
+	if len(grantCapabilityKey) == 0 {
+		grantCapabilityKey = copyBytes(c.sessionKey)
+	}
 	c.expiresAt = time.Now().Add(c.sessionTTL)
 
 	b := make([]byte, 16)
@@ -130,8 +134,9 @@ func (c *Client) EstablishSession(_ context.Context, req enclave.SessionRequest)
 	c.sessionID = hex.EncodeToString(b)
 
 	return enclave.SessionResponse{
-		SessionID: c.sessionID,
-		ExpiresAt: c.expiresAt.Format(time.RFC3339),
+		SessionID:          c.sessionID,
+		ExpiresAt:          c.expiresAt.Format(time.RFC3339),
+		GrantCapabilityKey: grantCapabilityKey,
 	}, nil
 }
 

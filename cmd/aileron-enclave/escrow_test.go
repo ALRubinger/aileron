@@ -100,6 +100,79 @@ func TestEscrowGetForExecuteEnforcesScope(t *testing.T) {
 	}
 }
 
+func TestEscrowGetForExecuteEnforcesIssuedCapabilityBinding(t *testing.T) {
+	baseCap := enclave.GrantCapability{
+		GrantID:        "grant-1",
+		UserID:         "user-1",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "oauth2",
+		ActionType:     "email.send",
+		Nonce:          "nonce-1",
+	}
+	s := mustNewEscrowStore(t)
+	id := s.Store(enclave.EscrowStoreRequest{
+		IssuedCapability: &enclave.SignedGrantCapability{Capability: baseCap, Signature: "sig"},
+	}, []byte("scoped-cred"), time.Now().Add(time.Hour))
+
+	valid := enclave.ExecuteRequest{
+		EscrowID:       id,
+		GrantID:        "grant-1",
+		UserID:         "user-1",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "oauth2",
+		ActionType:     "email.send",
+	}
+	if _, err := s.GetForExecute(valid); err != nil {
+		t.Fatalf("GetForExecute valid issued scope: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*enclave.ExecuteRequest)
+	}{
+		{"grant", func(r *enclave.ExecuteRequest) { r.GrantID = "grant-2" }},
+		{"user", func(r *enclave.ExecuteRequest) { r.UserID = "user-2" }},
+		{"vault", func(r *enclave.ExecuteRequest) { r.VaultPath = "connected-accounts/user-2/gmail" }},
+		{"provider", func(r *enclave.ExecuteRequest) { r.Provider = "drive" }},
+		{"credential type", func(r *enclave.ExecuteRequest) { r.CredentialType = "api_key" }},
+		{"action", func(r *enclave.ExecuteRequest) { r.ActionType = "email.delete" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := valid
+			tt.mutate(&candidate)
+			_, err := s.GetForExecute(candidate)
+			if err != enclave.ErrEscrowScopeMismatch {
+				t.Fatalf("expected ErrEscrowScopeMismatch, got %v", err)
+			}
+		})
+	}
+}
+
+func TestEscrowGetForExecuteEnforcesIssuedCapabilityActionTypes(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	id := s.Store(enclave.EscrowStoreRequest{
+		IssuedCapability: &enclave.SignedGrantCapability{
+			Capability: enclave.GrantCapability{
+				ActionTypes: []string{"email.send", "email.archive"},
+				Nonce:       "nonce-1",
+			},
+			Signature: "sig",
+		},
+	}, []byte("scoped-cred"), time.Now().Add(time.Hour))
+
+	valid := enclave.ExecuteRequest{EscrowID: id, ActionType: "email.archive"}
+	if _, err := s.GetForExecute(valid); err != nil {
+		t.Fatalf("GetForExecute valid action type: %v", err)
+	}
+	invalid := enclave.ExecuteRequest{EscrowID: id, ActionType: "email.delete"}
+	if _, err := s.GetForExecute(invalid); err != enclave.ErrEscrowScopeMismatch {
+		t.Fatalf("expected ErrEscrowScopeMismatch, got %v", err)
+	}
+}
+
 func TestEscrowGetForSourceEnforcesScope(t *testing.T) {
 	s := mustNewEscrowStore(t)
 	req := testEscrowRequest("grant-1", "oauth2", nil)
@@ -137,6 +210,73 @@ func TestEscrowGetForSourceEnforcesScope(t *testing.T) {
 				t.Fatalf("expected ErrEscrowScopeMismatch, got %v", err)
 			}
 		})
+	}
+}
+
+func TestEscrowGetForSourceEnforcesIssuedCapabilityBinding(t *testing.T) {
+	baseCap := enclave.GrantCapability{
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "gmail_search",
+		Nonce:     "nonce-1",
+	}
+	s := mustNewEscrowStore(t)
+	id := s.Store(enclave.EscrowStoreRequest{
+		IssuedCapability: &enclave.SignedGrantCapability{Capability: baseCap, Signature: "sig"},
+	}, []byte("token"), time.Now().Add(time.Hour))
+
+	valid := enclave.SourceExecuteRequest{
+		EscrowID:  id,
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "gmail_search",
+	}
+	if _, err := s.GetForSource(valid); err != nil {
+		t.Fatalf("GetForSource valid issued scope: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*enclave.SourceExecuteRequest)
+	}{
+		{"user", func(r *enclave.SourceExecuteRequest) { r.UserID = "user-2" }},
+		{"vault", func(r *enclave.SourceExecuteRequest) { r.VaultPath = "connected-accounts/user-2/gmail" }},
+		{"provider", func(r *enclave.SourceExecuteRequest) { r.Provider = "drive" }},
+		{"tool", func(r *enclave.SourceExecuteRequest) { r.Tool = "gmail_delete" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidate := valid
+			tt.mutate(&candidate)
+			_, err := s.GetForSource(candidate)
+			if err != enclave.ErrEscrowScopeMismatch {
+				t.Fatalf("expected ErrEscrowScopeMismatch, got %v", err)
+			}
+		})
+	}
+}
+
+func TestEscrowGetForSourceEnforcesIssuedCapabilitySourceTools(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	id := s.Store(enclave.EscrowStoreRequest{
+		IssuedCapability: &enclave.SignedGrantCapability{
+			Capability: enclave.GrantCapability{
+				SourceTools: []string{"gmail_search", "gmail_threads"},
+				Nonce:       "nonce-1",
+			},
+			Signature: "sig",
+		},
+	}, []byte("token"), time.Now().Add(time.Hour))
+
+	valid := enclave.SourceExecuteRequest{EscrowID: id, Tool: "gmail_threads"}
+	if _, err := s.GetForSource(valid); err != nil {
+		t.Fatalf("GetForSource valid source tool: %v", err)
+	}
+	invalid := enclave.SourceExecuteRequest{EscrowID: id, Tool: "gmail_delete"}
+	if _, err := s.GetForSource(invalid); err != enclave.ErrEscrowScopeMismatch {
+		t.Fatalf("expected ErrEscrowScopeMismatch, got %v", err)
 	}
 }
 

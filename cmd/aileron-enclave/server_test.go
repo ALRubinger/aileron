@@ -26,6 +26,7 @@ import (
 type testSessionAuth struct {
 	sessionID string
 	authKey   []byte
+	grantKey  []byte
 }
 
 var testSessions sync.Map
@@ -180,6 +181,13 @@ func attachTestCapability(t *testing.T, path string, body any, sess testSessionA
 			t.Fatalf("signing execute capability: %v", err)
 		}
 		req.Capability = capability
+		if req.IssuedCapability == nil {
+			issued, err := enclave.SignGrantCapability(sess.grantKey, enclave.IssuedExecuteGrantCapability(req, nonce+"-issued", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)))
+			if err != nil {
+				t.Fatalf("signing issued execute capability: %v", err)
+			}
+			req.IssuedCapability = issued
+		}
 		return req
 	case enclave.EscrowStoreRequest:
 		capability, err := enclave.SignGrantCapability(sess.authKey, enclave.EscrowStoreGrantCapability(req, nonce))
@@ -187,6 +195,13 @@ func attachTestCapability(t *testing.T, path string, body any, sess testSessionA
 			t.Fatalf("signing escrow capability: %v", err)
 		}
 		req.Capability = capability
+		if req.IssuedCapability == nil {
+			issued, err := enclave.SignGrantCapability(sess.grantKey, enclave.EscrowStoreGrantCapability(req, nonce+"-issued"))
+			if err != nil {
+				t.Fatalf("signing issued escrow capability: %v", err)
+			}
+			req.IssuedCapability = issued
+		}
 		return req
 	case enclave.SourceExecuteRequest:
 		capability, err := enclave.SignGrantCapability(sess.authKey, enclave.SourceExecuteGrantCapability(req, nonce))
@@ -198,6 +213,60 @@ func attachTestCapability(t *testing.T, path string, body any, sess testSessionA
 	default:
 		return body
 	}
+}
+
+func attachTestRequestCapabilityOnly(t *testing.T, body any, sess testSessionAuth) any {
+	t.Helper()
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		t.Fatalf("generating capability nonce: %v", err)
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+	switch req := body.(type) {
+	case enclave.ExecuteRequest:
+		capability, err := enclave.SignGrantCapability(sess.authKey, enclave.ExecuteGrantCapability(req, nonce))
+		if err != nil {
+			t.Fatalf("signing execute capability: %v", err)
+		}
+		req.Capability = capability
+		return req
+	case enclave.EscrowStoreRequest:
+		capability, err := enclave.SignGrantCapability(sess.authKey, enclave.EscrowStoreGrantCapability(req, nonce))
+		if err != nil {
+			t.Fatalf("signing escrow capability: %v", err)
+		}
+		req.Capability = capability
+		return req
+	default:
+		return body
+	}
+}
+
+func testSession(t *testing.T, server *httptest.Server) testSessionAuth {
+	t.Helper()
+	sessAny, ok := testSessions.Load(server.URL)
+	if !ok {
+		t.Fatal("test session not established")
+	}
+	return sessAny.(testSessionAuth)
+}
+
+func signIssuedExecuteCapability(t *testing.T, sess testSessionAuth, req enclave.ExecuteRequest, expiresAt time.Time) *enclave.SignedGrantCapability {
+	t.Helper()
+	capability, err := enclave.SignGrantCapability(sess.grantKey, enclave.IssuedExecuteGrantCapability(req, "issued-"+req.RequestID, expiresAt.UTC().Format(time.RFC3339)))
+	if err != nil {
+		t.Fatalf("signing issued execute capability: %v", err)
+	}
+	return capability
+}
+
+func signIssuedEscrowCapability(t *testing.T, sess testSessionAuth, req enclave.EscrowStoreRequest) *enclave.SignedGrantCapability {
+	t.Helper()
+	capability, err := enclave.SignGrantCapability(sess.grantKey, enclave.EscrowStoreGrantCapability(req, "issued-"+req.GrantID))
+	if err != nil {
+		t.Fatalf("signing issued escrow capability: %v", err)
+	}
+	return capability
 }
 
 func signedTestRequest(t *testing.T, server *httptest.Server, path string, body []byte, sess testSessionAuth) *http.Request {
@@ -273,9 +342,13 @@ func establishTestSession(t *testing.T, server *httptest.Server) []byte {
 	if len(sessResult.RequestAuthKey) == 0 {
 		t.Fatal("empty request auth key")
 	}
+	if len(sessResult.GrantCapabilityKey) == 0 {
+		t.Fatal("empty grant capability key")
+	}
 	testSessions.Store(server.URL, testSessionAuth{
 		sessionID: sessResult.SessionID,
 		authKey:   sessResult.RequestAuthKey,
+		grantKey:  sessResult.GrantCapabilityKey,
 	})
 	t.Cleanup(func() {
 		testSessions.Delete(server.URL)
@@ -357,6 +430,129 @@ func TestFullExecuteFlow(t *testing.T) {
 	}
 	if execResult.ReceiptRef != "test-receipt" {
 		t.Fatalf("expected test-receipt, got %q", execResult.ReceiptRef)
+	}
+}
+
+func TestExecuteRequiresIssuedCapability(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
+	req := enclave.ExecuteRequest{
+		RequestID:           "exec-missing-issued",
+		UserID:              "user-1",
+		GrantID:             "grant-1",
+		ActionType:          "test.action",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+	}
+	req = attachTestRequestCapabilityOnly(t, req, testSession(t, server)).(enclave.ExecuteRequest)
+
+	resp := postRaw(t, server, "/execute", mustJSON(t, req), true)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for missing issued capability, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestExecuteRejectsIssuedCapabilityScopeMismatch(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
+	req := enclave.ExecuteRequest{
+		RequestID:           "exec-scope-mismatch",
+		UserID:              "user-1",
+		GrantID:             "grant-1",
+		ActionType:          "test.action",
+		ConnectorID:         "test/stub",
+		VaultPath:           "connected-accounts/user-1/gmail",
+		Provider:            "gmail",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+	}
+	issuedReq := req
+	issuedReq.Provider = "drive"
+	req.IssuedCapability = signIssuedExecuteCapability(t, testSession(t, server), issuedReq, time.Now().Add(time.Hour))
+
+	resp := postJSON(t, server, "/execute", req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for issued capability scope mismatch, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestExecuteRejectsReplayedIssuedCapability(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
+	req := enclave.ExecuteRequest{
+		RequestID:           "exec-replay",
+		UserID:              "user-1",
+		GrantID:             "grant-1",
+		ActionType:          "test.action",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+	}
+	req.IssuedCapability = signIssuedExecuteCapability(t, testSession(t, server), req, time.Now().Add(time.Hour))
+
+	resp := postJSON(t, server, "/execute", req)
+	result := decodeResp[enclave.ExecuteResponse](t, resp)
+	if result.Status != "succeeded" {
+		t.Fatalf("expected first execution succeeded, got %q", result.Status)
+	}
+
+	resp = postJSON(t, server, "/execute", req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for replayed issued capability, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestVerifyCapabilityExpiryRejectsMissingAndInvalidExpiry(t *testing.T) {
+	tests := []struct {
+		name       string
+		capability *enclave.SignedGrantCapability
+	}{
+		{
+			name:       "missing",
+			capability: &enclave.SignedGrantCapability{Capability: enclave.GrantCapability{Nonce: "nonce"}, Signature: "sig"},
+		},
+		{
+			name:       "invalid",
+			capability: &enclave.SignedGrantCapability{Capability: enclave.GrantCapability{Nonce: "nonce", ExpiresAt: "not-a-date"}, Signature: "sig"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := verifyCapabilityExpiry(tt.capability); err == nil {
+				t.Fatal("expected expiry validation error")
+			}
+		})
+	}
+}
+
+func TestCapabilityReplayKeyHandlesNil(t *testing.T) {
+	if got := capabilityReplayKey(nil); got != "" {
+		t.Fatalf("expected empty replay key for nil capability, got %q", got)
 	}
 }
 
@@ -474,6 +670,28 @@ func TestEscrowFlow(t *testing.T) {
 	execResp2.Body.Close()
 }
 
+func TestEscrowStoreRejectsIssuedCapabilityScopeMismatch(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("escrowed-cred"), userKEK)
+	req := validEscrowStoreRequest(encrypted)
+	issuedReq := req
+	issuedReq.VaultPath = "connected-accounts/user-1/drive"
+	req.IssuedCapability = signIssuedEscrowCapability(t, testSession(t, server), issuedReq)
+
+	resp := postJSON(t, server, "/escrow", req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for escrow issued capability scope mismatch, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestExecuteWithEscrowRejectsScopeMismatch(t *testing.T) {
 	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
@@ -529,8 +747,10 @@ func TestSessionEndpoint(t *testing.T) {
 	postJSON(t, server, "/attest", enclave.AttestationRequest{Nonce: []byte("n"), Audience: "a"})
 
 	hostKey, _ := ecdh.P256().GenerateKey(rand.Reader)
+	grantKey := []byte("01234567890123456789012345678901")
 	resp := postJSON(t, server, "/session", enclave.SessionRequest{
-		PublicKey: hostKey.PublicKey().Bytes(),
+		PublicKey:          hostKey.PublicKey().Bytes(),
+		GrantCapabilityKey: grantKey,
 	})
 	result := decodeResp[enclave.SessionResponse](t, resp)
 	if result.SessionID == "" {
@@ -538,6 +758,12 @@ func TestSessionEndpoint(t *testing.T) {
 	}
 	if result.ExpiresAt == "" {
 		t.Fatal("empty expires_at")
+	}
+	if len(result.GrantCapabilityKey) == 0 {
+		t.Fatal("empty grant capability key")
+	}
+	if !bytes.Equal(result.GrantCapabilityKey, grantKey) {
+		t.Fatal("expected enclave to use provided grant capability key")
 	}
 }
 
@@ -588,6 +814,8 @@ func TestEscrowStoreWithoutKEK(t *testing.T) {
 		VaultPath:      "connected-accounts/no-kek-user/gmail",
 		Provider:       "gmail",
 		CredentialType: "api_key",
+		ExpiresAt:      time.Now().Add(time.Hour).Format(time.RFC3339),
+		ActionTypes:    []string{"test.action"},
 	})
 	if resp.StatusCode != http.StatusPreconditionFailed {
 		t.Fatalf("expected 412, got %d", resp.StatusCode)
@@ -777,7 +1005,7 @@ func TestEscrowRevokeBadJSON(t *testing.T) {
 }
 
 func TestExecuteWithExpiredEscrow(t *testing.T) {
-	server, srv := setupTestEnclaveServer(t)
+	server, _ := setupTestEnclaveServer(t)
 	defer server.Close()
 
 	sessionKey := establishTestSession(t, server)
@@ -792,24 +1020,10 @@ func TestExecuteWithExpiredEscrow(t *testing.T) {
 	expiredReq.GrantID = "g1"
 	expiredReq.ExpiresAt = time.Now().Add(-time.Second).Format(time.RFC3339)
 	storeResp := postJSON(t, server, "/escrow", expiredReq)
-	storeResult := decodeResp[enclave.EscrowStoreResponse](t, storeResp)
-
-	// Execute with expired escrow.
-	_ = srv // keep reference
-	execResp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
-		UserID:         "user-1",
-		GrantID:        "g1",
-		ActionType:     "test.action",
-		ConnectorID:    "test/stub",
-		VaultPath:      "connected-accounts/user-1/gmail",
-		Provider:       "gmail",
-		CredentialType: "api_key",
-		EscrowID:       storeResult.EscrowID,
-	})
-	if execResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for expired escrow, got %d", execResp.StatusCode)
+	if storeResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for expired issued capability, got %d", storeResp.StatusCode)
 	}
-	execResp.Body.Close()
+	storeResp.Body.Close()
 }
 
 func TestTransmitKEKEndpoint(t *testing.T) {

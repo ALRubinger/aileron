@@ -191,6 +191,9 @@ func TestRunExecution_TEEMode_Success(t *testing.T) {
 	if enclaveClient.execute.Capability == nil {
 		t.Fatal("expected issued capability to be forwarded to enclave client")
 	}
+	if enclaveClient.execute.IssuedCapability == nil {
+		t.Fatal("expected durable issued capability to be forwarded to enclave client")
+	}
 	if enclaveClient.execute.GrantID != "grant_2" {
 		t.Fatalf("enclave grant ID = %q, want grant_2", enclaveClient.execute.GrantID)
 	}

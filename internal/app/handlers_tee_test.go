@@ -669,6 +669,9 @@ func TestEstablishTeeSession_AutoEscrows(t *testing.T) {
 		}
 		t.Fatalf("expected escrowed_count=1, got %d", escrowed)
 	}
+	if len(srv.grantCapabilityKey) == 0 {
+		t.Fatal("expected TEE session grant capability key to be stored")
+	}
 }
 
 func TestInitiateAttestationBadJSON(t *testing.T) {

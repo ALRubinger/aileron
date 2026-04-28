@@ -86,6 +86,12 @@ func ExecuteGrantCapability(req ExecuteRequest, nonce string) GrantCapability {
 	}
 }
 
+func IssuedExecuteGrantCapability(req ExecuteRequest, nonce, expiresAt string) GrantCapability {
+	capability := ExecuteGrantCapability(req, nonce)
+	capability.ExpiresAt = expiresAt
+	return capability
+}
+
 func EscrowStoreGrantCapability(req EscrowStoreRequest, nonce string) GrantCapability {
 	return GrantCapability{
 		GrantID:        req.GrantID,
@@ -99,6 +105,14 @@ func EscrowStoreGrantCapability(req EscrowStoreRequest, nonce string) GrantCapab
 		ExpiresAt:      req.ExpiresAt,
 		Nonce:          nonce,
 	}
+}
+
+func IssuedSourceExecuteGrantCapability(req SourceExecuteRequest, nonce, grantID, expiresAt, credentialType string) GrantCapability {
+	capability := SourceExecuteGrantCapability(req, nonce)
+	capability.GrantID = grantID
+	capability.CredentialType = credentialType
+	capability.ExpiresAt = expiresAt
+	return capability
 }
 
 func SourceExecuteGrantCapability(req SourceExecuteRequest, nonce string) GrantCapability {

@@ -27,6 +27,7 @@ type escrowEntry struct {
 	sourceTools       []string
 	allowedParameters map[string]any
 	expiresAt         time.Time
+	issuedCapability  *enclave.SignedGrantCapability
 }
 
 type escrowStore struct {
@@ -38,17 +39,18 @@ type escrowStore struct {
 
 // persistedEntry is the JSON-serializable form of an escrow entry.
 type persistedEntry struct {
-	UserID            string         `json:"user_id"`
-	GrantID           string         `json:"grant_id"`
-	EnforceGrantID    bool           `json:"enforce_grant_id,omitempty"`
-	VaultPath         string         `json:"vault_path"`
-	Provider          string         `json:"provider"`
-	Credential        []byte         `json:"credential"`
-	CredType          string         `json:"cred_type"`
-	ActionTypes       []string       `json:"action_types"`
-	SourceTools       []string       `json:"source_tools,omitempty"`
-	AllowedParameters map[string]any `json:"allowed_parameters,omitempty"`
-	ExpiresAt         time.Time      `json:"expires_at"`
+	UserID            string                         `json:"user_id"`
+	GrantID           string                         `json:"grant_id"`
+	EnforceGrantID    bool                           `json:"enforce_grant_id,omitempty"`
+	VaultPath         string                         `json:"vault_path"`
+	Provider          string                         `json:"provider"`
+	Credential        []byte                         `json:"credential"`
+	CredType          string                         `json:"cred_type"`
+	ActionTypes       []string                       `json:"action_types"`
+	SourceTools       []string                       `json:"source_tools,omitempty"`
+	AllowedParameters map[string]any                 `json:"allowed_parameters,omitempty"`
+	ExpiresAt         time.Time                      `json:"expires_at"`
+	IssuedCapability  *enclave.SignedGrantCapability `json:"issued_capability,omitempty"`
 }
 
 func newEscrowStore(dataDir string) (*escrowStore, error) {
@@ -99,6 +101,7 @@ func (s *escrowStore) Store(req enclave.EscrowStoreRequest, credential []byte, e
 		sourceTools:       append([]string(nil), req.SourceTools...),
 		allowedParameters: cloneMap(req.AllowedParameters),
 		expiresAt:         expiresAt,
+		issuedCapability:  cloneSignedGrantCapability(req.IssuedCapability),
 	}
 	s.persistLocked()
 	s.mu.Unlock()
@@ -149,6 +152,9 @@ func (s *escrowStore) GetForExecute(req enclave.ExecuteRequest) ([]byte, error) 
 	if len(entry.allowedParameters) > 0 && !reflect.DeepEqual(entry.allowedParameters, req.Parameters) {
 		return nil, enclave.ErrEscrowScopeMismatch
 	}
+	if !entry.matchesIssuedExecute(req) {
+		return nil, enclave.ErrEscrowScopeMismatch
+	}
 	return copyBytes(entry.credential), nil
 }
 
@@ -174,7 +180,62 @@ func (s *escrowStore) GetForSource(req enclave.SourceExecuteRequest) ([]byte, er
 	if len(entry.allowedParameters) > 0 && !reflect.DeepEqual(entry.allowedParameters, req.Params) {
 		return nil, enclave.ErrEscrowScopeMismatch
 	}
+	if !entry.matchesIssuedSource(req) {
+		return nil, enclave.ErrEscrowScopeMismatch
+	}
 	return copyBytes(entry.credential), nil
+}
+
+func (e *escrowEntry) matchesIssuedExecute(req enclave.ExecuteRequest) bool {
+	if e.issuedCapability == nil {
+		return true
+	}
+	cap := e.issuedCapability.Capability
+	if cap.GrantID != "" && cap.GrantID != req.GrantID {
+		return false
+	}
+	if cap.UserID != "" && cap.UserID != req.UserID {
+		return false
+	}
+	if cap.VaultPath != "" && cap.VaultPath != req.VaultPath {
+		return false
+	}
+	if cap.Provider != "" && cap.Provider != req.Provider {
+		return false
+	}
+	if cap.CredentialType != "" && cap.CredentialType != req.CredentialType {
+		return false
+	}
+	if cap.ActionType != "" {
+		return cap.ActionType == req.ActionType
+	}
+	if len(cap.ActionTypes) > 0 {
+		return containsString(cap.ActionTypes, req.ActionType)
+	}
+	return true
+}
+
+func (e *escrowEntry) matchesIssuedSource(req enclave.SourceExecuteRequest) bool {
+	if e.issuedCapability == nil {
+		return true
+	}
+	cap := e.issuedCapability.Capability
+	if cap.UserID != "" && cap.UserID != req.UserID {
+		return false
+	}
+	if cap.VaultPath != "" && cap.VaultPath != req.VaultPath {
+		return false
+	}
+	if cap.Provider != "" && cap.Provider != req.Provider {
+		return false
+	}
+	if cap.Tool != "" {
+		return cap.Tool == req.Tool
+	}
+	if len(cap.SourceTools) > 0 {
+		return containsString(cap.SourceTools, req.Tool)
+	}
+	return true
 }
 
 func (s *escrowStore) entry(escrowID string) (*escrowEntry, error) {
@@ -302,6 +363,7 @@ func (s *escrowStore) persistLocked() {
 			SourceTools:       e.sourceTools,
 			AllowedParameters: e.allowedParameters,
 			ExpiresAt:         e.expiresAt,
+			IssuedCapability:  cloneSignedGrantCapability(e.issuedCapability),
 		}
 	}
 
@@ -358,9 +420,34 @@ func (s *escrowStore) load() error {
 			sourceTools:       pe.SourceTools,
 			allowedParameters: pe.AllowedParameters,
 			expiresAt:         pe.ExpiresAt,
+			issuedCapability:  cloneSignedGrantCapability(pe.IssuedCapability),
 		}
 	}
 	return nil
+}
+
+func cloneSignedGrantCapability(in *enclave.SignedGrantCapability) *enclave.SignedGrantCapability {
+	if in == nil {
+		return nil
+	}
+	return &enclave.SignedGrantCapability{
+		Capability: enclave.GrantCapability{
+			GrantID:        in.Capability.GrantID,
+			IntentID:       in.Capability.IntentID,
+			UserID:         in.Capability.UserID,
+			VaultPath:      in.Capability.VaultPath,
+			Provider:       in.Capability.Provider,
+			CredentialType: in.Capability.CredentialType,
+			ActionType:     in.Capability.ActionType,
+			Tool:           in.Capability.Tool,
+			Parameters:     cloneMap(in.Capability.Parameters),
+			ActionTypes:    append([]string(nil), in.Capability.ActionTypes...),
+			SourceTools:    append([]string(nil), in.Capability.SourceTools...),
+			ExpiresAt:      in.Capability.ExpiresAt,
+			Nonce:          in.Capability.Nonce,
+		},
+		Signature: in.Signature,
+	}
 }
 
 func cloneMap(in map[string]any) map[string]any {

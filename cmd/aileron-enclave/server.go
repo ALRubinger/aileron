@@ -28,19 +28,21 @@ const (
 )
 
 type enclaveServer struct {
-	log            *slog.Logger
-	registry       *connector.Registry
-	sourceRegistry *source.Registry
-	provider       string
-	mu             sync.Mutex
-	enclaveKey     *ecdh.PrivateKey
-	sessionKey     []byte
-	requestAuthKey []byte
-	sessionID      string
-	expiresAt      time.Time
-	seenNonces     map[string]time.Time
-	keks           *kekStore
-	escrow         *escrowStore
+	log                   *slog.Logger
+	registry              *connector.Registry
+	sourceRegistry        *source.Registry
+	provider              string
+	mu                    sync.Mutex
+	enclaveKey            *ecdh.PrivateKey
+	sessionKey            []byte
+	requestAuthKey        []byte
+	grantCapabilityKey    []byte
+	sessionID             string
+	expiresAt             time.Time
+	seenNonces            map[string]time.Time
+	usedGrantCapabilities map[string]time.Time
+	keks                  *kekStore
+	escrow                *escrowStore
 }
 
 func newEnclaveServer(log *slog.Logger, registry *connector.Registry, sourceReg *source.Registry, provider, dataDir string) (*enclaveServer, error) {
@@ -49,13 +51,14 @@ func newEnclaveServer(log *slog.Logger, registry *connector.Registry, sourceReg 
 		return nil, fmt.Errorf("initializing escrow store: %w", err)
 	}
 	return &enclaveServer{
-		log:            log,
-		registry:       registry,
-		sourceRegistry: sourceReg,
-		provider:       provider,
-		seenNonces:     make(map[string]time.Time),
-		keks:           newKEKStore(),
-		escrow:         escrow,
+		log:                   log,
+		registry:              registry,
+		sourceRegistry:        sourceReg,
+		provider:              provider,
+		seenNonces:            make(map[string]time.Time),
+		usedGrantCapabilities: make(map[string]time.Time),
+		keks:                  newKEKStore(),
+		escrow:                escrow,
 	}, nil
 }
 
@@ -152,21 +155,33 @@ func (s *enclaveServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "generating request auth key")
 		return
 	}
+	grantCapabilityKey := copyBytes(req.GrantCapabilityKey)
+	if len(grantCapabilityKey) == 0 {
+		grantCapabilityKey = make([]byte, requestAuthNonceBytes)
+		if _, err := rand.Read(grantCapabilityKey); err != nil {
+			writeErr(w, http.StatusInternalServerError, "generating grant capability key")
+			return
+		}
+	}
 
 	// Zero previous session material only after the new session is ready.
 	zeroBytes(s.sessionKey)
 	zeroBytes(s.requestAuthKey)
+	zeroBytes(s.grantCapabilityKey)
 
 	s.sessionKey = h[:]
 	s.requestAuthKey = requestAuthKey
+	s.grantCapabilityKey = grantCapabilityKey
 	s.expiresAt = time.Now().Add(enclaveSessionTTL)
 	s.sessionID = hex.EncodeToString(b)
 	clear(s.seenNonces)
+	clear(s.usedGrantCapabilities)
 
 	writeJSON(w, http.StatusOK, enclave.SessionResponse{
-		SessionID:      s.sessionID,
-		ExpiresAt:      s.expiresAt.Format(time.RFC3339),
-		RequestAuthKey: copyBytes(s.requestAuthKey),
+		SessionID:          s.sessionID,
+		ExpiresAt:          s.expiresAt.Format(time.RFC3339),
+		RequestAuthKey:     copyBytes(s.requestAuthKey),
+		GrantCapabilityKey: copyBytes(s.grantCapabilityKey),
 	})
 }
 
@@ -266,6 +281,10 @@ func (s *enclaveServer) handleExecute(w http.ResponseWriter, r *http.Request) {
 	defer zeroBytes(authKey)
 	if !enclave.VerifyExecuteCapability(authKey, req) {
 		writeErr(w, http.StatusForbidden, "invalid grant capability")
+		return
+	}
+	if err := s.verifyIssuedExecuteCapability(req); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -372,6 +391,15 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "credential_type required")
 		return
 	}
+	expiresAt, err := time.Parse(time.RFC3339, req.ExpiresAt)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid expires_at: "+err.Error())
+		return
+	}
+	if err := s.verifyIssuedEscrowCapability(req); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	// Decrypt credential with user's KEK.
 	kek, err := s.keks.Get(req.UserID)
@@ -384,13 +412,6 @@ func (s *enclaveServer) handleEscrowStore(w http.ResponseWriter, r *http.Request
 	zeroBytes(kek)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "decryption failed: "+err.Error())
-		return
-	}
-
-	expiresAt, err := time.Parse(time.RFC3339, req.ExpiresAt)
-	if err != nil {
-		zeroBytes(plaintext)
-		writeErr(w, http.StatusBadRequest, "invalid expires_at: "+err.Error())
 		return
 	}
 
@@ -490,6 +511,85 @@ func (s *enclaveServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"provider":       s.provider,
 		"session_active": hasSession,
 	})
+}
+
+func (s *enclaveServer) verifyIssuedEscrowCapability(req enclave.EscrowStoreRequest) error {
+	if req.IssuedCapability == nil {
+		return fmt.Errorf("missing issued grant capability")
+	}
+	key := s.grantSigningKey()
+	defer zeroBytes(key)
+	if len(key) == 0 {
+		return fmt.Errorf("grant capability signing key unavailable")
+	}
+	expected := enclave.EscrowStoreGrantCapability(req, req.IssuedCapability.Capability.Nonce)
+	if !enclave.VerifySignedGrantCapability(key, req.IssuedCapability, expected) {
+		return fmt.Errorf("invalid issued grant capability")
+	}
+	return verifyCapabilityExpiry(req.IssuedCapability)
+}
+
+func (s *enclaveServer) verifyIssuedExecuteCapability(req enclave.ExecuteRequest) error {
+	if req.IssuedCapability == nil {
+		return fmt.Errorf("missing issued grant capability")
+	}
+	key := s.grantSigningKey()
+	defer zeroBytes(key)
+	if len(key) == 0 {
+		return fmt.Errorf("grant capability signing key unavailable")
+	}
+	expected := enclave.IssuedExecuteGrantCapability(req, req.IssuedCapability.Capability.Nonce, req.IssuedCapability.Capability.ExpiresAt)
+	if !enclave.VerifySignedGrantCapability(key, req.IssuedCapability, expected) {
+		return fmt.Errorf("invalid issued grant capability")
+	}
+	if err := verifyCapabilityExpiry(req.IssuedCapability); err != nil {
+		return err
+	}
+	if !s.consumeIssuedCapability(req.IssuedCapability) {
+		return fmt.Errorf("replayed issued grant capability")
+	}
+	return nil
+}
+
+func (s *enclaveServer) grantSigningKey() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return copyBytes(s.grantCapabilityKey)
+}
+
+func (s *enclaveServer) consumeIssuedCapability(capability *enclave.SignedGrantCapability) bool {
+	key := capabilityReplayKey(capability)
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pruneSeenNonces(s.usedGrantCapabilities, now.Add(-enclaveSessionTTL))
+	if _, ok := s.usedGrantCapabilities[key]; ok {
+		return false
+	}
+	s.usedGrantCapabilities[key] = now
+	return true
+}
+
+func capabilityReplayKey(capability *enclave.SignedGrantCapability) string {
+	if capability == nil {
+		return ""
+	}
+	return capability.Signature
+}
+
+func verifyCapabilityExpiry(capability *enclave.SignedGrantCapability) error {
+	expiresAt := capability.Capability.ExpiresAt
+	if expiresAt == "" {
+		return fmt.Errorf("issued grant capability has no expiry")
+	}
+	expiry, err := time.Parse(time.RFC3339, expiresAt)
+	if err != nil {
+		return fmt.Errorf("invalid issued grant capability expiry")
+	}
+	if !time.Now().Before(expiry) {
+		return fmt.Errorf("expired issued grant capability")
+	}
+	return nil
 }
 
 func (s *enclaveServer) decodeAuthenticatedJSON(w http.ResponseWriter, r *http.Request, v any) ([]byte, error) {
