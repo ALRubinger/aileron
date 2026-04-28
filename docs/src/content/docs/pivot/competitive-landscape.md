@@ -1,12 +1,14 @@
 ---
 title: "Competitive Landscape"
 description: "Where Aileron sits in the AI agent infrastructure ecosystem"
-order: 2
+order: 3
 ---
 
 This page captures the competitive scan that informed the Aileron pivot. The takeaway is structural: **the LLM endpoint seam Aileron occupies is genuinely empty.** Adjacent products solve fragments of the pattern; none assembles the load-bearing pieces in the right place.
 
 This is informational, not a sales pitch. It exists so future agents and strategists can understand the landscape, name competitors precisely, and avoid relitigating questions we've already researched.
+
+> **At-a-glance positioning:** for a tighter side-by-side contrast with the two most directly relevant patterns, see [Aileron vs Tool Calling vs MCP](/pivot/tool-calling-mcp-comparison).
 
 ## The pattern Aileron occupies
 

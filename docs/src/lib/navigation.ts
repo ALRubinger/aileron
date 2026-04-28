@@ -39,6 +39,7 @@ export const navigation: NavItem[] = [
     children: [
       { label: 'The Deterministic Layer', href: '/pivot/the-deterministic-layer' },
       { label: 'What Your Agent Can Now Do', href: '/pivot/what-your-agent-can-do' },
+      { label: 'Aileron vs Tool Calling vs MCP', href: '/pivot/tool-calling-mcp-comparison' },
       { label: 'Competitive Landscape', href: '/pivot/competitive-landscape' }
     ]
   },
