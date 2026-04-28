@@ -44,7 +44,7 @@ This means prompt injection can't leak what the agent doesn't have.
 - Aileron operators cannot read your credentials, even with full database access.
 - Hosting providers see only encrypted data.
 
-For the full trust model, see [How Aileron Works](/how-aileron-works) and [ADR-0010: Zero-Knowledge Vault](/adr/0010-zero-knowledge-vault-trust-model).
+For the full trust model, see [How Aileron Works](/how-aileron-works) and [ADR-0010: Zero-Knowledge Vault](/archived-adr/0010-zero-knowledge-vault-trust-model).
 
 ## System vault
 
@@ -61,4 +61,4 @@ openssl rand -hex 32
 AILERON_SYSTEM_VAULT_KEY=your-64-char-hex-key
 ```
 
-For the full design, see [ADR-0020: System Vault](/adr/0020-system-vault).
+For the full design, see [ADR-0020: System Vault](/archived-adr/0020-system-vault).

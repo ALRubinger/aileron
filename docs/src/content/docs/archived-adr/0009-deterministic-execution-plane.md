@@ -7,8 +7,8 @@ title: "ADR-0009: Pivot from MCP Gateway to Deterministic Execution Plane"
 <table>
   <tr><th>Status</th><td>Superseded</td></tr>
   <tr><th>Date</th><td>2026-04-05</td></tr>
-  <tr><th>Supersedes</th><td><a href="/adr/0001-hybrid-mcp-execution-model">ADR-0001</a>, <a href="/adr/0002-mcp-marketplace-integration">ADR-0002</a>, <a href="/adr/0003-marketplace-dashboard-ui">ADR-0003</a>, <a href="/adr/0008-per-user-enterprise-mcp-server-scoping">ADR-0008</a></td></tr>
-  <tr><th>Superseded by</th><td><a href="/adr/0013-local-policy-enforced-shell">ADR-0013</a></td></tr>
+  <tr><th>Supersedes</th><td><a href="/archived-adr/0001-hybrid-mcp-execution-model">ADR-0001</a>, <a href="/archived-adr/0002-mcp-marketplace-integration">ADR-0002</a>, <a href="/archived-adr/0003-marketplace-dashboard-ui">ADR-0003</a>, <a href="/archived-adr/0008-per-user-enterprise-mcp-server-scoping">ADR-0008</a></td></tr>
+  <tr><th>Superseded by</th><td><a href="/archived-adr/0013-local-policy-enforced-shell">ADR-0013</a></td></tr>
 </table>
 </div>
 

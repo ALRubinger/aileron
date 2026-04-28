@@ -7,7 +7,7 @@ title: "ADR-0004: Enterprise Account Model, SSO/OAuth, and Email/Password Auth"
 <table>
   <tr><th>Status</th><td>Superseded</td></tr>
   <tr><th>Date</th><td>2026-04-02</td></tr>
-  <tr><th>Superseded by</th><td><a href="/adr/0005-github-oauth-and-auth-spi-evolution">ADR-0005</a></td></tr>
+  <tr><th>Superseded by</th><td><a href="/archived-adr/0005-github-oauth-and-auth-spi-evolution">ADR-0005</a></td></tr>
 </table>
 </div>
 

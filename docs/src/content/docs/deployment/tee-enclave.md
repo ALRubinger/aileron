@@ -322,4 +322,4 @@ Google, Slack, GitHub APIs
 
 > **Railway note:** Railway supports this topology well — enable static IPs on the server service for the firewall rule, set the 4 TEE env vars, and the server connects to the GCP enclave over the public internet. You keep per-branch preview deployments, managed Postgres, and zero-config deploys.
 
-For design rationale, see [ADR-0010: Zero-Knowledge Vault](/adr/0010-zero-knowledge-vault-trust-model), [ADR-0011: TEE Provider SPI](/adr/0011-tee-provider-spi-and-confidential-space), and [ADR-0012: Auto-Escrow & Session Lifetimes](/adr/0012-auto-escrow-and-decoupled-session-lifetimes).
+For design rationale, see [ADR-0010: Zero-Knowledge Vault](/archived-adr/0010-zero-knowledge-vault-trust-model), [ADR-0011: TEE Provider SPI](/archived-adr/0011-tee-provider-spi-and-confidential-space), and [ADR-0012: Auto-Escrow & Session Lifetimes](/archived-adr/0012-auto-escrow-and-decoupled-session-lifetimes).

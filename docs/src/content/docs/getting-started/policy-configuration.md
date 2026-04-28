@@ -53,4 +53,4 @@ Test how a command would be evaluated without running it:
 aileron policy test "git push origin main"
 ```
 
-For the full design rationale, see [ADR-0014: aileron.yaml Policy Schema](/adr/0014-aileron-yaml-policy-schema), [ADR-0015: Built-in Policy Defaults](/adr/0015-built-in-policy-defaults), and [ADR-0016: Layer Overrides & Specificity](/adr/0016-layer-overrides-and-specificity).
+For the full design rationale, see [ADR-0014: aileron.yaml Policy Schema](/archived-adr/0014-aileron-yaml-policy-schema), [ADR-0015: Built-in Policy Defaults](/archived-adr/0015-built-in-policy-defaults), and [ADR-0016: Layer Overrides & Specificity](/archived-adr/0016-layer-overrides-and-specificity).
