@@ -4,7 +4,9 @@ description: "The building blocks that make Aileron trustworthy with real life"
 order: 3
 ---
 
-Aileron handles things that matter. Your messages, your money, your schedule, your credentials. That only works if you can trust it. Not trust as in "we promise to be careful." Trust as in "the system is designed so that even we can't violate it."
+Aileron handles things that matter. Your messages, your money, your schedule, your credentials. The way it earns the right to do that is by drawing a hard line between two things current AI architectures usually conflate: **deciding what to do** and **actually doing it.** Language models are great at the first; they shouldn't be trusted with the second. Aileron is the layer that takes the model's proposed action — at the LLM endpoint, before anything irreversible happens — and executes it deterministically, with sealed credentials and your explicit approval where it counts.
+
+Trust isn't "we promise to be careful." It's "the system is designed so that even we can't violate it."
 
 Here's how.
 
@@ -12,7 +14,7 @@ Here's how.
 
 Nothing happens without your approval. Aileron prepares, assembles, and recommends. You decide. Every message, every payment, every action waits for you to say yes. If you say no, nothing moves. If you edit, Aileron learns. If you walk away, everything stops.
 
-This isn't a safety net bolted on at the end. It's the foundation everything else is built on.
+This isn't a safety net bolted on at the end. It's the foundation everything else is built on. The approval flow itself runs on a channel the agent can't tamper with — see [Aileron Control](/pivot/control) for the architecture.
 
 ## LLMs express intent. Aileron owns execution.
 
@@ -20,7 +22,7 @@ Language models are good at understanding what needs to happen. They are not goo
 
 The model figures out what you'd probably want to do. Aileron is the one that actually does it. Your credentials, your OAuth tokens, your payment instruments never touch the model. It sees results, not secrets. It can suggest "reply to Sarah's message about the migration," but it cannot access your Slack token, your bank account, or anything else without Aileron brokering the interaction on your behalf, with your approval.
 
-This means a prompt injection, a model hallucination, or a bad suggestion can't do damage. The worst it can do is recommend something you'd decline.
+This means a prompt injection, a model hallucination, or a bad suggestion can't do damage. The worst it can do is recommend something you'd decline. The architectural commitments behind this — the connector model, the action model, capability binding, sandboxing — live in the [Pivot Architecture](/pivot/architecture/) section.
 
 ## The zero-knowledge vault
 
@@ -32,13 +34,7 @@ When you need a credential for an action, you unlock your vault once. The decryp
 
 This isn't new or experimental. Zero-knowledge encryption is the same proven technique behind password managers like 1Password and Bitwarden, secure email like Proton Mail, and end-to-end encrypted messaging like Signal. It's the standard the security community trusts for protecting data that matters.
 
-## The secure enclave
-
-Some operations need to happen in a place where no one can look, not even us.
-
-A secure enclave is a hardware-isolated environment that runs code in a way that the host machine cannot inspect or tamper with. Not the operating system, not the cloud provider, not Aileron's operators. The code inside is sealed and verifiable through remote attestation, which means your security team can independently confirm what's running without trusting anyone's word.
-
-When Aileron handles your messages, routes your data, or brokers a credential, the sensitive parts happen inside the enclave. Your data passes through, gets processed, and leaves. Nothing is retained. Nothing is visible to the outside.
+For users who need a stronger boundary still, sensitive operations can additionally run inside a hardware-isolated enclave whose code is verifiable via remote attestation; see the [TEE Enclave deployment](/deployment/tee-enclave) guide. For everyday use, the vault is the guarantee.
 
 ## The personal context store
 
@@ -48,7 +44,7 @@ Without context, you get generic filler. With the right context, you get somethi
 
 Aileron builds that context around how you actually work and communicate. Your conversations, your projects, your decisions, your preferences. It learns from what you approve, what you edit, and what you throw away. Nobody fills out a profile. Nobody writes a prompt. The context grows because you're living your life, and it gets better every day because it's learning from you.
 
-This is the thing that makes everything else work. The vault protects your credentials. The enclave protects your data. The context store is what makes the output worth protecting.
+This is the thing that makes everything else work. The vault protects your credentials. Policy controls what gets to act on your behalf. The context store is what makes the output worth protecting.
 
 ## The audit trail
 
@@ -68,8 +64,8 @@ Safe actions are approved automatically. Dangerous actions are blocked. Everythi
 
 These aren't features on a checklist. They're building blocks that solve a single problem: how do you trust a service with your real life?
 
-The zero-knowledge vault means your credentials are safe even if everything else fails. The separation of intent and execution means a bad model output can't cause real harm. The secure enclave means sensitive operations are private by physics, not by policy. The personal context store means every interaction gets better. The audit trail means there's proof. The human in control means nothing consequential happens without you.
+The zero-knowledge vault means your credentials are safe even if everything else fails. The separation of intent and execution means a bad model output can't cause real harm. The personal context store means every interaction gets better. The audit trail means there's proof. The human in control means nothing consequential happens without you. (For users who need it, optional hardware-isolated enclaves add a stronger boundary still.)
 
 Together, they let Aileron do something no other service can: work with your actual life. Your real messages, your real money, your real relationships, your real schedule. Not a sandbox. Not a demo. The things that matter, handled responsibly, so you can spend your time on what matters more.
 
-A partner to crush the overhead of everyday life and work, and give time back to you where it counts.
+A partner to crush the overhead of everyday life and work, and give time back to you where it counts. For the architectural picture behind this, start at [Aileron Runtime](/pivot/runtime).

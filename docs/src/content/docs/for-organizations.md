@@ -1,23 +1,15 @@
 ---
 title: "For Organizations"
-description: "Institutional memory that builds itself"
+description: "How Aileron's architecture preserves an enterprise path"
 order: 2
 ---
 
-Your organization's real knowledge has never been in a wiki.
+Aileron's v1 wedge is the individual developer — see [The Customer](/pivot/customer) for the four named personas. Organizations land here later, by design.
 
-It's in the engineer who knows why the auth service is built that way. In the thread where the team debated the migration plan. In the calendar of the one person who remembers the client's scheduling preferences. In a hundred small decisions made by people who are too busy doing the work to write it down.
+The architecture is built so the enterprise path is preserved without rewriting anything. Sandboxed connectors with content-addressed binaries, capability binding that federates through Aileron Control, audit trails that come for free because Runtime sits in the request path by construction — these are the same primitives an individual developer uses. What changes for organizations is what's productized around them: multi-user vault, RBAC, federated bindings, signed-connector supply chains, audit retention beyond cloud limits, on-prem deployment.
 
-Every attempt to capture this knowledge has failed for the same reason: it asks people to do extra work with no immediate reward. Write the doc. Update the runbook. Tag the article. Nobody does, because the cost falls on the writer and the benefit goes to a future reader who may never come.
+Until the dedicated enterprise document lands, the closest reading material lives in the Pivot section:
 
-Aileron inverts this.
-
-When your people use Aileron, they're not documenting anything. They're just handling their messages, making decisions, doing their jobs. But every conversation that informs a draft, every decision that gets referenced in a reply, every correction that sharpens a future response — it all feeds a shared understanding. Your organization's institutional memory builds itself, not from documentation initiatives, but from real work.
-
-The new engineer asks how the auth service works. The answer comes from actual code, actual conversations, actual decisions — not a page that was outdated the day after someone wrote it. Someone goes on vacation. Their knowledge doesn't go with them, because the team's shared context already includes their contributions. A critical question comes in at 2am in a timezone where nobody's awake. The draft is ready when they wake up.
-
-This is not surveillance. Aileron works for the individual first, always. Each person controls what they connect, approves every action, and owns their data. The organization benefits because its people work better — not because it's watching them. Admins see aggregate metrics: time saved, messages handled, adoption. Never individual message content. The secure enclave architecture makes this a technical guarantee, not a policy.
-
-The result is an organization that gets smarter every day without asking anyone to do anything differently. Knowledge stops being trapped in people's heads. Communication latency drops. New hires ramp faster. Vacations stop creating bottlenecks. And it compounds — the more people who use Aileron, the richer everyone's context becomes.
-
-No one mandated a knowledge management system. No one asked anyone to write a handoff doc. The organization got smarter because its people used something that made their own lives easier. That's the only incentive structure that has ever worked at scale.
+- [Pivot — Enterprise, Addressed Later](/pivot/enterprise-later) — why enterprise is intentionally out of the v1 pitch and which architectural commitments preserve it as a future path.
+- [Pivot — Aileron Control](/pivot/control) — the governance surface enterprise tiers productize.
+- [Pivot — The Business](/pivot/business) — Aileron Enterprise (Surface 7), Connector Certification (4), Insights (6), and Connector Studio (5) are the revenue surfaces aimed at this audience.
