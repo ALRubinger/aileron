@@ -222,7 +222,20 @@ Expected response:
 
 ## Persistent escrow storage
 
-Escrowed credentials are persisted to disk so they survive enclave restarts. The enclave writes two files inside its data directory:
+Escrowed credentials are persisted to disk so they survive enclave restarts. In strict Confidential Space mode, the enclave requires the escrow data-encryption key to be supplied from outside the operator-mounted data directory:
+
+| Environment variable | Purpose |
+|----------------------|---------|
+| `AILERON_ENCLAVE_ESCROW_KEY_B64` | Base64-encoded 32-byte AES-256-GCM data-encryption key for `escrow.dat` |
+| `AILERON_ENCLAVE_ALLOW_RAW_ESCROW_KEY=true` | Legacy/dev override that allows `escrow.key` to be read or created in the data directory |
+
+When `AILERON_ENCLAVE_ESCROW_KEY_B64` is set, the enclave writes only encrypted escrow data and refuses to start if a raw `escrow.key` file is present in the data directory:
+
+| File | Purpose |
+|------|---------|
+| `escrow.dat` | Encrypted escrow entries (credentials, grant IDs, expiry times) |
+
+When the legacy raw-key override is enabled, the enclave also writes a raw key file:
 
 | File | Purpose |
 |------|---------|
@@ -246,9 +259,10 @@ The defaults work for most deployments. Override the directory when:
 
 ### Security notes
 
-- The DEK (`escrow.key`) is a 32-byte random key stored in plaintext on disk. In production, the Confidential Space VM's memory and disk are hardware-encrypted by AMD SEV-SNP, so the key is protected at rest by the TEE.
+- In `confidential-space` mode, the enclave refuses to create or read raw `escrow.key` files unless `AILERON_ENCLAVE_ALLOW_RAW_ESCROW_KEY=true` is explicitly set.
+- `AILERON_ENCLAVE_ESCROW_KEY_B64` must be injected only into the expected enclave workload. Do not place this value on the mounted escrow data disk.
 - `escrow.dat` is encrypted with AES-256-GCM using the DEK. Even if the file is exfiltrated without the key, the contents are unreadable.
-- If either file is corrupt or missing, the enclave starts fresh with an empty escrow store. Existing in-memory entries are not affected.
+- If `escrow.dat` is corrupt or cannot be decrypted with the supplied key, the enclave starts fresh with an empty escrow store. Existing in-memory entries are not affected.
 - Expired entries are evicted on startup and periodically (every 10 minutes).
 
 ## How attestation works
