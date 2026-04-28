@@ -294,6 +294,20 @@ func (s *escrowStore) Revoke(escrowID, grantID string) error {
 	return nil
 }
 
+func (s *escrowStore) GrantID(escrowID string) (string, error) {
+	s.mu.RLock()
+	entry, ok := s.entries[escrowID]
+	s.mu.RUnlock()
+	if !ok {
+		return "", enclave.ErrEscrowNotFound
+	}
+	if time.Now().After(entry.expiresAt) {
+		s.revokeByID(escrowID)
+		return "", enclave.ErrEscrowExpired
+	}
+	return entry.grantID, nil
+}
+
 // Update replaces the credential for an existing escrow entry. The old
 // credential bytes are zeroed before replacement. This is used when an OAuth
 // token is refreshed inside the enclave — the enclave updates its own copy

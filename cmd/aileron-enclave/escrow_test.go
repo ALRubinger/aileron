@@ -306,6 +306,35 @@ func TestEscrowRevokeWrongGrant(t *testing.T) {
 	}
 }
 
+func TestEscrowGrantID(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	id := s.Store(testEscrowRequest("grant-1", "api_key", nil), []byte("cred"), time.Now().Add(time.Hour))
+	grantID, err := s.GrantID(id)
+	if err != nil {
+		t.Fatalf("GrantID: %v", err)
+	}
+	if grantID != "grant-1" {
+		t.Fatalf("grant ID = %q, want grant-1", grantID)
+	}
+}
+
+func TestEscrowGrantIDNotFound(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	_, err := s.GrantID("missing")
+	if err != enclave.ErrEscrowNotFound {
+		t.Fatalf("expected ErrEscrowNotFound, got %v", err)
+	}
+}
+
+func TestEscrowGrantIDExpired(t *testing.T) {
+	s := mustNewEscrowStore(t)
+	id := s.Store(testEscrowRequest("grant-1", "api_key", nil), []byte("cred"), time.Now().Add(-time.Second))
+	_, err := s.GrantID(id)
+	if err != enclave.ErrEscrowExpired {
+		t.Fatalf("expected ErrEscrowExpired, got %v", err)
+	}
+}
+
 func TestEscrowEvictExpired(t *testing.T) {
 	s := mustNewEscrowStore(t)
 	live := []byte("live")

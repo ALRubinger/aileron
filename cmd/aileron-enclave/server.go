@@ -41,6 +41,7 @@ type enclaveServer struct {
 	expiresAt             time.Time
 	seenNonces            map[string]time.Time
 	usedGrantCapabilities map[string]time.Time
+	revokedGrantIDs       map[string]time.Time
 	keks                  *kekStore
 	escrow                *escrowStore
 }
@@ -57,6 +58,7 @@ func newEnclaveServer(log *slog.Logger, registry *connector.Registry, sourceReg 
 		provider:              provider,
 		seenNonces:            make(map[string]time.Time),
 		usedGrantCapabilities: make(map[string]time.Time),
+		revokedGrantIDs:       make(map[string]time.Time),
 		keks:                  newKEKStore(),
 		escrow:                escrow,
 	}, nil
@@ -442,10 +444,17 @@ func (s *enclaveServer) handleEscrowRevoke(w http.ResponseWriter, r *http.Reques
 	}
 	zeroBytes(authKey)
 
-	if err := s.escrow.Revoke(req.EscrowID, req.GrantID); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+	if req.GrantID == "" {
+		writeErr(w, http.StatusBadRequest, "grant_id required")
 		return
 	}
+	if req.EscrowID != "" {
+		if err := s.escrow.Revoke(req.EscrowID, req.GrantID); err != nil {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+	}
+	s.revokeGrant(req.GrantID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -463,6 +472,13 @@ func (s *enclaveServer) handleSourceExecute(w http.ResponseWriter, r *http.Reque
 	defer zeroBytes(authKey)
 	if !enclave.VerifySourceExecuteCapability(authKey, req) {
 		writeErr(w, http.StatusForbidden, "invalid grant capability")
+		return
+	}
+	if grantID, err := s.escrow.GrantID(req.EscrowID); err != nil {
+		writeEscrowErr(w, err)
+		return
+	} else if s.isGrantRevoked(grantID) {
+		writeErr(w, http.StatusForbidden, enclave.ErrCapabilityRevoked.Error())
 		return
 	}
 
@@ -526,6 +542,9 @@ func (s *enclaveServer) verifyIssuedEscrowCapability(req enclave.EscrowStoreRequ
 	if !enclave.VerifySignedGrantCapability(key, req.IssuedCapability, expected) {
 		return fmt.Errorf("invalid issued grant capability")
 	}
+	if s.isGrantRevoked(req.IssuedCapability.Capability.GrantID) {
+		return enclave.ErrCapabilityRevoked
+	}
 	return verifyCapabilityExpiry(req.IssuedCapability)
 }
 
@@ -542,6 +561,9 @@ func (s *enclaveServer) verifyIssuedExecuteCapability(req enclave.ExecuteRequest
 	if !enclave.VerifySignedGrantCapability(key, req.IssuedCapability, expected) {
 		return fmt.Errorf("invalid issued grant capability")
 	}
+	if s.isGrantRevoked(req.IssuedCapability.Capability.GrantID) {
+		return enclave.ErrCapabilityRevoked
+	}
 	if err := verifyCapabilityExpiry(req.IssuedCapability); err != nil {
 		return err
 	}
@@ -555,6 +577,25 @@ func (s *enclaveServer) grantSigningKey() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return copyBytes(s.grantCapabilityKey)
+}
+
+func (s *enclaveServer) revokeGrant(grantID string) {
+	if grantID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revokedGrantIDs[grantID] = time.Now()
+}
+
+func (s *enclaveServer) isGrantRevoked(grantID string) bool {
+	if grantID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.revokedGrantIDs[grantID]
+	return ok
 }
 
 func (s *enclaveServer) consumeIssuedCapability(capability *enclave.SignedGrantCapability) bool {
@@ -713,7 +754,7 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 func writeEscrowErr(w http.ResponseWriter, err error) {
 	status := http.StatusNotFound
-	if err == enclave.ErrEscrowScopeMismatch {
+	if err == enclave.ErrEscrowScopeMismatch || err == enclave.ErrCapabilityRevoked {
 		status = http.StatusForbidden
 	}
 	writeErr(w, status, err.Error())

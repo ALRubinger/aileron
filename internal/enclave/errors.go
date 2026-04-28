@@ -20,6 +20,10 @@ var (
 	// not match the ownership or scope bound to the escrow entry.
 	ErrEscrowScopeMismatch = errors.New("enclave: escrow scope mismatch")
 
+	// ErrCapabilityRevoked indicates that the issued grant capability has
+	// been revoked inside the enclave boundary.
+	ErrCapabilityRevoked = errors.New("enclave: issued grant capability revoked")
+
 	// ErrNoKEK indicates that no KEK has been transmitted for the given user.
 	ErrNoKEK = errors.New("enclave: no KEK stored for user")
 )
