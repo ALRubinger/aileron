@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -70,7 +72,13 @@ func main() {
 	sourceReg.Register(slacksource.New())
 	sourceReg.Register(githubsource.New())
 
-	srv, err := newEnclaveServer(log, registry, sourceReg, provider, dataDir)
+	escrowKeyCfg, err := escrowKeyConfigFromEnv(provider)
+	if err != nil {
+		log.Error("failed to configure escrow key", "error", err)
+		os.Exit(1)
+	}
+
+	srv, err := newEnclaveServerWithEscrowKeyConfig(log, registry, sourceReg, provider, dataDir, escrowKeyCfg)
 	if err != nil {
 		log.Error("failed to initialize enclave server", "error", err)
 		os.Exit(1)
@@ -111,4 +119,25 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	httpServer.Shutdown(shutdownCtx)
+}
+
+func escrowKeyConfigFromEnv(provider string) (escrowKeyConfig, error) {
+	cfg := escrowKeyConfig{allowRawFile: provider != "confidential-space"}
+	if os.Getenv("AILERON_ENCLAVE_ALLOW_RAW_ESCROW_KEY") == "true" {
+		cfg.allowRawFile = true
+	}
+	keyB64 := os.Getenv("AILERON_ENCLAVE_ESCROW_KEY_B64")
+	if keyB64 == "" {
+		return cfg, nil
+	}
+	key, err := base64.StdEncoding.DecodeString(keyB64)
+	if err != nil {
+		return escrowKeyConfig{}, fmt.Errorf("decoding AILERON_ENCLAVE_ESCROW_KEY_B64: %w", err)
+	}
+	if len(key) != 32 {
+		return escrowKeyConfig{}, fmt.Errorf("AILERON_ENCLAVE_ESCROW_KEY_B64: expected 32 decoded bytes, got %d", len(key))
+	}
+	cfg.key = key
+	cfg.allowRawFile = false
+	return cfg, nil
 }

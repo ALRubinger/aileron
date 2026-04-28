@@ -47,7 +47,11 @@ type enclaveServer struct {
 }
 
 func newEnclaveServer(log *slog.Logger, registry *connector.Registry, sourceReg *source.Registry, provider, dataDir string) (*enclaveServer, error) {
-	escrow, err := newEscrowStore(dataDir)
+	return newEnclaveServerWithEscrowKeyConfig(log, registry, sourceReg, provider, dataDir, escrowKeyConfig{allowRawFile: true})
+}
+
+func newEnclaveServerWithEscrowKeyConfig(log *slog.Logger, registry *connector.Registry, sourceReg *source.Registry, provider, dataDir string, keyCfg escrowKeyConfig) (*enclaveServer, error) {
+	escrow, err := newEscrowStoreWithKeyConfig(dataDir, keyCfg)
 	if err != nil {
 		return nil, fmt.Errorf("initializing escrow store: %w", err)
 	}

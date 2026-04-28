@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -394,6 +395,79 @@ func TestEscrowPersistence_RoundTrip(t *testing.T) {
 	}
 	if string(got2) != "cred-two" {
 		t.Errorf("id2 = %q, want cred-two", got2)
+	}
+}
+
+func TestEscrowPersistence_ExternalKeyDoesNotWriteRawKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("01234567890123456789012345678901")
+
+	s1, err := newEscrowStoreWithKeyConfig(dir, escrowKeyConfig{key: key})
+	if err != nil {
+		t.Fatalf("newEscrowStoreWithKeyConfig: %v", err)
+	}
+	id := s1.Store(testEscrowRequest("grant-1", "oauth", nil), []byte("cred-one"), time.Now().Add(time.Hour))
+	if _, err := os.Stat(filepath.Join(dir, "escrow.key")); !os.IsNotExist(err) {
+		t.Fatalf("expected no raw escrow.key file, got err=%v", err)
+	}
+
+	s2, err := newEscrowStoreWithKeyConfig(dir, escrowKeyConfig{key: key})
+	if err != nil {
+		t.Fatalf("reload with external key: %v", err)
+	}
+	got, err := s2.Get(id)
+	if err != nil {
+		t.Fatalf("Get after reload: %v", err)
+	}
+	if string(got) != "cred-one" {
+		t.Fatalf("got %q, want cred-one", got)
+	}
+}
+
+func TestEscrowPersistence_ExternalKeyRejectsExistingRawKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("01234567890123456789012345678901")
+	if err := os.WriteFile(filepath.Join(dir, "escrow.key"), []byte("abcdefghijklmnopqrstuvwxzy123456"), 0600); err != nil {
+		t.Fatalf("writing raw key: %v", err)
+	}
+
+	_, err := newEscrowStoreWithKeyConfig(dir, escrowKeyConfig{key: key})
+	if err == nil {
+		t.Fatal("expected strict external key mode to reject existing raw escrow.key")
+	}
+}
+
+func TestEscrowPersistence_ExternalKeyCannotBeDecryptedWithWrongKey(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("01234567890123456789012345678901")
+	wrongKey := []byte("abcdefghijklmnopqrstuvwxzy123456")
+
+	s1, err := newEscrowStoreWithKeyConfig(dir, escrowKeyConfig{key: key})
+	if err != nil {
+		t.Fatalf("newEscrowStoreWithKeyConfig: %v", err)
+	}
+	id := s1.Store(testEscrowRequest("grant-1", "oauth", nil), []byte("cred-one"), time.Now().Add(time.Hour))
+
+	s2, err := newEscrowStoreWithKeyConfig(dir, escrowKeyConfig{key: wrongKey})
+	if err != nil {
+		t.Fatalf("reload with wrong external key: %v", err)
+	}
+	if _, err := s2.Get(id); err != enclave.ErrEscrowNotFound {
+		t.Fatalf("expected wrong key to start with empty escrow store, got %v", err)
+	}
+}
+
+func TestEscrowPersistence_StrictModeRequiresExternalKey(t *testing.T) {
+	_, err := newEscrowStoreWithKeyConfig(t.TempDir(), escrowKeyConfig{})
+	if err == nil {
+		t.Fatal("expected strict mode without key to fail")
+	}
+}
+
+func TestEscrowPersistence_RejectsWrongSizeExternalKey(t *testing.T) {
+	_, err := newEscrowStoreWithKeyConfig(t.TempDir(), escrowKeyConfig{key: []byte("short")})
+	if err == nil {
+		t.Fatal("expected wrong-size external key to fail")
 	}
 }
 

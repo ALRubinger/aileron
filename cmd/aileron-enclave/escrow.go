@@ -37,6 +37,11 @@ type escrowStore struct {
 	encKey  []byte // 32-byte DEK for at-rest encryption
 }
 
+type escrowKeyConfig struct {
+	key          []byte
+	allowRawFile bool
+}
+
 // persistedEntry is the JSON-serializable form of an escrow entry.
 type persistedEntry struct {
 	UserID            string                         `json:"user_id"`
@@ -54,10 +59,17 @@ type persistedEntry struct {
 }
 
 func newEscrowStore(dataDir string) (*escrowStore, error) {
+	return newEscrowStoreWithKeyConfig(dataDir, escrowKeyConfig{allowRawFile: true})
+}
+
+func newEscrowStoreWithKeyConfig(dataDir string, cfg escrowKeyConfig) (*escrowStore, error) {
 	s := &escrowStore{entries: make(map[string]*escrowEntry)}
 
 	if dataDir == "" {
 		return s, nil
+	}
+	if len(cfg.key) > 0 && len(cfg.key) != 32 {
+		return nil, fmt.Errorf("escrow key: expected 32 bytes, got %d", len(cfg.key))
 	}
 
 	s.dataDir = dataDir
@@ -65,11 +77,26 @@ func newEscrowStore(dataDir string) (*escrowStore, error) {
 		return nil, fmt.Errorf("creating escrow data dir: %w", err)
 	}
 
-	key, err := enclave.LoadOrCreateKey(filepath.Join(dataDir, "escrow.key"))
-	if err != nil {
-		return nil, err
+	rawKeyPath := filepath.Join(dataDir, "escrow.key")
+	if len(cfg.key) > 0 {
+		if !cfg.allowRawFile {
+			if _, err := os.Stat(rawKeyPath); err == nil {
+				return nil, fmt.Errorf("raw escrow key file present at %s; remove it before using external escrow key strict mode", rawKeyPath)
+			} else if !os.IsNotExist(err) {
+				return nil, fmt.Errorf("checking raw escrow key file: %w", err)
+			}
+		}
+		s.encKey = copyBytes(cfg.key)
+	} else {
+		if !cfg.allowRawFile {
+			return nil, fmt.Errorf("escrow key required: set AILERON_ENCLAVE_ESCROW_KEY_B64 or explicitly allow raw escrow.key files")
+		}
+		key, err := enclave.LoadOrCreateKey(rawKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		s.encKey = key
 	}
-	s.encKey = key
 
 	// Load existing entries from disk.
 	if err := s.load(); err != nil {
