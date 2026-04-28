@@ -22,4 +22,4 @@ Aileron uses a pluggable agent SPI. Each agent exposes a standard interface for 
 
 For agents that don't respect `$SHELL` directly, Aileron installs a wrapper script that satisfies the agent's shell validation and delegates to `aileron-sh`.
 
-See [ADR-0017: Pluggable Agent SPI](/adr/0017-pluggable-agent-spi) for the design rationale.
+See [ADR-0017: Pluggable Agent SPI](/archived-adr/0017-pluggable-agent-spi) for the design rationale.

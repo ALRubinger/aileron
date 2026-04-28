@@ -7,8 +7,8 @@ title: "ADR-0006: Stable OAuth Callback Domain for Branch Deployments"
 <table>
   <tr><th>Status</th><td>Superseded</td></tr>
   <tr><th>Date</th><td>2026-04-03</td></tr>
-  <tr><th>Supersedes</th><td><a href="/adr/0005-github-oauth-and-auth-spi-evolution">ADR-0005</a> (specifically the "Removal of OAuthRedirectURL override" decision)</td></tr>
-  <tr><th>Superseded by</th><td><a href="/adr/0007-remove-stable-oauth-callback-domain">ADR-0007</a></td></tr>
+  <tr><th>Supersedes</th><td><a href="/archived-adr/0005-github-oauth-and-auth-spi-evolution">ADR-0005</a> (specifically the "Removal of OAuthRedirectURL override" decision)</td></tr>
+  <tr><th>Superseded by</th><td><a href="/archived-adr/0007-remove-stable-oauth-callback-domain">ADR-0007</a></td></tr>
 </table>
 </div>
 

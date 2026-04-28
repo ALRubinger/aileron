@@ -7,7 +7,7 @@ title: "ADR-0005: GitHub OAuth Provider and Auth SPI Evolution"
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-04-03</td></tr>
-  <tr><th>Supersedes</th><td><a href="/adr/0004-enterprise-auth-sso">ADR-0004</a> (Enterprise Account Model, SSO/OAuth, and Email/Password Auth)</td></tr>
+  <tr><th>Supersedes</th><td><a href="/archived-adr/0004-enterprise-auth-sso">ADR-0004</a> (Enterprise Account Model, SSO/OAuth, and Email/Password Auth)</td></tr>
 </table>
 </div>
 

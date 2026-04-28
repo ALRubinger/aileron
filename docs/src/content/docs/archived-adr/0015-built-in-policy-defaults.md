@@ -7,7 +7,7 @@ title: "ADR-0015: Built-in Policy Defaults — Convention over Configuration"
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-04-09</td></tr>
-  <tr><th>Supersedes</th><td><a href="/adr/0014-aileron-yaml-policy-schema">ADR-0014</a> (profile composition model only; the rest of ADR-0014 remains in effect)</td></tr>
+  <tr><th>Supersedes</th><td><a href="/archived-adr/0014-aileron-yaml-policy-schema">ADR-0014</a> (profile composition model only; the rest of ADR-0014 remains in effect)</td></tr>
 </table>
 </div>
 

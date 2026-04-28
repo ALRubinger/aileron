@@ -7,7 +7,7 @@ title: "ADR-0008: Per-User and Enterprise-Governed MCP Server Management"
 <table>
   <tr><th>Status</th><td>Superseded</td></tr>
   <tr><th>Date</th><td>2026-04-04</td></tr>
-  <tr><th>Superseded by</th><td><a href="/adr/0009-deterministic-execution-plane">ADR-0009</a></td></tr>
+  <tr><th>Superseded by</th><td><a href="/archived-adr/0009-deterministic-execution-plane">ADR-0009</a></td></tr>
 </table>
 </div>
 

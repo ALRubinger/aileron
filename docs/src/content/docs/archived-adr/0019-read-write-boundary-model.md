@@ -7,7 +7,7 @@ title: "ADR-0019: Read/Write Boundary Model — LLM Reads, Aileron Writes"
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-04-16</td></tr>
-  <tr><th>Refines</th><td><a href="/adr/0009-deterministic-execution-plane">ADR-0009</a>, <a href="/adr/0018-context-store-architecture">ADR-0018</a></td></tr>
+  <tr><th>Refines</th><td><a href="/archived-adr/0009-deterministic-execution-plane">ADR-0009</a>, <a href="/archived-adr/0018-context-store-architecture">ADR-0018</a></td></tr>
 </table>
 </div>
 

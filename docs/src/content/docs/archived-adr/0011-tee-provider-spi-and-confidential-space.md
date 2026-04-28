@@ -7,7 +7,7 @@ title: "ADR-0011: TEE Provider SPI and Google Confidential Space"
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-04-06</td></tr>
-  <tr><th>Supplements</th><td><a href="/adr/0010-zero-knowledge-vault-trust-model">ADR-0010</a></td></tr>
+  <tr><th>Supplements</th><td><a href="/archived-adr/0010-zero-knowledge-vault-trust-model">ADR-0010</a></td></tr>
 </table>
 </div>
 

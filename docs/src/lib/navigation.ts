@@ -127,7 +127,15 @@ export const navigation: NavItem[] = [
   {
     label: 'Architecture Decisions',
     defaultOpen: false,
-    children: [] // populated at build time from content collection
+    children: [] // populated at build time from content collection (adr/*); empty until #343 lands
+  },
+  {
+    label: 'Archived ADRs',
+    defaultOpen: false,
+    children: [
+      { label: 'Overview', href: '/archived-adr/' }
+      // ADR entries appended at build time from content collection (archived-adr/*)
+    ]
   }
 ];
 

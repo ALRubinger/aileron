@@ -7,7 +7,7 @@ title: "ADR-0020: System Vault for Infrastructure Secrets"
 <table>
   <tr><th>Status</th><td>Proposed</td></tr>
   <tr><th>Date</th><td>2026-04-21</td></tr>
-  <tr><th>References</th><td><a href="/adr/0010-zero-knowledge-vault-trust-model">ADR-0010</a></td></tr>
+  <tr><th>References</th><td><a href="/archived-adr/0010-zero-knowledge-vault-trust-model">ADR-0010</a></td></tr>
 </table>
 </div>
 

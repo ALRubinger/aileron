@@ -7,7 +7,7 @@ title: "ADR-0013: Pivot from Cloud Execution Plane to Local Policy-Enforced Shel
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-04-08</td></tr>
-  <tr><th>Supersedes</th><td><a href="/adr/0009-deterministic-execution-plane">ADR-0009</a> (Pivot from MCP Gateway to Deterministic Execution Plane)</td></tr>
+  <tr><th>Supersedes</th><td><a href="/archived-adr/0009-deterministic-execution-plane">ADR-0009</a> (Pivot from MCP Gateway to Deterministic Execution Plane)</td></tr>
 </table>
 </div>
 

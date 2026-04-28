@@ -7,7 +7,7 @@ title: "ADR-0014: aileron.yaml Policy Schema for Launch Sessions"
 <table>
   <tr><th>Status</th><td>Partially Superseded</td></tr>
   <tr><th>Date</th><td>2026-04-08</td></tr>
-  <tr><th>Superseded by</th><td><a href="/adr/0015-built-in-policy-defaults">ADR-0015</a> (profile composition model replaced; rule syntax and schema remain in effect)</td></tr>
+  <tr><th>Superseded by</th><td><a href="/archived-adr/0015-built-in-policy-defaults">ADR-0015</a> (profile composition model replaced; rule syntax and schema remain in effect)</td></tr>
 </table>
 </div>
 

@@ -7,7 +7,7 @@ title: "ADR-0002: MCP Marketplace Integration"
 <table>
   <tr><th>Status</th><td>Superseded</td></tr>
   <tr><th>Date</th><td>2026-04-01</td></tr>
-  <tr><th>Superseded by</th><td><a href="/adr/0009-deterministic-execution-plane">ADR-0009</a></td></tr>
+  <tr><th>Superseded by</th><td><a href="/archived-adr/0009-deterministic-execution-plane">ADR-0009</a></td></tr>
 </table>
 </div>
 
