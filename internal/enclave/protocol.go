@@ -101,8 +101,11 @@ type ExecuteRequest struct {
 	// instead of EncryptedCredential.
 	EscrowID string `json:"escrow_id,omitempty"`
 	// Capability is a signed, scoped grant envelope the enclave verifies
-	// before using credentials for this operation.
+	// for request authentication before using credentials for this operation.
 	Capability *SignedGrantCapability `json:"capability,omitempty"`
+	// IssuedCapability is the durable grant capability issued by the control
+	// plane and independently verified by the enclave.
+	IssuedCapability *SignedGrantCapability `json:"issued_capability,omitempty"`
 }
 
 // ExecuteResponse is returned by the enclave after connector execution.
@@ -137,14 +140,18 @@ type AttestationResponse struct {
 type SessionRequest struct {
 	// PublicKey is the host's ephemeral P-256 ECDH public key.
 	PublicKey []byte `json:"public_key"`
+	// GrantCapabilityKey is the HMAC key used to verify durable issued grant
+	// capabilities inside the enclave.
+	GrantCapabilityKey []byte `json:"grant_capability_key,omitempty"`
 }
 
 // SessionResponse confirms that the session is established and credentials
 // can be transmitted.
 type SessionResponse struct {
-	SessionID      string `json:"session_id"`
-	ExpiresAt      string `json:"expires_at"` // RFC 3339
-	RequestAuthKey []byte `json:"request_auth_key,omitempty"`
+	SessionID          string `json:"session_id"`
+	ExpiresAt          string `json:"expires_at"` // RFC 3339
+	RequestAuthKey     []byte `json:"request_auth_key,omitempty"`
+	GrantCapabilityKey []byte `json:"grant_capability_key,omitempty"`
 }
 
 // HeaderSessionID binds post-attestation enclave requests to the active
@@ -172,6 +179,7 @@ type EscrowStoreRequest struct {
 	SourceTools         []string               `json:"source_tools,omitempty"`
 	AllowedParameters   map[string]any         `json:"allowed_parameters,omitempty"`
 	Capability          *SignedGrantCapability `json:"capability,omitempty"`
+	IssuedCapability    *SignedGrantCapability `json:"issued_capability,omitempty"`
 }
 
 // EscrowStoreResponse confirms that the credential has been escrowed.
@@ -217,8 +225,11 @@ type SourceExecuteRequest struct {
 	// Params are the tool parameters (query, filters, etc.).
 	Params map[string]any `json:"params"`
 	// Capability is a signed, scoped grant envelope the enclave verifies
-	// before using credentials for this operation.
+	// for request authentication before using credentials for this operation.
 	Capability *SignedGrantCapability `json:"capability,omitempty"`
+	// IssuedCapability is the durable grant capability issued by the control
+	// plane and independently verified by the enclave.
+	IssuedCapability *SignedGrantCapability `json:"issued_capability,omitempty"`
 }
 
 // SourceExecuteResponse contains the tool execution results. The credential

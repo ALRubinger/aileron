@@ -309,7 +309,8 @@ func (s *apiServer) EstablishTeeSession(w http.ResponseWriter, r *http.Request) 
 	// Forward the client's public key to the enclave for ECDH key exchange.
 	// The server never generates its own key pair — it's a pass-through.
 	sessResp, err := s.enclaveClient.EstablishSession(r.Context(), enclave.SessionRequest{
-		PublicKey: req.ClientPublicKey,
+		PublicKey:          req.ClientPublicKey,
+		GrantCapabilityKey: append([]byte(nil), s.grantSigningKey()...),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_error", err.Error())
@@ -326,6 +327,9 @@ func (s *apiServer) EstablishTeeSession(w http.ResponseWriter, r *http.Request) 
 	if transmitErr != nil {
 		writeError(w, http.StatusInternalServerError, "kek_error", "failed to transmit KEK to enclave: "+transmitErr.Error())
 		return
+	}
+	if len(sessResp.GrantCapabilityKey) > 0 {
+		s.grantCapabilityKey = append(s.grantCapabilityKey[:0], sessResp.GrantCapabilityKey...)
 	}
 
 	// Parse expiry.
@@ -380,8 +384,7 @@ func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) in
 
 		expiresAt := time.Now().Add(s.escrowTTL)
 		grantID := "auto-escrow-" + acc.ID
-
-		resp, err := s.enclaveClient.EscrowStore(ctx, enclave.EscrowStoreRequest{
+		req := enclave.EscrowStoreRequest{
 			UserID:              userID,
 			GrantID:             grantID,
 			VaultPath:           acc.VaultPath(),
@@ -391,7 +394,14 @@ func (s *apiServer) autoEscrowCredentials(ctx context.Context, userID string) in
 			ExpiresAt:           expiresAt.Format(time.RFC3339),
 			ActionTypes:         actionTypesForProvider(acc.Provider),
 			SourceTools:         sourceToolsForProvider(s.sourceRegistry, acc.Provider),
-		})
+		}
+		capability, err := s.signIssuedGrantCapability(enclave.EscrowStoreGrantCapability(req, randomCapabilityNonce()))
+		if err != nil {
+			continue
+		}
+		req.IssuedCapability = capability
+
+		resp, err := s.enclaveClient.EscrowStore(ctx, req)
 		if err != nil {
 			continue
 		}

@@ -800,6 +800,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		if issuedCapability != nil {
 			applyIssuedCapabilityToExecuteRequest(&execReq, issuedCapability.Capability)
 			execReq.Capability = issuedCapability
+			execReq.IssuedCapability = issuedCapability
 		}
 		// If credential is escrowed in TEE memory, use the escrow ID
 		// instead of sending the encrypted credential. This allows
@@ -1201,6 +1202,7 @@ func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*
 		if issuedCapability != nil {
 			applyIssuedCapabilityToExecuteRequest(&execReq, issuedCapability.Capability)
 			execReq.Capability = issuedCapability
+			execReq.IssuedCapability = issuedCapability
 		}
 		if escrowID, ok := s.escrowIndex.Load(vaultPath); ok {
 			execReq.EscrowID = escrowID.(string)

@@ -179,16 +179,21 @@ func TestRequiresRequestAuth(t *testing.T) {
 
 func TestAttachGrantCapability(t *testing.T) {
 	authKey := []byte("01234567890123456789012345678901")
+	issuedCapability := &enclave.SignedGrantCapability{
+		Capability: enclave.GrantCapability{GrantID: "grant-1", Nonce: "issued-nonce"},
+		Signature:  "issued-signature",
+	}
 
 	execute, err := attachGrantCapability(enclave.ExecuteRequest{
-		GrantID:        "grant-1",
-		IntentID:       "intent-1",
-		UserID:         "user-1",
-		VaultPath:      "connected-accounts/user-1/gmail",
-		Provider:       "gmail",
-		CredentialType: "oauth2",
-		ActionType:     "email.send",
-		Parameters:     map[string]any{"to": "a@example.com"},
+		GrantID:          "grant-1",
+		IntentID:         "intent-1",
+		UserID:           "user-1",
+		VaultPath:        "connected-accounts/user-1/gmail",
+		Provider:         "gmail",
+		CredentialType:   "oauth2",
+		ActionType:       "email.send",
+		Parameters:       map[string]any{"to": "a@example.com"},
+		IssuedCapability: issuedCapability,
 	}, authKey)
 	if err != nil {
 		t.Fatalf("attach execute capability: %v", err)
@@ -196,6 +201,9 @@ func TestAttachGrantCapability(t *testing.T) {
 	executeReq := execute.(enclave.ExecuteRequest)
 	if !enclave.VerifyExecuteCapability(authKey, executeReq) {
 		t.Fatal("expected execute capability to verify")
+	}
+	if executeReq.IssuedCapability != issuedCapability {
+		t.Fatal("expected issued capability to be preserved")
 	}
 
 	escrow, err := attachGrantCapability(enclave.EscrowStoreRequest{

@@ -87,6 +87,46 @@ func TestSourceExecuteCapabilityVerifiesBoundFields(t *testing.T) {
 	}
 }
 
+func TestIssuedExecuteGrantCapabilityBindsExpiry(t *testing.T) {
+	req := ExecuteRequest{
+		GrantID:        "grant-1",
+		IntentID:       "intent-1",
+		UserID:         "user-1",
+		VaultPath:      "connected-accounts/user-1/gmail",
+		Provider:       "gmail",
+		CredentialType: "oauth2",
+		ActionType:     "email.send",
+		Parameters:     map[string]any{"to": "a@example.com"},
+	}
+	capability := IssuedExecuteGrantCapability(req, "nonce-1", "2026-04-26T09:00:00Z")
+	if capability.ExpiresAt != "2026-04-26T09:00:00Z" {
+		t.Fatalf("expires_at = %q", capability.ExpiresAt)
+	}
+	if capability.GrantID != req.GrantID || capability.ActionType != req.ActionType {
+		t.Fatalf("issued execute capability did not bind request scope: %#v", capability)
+	}
+}
+
+func TestIssuedSourceExecuteGrantCapabilityBindsGrantAndExpiry(t *testing.T) {
+	req := SourceExecuteRequest{
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "gmail_search",
+		Params:    map[string]any{"query": "from:a@example.com"},
+	}
+	capability := IssuedSourceExecuteGrantCapability(req, "nonce-1", "grant-1", "2026-04-26T09:00:00Z", "oauth2")
+	if capability.GrantID != "grant-1" {
+		t.Fatalf("grant_id = %q", capability.GrantID)
+	}
+	if capability.CredentialType != "oauth2" {
+		t.Fatalf("credential_type = %q", capability.CredentialType)
+	}
+	if capability.ExpiresAt != "2026-04-26T09:00:00Z" {
+		t.Fatalf("expires_at = %q", capability.ExpiresAt)
+	}
+}
+
 func TestGrantCapabilityRejectsMissingSignature(t *testing.T) {
 	req := ExecuteRequest{
 		GrantID:    "grant-1",
