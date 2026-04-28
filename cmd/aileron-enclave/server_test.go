@@ -527,6 +527,71 @@ func TestExecuteRejectsReplayedIssuedCapability(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestExecuteRejectsRevokedIssuedCapability(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	revokeResp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{GrantID: "grant-revoked"})
+	if revokeResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected revoke 204, got %d", revokeResp.StatusCode)
+	}
+	revokeResp.Body.Close()
+
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
+	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		RequestID:           "exec-revoked",
+		UserID:              "user-1",
+		GrantID:             "grant-revoked",
+		ActionType:          "test.action",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for revoked issued capability, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestExecuteRejectsRevokedIssuedCapabilityAfterNewSession(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	revokeResp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{GrantID: "grant-revoked-session"})
+	if revokeResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected revoke 204, got %d", revokeResp.StatusCode)
+	}
+	revokeResp.Body.Close()
+
+	sessionKey = establishTestSession(t, server)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	encrypted, _ := crypto.Encrypt([]byte("cred"), userKEK)
+	resp := postJSON(t, server, "/execute", enclave.ExecuteRequest{
+		RequestID:           "exec-revoked-session",
+		UserID:              "user-1",
+		GrantID:             "grant-revoked-session",
+		ActionType:          "test.action",
+		ConnectorID:         "test/stub",
+		EncryptedCredential: encrypted,
+		CredentialType:      "api_key",
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for revoked issued capability after new session, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestVerifyCapabilityExpiryRejectsMissingAndInvalidExpiry(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -664,8 +729,8 @@ func TestEscrowFlow(t *testing.T) {
 		CredentialType: "api_key",
 		EscrowID:       storeResult.EscrowID,
 	})
-	if execResp2.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 after revoke, got %d", execResp2.StatusCode)
+	if execResp2.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 after revoke, got %d", execResp2.StatusCode)
 	}
 	execResp2.Body.Close()
 }
@@ -688,6 +753,29 @@ func TestEscrowStoreRejectsIssuedCapabilityScopeMismatch(t *testing.T) {
 	resp := postJSON(t, server, "/escrow", req)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 for escrow issued capability scope mismatch, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestEscrowStoreRejectsRevokedIssuedCapability(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	sessionKey := establishTestSession(t, server)
+	userKEK := make([]byte, 32)
+	rand.Read(userKEK)
+	transmitTestKEK(t, server, sessionKey, "user-1", userKEK)
+
+	revokeResp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{GrantID: "grant-1"})
+	if revokeResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected revoke 204, got %d", revokeResp.StatusCode)
+	}
+	revokeResp.Body.Close()
+
+	encrypted, _ := crypto.Encrypt([]byte("escrowed-cred"), userKEK)
+	resp := postJSON(t, server, "/escrow", validEscrowStoreRequest(encrypted))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for revoked escrow issued capability, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }
@@ -917,6 +1005,27 @@ func TestEscrowRevokeNotFoundViaHTTP(t *testing.T) {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestEscrowRevokeRequiresGrantID(t *testing.T) {
+	server, _ := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	resp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{EscrowID: "esc_123"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestRevokeGrantIgnoresEmptyGrantID(t *testing.T) {
+	_, srv := setupTestEnclaveServer(t)
+	srv.revokeGrant("")
+	if srv.isGrantRevoked("") {
+		t.Fatal("empty grant ID should not be considered revoked")
+	}
 }
 
 func TestHealthWithActiveSession(t *testing.T) {
@@ -1758,6 +1867,35 @@ func TestSourceExecute_RejectsScopeMismatch(t *testing.T) {
 	})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestSourceExecuteRejectsRevokedEscrowGrant(t *testing.T) {
+	server, srv := setupTestEnclaveServer(t)
+	defer server.Close()
+
+	establishTestSession(t, server)
+
+	escrowReq := testEscrowRequest("g1", "oauth2", nil)
+	escrowID := srv.escrow.Store(escrowReq, []byte(`{"access_token":"test"}`), time.Now().Add(time.Hour))
+
+	revokeResp := postJSON(t, server, "/escrow/revoke", enclave.EscrowRevokeRequest{GrantID: "g1"})
+	if revokeResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected revoke 204, got %d", revokeResp.StatusCode)
+	}
+	revokeResp.Body.Close()
+
+	resp := postJSON(t, server, "/source/execute", enclave.SourceExecuteRequest{
+		EscrowID:  escrowID,
+		UserID:    "user-1",
+		VaultPath: "connected-accounts/user-1/gmail",
+		Provider:  "gmail",
+		Tool:      "test_search",
+		Params:    map[string]any{"query": "hello"},
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for revoked source grant, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }
