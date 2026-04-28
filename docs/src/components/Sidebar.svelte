@@ -9,6 +9,7 @@
   import GitFork from '@lucide/svelte/icons/git-fork';
   import Braces from '@lucide/svelte/icons/braces';
   import Cloud from '@lucide/svelte/icons/cloud';
+  import Compass from '@lucide/svelte/icons/compass';
 
   let { currentPath = '', navigation = [] as NavItem[] }: { currentPath?: string; navigation?: NavItem[] } = $props();
   let mobileOpen = $state(false);
@@ -50,6 +51,7 @@
 
   // Map top-level labels to icons
   const iconMap: Record<string, typeof Plane> = {
+    'Pivot': Compass,
     'Meet Aileron': Plane,
     'Getting Started': Rocket,
     'Operations': Server,

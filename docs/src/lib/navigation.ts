@@ -35,6 +35,14 @@ export function isSection(item: NavItem): item is NavSection {
  */
 export const navigation: NavItem[] = [
   {
+    label: 'Pivot',
+    children: [
+      { label: 'The Deterministic Layer', href: '/pivot/the-deterministic-layer' },
+      { label: 'What Your Agent Can Now Do', href: '/pivot/what-your-agent-can-do' },
+      { label: 'Competitive Landscape', href: '/pivot/competitive-landscape' }
+    ]
+  },
+  {
     label: 'Meet Aileron',
     children: [
       { label: 'Overview', href: '/' },
