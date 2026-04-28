@@ -6,7 +6,7 @@ order: 2
 
 A quick-reference contrast between three patterns that all let agents take action: native LLM tool calling, MCP servers, and Aileron's deterministic execution layer. Tool Calling and MCP put the LLM in control of execution; Aileron moves control to a deterministic policy layer.
 
-> **Companion documents:** for the full strategy and architecture behind Aileron, see [The Deterministic Layer for AI Agents](/pivot/the-deterministic-layer). For the broader competitive scan beyond the two patterns compared here, see [Competitive Landscape](/pivot/competitive-landscape).
+> **Companion documents:** for the pitch and architectural insight, see [Overview](/pivot/overview); for the load-bearing decisions, see [Architecture](/pivot/architecture/). For the broader competitive scan beyond the two patterns compared here, see [Competitive Landscape](/pivot/competitive-landscape).
 
 ## Comparison Table
 
