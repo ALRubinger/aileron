@@ -333,6 +333,37 @@ func TestGetTeeStatusConfidentialSpace(t *testing.T) {
 	}
 }
 
+func TestGetTeeStatus_WithExpectedIdentity(t *testing.T) {
+	s := &apiServer{
+		teeCfg: &config.TEEConfig{
+			Provider:    "confidential-space",
+			ImageDigest: "sha256:expected",
+			ProjectID:   "expected-project",
+		},
+		teeState: newTeeState(),
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/tee/status", nil)
+	s.GetTeeStatus(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var status api.TeeStatus
+	json.NewDecoder(w.Body).Decode(&status)
+	if status.ExpectedIdentity == nil {
+		t.Fatal("expected expected_identity to be present")
+	}
+	if status.ExpectedIdentity.ImageDigest == nil || *status.ExpectedIdentity.ImageDigest != "sha256:expected" {
+		t.Fatalf("expected image digest pin, got %#v", status.ExpectedIdentity.ImageDigest)
+	}
+	if status.ExpectedIdentity.ProjectId == nil || *status.ExpectedIdentity.ProjectId != "expected-project" {
+		t.Fatalf("expected project ID pin, got %#v", status.ExpectedIdentity.ProjectId)
+	}
+}
+
 func TestGetTeeStatus_WithAttestationClaims(t *testing.T) {
 	now := time.Now()
 	expires := now.Add(time.Hour)

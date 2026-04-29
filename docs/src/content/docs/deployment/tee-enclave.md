@@ -275,7 +275,7 @@ The defaults work for most deployments. Override the directory when:
 2. The enclave fetches an OIDC JWT from the GCE metadata service. This token is signed by Google and contains claims about the workload: container image digest, GCP project ID, and hardware model.
 3. The server verifies the JWT signature against Google's JWKS.
 4. The server validates: the issuer is `https://accounts.google.com`, the token is not expired, the nonce matches, and the image digest and project ID match the expected values.
-5. The browser also verifies the JWT signature via `GET /v1/tee/jwks`, which proxies Google's JWKS endpoint (the browser cannot fetch directly due to CORS). This is a defense-in-depth check — the ECDH key exchange in step 6 is the primary cryptographic protection.
+5. The browser also verifies the JWT signature via `GET /v1/tee/jwks`, which proxies Google's JWKS endpoint (the browser cannot fetch directly due to CORS), and pins the attested image digest and project ID against the expected identity exposed by `GET /v1/tee/status`.
 6. On success, the server and enclave perform an ECDH key exchange to establish an encrypted channel.
 7. Subsequent requests encrypt credentials with the session key before sending them to the enclave. The enclave decrypts inside hardware-isolated memory, executes the connector, and returns only the structured result.
 
