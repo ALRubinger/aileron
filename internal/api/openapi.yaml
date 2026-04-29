@@ -3101,6 +3101,16 @@ components:
           type: string
           format: date-time
           description: When the current session expires
+        expected_identity:
+          type: object
+          description: Expected enclave identity pins configured by the server and intended for browser/client verification
+          properties:
+            image_digest:
+              type: string
+              description: Expected container image digest (e.g. "sha256:abc...")
+            project_id:
+              type: string
+              description: Expected GCP project ID that owns the enclave workload
         attestation_claims:
           type: object
           description: Verified attestation claims from the TEE (present only when attested)

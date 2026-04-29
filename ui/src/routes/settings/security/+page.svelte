@@ -133,6 +133,25 @@
 							</Collapsible.Content>
 						</Collapsible.Root>
 					{/if}
+
+					{#if teeStatus.expected_identity}
+						{@const expected = teeStatus.expected_identity}
+						<hr class="border-border" />
+
+						<h4 class="text-sm font-medium">Expected enclave identity</h4>
+
+						<div class="grid grid-cols-[auto_1fr] gap-x-8 gap-y-3 text-sm">
+							{#if expected.image_digest}
+								<span class="text-muted-foreground">Image digest pin</span>
+								<code class="text-xs font-mono bg-muted px-1.5 py-0.5 rounded break-all">{expected.image_digest}</code>
+							{/if}
+
+							{#if expected.project_id}
+								<span class="text-muted-foreground">Project ID pin</span>
+								<span>{expected.project_id}</span>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			</Card.Content>
 		</Card.Root>
@@ -145,9 +164,9 @@
 				<div class="flex flex-col gap-3 text-sm text-muted-foreground">
 					<p>
 						Attestation tokens are verified against Google's JWKS (JSON Web Key Set),
-						fetched through a server-side proxy. The server caches JWKS responses for
-						up to 1 hour. In a full zero-trust model, the client would fetch JWKS
-						directly from Google, but browser CORS restrictions prevent this.
+						fetched through a server-side proxy. The browser also pins the configured
+						enclave image digest and project ID during vault unlock when those pins are
+						available.
 					</p>
 					<p>
 						The ECDH key exchange between your browser and the enclave remains the

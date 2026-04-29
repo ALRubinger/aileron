@@ -35,6 +35,7 @@ Browser
   │     a. Validate JWT claims (issuer, expiry)
   │     b. Fetch JWKS from /v1/tee/jwks (server-proxied)
   │     c. Verify JWT signature via Web Crypto
+  │     d. Pin image digest and project ID from /v1/tee/status
   ├─ 5. ECDH key exchange (establish encrypted channel)
   ├─ 6. Encrypt KEK with shared secret, send to enclave
   │
@@ -67,7 +68,11 @@ Expected response:
   "enabled": true,
   "provider": "confidential-space",
   "attested": false,
-  "session_active": false
+  "session_active": false,
+  "expected_identity": {
+    "image_digest": "sha256:...",
+    "project_id": "your-gcp-project"
+  }
 }
 ```
 

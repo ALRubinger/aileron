@@ -84,7 +84,7 @@ export async function unlockVault(
 
 		if (teeStatus.enabled) {
 			// TEE mode: attestation + ECDH + encrypted KEK transmission.
-			return await unlockViaTee(kek, onProgress);
+			return await unlockViaTee(kek, onProgress, teeStatus.expected_identity);
 		}
 
 		// Direct mode: send KEK over HTTPS to server session cache.
@@ -106,7 +106,8 @@ export async function unlockVault(
  */
 async function unlockViaTee(
 	kek: Uint8Array,
-	onProgress?: (step: UnlockProgress) => void
+	onProgress?: (step: UnlockProgress) => void,
+	expectedIdentity?: { image_digest?: string; project_id?: string }
 ): Promise<UnlockResult> {
 	onProgress?.('attesting');
 	const attestResp = await initiateAttestation();
@@ -117,7 +118,8 @@ async function unlockViaTee(
 		attestResp.token,
 		enclavePublicKey,
 		'aileron-enclave',
-		nonce
+		nonce,
+		expectedIdentity
 	);
 	if (!attResult.verified) {
 		throw new Error('Enclave attestation verification failed');

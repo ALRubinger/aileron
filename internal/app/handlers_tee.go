@@ -73,6 +73,15 @@ func (s *apiServer) GetTeeStatus(w http.ResponseWriter, _ *http.Request) {
 		Enabled:  enabled,
 		Provider: provider,
 	}
+	if enabled && s.teeCfg != nil && (s.teeCfg.ImageDigest != "" || s.teeCfg.ProjectID != "") {
+		status.ExpectedIdentity = &struct {
+			ImageDigest *string `json:"image_digest,omitempty"`
+			ProjectId   *string `json:"project_id,omitempty"`
+		}{
+			ImageDigest: optionalString(s.teeCfg.ImageDigest),
+			ProjectId:   optionalString(s.teeCfg.ProjectID),
+		}
+	}
 
 	if s.teeState != nil {
 		s.teeState.mu.Lock()
@@ -105,6 +114,13 @@ func (s *apiServer) GetTeeStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, status)
+}
+
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func (s *apiServer) GetTeeJwks(w http.ResponseWriter, r *http.Request) {

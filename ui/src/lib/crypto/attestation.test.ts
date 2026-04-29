@@ -90,6 +90,70 @@ describe('verifyAttestation', () => {
 			expect(result.verified).toBe(true);
 		});
 
+		it('verifies expected enclave identity pins', async () => {
+			const pkNonce = await pubkeyNonceB64(enclavePublicKey);
+			const claims = {
+				iss: 'https://accounts.google.com',
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				eat_nonce: [pkNonce],
+				submods: {
+					container: { image_digest: 'sha256:expected' },
+					gce: { project_id: 'expected-project' }
+				}
+			};
+			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
+
+			const result = await verifyAttestation(token, enclavePublicKey, 'aud', undefined, {
+				image_digest: 'sha256:expected',
+				project_id: 'expected-project'
+			});
+			expect(result.verified).toBe(true);
+			expect(result.claims?.image_digest).toBe('sha256:expected');
+			expect(result.claims?.project_id).toBe('expected-project');
+		});
+
+		it('rejects unexpected enclave image digest', async () => {
+			const pkNonce = await pubkeyNonceB64(enclavePublicKey);
+			const claims = {
+				iss: 'https://accounts.google.com',
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				eat_nonce: [pkNonce],
+				submods: {
+					container: { image_digest: 'sha256:actual' },
+					gce: { project_id: 'expected-project' }
+				}
+			};
+			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
+
+			await expect(
+				verifyAttestation(token, enclavePublicKey, 'aud', undefined, {
+					image_digest: 'sha256:expected',
+					project_id: 'expected-project'
+				})
+			).rejects.toThrow('Unexpected enclave image digest');
+		});
+
+		it('rejects unexpected enclave project ID', async () => {
+			const pkNonce = await pubkeyNonceB64(enclavePublicKey);
+			const claims = {
+				iss: 'https://accounts.google.com',
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				eat_nonce: [pkNonce],
+				submods: {
+					container: { image_digest: 'sha256:expected' },
+					gce: { project_id: 'actual-project' }
+				}
+			};
+			const token = await createSignedJWT(claims, keyPair, kid, 'RS256');
+
+			await expect(
+				verifyAttestation(token, enclavePublicKey, 'aud', undefined, {
+					image_digest: 'sha256:expected',
+					project_id: 'expected-project'
+				})
+			).rejects.toThrow('Unexpected enclave project ID');
+		});
+
 		it('throws on wrong issuer', async () => {
 			const claims = {
 				iss: 'https://evil.example.com',

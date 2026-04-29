@@ -15,6 +15,11 @@ export interface AttestationResult {
 	claims?: AttestationClaims;
 }
 
+export interface ExpectedEnclaveIdentity {
+	image_digest?: string;
+	project_id?: string;
+}
+
 /**
  * Verifies an enclave attestation token and extracts the enclave's ECDH
  * public key. In dev mode (token === "dev-ok"), verification is skipped.
@@ -27,7 +32,8 @@ export async function verifyAttestation(
 	token: string,
 	enclavePublicKey: Uint8Array,
 	expectedAudience: string,
-	nonce?: Uint8Array
+	nonce?: Uint8Array,
+	expectedIdentity?: ExpectedEnclaveIdentity
 ): Promise<AttestationResult> {
 	if (token === 'dev-ok') {
 		// Local TEE provider — no real attestation.
@@ -43,7 +49,8 @@ export async function verifyAttestation(
 		token,
 		expectedAudience,
 		enclavePublicKey,
-		nonce
+		nonce,
+		expectedIdentity
 	);
 	return { verified, enclavePublicKey, claims };
 }
@@ -89,7 +96,8 @@ async function verifyConfidentialSpaceJWT(
 	token: string,
 	expectedAudience: string,
 	enclavePublicKey?: Uint8Array,
-	nonce?: Uint8Array
+	nonce?: Uint8Array,
+	expectedIdentity?: ExpectedEnclaveIdentity
 ): Promise<{ verified: boolean; claims: AttestationClaims }> {
 	const parts = token.split('.');
 	if (parts.length !== 3) {
@@ -173,8 +181,26 @@ async function verifyConfidentialSpaceJWT(
 		issued_at: jwtClaims.iat,
 		expires_at: jwtClaims.exp
 	};
+	validateExpectedIdentity(attestationClaims, expectedIdentity);
 
 	return { verified: true, claims: attestationClaims };
+}
+
+function validateExpectedIdentity(
+	claims: AttestationClaims,
+	expectedIdentity?: ExpectedEnclaveIdentity
+) {
+	if (!expectedIdentity) {
+		return;
+	}
+	if (expectedIdentity.image_digest && claims.image_digest !== expectedIdentity.image_digest) {
+		throw new Error(
+			`Unexpected enclave image digest: ${claims.image_digest ?? 'missing'}`
+		);
+	}
+	if (expectedIdentity.project_id && claims.project_id !== expectedIdentity.project_id) {
+		throw new Error(`Unexpected enclave project ID: ${claims.project_id ?? 'missing'}`);
+	}
 }
 
 /**
