@@ -50,7 +50,8 @@ export const navigation: NavItem[] = [
     children: [
       { label: 'Overview', href: '/adr/' },
       { label: 'ADR-0001: Manifest Format', href: '/adr/0001-manifest-format/' },
-      { label: 'ADR-0002: Connector Model', href: '/adr/0002-connector-model/' }
+      { label: 'ADR-0002: Connector Model', href: '/adr/0002-connector-model/' },
+      { label: 'ADR-0003: Action Model', href: '/adr/0003-action-model/' }
     ]
   }
 ];
