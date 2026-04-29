@@ -51,8 +51,8 @@
 
   // Map top-level labels to icons
   const iconMap: Record<string, typeof Plane> = {
-    'Pivot': Compass,
     'Meet Aileron': Plane,
+    'Architecture': Compass,
     'Getting Started': Rocket,
     'Operations': Server,
     'Deployment': Cloud,
