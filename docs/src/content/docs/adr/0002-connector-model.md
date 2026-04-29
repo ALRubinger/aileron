@@ -53,13 +53,13 @@ This keeps the runtime small, vendor-neutral, and decoupled from the long tail o
 
 ### Connectors are content-addressed: name + exact version + content hash
 
-A connector is identified by the triple `(name, version, hash)`. The name is a human-readable handle. The version is a semantic version. The hash is the content hash of the connector binary plus its manifest, taken together as a single byte stream.
+A connector is identified by the triple `(name, version, hash)`. The name is a fully-qualified URI (see next section). The version is a semantic version. The hash is the content hash of the connector binary plus its manifest, taken together as a single byte stream.
 
 Action files reference connectors by all three:
 
 ```toml
 [[requires.connectors]]
-name = "slack"
+name = "github://aileron/slack"
 version = "1.2.0"
 hash = "sha256:abc123..."
 ```
@@ -70,7 +70,78 @@ The hash is verified at install time *and* before every execution. The runtime r
 - Manifest desynchronization (the manifest was edited locally to grant more capability than the original publisher signed).
 - Accidental corruption.
 
-There are no version ranges, no `^1.2.x`-style ranges, no "latest" pseudo-version. What an action file declares is what runs. Updating a connector is an explicit, visible edit to the action files that reference it.
+There are no version ranges, no `^1.2.x`-style ranges, no "latest" pseudo-version. What an action file declares is what runs. Updating a connector is an explicit, visible edit to the action files that reference it. (See "Versioning is strict SemVer" below for the full version model.)
+
+### Connector identity is a fully-qualified URI
+
+Connector names are not bare strings. They are fully-qualified URIs that encode the *publication channel*, the *publisher's identity within that channel*, and an optional *subpath* locating the connector within the publication source:
+
+```
+<scheme>://<owner>/<repo-or-namespace>/<...subpath>/<connector>
+```
+
+For git-host schemes (`github://`, `gitlab://`), the first two segments after the scheme are the repo (`<owner>/<repo>`) and any further segments locate the connector within the repo's tree. For `hub://`, the path after the owner is the publisher's organizational choice within their Hub namespace.
+
+Examples:
+
+| FQN | Meaning |
+|---|---|
+| `github://aileron/slack` | Repo `aileron/slack` on GitHub; one connector at the repo root |
+| `github://aileron/integrations/connectors/slack` | Repo `aileron/integrations` on GitHub; connector lives at `connectors/slack/` (monorepo) |
+| `github://aileron/integrations/connectors/discord` | Same repo as above; sibling connector |
+| `gitlab://team/linear` | Repo `team/linear` on GitLab; one connector at the repo root |
+| `hub://aileron/slack` | Aileron Hub, owner `aileron`, connector `slack` |
+| `hub://aileron/integrations/slack` | Aileron Hub, owner `aileron`, organized under `integrations/` |
+
+This is decentralized. The scheme plus full path uniquely identifies a publication source; there is no central naming authority. Two organizations both publishing a connector named `slack` cannot collide — `github://acme/slack` and `github://other/slack` are distinct identities and produce distinct content hashes.
+
+**Monorepo support is first-class.** A single repo can house many connectors (and many actions — see ADR-0003) at distinct subpaths. Each artifact has its own manifest at its own path within the repo. Publishers organize subpaths however they like; common conventions like `connectors/<name>/` or `integrations/<service>/` will emerge but nothing is enforced.
+
+**Initial scheme set:**
+
+- `github://` — published as a GitHub release artifact under the named owner/repo, optionally at a subpath within the repo.
+- `gitlab://` — published as a GitLab release artifact under the named owner/repo, optionally at a subpath within the repo.
+- `hub://` — published to the Aileron Hub. The Hub is one source among many, not a privileged namespace. `hub://` connectors are subject to the same identity, hash, and signing checks as any other source.
+
+Forward-compatible: additional schemes (custom forges, OCI registries, signed HTTPS URLs) can be added as the ecosystem matures. Schemes are added by code in Aileron's resolver, not by user configuration; an unknown scheme is a hard error at install.
+
+**FQN, hash, and signature relationships:**
+
+- The FQN is *identification*. It says where the connector came from and who is responsible for it.
+- The content hash is *the trust anchor for what runs*. The runtime executes only bytes whose hash matches.
+- The signature is *the identity that vouches for the binary at publish time*. Install tooling verifies the signature against keys associated with the FQN's authority (e.g., signing keys configured in the source repo).
+
+All three checks must pass. The FQN alone grants nothing; the hash alone tells you content but not provenance; the signature alone tells you who signed but not what. Together they are sufficient.
+
+**Forks are distinct connectors.** If `acme` forks `aileron/slack`, the fork's FQN is `github://acme/slack`. It is a separate connector from `github://aileron/slack` with its own version line, its own hash chain, and its own signing identity. Action files reference one or the other explicitly; there is no ambient "I forked it but kept the name" ambiguity.
+
+**Repository moves are republications.** If a publisher migrates from GitHub to GitLab, the connector's FQN changes from `github://owner/x` to `gitlab://owner/x`. Existing action references continue to work against locally-cached binaries (the hash is unchanged); updating to the new location is an explicit edit to the action file, never an automatic redirect.
+
+### Versioning is strict SemVer; hash is the immutable trust anchor
+
+Every connector version is a strict [Semantic Versioning](https://semver.org) string (`MAJOR.MINOR.PATCH`, with optional pre-release like `2.0.0-rc.1` and optional build metadata like `1.2.0+sha.abc`). The `version` field in the connector manifest and in action `[[requires.connectors]]` references must be a valid SemVer.
+
+Specifically excluded:
+- No `latest` pseudo-version. There is no implicit "give me the newest" — a version is always pinned.
+- No version ranges (`^1.2.x`, `~1.2`, `>=1.0`). Each reference resolves to one and only one version.
+- No date-based versioning (`2026.04.29`), no branch names, no commit SHAs in the `version` field. Commit identity is captured by the hash, not by the version.
+
+This is a deliberate constraint. Strict SemVer gives ecosystem tooling a known schema for "what's the next compatible release?" and "what would a major bump break?" Strict pinning ensures reproducibility from git: the action file declares exactly what runs, and what runs cannot change without a visible TOML edit.
+
+**Version is for human reasoning. Hash is for machine verification.**
+
+- The `version` field says *which release this claims to be*. It corresponds to a tag in the publication source.
+- The `hash` field says *exactly which bytes will run*. It is the SHA-256 of the connector binary plus its manifest.
+
+Tags are mutable on git hosts (a publisher can re-tag, force-push, delete and recreate a release). The hash is immutable. If the two ever disagree — for example, the publisher re-tagged `v1.2.0` after release with different bytes — the runtime detects the mismatch on next install or execution and fails loudly. Trust flows from the hash; the version is a label.
+
+**Multiple versions of the same connector coexist by construction.** Two actions in the same project can reference `github://aileron/slack@1.2.0` and `github://aileron/slack@2.0.0` simultaneously. Different hashes mean different entries in the content-addressed store; the runtime loads the version each action declares. There is no project-wide version resolution step; there is no "this conflicts with that" check.
+
+This drops out of the content-addressed model directly, but is worth stating explicitly because it makes monorepos and gradual migrations work without ceremony. Action A can pin an old, stable version while Action B adopts a new major; both run side by side.
+
+**Compact reference form.** In commands and provenance fields, `@<version>` is the canonical compact form: `aileron connector install github://aileron/slack@1.2.0`, `source = "hub://aileron/ship-update@1.0.0"`. In TOML manifests, the canonical form is `name` and `version` as separate fields so each is queryable, diffable, and updatable independently. Both forms are equivalent; the FQN identity does not include the version.
+
+The mechanics of *how* a version maps to a concrete fetch (tag conventions, release-asset layout, update discovery, prerelease handling) are resolver concerns and are deferred to the dependency-resolution ADR.
 
 ### Connectors declare their needs in a manifest
 
@@ -78,9 +149,8 @@ The manifest is a pure-TOML file shipped alongside the binary. Its only job is t
 
 ```toml
 [connector]
-name = "gmail"
+name = "github://acme/gmail"
 version = "1.2.3"
-publisher = "acme.dev"
 provenance_hash = "sha256:abc123..."
 
 [capabilities.network]
@@ -97,11 +167,13 @@ imports = ["wasi:http/outgoing-handler", "wasi:cli/stdout"]
 intents = ["send_email", "draft_email"]
 ```
 
+The `name` field must match the FQN under which the binary was published. Install tooling verifies this — a binary fetched from `github://acme/gmail` whose manifest declares `name = "github://other/gmail"` is rejected.
+
 The manifest is a *request*. The runtime grants nothing that is not declared in it. Capability requests at execution time that exceed the manifest's grant are denied at the sandbox boundary; the connector's process is terminated and the action fails with a structured error.
 
 Manifest fields:
 
-- `[connector]` — identity. Name, version, publisher, provenance hash for the binary.
+- `[connector]` — identity. Fully-qualified URI name, semantic version, content hash of the binary.
 - `[capabilities.network]` — outbound network grants. Pinned to specific `host:port` pairs; no wildcards.
 - `[capabilities.credential]` — credential kinds and scopes the connector needs. The connector declares the *type*; the user binds a concrete vault entry at install or first use.
 - `[capabilities.runtime]` — host-function imports the connector uses (audit emit, logging, time, RNG, etc.).
@@ -117,11 +189,13 @@ This is a structural property, not a UX preference. A malicious connector cannot
 
 The mechanics of how the user binds an abstract capability to a concrete resource (the install-time UI, the first-use flow, the rebind command) are out of scope for this ADR.
 
-### Publisher identity and provenance hash
+### Publisher identity, signing, and provenance hash
 
-Each manifest carries `publisher` and `provenance_hash` fields. The publisher is the cryptographic identity that signed the binary. The provenance hash records the build artifact's hash at publish time.
+The publisher is implicit in the FQN's authority — `github://acme/gmail` is published by the `acme` GitHub organization. Signing keys are associated with that authority through the publication channel's own conventions (e.g., signing keys configured in the source repo or via sigstore identities tied to the org).
 
-The runtime treats publisher identity as *information*, not as authorization. A connector signed by a known publisher and a connector signed by an unknown publisher both go through the same install consent path; the publisher field is shown to the user, and the Hub may use it to organize browse views, but signature presence does not bypass anything.
+Install tooling verifies the binary's signature against keys authorized for the FQN's authority. A connector named `github://acme/gmail` signed by a key not associated with `acme`'s GitHub org is rejected at install. The `provenance_hash` field in the manifest records the binary's content hash at publish time; the runtime checks this matches actual on-disk bytes before every execution.
+
+The runtime treats signature *presence* as information, not as authorization. A signed connector and an unsigned connector both go through the same install consent path; signature status is shown to the user (and the Hub may use it to organize browse views), but a valid signature does not bypass any capability check or skip the consent prompt.
 
 This keeps the trust model honest. Signing tells the user *who* is making a claim about a binary; it does not tell the runtime *whether* to grant the binary capabilities. Capability grants come exclusively from the user's install consent.
 
@@ -174,15 +248,16 @@ Rejected as deliberate scope reduction. Capability abstraction would require: a 
 
 ### For action authors
 
-- Actions name connectors directly: `slack@1.2.0` with hash. No abstract capability names to look up.
+- Actions name connectors by FQN: `github://aileron/slack` at version `1.2.0` with hash. No abstract capability names to look up; no bare `slack` that could mean any of several publishers.
 - The capability subset an action uses is declared in the action file (e.g. `capabilities = ["chat:write"]` is a subset of the connector's full grant). The runtime enforces this subset *in addition* to the connector's manifest. Defense in depth.
 - Updating a connector is a visible edit to action files that reference it. There is no automatic "follow latest" behavior.
 
 ### For the Hub and distribution
 
-- The Hub indexes connectors by `(name, version, publisher, hash)` and serves their binaries plus manifests.
+- The Hub indexes connectors by `(FQN, version, hash)` and serves their binaries plus manifests. Hub-published connectors carry `hub://` FQNs.
+- The Hub does not own a privileged namespace. A developer browsing the Hub may install a `hub://` connector or a `github://` / `gitlab://` connector through the same flow; the Hub surfaces what it serves and the FQN tells the user where everything else came from.
 - Discovery surfaces (browse, search) use the `provides.intents` field and the connector's documentation.
-- The Hub validates manifests at publish time. Manifests with malformed or contradictory capability declarations do not enter the catalog.
+- The Hub validates manifests at publish time. Manifests with malformed or contradictory capability declarations, or whose `name` does not match the FQN they're being published under, do not enter the catalog.
 
 ### For security and audit
 
@@ -192,6 +267,7 @@ Rejected as deliberate scope reduction. Capability abstraction would require: a 
 
 ### Open implementation questions (deferred to subsequent ADRs)
 
+- *How does a `version` map to a concrete tag and release artifact in each scheme? How does `aileron connector check` discover available updates? How are pre-releases handled?* — deferred to the dependency-resolution ADR.
 - *How is the connector store laid out on disk, and how does the integrity-check pipeline interact with concurrent installs?* — deferred to the dependency-resolution ADR.
 - *Which sandbox technology is the default, and what are the OS-process escalation criteria?* — deferred to the sandbox-choice ADR.
 - *What does the install consent flow show, and what does the user actually click?* — deferred to the install-consent ADR.
@@ -203,9 +279,8 @@ Rejected as deliberate scope reduction. Capability abstraction would require: a 
 
 ```toml
 [connector]
-name = "gmail"
+name = "github://acme/gmail"
 version = "1.2.3"
-publisher = "acme.dev"
 provenance_hash = "sha256:abc123..."
 
 [capabilities.network]
@@ -226,13 +301,13 @@ intents = ["send_email", "draft_email"]
 
 ```toml
 [[requires.connectors]]
-name = "gmail"
+name = "github://acme/gmail"
 version = "1.2.3"
 hash = "sha256:abc123..."
 capabilities = ["oauth2"]
 ```
 
-The action declares the connector it needs (with exact version and hash) and the subset of the connector's capability grant it actually uses. The runtime enforces both: the connector cannot exceed its manifest, and the action cannot use capabilities the action did not declare. Two boundaries. Defense in depth.
+The action declares the connector it needs (with FQN, exact version, and hash) and the subset of the connector's capability grant it actually uses. The runtime enforces both: the connector cannot exceed its manifest, and the action cannot use capabilities the action did not declare. Two boundaries. Defense in depth.
 
 ### Capability denial at runtime
 
@@ -242,7 +317,7 @@ A connector whose manifest declares only `gmail.googleapis.com:443` attempts to 
 {
   "error": {
     "class": "capability_denied",
-    "connector": "gmail@1.2.3",
+    "connector": "github://acme/gmail@1.2.3",
     "requested": "network:evil.example.com:443",
     "granted": ["network:gmail.googleapis.com:443", "network:oauth2.googleapis.com:443"],
     "audit_id": "audit-7f3e..."
