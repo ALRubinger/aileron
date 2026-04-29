@@ -44,6 +44,13 @@ export const navigation: NavItem[] = [
       { label: 'Overview', href: '/' },
       { label: 'Getting Started', href: '/getting-started/' }
     ]
+  },
+  {
+    label: 'Architecture Decisions',
+    children: [
+      { label: 'Overview', href: '/adr/' },
+      { label: 'ADR-0001: Manifest Format', href: '/adr/0001-manifest-format/' }
+    ]
   }
 ];
 
