@@ -28,10 +28,6 @@ These artifacts have very different audiences and very different security postur
 
 A single format choice across all four would be the wrong answer. Each kind of artifact has its own reader profile and its own failure modes. This ADR fixes a separate format choice for each — and ratifies the trade-offs.
 
-The architectural commitment was stated in [`docs/archive/architecture/manifest-format.md`](https://github.com/ALRubinger/aileron/blob/main/docs/archive/architecture/manifest-format.md); this ADR fills in the trade-offs, alternatives considered, and consequences for tooling.
-
-The legacy [archived ADR-0014](/archived-adr/0014-aileron-yaml-policy-schema) introduced an `aileron.yaml` policy schema for `aileron launch` sessions. The format choice in that ADR (YAML) is superseded for the project-config artifact by the decision below; the *schema and rule semantics* in ADR-0014 are a separate concern and are not in scope here.
-
 ## Decision
 
 ### Action files: Markdown body + TOML frontmatter (`+++` delimited)
@@ -186,10 +182,6 @@ Rejected for the same reason as YAML-everywhere: action frontmatter declares cap
 - Authors can write action files in any text editor. No proprietary tooling required.
 - Existing Hugo/Zola/Anthropic-Skills authors recognize the envelope structure immediately. The pattern is established.
 
-### Supersession of legacy ADR-0014
-
-The format choice in [archived ADR-0014](/archived-adr/0014-aileron-yaml-policy-schema) (`aileron.yaml`, YAML) is superseded for project config: post-Pivot project config is `aileron.toml`. The *rule schema and policy semantics* in ADR-0014 (the three-bucket allow/ask/deny model, glob matching, profile composition) are a separate concern and are not addressed by this ADR. If those semantics carry forward into the post-Pivot architecture, they will be ratified in their own ADR with TOML as the new file format.
-
 ## Examples
 
 ### Action file (`actions/ship-update.md`)
@@ -300,8 +292,3 @@ listen = "127.0.0.1:8721"
 }
 ```
 
-## References
-
-- Architectural commitment source: [`docs/archive/architecture/manifest-format.md`](https://github.com/ALRubinger/aileron/blob/main/docs/archive/architecture/manifest-format.md)
-- Related architecture pages: [Connector Model](https://github.com/ALRubinger/aileron/blob/main/docs/archive/architecture/connector-model.md), [Action Model](https://github.com/ALRubinger/aileron/blob/main/docs/archive/architecture/action-model.md), [Distribution Mechanics](https://github.com/ALRubinger/aileron/blob/main/docs/archive/architecture/distribution-mechanics.md)
-- Superseded format choice: [archived ADR-0014](/archived-adr/0014-aileron-yaml-policy-schema)

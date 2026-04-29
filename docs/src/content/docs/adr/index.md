@@ -6,7 +6,11 @@ order: 0
 
 This section holds the architecture decision records (ADRs) that ratify Aileron's post-Pivot architecture. Each ADR fills in the trade-offs, alternatives considered, and operational details for a single architectural commitment.
 
-The pre-Pivot ADRs (0001 through 0020) are preserved at [`/archived-adr/`](/archived-adr/) as immutable historical record. The numbering here starts fresh from `0001`.
+## A fresh start
+
+These ADRs are written fresh. They are **not** corrections, amendments, or extensions of any prior materials, and they do not consult or cite any preexisting design documents, strategy notes, or earlier ADRs as input. Each decision is made on its own merits and is fully self-contained — a reader should not have to follow a link off this section to understand why a decision was made or what it commits to.
+
+Numbering restarts from `0001`. There are no implicit suppressions: any decision a future ADR replaces will be explicitly named in the superseding ADR.
 
 ## What's landed
 
@@ -33,5 +37,4 @@ ADRs land in the order above to maximize unblocking — each ADR can reference t
 ## How to read these
 
 - Each ADR is a *decision*, not a *design document*. Operational detail is included where it ratifies the decision; broader implementation detail belongs in code and PRs.
-- The architectural *posture* is captured in the post-Pivot strategy materials archived under [`docs/archive/architecture/`](https://github.com/ALRubinger/aileron/tree/main/docs/archive/architecture). Each ADR cites the corresponding archive page.
 - ADRs are immutable once merged. Superseding decisions land as new ADRs that explicitly cite what they replace.
