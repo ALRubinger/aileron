@@ -127,9 +127,27 @@ func escrowKeyConfigFromEnv(provider string) (escrowKeyConfig, error) {
 		cfg.allowRawFile = true
 	}
 	keyB64 := os.Getenv("AILERON_ENCLAVE_ESCROW_KEY_B64")
+	releaseURL := os.Getenv("AILERON_ENCLAVE_ESCROW_KEY_RELEASE_URL")
+	if keyB64 != "" && releaseURL != "" {
+		return escrowKeyConfig{}, fmt.Errorf("set only one of AILERON_ENCLAVE_ESCROW_KEY_B64 or AILERON_ENCLAVE_ESCROW_KEY_RELEASE_URL")
+	}
+	if releaseURL != "" {
+		audience := os.Getenv("AILERON_ENCLAVE_ESCROW_KEY_RELEASE_AUDIENCE")
+		if audience == "" {
+			audience = releaseURL
+		}
+		cfg.keyProvider = attestedEscrowKeyProvider{
+			provider:   provider,
+			releaseURL: releaseURL,
+			audience:   audience,
+		}
+		cfg.allowRawFile = false
+		return cfg, nil
+	}
 	if keyB64 == "" {
 		return cfg, nil
 	}
+
 	key, err := base64.StdEncoding.DecodeString(keyB64)
 	if err != nil {
 		return escrowKeyConfig{}, fmt.Errorf("decoding AILERON_ENCLAVE_ESCROW_KEY_B64: %w", err)

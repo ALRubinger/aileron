@@ -227,9 +227,13 @@ Escrowed credentials are persisted to disk so they survive enclave restarts. In 
 | Environment variable | Purpose |
 |----------------------|---------|
 | `AILERON_ENCLAVE_ESCROW_KEY_B64` | Base64-encoded 32-byte AES-256-GCM data-encryption key for `escrow.dat` |
+| `AILERON_ENCLAVE_ESCROW_KEY_RELEASE_URL` | Attested key-release endpoint that receives the enclave attestation token and returns `{"escrow_key_b64":"..."}` |
+| `AILERON_ENCLAVE_ESCROW_KEY_RELEASE_AUDIENCE` | Optional attestation audience for the key-release request; defaults to the release URL |
 | `AILERON_ENCLAVE_ALLOW_RAW_ESCROW_KEY=true` | Legacy/dev override that allows `escrow.key` to be read or created in the data directory |
 
-When `AILERON_ENCLAVE_ESCROW_KEY_B64` is set, the enclave writes only encrypted escrow data and refuses to start if a raw `escrow.key` file is present in the data directory:
+Set exactly one of `AILERON_ENCLAVE_ESCROW_KEY_B64` or `AILERON_ENCLAVE_ESCROW_KEY_RELEASE_URL` in production. With attested key release, the enclave fetches a Confidential Space identity token, posts it to the release URL, and uses the returned 32-byte key only in enclave memory. The key-release service is responsible for verifying the token claims, including the expected project, audience, and image digest, before returning the key.
+
+When an external key source is set, the enclave writes only encrypted escrow data and refuses to start if a raw `escrow.key` file is present in the data directory:
 
 | File | Purpose |
 |------|---------|
@@ -260,7 +264,7 @@ The defaults work for most deployments. Override the directory when:
 ### Security notes
 
 - In `confidential-space` mode, the enclave refuses to create or read raw `escrow.key` files unless `AILERON_ENCLAVE_ALLOW_RAW_ESCROW_KEY=true` is explicitly set.
-- `AILERON_ENCLAVE_ESCROW_KEY_B64` must be injected only into the expected enclave workload. Do not place this value on the mounted escrow data disk.
+- External escrow keys must be released only to the expected enclave workload. Do not place `AILERON_ENCLAVE_ESCROW_KEY_B64` on the mounted escrow data disk.
 - `escrow.dat` is encrypted with AES-256-GCM using the DEK. Even if the file is exfiltrated without the key, the contents are unreadable.
 - If `escrow.dat` is corrupt or cannot be decrypted with the supplied key, the enclave starts fresh with an empty escrow store. Existing in-memory entries are not affected.
 - Expired entries are evicted on startup and periodically (every 10 minutes).
