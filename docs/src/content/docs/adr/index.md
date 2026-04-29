@@ -1,16 +1,10 @@
 ---
 title: "Architecture Decisions"
-description: "Post-Pivot architecture decision records for Aileron"
+description: "Architecture decision records for Aileron"
 order: 0
 ---
 
-This section holds the architecture decision records (ADRs) that ratify Aileron's post-Pivot architecture. Each ADR fills in the trade-offs, alternatives considered, and operational details for a single architectural commitment.
-
-## A fresh start
-
-These ADRs are written fresh. They are **not** corrections, amendments, or extensions of any prior materials, and they do not consult or cite any preexisting design documents, strategy notes, or earlier ADRs as input. Each decision is made on its own merits and is fully self-contained — a reader should not have to follow a link off this section to understand why a decision was made or what it commits to.
-
-Numbering restarts from `0001`. There are no implicit suppressions: any decision a future ADR replaces will be explicitly named in the superseding ADR.
+This section holds the architecture decision records (ADRs) that define Aileron's architecture. Each ADR captures one decision: the context, the choice, the trade-offs, and the consequences.
 
 ## What's landed
 
@@ -18,7 +12,7 @@ Numbering restarts from `0001`. There are no implicit suppressions: any decision
 
 ## What's coming
 
-The full sequence of post-Pivot ADRs is tracked in [issue #343](https://github.com/ALRubinger/aileron/issues/343):
+The full sequence is tracked in [issue #343](https://github.com/ALRubinger/aileron/issues/343):
 
 1. **Manifest Format Conventions** — *landed (this ADR-0001)*
 2. Connector model
