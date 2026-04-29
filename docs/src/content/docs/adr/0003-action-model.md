@@ -48,18 +48,29 @@ The action file is *the* contract Aileron executes. There is no separate manifes
 
 ### Actions are copied on install, not registered
 
-`aileron action add ship-update` fetches a template from the Hub, *copies* it into the developer's project, and exits. From that moment the developer owns the file. They can edit it, restructure it, retitle it, change the connector versions it references, modify the prompts and triggers — and none of it requires anyone's permission or a republish to the Hub.
+`aileron action add <FQN>` fetches a template from any supported source, *copies* it into the developer's project, and exits. From that moment the developer owns the file. They can edit it, restructure it, retitle it, change the connector versions it references, modify the prompts and triggers — and none of it requires anyone's permission or a republish.
 
 ```
-$ aileron action add ship-update
-→ Fetching action 'ship-update' from Aileron Hub...
+$ aileron action add hub://aileron/ship-update@1.0.0
+→ Fetching action from hub://aileron/ship-update@1.0.0...
 ✓ Action file written to actions/ship-update.md
   Source: hub://aileron/ship-update@1.0.0
+
+$ aileron action add github://acme/templates/actions/file-bug@2.1.0
+→ Fetching action from github://acme/templates/actions/file-bug@2.1.0...
+✓ Action file written to actions/file-bug.md
+  Source: github://acme/templates/actions/file-bug@2.1.0
 ```
 
-This is the ShadCN distribution model applied to actions: the Hub is a curated catalog of *starting-point templates*, not a runtime registry. Aileron does not phone the Hub at runtime to "load an action"; it reads the local file. A project can be reproduced from git alone, with no Hub access.
+This is the ShadCN distribution model applied to actions: a source is a curated catalog of *starting-point templates*, not a runtime registry. Aileron does not phone the source at runtime to "load an action"; it reads the local file. A project can be reproduced from git alone, with no network access to the original source.
 
-The action file records its provenance with a fully-qualified URI in the `source` field (e.g., `source = "hub://aileron/ship-update@1.0.0"`, `source = "github://aileron/ship-update@1.0.0"`). Update tooling uses this to offer newer template versions when they become available, but the local copy remains canonical until the developer accepts a diff.
+**Action templates are hostable from any scheme.** Actions and connectors are symmetric in their distribution model: both are FQN-identified, both can live on `github://`, `gitlab://`, `hub://`, or any future scheme the resolver knows. The Hub is a curated catalog with discoverability and review, not a privileged source. Publishers who prefer to host their own action templates on GitHub or GitLab can do so; install commands and provenance fields use the FQN of the chosen source.
+
+Monorepo support carries over from ADR-0002. A single repo can host multiple action templates at distinct subpaths: `github://aileron/integrations/actions/ship-update`, `github://aileron/integrations/actions/file-bug`. The Hub similarly allows organizational subpaths within an owner's namespace.
+
+**Versioning inherits the rules from ADR-0002.** Action templates are pinned to strict SemVer; the `source` field includes `@<version>`; the local action file records the exact source FQN+version it was copied from. The local copy is canonical from install onward; the source version is provenance, not a runtime dependency.
+
+The action file records its provenance with a fully-qualified URI in the `source` field. Update tooling uses this to offer newer template versions when they become available, but the local copy remains canonical until the developer accepts a diff.
 
 Note the asymmetry between the action's *own* `name` and its references to other artifacts:
 
@@ -105,7 +116,7 @@ This is enforced at runtime. If `ship-update` at execution time tries to invoke 
 Defense in depth, with two practical benefits:
 
 - **Audit is precise without reading the execution body.** A reviewer can scan the `[[requires.connectors]]` blocks at the top of the file and know exactly what the action will touch.
-- **Capability creep is visible.** If a developer or upstream Hub update adds a new capability to an action, the change shows up as a TOML diff in the same file. There is no hidden expansion of what the action is allowed to do.
+- **Capability creep is visible.** If a developer or an upstream template update adds a new capability to an action, the change shows up as a TOML diff in the same file. There is no hidden expansion of what the action is allowed to do.
 
 ### The Markdown body is the documentation and the LLM-facing description
 
@@ -119,7 +130,7 @@ Authors write one piece of prose. There is no separate "LLM hint" field to keep 
 
 ### Updates are visible, never silent
 
-When the Hub publishes a new version of `ship-update`, the developer's local file does not change. `aileron action update ship-update` fetches the new template and produces a diff against the local file. The developer accepts, rejects, or merges manually. Updates always go through git review.
+When the source publishes a new version of `ship-update`, the developer's local file does not change. `aileron action update ship-update` fetches the new template (from the FQN recorded in `source`) and produces a diff against the local file. The developer accepts, rejects, or merges manually. Updates always go through git review.
 
 Aileron will not silently update an installed action. There is no "auto-follow latest" mode. If an upstream connector publishes a security fix, the developer (or their tooling) must explicitly bump the connector version in the action files that reference it. The runtime will not switch transitively.
 
@@ -127,9 +138,9 @@ Aileron will not silently update an installed action. There is no "auto-follow l
 
 ### Actions as a hosted catalog the runtime fetches at execution time (rejected)
 
-The Hub serves actions as a live registry. The runtime fetches `slack/ship-update@1.0.0` at execution time and runs the freshly fetched code.
+The source (Hub, GitHub, or any other) serves actions as a live registry. The runtime fetches the action FQN at execution time and runs the freshly fetched code.
 
-Rejected because it inverts the trust model. Runtime fetch means the action's behavior at any moment is whatever the Hub serves at that moment, with no local artifact to review. PR review becomes meaningless (the diff is the file path, not the code). Reproducibility from git is broken (the same commit produces different behavior across time as the Hub updates). And it introduces a hard runtime dependency on the Hub's availability and integrity. Local-first execution is non-negotiable for this trust profile.
+Rejected because it inverts the trust model. Runtime fetch means the action's behavior at any moment is whatever the source serves at that moment, with no local artifact to review. PR review becomes meaningless (the diff is the file path, not the code). Reproducibility from git is broken (the same commit produces different behavior across time as the source updates). And it introduces a hard runtime dependency on the source's availability and integrity. Local-first execution is non-negotiable for this trust profile.
 
 ### Actions as imported library functions (rejected)
 
@@ -153,7 +164,7 @@ Rejected because it removes defense in depth. A bug or compromise in an action's
 
 Aileron ships with first-party actions for common tasks ("send-email", "post-to-slack", "create-calendar-event") that developers don't need to install.
 
-Rejected because it ossifies behavior at a layer that should remain flexible. A first-party `send-email` action implies one canonical authoring style, one default tone, one canonical set of trigger phrases. Real users want their actions to reflect their voice, their team's conventions, their project's preferences. The ShadCN model — install a template, then own and edit the file — is the right shape for this layer. The Hub provides starting points; developers customize.
+Rejected because it ossifies behavior at a layer that should remain flexible. A first-party `send-email` action implies one canonical authoring style, one default tone, one canonical set of trigger phrases. Real users want their actions to reflect their voice, their team's conventions, their project's preferences. The ShadCN model — install a template, then own and edit the file — is the right shape for this layer. Sources (Hub, GitHub, GitLab, etc.) provide starting points; developers customize.
 
 ## Consequences
 
@@ -161,12 +172,13 @@ Rejected because it ossifies behavior at a layer that should remain flexible. A 
 
 - Actions live in `actions/` (or wherever the project chooses) alongside the rest of the project's source. They are checked into git, reviewed in PRs, diffed like any other code.
 - The set of actions a project can perform is fully determined by reading its action files. No hidden registries, no runtime resolution surprises.
-- Customizing an installed action is just editing a file. The Hub's template is a starting point; the developer's copy is canonical from install onward.
+- Customizing an installed action is just editing a file. The source's template is a starting point; the developer's copy is canonical from install onward.
 - Compound operations are either composed in agent conversation or written as a new action. Either is a normal authoring activity, not a special framework feature.
 
-### For action authors (publishing to the Hub)
+### For action authors
 
-- An action is a single file. Publishing is uploading that file to the Hub.
+- An action is a single file. Publishing is making that file available at an FQN — pushing to a GitHub release, a GitLab release, the Aileron Hub, or any future scheme the resolver knows.
+- Publishers choose where to host. The Hub offers discoverability, search, and curation. Self-hosting on `github://` or `gitlab://` keeps the publisher in full control of release cadence and access policy.
 - Authors do not control how their action is used after install. The developer who runs `aileron action add` owns the resulting file outright.
 - An action that wants new capability or a new connector dependency requires republishing a new template version. The developer chooses whether and when to apply the diff.
 
@@ -176,11 +188,11 @@ Rejected because it ossifies behavior at a layer that should remain flexible. A 
 - Capability enforcement runs at *both* boundaries: the connector's manifest grant (per ADR-0002) and the action's declared subset. A violation at either boundary terminates the call.
 - The runtime parses the TOML frontmatter and extracts the Markdown body separately; the body becomes the LLM-facing function description when actions are surfaced to the agent.
 
-### For the Hub
+### For sources (Hub, GitHub releases, GitLab releases, etc.)
 
-- The Hub is a curated catalog of action templates and connector binaries. It is *not* a runtime dependency.
-- Action discovery, search, and browse happen on the Hub. Installation is a copy operation; the Hub is not consulted again until the developer asks for an update.
-- The Hub validates action templates at publish time: TOML frontmatter parses; declared connectors exist at the named version+hash; declared capability subsets are valid against the connector's manifest; Markdown body parses.
+- A source is a curated catalog of action templates and connector binaries that publishers push to. It is *not* a runtime dependency.
+- Action discovery, search, and browse happen on the source's surface (the Hub provides this natively; GitHub/GitLab provide it through their own browse and search). Installation is a copy operation; the source is not consulted again until the developer asks for an update.
+- The Hub validates action templates at publish time: TOML frontmatter parses; declared connectors exist at the named FQN+version+hash; declared capability subsets are valid against the connector's manifest; Markdown body parses. Other schemes do not enforce validation server-side; install tooling validates locally before writing to the project.
 
 ### For composition and agent orchestration
 
