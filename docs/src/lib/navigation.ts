@@ -4,6 +4,10 @@
  * Each entry is either a link (href + label) or a section (label + children).
  * Sections can be nested to any depth. The sidebar component renders this
  * tree with collapsible groups.
+ *
+ * Currently minimal: the homepage is the only docs page. Historical content
+ * lives in `docs/archive/` (off-site) and will be rebuilt page by page during
+ * the post-pivot docs rewrite.
  */
 
 import type { Component } from 'svelte';
@@ -35,106 +39,10 @@ export function isSection(item: NavItem): item is NavSection {
  */
 export const navigation: NavItem[] = [
   {
-    label: 'Pivot',
-    children: [
-      { label: 'Overview', href: '/pivot/overview' },
-      { label: 'The Problem', href: '/pivot/the-problem' },
-      { label: 'Aileron Runtime', href: '/pivot/runtime' },
-      { label: 'Aileron Control', href: '/pivot/control' },
-      {
-        label: 'Architecture',
-        children: [
-          { label: 'Overview', href: '/pivot/architecture/' },
-          { label: 'Connector Model', href: '/pivot/architecture/connector-model' },
-          { label: 'Capability Model', href: '/pivot/architecture/capability-model' },
-          { label: 'Action Model', href: '/pivot/architecture/action-model' },
-          { label: 'Intent Matching', href: '/pivot/architecture/intent-matching' },
-          { label: 'Install Consent', href: '/pivot/architecture/install-consent' },
-          { label: 'Capability Binding', href: '/pivot/architecture/capability-binding' },
-          { label: 'Distribution Mechanics', href: '/pivot/architecture/distribution-mechanics' },
-          { label: 'Sandboxing', href: '/pivot/architecture/sandboxing' },
-          { label: 'User Channel', href: '/pivot/architecture/user-channel' },
-          { label: 'Failure Handling', href: '/pivot/architecture/failure-handling' },
-          { label: 'Project Portability', href: '/pivot/architecture/project-portability' },
-          { label: 'Manifest Format', href: '/pivot/architecture/manifest-format' }
-        ]
-      },
-      { label: 'Why This Is Defensible', href: '/pivot/why-defensible' },
-      { label: 'The Customer', href: '/pivot/customer' },
-      { label: 'Enterprise — Addressed Later', href: '/pivot/enterprise-later' },
-      { label: 'The Business', href: '/pivot/business' },
-      { label: 'What Aileron Is Not', href: '/pivot/not' },
-      { label: 'What Your Agent Can Now Do', href: '/pivot/what-your-agent-can-do' },
-      { label: 'Aileron vs Tool Calling vs MCP', href: '/pivot/tool-calling-mcp-comparison' },
-      { label: 'Competitive Landscape', href: '/pivot/competitive-landscape' }
-    ]
-  },
-  {
     label: 'Meet Aileron',
     children: [
       { label: 'Overview', href: '/' },
-      { label: 'For Individuals', href: '/for-individuals' },
-      { label: 'For Organizations', href: '/for-organizations' },
-      { label: 'How Aileron Works', href: '/how-aileron-works' }
-    ]
-  },
-  {
-    label: 'Getting Started',
-    children: [
-      { label: 'Installation', href: '/getting-started/installation' },
-      { label: 'Quick Start', href: '/getting-started/quick-start' },
-      { label: 'Policy Configuration', href: '/getting-started/policy-configuration' },
-      { label: 'Credential Vault', href: '/getting-started/credential-vault' },
-      { label: 'Slack Integration', href: '/getting-started/slack-integration' },
-      { label: 'Google Integration', href: '/getting-started/google-integration' },
-      { label: 'Slack Cloud Integration', href: '/getting-started/slack-cloud-integration' },
-      { label: 'Slack App Install (Admin)', href: '/getting-started/slack-app-install' },
-      { label: 'Slack Connect (User)', href: '/getting-started/slack-connect' },
-      { label: 'GitHub Integration', href: '/getting-started/github-integration' },
-      { label: 'Discord Integration', href: '/getting-started/discord-integration' },
-      { label: 'Zero-Knowledge Enclave', href: '/getting-started/zero-knowledge-enclave' }
-    ]
-  },
-  {
-    label: 'Operations',
-    children: [
-      { label: 'Supported Agents', href: '/operations/supported-agents' },
-      { label: 'Status & Audit', href: '/operations/status-and-audit' },
-      { label: 'Running Locally', href: '/operations/running-locally' },
-      { label: 'Slack App Configuration', href: '/operations/slack-app-configuration' }
-    ]
-  },
-  {
-    label: 'Deployment',
-    defaultOpen: false,
-    children: [
-      { label: 'Cloud Deployment', href: '/deployment/cloud' },
-      { label: 'Railway', href: '/deployment/railway' },
-      { label: 'TEE Enclave', href: '/deployment/tee-enclave' },
-      { label: 'CI/CD Pipeline', href: '/deployment/ci-cd' }
-    ]
-  },
-  {
-    label: 'Development',
-    defaultOpen: false,
-    children: [
-      { label: 'Building from Source', href: '/development/building-from-source' },
-      { label: 'Testing', href: '/development/testing' },
-      { label: 'Project Structure', href: '/development/project-structure' },
-      { label: 'Releasing', href: '/development/releasing' }
-    ]
-  },
-  {
-    label: 'Architecture Decisions',
-    defaultOpen: false,
-    children: [] // populated at build time from content collection (adr/*); empty until #343 lands
-  },
-  {
-    label: 'Archived ADRs',
-    defaultOpen: false,
-    children: [
-      { label: 'Overview', href: '/archived-adr/' }
-      // ADR entries appended at build time from content collection (archived-adr/*)
+      { label: 'Getting Started', href: '/getting-started/' }
     ]
   }
 ];

@@ -1,7 +1,6 @@
 ---
-import { getCollection } from 'astro:content';
 import Sidebar from '../components/Sidebar.svelte';
-import { navigation, type NavSection } from '../lib/navigation';
+import { navigation } from '../lib/navigation';
 import '../styles/global.css';
 
 interface Props {
@@ -11,39 +10,11 @@ interface Props {
 const { title } = Astro.props;
 const currentPath = Astro.url.pathname;
 
-// Build ADR nav entries from the content collection.
-// `adr/` holds the live, post-Pivot ADRs (currently empty until issue #343 lands them).
-// `archived-adr/` holds the pre-Pivot ADRs (0001–0020) preserved as immutable historical record.
-const docs = await getCollection('docs');
-
-const adrEntries = docs
-  .filter((entry) => entry.id.startsWith('adr/'))
-  .sort((a, b) => a.id.localeCompare(b.id))
-  .map((entry) => ({
-    label: entry.data.title.replace(/^ADR-\d+:\s*/, (m: string) => m),
-    href: `/${entry.id}`
-  }));
-
-const archivedAdrEntries = docs
-  .filter((entry) => entry.id.startsWith('archived-adr/') && entry.id !== 'archived-adr/index')
-  .sort((a, b) => a.id.localeCompare(b.id))
-  .map((entry) => ({
-    label: entry.data.title.replace(/^ADR-\d+:\s*/, (m: string) => m),
-    href: `/${entry.id}`
-  }));
-
-// Inject ADR entries into their respective sections.
-// `Architecture Decisions` gets the live `adr/*` entries (auto-populated as ADRs land).
-// `Archived ADRs` keeps its hardcoded Overview entry and appends `archived-adr/*` entries.
-const nav = navigation.map((item) => {
-  if ('children' in item && item.label === 'Architecture Decisions') {
-    return { ...item, children: adrEntries } as NavSection;
-  }
-  if ('children' in item && item.label === 'Archived ADRs') {
-    return { ...item, children: [...item.children, ...archivedAdrEntries] } as NavSection;
-  }
-  return item;
-});
+// Navigation is currently a flat structure (homepage only).
+// Historical content lives in `docs/archive/` off-site; nav will be rebuilt as
+// new pages are written. ADR auto-injection from content collections has been
+// removed since both `adr/` and `archived-adr/` are now archived off-site.
+const nav = navigation;
 ---
 
 <!doctype html>

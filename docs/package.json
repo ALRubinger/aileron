@@ -11,13 +11,19 @@
     "check": "astro check"
   },
   "dependencies": {
+    "@astrojs/mdx": "^5.0.4",
     "@astrojs/svelte": "^8.0.5",
     "@lucide/svelte": "^1.8.0",
     "astro": "^6.1.6",
-    "svelte": "^5.55.4"
+    "bits-ui": "^2.18.0",
+    "clsx": "^2.1.1",
+    "svelte": "^5.55.4",
+    "tailwind-merge": "^3.5.0",
+    "tailwind-variants": "^3.2.2"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.8",
+    "@internationalized/date": "^3.12.1",
     "@tailwindcss/vite": "^4.2.2",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3"
