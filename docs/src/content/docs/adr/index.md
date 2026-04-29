@@ -31,4 +31,4 @@ ADRs land in the order above to maximize unblocking — each ADR can reference t
 ## How to read these
 
 - Each ADR is a *decision*, not a *design document*. Operational detail is included where it ratifies the decision; broader implementation detail belongs in code and PRs.
-- ADRs are immutable once merged. Superseding decisions land as new ADRs that explicitly cite what they replace.
+- **ADRs are editable until the first working MVP ships.** Real usage will surface assumptions worth revising; until MVP, an ADR is amended in place when its decision changes. Once MVP ships, this section will switch to the standard immutability convention: superseding decisions land as new ADRs that explicitly cite what they replace.
