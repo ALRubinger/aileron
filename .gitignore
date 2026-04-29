@@ -41,6 +41,3 @@ deploy/.env
 # Agent checkpoint artifacts
 /.entire/
 /.codex/
-
-# Stray '~' file from typo'd shell redirects (e.g. `cat > ~` instead of `cat > ~/foo`)
-/~
