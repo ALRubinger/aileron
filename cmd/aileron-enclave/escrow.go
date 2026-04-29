@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -39,6 +40,7 @@ type escrowStore struct {
 
 type escrowKeyConfig struct {
 	key          []byte
+	keyProvider  escrowKeyProvider
 	allowRawFile bool
 }
 
@@ -63,10 +65,21 @@ func newEscrowStore(dataDir string) (*escrowStore, error) {
 }
 
 func newEscrowStoreWithKeyConfig(dataDir string, cfg escrowKeyConfig) (*escrowStore, error) {
+	return newEscrowStoreWithKeyConfigContext(context.Background(), dataDir, cfg)
+}
+
+func newEscrowStoreWithKeyConfigContext(ctx context.Context, dataDir string, cfg escrowKeyConfig) (*escrowStore, error) {
 	s := &escrowStore{entries: make(map[string]*escrowEntry)}
 
 	if dataDir == "" {
 		return s, nil
+	}
+	if cfg.keyProvider != nil {
+		key, err := cfg.keyProvider.Key(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("loading escrow key: %w", err)
+		}
+		cfg.key = key
 	}
 	if len(cfg.key) > 0 && len(cfg.key) != 32 {
 		return nil, fmt.Errorf("escrow key: expected 32 bytes, got %d", len(cfg.key))

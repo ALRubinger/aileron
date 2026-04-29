@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -414,6 +415,38 @@ func TestEscrowPersistence_ExternalKeyDoesNotWriteRawKeyFile(t *testing.T) {
 	s2, err := newEscrowStoreWithKeyConfig(dir, escrowKeyConfig{key: key})
 	if err != nil {
 		t.Fatalf("reload with external key: %v", err)
+	}
+	got, err := s2.Get(id)
+	if err != nil {
+		t.Fatalf("Get after reload: %v", err)
+	}
+	if string(got) != "cred-one" {
+		t.Fatalf("got %q, want cred-one", got)
+	}
+}
+
+func TestEscrowPersistence_KeyProviderDoesNotWriteRawKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("01234567890123456789012345678901")
+
+	s1, err := newEscrowStoreWithKeyConfigContext(context.Background(), dir, escrowKeyConfig{
+		keyProvider:  staticEscrowKeyProvider{key: key},
+		allowRawFile: false,
+	})
+	if err != nil {
+		t.Fatalf("newEscrowStoreWithKeyConfigContext: %v", err)
+	}
+	id := s1.Store(testEscrowRequest("grant-1", "oauth", nil), []byte("cred-one"), time.Now().Add(time.Hour))
+	if _, err := os.Stat(filepath.Join(dir, "escrow.key")); !os.IsNotExist(err) {
+		t.Fatalf("expected no raw escrow.key file, got err=%v", err)
+	}
+
+	s2, err := newEscrowStoreWithKeyConfigContext(context.Background(), dir, escrowKeyConfig{
+		keyProvider:  staticEscrowKeyProvider{key: key},
+		allowRawFile: false,
+	})
+	if err != nil {
+		t.Fatalf("reload with key provider: %v", err)
 	}
 	got, err := s2.Get(id)
 	if err != nil {

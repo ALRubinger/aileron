@@ -55,7 +55,9 @@ Each service needs a domain or URL. The auth domain points to the **server** ser
 | `AILERON_ENCLAVE_URL` | No | | Base URL of the enclave binary. Required when `AILERON_TEE_PROVIDER=confidential-space` |
 | `AILERON_ENCLAVE_IMAGE_DIGEST` | No | | Expected container image digest (`sha256:...`) for attestation verification |
 | `AILERON_GCP_PROJECT_ID` | No | | Expected GCP project ID for attestation verification |
-| `AILERON_ENCLAVE_ESCROW_KEY_B64` | Required for production enclave persistence | | Base64-encoded 32-byte escrow encryption key supplied only to the enclave workload |
+| `AILERON_ENCLAVE_ESCROW_KEY_B64` | Required for production enclave persistence unless using attested release | | Base64-encoded 32-byte escrow encryption key supplied only to the enclave workload |
+| `AILERON_ENCLAVE_ESCROW_KEY_RELEASE_URL` | Required for attested production key release unless using `AILERON_ENCLAVE_ESCROW_KEY_B64` | | Endpoint that receives the enclave attestation token and returns `{"escrow_key_b64":"..."}` after verifying the expected workload identity |
+| `AILERON_ENCLAVE_ESCROW_KEY_RELEASE_AUDIENCE` | No | Release URL | Audience claim requested for the key-release attestation token |
 | `AILERON_ENCLAVE_ALLOW_RAW_ESCROW_KEY` | No | `false` in Confidential Space, `true` locally | Legacy override that allows `escrow.key` in the enclave data directory |
 | `ANTHROPIC_API_KEY` | No | | Anthropic API key. Enables AI-powered draft generation when set |
 | `AILERON_LLM_MODEL_RESEARCH` | No | `claude-haiku-4-5-20251001` | Model for the research round (tool-call decisions, context gathering). Use a fast model — quality is less important than speed here. Any Anthropic model ID works |
