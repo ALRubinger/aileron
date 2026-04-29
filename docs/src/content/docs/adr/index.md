@@ -9,13 +9,14 @@ This section holds the architecture decision records (ADRs) that define Aileron'
 ## What's landed
 
 - [ADR-0001: Manifest Format Conventions](/adr/0001-manifest-format) — Markdown body + TOML frontmatter for actions; pure TOML for connectors and project config; JSON for runtime IPC.
+- [ADR-0002: Connector Model](/adr/0002-connector-model) — Connectors are sandboxed, content-addressed binaries; Aileron core ships only primitive capability types.
 
 ## What's coming
 
 The full sequence is tracked in [issue #343](https://github.com/ALRubinger/aileron/issues/343):
 
-1. **Manifest Format Conventions** — *landed (this ADR-0001)*
-2. Connector model
+1. **Manifest Format Conventions** — *landed (ADR-0001)*
+2. **Connector Model** — *landed (ADR-0002)*
 3. Action model
 4. Dependency resolution
 5. Sandbox choice
