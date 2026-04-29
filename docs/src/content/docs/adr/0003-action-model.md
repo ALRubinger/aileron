@@ -59,7 +59,13 @@ $ aileron action add ship-update
 
 This is the ShadCN distribution model applied to actions: the Hub is a curated catalog of *starting-point templates*, not a runtime registry. Aileron does not phone the Hub at runtime to "load an action"; it reads the local file. A project can be reproduced from git alone, with no Hub access.
 
-The action file records its provenance (`source = "hub://..."`) so update tooling can later offer to fetch a newer template version, but the local copy remains canonical until the developer accepts a diff.
+The action file records its provenance with a fully-qualified URI in the `source` field (e.g., `source = "hub://aileron/ship-update@1.0.0"`, `source = "github://aileron/ship-update@1.0.0"`). Update tooling uses this to offer newer template versions when they become available, but the local copy remains canonical until the developer accepts a diff.
+
+Note the asymmetry between the action's *own* `name` and its references to other artifacts:
+
+- The action's `name` field is a **bare local handle** (e.g., `name = "ship-update"`). The developer owns the file post-install and chooses the name; FQN doesn't apply to a file the developer owns.
+- The `source` field is a **fully-qualified URI** indicating where the template came from.
+- The `[[requires.connectors]]` blocks reference connectors by their **fully-qualified URI** (per ADR-0002), since connectors are shared, sandboxed binaries that need unambiguous identification across the ecosystem.
 
 ### Actions are atomic — no inter-action dependencies
 
@@ -68,7 +74,7 @@ An action does one thing. It does not declare dependencies on other actions. The
 When a developer wants a compound operation — "ship-update + create-followup-ticket + block-calendar" — they have two options:
 
 1. **Let the agent orchestrate.** The agent already calls actions; chaining `ship-update` then `create-followup-ticket` then `block-calendar` in conversation is its native mode. This is the default and almost always the right choice.
-2. **Write a new action that performs all three.** The new action declares dependencies on `slack`, `linear`, and `gcal` connectors (rather than on three other actions) and orchestrates the connector calls itself.
+2. **Write a new action that performs all three.** The new action declares dependencies on the relevant connectors (e.g., `github://aileron/slack`, `github://aileron/linear`, `github://aileron/gcal`) rather than on three other actions, and orchestrates the connector calls itself.
 
 Both options keep the dependency graph at depth 1: actions depend on connectors. Connectors depend on nothing inside Aileron.
 
@@ -76,17 +82,17 @@ This is a deliberate simplification, not a deferred decision. Action-to-action d
 
 ### Action files declare connector dependencies and capability subsets
 
-Each action file lists the connectors it uses. For each connector, it pins the exact version, the content hash (per ADR-0002), and the *subset* of the connector's declared capabilities that the action actually exercises:
+Each action file lists the connectors it uses. For each connector, it pins the fully-qualified URI name (per ADR-0002), the exact version, the content hash, and the *subset* of the connector's declared capabilities that the action actually exercises:
 
 ```toml
 [[requires.connectors]]
-name = "slack"
+name = "github://aileron/slack"
 version = "1.2.0"
 hash = "sha256:abc123..."
 capabilities = ["chat:write", "channels:read"]
 
 [[requires.connectors]]
-name = "git"
+name = "github://aileron/git"
 version = "2.1.0"
 hash = "sha256:def456..."
 capabilities = ["read"]
@@ -200,13 +206,13 @@ version = "1.0.0"
 source = "hub://aileron/ship-update@1.0.0"
 
 [[requires.connectors]]
-name = "slack"
+name = "github://aileron/slack"
 version = "1.2.0"
 hash = "sha256:abc123..."
 capabilities = ["chat:write", "channels:read"]
 
 [[requires.connectors]]
-name = "git"
+name = "github://aileron/git"
 version = "2.1.0"
 hash = "sha256:def456..."
 capabilities = ["read"]
@@ -216,12 +222,12 @@ intent = "tell team I shipped"
 
 [[execute]]
 id = "recent_merge"
-connector = "git"
+connector = "github://aileron/git"
 op = "read_recent_merge"
 
 [[execute]]
 id = "post"
-connector = "slack"
+connector = "github://aileron/slack"
 op = "post_message"
 
 [execute.inputs]
@@ -250,7 +256,7 @@ Triggered when the user tells their agent things like:
 
 ### Capability denial at the action boundary
 
-`ship-update` declares `slack: capabilities = ["chat:write", "channels:read"]`. At runtime, an `[[execute]]` step attempts `slack.list_users`. The Slack connector's manifest *does* permit `users:read`, but the action did not declare it. The runtime denies the call at the action boundary before it reaches the connector:
+`ship-update` declares `github://aileron/slack` with `capabilities = ["chat:write", "channels:read"]`. At runtime, an `[[execute]]` step attempts `slack.list_users`. The Slack connector's manifest *does* permit `users:read`, but the action did not declare it. The runtime denies the call at the action boundary before it reaches the connector:
 
 ```json
 {
@@ -258,7 +264,7 @@ Triggered when the user tells their agent things like:
     "class": "capability_denied",
     "boundary": "action",
     "action": "ship-update@1.0.0",
-    "connector": "slack@1.2.0",
+    "connector": "github://aileron/slack@1.2.0",
     "requested": "users:read",
     "declared_subset": ["chat:write", "channels:read"],
     "audit_id": "audit-9c2a..."
