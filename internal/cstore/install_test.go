@@ -1,0 +1,277 @@
+package cstore
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+// fakeFetcher serves bytes from an in-memory map keyed by URL. It captures
+// every URL it was called with, so tests can assert resolution flowed
+// through the resolver they expected.
+type fakeFetcher struct {
+	mu      sync.Mutex
+	bytesAt map[string][]byte
+	calls   []string
+}
+
+func (f *fakeFetcher) Fetch(_ context.Context, url string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, url)
+	body, ok := f.bytesAt[url]
+	if !ok {
+		return nil, newError(ClassFetchFailed, BoundaryExternal, false, "no fixture for %s", url)
+	}
+	return io.NopCloser(bytes.NewReader(body)), nil
+}
+
+// happyPathInstaller wires an Installer with an in-memory fetcher whose
+// canonical tarball lives at the resolver-computed URL for ref. Returns
+// the installer, the canonical hash, and the in-memory fixture so tests
+// can mutate as needed.
+func happyPathInstaller(t *testing.T, ref Ref) (*Installer, string, *fakeFetcher) {
+	t.Helper()
+	manifest := []byte(canonicalManifestFor(ref.FQN.String(), ref.Version))
+	binary := []byte("BINARY")
+	sig, pub := signedManifest(t, binary, manifest)
+	tarBytes := buildTarball(t, tarBinaryWASM, binary, manifest, sig)
+
+	resolver := DefaultResolver()
+	url, err := resolver.ResolveTarball(ref)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	fetcher := &fakeFetcher{bytesAt: map[string][]byte{url: tarBytes}}
+
+	keyring := NewEd25519Keyring()
+	keyring.Add(ref.FQN.Authority(), pub)
+
+	store := NewStore(t.TempDir())
+	inst := &Installer{
+		Resolver: resolver,
+		Fetcher:  fetcher,
+		Verifier: keyring,
+		Store:    store,
+	}
+	tb := &Tarball{Binary: binary, Manifest: manifest}
+	return inst, "sha256:" + tb.CanonicalHashHex(), fetcher
+}
+
+func TestInstall_HappyPath_RecordsHashAndStoresFiles(t *testing.T) {
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, expectedHash, fetcher := happyPathInstaller(t, ref)
+
+	res, err := inst.Install(context.Background(), InstallRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.AlreadyInstalled {
+		t.Errorf("AlreadyInstalled = true on first install")
+	}
+	if res.Hash != expectedHash {
+		t.Errorf("Hash = %q, want %q", res.Hash, expectedHash)
+	}
+	if !filepath.IsAbs(res.EntryDir) || filepath.Base(filepath.Dir(res.EntryDir)) != "sha256" {
+		t.Errorf("EntryDir = %q; want absolute path under sha256/", res.EntryDir)
+	}
+	for _, name := range []string{tarBinaryWASM, tarManifestFile, tarSignatureFile} {
+		if _, err := os.Stat(filepath.Join(res.EntryDir, name)); err != nil {
+			t.Errorf("missing %s in entry: %v", name, err)
+		}
+	}
+	if got, ok := inst.Store.Lookup(ref); !ok || got != expectedHash {
+		t.Errorf("Lookup after install = (%q, %v)", got, ok)
+	}
+
+	// Sanity check: fetcher was actually called with the resolver-computed URL.
+	want := "https://github.com/aileron/slack/releases/download/v1.2.0/aileron.tar.gz"
+	if len(fetcher.calls) != 1 || fetcher.calls[0] != want {
+		t.Errorf("fetcher calls = %v; want %q", fetcher.calls, want)
+	}
+}
+
+func TestInstall_HashMismatch_LeavesStoreUntouched(t *testing.T) {
+	// ADR-0004's failure-modes table:
+	//   "Hash mismatch (action declares X, source serves Y) → Hard fail.
+	//    The install was aborted; nothing was written to the store."
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, _, _ := happyPathInstaller(t, ref)
+
+	_, err := inst.Install(context.Background(), InstallRequest{
+		Ref:          ref,
+		ExpectedHash: "sha256:0000000000",
+	})
+	if err == nil {
+		t.Fatal("Install with hash mismatch succeeded; want failure")
+	}
+	var aerr *Error
+	if !errors.As(err, &aerr) || aerr.Class != ClassHashMismatch {
+		t.Fatalf("err class = %v, want ClassHashMismatch", aerr)
+	}
+
+	// Store remains untouched.
+	if entries, _ := os.ReadDir(inst.Store.sha256Root()); len(entries) != 0 {
+		t.Errorf("sha256/ has %d entries; want 0 after hash-mismatch hard fail", len(entries))
+	}
+}
+
+func TestInstall_SignatureFailure_LeavesStoreUntouched(t *testing.T) {
+	// ADR-0004's failure-modes table:
+	//   "Signature verification fails → Hard fail. No 'warning, you are
+	//    about to install an unsigned binary' downgrade."
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, _, _ := happyPathInstaller(t, ref)
+	// Replace the verifier with a strict keyring that has no key for the
+	// authority — must fail closed per ADR-0004.
+	inst.Verifier = NewEd25519Keyring()
+
+	_, err := inst.Install(context.Background(), InstallRequest{Ref: ref})
+	if err == nil {
+		t.Fatal("Install with no key registered succeeded; want failure")
+	}
+	var aerr *Error
+	if !errors.As(err, &aerr) || aerr.Class != ClassSignatureFailure {
+		t.Fatalf("err class = %v, want ClassSignatureFailure", aerr)
+	}
+	if entries, _ := os.ReadDir(inst.Store.sha256Root()); len(entries) != 0 {
+		t.Errorf("sha256/ has %d entries; want 0 after signature-failure hard fail", len(entries))
+	}
+}
+
+func TestInstall_FQNMismatchInManifest_HardFails(t *testing.T) {
+	// ADR-0002: the manifest's `name` field "must match the FQN under
+	// which the binary was published. Install tooling verifies this — a
+	// binary fetched from `github://acme/gmail` whose manifest declares
+	// `name = "github://other/gmail"` is rejected."
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	manifest := []byte(canonicalManifestFor("github://impostor/slack", "1.2.0"))
+	binary := []byte("BIN")
+	sig, pub := signedManifest(t, binary, manifest)
+	tarBytes := buildTarball(t, tarBinaryWASM, binary, manifest, sig)
+
+	resolver := DefaultResolver()
+	url, _ := resolver.ResolveTarball(ref)
+	keyring := NewEd25519Keyring()
+	keyring.Add(ref.FQN.Authority(), pub)
+
+	inst := &Installer{
+		Resolver: resolver,
+		Fetcher:  &fakeFetcher{bytesAt: map[string][]byte{url: tarBytes}},
+		Verifier: keyring,
+		Store:    NewStore(t.TempDir()),
+	}
+	_, err := inst.Install(context.Background(), InstallRequest{Ref: ref})
+	if err == nil {
+		t.Fatal("Install with FQN mismatch succeeded; want failure")
+	}
+	var aerr *Error
+	if !errors.As(err, &aerr) || aerr.Class != ClassFQNMismatch {
+		t.Errorf("err class = %v, want ClassFQNMismatch", aerr)
+	}
+}
+
+func TestInstall_ExpectedHashAlreadyPresent_SkipsFetchAndReturnsAlreadyInstalled(t *testing.T) {
+	// ADR-0004 §"Offline behavior":
+	//   "Reinstall of an already-stored hash is offline. If (FQN, version,
+	//    hash) resolves to an entry already in the store, the install
+	//    pipeline short-circuits at step 7 — no download, no signature
+	//    check on the already-trusted bytes."
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, expectedHash, fetcher := happyPathInstaller(t, ref)
+
+	// First install populates the store.
+	if _, err := inst.Install(context.Background(), InstallRequest{Ref: ref}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	fetcher.calls = nil
+
+	// Second install with the expected hash should skip the fetch.
+	res, err := inst.Install(context.Background(), InstallRequest{
+		Ref:          ref,
+		ExpectedHash: expectedHash,
+	})
+	if err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if !res.AlreadyInstalled {
+		t.Errorf("AlreadyInstalled = false; want true on offline reinstall")
+	}
+	if len(fetcher.calls) != 0 {
+		t.Errorf("fetcher was called %d times; want 0 on offline reinstall (calls=%v)", len(fetcher.calls), fetcher.calls)
+	}
+}
+
+func TestInstall_RecordsHashWhenNoExpectedHash(t *testing.T) {
+	// First-install path — caller doesn't yet know what hash to expect,
+	// pipeline records whatever the bytes produce.
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, expectedHash, _ := happyPathInstaller(t, ref)
+	res, err := inst.Install(context.Background(), InstallRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.Hash != expectedHash {
+		t.Errorf("Hash = %q, want %q", res.Hash, expectedHash)
+	}
+}
+
+func TestInstall_FetchFailure_LeavesStoreUntouched(t *testing.T) {
+	// Source-unreachable case: ADR-0004's failure-modes table demands hard
+	// fail with no fallback.
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst := &Installer{
+		Resolver: DefaultResolver(),
+		Fetcher:  &fakeFetcher{bytesAt: map[string][]byte{}},
+		Verifier: PermissiveVerifier{},
+		Store:    NewStore(t.TempDir()),
+	}
+	_, err := inst.Install(context.Background(), InstallRequest{Ref: ref})
+	if err == nil {
+		t.Fatal("Install with no fixture succeeded; want fetch failure")
+	}
+	var aerr *Error
+	if !errors.As(err, &aerr) || aerr.Class != ClassFetchFailed {
+		t.Errorf("err class = %v, want ClassFetchFailed", aerr)
+	}
+	entries, _ := os.ReadDir(inst.Store.sha256Root())
+	if len(entries) != 0 {
+		t.Errorf("sha256/ has %d entries after fetch failure; want 0", len(entries))
+	}
+}
+
+func TestInstall_RejectsNilDependencies(t *testing.T) {
+	// Programmer error, not a runtime spec, but it ensures we don't
+	// silently dereference nils. Each missing dep produces a non-nil
+	// error explicitly so callers get a fast signal in tests.
+	cases := []struct {
+		name string
+		mut  func(*Installer)
+	}{
+		{"no resolver", func(i *Installer) { i.Resolver = nil }},
+		{"no fetcher", func(i *Installer) { i.Fetcher = nil }},
+		{"no verifier", func(i *Installer) { i.Verifier = nil }},
+		{"no store", func(i *Installer) { i.Store = nil }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			i := &Installer{
+				Resolver: DefaultResolver(),
+				Fetcher:  &fakeFetcher{},
+				Verifier: PermissiveVerifier{},
+				Store:    NewStore(t.TempDir()),
+			}
+			tc.mut(i)
+			_, err := i.Install(context.Background(), InstallRequest{Ref: mustRef(t, "github://x/y@1.0.0")})
+			if err == nil {
+				t.Errorf("Install with %s succeeded; want error", tc.name)
+			}
+		})
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/account"
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/auth"
 	githubauth "github.com/ALRubinger/aileron/internal/auth/github"
@@ -166,6 +167,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		anthropicProxy:     anthropicProxy,
 		newID:              idGen,
 		actions:            action.NewStore(action.DefaultDir()),
+		installer:          newConnectorInstaller(log),
 	}
 	if res, err := server.actions.Load(); err != nil {
 		log.Warn("failed to load actions directory", "dir", server.actions.Dir(), "error", err)
@@ -511,5 +513,32 @@ func registerProviders(
 		))
 		sourceReg.Register(githubsource.New())
 		log.Info("enabled GitHub connected accounts and source connector")
+	}
+}
+
+// newConnectorInstaller wires the cstore install pipeline (ADR-0004) with
+// the v1 production defaults: HTTP fetcher, default per-scheme resolver,
+// and an empty Ed25519 keyring. The keyring is intentionally empty —
+// signing-keys-and-rotation is deferred per ADR-0002, and an empty keyring
+// fails closed on every install (per ADR-0004's failure-modes table).
+// Operators register authority keys on the returned Installer's
+// `Verifier.(*cstore.Ed25519Keyring).Add` once a key-distribution
+// mechanism lands.
+//
+// The store root is `~/.aileron/store` per ADR-0004 §"Content-addressed
+// store layout"; tests substitute their own Installer on the apiServer
+// directly so the running server isn't required to spin up a real store.
+func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
+	store := cstore.NewStore(cstore.DefaultRoot())
+	if err := store.LoadIndex(); err != nil {
+		log.Warn("failed to load connector index; rebuilding from disk",
+			"root", store.Root(), "error", err)
+		_ = store.RebuildIndex()
+	}
+	return &cstore.Installer{
+		Resolver: cstore.DefaultResolver(),
+		Fetcher:  &cstore.HTTPFetcher{},
+		Verifier: cstore.NewEd25519Keyring(),
+		Store:    store,
 	}
 }

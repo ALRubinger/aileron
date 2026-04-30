@@ -13,6 +13,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/account"
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/comms"
@@ -95,7 +96,8 @@ type apiServer struct {
 	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
 	interceptEngine    interceptEngineHandle       // tool-call intercept engine; nil disables interception (proxy passthrough only)
 	newID              func() string
-	actions            *action.Store // installed actions in ~/.aileron/actions/ (ADR-0003)
+	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
+	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
 }
 
 // --- JSON helpers ---
@@ -993,6 +995,94 @@ func (s *apiServer) UpdateConnector(w http.ResponseWriter, r *http.Request, conn
 	}
 	s.connectors.Update(ctx, c)
 	writeJSON(w, http.StatusOK, c)
+}
+
+// --- Connector install pipeline (ADR-0004) ---
+
+// InstallConnector runs the install pipeline for the supplied FQN+version.
+// On success returns 201 with the InstalledConnector envelope (or 200 when
+// the entry was already present in the store). On any pipeline failure
+// returns a structured error per ADR-0010 — 422 for verification/hash
+// failures so callers can distinguish "the request was well-formed but
+// the artifact didn't pass" from a 4xx caused by malformed input.
+func (s *apiServer) InstallConnector(w http.ResponseWriter, r *http.Request) {
+	if s.installer == nil {
+		writeError(w, http.StatusServiceUnavailable, "installer_disabled",
+			"connector install pipeline is not configured")
+		return
+	}
+	var req api.InstallConnectorRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	fqn, err := cstore.ParseFQN(req.Fqn)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_fqn", err.Error())
+		return
+	}
+	if req.Version == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "version is required")
+		return
+	}
+	ref, err := cstore.ParseRef(fqn.String() + "@" + req.Version)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	expected := ""
+	if req.ExpectedHash != nil {
+		expected = *req.ExpectedHash
+	}
+	res, err := s.installer.Install(r.Context(), cstore.InstallRequest{
+		Ref:          ref,
+		ExpectedHash: expected,
+	})
+	if err != nil {
+		var aerr *cstore.Error
+		if errors.As(err, &aerr) {
+			writeError(w, installHTTPStatus(aerr.Class), string(aerr.Class), aerr.Message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	out := api.InstalledConnector{
+		Fqn:      ref.FQN.String(),
+		Version:  ref.Version,
+		Hash:     res.Hash,
+		EntryDir: res.EntryDir,
+	}
+	if res.AlreadyInstalled {
+		already := true
+		out.AlreadyInstalled = &already
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// installHTTPStatus maps a cstore failure class to an HTTP status. Per
+// ADR-0010, every failure is structured; the choice of HTTP code reflects
+// whether the failure is "your input is wrong" (4xx) or "the artifact
+// didn't pass" (422 — request is well-formed but processing failed).
+func installHTTPStatus(class cstore.FailureClass) int {
+	switch class {
+	case cstore.ClassUnknownScheme,
+		cstore.ClassParseError,
+		cstore.ClassValidationError:
+		return http.StatusBadRequest
+	case cstore.ClassFetchFailed,
+		cstore.ClassMalformedTarball,
+		cstore.ClassSignatureFailure,
+		cstore.ClassHashMismatch,
+		cstore.ClassFQNMismatch:
+		return http.StatusUnprocessableEntity
+	case cstore.ClassStoreUnwritable:
+		return http.StatusInternalServerError
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // --- Actions (ADR-0003) ---
