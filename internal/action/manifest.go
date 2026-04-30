@@ -1,0 +1,115 @@
+// Package action implements parsing, validation, storage, and capability
+// enforcement for Aileron action files.
+//
+// Per [ADR-0001] and [ADR-0003], an action is a single file in
+// ~/.aileron/actions/ with TOML frontmatter delimited by `+++` and a
+// Markdown body. The frontmatter is the contract Aileron executes; the body
+// doubles as the LLM-facing function description when the action is surfaced
+// to the agent's tool catalog.
+//
+// [ADR-0001]: https://docs.withaileron.ai/adr/0001-manifest-format
+// [ADR-0003]: https://docs.withaileron.ai/adr/0003-action-model
+package action
+
+// Manifest is the parsed contents of a single action file: TOML frontmatter
+// fields plus the Markdown body.
+type Manifest struct {
+	// Name is the bare local handle for the action (e.g. "ship-update").
+	// Per ADR-0003, the user owns the file post-install and chooses the name;
+	// FQN does not apply to the action's own identity.
+	Name string `toml:"name"`
+
+	// Version is a strict semantic version (e.g. "1.0.0").
+	Version string `toml:"version"`
+
+	// Source is a fully-qualified URI recording where the action template was
+	// copied from (e.g. "hub://aileron/ship-update@1.0.0"). Provenance only —
+	// not consulted at runtime.
+	Source string `toml:"source"`
+
+	// Requires holds dependency declarations.
+	Requires Requires `toml:"requires"`
+
+	// Match describes how the runtime matches agent intent to this action
+	// ([ADR-0008]). The shape evolves as intent matching matures; v1 only
+	// requires the `intent` phrase to be present.
+	//
+	// [ADR-0008]: https://docs.withaileron.ai/adr/0008-intent-matching
+	Match Match `toml:"match"`
+
+	// Execute is the ordered list of connector operations the action runs.
+	// v1 actions are linear chains with first-failure-terminates semantics
+	// (per ADR-0010).
+	Execute []ExecuteStep `toml:"execute"`
+
+	// Body is the Markdown content following the closing `+++` delimiter.
+	// The first paragraph (or a designated section) is surfaced to the LLM
+	// as the function `description` when the action is exposed as a tool.
+	Body string `toml:"-"`
+}
+
+// Requires is the `[requires]` table holding connector dependencies.
+type Requires struct {
+	// Connectors is the list of `[[requires.connectors]]` entries.
+	Connectors []RequiresConnector `toml:"connectors"`
+}
+
+// RequiresConnector pins a single connector dependency: its fully-qualified
+// URI name, exact version, content hash, and the subset of declared
+// capabilities the action will exercise. The capability subset is enforced
+// at the action boundary at runtime — calls outside the subset are denied
+// even when the connector's manifest permits the operation.
+type RequiresConnector struct {
+	// Name is the connector's fully-qualified URI per ADR-0002
+	// (e.g. "github://aileron/slack", "hub://aileron/slack").
+	Name string `toml:"name"`
+
+	// Version is the exact pinned semantic version.
+	Version string `toml:"version"`
+
+	// Hash is the content hash of the connector binary plus its manifest
+	// (e.g. "sha256:abc123..."). Verified at install time.
+	Hash string `toml:"hash"`
+
+	// Capabilities is the action's declared subset of operations on the
+	// connector (e.g. ["chat:write", "channels:read"]). Empty means the
+	// action declares no capabilities and may not invoke the connector.
+	Capabilities []string `toml:"capabilities"`
+}
+
+// Match holds intent-matching metadata for the action. Shape stays minimal
+// in v1; richer fields are added as ADR-0008 matures.
+type Match struct {
+	// Intent is the canonical natural-language phrase the runtime matches
+	// against agent requests when surfacing this action.
+	Intent string `toml:"intent"`
+}
+
+// ExecuteStep is one step in the action's execution chain. The runtime
+// invokes steps in declared order; on the first step failure the action
+// terminates and returns the failing step's structured error
+// (per ADR-0010). Successful prior steps are not auto-rolled-back.
+type ExecuteStep struct {
+	// ID is a label for the step. Subsequent steps may reference its outputs
+	// via `${id.field}` interpolation in `Inputs`.
+	ID string `toml:"id"`
+
+	// Connector is the FQN of the connector whose operation this step calls.
+	// Must appear in `Requires.Connectors` and must match one of those FQNs
+	// exactly.
+	Connector string `toml:"connector"`
+
+	// Op is the connector operation invoked at this step.
+	Op string `toml:"op"`
+
+	// Idempotent overrides the connector's declared idempotency for this
+	// call (per ADR-0010). v1 recognizes the field but the runtime uses
+	// the connector's manifest-level declaration as the authoritative
+	// retry signal; per-call overrides are flagged for post-MVP retry tuning.
+	Idempotent *bool `toml:"idempotent"`
+
+	// Inputs is the keyed argument map passed to the connector op. Values
+	// may be string interpolations referencing call-time arguments
+	// (`${args.X}`) or the outputs of prior steps (`${step_id.field}`).
+	Inputs map[string]any `toml:"inputs"`
+}

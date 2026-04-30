@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/account"
+	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/auth"
@@ -153,6 +154,14 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		teeCfg:             teeCfg,
 		grantCapabilityKey: grantCapabilityKey,
 		newID:              idGen,
+		actions:            action.NewStore(action.DefaultDir()),
+	}
+	if res, err := server.actions.Load(); err != nil {
+		log.Warn("failed to load actions directory", "dir", server.actions.Dir(), "error", err)
+	} else if res.HasErrors() {
+		for _, e := range res.Errors {
+			log.Warn("action manifest failed to load", "file", e.File, "line", e.Line, "class", e.Class, "message", e.Message)
+		}
 	}
 	if teeCfg.TEEEnabled() {
 		server.teeState = newTeeState()

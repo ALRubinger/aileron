@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/account"
+	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/auth"
@@ -91,6 +92,7 @@ type apiServer struct {
 	escrowIndexStore   *postgres.EscrowIndexStore  // nil when auth is disabled; persists escrowIndex across restarts
 	uiBaseURL          string                      // base URL for the web UI (for constructing unlock links)
 	newID              func() string
+	actions            *action.Store // installed actions in ~/.aileron/actions/ (ADR-0003)
 }
 
 // --- JSON helpers ---
@@ -988,6 +990,125 @@ func (s *apiServer) UpdateConnector(w http.ResponseWriter, r *http.Request, conn
 	}
 	s.connectors.Update(ctx, c)
 	writeJSON(w, http.StatusOK, c)
+}
+
+// --- Actions (ADR-0003) ---
+
+// ListActions returns the actions installed in ~/.aileron/actions/, plus a
+// per-file load_errors slice for any files that failed to parse or validate
+// (per ADR-0010). Aileron is user-level only at v1, so the action set is the
+// running server's view of the local actions directory.
+func (s *apiServer) ListActions(w http.ResponseWriter, r *http.Request) {
+	if s.actions == nil {
+		writeJSON(w, http.StatusOK, api.ActionListResponse{})
+		return
+	}
+	res, err := s.actions.Load()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "actions_load_failed", err.Error())
+		return
+	}
+	loaded := s.actions.List()
+	items := make([]api.Action, 0, len(loaded))
+	for _, la := range loaded {
+		items = append(items, manifestToAPI(la))
+	}
+	resp := api.ActionListResponse{Items: &items}
+	if res.HasErrors() {
+		errs := make([]api.ActionLoadError, 0, len(res.Errors))
+		for _, e := range res.Errors {
+			errs = append(errs, loadErrorToAPI(e))
+		}
+		resp.LoadErrors = &errs
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// GetAction returns a single installed action by its bare local handle. The
+// response carries the full parsed manifest plus the Markdown body, which
+// doubles as the LLM-facing function description per ADR-0001/ADR-0003.
+func (s *apiServer) GetAction(w http.ResponseWriter, r *http.Request, name string) {
+	if s.actions == nil {
+		writeError(w, http.StatusNotFound, "not_found", "action not found")
+		return
+	}
+	la, err := s.actions.Get(name)
+	if errors.Is(err, action.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "action not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "actions_lookup_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, manifestToAPI(la))
+}
+
+func manifestToAPI(la action.LoadedAction) api.Action {
+	m := la.Manifest
+	connectors := make([]api.ActionRequiresConnector, 0, len(m.Requires.Connectors))
+	for _, c := range m.Requires.Connectors {
+		connectors = append(connectors, api.ActionRequiresConnector{
+			Name:         c.Name,
+			Version:      c.Version,
+			Hash:         c.Hash,
+			Capabilities: append([]string(nil), c.Capabilities...),
+		})
+	}
+	steps := make([]api.ActionExecuteStep, 0, len(m.Execute))
+	for _, st := range m.Execute {
+		var inputs *map[string]interface{}
+		if st.Inputs != nil {
+			cp := make(map[string]interface{}, len(st.Inputs))
+			for k, v := range st.Inputs {
+				cp[k] = v
+			}
+			inputs = &cp
+		}
+		steps = append(steps, api.ActionExecuteStep{
+			Id:         st.ID,
+			Connector:  st.Connector,
+			Op:         st.Op,
+			Idempotent: st.Idempotent,
+			Inputs:     inputs,
+		})
+	}
+	body := m.Body
+	path := la.Path
+	out := api.Action{
+		Name:    m.Name,
+		Version: m.Version,
+		Source:  m.Source,
+		Requires: api.ActionRequires{
+			Connectors: &connectors,
+		},
+		Match:   api.ActionMatch{Intent: m.Match.Intent},
+		Execute: steps,
+	}
+	if body != "" {
+		out.Body = &body
+	}
+	if path != "" {
+		out.Path = &path
+	}
+	return out
+}
+
+func loadErrorToAPI(e *action.Error) api.ActionLoadError {
+	out := api.ActionLoadError{
+		Class:   string(e.Class),
+		Message: e.Message,
+		File:    e.File,
+	}
+	if e.Line > 0 {
+		line := e.Line
+		out.Line = &line
+	}
+	if e.Boundary != "" {
+		b := string(e.Boundary)
+		out.Boundary = &b
+	}
+	return out
 }
 
 // --- Credentials ---
