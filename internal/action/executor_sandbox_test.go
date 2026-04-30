@@ -148,7 +148,7 @@ func TestSandboxExecutor_HappyPath_RunsStepsInOrder(t *testing.T) {
 	rt := &fakeRuntime{}
 	rt.connectors = map[string]*fakeConnector{"github://test/echo": {resp: map[string]any{"value": "hi"}}}
 
-	exec := NewSandboxExecutor(actions, store, rt)
+	exec := NewSandboxExecutor(actions, store, rt, nil)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	res, err := exec.Execute(context.Background(), "test-action", map[string]any{"value": "hi"})
@@ -185,7 +185,7 @@ func TestSandboxExecutor_ActionBoundary_DeniesUndeclaredOp(t *testing.T) {
 	actions := installFakeAction(t, "github://test/echo", "1.0.0", hash, []string{"echo"}, []string{"secret_op"})
 
 	rt := &fakeRuntime{}
-	exec := NewSandboxExecutor(actions, store, rt)
+	exec := NewSandboxExecutor(actions, store, rt, nil)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	res, err := exec.Execute(context.Background(), "test-action", nil)
@@ -223,7 +223,7 @@ func TestSandboxExecutor_FirstFailureTerminates_NoLaterStepsRun(t *testing.T) {
 		err: &sandbox.Error{Class: sandbox.ClassCapabilityDenied, Boundary: sandbox.BoundarySandbox, Message: "boom"},
 	}}
 
-	exec := NewSandboxExecutor(actions, store, rt)
+	exec := NewSandboxExecutor(actions, store, rt, nil)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	res, err := exec.Execute(context.Background(), "test-action", nil)
@@ -253,7 +253,7 @@ func TestSandboxExecutor_ActionNotFoundReturnsGoError(t *testing.T) {
 	if _, err := actions.Load(); err != nil {
 		t.Fatalf("load empty: %v", err)
 	}
-	exec := NewSandboxExecutor(actions, store, &fakeRuntime{})
+	exec := NewSandboxExecutor(actions, store, &fakeRuntime{}, nil)
 	_, err := exec.Execute(context.Background(), "missing", nil)
 	if err == nil {
 		t.Fatal("expected Go error for missing action")
@@ -281,7 +281,7 @@ func TestSandboxExecutor_CompiledConnectorIsCached(t *testing.T) {
 	rt := &countingRuntime{inner: &fakeRuntime{
 		connectors: map[string]*fakeConnector{"github://test/echo": {resp: map[string]any{"v": 1}}},
 	}}
-	exec := NewSandboxExecutor(actions, store, rt)
+	exec := NewSandboxExecutor(actions, store, rt, nil)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	for i := 0; i < 3; i++ {
@@ -317,7 +317,7 @@ func TestSandboxExecutor_ConnectorBinaryMissingFromStoreSurfacesError(t *testing
 	store := cstore.NewStore(cstoreDir)
 	// NOTE: not installing the connector — store is empty.
 	actions := installFakeAction(t, "github://test/echo", "1.0.0", "sha256:deadbeef", []string{"echo"}, []string{"echo"})
-	exec := NewSandboxExecutor(actions, store, &fakeRuntime{})
+	exec := NewSandboxExecutor(actions, store, &fakeRuntime{}, nil)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	res, err := exec.Execute(context.Background(), "test-action", nil)
@@ -337,7 +337,7 @@ func TestSandboxExecutor_Close_ClosesCachedConnectors(t *testing.T) {
 
 	rt := &fakeRuntime{}
 	rt.connectors = map[string]*fakeConnector{"github://test/echo": {resp: map[string]any{}}}
-	exec := NewSandboxExecutor(actions, store, rt)
+	exec := NewSandboxExecutor(actions, store, rt, nil)
 	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

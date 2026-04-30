@@ -167,6 +167,32 @@ Validation runs at parse time:
 - An action with no `[[inputs]]` and no `${args.*}` references is valid; its `parameters` schema is the empty object `{ "type": "object" }`.
 - Duplicate input names are rejected.
 
+### Credentials are bound by the action via `[[bindings]]` blocks
+
+Connector manifests declare *what kind* of credential they need ([ADR-0002](/adr/0002-connector-model)'s `[capabilities.credential]`); they do not say *which* credential to use. The action supplies that detail at install time with a `[[bindings]]` block — one entry per connector that requires a credential, mapping the connector's FQN to a vault path:
+
+```toml
+[[bindings]]
+connector = "github://aileron/slack"
+vault_path = "oauth2/slack/work"
+```
+
+Per [ADR-0005](/adr/0005-sandbox-choice)'s credential mediation rule, the connector never sees the credential bytes. When the connector emits an outbound HTTP request that references its declared `[capabilities.credential]`, the runtime:
+
+1. Looks up the action's `[[bindings]]` entry for that connector.
+2. Resolves the credential at the named vault path (per [ADR-0011](/adr/0011-vault-key-custody)).
+3. Verifies the vault entry's metadata kind matches the connector's declared kind.
+4. Injects the credential into the request before it leaves the host (e.g. `Authorization: Bearer <token>`).
+
+Validation runs at parse time:
+
+- Every `[[bindings]]` entry's `connector` must appear in `[[requires.connectors]]`.
+- `vault_path` is required and non-empty.
+- v1 supports at most one binding per connector.
+- A connector that declares `[capabilities.credential]` without a matching binding does not fail validation — the runtime returns `binding_required` at the moment the connector tries to use the credential, so the agent's tool result names the missing binding directly.
+
+**This block is a v1 stand-in.** A future binding-management API and CLI ([ADR-0006](/adr/0006-capability-binding-ux), tracked under `#362`) will replace `[[bindings]]` with a per-user binding store the action does not have to know about. Until that lands, `[[bindings]]` is the explicit declaration: the action records which vault path each connector reads from, and the runtime mediates the actual byte transfer.
+
 ### The Markdown body is the documentation and the LLM-facing description
 
 Per [ADR-0001](/adr/0001-manifest-format), the body of the action file is Markdown. It serves three readers simultaneously:
@@ -286,6 +312,10 @@ intent = "tell team I shipped"
 name = "channel"
 type = "string"
 description = "Slack channel to post the announcement to (e.g. '#engineering')."
+
+[[bindings]]
+connector = "github://aileron/slack"
+vault_path = "oauth2/slack/work"
 
 [[execute]]
 id = "recent_merge"

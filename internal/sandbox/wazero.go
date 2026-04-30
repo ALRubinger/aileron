@@ -171,10 +171,13 @@ func (c *wazeroConnector) Invoke(ctx context.Context, call Call) (Result, error)
 	defer cancel()
 
 	state := &hostState{
-		policy:      c.policy,
-		doer:        c.runtime.doer,
-		actionGrant: toSet(call.AllowedAuthority),
-		logger:      c.runtime.log,
+		policy:                 c.policy,
+		doer:                   c.runtime.doer,
+		actionGrant:            toSet(call.AllowedAuthority),
+		logger:                 c.runtime.log,
+		connectorFQN:           manifestFQN(c.manifest),
+		expectedCredentialKind: manifestCredentialKind(c.manifest),
+		credentialResolver:     call.CredentialResolver,
 	}
 	callCtx = ctxWithState(callCtx, state)
 
@@ -287,6 +290,27 @@ func encodeInvocationInput(call Call) ([]byte, error) {
 		"op":   call.Op,
 		"args": args,
 	})
+}
+
+// manifestFQN safely returns the connector's fully-qualified name from
+// its parsed manifest. Empty when the manifest is nil.
+func manifestFQN(m *cstore.Manifest) string {
+	if m == nil {
+		return ""
+	}
+	return m.Connector.Name
+}
+
+// manifestCredentialKind safely returns the connector manifest's
+// declared `[capabilities.credential].kind`. Empty string means the
+// connector did not declare a credential capability — any credential
+// reference on an http_request envelope is then refused at the sandbox
+// boundary (capability_denied).
+func manifestCredentialKind(m *cstore.Manifest) string {
+	if m == nil || m.Capabilities.Credential == nil {
+		return ""
+	}
+	return m.Capabilities.Credential.Kind
 }
 
 // toSet converts a slice of capability strings to a lookup set used by

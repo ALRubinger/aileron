@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,8 @@ import (
 	"sync"
 
 	"github.com/tetratelabs/wazero/api"
+
+	"github.com/ALRubinger/aileron/internal/credential"
 )
 
 // HTTPDoer is the narrow HTTP-client surface the sandbox needs. It
@@ -45,6 +48,24 @@ type hostState struct {
 	doer        HTTPDoer
 	actionGrant map[string]struct{}
 	logger      *slog.Logger
+
+	// connectorFQN is the fully-qualified name of the connector being
+	// invoked. Threaded into structured-error details so denials at the
+	// sandbox boundary identify which connector emitted the request.
+	connectorFQN string
+
+	// expectedCredentialKind is the connector manifest's declared
+	// `[capabilities.credential].kind`. Empty when the connector
+	// declares no credential capability — any `credential` field on an
+	// http_request envelope is then refused as capability_denied.
+	expectedCredentialKind string
+
+	// credentialResolver is the per-Invoke handle the host uses to
+	// fetch a bound credential when the connector's http_request
+	// envelope carries a `credential` field. Nil when the action did
+	// not declare a binding for this connector; the host returns
+	// `binding_required` if the connector tries to use the path.
+	credentialResolver credential.Resolver
 
 	mu        sync.Mutex
 	logs      []LogLine
@@ -125,11 +146,21 @@ func hostLog(ctx context.Context, mod api.Module, levelPtr, levelLen, msgPtr, ms
 // httpRequestEnvelope is the JSON shape connectors marshal as the input
 // to `aileron_host.http_request`. Designed to be ergonomic across
 // language ABIs; the runtime parses it host-side.
+//
+// `Credential` (optional) names the kind of credential the connector
+// wants the runtime to attach to this request. Per ADR-0005 credential
+// mediation, the connector never holds the credential bytes — it
+// references its own manifest's `[capabilities.credential].kind`
+// (e.g. "oauth2", "api_key") and the runtime resolves the bound vault
+// entry, fails closed when none is bound, and injects the credential
+// into the outbound request. Connectors that do not need a credential
+// omit the field entirely.
 type httpRequestEnvelope struct {
-	Method  string            `json:"method"`
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Body    string            `json:"body,omitempty"`
+	Method     string            `json:"method"`
+	URL        string            `json:"url"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	Body       string            `json:"body,omitempty"`
+	Credential string            `json:"credential,omitempty"`
 }
 
 // hostHTTPRequest implements `aileron_host.http_request(req_ptr, req_len) -> i32`.
@@ -219,6 +250,21 @@ func hostHTTPRequest(ctx context.Context, mod api.Module, reqPtr, reqLen uint32)
 	for k, v := range env.Headers {
 		req.Header.Set(k, v)
 	}
+	// Credential mediation (ADR-0005). When the connector asks for a
+	// credential to be attached, the host resolves the bound vault
+	// entry and injects it; the connector never holds the bytes. The
+	// envelope's `credential` field references the connector's own
+	// manifest kind — a connector cannot forge a different connector's
+	// kind because each runs in its own sandbox and the validation is
+	// against its own manifest.
+	if env.Credential != "" {
+		if denyErr := injectCredential(ctx, s, req, env.Credential); denyErr != nil {
+			s.mu.Lock()
+			s.respErr = denyErr
+			s.mu.Unlock()
+			return -1
+		}
+	}
 	resp, err := s.doer.Do(req)
 	if err != nil {
 		s.mu.Lock()
@@ -300,6 +346,90 @@ func hostHTTPResponseRead(ctx context.Context, mod api.Module, dstPtr, dstLen ui
 		return -1
 	}
 	return int32(wrote)
+}
+
+// injectCredential resolves the bound credential and attaches it to
+// `req` per the kind's wire convention. Returns a structured *Error on
+// any of the failure modes:
+//
+//   - capability_denied: connector requested a kind that does not
+//     match its manifest's `[capabilities.credential].kind`, or its
+//     manifest declares no credential capability at all.
+//   - binding_required: the action did not declare a binding for this
+//     connector (no resolver wired), or the vault entry is missing.
+//   - capability_denied (kind mismatch): the bound vault entry's
+//     metadata kind does not match what the connector's manifest
+//     declares.
+//
+// The credential bytes never leave this function; the only place they
+// land is `req.Header` for the actual outbound dial.
+func injectCredential(ctx context.Context, s *hostState, req *http.Request, requested string) *Error {
+	if s.expectedCredentialKind == "" {
+		return newCapabilityDenied(
+			"http_request: connector did not declare [capabilities.credential]",
+			map[string]any{
+				"requested":       "credential:" + requested,
+				"connector":       s.connectorFQN,
+				"boundary_detail": "connector_manifest",
+			})
+	}
+	if requested != s.expectedCredentialKind {
+		return newCapabilityDenied(
+			"http_request: requested credential kind does not match connector manifest",
+			map[string]any{
+				"requested":       "credential:" + requested,
+				"declared":        "credential:" + s.expectedCredentialKind,
+				"connector":       s.connectorFQN,
+				"boundary_detail": "connector_manifest",
+			})
+	}
+	if s.credentialResolver == nil {
+		return newBindingRequired(
+			"http_request: action declares no [[bindings]] entry for this connector",
+			map[string]any{
+				"connector":       s.connectorFQN,
+				"capability_kind": s.expectedCredentialKind,
+				"boundary_detail": "action",
+			})
+	}
+	cred, resolveErr := s.credentialResolver.Resolve(ctx)
+	if resolveErr != nil {
+		switch {
+		case errors.Is(resolveErr, credential.ErrBindingMissing),
+			errors.Is(resolveErr, credential.ErrNoBindingResolver):
+			return newBindingRequired(
+				resolveErr.Error(),
+				map[string]any{
+					"connector":       s.connectorFQN,
+					"capability_kind": s.expectedCredentialKind,
+					"boundary_detail": "action",
+				})
+		case errors.Is(resolveErr, credential.ErrCredentialKindMismatch):
+			return newCapabilityDenied(
+				resolveErr.Error(),
+				map[string]any{
+					"connector":       s.connectorFQN,
+					"capability_kind": s.expectedCredentialKind,
+					"boundary_detail": "vault",
+				})
+		default:
+			return newConnectorRuntimeError(fmt.Sprintf(
+				"http_request: resolve credential: %s", resolveErr.Error()))
+		}
+	}
+	switch cred.Kind {
+	case "oauth2", "api_key":
+		req.Header.Set("Authorization", "Bearer "+string(cred.Value))
+	default:
+		return newCapabilityDenied(
+			"http_request: unsupported credential kind for v1 injection",
+			map[string]any{
+				"connector":       s.connectorFQN,
+				"capability_kind": cred.Kind,
+				"boundary_detail": "runtime",
+			})
+	}
+	return nil
 }
 
 // hostFromURL extracts the host:port portion of a URL using the same

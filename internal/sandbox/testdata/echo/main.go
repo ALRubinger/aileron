@@ -16,6 +16,9 @@
 //	"echo"          — round-trips args.value to output (happy path)
 //	"log"           — calls aileron_host.log; produces empty output
 //	"http"          — calls aileron_host.http_request with args.url
+//	"http_cred"     — calls http_request with args.url and a
+//	                  `credential` field set to args.credential. Drives
+//	                  the credential-mediation path (ADR-0005, #360).
 //	"loop"          — infinite loop (resource-limit test)
 //	"panic"         — calls os.Exit(1) (connector_runtime_error test)
 //
@@ -112,6 +115,38 @@ func main() {
 			method = "GET"
 		}
 		req, _ := json.Marshal(map[string]any{"method": method, "url": url})
+		rc := hostHTTPRequest(ptr(req), uint32(len(req)))
+		if rc != 0 {
+			writeOutput(map[string]any{"http_request_rc": int(rc)})
+			return
+		}
+		size := hostHTTPResponseSize()
+		status := hostHTTPResponseStatus()
+		out := map[string]any{
+			"status": int(status),
+			"size":   int(size),
+		}
+		if size > 0 {
+			body := make([]byte, size)
+			n := hostHTTPResponseRead(ptr(body), uint32(size))
+			if n > 0 {
+				out["body"] = string(body[:n])
+			}
+		}
+		writeOutput(out)
+
+	case "http_cred":
+		url, _ := in.Args["url"].(string)
+		method, _ := in.Args["method"].(string)
+		if method == "" {
+			method = "GET"
+		}
+		credKind, _ := in.Args["credential"].(string)
+		req, _ := json.Marshal(map[string]any{
+			"method":     method,
+			"url":        url,
+			"credential": credKind,
+		})
 		rc := hostHTTPRequest(ptr(req), uint32(len(req)))
 		if rc != 0 {
 			writeOutput(map[string]any{"http_request_rc": int(rc)})

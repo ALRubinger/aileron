@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/cstore"
 )
 
@@ -72,13 +73,22 @@ type Connector interface {
 // connector's capabilities; the network host import checks this in
 // addition to the connector manifest's grant (ADR-0003 §"defense in
 // depth"). When empty, only the connector manifest gates network
-// access. Future credential-mediation work (#360) will use the same
-// field shape to scope which credentials the invocation may resolve.
+// access.
+//
+// `CredentialResolver` is the per-invocation handle the host uses to
+// resolve a bound credential when the connector emits an outbound
+// request that references its declared `[capabilities.credential]`
+// (per ADR-0005 credential mediation). Nil means no binding is wired
+// for this call; the host returns `binding_required` if the connector
+// tries to use the credential path. Resolver lifetime is the single
+// Invoke; per-call hostState drops the reference on completion so the
+// connector cannot stash it across calls.
 type Call struct {
-	Op               string
-	Args             map[string]any
-	Limits           Limits
-	AllowedAuthority []string
+	Op                 string
+	Args               map[string]any
+	Limits             Limits
+	AllowedAuthority   []string
+	CredentialResolver credential.Resolver
 }
 
 // Result is what the sandbox produced. Successful runs surface their

@@ -203,3 +203,56 @@ func TestValidate_AcceptsArgsRefAcrossNestedInputs(t *testing.T) {
 		t.Errorf("Validate() error = %v", err)
 	}
 }
+
+// [[bindings]] validation per #360 / ADR-0005 credential mediation.
+//
+// Each binding maps a connector FQN to a vault path. The connector
+// must appear in [[requires.connectors]]; the vault path must be
+// non-empty; v1 allows at most one binding per connector.
+
+func TestValidate_AcceptsValidBinding(t *testing.T) {
+	m := goodManifest()
+	m.Bindings = []Binding{
+		{Connector: "github://aileron/slack", VaultPath: "oauth2/slack/work"},
+	}
+	if err := Validate(m, "x.md"); err != nil {
+		t.Errorf("Validate() error = %v", err)
+	}
+}
+
+func TestValidate_RejectsBadBindings(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Manifest)
+		want   string
+	}{
+		{"empty connector", func(m *Manifest) {
+			m.Bindings = []Binding{{Connector: "", VaultPath: "oauth2/x"}}
+		}, "bindings[0].connector is required"},
+		{"unknown connector", func(m *Manifest) {
+			m.Bindings = []Binding{{Connector: "github://other/foo", VaultPath: "oauth2/x"}}
+		}, "is not declared in [[requires.connectors]]"},
+		{"empty vault path", func(m *Manifest) {
+			m.Bindings = []Binding{{Connector: "github://aileron/slack", VaultPath: ""}}
+		}, "vault_path is required"},
+		{"duplicate connector", func(m *Manifest) {
+			m.Bindings = []Binding{
+				{Connector: "github://aileron/slack", VaultPath: "oauth2/work"},
+				{Connector: "github://aileron/slack", VaultPath: "oauth2/personal"},
+			}
+		}, "is bound twice"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := goodManifest()
+			tc.mutate(m)
+			err := Validate(m, "x.md")
+			if err == nil {
+				t.Fatalf("Validate accepted; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q; want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
