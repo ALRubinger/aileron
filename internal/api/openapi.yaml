@@ -1593,7 +1593,10 @@ paths:
           description: |
             Chat completion response. Content-Type is
             `text/event-stream` when the request set `stream: true`,
-            otherwise `application/json`.
+            otherwise `application/json`. Body shape, status code, and
+            response headers are forwarded from the upstream provider
+            unchanged other than hop-by-hop headers stripped by the
+            proxy.
           content:
             application/json:
               schema:
@@ -1609,16 +1612,22 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "501":
+        "502":
           description: |
-            Endpoint is registered but not yet fully implemented. Returned
-            during staged rollout of the gateway.
+            Upstream provider request failed (network error, TLS error,
+            or unreachable host). Upstream-returned 4xx/5xx statuses
+            propagate with their original status code; this 502 is for
+            failures Aileron observed before/around the upstream
+            transaction.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "502":
-          description: Upstream provider error
+        "503":
+          description: |
+            Gateway upstream is not configured for this protocol. Set
+            `AILERON_OPENAI_BASE_URL` (or rely on the default
+            `https://api.openai.com`).
           content:
             application/json:
               schema:
@@ -1666,6 +1675,9 @@ paths:
           description: |
             Messages response. Content-Type is `text/event-stream` when
             the request set `stream: true`, otherwise `application/json`.
+            Body shape, status code, and response headers are forwarded
+            from the upstream provider unchanged other than hop-by-hop
+            headers stripped by the proxy.
           content:
             application/json:
               schema:
@@ -1682,16 +1694,22 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "501":
+        "502":
           description: |
-            Endpoint is registered but not yet fully implemented. Returned
-            during staged rollout of the gateway.
+            Upstream provider request failed (network error, TLS error,
+            or unreachable host). Upstream-returned 4xx/5xx statuses
+            propagate with their original status code; this 502 is for
+            failures Aileron observed before/around the upstream
+            transaction.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "502":
-          description: Upstream provider error
+        "503":
+          description: |
+            Gateway upstream is not configured for this protocol. Set
+            `AILERON_ANTHROPIC_BASE_URL` (or rely on the default
+            `https://api.anthropic.com`).
           content:
             application/json:
               schema:
