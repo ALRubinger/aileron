@@ -14,6 +14,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/comms"
@@ -98,6 +99,7 @@ type apiServer struct {
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
+	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
 }
 
 // --- JSON helpers ---

@@ -29,6 +29,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/intercept"
+	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
 	"github.com/ALRubinger/aileron/internal/source"
@@ -177,16 +178,25 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		}
 	}
 
+	// --- Sandbox runtime (ADR-0005) ---
+	// Per-call WASM instantiation. Falls back to the stub executor
+	// when the sandbox runtime fails to come up — startup must not
+	// fail just because Wazero couldn't initialize on this host.
+	var executor action.Executor = action.StubExecutor{}
+	sandboxRT, sandboxErr := sandbox.NewWazeroRuntime(ctx, sandbox.WithLogger(log))
+	if sandboxErr != nil {
+		log.Warn("sandbox runtime unavailable; using stub executor", "error", sandboxErr)
+	} else {
+		executor = action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT)
+		server.sandboxRuntime = sandboxRT
+	}
+
 	// --- Intercept engine (stage 4) ---
-	// The engine handles tool-call interception. Real action
-	// execution lands in a follow-up issue; for now we wire a stub
-	// executor that returns a placeholder result so the interception
-	// machinery can be exercised end-to-end.
 	engine, engineErr := intercept.New(intercept.Config{
 		OpenAIUpstream:    gatewayCfg.OpenAIBaseURL,
 		AnthropicUpstream: gatewayCfg.AnthropicBaseURL,
 		Actions:           server.actions,
-		Executor:          action.StubExecutor{},
+		Executor:          executor,
 		Log:               log,
 	})
 	if engineErr != nil {
