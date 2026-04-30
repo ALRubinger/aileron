@@ -27,6 +27,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/intercept"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
 	"github.com/ALRubinger/aileron/internal/source"
@@ -173,6 +174,24 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 			log.Warn("action manifest failed to load", "file", e.File, "line", e.Line, "class", e.Class, "message", e.Message)
 		}
 	}
+
+	// --- Intercept engine (stage 4) ---
+	// The engine handles tool-call interception. Real action
+	// execution lands in a follow-up issue; for now we wire a stub
+	// executor that returns a placeholder result so the interception
+	// machinery can be exercised end-to-end.
+	engine, engineErr := intercept.New(intercept.Config{
+		OpenAIUpstream:    gatewayCfg.OpenAIBaseURL,
+		AnthropicUpstream: gatewayCfg.AnthropicBaseURL,
+		Actions:           server.actions,
+		Executor:          action.StubExecutor{},
+		Log:               log,
+	})
+	if engineErr != nil {
+		return nil, fmt.Errorf("intercept engine: %w", engineErr)
+	}
+	server.interceptEngine = engine
+
 	if teeCfg.TEEEnabled() {
 		server.teeState = newTeeState()
 	}

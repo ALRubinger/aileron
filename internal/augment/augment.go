@@ -120,30 +120,45 @@ func deriveParameters(m *action.Manifest) map[string]any {
 	return schema
 }
 
+// Augmented is the result of running [AugmentOpenAI] or
+// [AugmentAnthropic]. Body is the re-encoded request payload to
+// forward upstream; OurNames is the post-collision list of tool names
+// the gateway now owns. The interception layer uses OurNames to
+// decide whether a tool call coming back from the upstream LLM should
+// be intercepted (Aileron-owned) or passed through unchanged
+// (agent-declared).
+type Augmented struct {
+	Body     []byte
+	OurNames []string
+}
+
 // AugmentOpenAI parses an OpenAI Chat Completions request body, applies
 // collision rules, appends the derived actions to the `tools` array,
-// and returns the re-encoded body. When `actions` is empty the body is
-// returned untouched.
-func AugmentOpenAI(body []byte, actions []DerivedAction, log Logger) ([]byte, error) {
+// and returns the re-encoded body alongside the post-collision list
+// of Aileron-owned tool names. When `actions` is empty the body is
+// returned untouched and OurNames is empty.
+func AugmentOpenAI(body []byte, actions []DerivedAction, log Logger) (Augmented, error) {
 	if len(actions) == 0 {
-		return body, nil
+		return Augmented{Body: body}, nil
 	}
 	if log == nil {
 		log = nopLogger{}
 	}
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, err
+		return Augmented{}, err
 	}
 
 	tools, _ := req["tools"].([]any)
 	declared := agentDeclaredOpenAI(tools, log)
 
+	ourNames := make([]string, 0, len(actions))
 	for _, a := range actions {
 		finalName := a.Name
 		if declared[finalName] {
 			finalName = "aileron." + finalName
 		}
+		ourNames = append(ourNames, finalName)
 		tools = append(tools, map[string]any{
 			"type": "function",
 			"function": map[string]any{
@@ -154,34 +169,40 @@ func AugmentOpenAI(body []byte, actions []DerivedAction, log Logger) ([]byte, er
 		})
 	}
 	req["tools"] = tools
-	return json.Marshal(req)
+	out, err := json.Marshal(req)
+	if err != nil {
+		return Augmented{}, err
+	}
+	return Augmented{Body: out, OurNames: ourNames}, nil
 }
 
 // AugmentAnthropic parses an Anthropic Messages request body, applies
 // collision rules, appends the derived actions to the `tools` array
 // (Anthropic shape: name/description/input_schema), and returns the
-// re-encoded body. When `actions` is empty the body is returned
-// untouched.
-func AugmentAnthropic(body []byte, actions []DerivedAction, log Logger) ([]byte, error) {
+// re-encoded body alongside the post-collision list of Aileron-owned
+// tool names.
+func AugmentAnthropic(body []byte, actions []DerivedAction, log Logger) (Augmented, error) {
 	if len(actions) == 0 {
-		return body, nil
+		return Augmented{Body: body}, nil
 	}
 	if log == nil {
 		log = nopLogger{}
 	}
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, err
+		return Augmented{}, err
 	}
 
 	tools, _ := req["tools"].([]any)
 	declared := agentDeclaredAnthropic(tools, log)
 
+	ourNames := make([]string, 0, len(actions))
 	for _, a := range actions {
 		finalName := a.Name
 		if declared[finalName] {
 			finalName = "aileron." + finalName
 		}
+		ourNames = append(ourNames, finalName)
 		tools = append(tools, map[string]any{
 			"name":         finalName,
 			"description":  a.Description,
@@ -189,7 +210,11 @@ func AugmentAnthropic(body []byte, actions []DerivedAction, log Logger) ([]byte,
 		})
 	}
 	req["tools"] = tools
-	return json.Marshal(req)
+	out, err := json.Marshal(req)
+	if err != nil {
+		return Augmented{}, err
+	}
+	return Augmented{Body: out, OurNames: ourNames}, nil
 }
 
 // agentDeclaredOpenAI walks the OpenAI-shape tools array, applies the

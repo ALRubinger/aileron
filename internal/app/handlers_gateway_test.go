@@ -18,6 +18,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/intercept"
 )
 
 // Stage 2 contract (#368, ratified by ADR-0008):
@@ -390,8 +391,9 @@ channel = "${args.channel}"
 Posts a 'shipped' announcement to a Slack channel.
 `
 
-// newGatewayTestServerWithActions wires a populated action.Store into
-// the test server so augmentation has something to derive from.
+// newGatewayTestServerWithActions wires a populated action.Store and
+// an intercept engine into the test server so augmentation +
+// interception have something to operate on.
 func newGatewayTestServerWithActions(t *testing.T, openAIUpstream, anthropicUpstream *url.URL, manifests map[string]string) *apiServer {
 	t.Helper()
 	s := newGatewayTestServer(t, openAIUpstream, anthropicUpstream)
@@ -412,6 +414,17 @@ func newGatewayTestServerWithActions(t *testing.T, openAIUpstream, anthropicUpst
 		t.Fatalf("load errors: %+v", res.Errors)
 	}
 	s.actions = store
+	engine, err := intercept.New(intercept.Config{
+		OpenAIUpstream:    openAIUpstream,
+		AnthropicUpstream: anthropicUpstream,
+		Actions:           store,
+		Executor:          action.StubExecutor{},
+		Log:               s.log,
+	})
+	if err != nil {
+		t.Fatalf("intercept.New: %v", err)
+	}
+	s.interceptEngine = engine
 	return s
 }
 
