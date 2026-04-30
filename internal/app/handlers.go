@@ -91,6 +91,8 @@ type apiServer struct {
 	escrowIndex        sync.Map                    // vault path (string) -> escrow ID (string)
 	escrowIndexStore   *postgres.EscrowIndexStore  // nil when auth is disabled; persists escrowIndex across restarts
 	uiBaseURL          string                      // base URL for the web UI (for constructing unlock links)
+	openAIProxy        http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
+	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
 	newID              func() string
 	actions            *action.Store // installed actions in ~/.aileron/actions/ (ADR-0003)
 }

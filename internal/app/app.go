@@ -109,6 +109,14 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	// --- Notifier ---
 	notifier := notify.NewLogNotifier(log)
 
+	// --- LLM gateway (dual-protocol: OpenAI + Anthropic) ---
+	gatewayCfg, err := config.LoadGatewayConfig()
+	if err != nil {
+		return nil, fmt.Errorf("gateway config: %w", err)
+	}
+	openAIProxy := newGatewayProxy(gatewayCfg.OpenAIBaseURL, "openai", log)
+	anthropicProxy := newGatewayProxy(gatewayCfg.AnthropicBaseURL, "anthropic", log)
+
 	// --- TEE (optional — enabled when AILERON_TEE_PROVIDER is set) ---
 	teeCfg := config.LoadTEEConfig()
 	var enclaveClient enclave.Client
@@ -153,6 +161,8 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		enclaveVerifier:    enclaveVerifier,
 		teeCfg:             teeCfg,
 		grantCapabilityKey: grantCapabilityKey,
+		openAIProxy:        openAIProxy,
+		anthropicProxy:     anthropicProxy,
 		newID:              idGen,
 		actions:            action.NewStore(action.DefaultDir()),
 	}
