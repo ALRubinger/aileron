@@ -187,3 +187,105 @@ func TestEnsureVault_DefaultPrompterFailsGracefullyOffTTY(t *testing.T) {
 		t.Error("expected error from default prompter without a tty")
 	}
 }
+
+// erroringPrompter returns the supplied error on every call.
+func erroringPrompter(err error) PassphrasePrompter {
+	return func(_ string, _ io.Writer) (string, error) { return "", err }
+}
+
+// errorOnNthPrompter returns ok answers until the n-th call, then errors.
+func errorOnNthPrompter(n int, errVal error, answers ...string) PassphrasePrompter {
+	idx := 0
+	return func(_ string, _ io.Writer) (string, error) {
+		idx++
+		if idx == n {
+			return "", errVal
+		}
+		if idx-1 < len(answers) {
+			return answers[idx-1], nil
+		}
+		return "", fmt.Errorf("script exhausted at index %d", idx)
+	}
+}
+
+func TestEnsureVault_FirstRun_PrompterErrorOnFirstCallPropagates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	myErr := errors.New("interrupted")
+	_, err := EnsureVault(path, erroringPrompter(myErr), &bytes.Buffer{}, 3)
+	if err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Errorf("err = %v, want wrapped 'interrupted'", err)
+	}
+}
+
+func TestEnsureVault_FirstRun_PrompterErrorOnConfirmPropagates(t *testing.T) {
+	// Fail on the SECOND call (the confirm prompt).
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	myErr := errors.New("eof on confirm")
+	_, err := EnsureVault(path, errorOnNthPrompter(2, myErr, "first", "ignored"), &bytes.Buffer{}, 3)
+	if err == nil || !strings.Contains(err.Error(), "eof on confirm") {
+		t.Errorf("err = %v, want confirm-prompt error", err)
+	}
+}
+
+func TestEnsureVault_FirstRun_EmptyPassphraseAborts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	_, err := EnsureVault(path, scripted("", ""), &bytes.Buffer{}, 3)
+	if err == nil || !strings.Contains(err.Error(), "cannot be empty") {
+		t.Errorf("err = %v, want empty-passphrase abort", err)
+	}
+}
+
+func TestEnsureVault_ExistingVault_PrompterErrorPropagates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	if _, err := vault.Init(path, "p"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	myErr := errors.New("read fail")
+	_, err := EnsureVault(path, erroringPrompter(myErr), &bytes.Buffer{}, 3)
+	if err == nil || !strings.Contains(err.Error(), "read fail") {
+		t.Errorf("err = %v, want wrapped 'read fail'", err)
+	}
+}
+
+func TestEnsureVault_ExistingVault_GenericUnlockErrorPropagates(t *testing.T) {
+	// An empty passphrase makes vault.Unlock return a non-sentinel
+	// error ("passphrase cannot be empty"), which the retry loop
+	// surfaces immediately rather than retrying.
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	if _, err := vault.Init(path, "p"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	called := 0
+	prompter := func(_ string, _ io.Writer) (string, error) {
+		called++
+		return "", nil // empty passphrase → generic Unlock error
+	}
+	_, err := EnsureVault(path, prompter, &bytes.Buffer{}, 5)
+	if err == nil {
+		t.Error("expected error")
+	}
+	if called > 1 {
+		t.Errorf("prompter called %d times; non-sentinel error must not retry", called)
+	}
+}
+
+func TestEnsureVault_MaxRetriesLessThanOneClampsToDefault(t *testing.T) {
+	// maxRetries = 0 should clamp to 3, so three "wrong" attempts
+	// fail rather than zero attempts succeeding artificially.
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	if _, err := vault.Init(path, "right"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	called := 0
+	prompter := func(_ string, _ io.Writer) (string, error) {
+		called++
+		return "wrong", nil
+	}
+	_, err := EnsureVault(path, prompter, &bytes.Buffer{}, 0)
+	if err == nil {
+		t.Error("expected error")
+	}
+	if called != 3 {
+		t.Errorf("prompter called %d times; default maxRetries should be 3", called)
+	}
+}

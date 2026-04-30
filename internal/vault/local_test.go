@@ -228,3 +228,108 @@ func TestCheckState(t *testing.T) {
 		t.Errorf("after Init state = %v, want StateReady", got)
 	}
 }
+
+func TestCheckState_LegacyVaultReportsLegacy(t *testing.T) {
+	// A vault file with a salt + secrets but no verification blob
+	// is the pre-ADR-0011 shape. CheckState must report StateLegacy
+	// so callers know to migrate (or accept the heuristic fallback).
+	path := tmpVaultPath(t)
+	fv, err := vault.NewFileVault(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	salt, _ := fv.Salt()
+	kek, _ := crypto.DeriveKEK([]byte("legacy"), salt)
+	ev, _ := vault.NewEncryptedVault(fv, kek)
+	if err := ev.Put(context.Background(), "x", []byte("v"), vault.Metadata{}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := vault.CheckState(path)
+	if err != nil {
+		t.Fatalf("CheckState: %v", err)
+	}
+	if got != vault.StateLegacy {
+		t.Errorf("state = %v, want StateLegacy", got)
+	}
+}
+
+func TestInit_RejectsEmptyPassphrase_BeforeStateCheck(t *testing.T) {
+	// Empty passphrase fails fast — never touches disk.
+	if _, err := vault.Init(tmpVaultPath(t), ""); err == nil {
+		t.Error("expected error on empty passphrase")
+	}
+}
+
+func TestUnlock_RejectsEmptyPassphrase(t *testing.T) {
+	path := tmpVaultPath(t)
+	if _, err := vault.Init(path, "p"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if _, err := vault.Unlock(path, ""); err == nil {
+		t.Error("expected error on empty passphrase")
+	}
+}
+
+func TestFileVault_HasContents(t *testing.T) {
+	// HasContents reports whether the file has any data on disk.
+	// New file: false. After salt is generated: true. Used by
+	// future migration helpers to detect "is this a fresh path or
+	// an existing vault?"
+	path := tmpVaultPath(t)
+	fv, err := vault.NewFileVault(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if fv.HasContents() {
+		t.Error("fresh vault HasContents=true, want false")
+	}
+	if _, err := fv.Salt(); err != nil {
+		t.Fatalf("Salt: %v", err)
+	}
+	if !fv.HasContents() {
+		t.Error("after Salt, HasContents=false")
+	}
+}
+
+func TestFileVault_SetVerification_RefusesOverwrite(t *testing.T) {
+	// Once a verification blob is set, the FileVault refuses to
+	// overwrite it — overwriting would silently invalidate every
+	// existing encrypted secret.
+	path := tmpVaultPath(t)
+	if _, err := vault.Init(path, "p"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	fv, _ := vault.NewFileVault(path)
+	if err := fv.SetVerification([]byte("anything")); err == nil {
+		t.Error("SetVerification should refuse to overwrite an existing blob")
+	}
+}
+
+func TestInit_OnLegacyFile_UpgradesIt(t *testing.T) {
+	// Calling Init on a legacy file (salt + secrets, no verification)
+	// is allowed — it stamps the verification blob in place. The
+	// existing secrets become readable only with the same passphrase.
+	path := tmpVaultPath(t)
+	fv, err := vault.NewFileVault(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := fv.Salt(); err != nil {
+		t.Fatalf("Salt: %v", err)
+	}
+	// State is now Legacy (salt set, no verification, no secrets).
+	if got, _ := vault.CheckState(path); got != vault.StateLegacy {
+		t.Fatalf("preconditon: state = %v, want StateLegacy", got)
+	}
+	v, err := vault.Init(path, "p")
+	if err != nil {
+		t.Fatalf("Init on legacy: %v", err)
+	}
+	if v == nil {
+		t.Fatal("Init returned nil")
+	}
+	// After Init, the file is StateReady.
+	if got, _ := vault.CheckState(path); got != vault.StateReady {
+		t.Errorf("after Init state = %v, want StateReady", got)
+	}
+}
