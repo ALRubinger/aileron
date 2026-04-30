@@ -10,6 +10,7 @@
   import Braces from '@lucide/svelte/icons/braces';
   import Cloud from '@lucide/svelte/icons/cloud';
   import Compass from '@lucide/svelte/icons/compass';
+  import Layers from '@lucide/svelte/icons/layers';
 
   let { currentPath = '', navigation = [] as NavItem[] }: { currentPath?: string; navigation?: NavItem[] } = $props();
   let mobileOpen = $state(false);
@@ -58,6 +59,7 @@
     'Deployment': Cloud,
     'Development': Wrench,
     'Architecture Decisions': GitFork,
+    'Concepts': Layers,
     'API Reference': Braces
   };
 
