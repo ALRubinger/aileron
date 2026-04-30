@@ -87,6 +87,22 @@ func ResolveShim(selfPath string) (string, error) {
 // When stdin is a terminal, the agent runs inside a pty with a status bar
 // rendered in the bottom 2 rows. Otherwise, it falls back to direct I/O.
 func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
+	// Per ADR-0011, ensure the local credential vault is unlocked
+	// before any agent runs. On first launch (no vault file) we
+	// prompt to create one; on subsequent launches we prompt for
+	// the passphrase with retry. The KEK lives in this process for
+	// the lifetime of the launch.
+	//
+	// We only do this when stdin is a terminal — non-TTY contexts
+	// (tests, CI, headless integrations) fall through to the lazy
+	// on-demand path via OpenVaultFunc, preserving backward
+	// compatibility with the existing test surface.
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if _, err := EnsureVault(DefaultVaultPath(), nil, os.Stderr, 3); err != nil {
+			return LaunchResult{}, fmt.Errorf("vault: %w", err)
+		}
+	}
+
 	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)

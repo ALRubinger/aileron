@@ -45,9 +45,29 @@ import (
 	"github.com/google/uuid"
 )
 
-// NewHandler creates a fully-wired Aileron control plane HTTP handler with
-// in-memory stores, seeded policies, and registered connectors.
+// Config customizes [NewHandlerWithConfig]. The zero value is valid:
+// every field is optional and defaults reproduce the historic
+// [NewHandler] behaviour.
+type Config struct {
+	// Vault overrides the default in-memory random-KEK vault. Pass a
+	// vault produced by [vault.Init] / [vault.Unlock] when the
+	// runtime is being driven by `aileron launch`, so credentials
+	// land in the user's encrypted file at ~/.aileron/secrets.json
+	// rather than in a process-lifetime memory vault.
+	Vault vault.Vault
+}
+
+// NewHandler creates a fully-wired Aileron control plane HTTP handler
+// with in-memory stores, seeded policies, and registered connectors.
+// Equivalent to NewHandlerWithConfig(log, Config{}).
 func NewHandler(log *slog.Logger) (http.Handler, error) {
+	return NewHandlerWithConfig(log, Config{})
+}
+
+// NewHandlerWithConfig is the configurable entry point. The launcher
+// uses this with a passphrase-unlocked Vault; the standalone server
+// binary uses NewHandler (dev-mode fallback).
+func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	ctx := context.Background()
 
 	// --- In-memory stores ---
@@ -76,13 +96,19 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 	registry.Register(ctx, github.New())
 
 	// --- Vault ---
-	// Start with in-memory vault wrapped in encryption; upgrade to Postgres when
-	// database is available. Even in local/dev mode, all secrets are encrypted
-	// at rest with an auto-generated KEK. This ensures a single code path for
-	// encryption — no plaintext bypass.
-	v, err := newLocalEncryptedVault()
-	if err != nil {
-		return nil, err
+	// When the caller (typically `aileron launch`) supplied a
+	// passphrase-unlocked vault via Config, use it directly. Otherwise
+	// fall back to the dev-mode in-memory vault with an
+	// auto-generated KEK so the standalone server binary still works
+	// without any setup. Either way, the on-the-wire path is encrypted
+	// — there is no plaintext bypass.
+	v := cfg.Vault
+	if v == nil {
+		var err error
+		v, err = newLocalEncryptedVault()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
 		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{

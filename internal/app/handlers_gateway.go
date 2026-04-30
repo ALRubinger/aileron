@@ -6,6 +6,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 
+	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/intercept"
 )
 
@@ -17,7 +18,17 @@ import (
 // which augments the tool catalog (stage 3) and intercepts Aileron
 // tool calls (stage 4) before forwarding the final assistant message
 // to the agent.
+//
+// When the local credential vault is locked (per ADR-0011), the
+// endpoint refuses to serve — the runtime cannot resolve any
+// credential a connector might need. The agent receives a 423
+// FailureEnvelope with class `binding_required`, prompting them to
+// surface the unlock requirement to the user.
 func (s *apiServer) PostChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if s.vaultLocked {
+		writeVaultLocked(w)
+		return
+	}
 	if s.openAIProxy == nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured",
 			"OpenAI gateway upstream is not configured")
@@ -33,6 +44,10 @@ func (s *apiServer) PostChatCompletions(w http.ResponseWriter, r *http.Request) 
 // PostMessages handles POST /v1/messages with the same logic shaped
 // for the Anthropic Messages protocol.
 func (s *apiServer) PostMessages(w http.ResponseWriter, r *http.Request) {
+	if s.vaultLocked {
+		writeVaultLocked(w)
+		return
+	}
 	if s.anthropicProxy == nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured",
 			"Anthropic gateway upstream is not configured")
@@ -43,6 +58,23 @@ func (s *apiServer) PostMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.interceptEngine.HandleAnthropic(w, r)
+}
+
+// writeVaultLocked emits the canonical FailureEnvelope for "the
+// runtime can't serve this request until the vault is unlocked."
+// `binding_required` is the closest fit in ADR-0010's closed
+// taxonomy: the user must bind a credential (their passphrase) and
+// retry. failure.WriteHTTP maps the class to its canonical status
+// (412 Precondition Failed for binding_required).
+func writeVaultLocked(w http.ResponseWriter) {
+	f := failure.BindingRequiredFailure(
+		"local credential vault is locked; run `aileron vault unlock` to resume",
+		failure.WithDetails(map[string]any{
+			"required": "vault.passphrase",
+			"hint":     "the runtime needs the KEK in memory before any connector credential can be resolved",
+		}),
+	)
+	failure.WriteHTTP(w, f)
 }
 
 // hasInstalledActions reports whether at least one action is loaded

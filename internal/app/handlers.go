@@ -98,6 +98,7 @@ type apiServer struct {
 	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
 	interceptEngine    interceptEngineHandle       // tool-call intercept engine; nil disables interception (proxy passthrough only)
 	auditStore         *audit.MemStore             // ADR-0010 audit store; in-memory for v1, Postgres post-MVP
+	vaultLocked        bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
