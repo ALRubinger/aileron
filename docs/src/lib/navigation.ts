@@ -51,7 +51,8 @@ export const navigation: NavItem[] = [
       { label: 'The LLM Gateway', href: '/concepts/llm-gateway/' },
       { label: 'Actions', href: '/concepts/actions/' },
       { label: 'Connectors', href: '/concepts/connectors/' },
-      { label: 'The Vault', href: '/concepts/the-vault/' }
+      { label: 'The Vault', href: '/concepts/the-vault/' },
+      { label: 'Proof of Control', href: '/concepts/proof-of-control/' }
     ]
   },
   {
