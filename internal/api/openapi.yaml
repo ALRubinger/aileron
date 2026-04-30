@@ -1020,6 +1020,54 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/connectors/install:
+    post:
+      tags: [Connectors]
+      summary: Install a connector into the content-addressed store
+      description: |
+        Runs the install pipeline (per ADR-0004) for the given FQN+version
+        reference: resolve fetch URL → download tarball → verify signature
+        against keys associated with the FQN authority → compute SHA-256
+        of `binary || manifest` → match against `expected_hash` when
+        supplied → atomic rename into `~/.aileron/store/connectors/sha256/<hash>/`
+        → update the FQN+version → hash index.
+
+        Per ADR-0010, every failure produces a structured error: hash
+        mismatch, signature failure, malformed tarball, fetch failure,
+        unknown scheme, etc. Nothing is written to the store on failure.
+      operationId: installConnector
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallConnectorRequest"
+      responses:
+        "200":
+          description: Installation succeeded (the entry was already present)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledConnector"
+        "201":
+          description: Installation succeeded (new entry written to the store)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledConnector"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Install pipeline failed (hash mismatch, signature failure, malformed tarball, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/actions:
     get:
       tags: [Actions]
@@ -2742,6 +2790,50 @@ components:
             $ref: "#/components/schemas/Connector"
         pagination:
           $ref: "#/components/schemas/Pagination"
+
+    InstallConnectorRequest:
+      type: object
+      required: [fqn, version]
+      properties:
+        fqn:
+          type: string
+          description: |
+            Fully-qualified URI per ADR-0002 (e.g. `github://aileron/slack`).
+            Scheme must be one of `github`, `gitlab`, `hub` in v1.
+        version:
+          type: string
+          description: Strict SemVer (e.g. `1.2.0`). No ranges, no `latest`.
+        expected_hash:
+          type: string
+          description: |
+            Optional canonical hash (`sha256:<hex>`) the install must match.
+            When supplied (typical when the install is driven by an action
+            file's `[[requires.connectors]] hash`), a computed hash that
+            does not match aborts the install with `hash_mismatch` and
+            nothing is written to the store. When omitted (typical for
+            first install), the pipeline records whatever hash the bytes
+            produce.
+
+    InstalledConnector:
+      type: object
+      required: [fqn, version, hash, entry_dir]
+      properties:
+        fqn:
+          type: string
+        version:
+          type: string
+        hash:
+          type: string
+          description: Canonical `sha256:<hex>` of the installed bytes.
+        entry_dir:
+          type: string
+          description: Absolute path of the store entry on disk.
+        already_installed:
+          type: boolean
+          description: |
+            True when the install was a no-op because an entry with the
+            matching hash already existed (offline reinstall path per
+            ADR-0004).
 
     Action:
       type: object

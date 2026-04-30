@@ -1,0 +1,153 @@
+// Package cstore implements Aileron's content-addressed connector store and
+// the install pipeline that populates it.
+//
+// The store layout, hash semantics, FQN resolution, and install pipeline are
+// ratified by [ADR-0002] and [ADR-0004]. Connectors are content-addressed by
+// SHA-256 of `connector.<binary> || manifest.toml` (signature excluded), live
+// at `~/.aileron/store/connectors/sha256/<hash>/`, and are reachable via an
+// FQN+version → hash index that is rebuildable from on-disk contents.
+//
+// [ADR-0002]: https://docs.withaileron.ai/adr/0002-connector-model
+// [ADR-0004]: https://docs.withaileron.ai/adr/0004-dependency-resolution
+package cstore
+
+import (
+	"strings"
+
+	"github.com/BurntSushi/toml"
+)
+
+// Manifest is the parsed contents of a connector's `manifest.toml`. The
+// manifest is the connector's *request* for runtime grants (per ADR-0002).
+// The runtime grants nothing not declared here.
+type Manifest struct {
+	Connector ManifestConnector `toml:"connector"`
+
+	// Capabilities holds the connector's grant requests. Each sub-table is
+	// independently optional — a connector that needs no network access
+	// simply omits `[capabilities.network]`.
+	Capabilities ManifestCapabilities `toml:"capabilities"`
+
+	// Provides advertises the intents this connector implements. Used by
+	// the Hub for discovery and by action authors when wiring connectors.
+	Provides ManifestProvides `toml:"provides"`
+}
+
+// ManifestConnector is the `[connector]` table — the connector's identity.
+type ManifestConnector struct {
+	// Name is the fully-qualified URI of this connector
+	// (e.g. "github://aileron/slack"). At install time it must match the
+	// FQN under which the binary is being fetched.
+	Name string `toml:"name"`
+
+	// Version is a strict SemVer string per ADR-0002.
+	Version string `toml:"version"`
+
+	// ProvenanceHash is the binary+manifest content hash at publish time
+	// (e.g. "sha256:abc123..."). The runtime checks the on-disk bytes
+	// against this before every execution.
+	ProvenanceHash string `toml:"provenance_hash"`
+
+	// Publisher is the human-readable publisher name shown in the Hub /
+	// install consent UI. Not load-bearing; provenance lives in the FQN.
+	Publisher string `toml:"publisher"`
+}
+
+// ManifestCapabilities holds the sub-tables for each primitive capability
+// type the runtime knows about (per ADR-0002).
+type ManifestCapabilities struct {
+	Network    *ManifestNetwork    `toml:"network"`
+	Credential *ManifestCredential `toml:"credential"`
+	Runtime    *ManifestRuntime    `toml:"runtime"`
+}
+
+// ManifestNetwork is `[capabilities.network]` — declared outbound grants.
+// Hosts are pinned to specific `host:port` pairs; no wildcards.
+type ManifestNetwork struct {
+	Hosts []string `toml:"hosts"`
+}
+
+// ManifestCredential is `[capabilities.credential]` — abstract credential
+// type and scope. The connector declares the *type*; the user binds a
+// concrete vault entry at install or first use (ADR-0002, ADR-0006).
+type ManifestCredential struct {
+	Kind  string `toml:"kind"`
+	Scope string `toml:"scope"`
+}
+
+// ManifestRuntime is `[capabilities.runtime]` — host-function imports. Used
+// by the WASM sandbox to gate which host functions the connector may call.
+type ManifestRuntime struct {
+	Imports []string `toml:"imports"`
+}
+
+// ManifestProvides is `[provides]` — discovery metadata. Not enforced by
+// the runtime; consumed by the Hub and by action authors.
+type ManifestProvides struct {
+	Intents []string `toml:"intents"`
+}
+
+// ParseManifest decodes a connector manifest from raw TOML bytes. `file` is
+// the path of the source file (for error reporting) and may be empty when
+// the manifest is in-memory.
+func ParseManifest(file string, data []byte) (*Manifest, error) {
+	m := &Manifest{}
+	meta, err := toml.Decode(string(data), m)
+	if err != nil {
+		return nil, newParseErr(file, tomlErrorLine(err), "invalid TOML: %s", err.Error())
+	}
+	if undecoded := meta.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, 0, len(undecoded))
+		for _, k := range undecoded {
+			keys = append(keys, k.String())
+		}
+		return nil, newParseErr(file, 0, "unknown manifest key(s): %s", strings.Join(keys, ", "))
+	}
+	return m, nil
+}
+
+// ValidateManifest enforces the schema described in ADR-0002. It does not
+// check that the manifest's declared FQN matches the FQN the binary is
+// being installed under — that's the install pipeline's job.
+func ValidateManifest(m *Manifest, file string) error {
+	if m == nil {
+		return newValidationErr(file, "manifest is nil")
+	}
+	if m.Connector.Name == "" {
+		return newValidationErr(file, "[connector].name is required")
+	}
+	if _, err := ParseFQN(m.Connector.Name); err != nil {
+		return newValidationErr(file, "[connector].name: %s", err.Error())
+	}
+	if m.Connector.Version == "" {
+		return newValidationErr(file, "[connector].version is required")
+	}
+	if !semverRe.MatchString(m.Connector.Version) {
+		return newValidationErr(file, "[connector].version %q must be strict SemVer", m.Connector.Version)
+	}
+	if m.Connector.ProvenanceHash != "" {
+		if !strings.HasPrefix(m.Connector.ProvenanceHash, "sha256:") || len(m.Connector.ProvenanceHash) <= len("sha256:") {
+			return newValidationErr(file, "[connector].provenance_hash %q must be prefixed with sha256:", m.Connector.ProvenanceHash)
+		}
+	}
+	if m.Capabilities.Network != nil {
+		for i, h := range m.Capabilities.Network.Hosts {
+			if !strings.Contains(h, ":") {
+				return newValidationErr(file, "[capabilities.network].hosts[%d] %q must be host:port", i, h)
+			}
+		}
+	}
+	return nil
+}
+
+// tomlErrorLine extracts a 1-based line number from a BurntSushi/toml error
+// when the error type exposes one. Returns 0 otherwise.
+func tomlErrorLine(err error) int {
+	type lineError interface {
+		Line() int
+	}
+	if le, ok := err.(lineError); ok && le.Line() > 0 {
+		return le.Line()
+	}
+	return 0
+}
