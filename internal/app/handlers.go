@@ -16,6 +16,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/approval"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
@@ -96,6 +97,7 @@ type apiServer struct {
 	openAIProxy        http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
 	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
 	interceptEngine    interceptEngineHandle       // tool-call intercept engine; nil disables interception (proxy passthrough only)
+	auditStore         *audit.MemStore             // ADR-0010 audit store; in-memory for v1, Postgres post-MVP
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install

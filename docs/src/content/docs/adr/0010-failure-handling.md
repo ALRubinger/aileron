@@ -233,10 +233,18 @@ Rejected because it imposes a class-hierarchy ceremony that doesn't pay off in t
 
 ### For Aileron runtime
 
-- The runtime implements bounded retry with exponential backoff for `retriable: true` errors. v1 default: 3 retries; uniform across actions.
+- The runtime implements bounded retry with exponential backoff for `retriable: true` errors. v1 default: 3 retries; uniform across actions. Implementation lives in [`internal/retry`](https://github.com/ALRubinger/aileron/blob/main/internal/retry); the [`internal/clock`](https://github.com/ALRubinger/aileron/blob/main/internal/clock) abstraction makes retry tests deterministic.
 - Idempotency is checked at the runtime/connector boundary; the runtime trusts the connector's `[connector.idempotency]` declaration but enforces the default-on-retry policy.
-- The structured error envelope is constructed at the boundary that produced the error and passed through unchanged. Boundaries don't rewrap each other's errors.
-- Audit logging records every failure with full context: class, message, boundary, retried-count, action and connector identity, time, audit ID.
+- The structured error envelope is constructed at the boundary that produced the error and passed through unchanged. Boundaries don't rewrap each other's errors. The closed taxonomy lives in [`internal/failure`](https://github.com/ALRubinger/aileron/blob/main/internal/failure); only the package's per-class constructors can produce a valid Failure value, so handlers cannot synthesize an arbitrary class string.
+- Audit logging records every failure with full context: class, message, boundary, retried-count, actor identity, time, audit ID. Implementation lives in [`internal/audit`](https://github.com/ALRubinger/aileron/blob/main/internal/audit) on top of the existing `Store` SPI; v1 ships an in-memory implementation, with Postgres persistence post-MVP.
+
+### Scope: which envelope applies where
+
+The ADR-0010 envelope applies to **errors returned to the calling action and through it to the agent** — the gateway endpoints (`/v1/chat/completions`, `/v1/messages`) and action / connector install responses.
+
+Other API endpoints (intents, approvals, policies, accounts, auth) retain the existing `api.Error` envelope (`{error: {code, message, details, request_id}}`). Those errors are CRUD-shaped and don't fit ADR-0010's runtime taxonomy of `network_error` / `capability_denied` / etc. Forcing them in would either expand the closed taxonomy beyond its semantic anchor or drop fidelity. Consumers that want a single unified shape can layer one in their own client; the server emits two stable envelopes by design.
+
+The `internal/auth` package was previously emitting a third, ad-hoc shape (`{"error": "<string>"}`). Stage 5 of #356 normalised those handlers to the standard `api.Error` shape so the v1 server emits exactly two envelope shapes — the gateway/action `FailureEnvelope` and the CRUD `api.Error`.
 
 ### For users
 

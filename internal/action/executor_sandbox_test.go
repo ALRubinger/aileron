@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/sandbox"
 )
 
@@ -154,7 +155,7 @@ func TestSandboxExecutor_HappyPath_RunsStepsInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if res.IsError {
+	if res.Failure != nil {
 		t.Errorf("expected non-error result; got %+v", res)
 	}
 	var body map[string]any
@@ -189,21 +190,16 @@ func TestSandboxExecutor_ActionBoundary_DeniesUndeclaredOp(t *testing.T) {
 
 	res, err := exec.Execute(context.Background(), "test-action", nil)
 	if err != nil {
-		t.Fatalf("Execute returned a Go error; want IsError result: %v", err)
+		t.Fatalf("Execute returned a Go error; want failure result: %v", err)
 	}
-	if !res.IsError {
-		t.Fatal("expected IsError=true on undeclared op")
+	if res.Failure == nil {
+		t.Fatal("expected Result.Failure on undeclared op")
 	}
-	var body map[string]any
-	if err := json.Unmarshal([]byte(res.Content), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
+	if res.Failure.Class() != failure.CapabilityDenied {
+		t.Errorf("class = %q, want capability_denied", res.Failure.Class())
 	}
-	envelope, _ := body["error"].(map[string]any)
-	if envelope["class"] != "capability_denied" {
-		t.Errorf("error.class = %v, want capability_denied", envelope["class"])
-	}
-	if envelope["boundary"] != "action" {
-		t.Errorf("error.boundary = %v, want action", envelope["boundary"])
+	if res.Failure.Boundary() != failure.Action {
+		t.Errorf("boundary = %q, want action", res.Failure.Boundary())
 	}
 	// The runtime must NOT have been invoked when the action-boundary
 	// check denies — defense in depth means the inner check is unreachable.
@@ -234,7 +230,7 @@ func TestSandboxExecutor_FirstFailureTerminates_NoLaterStepsRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute Go error: %v", err)
 	}
-	if !res.IsError {
+	if res.Failure == nil {
 		t.Fatal("expected IsError=true on first-step failure")
 	}
 	// step2 must not have been invoked.
@@ -328,7 +324,7 @@ func TestSandboxExecutor_ConnectorBinaryMissingFromStoreSurfacesError(t *testing
 	if err != nil {
 		t.Fatalf("Execute Go err: %v", err)
 	}
-	if !res.IsError {
+	if res.Failure == nil {
 		t.Errorf("expected IsError=true when connector binary missing")
 	}
 }
@@ -353,55 +349,75 @@ func TestSandboxExecutor_Close_ClosesCachedConnectors(t *testing.T) {
 	}
 }
 
-func TestErrorEnvelope_PreservesStructuredErrors(t *testing.T) {
-	// Recognized error types preserve their fields in the envelope so
-	// the LLM and audit log see the boundary, class, and details.
+func TestFailureFromError_PreservesStructuredErrors(t *testing.T) {
+	// Recognized error types map to failure.Failure preserving the
+	// boundary, class, and details so the LLM and audit log see the
+	// canonical ADR-0010 envelope.
 	cases := []struct {
-		name string
-		err  error
-		want map[string]any
+		name         string
+		err          error
+		wantClass    failure.FailureClass
+		wantBoundary failure.Boundary
+		wantMessage  string
 	}{
 		{
-			"action error",
+			"action capability_denied",
 			&Error{Class: ClassCapabilityDenied, Boundary: BoundaryAction, Message: "no", Details: map[string]any{"x": 1}},
-			map[string]any{"class": "capability_denied", "boundary": "action", "message": "no", "details": map[string]any{"x": 1}},
+			failure.CapabilityDenied, failure.Action, "no",
 		},
 		{
-			"sandbox error",
+			"sandbox resource_limit_exceeded",
 			&sandbox.Error{Class: sandbox.ClassResourceLimitExceeded, Boundary: sandbox.BoundarySandbox, Message: "boom"},
-			map[string]any{"class": "resource_limit_exceeded", "boundary": "sandbox", "message": "boom", "retriable": false},
+			failure.ResourceLimitExceeded, failure.Sandbox, "boom",
 		},
 		{
-			"cstore error",
+			"cstore hash_mismatch",
 			&cstore.Error{Class: cstore.ClassHashMismatch, Boundary: cstore.BoundaryRuntime, Message: "diff"},
-			map[string]any{"class": "hash_mismatch", "boundary": "runtime", "message": "diff", "retriable": false},
+			failure.HashMismatch, failure.Runtime, "diff",
 		},
 		{
-			"plain error",
+			"plain error → connector_runtime_error",
 			errors.New("ouch"),
-			map[string]any{"class": "internal_error", "message": "ouch"},
+			failure.ConnectorRuntimeError, failure.Runtime, "ouch",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := errorEnvelope(tc.err)
-			for k, v := range tc.want {
-				gotVal, ok := got[k]
-				if !ok {
-					t.Errorf("missing key %q in envelope %v", k, got)
-					continue
-				}
-				// reflect.DeepEqual would suffice but produces less
-				// helpful diagnostics here; spot-check the strings.
-				if gotStr, want := primitiveString(gotVal), primitiveString(v); gotStr != want {
-					t.Errorf("envelope[%q] = %v, want %v", k, gotVal, v)
-				}
+			got := failureFromError(tc.err)
+			if got == nil {
+				t.Fatalf("failureFromError(%v) = nil", tc.err)
+			}
+			if got.Class() != tc.wantClass {
+				t.Errorf("class = %q, want %q", got.Class(), tc.wantClass)
+			}
+			if got.Boundary() != tc.wantBoundary {
+				t.Errorf("boundary = %q, want %q", got.Boundary(), tc.wantBoundary)
+			}
+			if got.Message() != tc.wantMessage {
+				t.Errorf("message = %q, want %q", got.Message(), tc.wantMessage)
+			}
+			if !errors.Is(got, tc.err) {
+				t.Errorf("errors.Is(failure, original) = false; cause not wrapped")
 			}
 		})
 	}
 }
 
-func primitiveString(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
+func TestFailureFromError_PreservesActionDetails(t *testing.T) {
+	src := &Error{
+		Class:    ClassCapabilityDenied,
+		Boundary: BoundaryAction,
+		Message:  "no",
+		Details:  map[string]any{"x": 1},
+	}
+	got := failureFromError(src)
+	if got.Details()["x"] != 1 {
+		t.Errorf("details.x = %v, want 1", got.Details()["x"])
+	}
+}
+
+func TestFailureFromError_NilErrorReturnsNil(t *testing.T) {
+	if got := failureFromError(nil); got != nil {
+		t.Errorf("failureFromError(nil) = %v, want nil", got)
+	}
 }

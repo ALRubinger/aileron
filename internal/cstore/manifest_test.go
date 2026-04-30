@@ -126,3 +126,90 @@ func TestValidateManifest_NilManifest(t *testing.T) {
 		t.Fatal("ValidateManifest(nil) succeeded; want error")
 	}
 }
+
+// Idempotency declaration (ADR-0010).
+
+func TestIsIdempotent_DefaultsToTrue(t *testing.T) {
+	m, err := ParseManifest("m.toml", []byte(validManifestTOML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !m.IsIdempotent() {
+		t.Error("default (no idempotency block) should be idempotent")
+	}
+}
+
+func TestIsIdempotent_RespectsExplicitIdempotent(t *testing.T) {
+	m := &Manifest{Connector: ManifestConnector{
+		Idempotency: &ManifestIdempotency{Default: IdempotencyIdempotent},
+	}}
+	if !m.IsIdempotent() {
+		t.Error("explicit idempotent value should be idempotent")
+	}
+}
+
+func TestIsIdempotent_NotIdempotentOptOut(t *testing.T) {
+	m := &Manifest{Connector: ManifestConnector{
+		Idempotency: &ManifestIdempotency{Default: IdempotencyNotIdempotent},
+	}}
+	if m.IsIdempotent() {
+		t.Error("not_idempotent declaration should opt out of retry")
+	}
+}
+
+func TestIsIdempotent_NilManifestSafe(t *testing.T) {
+	var m *Manifest
+	if !m.IsIdempotent() {
+		t.Error("nil manifest should default to idempotent (safe)")
+	}
+}
+
+func TestValidateManifest_RejectsBadIdempotencyValues(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		want string
+	}{
+		{"empty", "", "is required when the table is present"},
+		{"unknown", "maybe", "must be"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := ParseManifest("m.toml", []byte(validManifestTOML))
+			m.Connector.Idempotency = &ManifestIdempotency{Default: tc.val}
+			err := ValidateManifest(m, "m.toml")
+			if err == nil {
+				t.Fatalf("accepted bad value %q", tc.val)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q; want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_AcceptsValidIdempotencyValues(t *testing.T) {
+	for _, v := range []string{IdempotencyIdempotent, IdempotencyNotIdempotent} {
+		t.Run(v, func(t *testing.T) {
+			m, _ := ParseManifest("m.toml", []byte(validManifestTOML))
+			m.Connector.Idempotency = &ManifestIdempotency{Default: v}
+			if err := ValidateManifest(m, "m.toml"); err != nil {
+				t.Errorf("ValidateManifest(%q) err = %v", v, err)
+			}
+		})
+	}
+}
+
+func TestParseManifest_AcceptsIdempotencyTOML(t *testing.T) {
+	body := validManifestTOML + "\n[connector.idempotency]\ndefault = \"not_idempotent\"\n"
+	m, err := ParseManifest("m.toml", []byte(body))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if m.Connector.Idempotency == nil {
+		t.Fatal("Idempotency block not parsed")
+	}
+	if m.Connector.Idempotency.Default != IdempotencyNotIdempotent {
+		t.Errorf("Default = %q", m.Connector.Idempotency.Default)
+	}
+}

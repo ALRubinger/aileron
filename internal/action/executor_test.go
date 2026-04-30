@@ -8,8 +8,9 @@ import (
 
 // StubExecutor must always succeed (no Go error), produce a JSON
 // payload the LLM can parse, and reflect the action name and args.
-// Per ADR-0010, action-side errors should be Results with IsError=true,
-// not error returns — the stub never errors.
+// Per ADR-0010, action-side errors should be Results carrying a
+// non-nil *failure.Failure, not error returns — the stub never
+// errors.
 
 func TestStubExecutor_ReturnsPlaceholderJSON(t *testing.T) {
 	res, err := StubExecutor{}.Execute(context.Background(), "ship_update",
@@ -17,8 +18,8 @@ func TestStubExecutor_ReturnsPlaceholderJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
-	if res.IsError {
-		t.Error("StubExecutor unexpectedly marked Result as error")
+	if res.Failure != nil {
+		t.Errorf("StubExecutor unexpectedly marked Result as failure: %v", res.Failure)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(res.Content), &payload); err != nil {

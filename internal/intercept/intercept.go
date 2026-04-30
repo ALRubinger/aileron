@@ -18,7 +18,10 @@ import (
 	"net/url"
 
 	"github.com/ALRubinger/aileron/internal/action"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/augment"
+	"github.com/ALRubinger/aileron/internal/clock"
+	"github.com/ALRubinger/aileron/internal/retry"
 )
 
 // maxRounds caps the number of intercept iterations a single agent
@@ -36,6 +39,9 @@ type Engine struct {
 	executor          action.Executor
 	httpClient        *http.Client
 	log               *slog.Logger
+	recorder          audit.Recorder
+	retryPolicy       retry.Policy
+	clock             clock.Clock
 }
 
 // Config groups the dependencies required to build an Engine. The
@@ -49,6 +55,19 @@ type Config struct {
 	Executor          action.Executor
 	HTTPClient        *http.Client // optional; defaults to http.DefaultClient
 	Log               *slog.Logger // optional; defaults to slog.Default()
+
+	// Recorder writes audit events for every failure surfaced through
+	// the gateway. Required — pass audit.NewRecorder(audit.NewMemStore(),
+	// nil, nil) for a default in-memory recorder.
+	Recorder audit.Recorder
+
+	// RetryPolicy governs upstream retries per ADR-0010. Optional;
+	// defaults to retry.DefaultPolicy().
+	RetryPolicy retry.Policy
+
+	// Clock is the time source used for retry backoff. Optional;
+	// defaults to clock.System{}.
+	Clock clock.Clock
 }
 
 // New builds an Engine from a Config.
@@ -59,6 +78,9 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Executor == nil {
 		return nil, errors.New("intercept: Executor is required")
 	}
+	if cfg.Recorder == nil {
+		return nil, errors.New("intercept: Recorder is required")
+	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = http.DefaultClient
@@ -67,6 +89,14 @@ func New(cfg Config) (*Engine, error) {
 	if log == nil {
 		log = slog.Default()
 	}
+	policy := cfg.RetryPolicy
+	if policy.MaxRetries == 0 && policy.BaseDelay == 0 && policy.Jitter == 0 {
+		policy = retry.DefaultPolicy()
+	}
+	clk := cfg.Clock
+	if clk == nil {
+		clk = clock.System{}
+	}
 	return &Engine{
 		openAIUpstream:    cfg.OpenAIUpstream,
 		anthropicUpstream: cfg.AnthropicUpstream,
@@ -74,6 +104,9 @@ func New(cfg Config) (*Engine, error) {
 		executor:          cfg.Executor,
 		httpClient:        client,
 		log:               log,
+		recorder:          cfg.Recorder,
+		retryPolicy:       policy,
+		clock:             clk,
 	}, nil
 }
 

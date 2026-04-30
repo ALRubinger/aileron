@@ -24,17 +24,17 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
 
 	body.Email = strings.TrimSpace(strings.ToLower(body.Email))
 	if body.Email == "" || !strings.Contains(body.Email, "@") {
-		http.Error(w, `{"error":"valid email is required"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_email", "valid email is required")
 		return
 	}
 	if len(body.Password) < 8 {
-		http.Error(w, `{"error":"password must be at least 8 characters"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_password", "password must be at least 8 characters")
 		return
 	}
 	if body.DisplayName == "" {
@@ -45,7 +45,7 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 
 	// Check if email is already taken.
 	if _, err := h.users.GetByEmail(ctx, body.Email); err == nil {
-		http.Error(w, `{"error":"email already registered"}`, http.StatusConflict)
+		writeError(w, http.StatusConflict, "email_exists", "email already registered")
 		return
 	}
 
@@ -53,7 +53,7 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(body.Password), h.bcryptCost)
 	if err != nil {
 		h.log.Error("failed to hash password", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -82,7 +82,7 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.enterprises.Create(ctx, enterprise); err != nil {
 		h.log.Error("failed to create enterprise", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -104,7 +104,7 @@ func (h *Handler) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.users.Create(ctx, user); err != nil {
 		h.log.Error("failed to create user", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -144,14 +144,14 @@ func (h *Handler) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 		Code  string `json:"code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
 
 	body.Email = strings.TrimSpace(strings.ToLower(body.Email))
 	body.Code = strings.TrimSpace(body.Code)
 	if body.Email == "" || body.Code == "" {
-		http.Error(w, `{"error":"email and code are required"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_field", "email and code are required")
 		return
 	}
 
@@ -159,24 +159,24 @@ func (h *Handler) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.users.GetByEmail(ctx, body.Email)
 	if err != nil {
-		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
 
 	if user.Status != model.UserStatusPendingVerification {
-		http.Error(w, `{"error":"account already verified"}`, http.StatusConflict)
+		writeError(w, http.StatusConflict, "already_verified", "account already verified")
 		return
 	}
 
 	code, err := h.verificationCodes.GetActiveByUserID(ctx, user.ID)
 	if err != nil {
-		http.Error(w, `{"error":"no active verification code — request a new one"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "no_verification_code", "no active verification code — request a new one")
 		return
 	}
 
 	// Compare hashed code.
 	if HashToken(body.Code) != code.CodeHash {
-		http.Error(w, `{"error":"invalid verification code"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_verification", "invalid verification code")
 		return
 	}
 
@@ -189,7 +189,7 @@ func (h *Handler) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
 	user.UpdatedAt = now
 	if err := h.users.Update(ctx, user); err != nil {
 		h.log.Error("failed to activate user", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -209,13 +209,13 @@ func (h *Handler) handleEmailLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
 		return
 	}
 
 	body.Email = strings.TrimSpace(strings.ToLower(body.Email))
 	if body.Email == "" || body.Password == "" {
-		http.Error(w, `{"error":"email and password are required"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_field", "email and password are required")
 		return
 	}
 
@@ -225,27 +225,27 @@ func (h *Handler) handleEmailLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Constant-time-ish: still run bcrypt comparison to prevent timing attacks.
 		bcrypt.CompareHashAndPassword([]byte(h.dummyHash), []byte(body.Password))
-		http.Error(w, `{"error":"invalid email or password"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid email or password")
 		return
 	}
 
 	if user.PasswordHash == "" {
 		// OAuth-only user — no password set.
-		http.Error(w, `{"error":"this account uses OAuth sign-in"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "oauth_account", "this account uses OAuth sign-in")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(body.Password)); err != nil {
-		http.Error(w, `{"error":"invalid email or password"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "invalid_credentials", "invalid email or password")
 		return
 	}
 
 	if user.Status == model.UserStatusPendingVerification {
-		http.Error(w, `{"error":"email not verified — check your inbox"}`, http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "email_unverified", "email not verified — check your inbox")
 		return
 	}
 	if user.Status == model.UserStatusSuspended {
-		http.Error(w, `{"error":"account suspended"}`, http.StatusForbidden)
+		writeError(w, http.StatusForbidden, "account_suspended", "account suspended")
 		return
 	}
 
@@ -258,13 +258,13 @@ func (h *Handler) handleEmailLogin(w http.ResponseWriter, r *http.Request) {
 	// Issue tokens.
 	accessToken, err := h.issuer.Issue(user.ID, user.EnterpriseID, user.Email, string(user.Role))
 	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
 	refreshRaw, refreshHash, err := GenerateRefreshToken()
 	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -277,7 +277,7 @@ func (h *Handler) handleEmailLogin(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:        now,
 	}
 	if err := h.sessions.Create(ctx, session); err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
