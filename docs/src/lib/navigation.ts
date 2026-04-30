@@ -51,7 +51,14 @@ export const navigation: NavItem[] = [
       { label: 'Overview', href: '/adr/' },
       { label: 'ADR-0001: Manifest Format', href: '/adr/0001-manifest-format/' },
       { label: 'ADR-0002: Connector Model', href: '/adr/0002-connector-model/' },
-      { label: 'ADR-0003: Action Model', href: '/adr/0003-action-model/' }
+      { label: 'ADR-0003: Action Model', href: '/adr/0003-action-model/' },
+      { label: 'ADR-0004: Dependency Resolution', href: '/adr/0004-dependency-resolution/' },
+      { label: 'ADR-0005: Sandbox Choice', href: '/adr/0005-sandbox-choice/' },
+      { label: 'ADR-0006: Capability Binding UX', href: '/adr/0006-capability-binding-ux/' },
+      { label: 'ADR-0007: Install Consent Flow', href: '/adr/0007-install-consent/' },
+      { label: 'ADR-0008: Intent Matching', href: '/adr/0008-intent-matching/' },
+      { label: 'ADR-0009: User Channel', href: '/adr/0009-user-channel/' },
+      { label: 'ADR-0010: Failure Handling', href: '/adr/0010-failure-handling/' }
     ]
   }
 ];

@@ -19,12 +19,12 @@ Aileron's runtime executes against four distinct kinds of declarative artifact:
 
 | Artifact | Read by | Lifetime |
 |---|---|---|
-| Action files | Runtime (frontmatter), developers (prose), Hub (renderer), LLM (function description) | Live in the user's repo; evolve with the project |
+| Action files | Runtime (frontmatter), users (prose), Hub (renderer), LLM (function description) | Live in `~/.aileron/actions/`; user-owned and editable |
 | Connector manifests | Runtime (capability validation, install verification) | Shipped with the connector binary; immutable per version |
-| Project config (`aileron.toml`) | Runtime, CLI | Lives in the user's repo |
+| User config (`~/.aileron/config.toml`) | Runtime, CLI | Per-user; surface preferences, runtime listen address, hub registry |
 | Runtime IPC and internal state | Aileron processes (Runtime ↔ connector sandbox; Runtime ↔ CLI) | Process-local; never authored by hand |
 
-These artifacts have very different audiences and very different security postures. Action files mix structured contract with human prose and LLM-facing description. Connector manifests are a security boundary: they declare what a sandboxed binary is allowed to do. Project config is editable infrastructure. Runtime IPC is a wire format between trusted processes.
+These artifacts have very different audiences and very different security postures. Action files mix structured contract with human prose and LLM-facing description. Connector manifests are a security boundary: they declare what a sandboxed binary is allowed to do. User config is editable infrastructure. Runtime IPC is a wire format between trusted processes.
 
 A single format choice across all four would be the wrong answer. Each kind of artifact has its own reader profile and its own failure modes. This ADR fixes a separate format choice for each — and ratifies the trade-offs.
 
@@ -81,22 +81,24 @@ scope = "https://www.googleapis.com/auth/gmail.send"
 
 A connector manifest is *not* a documentation surface. Its sole reader is the Runtime, and its sole job is to declare what the sandboxed binary is allowed to do. Mixing prose into this file would invite the same field to be parsed two ways and would obscure the security review surface. The Hub renders connector documentation from a separate README/markdown file shipped alongside the binary; the manifest stays minimal and machine-focused.
 
-### Project config: pure TOML (`aileron.toml`)
+### User config: pure TOML (`~/.aileron/config.toml`)
 
-Project-level configuration uses pure TOML. The file is light and optional — many projects will not need one. When present, it carries project-scoped settings (telemetry opt-out, default Hub registry, action search paths) that don't belong in any single action file.
+User-level configuration uses pure TOML. The file is light and optional. When present, it carries user-scoped settings (telemetry opt-out, default Hub registry, runtime listen address, surface preferences for the user channel) that don't belong in any single action file.
 
 ```toml
-[project]
-name = "my-app"
-
 [hub]
 registry = "https://hub.aileron.dev"
 
 [runtime]
 listen = "127.0.0.1:8721"
+
+[telemetry]
+enabled = false
 ```
 
-There is intentionally no project-level lock file. Action files are self-describing — they pin connector versions and content hashes inline. Reproducibility comes from git, not from a generated lock file.
+There is no lock file. Action files are self-describing — they pin connector versions and content hashes inline. Reproducibility comes from copying the action files; nothing else has to be regenerated.
+
+Aileron does not write configuration files into the user's projects. There is no `<project>/aileron.toml`. Aileron is a personal capability layer; configuration is per-user, in the user's home directory.
 
 ### Runtime IPC and internal state: JSON
 
@@ -264,17 +266,17 @@ imports = ["wasi:http/outgoing-handler", "wasi:cli/stdout"]
 intents = ["send_email", "draft_email"]
 ```
 
-### Project config (`aileron.toml`)
+### User config (`~/.aileron/config.toml`)
 
 ```toml
-[project]
-name = "my-app"
-
 [hub]
 registry = "https://hub.aileron.dev"
 
 [runtime]
 listen = "127.0.0.1:8721"
+
+[telemetry]
+enabled = false
 ```
 
 ### Runtime IPC (illustrative; never authored by hand)
