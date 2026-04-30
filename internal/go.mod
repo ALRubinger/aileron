@@ -3,6 +3,7 @@ module github.com/ALRubinger/aileron/internal
 go 1.25.0
 
 require (
+	github.com/BurntSushi/toml v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.36.0
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/creack/pty/v2 v2.0.1

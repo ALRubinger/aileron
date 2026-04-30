@@ -29,6 +29,7 @@ tags:
   - name: Approvals
   - name: Policies
   - name: Connectors
+  - name: Actions
   - name: Executions
   - name: Funding Sources
   - name: Credentials
@@ -1012,6 +1013,62 @@ paths:
                 $ref: "#/components/schemas/Connector"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/actions:
+    get:
+      tags: [Actions]
+      summary: List installed actions
+      description: |
+        Lists actions installed in the user's `~/.aileron/actions/` directory
+        (per ADR-0003). Each entry carries identity and dependency metadata
+        without the full Markdown body — use `GET /v1/actions/{name}` for the
+        complete manifest.
+
+        Per ADR-0010, files that fail to parse or validate at load time are
+        not silently dropped: the `load_errors` field surfaces a structured
+        error per offending file with the file path and (when known) the
+        line number where parsing failed.
+      operationId: listActions
+      responses:
+        "200":
+          description: Installed actions plus any per-file load errors
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/actions/{name}:
+    get:
+      tags: [Actions]
+      summary: Get an installed action by name
+      description: |
+        Returns the full parsed manifest of an installed action plus its
+        Markdown body. The body is the LLM-facing function description per
+        ADR-0001 and ADR-0003.
+      operationId: getAction
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Action manifest and body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Action"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -2667,6 +2724,141 @@ components:
             $ref: "#/components/schemas/Connector"
         pagination:
           $ref: "#/components/schemas/Pagination"
+
+    Action:
+      type: object
+      description: |
+        A user-installed action manifest. Per ADR-0001 and ADR-0003, an
+        action is a single Markdown file with TOML frontmatter; the parsed
+        frontmatter populates this object's structured fields and the
+        Markdown content following the closing `+++` populates `body`.
+      required:
+        - name
+        - version
+        - source
+        - requires
+        - match
+        - execute
+      properties:
+        name:
+          type: string
+          description: Bare local handle for the action (e.g. "ship-update").
+        version:
+          type: string
+          description: Strict SemVer of the action manifest.
+        source:
+          type: string
+          description: |
+            Fully-qualified URI of the template the action was installed from
+            (e.g. "hub://aileron/ship-update@1.0.0"). Provenance only — not
+            consulted at runtime.
+        requires:
+          $ref: "#/components/schemas/ActionRequires"
+        match:
+          $ref: "#/components/schemas/ActionMatch"
+        execute:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionExecuteStep"
+        body:
+          type: string
+          description: |
+            Markdown content following the closing `+++` delimiter. The first
+            paragraph (or a designated section) is surfaced to the LLM as the
+            function description when the action is exposed as a tool.
+        path:
+          type: string
+          description: Absolute path of the source file on disk.
+
+    ActionRequires:
+      type: object
+      properties:
+        connectors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionRequiresConnector"
+
+    ActionRequiresConnector:
+      type: object
+      required: [name, version, hash, capabilities]
+      properties:
+        name:
+          type: string
+          description: Connector FQN per ADR-0002 (e.g. "github://aileron/slack").
+        version:
+          type: string
+          description: Pinned SemVer of the connector.
+        hash:
+          type: string
+          description: Content hash of the connector binary plus its manifest.
+        capabilities:
+          type: array
+          items:
+            type: string
+          description: |
+            The action's declared subset of operations on the connector. Per
+            ADR-0003, calls outside this subset are denied at the action
+            boundary even when the connector permits the operation.
+
+    ActionMatch:
+      type: object
+      required: [intent]
+      properties:
+        intent:
+          type: string
+          description: Canonical phrase the runtime matches against agent intent.
+
+    ActionExecuteStep:
+      type: object
+      required: [id, connector, op]
+      properties:
+        id:
+          type: string
+        connector:
+          type: string
+        op:
+          type: string
+        idempotent:
+          type: boolean
+        inputs:
+          type: object
+          additionalProperties: true
+
+    ActionLoadError:
+      type: object
+      description: |
+        A structured error describing a single file in the actions directory
+        that failed to parse or validate, per ADR-0010. Loading is
+        non-fatal — files that load successfully appear in `items`; failed
+        files appear here so callers can surface a precise message.
+      required: [class, message, file]
+      properties:
+        class:
+          type: string
+          description: Canonical failure class (e.g. parse_error, validation_error).
+        message:
+          type: string
+        file:
+          type: string
+          description: Absolute path of the offending file.
+        line:
+          type: integer
+          description: Line within the file where the error was detected; 0 when unknown.
+        boundary:
+          type: string
+          description: Which layer produced the error (always "action" for load failures).
+
+    ActionListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Action"
+        load_errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionLoadError"
 
     ExecutionGrant:
       type: object
