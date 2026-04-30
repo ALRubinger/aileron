@@ -346,3 +346,92 @@ func TestAugmentOpenAI_InvalidJSON_ReturnsError(t *testing.T) {
 		t.Logf("error message: %v", err)
 	}
 }
+
+func TestAugmentAnthropic_InvalidJSON_ReturnsError(t *testing.T) {
+	_, err := AugmentAnthropic([]byte(`{not-json`), []DerivedAction{{Name: "x"}}, nil)
+	if err == nil {
+		t.Fatal("expected error decoding invalid JSON")
+	}
+}
+
+func TestAugmentAnthropic_NoActions_ReturnsBodyUnchanged(t *testing.T) {
+	body := []byte(`{"model":"c","max_tokens":1,"messages":[]}`)
+	got, err := AugmentAnthropic(body, nil, nil)
+	if err != nil {
+		t.Fatalf("AugmentAnthropic: %v", err)
+	}
+	if string(got.Body) != string(body) {
+		t.Errorf("body modified despite no actions: %s", got.Body)
+	}
+	if len(got.OurNames) != 0 {
+		t.Errorf("OurNames = %v, want empty", got.OurNames)
+	}
+}
+
+// --- DeriveAll covers list iteration ---
+
+func TestDeriveAll_PreservesOrder(t *testing.T) {
+	actions := []action.LoadedAction{
+		loadedAction(t, "ship-update", "first body", nil),
+		loadedAction(t, "file-bug", "second body", nil),
+	}
+	got := DeriveAll(actions)
+	if len(got) != 2 {
+		t.Fatalf("DeriveAll length = %d, want 2", len(got))
+	}
+	if got[0].Name != "ship_update" {
+		t.Errorf("got[0].Name = %q, want ship_update", got[0].Name)
+	}
+	if got[1].Name != "file_bug" {
+		t.Errorf("got[1].Name = %q, want file_bug", got[1].Name)
+	}
+}
+
+// --- nopLogger.Warn is exercised when caller passes nil ---
+
+func TestAugmentOpenAI_NilLogger_DoesNotPanicOnReverseCollision(t *testing.T) {
+	// Reverse collision triggers a Warn call. Passing nil log must
+	// route through nopLogger and not panic.
+	body := []byte(`{"model":"gpt-4","messages":[],"tools":[{"type":"function","function":{"name":"aileron.search"}}]}`)
+	actions := []DerivedAction{{Name: "ship_update", Description: "x", Parameters: map[string]any{"type": "object"}}}
+	_, err := AugmentOpenAI(body, actions, nil)
+	if err != nil {
+		t.Fatalf("AugmentOpenAI: %v", err)
+	}
+}
+
+func TestAugmentAnthropic_NilLogger_DoesNotPanicOnReverseCollision(t *testing.T) {
+	body := []byte(`{"model":"c","max_tokens":1,"messages":[],"tools":[{"name":"aileron.search","input_schema":{"type":"object"}}]}`)
+	actions := []DerivedAction{{Name: "ship_update", Description: "x", Parameters: map[string]any{"type": "object"}}}
+	_, err := AugmentAnthropic(body, actions, nil)
+	if err != nil {
+		t.Fatalf("AugmentAnthropic: %v", err)
+	}
+}
+
+// --- Malformed tool entries are skipped, not panicked ---
+
+func TestAugmentOpenAI_SkipsMalformedToolEntries(t *testing.T) {
+	body := []byte(`{"model":"gpt-4","messages":[],"tools":["not-an-object",{"type":"function"},{"type":"function","function":"not-an-object"},{"type":"function","function":{}}]}`)
+	actions := []DerivedAction{{Name: "ship_update", Description: "x", Parameters: map[string]any{"type": "object"}}}
+	got, err := AugmentOpenAI(body, actions, nil)
+	if err != nil {
+		t.Fatalf("AugmentOpenAI: %v", err)
+	}
+	// Action still appended; malformed entries didn't cause a crash.
+	if len(got.OurNames) != 1 || got.OurNames[0] != "ship_update" {
+		t.Errorf("OurNames = %v, want [ship_update]", got.OurNames)
+	}
+}
+
+func TestAugmentAnthropic_SkipsMalformedToolEntries(t *testing.T) {
+	body := []byte(`{"model":"c","max_tokens":1,"messages":[],"tools":["not-an-object",{}]}`)
+	actions := []DerivedAction{{Name: "ship_update", Description: "x", Parameters: map[string]any{"type": "object"}}}
+	got, err := AugmentAnthropic(body, actions, nil)
+	if err != nil {
+		t.Fatalf("AugmentAnthropic: %v", err)
+	}
+	if len(got.OurNames) != 1 || got.OurNames[0] != "ship_update" {
+		t.Errorf("OurNames = %v, want [ship_update]", got.OurNames)
+	}
+}

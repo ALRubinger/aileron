@@ -680,3 +680,464 @@ func TestAgentRequestedStreaming_Detects(t *testing.T) {
 		t.Error("expected false on malformed body")
 	}
 }
+
+func TestSetStream_RejectsMalformedBody(t *testing.T) {
+	if _, err := setStream([]byte(`not-json`), false); err == nil {
+		t.Error("expected error on malformed body")
+	}
+}
+
+func TestCopyForwardableHeaders_DropsHopByHop(t *testing.T) {
+	src := http.Header{}
+	src.Set("Authorization", "Bearer x")
+	src.Set("X-Custom", "keep")
+	src.Set("Connection", "close")        // hop-by-hop
+	src.Set("Keep-Alive", "timeout=5")    // hop-by-hop
+	src.Set("Transfer-Encoding", "chunked") // hop-by-hop
+	src.Set("Content-Length", "100")      // explicitly stripped
+	src.Set("Host", "x.example")          // explicitly stripped
+
+	dst := http.Header{}
+	copyForwardableHeaders(src, dst)
+
+	if dst.Get("Authorization") != "Bearer x" {
+		t.Error("Authorization not forwarded")
+	}
+	if dst.Get("X-Custom") != "keep" {
+		t.Error("X-Custom not forwarded")
+	}
+	for _, k := range []string{"Connection", "Keep-Alive", "Transfer-Encoding", "Content-Length", "Host"} {
+		if dst.Get(k) != "" {
+			t.Errorf("%s should not be forwarded", k)
+		}
+	}
+}
+
+func TestPassThrough_FiltersHopByHop(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Connection", "close")
+	headers.Set("X-Upstream-ID", "abc")
+
+	w := httptest.NewRecorder()
+	passThrough(w, http.StatusTeapot, headers, []byte(`{"x":1}`))
+
+	if w.Code != http.StatusTeapot {
+		t.Errorf("status = %d, want 418", w.Code)
+	}
+	if w.Header().Get("Content-Type") != "application/json" {
+		t.Error("Content-Type not propagated")
+	}
+	if w.Header().Get("X-Upstream-ID") != "abc" {
+		t.Error("X-Upstream-ID not propagated")
+	}
+	if w.Header().Get("Connection") != "" {
+		t.Error("Connection should not be propagated")
+	}
+}
+
+// --- OpenAI: invalid JSON request body fails augmentation ---
+
+func TestHandleOpenAI_InvalidJSONBody_Returns400(t *testing.T) {
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream should not be reached when augmentation fails")
+	}))
+	t.Cleanup(srv.Close)
+	e := engineFor(t, srv.URL, "", store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{not-json`))
+	w := httptest.NewRecorder()
+	e.HandleOpenAI(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid_request") {
+		t.Errorf("body = %s, want invalid_request error", w.Body.String())
+	}
+}
+
+// --- OpenAI: upstream connection failure → 502 ---
+
+func TestHandleOpenAI_UpstreamUnreachable_Returns502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	upstreamURL := srv.URL
+	srv.Close()
+
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, upstreamURL, "", store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleOpenAI(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "upstream_error") {
+		t.Errorf("body = %s, want upstream_error code", w.Body.String())
+	}
+}
+
+// --- OpenAI: executor returning a fatal error → 500 ---
+
+type erroringExecutor struct {
+	err error
+}
+
+func (e erroringExecutor) Execute(_ context.Context, _ string, _ map[string]any) (action.Result, error) {
+	return action.Result{}, e.err
+}
+
+func TestHandleOpenAI_ExecutorFatalError_Returns500(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t,
+		`{"id":"r1","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"ship_update","arguments":"{}"}}]}}]}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	exec := erroringExecutor{err: fmt.Errorf("connector unavailable")}
+	e := engineFor(t, upstream.URL, "", store, exec)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleOpenAI(w, r)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "executor_error") {
+		t.Errorf("body = %s, want executor_error code", w.Body.String())
+	}
+}
+
+// =====================================================================
+// Anthropic-side parity tests
+// =====================================================================
+
+// --- Anthropic: gateway not configured ---
+
+func TestHandleAnthropic_UpstreamNotConfigured_Returns503(t *testing.T) {
+	store := loadStore(t, nil)
+	e := engineFor(t, "", "", store, nil)
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+// --- Anthropic: invalid JSON body ---
+
+func TestHandleAnthropic_InvalidJSONBody_Returns400(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream should not be reached")
+	}))
+	t.Cleanup(srv.Close)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", srv.URL, store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{not-json`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+// --- Anthropic: upstream unreachable ---
+
+func TestHandleAnthropic_UpstreamUnreachable_Returns502(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	upstreamURL := srv.URL
+	srv.Close()
+
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", upstreamURL, store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
+	}
+}
+
+// --- Anthropic: upstream non-200 propagates ---
+
+func TestHandleAnthropic_UpstreamErrorPassesThrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"type":"error","error":{"type":"authentication_error","message":"bad key"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", srv.URL, store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (passed through)", w.Code)
+	}
+	if !bytes.Contains(w.Body.Bytes(), []byte("bad key")) {
+		t.Errorf("body lost upstream message: %s", w.Body.String())
+	}
+}
+
+// --- Anthropic: executor fatal error ---
+
+func TestHandleAnthropic_ExecutorFatalError_Returns500(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t,
+		`{"id":"m1","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"tu","name":"ship_update","input":{}}],"stop_reason":"tool_use"}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	exec := erroringExecutor{err: fmt.Errorf("nope")}
+	e := engineFor(t, "", upstream.URL, store, exec)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
+	}
+}
+
+// --- Anthropic: mixed tool uses → 502 ---
+
+func TestHandleAnthropic_MixedToolUses_Returns502(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t,
+		`{"id":"m1","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"a","name":"ship_update","input":{}},{"type":"tool_use","id":"b","name":"agent_thing","input":{}}],"stop_reason":"tool_use"}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", upstream.URL, store, nil)
+
+	body := `{"model":"c","max_tokens":1,"messages":[],"tools":[{"name":"agent_thing","input_schema":{"type":"object"}}]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (mixed unsupported)", w.Code)
+	}
+}
+
+// --- Anthropic: agent's tool_use passes through ---
+
+func TestHandleAnthropic_AgentToolUsePassesThrough(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t,
+		`{"id":"m1","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"a","name":"agent_thing","input":{}}],"stop_reason":"tool_use"}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	exec := &staticExecutor{}
+	e := engineFor(t, "", upstream.URL, store, exec)
+
+	body := `{"model":"c","max_tokens":1,"messages":[],"tools":[{"name":"agent_thing","input_schema":{"type":"object"}}]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"name":"agent_thing"`) {
+		t.Errorf("agent should see its own tool_use; got %s", w.Body.String())
+	}
+	if len(exec.calls) != 0 {
+		t.Errorf("executor called %d times for agent's tool; want 0", len(exec.calls))
+	}
+}
+
+// --- Anthropic: max rounds cap ---
+
+func TestHandleAnthropic_MaxRoundsCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"m","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"t","name":"ship_update","input":{}}],"stop_reason":"tool_use"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", srv.URL, store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 (max rounds)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "max_intercept_rounds") {
+		t.Errorf("body = %s, want max_intercept_rounds error code", w.Body.String())
+	}
+}
+
+// --- Anthropic: multi-turn ---
+
+func TestHandleAnthropic_MultiTurnInterception(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t,
+		`{"id":"m1","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"t1","name":"ship_update","input":{"channel":"#x"}}],"stop_reason":"tool_use"}`,
+		`{"id":"m2","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"t2","name":"file_bug","input":{"title":"bug"}}],"stop_reason":"tool_use"}`,
+		`{"id":"m3","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}`,
+	)
+	store := loadStore(t, map[string]string{
+		"ship-update.md": shipUpdateAction,
+		"file-bug.md":    fileBugAction,
+	})
+	exec := &staticExecutor{result: action.Result{Content: `{"ok":true}`}}
+	e := engineFor(t, "", upstream.URL, store, exec)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"text":"Done."`) {
+		t.Errorf("agent didn't see final text: %s", w.Body.String())
+	}
+	if len(exec.calls) != 2 {
+		t.Errorf("executor called %d times; want 2", len(exec.calls))
+	}
+}
+
+// --- Anthropic: action error → tool_result with is_error ---
+
+// --- Upstream returns 200 but unparseable shape → passThrough ---
+
+func TestHandleOpenAI_UpstreamShapeUnparseable_PassesThrough(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t, `{}`)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, upstream.URL, "", store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleOpenAI(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (passThrough)", w.Code)
+	}
+	if w.Body.String() != `{}` {
+		t.Errorf("body = %q, want passthrough of upstream %q", w.Body.String(), `{}`)
+	}
+}
+
+func TestHandleAnthropic_UpstreamShapeUnparseable_PassesThrough(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t, `{"not":"a message"}`)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", upstream.URL, store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (passThrough)", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"a message"`) {
+		t.Errorf("body lost upstream payload: %s", w.Body.String())
+	}
+}
+
+// --- Streaming fallback when terminal response can't be reshaped ---
+
+func TestEmitOpenAITerminal_StreamingFallbackOnUnparseableBody(t *testing.T) {
+	w := httptest.NewRecorder()
+	emitOpenAITerminal(w, []byte(`not-json`), true /*wantStream*/)
+	// Falls back to JSON when chunk synthesis fails — at least the
+	// raw upstream body reaches the agent.
+	if w.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json (fallback)", w.Header().Get("Content-Type"))
+	}
+	if w.Body.String() != "not-json" {
+		t.Errorf("body = %q, want fallback raw passthrough", w.Body.String())
+	}
+}
+
+func TestEmitAnthropicTerminal_StreamingFallbackOnUnparseableBody(t *testing.T) {
+	w := httptest.NewRecorder()
+	emitAnthropicTerminal(w, []byte(`not-json`), true /*wantStream*/)
+	if w.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json (fallback)", w.Header().Get("Content-Type"))
+	}
+}
+
+func TestEmitAnthropicTerminal_StreamingFallbackOnMissingContent(t *testing.T) {
+	// Valid JSON but no `content` field — anthropicEventsFromMessage
+	// returns an error and the helper falls back to JSON.
+	w := httptest.NewRecorder()
+	emitAnthropicTerminal(w, []byte(`{"id":"x","type":"message"}`), true /*wantStream*/)
+	if w.Header().Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json fallback", w.Header().Get("Content-Type"))
+	}
+}
+
+func TestOpenAIChunksFromCompletion_ErrorOnNoChoices(t *testing.T) {
+	if _, err := openAIChunksFromCompletion([]byte(`{"id":"x"}`)); err == nil {
+		t.Error("expected error when response has no choices")
+	}
+}
+
+func TestAnthropicEventsFromMessage_ErrorOnInvalidJSON(t *testing.T) {
+	if _, err := anthropicEventsFromMessage([]byte(`not-json`)); err == nil {
+		t.Error("expected error decoding malformed JSON")
+	}
+}
+
+func TestParseAnthropicResponse_ErrorOnInvalidJSON(t *testing.T) {
+	_, _, err := parseAnthropicResponse([]byte(`not-json`))
+	if err == nil {
+		t.Error("expected error decoding malformed JSON")
+	}
+}
+
+func TestParseAnthropicResponse_ErrorOnWrongType(t *testing.T) {
+	_, _, err := parseAnthropicResponse([]byte(`{"type":"error"}`))
+	if err == nil {
+		t.Error("expected error when type != message")
+	}
+}
+
+func TestHandleAnthropic_ActionErrorBecomesIsError(t *testing.T) {
+	upstream, captured := newScriptedUpstream(t,
+		`{"id":"m1","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"t","name":"ship_update","input":{}}],"stop_reason":"tool_use"}`,
+		`{"id":"m2","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"Got error."}],"stop_reason":"end_turn"}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	exec := &staticExecutor{result: action.Result{Content: "rate limited", IsError: true}}
+	e := engineFor(t, "", upstream.URL, store, exec)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	contMessages, _ := captured.captured[1]["messages"].([]any)
+	user := contMessages[len(contMessages)-1].(map[string]any)
+	blocks := user["content"].([]any)
+	first := blocks[0].(map[string]any)
+	if first["is_error"] != true {
+		t.Errorf("tool_result.is_error = %v, want true", first["is_error"])
+	}
+}
