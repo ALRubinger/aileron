@@ -77,5 +77,6 @@ export const navigation: NavItem[] = [
  * Standalone nav entries rendered below the main tree (e.g. API Reference).
  */
 export const externalLinks: NavLink[] = [
+  { label: 'CLI Reference', href: '/cli/' },
   { label: 'API Reference', href: '/api' }
 ];
