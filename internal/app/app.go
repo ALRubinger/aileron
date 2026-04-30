@@ -214,7 +214,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	if sandboxErr != nil {
 		log.Warn("sandbox runtime unavailable; using stub executor", "error", sandboxErr)
 	} else {
-		executor = action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT)
+		executor = action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT, v)
 		server.sandboxRuntime = sandboxRT
 	}
 

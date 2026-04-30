@@ -34,6 +34,15 @@ const (
 	// connector's `[capabilities.runtime]` declaration", out-of-grant
 	// imports refuse at instantiation.
 	ClassConnectorLoadFailed FailureClass = "connector_load_failed"
+
+	// ClassBindingRequired is the canonical class for an outbound
+	// request that referenced a credential capability the action did
+	// not bind. The runtime mediates every credential use per ADR-0005;
+	// when the connector emits an `http_request` with a `credential`
+	// field but the action has no `[[bindings]]` entry that points at a
+	// vault path with the expected kind, the host returns this class.
+	// Mirrors `failure.BindingRequired` in the executor's surface.
+	ClassBindingRequired FailureClass = "binding_required"
 )
 
 // Boundary identifies the layer that produced a failure (per ADR-0010).
@@ -120,5 +129,18 @@ func newConnectorLoadFailed(message string) *Error {
 		Class:    ClassConnectorLoadFailed,
 		Message:  message,
 		Boundary: BoundarySandbox,
+	}
+}
+
+// newBindingRequired builds a binding_required error for the credential
+// mediation path. Details are merged into the structured envelope so
+// the agent can surface the missing binding (connector FQN, expected
+// kind, vault path) without the credential bytes ever appearing.
+func newBindingRequired(message string, details map[string]any) *Error {
+	return &Error{
+		Class:    ClassBindingRequired,
+		Message:  message,
+		Boundary: BoundarySandbox,
+		Details:  details,
 	}
 }
