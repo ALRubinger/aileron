@@ -108,7 +108,7 @@ JSON is the right choice here for reasons that are nearly the inverse of the act
 
 - **It is a wire format, not a documentation surface.** Humans rarely read it. Authoring ergonomics do not matter.
 - **Every language Aileron will ever interoperate with has a battle-tested, fast JSON implementation in its standard library.** TOML support is patchier.
-- **Streaming and partial parsing are routine.** The OpenAI-compatible chat-completion endpoint streams JSON deltas; the connector sandbox protocol streams JSON-RPC; audit logs are JSONL. None of these have natural TOML idioms.
+- **Streaming and partial parsing are routine.** The LLM gateway endpoints (OpenAI-compatible Chat Completions and Anthropic-compatible Messages) stream JSON deltas; the connector sandbox protocol streams JSON-RPC; audit logs are JSONL. None of these have natural TOML idioms.
 
 ### TOML over YAML for structured content
 

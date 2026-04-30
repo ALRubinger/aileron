@@ -18,10 +18,11 @@ This section holds the architecture decision records (ADRs) that define Aileron'
 - [ADR-0008: Intent Matching Mechanisms](/adr/0008-intent-matching) — Tool augmentation via function calling is the primary mechanism; pre-LLM bypass for high-confidence patterns is opt-in for read-only actions only; agent-defined tools take precedence in name collisions.
 - [ADR-0009: User Channel and OOB Approval Surfaces](/adr/0009-user-channel) — In-band streaming output describes; out-of-band surfaces decide. The agent is structurally never in the trust path for approvals. v1 MVP ships with CLI prompt only; web UI, system notifications, biometric, and a hosted Aileron backend are Phase 2.
 - [ADR-0010: Failure-Handling Policy](/adr/0010-failure-handling) — Failures are visible and structured; closed-set failure-class taxonomy; idempotency is the default; bounded retry on retriable errors; v1 actions are linear with first-failure-terminates semantics. LLM fallback, conditional compensation, and per-call retry tuning are post-MVP enhancements.
+- [ADR-0011: Local Credential Vault](/adr/0011-local-credential-vault) — Encrypted-at-rest local vault for user credentials. Argon2id KDF from a passphrase derives a key encryption key (KEK); AES-256-GCM envelope encryption protects bindings on disk. KEK held in memory for the runtime session, never persisted. TEE-backed and browser-enclave variants exist in code but are post-MVP.
 
 ## The sequence
 
-The ten ADRs form a complete architectural ratification of Aileron's v1, tracked in [issue #343](https://github.com/ALRubinger/aileron/issues/343):
+The eleven ADRs form a complete architectural ratification of Aileron's v1, tracked in [issue #343](https://github.com/ALRubinger/aileron/issues/343):
 
 1. **Manifest Format Conventions** — *landed ([ADR-0001](/adr/0001-manifest-format))*
 2. **Connector Model** — *landed ([ADR-0002](/adr/0002-connector-model))*
@@ -33,13 +34,9 @@ The ten ADRs form a complete architectural ratification of Aileron's v1, tracked
 8. **Intent Matching Mechanisms** — *landed ([ADR-0008](/adr/0008-intent-matching))*
 9. **User Channel and OOB Approval Surfaces** — *landed ([ADR-0009](/adr/0009-user-channel))*
 10. **Failure-Handling Policy** — *landed ([ADR-0010](/adr/0010-failure-handling))*
+11. **Local Credential Vault** — *landed ([ADR-0011](/adr/0011-local-credential-vault))*
 
-Aileron is user-level by construction in v1 — actions live in `~/.aileron/actions/`, not in the project's repo. Project-level shared actions and team-coordination features are post-MVP, deferred until concrete teams ask for them.
-9. User channel and OOB approval surfaces
-10. Failure-handling policy
-11. Project portability
-
-ADRs land in the order above to maximize unblocking — each ADR can reference the formats and primitives ratified by earlier ones.
+Aileron is user-level by construction in v1 — actions live in `~/.aileron/actions/`, not in the project's repo. Project-level shared actions, team-coordination features, and the TEE / browser-enclave vault variants are post-MVP, deferred until the hosted backend ships.
 
 ## How to read these
 

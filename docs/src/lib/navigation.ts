@@ -41,8 +41,17 @@ export const navigation: NavItem[] = [
   {
     label: 'Meet Aileron',
     children: [
-      { label: 'Overview', href: '/' },
-      { label: 'Getting Started', href: '/getting-started/' }
+      { label: 'Overview', href: '/' }
+    ]
+  },
+  {
+    label: 'Concepts',
+    children: [
+      { label: 'Deterministic Agentic Execution', href: '/concepts/deterministic-agentic-execution/' },
+      { label: 'The LLM Gateway', href: '/concepts/llm-gateway/' },
+      { label: 'Actions', href: '/concepts/actions/' },
+      { label: 'Connectors', href: '/concepts/connectors/' },
+      { label: 'The Vault', href: '/concepts/the-vault/' }
     ]
   },
   {
@@ -58,7 +67,8 @@ export const navigation: NavItem[] = [
       { label: 'ADR-0007: Install Consent Flow', href: '/adr/0007-install-consent/' },
       { label: 'ADR-0008: Intent Matching', href: '/adr/0008-intent-matching/' },
       { label: 'ADR-0009: User Channel', href: '/adr/0009-user-channel/' },
-      { label: 'ADR-0010: Failure Handling', href: '/adr/0010-failure-handling/' }
+      { label: 'ADR-0010: Failure Handling', href: '/adr/0010-failure-handling/' },
+      { label: 'ADR-0011: Local Credential Vault', href: '/adr/0011-local-credential-vault/' }
     ]
   }
 ];

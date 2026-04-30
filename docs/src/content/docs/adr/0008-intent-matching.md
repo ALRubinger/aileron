@@ -23,7 +23,7 @@ Aileron sits at the LLM endpoint. Every chat completion request from the agent p
 - The agent's declared tools (the array of function definitions the agent's host code passes in).
 - The agent's hyperparameters (model, temperature, etc.).
 
-What the runtime *doesn't* see — at least not directly — is the user's intent. The agent's host application may have already run the user's input through routing, extraction, or pre-processing. The runtime gets the chat completion request as it would arrive at OpenAI: a list of messages and tools.
+What the runtime *doesn't* see — at least not directly — is the user's intent. The agent's host application may have already run the user's input through routing, extraction, or pre-processing. The runtime gets the request as it would arrive at the upstream provider — either OpenAI's Chat Completions shape (`/v1/chat/completions`) or Anthropic's Messages shape (`/v1/messages`): a list of messages and tools, with provider-specific field naming.
 
 This ADR ratifies how the runtime matches that request to an installed action.
 
@@ -202,7 +202,7 @@ Rejected because it requires LLM-side awareness of Aileron, which violates the "
 
 ### For agent hosts
 
-- Existing agents that point at `https://api.openai.com/v1` (or the Anthropic equivalent) work unchanged when the URL is changed to Aileron's local endpoint. Aileron is an OpenAI-compatible endpoint by construction.
+- Existing agents that point at `https://api.openai.com/v1` or `https://api.anthropic.com/v1` work unchanged when the URL is changed to Aileron's local endpoint. Aileron is both OpenAI- and Anthropic-compatible by construction; it serves Chat Completions on `/v1/chat/completions` and Messages on `/v1/messages`. Tool augmentation, interception, and capability enforcement work identically across both protocols.
 - Tools the host declares are preserved. Aileron is additive only.
 - The agent receives tool results for Aileron-executed actions in the same shape it receives results for its own tools. There is no special handling required.
 
@@ -240,7 +240,7 @@ Rejected because it requires LLM-side awareness of Aileron, which violates the "
 
 ### Tool-augmentation flow (typical agent invocation)
 
-Agent posts to Aileron's chat completion endpoint:
+Agent posts to Aileron's gateway. The example below uses the OpenAI Chat Completions shape; an Anthropic Messages-shaped request to `/v1/messages` flows through the same augmentation and interception logic with provider-specific field names.
 
 ```json
 POST /v1/chat/completions

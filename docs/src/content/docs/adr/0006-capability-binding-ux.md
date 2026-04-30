@@ -105,7 +105,7 @@ Notable absences: there is no `aileron binding bind` command for creating a sing
 
 ### Bindings live in the user's local vault
 
-Bindings are stored in the user's local vault — the same store ADR-0002 designates as the credential-holding boundary. The vault is part of the user's `~/.aileron/` directory, alongside their actions and connector store.
+Bindings are stored in the user's local vault, ratified in [ADR-0011](/adr/0011-local-credential-vault). The vault is part of the user's `~/.aileron/` directory, alongside their actions and connector store, and is encrypted at rest with a passphrase-derived key.
 
 Bindings are user-local by construction. There is no mechanism for sharing bindings across users (that would mean sharing credentials, which is exactly what the trust model is designed to prevent). Shared service-account credentials for teams are a post-MVP feature paired with the hosted backend introduced in [ADR-0009](/adr/0009-user-channel) Phase 2; v1 supports only personal bindings.
 
