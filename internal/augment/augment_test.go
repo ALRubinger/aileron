@@ -150,8 +150,11 @@ func TestAugmentOpenAI_NoActions_ReturnsBodyUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AugmentOpenAI: %v", err)
 	}
-	if string(got) != string(body) {
-		t.Errorf("body modified despite no actions: %s", got)
+	if string(got.Body) != string(body) {
+		t.Errorf("body modified despite no actions: %s", got.Body)
+	}
+	if len(got.OurNames) != 0 {
+		t.Errorf("OurNames = %v, want empty when no actions provided", got.OurNames)
 	}
 }
 
@@ -168,7 +171,7 @@ func TestAugmentOpenAI_AppendsAction(t *testing.T) {
 	}
 
 	var req map[string]any
-	if err := json.Unmarshal(got, &req); err != nil {
+	if err := json.Unmarshal(got.Body, &req); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	tools, _ := req["tools"].([]any)
@@ -186,6 +189,9 @@ func TestAugmentOpenAI_AppendsAction(t *testing.T) {
 	if fn["description"] != "post a ship update" {
 		t.Errorf("description = %v", fn["description"])
 	}
+	if len(got.OurNames) != 1 || got.OurNames[0] != "ship_update" {
+		t.Errorf("OurNames = %v, want [ship_update]", got.OurNames)
+	}
 }
 
 func TestAugmentOpenAI_PreservesAgentTools(t *testing.T) {
@@ -196,7 +202,7 @@ func TestAugmentOpenAI_PreservesAgentTools(t *testing.T) {
 		t.Fatalf("AugmentOpenAI: %v", err)
 	}
 	var req map[string]any
-	json.Unmarshal(got, &req)
+	json.Unmarshal(got.Body, &req)
 	tools, _ := req["tools"].([]any)
 	if len(tools) != 2 {
 		t.Fatalf("got %d tools, want 2", len(tools))
@@ -215,7 +221,7 @@ func TestAugmentOpenAI_NameCollision_RenamesAileronAction(t *testing.T) {
 		t.Fatalf("AugmentOpenAI: %v", err)
 	}
 	var req map[string]any
-	json.Unmarshal(got, &req)
+	json.Unmarshal(got.Body, &req)
 	tools := req["tools"].([]any)
 	if len(tools) != 2 {
 		t.Fatalf("got %d tools, want 2", len(tools))
@@ -228,6 +234,9 @@ func TestAugmentOpenAI_NameCollision_RenamesAileronAction(t *testing.T) {
 	if aileronName != "aileron.search" {
 		t.Errorf("Aileron action name = %v, want aileron.search", aileronName)
 	}
+	if len(got.OurNames) != 1 || got.OurNames[0] != "aileron.search" {
+		t.Errorf("OurNames = %v, want [aileron.search] (post-collision)", got.OurNames)
+	}
 }
 
 func TestAugmentOpenAI_ReverseCollision_RenamesAgentTool(t *testing.T) {
@@ -239,7 +248,7 @@ func TestAugmentOpenAI_ReverseCollision_RenamesAgentTool(t *testing.T) {
 		t.Fatalf("AugmentOpenAI: %v", err)
 	}
 	var req map[string]any
-	json.Unmarshal(got, &req)
+	json.Unmarshal(got.Body, &req)
 	tools := req["tools"].([]any)
 	agentName := tools[0].(map[string]any)["function"].(map[string]any)["name"]
 	if agentName != "agent.search" {
@@ -264,7 +273,7 @@ func TestAugmentAnthropic_AppendsActionInAnthropicShape(t *testing.T) {
 		t.Fatalf("AugmentAnthropic: %v", err)
 	}
 	var req map[string]any
-	json.Unmarshal(got, &req)
+	json.Unmarshal(got.Body, &req)
 	tools, _ := req["tools"].([]any)
 	if len(tools) != 1 {
 		t.Fatalf("got %d tools, want 1", len(tools))
@@ -293,7 +302,7 @@ func TestAugmentAnthropic_NameCollision_RenamesAileronAction(t *testing.T) {
 		t.Fatalf("AugmentAnthropic: %v", err)
 	}
 	var req map[string]any
-	json.Unmarshal(got, &req)
+	json.Unmarshal(got.Body, &req)
 	tools := req["tools"].([]any)
 	if len(tools) != 2 {
 		t.Fatalf("got %d tools, want 2", len(tools))
@@ -315,7 +324,7 @@ func TestAugmentAnthropic_ReverseCollision_RenamesAgentTool(t *testing.T) {
 		t.Fatalf("AugmentAnthropic: %v", err)
 	}
 	var req map[string]any
-	json.Unmarshal(got, &req)
+	json.Unmarshal(got.Body, &req)
 	tools := req["tools"].([]any)
 	if tools[0].(map[string]any)["name"] != "agent.search" {
 		t.Errorf("agent tool name = %v, want agent.search", tools[0].(map[string]any)["name"])

@@ -93,6 +93,7 @@ type apiServer struct {
 	uiBaseURL          string                      // base URL for the web UI (for constructing unlock links)
 	openAIProxy        http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
 	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
+	interceptEngine    interceptEngineHandle       // tool-call intercept engine; nil disables interception (proxy passthrough only)
 	newID              func() string
 	actions            *action.Store // installed actions in ~/.aileron/actions/ (ADR-0003)
 }
