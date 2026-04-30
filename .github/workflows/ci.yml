@@ -22,8 +22,10 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: |
             internal/go.mod
+            cmd/aileron/go.mod
             cmd/aileron-enclave/go.mod
             cmd/aileron-mcp/go.mod
+            cmd/aileron-sh/go.mod
             sdk/go/go.mod
             test/integration/go.mod
 
@@ -47,8 +49,14 @@ jobs:
         working-directory: ui
         run: pnpm install --frozen-lockfile
 
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Go vet
-        run: go vet ./internal/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./sdk/go/...
+        run: task vet:go
 
       - name: Svelte check
         working-directory: ui
@@ -65,20 +73,24 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: |
             internal/go.mod
+            cmd/aileron/go.mod
+            cmd/aileron-enclave/go.mod
+            cmd/aileron-mcp/go.mod
+            cmd/aileron-sh/go.mod
             sdk/go/go.mod
             test/integration/go.mod
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
       - name: Run Go tests
-        run: |
-          gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt ./internal/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./sdk/go/...
-          # Strip generated code (oapi-codegen) from the coverage profile.
-          # Codecov's ignore directive does not match paths under internal/,
-          # so we remove api/gen entries before upload.
-          grep -v '/api/gen/' coverage-raw.txt > coverage.txt
-          rm coverage-raw.txt
+        run: task test:go:ci
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5

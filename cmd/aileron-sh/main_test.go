@@ -108,6 +108,8 @@ allow:
 }
 
 // TestShimPolicyDeny verifies that commands matching deny rules are blocked.
+// Uses a relative path so the project deny (rm -rf *) matches but the
+// built-in deny (rm -rf /*) does not, exercising the project rule directly.
 func TestShimPolicyDeny(t *testing.T) {
 	binary := buildShim(t)
 	dir := writePolicyDir(t, `
@@ -118,7 +120,7 @@ deny:
     description: "no recursive delete"
 `)
 
-	cmd := exec.Command(binary, "-c", "rm -rf /something")
+	cmd := exec.Command(binary, "-c", "rm -rf something")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/sh")
 	out, err := cmd.CombinedOutput()
@@ -141,7 +143,8 @@ deny:
 }
 
 // TestShimPolicyAskDeniesWithoutTTY verifies that ask commands default to
-// deny when there is no controlling terminal.
+// deny when there is no controlling terminal. Uses "docker" because it is
+// not on the built-in allow list, so default:ask actually applies.
 func TestShimPolicyAskDeniesWithoutTTY(t *testing.T) {
 	binary := buildShim(t)
 	dir := writePolicyDir(t, `
@@ -149,7 +152,7 @@ version: 1
 default: ask
 `)
 
-	cmd := exec.Command(binary, "-c", "git push origin main")
+	cmd := exec.Command(binary, "-c", "docker run myimage")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/sh")
 	err := cmd.Run()
@@ -325,8 +328,10 @@ deny:
     description: "no recursive delete"
 `)
 
-	// Simulate the exact wrapper Claude Code sends.
-	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'rm -rf /tmp/test' < /dev/null && pwd -P >| /tmp/claude-test-cwd"
+	// Simulate the exact wrapper Claude Code sends. Inner command uses a
+	// relative path so the project deny ("rm -rf *") matches and the built-in
+	// deny ("rm -rf /*") does not.
+	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'rm -rf tmp/test' < /dev/null && pwd -P >| /tmp/claude-test-cwd"
 	cmd := exec.Command(binary, "-c", "-l", wrapped)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/bash", "AILERON_AGENT=claude")
@@ -424,7 +429,7 @@ deny:
     description: "no recursive delete"
 `)
 
-	cmd := exec.Command(binary, "-c", "rm -rf /something")
+	cmd := exec.Command(binary, "-c", "rm -rf something")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "AILERON_REAL_SHELL=/bin/sh")
 	var stderr bytes.Buffer
@@ -479,7 +484,8 @@ deny:
 }
 
 // TestShimAskDeniesWithoutTTYAudit verifies that ask commands that
-// auto-deny (no tty) write an audit entry.
+// auto-deny (no tty) write an audit entry. Uses "docker" because it is
+// not on the built-in allow list, so default:ask actually applies.
 func TestShimAskDeniesWithoutTTYAudit(t *testing.T) {
 	binary := buildShim(t)
 	dir := writePolicyDir(t, `
@@ -488,7 +494,7 @@ default: ask
 `)
 
 	auditPath := filepath.Join(dir, "audit.jsonl")
-	cmd := exec.Command(binary, "-c", "git push origin main")
+	cmd := exec.Command(binary, "-c", "docker run myimage")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"AILERON_REAL_SHELL=/bin/sh",

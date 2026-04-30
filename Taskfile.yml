@@ -2,6 +2,9 @@ version: "3"
 
 vars:
   COMPOSE_FILE: deploy/docker-compose.yml
+  # Single source of truth for Go test/vet package set, shared by local
+  # (test:go, vet:go) and CI (test:go:ci) targets.
+  GO_TEST_PACKAGES: ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/... ./sdk/go/...
 
 tasks:
   default:
@@ -207,7 +210,22 @@ tasks:
   test:go:
     desc: Run Go tests
     cmds:
-      - go test ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
+      - go test {{.GO_TEST_PACKAGES}}
+
+  test:go:ci:
+    desc: Run Go tests with race, coverage, and JUnit output (used by CI)
+    cmds:
+      - gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt {{.GO_TEST_PACKAGES}}
+      # Strip generated code (oapi-codegen) from the coverage profile.
+      # Codecov's ignore directive does not match paths under internal/,
+      # so we remove api/gen entries before upload.
+      - grep -v '/api/gen/' coverage-raw.txt > coverage.txt
+      - rm coverage-raw.txt
+
+  vet:go:
+    desc: Run go vet over all Go packages
+    cmds:
+      - go vet {{.GO_TEST_PACKAGES}}
 
   test:integration:
     desc: Run integration tests against running services

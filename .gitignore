@@ -18,6 +18,11 @@ ui/.svelte-kit/
 ui/build/
 ui/node_modules/
 
+# Go test artifacts (task test:go:ci output)
+/junit.xml
+/coverage.txt
+/coverage-raw.txt
+
 # UI test artifacts
 ui/coverage/
 ui/coverage-e2e/
