@@ -26,6 +26,11 @@ capabilities = ["read"]
 [match]
 intent = "tell team I shipped"
 
+[[inputs]]
+name = "channel"
+type = "string"
+description = "Slack channel to post to (e.g. '#engineering')."
+
 [[execute]]
 id = "recent_merge"
 connector = "github://aileron/git"

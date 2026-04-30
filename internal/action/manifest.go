@@ -37,6 +37,14 @@ type Manifest struct {
 	// [ADR-0008]: https://docs.withaileron.ai/adr/0008-intent-matching
 	Match Match `toml:"match"`
 
+	// Inputs declares the call-time arguments the action accepts. Per
+	// [ADR-0003], inputs become the JSON Schema `parameters` object the
+	// LLM sees when Aileron exposes the action as a tool. Empty when the
+	// action takes no arguments.
+	//
+	// [ADR-0003]: https://docs.withaileron.ai/adr/0003-action-model
+	Inputs []Input `toml:"inputs"`
+
 	// Execute is the ordered list of connector operations the action runs.
 	// v1 actions are linear chains with first-failure-terminates semantics
 	// (per ADR-0010).
@@ -83,6 +91,35 @@ type Match struct {
 	// Intent is the canonical natural-language phrase the runtime matches
 	// against agent requests when surfacing this action.
 	Intent string `toml:"intent"`
+}
+
+// Input is one declared call-time argument. The set of inputs maps
+// directly to the JSON Schema `parameters` object the LLM sees when
+// Aileron augments the agent's tool catalog with this action.
+type Input struct {
+	// Name is the argument's identifier. Referenced in
+	// `[[execute]]` step `inputs` blocks as `${args.<name>}`.
+	Name string `toml:"name"`
+
+	// Type is the JSON Schema primitive: "string", "integer",
+	// "number", or "boolean". Object/array types are post-MVP.
+	Type string `toml:"type"`
+
+	// Required defaults to true when nil. Set to a non-nil pointer
+	// (`required = false` in TOML) to mark the argument optional.
+	// Pointer rather than bool so absence is distinguishable from
+	// an explicit false.
+	Required *bool `toml:"required"`
+
+	// Description becomes the field-level prose the LLM sees in the
+	// `parameters.properties[name].description` slot. Required.
+	Description string `toml:"description"`
+}
+
+// IsRequired reports whether the input is required, applying the
+// default-true rule when the manifest left `required` unset.
+func (i Input) IsRequired() bool {
+	return i.Required == nil || *i.Required
 }
 
 // ExecuteStep is one step in the action's execution chain. The runtime
