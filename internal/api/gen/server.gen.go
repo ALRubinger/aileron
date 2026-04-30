@@ -93,6 +93,24 @@ func (e ActorRefType) Valid() bool {
 	}
 }
 
+// Defines values for AnthropicMessageRole.
+const (
+	AnthropicMessageRoleAssistant AnthropicMessageRole = "assistant"
+	AnthropicMessageRoleUser      AnthropicMessageRole = "user"
+)
+
+// Valid indicates whether the value is a known member of the AnthropicMessageRole enum.
+func (e AnthropicMessageRole) Valid() bool {
+	switch e {
+	case AnthropicMessageRoleAssistant:
+		return true
+	case AnthropicMessageRoleUser:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ApprovalActorStatus.
 const (
 	ApprovalActorStatusApproved  ApprovalActorStatus = "approved"
@@ -237,6 +255,63 @@ func (e CalendarActionVisibility) Valid() bool {
 	case Private:
 		return true
 	case Public:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ChatCompletionMessageRole.
+const (
+	ChatCompletionMessageRoleAssistant ChatCompletionMessageRole = "assistant"
+	ChatCompletionMessageRoleDeveloper ChatCompletionMessageRole = "developer"
+	ChatCompletionMessageRoleSystem    ChatCompletionMessageRole = "system"
+	ChatCompletionMessageRoleTool      ChatCompletionMessageRole = "tool"
+	ChatCompletionMessageRoleUser      ChatCompletionMessageRole = "user"
+)
+
+// Valid indicates whether the value is a known member of the ChatCompletionMessageRole enum.
+func (e ChatCompletionMessageRole) Valid() bool {
+	switch e {
+	case ChatCompletionMessageRoleAssistant:
+		return true
+	case ChatCompletionMessageRoleDeveloper:
+		return true
+	case ChatCompletionMessageRoleSystem:
+		return true
+	case ChatCompletionMessageRoleTool:
+		return true
+	case ChatCompletionMessageRoleUser:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ChatCompletionToolType.
+const (
+	ChatCompletionToolTypeFunction ChatCompletionToolType = "function"
+)
+
+// Valid indicates whether the value is a known member of the ChatCompletionToolType enum.
+func (e ChatCompletionToolType) Valid() bool {
+	switch e {
+	case ChatCompletionToolTypeFunction:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ChatCompletionToolCallType.
+const (
+	ChatCompletionToolCallTypeFunction ChatCompletionToolCallType = "function"
+)
+
+// Valid indicates whether the value is a known member of the ChatCompletionToolCallType enum.
+func (e ChatCompletionToolCallType) Valid() bool {
+	switch e {
+	case ChatCompletionToolCallTypeFunction:
 		return true
 	default:
 		return false
@@ -909,6 +984,36 @@ func (e IntentStatus) Valid() bool {
 	}
 }
 
+// Defines values for MessagesResponseRole.
+const (
+	Assistant MessagesResponseRole = "assistant"
+)
+
+// Valid indicates whether the value is a known member of the MessagesResponseRole enum.
+func (e MessagesResponseRole) Valid() bool {
+	switch e {
+	case Assistant:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for MessagesResponseType.
+const (
+	Message MessagesResponseType = "message"
+)
+
+// Valid indicates whether the value is a known member of the MessagesResponseType enum.
+func (e MessagesResponseType) Valid() bool {
+	switch e {
+	case Message:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PaymentActionPaymentInstrumentPreference.
 const (
 	Ach          PaymentActionPaymentInstrumentPreference = "ach"
@@ -1247,6 +1352,29 @@ type AnalyticsSummary struct {
 	} `json:"totals,omitempty"`
 }
 
+// AnthropicMessage defines model for AnthropicMessage.
+type AnthropicMessage struct {
+	// Content String or array of content blocks (`text`, `tool_use`,
+	// `tool_result`, `image`, ...). Shape follows Anthropic's
+	// Messages contract.
+	Content              interface{}            `json:"content"`
+	Role                 AnthropicMessageRole   `json:"role"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// AnthropicMessageRole defines model for AnthropicMessage.Role.
+type AnthropicMessageRole string
+
+// AnthropicTool defines model for AnthropicTool.
+type AnthropicTool struct {
+	Description *string `json:"description,omitempty"`
+
+	// InputSchema JSON Schema for the tool's input.
+	InputSchema          *map[string]interface{} `json:"input_schema,omitempty"`
+	Name                 string                  `json:"name"`
+	AdditionalProperties map[string]interface{}  `json:"-"`
+}
+
 // AppendEvidenceRequest defines model for AppendEvidenceRequest.
 type AppendEvidenceRequest struct {
 	Evidence []EvidenceItem `json:"evidence"`
@@ -1349,6 +1477,99 @@ type CalendarAttendee struct {
 	Name     *string             `json:"name,omitempty"`
 	Optional *bool               `json:"optional,omitempty"`
 }
+
+// ChatCompletionChoice defines model for ChatCompletionChoice.
+type ChatCompletionChoice struct {
+	FinishReason         string                 `json:"finish_reason"`
+	Index                int                    `json:"index"`
+	Message              ChatCompletionMessage  `json:"message"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// ChatCompletionFunctionDef defines model for ChatCompletionFunctionDef.
+type ChatCompletionFunctionDef struct {
+	Description *string `json:"description,omitempty"`
+	Name        string  `json:"name"`
+
+	// Parameters JSON Schema for the function's parameters.
+	Parameters           *map[string]interface{} `json:"parameters,omitempty"`
+	AdditionalProperties map[string]interface{}  `json:"-"`
+}
+
+// ChatCompletionMessage defines model for ChatCompletionMessage.
+type ChatCompletionMessage struct {
+	// Content String or array of content parts; shape follows the upstream
+	// provider's contract. Aileron does not require parsing.
+	Content interface{}               `json:"content,omitempty"`
+	Name    *string                   `json:"name,omitempty"`
+	Role    ChatCompletionMessageRole `json:"role"`
+
+	// ToolCallId Required on `tool` role messages.
+	ToolCallId           *string                   `json:"tool_call_id,omitempty"`
+	ToolCalls            *[]ChatCompletionToolCall `json:"tool_calls,omitempty"`
+	AdditionalProperties map[string]interface{}    `json:"-"`
+}
+
+// ChatCompletionMessageRole defines model for ChatCompletionMessage.Role.
+type ChatCompletionMessageRole string
+
+// ChatCompletionRequest defines model for ChatCompletionRequest.
+type ChatCompletionRequest struct {
+	Messages []ChatCompletionMessage `json:"messages"`
+
+	// Model Model identifier passed to the upstream provider.
+	Model string `json:"model"`
+
+	// Stream When true, the response is `text/event-stream`. Aileron
+	// buffers tool-call deltas for augmented actions until the call
+	// is structurally complete.
+	Stream *bool `json:"stream,omitempty"`
+
+	// ToolChoice Passed through to the upstream provider unchanged.
+	ToolChoice interface{} `json:"tool_choice,omitempty"`
+
+	// Tools Agent-declared tools. Aileron preserves these unchanged and
+	// appends installed actions to the array before forwarding
+	// upstream.
+	Tools                *[]ChatCompletionTool  `json:"tools,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// ChatCompletionResponse defines model for ChatCompletionResponse.
+type ChatCompletionResponse struct {
+	Choices              []ChatCompletionChoice  `json:"choices"`
+	Created              *int                    `json:"created,omitempty"`
+	Id                   string                  `json:"id"`
+	Model                string                  `json:"model"`
+	Object               string                  `json:"object"`
+	Usage                *map[string]interface{} `json:"usage,omitempty"`
+	AdditionalProperties map[string]interface{}  `json:"-"`
+}
+
+// ChatCompletionTool defines model for ChatCompletionTool.
+type ChatCompletionTool struct {
+	Function             *ChatCompletionFunctionDef `json:"function,omitempty"`
+	Type                 ChatCompletionToolType     `json:"type"`
+	AdditionalProperties map[string]interface{}     `json:"-"`
+}
+
+// ChatCompletionToolType defines model for ChatCompletionTool.Type.
+type ChatCompletionToolType string
+
+// ChatCompletionToolCall defines model for ChatCompletionToolCall.
+type ChatCompletionToolCall struct {
+	Function struct {
+		// Arguments JSON-encoded argument object.
+		Arguments string `json:"arguments"`
+		Name      string `json:"name"`
+	} `json:"function"`
+	Id                   string                     `json:"id"`
+	Type                 ChatCompletionToolCallType `json:"type"`
+	AdditionalProperties map[string]interface{}     `json:"-"`
+}
+
+// ChatCompletionToolCallType defines model for ChatCompletionToolCall.Type.
+type ChatCompletionToolCallType string
 
 // CloudAction defines model for CloudAction.
 type CloudAction struct {
@@ -1822,6 +2043,46 @@ type LineItem struct {
 	Sku         *string `json:"sku,omitempty"`
 	UnitAmount  Money   `json:"unit_amount"`
 }
+
+// MessagesRequest defines model for MessagesRequest.
+type MessagesRequest struct {
+	MaxTokens int                `json:"max_tokens"`
+	Messages  []AnthropicMessage `json:"messages"`
+	Model     string             `json:"model"`
+	Stream    *bool              `json:"stream,omitempty"`
+
+	// System System prompt; string or array of content blocks (Anthropic
+	// shape).
+	System interface{} `json:"system,omitempty"`
+
+	// ToolChoice Passed through to the upstream provider unchanged.
+	ToolChoice interface{} `json:"tool_choice,omitempty"`
+
+	// Tools Agent-declared tools. Aileron preserves these unchanged and
+	// appends installed actions to the array before forwarding
+	// upstream (Anthropic shape).
+	Tools                *[]AnthropicTool       `json:"tools,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
+}
+
+// MessagesResponse defines model for MessagesResponse.
+type MessagesResponse struct {
+	Content              []map[string]interface{} `json:"content"`
+	Id                   string                   `json:"id"`
+	Model                string                   `json:"model"`
+	Role                 MessagesResponseRole     `json:"role"`
+	StopReason           *string                  `json:"stop_reason,omitempty"`
+	StopSequence         *string                  `json:"stop_sequence,omitempty"`
+	Type                 MessagesResponseType     `json:"type"`
+	Usage                *map[string]interface{}  `json:"usage,omitempty"`
+	AdditionalProperties map[string]interface{}   `json:"-"`
+}
+
+// MessagesResponseRole defines model for MessagesResponse.Role.
+type MessagesResponseRole string
+
+// MessagesResponseType defines model for MessagesResponse.Type.
+type MessagesResponseType string
 
 // ModifyApprovalRequest defines model for ModifyApprovalRequest.
 type ModifyApprovalRequest struct {
@@ -2338,6 +2599,9 @@ type DenyRequestJSONRequestBody = DenyRequest
 // ModifyRequestJSONRequestBody defines body for ModifyRequest for application/json ContentType.
 type ModifyRequestJSONRequestBody = ModifyApprovalRequest
 
+// PostChatCompletionsJSONRequestBody defines body for PostChatCompletions for application/json ContentType.
+type PostChatCompletionsJSONRequestBody = ChatCompletionRequest
+
 // CreateConnectorJSONRequestBody defines body for CreateConnector for application/json ContentType.
 type CreateConnectorJSONRequestBody = CreateConnectorRequest
 
@@ -2365,6 +2629,9 @@ type CreateIntentJSONRequestBody = CreateIntentRequest
 // AppendIntentEvidenceJSONRequestBody defines body for AppendIntentEvidence for application/json ContentType.
 type AppendIntentEvidenceJSONRequestBody = AppendEvidenceRequest
 
+// PostMessagesJSONRequestBody defines body for PostMessages for application/json ContentType.
+type PostMessagesJSONRequestBody = MessagesRequest
+
 // CreatePolicyJSONRequestBody defines body for CreatePolicy for application/json ContentType.
 type CreatePolicyJSONRequestBody = CreatePolicyRequest
 
@@ -2388,6 +2655,1242 @@ type SetPassphraseJSONRequestBody = SetPassphraseRequest
 
 // UnlockVaultJSONRequestBody defines body for UnlockVault for application/json ContentType.
 type UnlockVaultJSONRequestBody = UnlockVaultRequest
+
+// Getter for additional properties for AnthropicMessage. Returns the specified
+// element and whether it was found
+func (a AnthropicMessage) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for AnthropicMessage
+func (a *AnthropicMessage) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for AnthropicMessage to handle AdditionalProperties
+func (a *AnthropicMessage) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["content"]; found {
+		err = json.Unmarshal(raw, &a.Content)
+		if err != nil {
+			return fmt.Errorf("error reading 'content': %w", err)
+		}
+		delete(object, "content")
+	}
+
+	if raw, found := object["role"]; found {
+		err = json.Unmarshal(raw, &a.Role)
+		if err != nil {
+			return fmt.Errorf("error reading 'role': %w", err)
+		}
+		delete(object, "role")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for AnthropicMessage to handle AdditionalProperties
+func (a AnthropicMessage) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["content"], err = json.Marshal(a.Content)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'content': %w", err)
+	}
+
+	object["role"], err = json.Marshal(a.Role)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'role': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for AnthropicTool. Returns the specified
+// element and whether it was found
+func (a AnthropicTool) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for AnthropicTool
+func (a *AnthropicTool) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for AnthropicTool to handle AdditionalProperties
+func (a *AnthropicTool) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["description"]; found {
+		err = json.Unmarshal(raw, &a.Description)
+		if err != nil {
+			return fmt.Errorf("error reading 'description': %w", err)
+		}
+		delete(object, "description")
+	}
+
+	if raw, found := object["input_schema"]; found {
+		err = json.Unmarshal(raw, &a.InputSchema)
+		if err != nil {
+			return fmt.Errorf("error reading 'input_schema': %w", err)
+		}
+		delete(object, "input_schema")
+	}
+
+	if raw, found := object["name"]; found {
+		err = json.Unmarshal(raw, &a.Name)
+		if err != nil {
+			return fmt.Errorf("error reading 'name': %w", err)
+		}
+		delete(object, "name")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for AnthropicTool to handle AdditionalProperties
+func (a AnthropicTool) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Description != nil {
+		object["description"], err = json.Marshal(a.Description)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'description': %w", err)
+		}
+	}
+
+	if a.InputSchema != nil {
+		object["input_schema"], err = json.Marshal(a.InputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'input_schema': %w", err)
+		}
+	}
+
+	object["name"], err = json.Marshal(a.Name)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'name': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ChatCompletionChoice. Returns the specified
+// element and whether it was found
+func (a ChatCompletionChoice) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionChoice
+func (a *ChatCompletionChoice) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionChoice to handle AdditionalProperties
+func (a *ChatCompletionChoice) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["finish_reason"]; found {
+		err = json.Unmarshal(raw, &a.FinishReason)
+		if err != nil {
+			return fmt.Errorf("error reading 'finish_reason': %w", err)
+		}
+		delete(object, "finish_reason")
+	}
+
+	if raw, found := object["index"]; found {
+		err = json.Unmarshal(raw, &a.Index)
+		if err != nil {
+			return fmt.Errorf("error reading 'index': %w", err)
+		}
+		delete(object, "index")
+	}
+
+	if raw, found := object["message"]; found {
+		err = json.Unmarshal(raw, &a.Message)
+		if err != nil {
+			return fmt.Errorf("error reading 'message': %w", err)
+		}
+		delete(object, "message")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionChoice to handle AdditionalProperties
+func (a ChatCompletionChoice) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["finish_reason"], err = json.Marshal(a.FinishReason)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'finish_reason': %w", err)
+	}
+
+	object["index"], err = json.Marshal(a.Index)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'index': %w", err)
+	}
+
+	object["message"], err = json.Marshal(a.Message)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'message': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ChatCompletionFunctionDef. Returns the specified
+// element and whether it was found
+func (a ChatCompletionFunctionDef) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionFunctionDef
+func (a *ChatCompletionFunctionDef) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionFunctionDef to handle AdditionalProperties
+func (a *ChatCompletionFunctionDef) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["description"]; found {
+		err = json.Unmarshal(raw, &a.Description)
+		if err != nil {
+			return fmt.Errorf("error reading 'description': %w", err)
+		}
+		delete(object, "description")
+	}
+
+	if raw, found := object["name"]; found {
+		err = json.Unmarshal(raw, &a.Name)
+		if err != nil {
+			return fmt.Errorf("error reading 'name': %w", err)
+		}
+		delete(object, "name")
+	}
+
+	if raw, found := object["parameters"]; found {
+		err = json.Unmarshal(raw, &a.Parameters)
+		if err != nil {
+			return fmt.Errorf("error reading 'parameters': %w", err)
+		}
+		delete(object, "parameters")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionFunctionDef to handle AdditionalProperties
+func (a ChatCompletionFunctionDef) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Description != nil {
+		object["description"], err = json.Marshal(a.Description)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'description': %w", err)
+		}
+	}
+
+	object["name"], err = json.Marshal(a.Name)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'name': %w", err)
+	}
+
+	if a.Parameters != nil {
+		object["parameters"], err = json.Marshal(a.Parameters)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'parameters': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ChatCompletionMessage. Returns the specified
+// element and whether it was found
+func (a ChatCompletionMessage) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionMessage
+func (a *ChatCompletionMessage) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionMessage to handle AdditionalProperties
+func (a *ChatCompletionMessage) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["content"]; found {
+		err = json.Unmarshal(raw, &a.Content)
+		if err != nil {
+			return fmt.Errorf("error reading 'content': %w", err)
+		}
+		delete(object, "content")
+	}
+
+	if raw, found := object["name"]; found {
+		err = json.Unmarshal(raw, &a.Name)
+		if err != nil {
+			return fmt.Errorf("error reading 'name': %w", err)
+		}
+		delete(object, "name")
+	}
+
+	if raw, found := object["role"]; found {
+		err = json.Unmarshal(raw, &a.Role)
+		if err != nil {
+			return fmt.Errorf("error reading 'role': %w", err)
+		}
+		delete(object, "role")
+	}
+
+	if raw, found := object["tool_call_id"]; found {
+		err = json.Unmarshal(raw, &a.ToolCallId)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_call_id': %w", err)
+		}
+		delete(object, "tool_call_id")
+	}
+
+	if raw, found := object["tool_calls"]; found {
+		err = json.Unmarshal(raw, &a.ToolCalls)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_calls': %w", err)
+		}
+		delete(object, "tool_calls")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionMessage to handle AdditionalProperties
+func (a ChatCompletionMessage) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["content"], err = json.Marshal(a.Content)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'content': %w", err)
+	}
+
+	if a.Name != nil {
+		object["name"], err = json.Marshal(a.Name)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'name': %w", err)
+		}
+	}
+
+	object["role"], err = json.Marshal(a.Role)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'role': %w", err)
+	}
+
+	if a.ToolCallId != nil {
+		object["tool_call_id"], err = json.Marshal(a.ToolCallId)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tool_call_id': %w", err)
+		}
+	}
+
+	if a.ToolCalls != nil {
+		object["tool_calls"], err = json.Marshal(a.ToolCalls)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tool_calls': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ChatCompletionRequest. Returns the specified
+// element and whether it was found
+func (a ChatCompletionRequest) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionRequest
+func (a *ChatCompletionRequest) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionRequest to handle AdditionalProperties
+func (a *ChatCompletionRequest) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["messages"]; found {
+		err = json.Unmarshal(raw, &a.Messages)
+		if err != nil {
+			return fmt.Errorf("error reading 'messages': %w", err)
+		}
+		delete(object, "messages")
+	}
+
+	if raw, found := object["model"]; found {
+		err = json.Unmarshal(raw, &a.Model)
+		if err != nil {
+			return fmt.Errorf("error reading 'model': %w", err)
+		}
+		delete(object, "model")
+	}
+
+	if raw, found := object["stream"]; found {
+		err = json.Unmarshal(raw, &a.Stream)
+		if err != nil {
+			return fmt.Errorf("error reading 'stream': %w", err)
+		}
+		delete(object, "stream")
+	}
+
+	if raw, found := object["tool_choice"]; found {
+		err = json.Unmarshal(raw, &a.ToolChoice)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_choice': %w", err)
+		}
+		delete(object, "tool_choice")
+	}
+
+	if raw, found := object["tools"]; found {
+		err = json.Unmarshal(raw, &a.Tools)
+		if err != nil {
+			return fmt.Errorf("error reading 'tools': %w", err)
+		}
+		delete(object, "tools")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionRequest to handle AdditionalProperties
+func (a ChatCompletionRequest) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Messages != nil {
+		object["messages"], err = json.Marshal(a.Messages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'messages': %w", err)
+		}
+	}
+
+	object["model"], err = json.Marshal(a.Model)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'model': %w", err)
+	}
+
+	if a.Stream != nil {
+		object["stream"], err = json.Marshal(a.Stream)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stream': %w", err)
+		}
+	}
+
+	object["tool_choice"], err = json.Marshal(a.ToolChoice)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'tool_choice': %w", err)
+	}
+
+	if a.Tools != nil {
+		object["tools"], err = json.Marshal(a.Tools)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tools': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ChatCompletionResponse. Returns the specified
+// element and whether it was found
+func (a ChatCompletionResponse) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionResponse
+func (a *ChatCompletionResponse) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionResponse to handle AdditionalProperties
+func (a *ChatCompletionResponse) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["choices"]; found {
+		err = json.Unmarshal(raw, &a.Choices)
+		if err != nil {
+			return fmt.Errorf("error reading 'choices': %w", err)
+		}
+		delete(object, "choices")
+	}
+
+	if raw, found := object["created"]; found {
+		err = json.Unmarshal(raw, &a.Created)
+		if err != nil {
+			return fmt.Errorf("error reading 'created': %w", err)
+		}
+		delete(object, "created")
+	}
+
+	if raw, found := object["id"]; found {
+		err = json.Unmarshal(raw, &a.Id)
+		if err != nil {
+			return fmt.Errorf("error reading 'id': %w", err)
+		}
+		delete(object, "id")
+	}
+
+	if raw, found := object["model"]; found {
+		err = json.Unmarshal(raw, &a.Model)
+		if err != nil {
+			return fmt.Errorf("error reading 'model': %w", err)
+		}
+		delete(object, "model")
+	}
+
+	if raw, found := object["object"]; found {
+		err = json.Unmarshal(raw, &a.Object)
+		if err != nil {
+			return fmt.Errorf("error reading 'object': %w", err)
+		}
+		delete(object, "object")
+	}
+
+	if raw, found := object["usage"]; found {
+		err = json.Unmarshal(raw, &a.Usage)
+		if err != nil {
+			return fmt.Errorf("error reading 'usage': %w", err)
+		}
+		delete(object, "usage")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionResponse to handle AdditionalProperties
+func (a ChatCompletionResponse) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Choices != nil {
+		object["choices"], err = json.Marshal(a.Choices)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'choices': %w", err)
+		}
+	}
+
+	if a.Created != nil {
+		object["created"], err = json.Marshal(a.Created)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'created': %w", err)
+		}
+	}
+
+	object["id"], err = json.Marshal(a.Id)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'id': %w", err)
+	}
+
+	object["model"], err = json.Marshal(a.Model)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'model': %w", err)
+	}
+
+	object["object"], err = json.Marshal(a.Object)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'object': %w", err)
+	}
+
+	if a.Usage != nil {
+		object["usage"], err = json.Marshal(a.Usage)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'usage': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ChatCompletionTool. Returns the specified
+// element and whether it was found
+func (a ChatCompletionTool) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionTool
+func (a *ChatCompletionTool) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionTool to handle AdditionalProperties
+func (a *ChatCompletionTool) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["function"]; found {
+		err = json.Unmarshal(raw, &a.Function)
+		if err != nil {
+			return fmt.Errorf("error reading 'function': %w", err)
+		}
+		delete(object, "function")
+	}
+
+	if raw, found := object["type"]; found {
+		err = json.Unmarshal(raw, &a.Type)
+		if err != nil {
+			return fmt.Errorf("error reading 'type': %w", err)
+		}
+		delete(object, "type")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionTool to handle AdditionalProperties
+func (a ChatCompletionTool) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Function != nil {
+		object["function"], err = json.Marshal(a.Function)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'function': %w", err)
+		}
+	}
+
+	object["type"], err = json.Marshal(a.Type)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'type': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for ChatCompletionToolCall. Returns the specified
+// element and whether it was found
+func (a ChatCompletionToolCall) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for ChatCompletionToolCall
+func (a *ChatCompletionToolCall) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for ChatCompletionToolCall to handle AdditionalProperties
+func (a *ChatCompletionToolCall) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["function"]; found {
+		err = json.Unmarshal(raw, &a.Function)
+		if err != nil {
+			return fmt.Errorf("error reading 'function': %w", err)
+		}
+		delete(object, "function")
+	}
+
+	if raw, found := object["id"]; found {
+		err = json.Unmarshal(raw, &a.Id)
+		if err != nil {
+			return fmt.Errorf("error reading 'id': %w", err)
+		}
+		delete(object, "id")
+	}
+
+	if raw, found := object["type"]; found {
+		err = json.Unmarshal(raw, &a.Type)
+		if err != nil {
+			return fmt.Errorf("error reading 'type': %w", err)
+		}
+		delete(object, "type")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for ChatCompletionToolCall to handle AdditionalProperties
+func (a ChatCompletionToolCall) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["function"], err = json.Marshal(a.Function)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'function': %w", err)
+	}
+
+	object["id"], err = json.Marshal(a.Id)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'id': %w", err)
+	}
+
+	object["type"], err = json.Marshal(a.Type)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'type': %w", err)
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for MessagesRequest. Returns the specified
+// element and whether it was found
+func (a MessagesRequest) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for MessagesRequest
+func (a *MessagesRequest) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for MessagesRequest to handle AdditionalProperties
+func (a *MessagesRequest) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["max_tokens"]; found {
+		err = json.Unmarshal(raw, &a.MaxTokens)
+		if err != nil {
+			return fmt.Errorf("error reading 'max_tokens': %w", err)
+		}
+		delete(object, "max_tokens")
+	}
+
+	if raw, found := object["messages"]; found {
+		err = json.Unmarshal(raw, &a.Messages)
+		if err != nil {
+			return fmt.Errorf("error reading 'messages': %w", err)
+		}
+		delete(object, "messages")
+	}
+
+	if raw, found := object["model"]; found {
+		err = json.Unmarshal(raw, &a.Model)
+		if err != nil {
+			return fmt.Errorf("error reading 'model': %w", err)
+		}
+		delete(object, "model")
+	}
+
+	if raw, found := object["stream"]; found {
+		err = json.Unmarshal(raw, &a.Stream)
+		if err != nil {
+			return fmt.Errorf("error reading 'stream': %w", err)
+		}
+		delete(object, "stream")
+	}
+
+	if raw, found := object["system"]; found {
+		err = json.Unmarshal(raw, &a.System)
+		if err != nil {
+			return fmt.Errorf("error reading 'system': %w", err)
+		}
+		delete(object, "system")
+	}
+
+	if raw, found := object["tool_choice"]; found {
+		err = json.Unmarshal(raw, &a.ToolChoice)
+		if err != nil {
+			return fmt.Errorf("error reading 'tool_choice': %w", err)
+		}
+		delete(object, "tool_choice")
+	}
+
+	if raw, found := object["tools"]; found {
+		err = json.Unmarshal(raw, &a.Tools)
+		if err != nil {
+			return fmt.Errorf("error reading 'tools': %w", err)
+		}
+		delete(object, "tools")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for MessagesRequest to handle AdditionalProperties
+func (a MessagesRequest) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	object["max_tokens"], err = json.Marshal(a.MaxTokens)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'max_tokens': %w", err)
+	}
+
+	if a.Messages != nil {
+		object["messages"], err = json.Marshal(a.Messages)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'messages': %w", err)
+		}
+	}
+
+	object["model"], err = json.Marshal(a.Model)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'model': %w", err)
+	}
+
+	if a.Stream != nil {
+		object["stream"], err = json.Marshal(a.Stream)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stream': %w", err)
+		}
+	}
+
+	object["system"], err = json.Marshal(a.System)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'system': %w", err)
+	}
+
+	object["tool_choice"], err = json.Marshal(a.ToolChoice)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'tool_choice': %w", err)
+	}
+
+	if a.Tools != nil {
+		object["tools"], err = json.Marshal(a.Tools)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'tools': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
+
+// Getter for additional properties for MessagesResponse. Returns the specified
+// element and whether it was found
+func (a MessagesResponse) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for MessagesResponse
+func (a *MessagesResponse) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for MessagesResponse to handle AdditionalProperties
+func (a *MessagesResponse) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["content"]; found {
+		err = json.Unmarshal(raw, &a.Content)
+		if err != nil {
+			return fmt.Errorf("error reading 'content': %w", err)
+		}
+		delete(object, "content")
+	}
+
+	if raw, found := object["id"]; found {
+		err = json.Unmarshal(raw, &a.Id)
+		if err != nil {
+			return fmt.Errorf("error reading 'id': %w", err)
+		}
+		delete(object, "id")
+	}
+
+	if raw, found := object["model"]; found {
+		err = json.Unmarshal(raw, &a.Model)
+		if err != nil {
+			return fmt.Errorf("error reading 'model': %w", err)
+		}
+		delete(object, "model")
+	}
+
+	if raw, found := object["role"]; found {
+		err = json.Unmarshal(raw, &a.Role)
+		if err != nil {
+			return fmt.Errorf("error reading 'role': %w", err)
+		}
+		delete(object, "role")
+	}
+
+	if raw, found := object["stop_reason"]; found {
+		err = json.Unmarshal(raw, &a.StopReason)
+		if err != nil {
+			return fmt.Errorf("error reading 'stop_reason': %w", err)
+		}
+		delete(object, "stop_reason")
+	}
+
+	if raw, found := object["stop_sequence"]; found {
+		err = json.Unmarshal(raw, &a.StopSequence)
+		if err != nil {
+			return fmt.Errorf("error reading 'stop_sequence': %w", err)
+		}
+		delete(object, "stop_sequence")
+	}
+
+	if raw, found := object["type"]; found {
+		err = json.Unmarshal(raw, &a.Type)
+		if err != nil {
+			return fmt.Errorf("error reading 'type': %w", err)
+		}
+		delete(object, "type")
+	}
+
+	if raw, found := object["usage"]; found {
+		err = json.Unmarshal(raw, &a.Usage)
+		if err != nil {
+			return fmt.Errorf("error reading 'usage': %w", err)
+		}
+		delete(object, "usage")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for MessagesResponse to handle AdditionalProperties
+func (a MessagesResponse) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Content != nil {
+		object["content"], err = json.Marshal(a.Content)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'content': %w", err)
+		}
+	}
+
+	object["id"], err = json.Marshal(a.Id)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'id': %w", err)
+	}
+
+	object["model"], err = json.Marshal(a.Model)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'model': %w", err)
+	}
+
+	object["role"], err = json.Marshal(a.Role)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'role': %w", err)
+	}
+
+	if a.StopReason != nil {
+		object["stop_reason"], err = json.Marshal(a.StopReason)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stop_reason': %w", err)
+		}
+	}
+
+	if a.StopSequence != nil {
+		object["stop_sequence"], err = json.Marshal(a.StopSequence)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'stop_sequence': %w", err)
+		}
+	}
+
+	object["type"], err = json.Marshal(a.Type)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling 'type': %w", err)
+	}
+
+	if a.Usage != nil {
+		object["usage"], err = json.Marshal(a.Usage)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'usage': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
 
 // AsPolicyConditionValue0 returns the union data inside the PolicyCondition_Value as a PolicyConditionValue0
 func (t PolicyCondition_Value) AsPolicyConditionValue0() (PolicyConditionValue0, error) {
@@ -2549,6 +4052,9 @@ type ServerInterface interface {
 	// Approve with modifications
 	// (POST /v1/approvals/{approval_id}/modify)
 	ModifyRequest(w http.ResponseWriter, r *http.Request, approvalId ApprovalId)
+	// OpenAI-compatible chat completions endpoint
+	// (POST /v1/chat/completions)
+	PostChatCompletions(w http.ResponseWriter, r *http.Request)
 	// Initiate OAuth flow to connect an external account
 	// (GET /v1/connect/{provider})
 	ConnectAccount(w http.ResponseWriter, r *http.Request, provider string, params ConnectAccountParams)
@@ -2621,6 +4127,9 @@ type ServerInterface interface {
 	// Attach evidence to an intent
 	// (POST /v1/intents/{intent_id}/evidence)
 	AppendIntentEvidence(w http.ResponseWriter, r *http.Request, intentId IntentId)
+	// Anthropic-compatible messages endpoint
+	// (POST /v1/messages)
+	PostMessages(w http.ResponseWriter, r *http.Request)
 	// List policies
 	// (GET /v1/policies)
 	ListPolicies(w http.ResponseWriter, r *http.Request, params ListPoliciesParams)
@@ -2938,6 +4447,20 @@ func (siw *ServerInterfaceWrapper) ModifyRequest(w http.ResponseWriter, r *http.
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ModifyRequest(w, r, approvalId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostChatCompletions operation middleware
+func (siw *ServerInterfaceWrapper) PostChatCompletions(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostChatCompletions(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -3728,6 +5251,20 @@ func (siw *ServerInterfaceWrapper) AppendIntentEvidence(w http.ResponseWriter, r
 	handler.ServeHTTP(w, r)
 }
 
+// PostMessages operation middleware
+func (siw *ServerInterfaceWrapper) PostMessages(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostMessages(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListPolicies operation middleware
 func (siw *ServerInterfaceWrapper) ListPolicies(w http.ResponseWriter, r *http.Request) {
 
@@ -4327,6 +5864,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("POST "+options.BaseURL+"/v1/approvals/{approval_id}/approve", wrapper.ApproveRequest)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/approvals/{approval_id}/deny", wrapper.DenyRequest)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/approvals/{approval_id}/modify", wrapper.ModifyRequest)
+	m.HandleFunc("POST "+options.BaseURL+"/v1/chat/completions", wrapper.PostChatCompletions)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/connect/{provider}", wrapper.ConnectAccount)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/connect/{provider}/callback", wrapper.ConnectAccountCallback)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/connected-accounts", wrapper.ListConnectedAccounts)
@@ -4351,6 +5889,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("POST "+options.BaseURL+"/v1/intents", wrapper.CreateIntent)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/intents/{intent_id}", wrapper.GetIntent)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/intents/{intent_id}/evidence", wrapper.AppendIntentEvidence)
+	m.HandleFunc("POST "+options.BaseURL+"/v1/messages", wrapper.PostMessages)
 	m.HandleFunc("GET "+options.BaseURL+"/v1/policies", wrapper.ListPolicies)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/policies", wrapper.CreatePolicy)
 	m.HandleFunc("POST "+options.BaseURL+"/v1/policies/simulate", wrapper.SimulatePolicy)
@@ -4377,190 +5916,238 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-	"H4sIAAAAAAAC/+x923LcOLLgryC4GzH2bqkkX7pnWk/rttXdbrvHCsuefrAcDBSZVYUWCdAAWFK1QxHn",
-	"aT9g43zhfMkGbiRIgpeSVLI9My+2igSBRCKRNyQyP0cJywtGgUoRHX+OCsxxDhK4/vWsKDjb4Oxlqn4R",
-	"Gh1HBZbraBZRnEN0HGHbICZpNIs4fCoJhzQ6lryEWSSSNeRYfSq3hWouJCd0FV1fz6LnjFJIJOO9fSeu",
-	"xe6dn1xBUkrCaG/n4Frs3vnPHFPZ2/FKvd2905dUwkCvRL/evdtTvIIz8idU3X4qgW/rfgu8glioBn4/",
-	"KSxxmcno+LujWZTjK5KXeXT8+Ej9ItT8ejRzwynYVsCr8d6xC6CDA0rdYgRylpFk24uQQr/eFSHXqrEo",
-	"GBWg6ftHnL6FTyUIqX4lTGNZ/YmLIiMJVgRy+Idgejp1t/+TwzI6jv7HYb13Ds1bcXjCOeNmqBREwkmh",
-	"OomOo5d0gzOSIm4HNHtgmZHkHgZ3I6FLItcoKTkHKhEHwUqeABISS1AQ/cT4gqSpWb9940OUyyVJiIKk",
-	"AJ4TIQijQoHxdyZ/YiVN9w/FW4cCyiRa6jGvZ9F7iku5Zpz8CfcAw29q5nSFGEfEEokaHqi0AymQ/qF2",
-	"5GuWXNwHRHowRATK9IDon//136ik6ochoNM3Z+/Q4ebRYSmAi8McDgssRLHmWMChaag3sR1Ii5JE8+MK",
-	"6oKzArgkZiOmLMeEjsH7QrcyPSmc/FEKSZYOSd39PotykDjFUmMCpylRDXF26o1tWIb9kC3+gERvTVHm",
-	"OebbYKcS8xXIMWANmO9M22s3xOcIrnBeZGroD9GKyHlRZllsmcI84aB24ky/IUKUEHzE8lyhUS1bkbHt",
-	"nEMGWKhGScbKdO429jwvpfkYckyyuQCaVj9SjpeqjwRnQFPM57AB6oFQ4G2uH6zVHNQDzpKSg37oABbl",
-	"Iicy+jgLsPCaL38wb2u0fgygvIGwLoUQUWR4Gxv+H1gVkgYfXxDDRoAqqfUh2gBNGddSo2CCSKalE9AN",
-	"4YxarOKCKFgh4eAjyGEu5pCQgpi2kiQXppXCfOwwrx6UQrJ8HDUawh6EMP5WUdhdIaOiQYsMvDKTWJc5",
-	"1gIZ+IYY4Cvli5dUkhzG56FlsW4SnAzF2VaSRJzVO6s5qUqXzLAEmmzjXHQbFd8deTOrVI9ZVPzwXejF",
-	"dQCUxTbmRFzEGWwg6+cMoVG6fKIAQ19NMI2ETXr4B5M4i3NCGY9LSqSYCrj+UPRjTsRa+4Q0DHzdzO7e",
-	"voYpUGIH6r6sNGcRLzHJ+vrwmokySQDSvpZGt52IhBBanhVqEU42JAWagKfQNbEEtoHWKCUY6hoUj/aD",
-	"lxJyb/Ex53jbof6q949hCDXmB4i+Z8ea99YcmwS1G0tzjy7YswhSIvEig3ih1B2xs2iEq4JwEDHWOF4y",
-	"nqu/ohRLONCcYhbRMsvUEK0+PP5U2TOhSXNsgAnztop4hyAIfCVYthn+aBRspSeXk1fgzLS+nkWXjF+I",
-	"AicQnnGLlJpGtW/62fFbOPCpZIj6jIB9aw2g3WmxtpkrI/f48+S1noY7oyDWmLsZxgcRarscwRTjNxC7",
-	"BSc0IUU/CjnrIep6nk42K56mXlarm0aGM9s/MlhhxcFH5XIDqKFZvyZC9lNHxXx24kIhBlTgFaGVzj7U",
-	"y2ndso/z61HemunmQdvCbY54xVlZ9K1MztKGaqQsskwxBUy3MVuaj9XPLPN/fioZL0NKnnsVJ6w0UI24",
-	"Tnond7YjaeQsJcs2lTi2nWp9liaQZUHaccP2i1E7ZMysKK2cRUuciXr/LxjLAGszzZkrYbqHIi6LWBm8",
-	"MRZCjRO05YIYkhIna9V3UEvOSQ6xU3k7I/duYiEZxyuIuemz877kWUOClJxEsyngPrd2hDVgu5iVEmgK",
-	"MH2XVT3aL0O7zVkvfYSfMLoEpazWuHJ0RhnVhidjqwziHLSd8ydjuZov4FwMWTktn0JIntA01pJ3shDP",
-	"2ICtr8iSpMD9GVjQPQuOlTJj7GIYciExlzvCpp7/qRAWVPmJ7GH8GyLIgmREbn243aaaRUW5yEiirW+y",
-	"UYb5x91ozVFGVx1WpmxjeubJbIetwgqjqE3hA219WQ8WEkfPlSHdu0cSzU97VRQhSa4YXpwwMeqi+Y1R",
-	"2Jp5AN+NsPClIv5VokXCnyWvfC/LDHMYpi4Oq76hnPugV39w73vZmsQrMcGmbfsEBg0se1YD6bOkkmYt",
-	"e1c7jQaVaw44fUOzba+eCFcSOMVZXApw3Krpljy1C3EgCkjIkiRINUXK8JJK5HH0AOarOdK0hZaMo5/V",
-	"XzPdTBGxeUbkL+XCPEQvX+hnZxlOLh5OgdLANdosyIzs/hpiSjlJOBNsKevXHydAJRJWWB21gbE3z0q5",
-	"RuYtss4BJBl6RjLgjCrzwsmZAK0FB60ES1dlxYkkG2joGhw27MJoGqOTKIv01kTk0c5I2wFCD+n+SkEZ",
-	"Fcfuc4V1K1vrI8ywCKz9jnfqv+43UdzBWVPL6GMLtdLuEfQE66UihZQIZR1qDVQfN4Q4ouNmk5D7TjXe",
-	"2ahunSY3Pp4597TG2qCF2FzirsoJcs0a/mamCOexcSrHF7DVamXlaY2dPDNPL2GxZuwiNq5n+3BQkjjV",
-	"rYe+ar4wdaVbaLMTGkTFXdqN9Q7cq+HYJCbftDKHHkq4W0mbMCo5y5x8rw5d7FmBU5o8bm6OBIyBlvBc",
-	"U35RHSjEOaZYGX3GM6IlnjlwGFjo51q+VlD3G2c34VJfgAkNMZN7YAaDu1/jMEjwZhE4aH3DeB3CnuZ7",
-	"R2jnYMcwG6VaaMuaw5KDWNeRF03202E9w9S4UYp+rAMyQsDc4Vp4I/WvyE+ldoec6f3auyiDRzJ3vyLC",
-	"Omkc/9jdz95e0w3hssRZnGCexgXTLGlRpiu9WkuCZUuYZGS1llSBcImzrBInC5k0HwjJOKTxAme4eX6x",
-	"hxXtX0Tj+O1nbMkUtt8IMriemfPNXscHzrIFTi5i69Bpac7WtEV2Y6D3b1/P0bs1ILugqMgwBXRJsszE",
-	"QxitARktVpxTyZBcE6E+RFgguQZkXOGo4GzFQQhQTzkrV2v9NiNLSLZJBuf0gVHTEGxwViqleIacExtV",
-	"vn/3DNJD4/ybocpFf061D6PxDCmMZSAhfahmQgTCG0ZSAxoFSLUppHFmwC9YlumXP5+YcA97VHf4maTX",
-	"CGhaMELl/FxxlGF32MwErFzJaf7/57axtrcgL5g5EFYc7fYMp92jRyYdvdCSXT/ZmjC1XrIdd4ENS4pe",
-	"9sLLbAc/oYWyzIIewmlnLKaPm55ptfBq2buZRQ92rZS9U+3Sk91Wc96znhkYMOQ8sY2+HjPxG1Yomuic",
-	"3UrBeAEJEWFHZPOwdPQU1MRUxBywDdEb/4IIHaE0gQwdmC+8T25+YJtjmaxB6RgZScjObOY39XloW9lF",
-	"EjH2wiG6x0XN2Jyh8d4ScfFaN2zTgI+7Ro9Di/yiifCK9LOMXZqTP3YZe6drdsB6OnqVt96bnHGIA5Eh",
-	"Na5fAO2XHkMHZzUhDe8G2y48b2XH9nrauSRLnMjec7BkjekKYmPt9ipZWSlkj6E3xtVIPnQMl2OtjSid",
-	"Nb4kNGWXfTCora4ZwGTv/kW5AE5BglAsAngCanEpyIwstcIQ8P4vsy1hI+4aZjVOURYF4834K28HuDC8",
-	"sKuNYwmrxmmR6te4GxZZCfGKg+bJCaaYG3IsMjwak9ilDz/ctqMgP8ecExDIqEgH6uvaL78kkKVijk6u",
-	"cCKzLWIUzDOUl0KiBaCCFWWmNdtzmjBuwvKVwYS03gyo4LAkV4gtka/Vz9U4x+cUoQO0InL+v9A//+//",
-	"U3+ZRzYe1jw1P8wLExdrnuu/zWMTCWse679taxcSaz+wP81LFxdr3tlf9pUXIWtf10/OqbIe1NoCRxwU",
-	"loVT5gW6XAMHM3GHGWSioi3iUgYCUSbPqebPuqnBPVI4sfgyyniOr3zh/0jf22g9abEa576aeuJcBWEb",
-	"r9jYZ96Z3rXzoI1LNY8/Xc/qE8vBoD3VqP5mRUZNjp+JrNvb5RzX+3Qz77t6nUe/rZu670O7z59IKFTA",
-	"Rj7sEJLTiJYIyOdFkkzu7G0VAh3qiKXbeC3zLMjB9FtnC3YFxh3BsOQs36kDATSNO1FA6iHV4l+Hy8eM",
-	"ZttwyEBpVi6oTK854LRXkkl2F1MO0hCVwAtOgtF+Sp2B1ETeOCEYOEJ8CwrSRCJBVvSAUMufheI49qM5",
-	"OskLuUU5YCoQzjJkO58PHjC2l8xBZILsDfPbCSBz7ms/vCOgFkTL1niHcIkJh+E9x8r+3RCgMsaL5NHj",
-	"J0F66/etAxd9MRlNRL7jpTkRN7FuB/pA3H2OrCUn7Jm6Pkl3KH8YheK8igw3FOclB3ttRN+wqEgxuH2y",
-	"ctVd6vdvXx8sOQGaZltUUvKpBO+0P4RHIVhcq79TotMmnDpPuPfgTg7VNCwm2rTTIIzGuCHl3NzN6h4t",
-	"hB8nlm8FzE6JSdYUEjfwQtf7IQch8GowMnvieWyqEOa6+xgKRGnEC7UOjz1M+WH6HcxkeAHZJBeHFkmz",
-	"KCP0Qp9bL5exu640i0SilGqxZs5rziEBUrhfUk2bgzAxWw3LSJkIvik14gjJShhHnvVhmNZBnDjLP0Qq",
-	"YzEJ/tXoUIMloUSsbxlKP3wDgJWyKOXOxOovyhRPh/WR78SpQ7EOCRQmyJaXlBpLrL70MovsPZnhyNs2",
-	"vTcvqAdvAXjgDxLBc3vS0X9gqTZXPLS172ZBJiDz7jA4EMVRYUbf5e/iQ9+MgTRuZkPYaeYJLnAd1zn0",
-	"aVPkvSi5IlktaSE1MVuo7gzpG6ApUuqtMQHtEZBtqQM+5lEIoNF9LxLOLo3Xb9uQnS4QuAnpL+wS1b5W",
-	"gTAHZGIbzEGSPvzSUM3P6QFSfRwjytC7kxP0wP8whYRv1QZChKI1E/qALAEhHqrvBOh74ceNsQRQqfQ+",
-	"1VcB/KA+43rAAWd68yKlq+suzMwgbfbhniJCBUlB96UPwMSWJlrjTssMUlQK0EZ1KyrawhU5xPWE00+4",
-	"LdX5xvfW7sg4ByKxEkZFmTei8upIvdHd5OW1CPIib56DO+5tSXvZ0OC82QY4JyncfFP2zWgc3t4bU5bz",
-	"77S6o/J1koTZVYAMcMNG/MSOgRNL8208HLZ8T+EVYQM3wRJWjBPYMeLRfZ8DVwqd3PHzHF/FxrCKJcdU",
-	"TItgsCHpwavGE4Ish4Irv7k4ki5t3Txus0Hjd3mk3Nw8ez1Mrh2VXYUFC4gXHNMkfII68CpZQ3IhGkbz",
-	"dCJPWJ4TGYs13nF3LEkGIjaG0o5jag0oxkJrSLtuavPxgqVhdmZea5vxRh333/O5SZ8F74e04AODBW8f",
-	"ELkuFyaPSIYX2j0hF6XLXjEUZFwlyggb/RsCl+0b6uNRxh3y/gVwJtf9+3L4VKzNG/VtihRWHBsLImWX",
-	"NMweSQ5C4ryYLsE3wAWZcvhaW2pVYg33rT9wiGE1A6HGQkx9x2EKG8hYYeOThVRcZWX8cGnZjmfySL+I",
-	"cZpyED23QYi4iNdkZzFomXeRYamQ2waWFUCTDF/q8GpcphBbx5D67yrSV7PoGtNUmIszNskNoVajlYSW",
-	"6s8M09WK42I9crHPQGN1914FzN6x4rhfpZGQF4xjvo0HtVZ9H6XgIJqH3P6tuJ6lP6F6GeFOYyEnfGRS",
-	"ztwiYu8m7u/Ui7OZEuii9ei7zecx3bLaJX/B7t7lncMZQ9ZYO4zR5vmxlOPhezentJndXapPLVrfq/7U",
-	"WJvudXrn+ZhVD7zAntBFe2thTXFWDRnas+jXy4uQ+bIK62t8E3bf9KS/6kmLJcPSnPZxseDzq+DT7TjR",
-	"quENcCEy+/XyImDPXcB2Ol0plI7dbdIdhsZ/TWjPacJYPO+nElNpfX5D+R5mkbgow6imRMY4d9dsp9mK",
-	"jdA3D0QPoGbPoVn/xlKy3PopNXYOSjPBceaO/i29M82uwvBSCKURq3DXdFc+088RoUhn3kIm85aX0fQo",
-	"tEy+8yPHV6+BruQ6On6iv/N+jWT0yW1QbNVdaEKnDU7XnBWFKxl7yVPHTzeugyO4LI1nOBvg4Wss4jqj",
-	"YxeXv69BroFrB7Q+NV5jgQRIhJEOqEXex6EzV4GzwAr9iAV8//QAqNL9UvSMrxh9TFKkWqMHLCdSQoou",
-	"10ARZd4QiOjBH/q3EBZbOX5y25rmx0GM/QN4RZBfDnMXcBFvPEi6I5xQ503326FFxhbavZ1kBKg80C5v",
-	"63nXfvMvhV8/kGpgM0/K47AACkuSEJtfcEIE14/eF9fODxb3HqdrbyNOZCzB2DI3dIgqAybeTVOqhFLw",
-	"UN64KJ2vs++Sm23F/bsIXeeBwUxMqJC81H8WjS9CjkStXCrjy7gETbSs0kLjgrMrI35sdGiPEsRBMUeF",
-	"On0t1oaHtw5dckblOtsawcYlcP03prTEWU+vFC77Is1NLtC+NbJve1zQ1/3E/GOTCtsaRIG57JWgt8/K",
-	"EgSsOtPbOW3HDbL63PBKU53S++u88HQTU67rKfJ0i93sPD/jufV3t6y8yvqrfUz9F6zM7J4zmpIw69VR",
-	"xz1Zf4BjmyTD7U/4pLf8J308qP5kioFEs2gl9T/aR6PDa6Tz3OjoPnfbRAyHwzAKb5bR8YcuNNUTWuYL",
-	"jdcAqgObvyakDoF8HNhDd2n72l25V5vXv5LTdSJeFRmmA4mPBnekfTtI4or+eqm7B1i9a/vvW/Fmrr8p",
-	"SQj99IBGiBui33Wp6t0SWLNRvrhc2vjg9sWi1qUh3+ugrxxdErmOfXsouFcaBlMsIS8yLGHnE9eCE8at",
-	"BVsFgDw6ChpHg6vbuIRkG1ZY6OdIZyQvM6tk3+ld8Ju6M291z3Xg/nB3un1cZXfnaMclYF8MwNHxirn0",
-	"8NUhM+bJmmx6tLfupYYeXT52KdomK/UJEzJOdPxwcGONVwHIYKUZx4bAZeOgs6sS3rFi7iJi22fwgi3l",
-	"pUkUJzne6OtlCi53auPsDJ2p3h4eKWHJlPHYo+jqkVhPgialXBO5nYaE3TXf+l7CHvIMTs4cWN8H9VBt",
-	"eGwOKSnzaBatyUqfEXEiSdJjNJyBrO3+XjY0bor7LgOUMCokphJBZaDrWhpyDc4mT4GrDYZenbxCDxba",
-	"GzLB6J7oTnn0/YH6vuVWWQFVyhykaLH1QNnZ1NcgBNwToWV6B/BMSlDq6iCbL1MCVZLZhovjqtDpCJFr",
-	"YuMNAeG6X+Supk8g3zZEfZyYsiA8bzFNWY70W1QKl0jDg0VflqcgxJTlNCk/XbaLjncnwxv4i0BQrCEH",
-	"jjN08vzFL8h8hC5guxPpVN7ElrPUg92ds6EHb16+eI5+/f2dnt5zRpfEBlOiMyXyZug8SmFzwC7OI90k",
-	"YwnOHo7SjsGqg6Ux/x7yOTPnt/0+ak3E8RAin+smg3hUUwCDb/0brky8yhS8Vps8voCL7uhqhwf4gIKg",
-	"4gJijbn6T+dPQA9YgT+VgCSzV0h3d8c1YZoFsDSG7r594SJg62TXzen+XdtmiC2bAcOlZAdeFK6J541m",
-	"wWoSfhRtx6VKNfbsqT6yjX38DEf0N6IBmp3bqQ/eOmqzwrq7PnxWylY3AbTddXGSYZKLPpmieJ+3RU3j",
-	"Oihch1jbqAMdBm28uuYTSB9Gs64lOI7fDnPdGdPry5ylEMi29AvmqdKHkFNUkG5o756dRz8/P42f/fYi",
-	"Pjv5x3n0MHiBTicLSMnKMoRO/TOJCQWOdDtk2lXdizV+/N33x3iRzOfzvgF04P2uGLrEwobsT0aSbs67",
-	"o+i6eqYzXkG+lrIQx4eH7rbe3CSXnScs75lHwZkixSC1//z8FNn36OULJNdYInZJTYYoxwqViZMxnE4T",
-	"rY7mho9CXN9rLNACPFINHoIANdGuvV1iczHARsEhIpT2tSSrkvf1aDWK2OxzuR1QOhysrikqCPUHcJqU",
-	"vemPaWryfqVWL1hwdimAHxr22zil6ezLYaquQEpuT95DZFGNswf68EMVW/RuExxsoLGa3ZsYWs0wRlOl",
-	"kRyYhB8fB9i9NWz7iYi64WvBQnSqBieu7YzDR5x2lEmc1RVkvJkE64h5l3C3QllQDnEcivbXReCmG7+6",
-	"l5NNzyX84Yiqwfi63dwuVVfN2yl2Mr3TN4CHHEyM7xIqp8fpvVelX/YmbC/wVu+WnS/m7hq32ilY1URT",
-	"bGPpnddhODxVo+8uneGGHPfqC3+vC1Pq2pZDRv2oJf3ksbGklRLvlHWtenlH5huCK0t7Z0VdARFC+nt9",
-	"ArWnLMB7uKNzowsr170Tr7NZ9M/87pNaaEL8OlNb3AloN0hw0b/irewLU6KdzdreMo/mV5sns3/G7wX0",
-	"7+CRSmPBXkVIiXpmooyseWAS2JJUacSYIutSECXnbIWl8XI8KAWP0f9G79+/fPFQUZoiPCLOqdZpdeVA",
-	"lLEVSXBWq8Da6SUZSiEtTTVipbtxJgQyJSjqbXXe1XLHdmtVf8TTuV3r+qqxmqhP+UOLpJCl4HIVRV4T",
-	"ehHctxssMY8nlXy6YeT7WE25al+2UqOYbCiGL/zzv/4bectTYSm8BL486t3jdb6WPr3GRXddMp5ODHTD",
-	"yH2gY960g00BcFg9VpRFgwp1yDB5EyJghQyS56XGxQxRUFaY8dyZi8r17RNF6gM5djIsZKwhulWqC1f0",
-	"r7qadEk1peI013PNQUcufJztJEJdkHrLfiR0Q4zdLEp9SbbnwO5u0t40qaSuhtCgaosBL0ClteFbtLTb",
-	"nYTgVu7LerLj5uw3Ths7CunaQg+M62WGzE27GWIXEs+QwHk2QyCT+bgn3LNxGwCH5q31WCNmBhyzu1if",
-	"Sp9tWaCtsFBTDv7hdH/fnqNhs6oefn+/G1fL3k4z27qq9g8ocxa+N/VQbqvWMtlhZ+MBrt7R65kSPfa2",
-	"LmAOVQUZ8+snh9Bff38X2cr5Ggb9toZpLWVhSvYTumTdqW+O5o8RXEmgNrH7Qpkj9pb8gclZXyWaN64M",
-	"TpI18JnVLusknlZYKjZtM27+TKT2ZxVlVuWht0kohWlhcjbqRjoxZPOtUSb0S5tHsvneBlCaMeqIgrrR",
-	"OX3OuDcBDZfNqn9wXh4dPQFkU+e7oIfqeZVA/4ErW/ewelfnDzFpVLrP3RPtadA6jEsOdWxDKOoU/V7O",
-	"/ZmeCy5TItGz05dGXVmxDXAKqcm172YXVWUCo2fqOUnQc1tq4FQv27PTl15w33F0NH88P7IBeRQXJDqO",
-	"nswfzY907X651qR2qFjtoZGqOtStesB0Op/qiU3o7T9SRkhZ+E+0rNkeOJWkev7ZMa7rQ1dVoee1D8nm",
-	"0SF2VeEPRV0W3tb/r4ryvUyj4+hnkJ0S8mqedS6QD58j1XX0qQT9zmhU7Yiceh8baW2IPKhjh/vTiSWH",
-	"+pkmS8OdS3b7rnWpNSMQNAk8PjqyElBabxcujI5OGD38w2aRrgcZdHq1l0BzopZodG2QW9PrWfT06FFf",
-	"3xWwh++pIhfGyZ+Qmo+ejH/0E+MLkqZg2HS9KX9WYqQDiiuQ+KEGM9LxnpoaXYH8Xip8TYR8VrXq0F8I",
-	"0rrJ4SlewRn5E3T46YS2+sQn6qOVuyZsl1EhGvp2r8QVqkMdIjDHyD+VUMKXoS4FY6cki/DJq6KSLnkd",
-	"fvaqB1wPsrw6FnQ3UnMfvkyje1mzwXVySSjva6XUF0/Hv/g7kz+xkqZBxtFZ3ButrX1uNHNbkba5yK1y",
-	"27deZ93NjzZryB0ucQXh9bVRh/dMUCaKdBIb4JAwnjpSORpf+B9xWs3mmyBJuwTuSNKkD9mdGHWgeS8l",
-	"+qUovkIy9MG7blpkSuB9HTT5Qld5+TegSLUatyVHfWNhgCDNhfSvmCTDN+a/WuL8zbsh8m/ENLWPo5lO",
-	"YJBcrefNs1o9Da19XpcSrut4VB6sqnqJ+fYvzvueKFh1glYOQA1QNrDf97iwAsQ8mrV2gj0AeVYV12pt",
-	"hU7WdAUGt8Cpv/FSWneYPQmyMVHGxThHv9mqLBgJnMOBIBIQXgiWlRJ0AUPGEUYcMqzdZQWW6zl6Ya4H",
-	"CTXAoQApCV2Jw6rXgyomzVwK7BgcHGTJaaxt3ukWx5Ojx/0LoUCpvLJNlN+U0B9PoFnti31tvIK+zy86",
-	"/vDRJ8mXlEiCJViaWGbsUkFsUab4qSuCj+pCao5U61MwSweKZkdI4cR1Z0mtRk49rFsdXQStWhzPFd1v",
-	"Wd6ysv0sEhlOLkxOunW5iHWquVBMwMfevek7nMJmVHPzuFzY05xHNhnZrW1rIbGEuyXzap/VlRoKvALE",
-	"KNLJiIQYJMVfME0zR4gOh+beguUQdoCmeJ9GhN8aPXnMatD1U82+mvwtBfsdlEqvgJmSZbGrFGhHBlsG",
-	"yOmGYr7rJvHPmJSM/IsnejoMT4wRW+/K6aq0Zs9kYO4Xtg0c9byDts4SPg0c99k9kRJRDXwLNegWencF",
-	"wM2kRZ+jaRwrd6exdgm3S5bP2+R4B06kW7qEulvkLvjijr7bFuNifBLDYvybdVZ/3D8hMj7mcfbQ+OW8",
-	"zYm/li26Uw81vQUNaVOqumoa7ccabo2ykzn86O7XdHAdkY0w+Zqt3wYFvIUVEVJfbUm8dQySQYdFHH72",
-	"i38MHjj4RLIbv6i+3PeRw8QV/gYPHcaXVp/sm1QuzaVrhYbfwerdPYPoCV+/Z3/ZRPKxUWf/uu4xsxq7",
-	"8JP66u6wzuG1+4/SERKTFj2jWoeHyC+odlRQoCoLYEMD8aAcVUGqtvvVQaphvpQS4gHgEicOLvA3rY8E",
-	"CKSXPiwvqeOGxaGJe+/xr8uSV9dL3Sd1to9SrnWgnE5gUgrgXde50mmM78ErhrvH7e2NElpx6wbxqqHe",
-	"gZdFKQ9Jt+d6DWqgWkpE6+BAiwTRg9u/CK/zObJJ1QTS4ez6gCDNCUWcZdBdBiv7gyuxL02je1/snlWN",
-	"YVqo334LykZId9iB5ty+d3GxBzrOVhx+dtUzBq2SVr3GXbUK/dW+zZIWjKEFbwYZf1vhUK0IaX+h3ZvQ",
-	"OotDXtL+I/63Ja1L1e6HF4QqD07iA4/3BEK/wlcTSFXw71/W/DBzhTrSDtJuMMkIaX32axxOYyA7847q",
-	"y3vjH8OU8e25NWrOUd3/utH6Nk56w+ykU/H4DpZ7jxypXZf5vtWTIYpzsP0bBAqdMuFTaVLTzhCd2kT/",
-	"BybR/7BLpFEk8j9ekbEymmOOEdsYOdR/OefIsgVJTTIORrfmY66RZh3RfXpHGiN9IQdJq2rq2BJ/c+4R",
-	"g2mEWwQySB+Wr6x1GcwhZcYUytynE6NVijOwPmc2nsxCOxRppHQA0Wxeo8HOpZq9ucs5zE1f2jZfFRu9",
-	"UUiYqQ06aUmahQV773BpDdqlctr9CtiqLiX4RcRAoMBggPhsoiewifXkl5QApCJGR9KOPMc4vk1Nvyur",
-	"r/NXfI5WRJ6WmV+rLcCC/MvakVdTo06jby5+2w475aQj/bKuIR0tydWhrhrNSnkg8dUBZ4aZRa2C0B8i",
-	"k1zjafSxU/H5QyR4cijx1dwgD4QU5icIOTdJ21zN5A/RolwtyVVkq1WzUqdEqMojR+/WRKDTt2hJrkAg",
-	"1wZJfIUcbOYedpoKxGHFbZYDPeo88qspRz+Rq+aHSiV0o/opIeqKyn6F5AgnOVTo0RTTSlAfna1JUQO5",
-	"KFfIzK1euzcFUD0fznK0BCxLDsjgH0mG7IJIzJ3XvJFExgI2T1h+2ITGZFHR8MbewwtC3WM7jTpycEXk",
-	"XFFQbClobkRxVVFWZ4eJ8MoUzbrSIZcxzoo1jho1FxplgfxaxIESwbb4r076AnnBJNBka9I4R4+fpN8v",
-	"n+DFwV9h+cPB0ydP4GCRPoaDo+R7vHy6WDw6OnrULo1zHF2KGOiKUIAq74Ytc3Va8mRtk1N4JoF9is4w",
-	"PkOiXPg1FQd3kO22WbzM/fXob0dHR35Rwej92YtA4TJ7wT76A1P4P4onYbpVy9kpUaYYI1nRA6+eQKAA",
-	"WbQUsQScx14zv9BBJ2z8J7LKMTrlDD0zpbX8ypaPOkUqR6anJEagQplfBGGk5li71FijQIGBNrjT3gKF",
-	"S5PLRCthgE3SoQ5eZ6G1N2XFkEFGRhKg1sHds+0MHHaPWRCX9pndYuapt73sxOfJWvUa2FVeGoyYFeIW",
-	"m6oqtR3cV3/74Yfv/5p8tzg4evL06ODpX//26ADjo+Tgb0kKj2H59NHR0ePgvloSquDSYnoXM8SIvy9k",
-	"f7TLDnd1DNPiWzA81Bc/jH/xnNFlRlxSmoraz8pFTiTCSO0Uw9CsThNUaZpq+uHnKtvqoPu1UnV2U9jN",
-	"Z/t2vE6mhW/yGvuN1vLQr63ee28daGpx51rfcoH3cncdaOrg+0J+1nECcwAiXNiUbf+6tzKlxMm6Lioi",
-	"2TQq1VmdyIif9dQ1+o+HtScv6ahp7TD45Szqol5ERw0VVGM29akr4b8/92kzU+096y2uZGTPwm2/XUdp",
-	"4VYusOYtFnAoTNG8Aelky+rtlx76Chbes3jpLSQYcttWrRAHUWbymyEUt6IuvR8oKxy34gUGaOZzVcx0",
-	"UFOtCGZH+aE/27emOrb7v6m7DkMbfuSaw90s0r7CDm8gIO6PRP6N7jVMkCgS4NCr2dQvT1ziBq8u3p6E",
-	"Srg44j1TUU89xFASrlChwKoOmSuQc1PK+c581KoLdHKCKJPI1blpLn+VYoNDzmSjJJdHCu9OTppU8Mfl",
-	"hegNQz/l7IrYuOifdUqCQPVD9Ovvr84Q0LRghEokmCmPZKs9nVNT7kmgBFNT82nbKBf26+/vdNUH7es3",
-	"NYZYKdHzN2/PTM0vMT+nr2ArEOaAEpysdW1AvgF+IEhqguIfoTUruUmx3xFt7wB+VbPcI93o/gNU8uvZ",
-	"m7+j32GBXsEWnYE0axtIcPETJpmpJLAEmawNTjU5lYWQHHA+etRsPmnV3zTF2Fqp0nuJwWaC9tlBJx0A",
-	"FDbrTzJeSFIfPVGv4OOrk1fndJGxhSnIYCuFLRm/xDwVaMHk2iUSclW1sF+xocBCHMg1Z+VqfU51wnup",
-	"CEttC1ORxpQDaFSQ1HciNQT65auTV2Z0O8I5LYAvGc9FVYqyUfVy5r4W7nOT21hIpgiWSEToOV3bQn4H",
-	"RLBMH9HmkDO+naNndbVH4dJu+9Ug67wlIfo90aUNiFjX5Sj3x4Bb5UXvn/m2C24GAzBsonaHGEj1crw6",
-	"eYUkx1SYvO2enG9VIPWWVpGG953peIlJVvJ75d3VIuuCby4VvZqVm5ECc3DnVvUS+hT8uvzmnpfQRWp0",
-	"Vk7NzVULNNxJbyM7WzuDm98KGmCNGqvtGNwmDjkei2V8Z5r8x8MWLmE25mCz6Pty7jXp1q8iAPOgooFS",
-	"qDWYeCsveE2s4GxJQrfA6st474VNBbWntdD9D1zA08WC7vjqnS1A5PCqQLjddbtePDZu01Wo3JdB61eq",
-	"umdZ2LeM6vn9m7JDd+B6Fr+1p3Q9hIOq8k0rx2SduKq94XK2Aa0AmnxtnTJYKCP0ora7Wtm2XPWvc/rc",
-	"6oh1FinVPMNCagpEOcg1S6t6UjqjZV4KidZaB6VMrrUtU2U7qgDQCSL96k4hLa7OXuVX7BnLZ3naKLMj",
-	"mQ++KXHbrLzz8BYZDcflxdOgfWgA7KYHuy8Py11lFMN+XaMJ9Nys7hO2ls6MhVAbS24DpEjgTFZqq2+e",
-	"odo6Mt+cU2PYVNYH0mV/sy0qBaGrqtjmzJlZAmF0Qdll0+zTtCskptJaL7pOji6Rri0mB09tqylAqg1R",
-	"T/ecOrBNgbEMsLW6rMU/R2+ojhxTa0ulvlYiZsamuyJCKqAvYHtOcyyBE5whIhBnUguAB6o1cGE2H4cD",
-	"C4+tZmQsOoEEqI0jIds+DG23M5CnfgGlfYiIxhhfyulZAXCGs5HI4apCqwDpDM5lmWXbLyRGzoxlbhY+",
-	"WPVq8g48zFjzclxL9ckA8zpT8V+E8yIpItaiw/ohnMXeycF3Tiv6EuiS6LBipQqip4+foJJKkjUrbpXU",
-	"VtrCK0xoiEJfu4K8+9QFQ5XSArShm9naYHeS+5IlFxYXphwWYO6hfLelVYxpkkLu+KBhZS5TRkshqDue",
-	"maKxhK6ch9J4E6vaxhrhc/QsEwwRmmoFVaDL3sJt57TuvMcR2dyu0VfBGM4c4/dqON/aFG9YCX7HZto7",
-	"LL/ZSf17u5aTqE9MVsqhB0jlvzPkck7bslQZJVZGqk/9ytfWP2l5BlP//PLu3enZ/Jx6Pk0je41/UHMB",
-	"mw/WjtoR+UYqKzltebPZMfV0CLX8qaJt5zl59+71HGm3gXGyK6F+ThfgyfLaBaorGpIMwgwrRLhe9fB9",
-	"WVvd+uT3LEh34pQOWd9O1hINsF1tnYC/3goHrpD7zpy5cagwLZGRo8AO9Wua9tmwr2/6rX3NeJcdb7RW",
-	"tdft3vZ8+kQYGCQzl1NQwjiHRFIQwj+nOKdG4xVgx/QYinEkj/L9fzQPYu6B//sjDpJ2e0nuiv0HDZwJ",
-	"lKaptevXDpPXZajuqdXBGK927KzBN/X1iO05lSQHw377pTsaFe4eC/lqdLq7FeSbSk/sOtOrVWx64psl",
-	"Xz98vP6oXqvN1OPvqO9x6NLjuuqrOD48xAWZK86FSQac0TkmOpjFDv/ZuTr0ONez6refi8l7bKD1Hrys",
-	"rlPWXVUFUryHXpRo9ayRI7keuc6c4D1tX372u2kkPaweV27zGrCqfmMXCD8Nt9/JyYn/0949vv54/f8D",
-	"AAD//0+9Q/QG/QAA",
+	"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",
 }
 
 // GetSwagger returns the content of the embedded swagger specification file
