@@ -1,0 +1,6 @@
+# Code Owners for aileron
+#
+# Every PR requires review from a code owner before merging to main.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+* @ALRubinger
