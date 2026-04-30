@@ -58,6 +58,45 @@ func muxFor(s *apiServer) *http.ServeMux {
 
 // --- not-configured edge ---
 
+// ADR-0011: when vaultLocked is set, the gateway endpoints refuse to
+// serve. The body is the canonical FailureEnvelope with class
+// `binding_required` so the agent's LLM can surface the unlock
+// requirement to the user.
+
+func TestPostChatCompletions_VaultLocked_RefusesToServe(t *testing.T) {
+	s := &apiServer{log: slog.Default(), vaultLocked: true}
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	w := httptest.NewRecorder()
+	s.PostChatCompletions(w, r)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Errorf("status = %d, want 412 (binding_required)", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"class":"binding_required"`) {
+		t.Errorf("body = %s, want class=binding_required", body)
+	}
+	if !strings.Contains(body, "vault unlock") {
+		t.Errorf("body = %s, want unlock hint", body)
+	}
+}
+
+func TestPostMessages_VaultLocked_RefusesToServe(t *testing.T) {
+	s := &apiServer{log: slog.Default(), vaultLocked: true}
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude","max_tokens":1,"messages":[]}`))
+	w := httptest.NewRecorder()
+	s.PostMessages(w, r)
+
+	if w.Code != http.StatusPreconditionFailed {
+		t.Errorf("status = %d, want 412", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `"class":"binding_required"`) {
+		t.Errorf("body missing binding_required class: %s", w.Body.String())
+	}
+}
+
 func TestPostChatCompletions_NotConfigured_Returns503(t *testing.T) {
 	s := &apiServer{log: slog.Default()} // openAIProxy nil
 

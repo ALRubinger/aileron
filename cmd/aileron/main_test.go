@@ -744,6 +744,75 @@ func TestRunSecret_ListWithSecrets(t *testing.T) {
 	}
 }
 
+// `aileron binding list` reads vault metadata without unlocking, per
+// ADR-0011 acceptance: metadata is plaintext on disk, so the user
+// can inspect what's bound before paying the passphrase prompt.
+
+func TestRunBinding_ListEmpty(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No bindings stored") {
+		t.Errorf("output = %q, want 'No bindings stored' message", stdout.String())
+	}
+}
+
+func TestRunBinding_ListShowsMetadata(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
+	os.MkdirAll(filepath.Dir(vaultPath), 0o700)
+	// metadata is plaintext per ADR-0011; the value can be opaque.
+	os.WriteFile(vaultPath, []byte(`{
+  "version": 1,
+  "salt": "AAAA",
+  "secrets": {
+    "oauth2/slack/work": {"value":"ZW5j","metadata":{"type":"oauth2","labels":{"connector":"slack","scope":"chat:write"}}},
+    "connectors/github/default": {"value":"ZW5j","metadata":{"type":"api_key","labels":{"connector":"github"}}}
+  }
+}`), 0o600)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"PATH", "TYPE", "LABELS",
+		"oauth2/slack/work", "oauth2", "connector=slack",
+		"connectors/github/default", "api_key", "connector=github",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunBinding_NoSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit code with no subcommand")
+	}
+	if !strings.Contains(stderr.String(), "usage:") {
+		t.Errorf("stderr missing usage hint: %s", stderr.String())
+	}
+}
+
+func TestRunBinding_UnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "rebind"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit code for unknown subcommand")
+	}
+}
+
 func TestRunPolicySave_NoEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")

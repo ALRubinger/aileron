@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/audit"
@@ -92,6 +93,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return 1
 	case "secret":
 		return runSecret(args[1:], stdout, stderr)
+	case "binding":
+		return runBinding(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "log":
@@ -116,6 +119,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron policy save [flags]        Save user-approved commands as policy rules")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
+	fmt.Fprintln(w, "  aileron binding list               List credential bindings (metadata only — no unlock)")
 	fmt.Fprintln(w, "  aileron status [section]           Show merged config (policy, env, notifications, vault)")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
@@ -483,6 +487,81 @@ func runSecretList(stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, name)
 	}
 	return 0
+}
+
+// runBinding handles `aileron binding <subcommand>`.
+func runBinding(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: aileron binding <list>")
+		return 1
+	}
+	switch args[0] {
+	case "list":
+		return runBindingList(stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown binding command: %q\n", args[0])
+		fmt.Fprintln(stderr, "usage: aileron binding <list>")
+		return 1
+	}
+}
+
+// runBindingList prints every entry in the local vault as a binding
+// row: path, type, and labels. Per ADR-0011, this works without the
+// vault being unlocked — metadata is stored plaintext alongside the
+// encrypted value, so listing requires no KEK. The use of a binding
+// (e.g., resolving its credential during action execution) is the
+// step that triggers an unlock prompt.
+func runBindingList(stdout, stderr io.Writer) int {
+	vaultPath := launch.DefaultVaultPath()
+	fv, err := vault.NewFileVault(vaultPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	names := fv.Names()
+	if len(names) == 0 {
+		fmt.Fprintln(stdout, "No bindings stored.")
+		return 0
+	}
+
+	// Resolve each entry's metadata via Get. The FileVault stores
+	// metadata plaintext, so this works even though the vault is not
+	// formally "unlocked" with a KEK — Get on a FileVault returns
+	// the raw stored bytes (the EncryptedVault decorator is what
+	// would attempt decryption, and we deliberately read the inner
+	// FileVault directly here).
+	fmt.Fprintf(stdout, "%-40s  %-12s  %s\n", "PATH", "TYPE", "LABELS")
+	for _, name := range names {
+		s, err := fv.Get(context.Background(), name)
+		if err != nil {
+			fmt.Fprintf(stdout, "%-40s  %-12s  (metadata unreadable: %v)\n", name, "?", err)
+			continue
+		}
+		labels := formatLabels(s.Metadata.Labels)
+		typ := s.Metadata.Type
+		if typ == "" {
+			typ = "-"
+		}
+		fmt.Fprintf(stdout, "%-40s  %-12s  %s\n", name, typ, labels)
+	}
+	return 0
+}
+
+// formatLabels renders a label map as `k=v,k=v` for terminal display.
+func formatLabels(m map[string]string) string {
+	if len(m) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+m[k])
+	}
+	return strings.Join(parts, ",")
 }
 
 // promptPassphrase reads a password from the terminal without echoing.
