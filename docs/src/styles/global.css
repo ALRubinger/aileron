@@ -1,109 +1,180 @@
 @import "tailwindcss";
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
-@custom-variant dark (&:is(.dark *));
+  @custom-variant dark (&:is(.dark *));
 
-:root {
-	--background: oklch(1 0 0);
-	--foreground: oklch(0.145 0 0);
-	--muted: oklch(0.97 0 0);
-	--muted-foreground: oklch(0.556 0 0);
-	--border: oklch(0.922 0 0);
-	--primary: oklch(0.205 0 0);
-	--primary-foreground: oklch(0.985 0 0);
-	--accent: oklch(0.97 0 0);
-	--accent-foreground: oklch(0.205 0 0);
-	/* shadcn-svelte additional tokens */
-	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.145 0 0);
-	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.145 0 0);
-	--secondary: oklch(0.97 0 0);
-	--secondary-foreground: oklch(0.205 0 0);
-	--destructive: oklch(0.577 0.245 27.325);
-	--destructive-foreground: oklch(0.985 0 0);
-	--ring: oklch(0.708 0 0);
-	--input: oklch(0.922 0 0);
-}
+  /* ── Aileron Design System — Warm Parchment + Verdigris ──────────────────
+   *
+   * Light mode default: warm cream paper backgrounds, dark ink foreground,
+   * and verdigris (oxidized copper, oklch hue ~188) as the primary accent.
+   *
+   * The parchment palette uses very low chroma (~0.010–0.013) neutrals at
+   * hue angle 70–80 so backgrounds feel warm without reading as yellow.
+   *
+   * Verdigris (oklch(0.44 0.13 188)) is the colour of antique scientific
+   * instruments, aeronautical charts, and maritime compasses — distinct from
+   * both Claude amber and generic teal, and legible on cream at WCAG AA.
+   * ────────────────────────────────────────────────────────────────────────── */
 
-.dark {
-	--background: oklch(0.22 0 0);
-	--foreground: oklch(0.92 0 0);
-	--muted: oklch(0.269 0 0);
-	--muted-foreground: oklch(0.708 0 0);
-	--border: oklch(1 0 0 / 10%);
-	--primary: oklch(0.922 0 0);
-	--primary-foreground: oklch(0.205 0 0);
-	--accent: oklch(0.371 0 0);
-	--accent-foreground: oklch(0.985 0 0);
-	/* shadcn-svelte additional tokens */
-	--card: oklch(0.269 0 0);
-	--card-foreground: oklch(0.92 0 0);
-	--popover: oklch(0.269 0 0);
-	--popover-foreground: oklch(0.92 0 0);
-	--secondary: oklch(0.269 0 0);
-	--secondary-foreground: oklch(0.985 0 0);
-	--destructive: oklch(0.396 0.141 25.723);
-	--destructive-foreground: oklch(0.985 0 0);
-	--ring: oklch(0.439 0 0);
-	--input: oklch(1 0 0 / 15%);
-}
+  :root {
+    /* Warm parchment backgrounds */
+    --background:         oklch(0.97 0.010 80);   /* cream page          */
+    --foreground:         oklch(0.18 0.015 55);   /* warm dark ink       */
 
-@theme inline {
-	--color-background: var(--background);
-	--color-foreground: var(--foreground);
-	--color-muted: var(--muted);
-	--color-muted-foreground: var(--muted-foreground);
-	--color-border: var(--border);
-	--color-primary: var(--primary);
-	--color-primary-foreground: var(--primary-foreground);
-	--color-accent: var(--accent);
-	--color-accent-foreground: var(--accent-foreground);
-	--color-card: var(--card);
-	--color-card-foreground: var(--card-foreground);
-	--color-popover: var(--popover);
-	--color-popover-foreground: var(--popover-foreground);
-	--color-secondary: var(--secondary);
-	--color-secondary-foreground: var(--secondary-foreground);
-	--color-destructive: var(--destructive);
-	--color-destructive-foreground: var(--destructive-foreground);
-	--color-ring: var(--ring);
-	--color-input: var(--input);
-}
+    --muted:              oklch(0.90 0.012 74);   /* warm tinted surface */
+    --muted-foreground:   oklch(0.46 0.016 58);   /* mid warm gray       */
 
-@layer base {
-	* {
-		@apply border-border;
-	}
-	body {
-		@apply bg-background text-foreground;
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-		margin: 0;
-	}
-}
+    --card:               oklch(0.93 0.013 75);   /* buff sidebar/card   */
+    --card-foreground:    oklch(0.18 0.015 55);
 
-/* Prose typography for markdown content */
-.prose {
-	line-height: 1.75;
-	max-width: 85ch;
-}
-.prose h1 { font-size: 2.25rem; font-weight: 800; margin-top: 0; margin-bottom: 0.8rem; line-height: 1.1; }
-.prose h2 { font-size: 1.5rem; font-weight: 700; margin-top: 2rem; margin-bottom: 0.75rem; line-height: 1.3; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
-.prose h3 { font-size: 1.25rem; font-weight: 600; margin-top: 1.6rem; margin-bottom: 0.6rem; }
-.prose p { margin-top: 0; margin-bottom: 1.25rem; }
-.prose a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
-.prose a:hover { opacity: 0.8; }
-.prose strong { font-weight: 600; }
-.prose ul, .prose ol { margin-top: 0; margin-bottom: 1.25rem; padding-left: 1.625rem; }
-.prose li { margin-top: 0.25rem; margin-bottom: 0.25rem; }
-.prose code { font-size: 0.875em; background: var(--muted); padding: 0.2em 0.4em; border-radius: 0.25rem; }
-.prose pre { background: var(--muted); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-top: 0; margin-bottom: 1.25rem; }
-.prose pre code { background: none; padding: 0; font-size: 0.875em; }
-.prose blockquote { border-left: 4px solid var(--border); padding-left: 1rem; margin-left: 0; margin-right: 0; color: var(--muted-foreground); }
-.prose hr { border-color: var(--border); margin: 2rem 0; }
-.prose table { width: 100%; border-collapse: collapse; margin-bottom: 1.25rem; }
-.prose th, .prose td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
-.prose th { font-weight: 600; background: var(--muted); }
-.prose .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
-.prose .meta table { width: auto; }
-.prose .meta th { font-weight: 500; background: none; white-space: nowrap; }
-.prose .meta td { color: var(--foreground); }
+    --popover:            oklch(0.97 0.010 80);
+    --popover-foreground: oklch(0.18 0.015 55);
+
+    --border:             oklch(0 0 0 / 8%);
+    --input:              oklch(0 0 0 / 11%);
+
+    /* Verdigris accent — the only real hue in the palette */
+    --primary:            oklch(0.44 0.13 188);
+    --primary-foreground: oklch(0.97 0.010 80);
+
+    --secondary:          oklch(0.90 0.012 74);
+    --secondary-foreground: oklch(0.18 0.015 55);
+
+    --accent:             oklch(0.90 0.012 74);
+    --accent-foreground:  oklch(0.18 0.015 55);
+
+    --destructive:        oklch(0.577 0.245 27.325);
+    --destructive-foreground: oklch(0.97 0.010 80);
+
+    --ring:               oklch(0.44 0.13 188);
+  }
+
+  @theme inline {
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-border: var(--border);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-destructive: var(--destructive);
+    --color-destructive-foreground: var(--destructive-foreground);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+  }
+
+  @layer base {
+    * {
+      @apply border-border;
+    }
+    body {
+      @apply bg-background text-foreground;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      margin: 0;
+    }
+    code, pre, kbd, samp {
+      font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+    }
+  }
+
+  /* ── Aeronautical chart graticule overlay ────────────────────────────────
+   * Subtle latitude/longitude grid — the texture of sectional charts.
+   * Applied to page and sidebar backgrounds via .chart-graticule.
+   * ──────────────────────────────────────────────────────────────────────── */
+  .chart-graticule {
+    background-image:
+      repeating-linear-gradient(
+        0deg,
+        oklch(0.44 0.13 188 / 0.025) 0px,
+        oklch(0.44 0.13 188 / 0.025) 1px,
+        transparent 1px,
+        transparent 56px
+      ),
+      repeating-linear-gradient(
+        90deg,
+        oklch(0.44 0.13 188 / 0.025) 0px,
+        oklch(0.44 0.13 188 / 0.025) 1px,
+        transparent 1px,
+        transparent 56px
+      );
+  }
+
+  /* ── Bearing arrow — precedes h2 headings like a chart course indicator ──
+   * Usage: <h2 class="bearing-heading">…</h2>
+   * ──────────────────────────────────────────────────────────────────────── */
+  .bearing-heading::before {
+    content: '';
+    display: inline-block;
+    width: 22px;
+    height: 10px;
+    margin-right: 10px;
+    vertical-align: middle;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='10' viewBox='0 0 22 10'%3E%3Cline x1='0' y1='5' x2='16' y2='5' stroke='oklch(0.44 0.13 188)' stroke-width='1.5'/%3E%3Cpolygon points='13,2 22,5 13,8' fill='oklch(0.44 0.13 188)'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-size: contain;
+  }
+
+  /* ── Prose typography for markdown content ───────────────────────────────── */
+  .prose {
+    line-height: 1.75;
+    max-width: 85ch;
+  }
+  .prose h1 { font-size: 2.25rem; font-weight: 800; margin-top: 0; margin-bottom: 0.8rem; line-height: 1.1; }
+  .prose h2 {
+    font-size: 1.5rem; font-weight: 700; margin-top: 2rem; margin-bottom: 0.75rem;
+    line-height: 1.3; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem;
+    display: flex; align-items: center;
+  }
+  .prose h2::before {
+    content: '';
+    display: inline-block;
+    width: 22px;
+    height: 10px;
+    margin-right: 10px;
+    flex-shrink: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='10' viewBox='0 0 22 10'%3E%3Cline x1='0' y1='5' x2='16' y2='5' stroke='oklch(0.44 0.13 188)' stroke-width='1.5'/%3E%3Cpolygon points='13,2 22,5 13,8' fill='oklch(0.44 0.13 188)'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-size: contain;
+  }
+  .prose h3 { font-size: 1.25rem; font-weight: 600; margin-top: 1.6rem; margin-bottom: 0.6rem; }
+  .prose p { margin-top: 0; margin-bottom: 1.25rem; }
+  .prose a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+  .prose a:hover { opacity: 0.8; }
+  .prose strong { font-weight: 600; }
+  .prose ul, .prose ol { margin-top: 0; margin-bottom: 1.25rem; padding-left: 1.625rem; }
+  .prose li { margin-top: 0.25rem; margin-bottom: 0.25rem; }
+  .prose code { font-size: 0.875em; background: var(--muted); padding: 0.2em 0.4em; border-radius: 0.25rem; }
+  .prose pre {
+    background: var(--muted); padding: 1rem; border-radius: 0.5rem;
+    overflow-x: auto; margin-top: 0; margin-bottom: 1.25rem;
+    border: 1px solid var(--border);
+    border-top: 2px solid var(--primary);
+  }
+  .prose pre code { background: none; padding: 0; font-size: 0.875em; }
+  .prose blockquote {
+    border-left: 3px solid var(--primary); padding-left: 1rem;
+    margin-left: 0; margin-right: 0; color: var(--muted-foreground);
+  }
+  .prose hr { border-color: var(--border); margin: 2rem 0; }
+  .prose table { width: 100%; border-collapse: collapse; margin-bottom: 1.25rem; }
+  .prose th, .prose td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+  .prose th { font-weight: 600; background: var(--muted); }
+  .prose .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
+  .prose .meta table { width: auto; }
+  .prose .meta th { font-weight: 500; background: none; white-space: nowrap; }
+  .prose .meta td { color: var(--foreground); }
+
+  /* ── Custom scrollbar ────────────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: oklch(0 0 0 / 0.13); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: oklch(0.44 0.13 188 / 0.4); }
+  
