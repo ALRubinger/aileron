@@ -12,9 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/action"
+	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/failure"
+	"github.com/ALRubinger/aileron/internal/retry"
 )
 
 // Stage 4 contract (#370, ratified by ADR-0008):
@@ -195,11 +200,16 @@ func engineFor(t *testing.T, openAIURL, anthropicURL string, store *action.Store
 	if exec == nil {
 		exec = action.StubExecutor{}
 	}
+	// Tests use a tight retry policy so retried-network-error tests
+	// don't pay real-time backoff; the in-memory recorder lets tests
+	// query the audit log after the fact.
 	e, err := New(Config{
 		OpenAIUpstream:    oa,
 		AnthropicUpstream: an,
 		Actions:           store,
 		Executor:          exec,
+		Recorder:          audit.NewRecorder(audit.NewMemStore(), nil, nil),
+		RetryPolicy:       retry.Policy{MaxRetries: 0, BaseDelay: time.Millisecond, Jitter: 0},
 	})
 	if err != nil {
 		t.Fatalf("intercept.New: %v", err)
@@ -407,7 +417,7 @@ func TestHandleOpenAI_ActionErrorBecomesToolResultError(t *testing.T) {
 		`{"id":"r2","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"Got an error from the action."}}]}`,
 	)
 	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
-	exec := &staticExecutor{result: action.Result{Content: "rate limited", IsError: true}}
+	exec := &staticExecutor{result: action.Result{Failure: failure.Upstream(429, "rate limited")}}
 	e := engineFor(t, upstream.URL, "", store, exec)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
@@ -777,8 +787,8 @@ func TestHandleOpenAI_UpstreamUnreachable_Returns502(t *testing.T) {
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "upstream_error") {
-		t.Errorf("body = %s, want upstream_error code", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"class":"network_error"`) {
+		t.Errorf("body = %s, want network_error class", w.Body.String())
 	}
 }
 
@@ -808,8 +818,8 @@ func TestHandleOpenAI_ExecutorFatalError_Returns500(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "executor_error") {
-		t.Errorf("body = %s, want executor_error code", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"class":"connector_runtime_error"`) {
+		t.Errorf("body = %s, want connector_runtime_error class", w.Body.String())
 	}
 }
 
@@ -1122,7 +1132,7 @@ func TestHandleAnthropic_ActionErrorBecomesIsError(t *testing.T) {
 		`{"id":"m2","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"Got error."}],"stop_reason":"end_turn"}`,
 	)
 	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
-	exec := &staticExecutor{result: action.Result{Content: "rate limited", IsError: true}}
+	exec := &staticExecutor{result: action.Result{Failure: failure.Upstream(429, "rate limited")}}
 	e := engineFor(t, "", upstream.URL, store, exec)
 
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
@@ -1139,5 +1149,187 @@ func TestHandleAnthropic_ActionErrorBecomesIsError(t *testing.T) {
 	first := blocks[0].(map[string]any)
 	if first["is_error"] != true {
 		t.Errorf("tool_result.is_error = %v, want true", first["is_error"])
+	}
+}
+
+// =====================================================================
+// Stage 4 (#365, ratified by ADR-0010): retry + audit integration.
+//
+// These tests exercise the engine end-to-end with retry policy and a
+// recorder so we can assert that:
+//   - Network failures and upstream 5xx/429 retry per ADR-0010.
+//   - Final failures carry the retried count in details.
+//   - Failure responses to the agent embed an audit_id that resolves
+//     to a real recorded event.
+//   - Action-side failures (Result.Failure) flow back as tool-results
+//     with is_error / structured envelope content.
+// =====================================================================
+
+// engineWithRecorder builds an engine pointed at the given upstream
+// using a small retry policy (so retries don't pay real-time backoff)
+// and returns the engine + the audit store so tests can introspect
+// recorded events.
+func engineWithRecorder(t *testing.T, openAIURL, anthropicURL string, store *action.Store, exec action.Executor, policy retry.Policy) (*Engine, *audit.MemStore) {
+	t.Helper()
+	var oa, an *url.URL
+	if openAIURL != "" {
+		u, _ := url.Parse(openAIURL)
+		oa = u
+	}
+	if anthropicURL != "" {
+		u, _ := url.Parse(anthropicURL)
+		an = u
+	}
+	if exec == nil {
+		exec = action.StubExecutor{}
+	}
+	auditStore := audit.NewMemStore()
+	e, err := New(Config{
+		OpenAIUpstream:    oa,
+		AnthropicUpstream: an,
+		Actions:           store,
+		Executor:          exec,
+		Recorder:          audit.NewRecorder(auditStore, nil, nil),
+		RetryPolicy:       policy,
+	})
+	if err != nil {
+		t.Fatalf("intercept.New: %v", err)
+	}
+	return e, auditStore
+}
+
+// flakyUpstream returns 503 the first n times, then a real OpenAI
+// response. Counts requests for assertion.
+type flakyUpstream struct {
+	mu       sync.Mutex
+	failsLeft int
+	final    string
+	calls    int
+}
+
+func newFlakyUpstream(t *testing.T, failsLeft int, final string) (*httptest.Server, *flakyUpstream) {
+	t.Helper()
+	f := &flakyUpstream{failsLeft: failsLeft, final: final}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.calls++
+		left := f.failsLeft
+		if left > 0 {
+			f.failsLeft--
+		}
+		f.mu.Unlock()
+		if left > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte(`{"error":"upstream busy"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(f.final))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, f
+}
+
+func TestHandleOpenAI_RetriesUpstream5xxThenSucceeds(t *testing.T) {
+	upstream, flaky := newFlakyUpstream(t, 2,
+		`{"id":"ok","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"final"}}]}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e, _ := engineWithRecorder(t, upstream.URL, "", store, nil,
+		retry.Policy{MaxRetries: 3, BaseDelay: time.Millisecond, Jitter: 0})
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`))
+	w := httptest.NewRecorder()
+	e.HandleOpenAI(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if flaky.calls != 3 {
+		t.Errorf("upstream calls = %d, want 3 (2 retries + success)", flaky.calls)
+	}
+	if !strings.Contains(w.Body.String(), `"final"`) {
+		t.Errorf("body missing final content: %s", w.Body.String())
+	}
+}
+
+func TestHandleOpenAI_RetriesUpstream5xxThenFails_AuditIDResolvable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"persistent"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e, auditStore := engineWithRecorder(t, srv.URL, "", store, nil,
+		retry.Policy{MaxRetries: 2, BaseDelay: time.Millisecond, Jitter: 0})
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleOpenAI(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", w.Code)
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	inner, _ := resp["error"].(map[string]any)
+	if inner["class"] != "external_api_error" {
+		t.Errorf("class = %v, want external_api_error", inner["class"])
+	}
+	auditID, _ := inner["audit_id"].(string)
+	if auditID == "" {
+		t.Fatal("audit_id missing in envelope")
+	}
+	if _, ok := auditStore.GetByEventID(auditID); !ok {
+		t.Errorf("audit_id %q does not resolve to a recorded event", auditID)
+	}
+	details, _ := inner["details"].(map[string]any)
+	if details["retried"] == nil {
+		t.Errorf("details.retried missing on exhausted retry; got details=%v", details)
+	}
+}
+
+func TestHandleOpenAI_ActionFailure_FlowsAsToolResult_AuditRecorded(t *testing.T) {
+	upstream, captured := newScriptedUpstream(t,
+		`{"id":"r1","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"c","type":"function","function":{"name":"ship_update","arguments":"{}"}}]}}]}`,
+		`{"id":"r2","object":"chat.completion","model":"gpt-4","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"sorry"}}]}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	exec := &staticExecutor{result: action.Result{Failure: failure.CapabilityDeniedAt(failure.Action, "channel scope missing")}}
+	e, auditStore := engineWithRecorder(t, upstream.URL, "", store, exec, retry.DefaultPolicy())
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	w := httptest.NewRecorder()
+	e.HandleOpenAI(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (action errors are tool-results)", w.Code)
+	}
+	// Continuation request's tool message carries the failure shape.
+	contMessages, _ := captured.captured[1]["messages"].([]any)
+	last := contMessages[len(contMessages)-1].(map[string]any)
+	content, _ := last["content"].(string)
+	if !strings.Contains(content, "capability_denied") {
+		t.Errorf("tool content missing class: %s", content)
+	}
+	// Audit log records the action-side failure too.
+	traces, _ := auditStore.ListTraces(context.Background(), audit.Filter{})
+	hasFailure := false
+	for _, tr := range traces {
+		for _, ev := range tr.Events {
+			if class, _ := ev.Payload["class"].(string); class == "capability_denied" {
+				hasFailure = true
+			}
+		}
+	}
+	if !hasFailure {
+		t.Error("audit log did not record the action-side capability_denied failure")
 	}
 }

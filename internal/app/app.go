@@ -26,6 +26,7 @@ import (
 	gmailconnector "github.com/ALRubinger/aileron/internal/connector/email/gmail"
 	"github.com/ALRubinger/aileron/internal/connector/git/github"
 	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/intercept"
@@ -191,6 +192,15 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		server.sandboxRuntime = sandboxRT
 	}
 
+	// --- Audit log (ADR-0010) ---
+	// The in-memory store is sufficient for v1 dev/test; Postgres
+	// persistence is post-MVP. The recorder mints audit IDs and
+	// stamps them onto failures so the agent's response carries a
+	// working back-reference into the audit log.
+	auditStore := audit.NewMemStore()
+	recorder := audit.NewRecorder(auditStore, nil, nil)
+	server.auditStore = auditStore
+
 	// --- Intercept engine (stage 4) ---
 	engine, engineErr := intercept.New(intercept.Config{
 		OpenAIUpstream:    gatewayCfg.OpenAIBaseURL,
@@ -198,6 +208,7 @@ func NewHandler(log *slog.Logger) (http.Handler, error) {
 		Actions:           server.actions,
 		Executor:          executor,
 		Log:               log,
+		Recorder:          recorder,
 	})
 	if engineErr != nil {
 		return nil, fmt.Errorf("intercept engine: %w", engineErr)

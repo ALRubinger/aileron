@@ -33,6 +33,18 @@ type Manifest struct {
 	Provides ManifestProvides `toml:"provides"`
 }
 
+// IsIdempotent reports whether the runtime should treat this connector
+// as idempotent for retry purposes. Per ADR-0010, idempotency is the
+// default; a connector opts out via `[connector.idempotency] default
+// = "not_idempotent"`. The retry primitive consults this before
+// attempting a retry.
+func (m *Manifest) IsIdempotent() bool {
+	if m == nil || m.Connector.Idempotency == nil {
+		return true
+	}
+	return m.Connector.Idempotency.Default != IdempotencyNotIdempotent
+}
+
 // ManifestConnector is the `[connector]` table — the connector's identity.
 type ManifestConnector struct {
 	// Name is the fully-qualified URI of this connector
@@ -51,7 +63,31 @@ type ManifestConnector struct {
 	// Publisher is the human-readable publisher name shown in the Hub /
 	// install consent UI. Not load-bearing; provenance lives in the FQN.
 	Publisher string `toml:"publisher"`
+
+	// Idempotency is the optional `[connector.idempotency]` block per
+	// ADR-0010. Absent → idempotent default; present → must declare
+	// `default = "idempotent" | "not_idempotent"`. The retry primitive
+	// reads this via [Manifest.IsIdempotent] to decide whether to
+	// retry a failed call.
+	Idempotency *ManifestIdempotency `toml:"idempotency"`
 }
+
+// ManifestIdempotency is `[connector.idempotency]` — the connector's
+// declaration of whether a retry could double-send a side effect.
+type ManifestIdempotency struct {
+	// Default is one of [IdempotencyIdempotent] or
+	// [IdempotencyNotIdempotent]. Empty value is rejected at validation
+	// time; absent block is treated as idempotent.
+	Default string `toml:"default"`
+}
+
+// Idempotency declarations recognised by the runtime. Per ADR-0010,
+// the closed set is just two values; an empty `default` is invalid
+// (authors must opt in explicitly to opt out).
+const (
+	IdempotencyIdempotent    = "idempotent"
+	IdempotencyNotIdempotent = "not_idempotent"
+)
 
 // ManifestCapabilities holds the sub-tables for each primitive capability
 // type the runtime knows about (per ADR-0002).
@@ -135,6 +171,19 @@ func ValidateManifest(m *Manifest, file string) error {
 			if !strings.Contains(h, ":") {
 				return newValidationErr(file, "[capabilities.network].hosts[%d] %q must be host:port", i, h)
 			}
+		}
+	}
+	if m.Connector.Idempotency != nil {
+		switch m.Connector.Idempotency.Default {
+		case IdempotencyIdempotent, IdempotencyNotIdempotent:
+		case "":
+			return newValidationErr(file,
+				"[connector.idempotency].default is required when the table is present (use %q or %q)",
+				IdempotencyIdempotent, IdempotencyNotIdempotent)
+		default:
+			return newValidationErr(file,
+				"[connector.idempotency].default %q must be %q or %q",
+				m.Connector.Idempotency.Default, IdempotencyIdempotent, IdempotencyNotIdempotent)
 		}
 	}
 	return nil

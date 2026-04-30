@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/sandbox"
 )
 
@@ -17,12 +18,13 @@ import (
 // and returns a Result whose Content becomes the tool-result message
 // the LLM observes.
 //
-// Per [ADR-0010], action-side failures are returned as Results with
-// IsError=true rather than as Go errors — the LLM sees the failure as
-// a tool result and can decide how to proceed (retry, fall back to a
-// different action, ask the user). A returned `error` is reserved for
-// gateway-fatal conditions that should terminate the conversation
-// turn (e.g. action not found, executor misconfigured).
+// Per [ADR-0010], action-side failures are returned as Results carrying
+// a non-nil [failure.Failure] (mapped to ADR-0010's structured
+// envelope) rather than as Go errors — the LLM sees the failure as a
+// tool result and can decide how to proceed (retry, fall back, ask the
+// user). A returned `error` is reserved for gateway-fatal conditions
+// that should terminate the conversation turn (e.g. action not found,
+// executor misconfigured).
 //
 // [ADR-0010]: https://docs.withaileron.ai/adr/0010-failure-handling
 type Executor interface {
@@ -30,20 +32,25 @@ type Executor interface {
 }
 
 // Result is the synthesized tool-result content surfaced to the LLM.
-// Both OpenAI's `tool` message and Anthropic's `tool_result` content
-// block use a string body; the IsError flag is mapped to Anthropic's
-// `is_error` field and prepended to OpenAI's content as a marker.
+// Success and failure are mutually exclusive: when Failure is non-nil
+// the result is an error and Content is unused; when Failure is nil
+// the action succeeded and Content carries the payload (a JSON
+// document or plain prose).
+//
+// On the wire, Failure is rendered into the agent-visible tool-result
+// shape via [failure.ToOpenAIToolMessage] / [failure.ToAnthropicToolResult],
+// so the LLM sees a stable structured envelope regardless of provider.
 type Result struct {
-	// Content is the JSON-encoded tool result body. Implementations
-	// SHOULD return JSON the LLM can parse, but plain prose is
-	// acceptable when the action's output is naturally a sentence.
+	// Content is the success payload. JSON the LLM can parse is the
+	// preferred shape, but plain prose is acceptable for actions
+	// whose output is naturally a sentence.
 	Content string
 
-	// IsError reports whether the action failed in a way the LLM
-	// should be informed of. Per ADR-0010, this surfaces as
-	// `is_error: true` on Anthropic tool_result blocks and is encoded
-	// into the OpenAI tool-message body as a sentinel JSON shape.
-	IsError bool
+	// Failure marks an action-side error per ADR-0010. Mutually
+	// exclusive with a populated Content; the gateway's intercept
+	// layer renders the failure into the provider-shaped tool-result
+	// the LLM sees.
+	Failure *failure.Failure
 }
 
 // StubExecutor returns a placeholder JSON result describing what
@@ -88,16 +95,16 @@ func (StubExecutor) Execute(_ context.Context, name string, args map[string]any)
 //  6. Aggregate per-step outputs into the Result.
 //
 // First-failure-terminates per ADR-0010: the first step error returns
-// an IsError Result; later steps are not invoked. Successful prior
-// steps are *not* rolled back (ADR-0010's "no auto-compensation"
-// rule).
+// a Result whose Failure is populated; later steps are not invoked.
+// Successful prior steps are *not* rolled back (ADR-0010's "no
+// auto-compensation" rule).
 type SandboxExecutor struct {
-	Actions    *Store
-	Store      *cstore.Store
-	Runtime    sandbox.Runtime
+	Actions *Store
+	Store   *cstore.Store
+	Runtime sandbox.Runtime
 
-	mu       sync.Mutex
-	cache    map[string]sandbox.Connector // keyed by canonical hash "sha256:<hex>"
+	mu    sync.Mutex
+	cache map[string]sandbox.Connector // keyed by canonical hash "sha256:<hex>"
 }
 
 // NewSandboxExecutor builds a SandboxExecutor with the supplied
@@ -183,9 +190,9 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 		// Last step's output is the action's output by convention.
 		if i == len(manifest.Execute)-1 {
 			body, mErr := json.Marshal(map[string]any{
-				"action":  name,
-				"output":  res.Output,
-				"steps":   stepOutputs,
+				"action": name,
+				"output": res.Output,
+				"steps":  stepOutputs,
 			})
 			if mErr != nil {
 				return Result{}, mErr
@@ -231,130 +238,127 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 	if err != nil {
 		return nil, fmt.Errorf("read connector manifest: %w", err)
 	}
-	manifest, err := cstore.ParseManifest(filepath.Join(entryDir, "manifest.toml"), manifestBytes)
+	cmf, err := cstore.ParseManifest(filepath.Join(entryDir, "manifest.toml"), manifestBytes)
 	if err != nil {
 		return nil, err
 	}
-	binary, err := loadConnectorBinary(entryDir)
+	binPath := filepath.Join(entryDir, "connector.wasm")
+	if _, statErr := os.Stat(binPath); errors.Is(statErr, os.ErrNotExist) {
+		binPath = filepath.Join(entryDir, "connector.wat")
+	}
+	binBytes, err := os.ReadFile(binPath)
+	if err != nil {
+		return nil, fmt.Errorf("read connector binary: %w", err)
+	}
+	conn, err := e.Runtime.Compile(ctx, cmf, binBytes)
 	if err != nil {
 		return nil, err
 	}
-
-	conn, err := e.Runtime.Compile(ctx, manifest, binary)
-	if err != nil {
-		return nil, err
-	}
-
 	e.mu.Lock()
-	if existing, ok := e.cache[dep.Hash]; ok {
-		// A concurrent caller won the race; drop ours and use theirs.
-		e.mu.Unlock()
-		_ = conn.Close(ctx)
-		return existing, nil
-	}
 	e.cache[dep.Hash] = conn
 	e.mu.Unlock()
 	return conn, nil
 }
 
-// loadConnectorBinary reads the connector binary from the entry
-// directory. The file is named connector.wasm or connector.bin per
-// ADR-0004's tarball layout.
-func loadConnectorBinary(entryDir string) ([]byte, error) {
-	for _, name := range []string{"connector.wasm", "connector.bin"} {
-		data, err := os.ReadFile(filepath.Join(entryDir, name))
-		if err == nil {
-			return data, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-	}
-	return nil, fmt.Errorf("entry %s contains no connector binary (connector.wasm or connector.bin)", entryDir)
-}
-
 // mergeArgs combines the call-time args with the action's declared
-// step Inputs. Call-time args take precedence on key collisions —
-// untemplated step Inputs serve as defaults.
-func mergeArgs(callArgs map[string]any, stepInputs map[string]any) map[string]any {
-	out := make(map[string]any, len(callArgs)+len(stepInputs))
+// step inputs. Caller args win on key conflict (the LLM's
+// interpretation of the user message takes precedence over the
+// author's static defaults).
+func mergeArgs(args, stepInputs map[string]any) map[string]any {
+	out := make(map[string]any, len(args)+len(stepInputs))
 	for k, v := range stepInputs {
 		out[k] = v
 	}
-	for k, v := range callArgs {
+	for k, v := range args {
 		out[k] = v
 	}
 	return out
 }
 
-// allowedAuthorityFor returns the action's declared subset of
-// network host:port pairs for the given connector, used by the
-// sandbox's host-policy as the action-boundary capability subset.
-//
-// v1's action manifest does not separately list network hosts (the
-// action declares operation capabilities via `capabilities`). Until a
-// dedicated network-subset field lands, the empty slice signals "no
-// extra restriction" — the connector manifest's grant is the only
-// gate. The seam is here so the action-boundary network gate lights
-// up automatically when the schema gains the field.
+// allowedAuthorityFor returns the network authority subset the action
+// permits for the given connector — the intersection of the
+// connector's manifest network capability and the action's declared
+// subset. v1 doesn't yet enforce subset narrowing at the action layer
+// for network; the connector's manifest is authoritative until #362
+// lands binding-level scoping. This function exists so the call site
+// passes through whatever the action allows.
 func allowedAuthorityFor(_ *Manifest, _ string) []string {
+	// Returning nil tells the sandbox to defer to the connector
+	// manifest's `[capabilities.network].hosts`. Action-level
+	// subset narrowing for network capabilities lands in a follow-up.
 	return nil
 }
 
-// errorResult wraps a sandbox or capability error into a tool-result
-// that the LLM sees as IsError per ADR-0010. The structured error's
-// fields are preserved in the body so the LLM (and audit log) can
-// reason about class/boundary/details.
+// errorResult wraps a sandbox or capability error into a Result whose
+// Failure is the ADR-0010 envelope the LLM sees as a tool-result.
+// Recognised typed errors (`*action.Error`, `*sandbox.Error`,
+// `*cstore.Error`) carry Class/Boundary/Retriable/Details and map to
+// the corresponding [failure] constructor; other errors fall back to
+// `connector_runtime_error` with boundary `runtime`.
 func errorResult(err error) Result {
-	body, mErr := json.Marshal(map[string]any{
-		"error": errorEnvelope(err),
-	})
-	if mErr != nil {
-		return Result{Content: fmt.Sprintf(`{"error":{"class":"internal_error","message":%q}}`, err.Error()), IsError: true}
-	}
-	return Result{Content: string(body), IsError: true}
+	return Result{Failure: failureFromError(err)}
 }
 
-// errorEnvelope produces an ADR-0010-shaped JSON map from any error
-// the executor encountered. Recognized types (`*action.Error`,
-// `*sandbox.Error`, `*cstore.Error`) preserve their fields; other
-// errors are rendered as a generic envelope.
-func errorEnvelope(err error) map[string]any {
-	out := map[string]any{
-		"class":   "internal_error",
-		"message": err.Error(),
+// failureFromError converts an executor-side error into a
+// *failure.Failure whose class / boundary / retriable values fit
+// ADR-0010's closed taxonomy. The mapping preserves details and
+// wraps the original error as the Failure's cause.
+func failureFromError(err error) *failure.Failure {
+	if err == nil {
+		return nil
 	}
 	var aerr *Error
 	if errors.As(err, &aerr) {
-		out["class"] = string(aerr.Class)
-		out["message"] = aerr.Message
-		out["boundary"] = string(aerr.Boundary)
+		opts := []failure.Option{failure.WithCause(err)}
 		if aerr.Details != nil {
-			out["details"] = aerr.Details
+			opts = append(opts, failure.WithDetails(aerr.Details))
 		}
-		return out
+		switch aerr.Class {
+		case ClassCapabilityDenied:
+			return failure.CapabilityDeniedAt(failure.Action, aerr.Message, opts...)
+		}
+		// Other action-package classes (parse_error, validation_error,
+		// not_found) are install-time concerns; if they leak into a
+		// runtime call, surface as a runtime error so the LLM sees a
+		// closed-taxonomy class.
+		opts = append(opts, failure.WithBoundary(failure.Runtime))
+		return failure.ConnectorRuntime(aerr.Message, false, opts...)
 	}
 	var serr *sandbox.Error
 	if errors.As(err, &serr) {
-		out["class"] = string(serr.Class)
-		out["message"] = serr.Message
-		out["boundary"] = string(serr.Boundary)
-		out["retriable"] = serr.Retriable
+		opts := []failure.Option{failure.WithCause(err)}
 		if serr.Details != nil {
-			out["details"] = serr.Details
+			opts = append(opts, failure.WithDetails(serr.Details))
 		}
-		return out
+		switch serr.Class {
+		case sandbox.ClassCapabilityDenied:
+			return failure.CapabilityDeniedAt(failure.Sandbox, serr.Message, opts...)
+		case sandbox.ClassResourceLimitExceeded:
+			return failure.ResourceLimitFailure(serr.Message, opts...)
+		}
+		// connector_runtime_error or connector_load_failed — both map
+		// to ConnectorRuntimeError in ADR-0010's closed taxonomy.
+		return failure.ConnectorRuntime(serr.Message, serr.Retriable, opts...)
 	}
 	var cerr *cstore.Error
 	if errors.As(err, &cerr) {
-		out["class"] = string(cerr.Class)
-		out["message"] = cerr.Message
-		out["boundary"] = string(cerr.Boundary)
-		out["retriable"] = cerr.Retriable
+		opts := []failure.Option{failure.WithCause(err)}
 		if cerr.Details != nil {
-			out["details"] = cerr.Details
+			opts = append(opts, failure.WithDetails(cerr.Details))
 		}
-		return out
+		switch cerr.Class {
+		case cstore.ClassHashMismatch:
+			return failure.HashMismatchFailure(cerr.Message, opts...)
+		case cstore.ClassSignatureFailure:
+			return failure.SignatureFailureFailure(cerr.Message, opts...)
+		}
+		// Install-time classes (parse, validation, fetch, malformed,
+		// fqn_mismatch, unknown_scheme, store_unwritable) leaking into
+		// runtime → ConnectorRuntimeError, runtime boundary.
+		opts = append(opts, failure.WithBoundary(failure.Runtime))
+		return failure.ConnectorRuntime(cerr.Message, cerr.Retriable, opts...)
 	}
-	return out
+	return failure.ConnectorRuntime(err.Error(), false,
+		failure.WithBoundary(failure.Runtime),
+		failure.WithCause(err))
 }

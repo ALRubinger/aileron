@@ -11,6 +11,9 @@ import (
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/augment"
+	"github.com/ALRubinger/aileron/internal/failure"
+	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/retry"
 )
 
 // HandleAnthropic mirrors HandleOpenAI for the Anthropic Messages
@@ -51,11 +54,12 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 
 	ourNames := nameSet(aug.OurNames)
 
+	gatewayActor := model.ActorRef{ID: "aileron-gateway", Type: model.ActorTypeService}
+
 	for round := 0; round < maxRounds; round++ {
-		respStatus, respHeaders, respBody, err := e.sendAnthropic(r, currentBody)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "upstream_error",
-				"upstream Anthropic request failed: "+err.Error())
+		respStatus, respHeaders, respBody, sendFailure := e.sendAnthropicWithRetry(r, currentBody)
+		if sendFailure != nil {
+			writeFailure(r.Context(), w, e.recorder, sendFailure, gatewayActor)
 			return
 		}
 		if respStatus != http.StatusOK {
@@ -83,8 +87,11 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 
 		toolResultBlocks, execErr := e.executeAnthropicToolUses(r.Context(), ours)
 		if execErr != nil {
-			writeError(w, http.StatusInternalServerError, "executor_error",
-				"action executor returned a fatal error: "+execErr.Error())
+			writeFailure(r.Context(), w, e.recorder,
+				failure.ConnectorRuntime("action executor fatal error: "+execErr.Error(), false,
+					failure.WithBoundary(failure.Runtime),
+					failure.WithCause(execErr)),
+				gatewayActor)
 			return
 		}
 
@@ -101,16 +108,47 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 		"interception loop exceeded maximum rounds; aborting to avoid infinite cycle")
 }
 
+// sendAnthropicWithRetry runs sendAnthropic inside the engine's retry
+// policy. Mirror of sendOpenAIWithRetry.
+func (e *Engine) sendAnthropicWithRetry(orig *http.Request, body []byte) (int, http.Header, []byte, *failure.Failure) {
+	type result struct {
+		status  int
+		headers http.Header
+		body    []byte
+	}
+	out, f := retry.Do(orig.Context(), e.retryPolicy, e.clock,
+		func(ctx context.Context, _ int) (result, *failure.Failure) {
+			status, hdrs, body, err := e.sendAnthropic(ctx, orig, body)
+			if err != nil {
+				return result{}, failure.Network(
+					"upstream Anthropic request failed: "+err.Error(),
+					failure.WithCause(err),
+				)
+			}
+			if status == http.StatusTooManyRequests || (status >= 500 && status <= 599) {
+				return result{}, failure.Upstream(status,
+					fmt.Sprintf("upstream returned %d", status),
+					failure.WithDetails(map[string]any{"body": string(body)}),
+				)
+			}
+			return result{status: status, headers: hdrs, body: body}, nil
+		})
+	if f != nil {
+		return 0, nil, nil, f
+	}
+	return out.status, out.headers, out.body, nil
+}
+
 // sendAnthropic posts the body to the configured Anthropic upstream
 // and returns status, headers, and body.
-func (e *Engine) sendAnthropic(orig *http.Request, body []byte) (int, http.Header, []byte, error) {
+func (e *Engine) sendAnthropic(ctx context.Context, orig *http.Request, body []byte) (int, http.Header, []byte, error) {
 	target := *e.anthropicUpstream
 	if target.Path == "" || target.Path == "/" {
 		target.Path = "/v1/messages"
 	} else {
 		target.Path = strings.TrimRight(target.Path, "/") + "/v1/messages"
 	}
-	req, err := http.NewRequestWithContext(orig.Context(), http.MethodPost, target.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -182,15 +220,17 @@ func (e *Engine) executeAnthropicToolUses(ctx context.Context, uses []map[string
 		if err != nil {
 			return nil, err
 		}
-		block := map[string]any{
+		if res.Failure != nil {
+			e.recorder.RecordFailure(ctx, res.Failure,
+				model.ActorRef{ID: name, Type: model.ActorTypeConnectorRuntime})
+			out = append(out, failure.ToAnthropicToolResult(res.Failure, id))
+			continue
+		}
+		out = append(out, map[string]any{
 			"type":        "tool_result",
 			"tool_use_id": id,
 			"content":     res.Content,
-		}
-		if res.IsError {
-			block["is_error"] = true
-		}
-		out = append(out, block)
+		})
 	}
 	return out, nil
 }

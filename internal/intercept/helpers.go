@@ -1,8 +1,13 @@
 package intercept
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+
+	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/failure"
+	"github.com/ALRubinger/aileron/internal/model"
 )
 
 // nameSet builds a set lookup from a slice for O(1) membership tests.
@@ -100,11 +105,28 @@ type errorBodyInner struct {
 	Message string `json:"message"`
 }
 
-// writeError emits a structured JSON error matching the Aileron API
-// contract.
+// writeError emits a structured JSON error matching the Aileron
+// `api.Error` schema. Used for gateway-protocol errors (request
+// validation, configuration) that don't fit ADR-0010's runtime
+// failure taxonomy. Action-execution and upstream-call failures use
+// [writeFailure] instead, which writes the [failure.Envelope] shape.
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	body, _ := json.Marshal(errorBody{Error: errorBodyInner{Code: code, Message: message}})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(body)
+}
+
+// writeFailure records the failure to the audit log and writes the
+// ADR-0010 envelope to the response. The audit_id stamped on the
+// failure is included in the envelope so callers can correlate.
+//
+// `actor` identifies who/what produced the failure for audit purposes.
+// Pass model.ActorRef{} when no concrete actor exists; the audit
+// store will record the failure under the unknown-actor namespace.
+func writeFailure(ctx context.Context, w http.ResponseWriter, recorder audit.Recorder, f *failure.Failure, actor model.ActorRef) {
+	if recorder != nil {
+		recorder.RecordFailure(ctx, f, actor)
+	}
+	failure.WriteHTTP(w, f)
 }

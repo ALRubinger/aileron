@@ -12,6 +12,9 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/action"
 	"github.com/ALRubinger/aileron/internal/augment"
+	"github.com/ALRubinger/aileron/internal/failure"
+	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/retry"
 )
 
 // HandleOpenAI runs the augmentation + interception loop for an
@@ -69,11 +72,12 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	ourNames := nameSet(aug.OurNames)
 
+	gatewayActor := model.ActorRef{ID: "aileron-gateway", Type: model.ActorTypeService}
+
 	for round := 0; round < maxRounds; round++ {
-		respStatus, respHeaders, respBody, err := e.sendOpenAI(r, currentBody)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "upstream_error",
-				"upstream OpenAI request failed: "+err.Error())
+		respStatus, respHeaders, respBody, sendFailure := e.sendOpenAIWithRetry(r, currentBody)
+		if sendFailure != nil {
+			writeFailure(r.Context(), w, e.recorder, sendFailure, gatewayActor)
 			return
 		}
 		if respStatus != http.StatusOK {
@@ -103,8 +107,11 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 		toolMessages, execErr := e.executeOpenAIToolCalls(r.Context(), ours)
 		if execErr != nil {
-			writeError(w, http.StatusInternalServerError, "executor_error",
-				"action executor returned a fatal error: "+execErr.Error())
+			writeFailure(r.Context(), w, e.recorder,
+				failure.ConnectorRuntime("action executor fatal error: "+execErr.Error(), false,
+					failure.WithBoundary(failure.Runtime),
+					failure.WithCause(execErr)),
+				gatewayActor)
 			return
 		}
 
@@ -121,20 +128,61 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 		"interception loop exceeded maximum rounds; aborting to avoid infinite cycle")
 }
 
+// sendOpenAIWithRetry runs sendOpenAI inside the engine's retry
+// policy. Network errors and upstream 5xx/429 responses retry per
+// ADR-0010; everything else returns immediately. Non-retriable
+// upstream statuses (4xx) come back as a successful HTTP response
+// with the raw status — caller decides whether to passThrough.
+//
+// Returns:
+//   - status, headers, body for any HTTP response (2xx through 5xx);
+//   - or a *failure.Failure for transport-level failures (network
+//     errors, retried upstream 5xx that exhausted) that the caller
+//     should map to FailureEnvelope.
+func (e *Engine) sendOpenAIWithRetry(orig *http.Request, body []byte) (int, http.Header, []byte, *failure.Failure) {
+	type result struct {
+		status  int
+		headers http.Header
+		body    []byte
+	}
+	out, f := retry.Do(orig.Context(), e.retryPolicy, e.clock,
+		func(ctx context.Context, _ int) (result, *failure.Failure) {
+			status, hdrs, body, err := e.sendOpenAI(ctx, orig, body)
+			if err != nil {
+				return result{}, failure.Network(
+					"upstream OpenAI request failed: "+err.Error(),
+					failure.WithCause(err),
+				)
+			}
+			// 5xx and 429 → translate into a retriable Upstream failure
+			// so retry.Do can reattempt. Other statuses pass through
+			// the success path.
+			if status == http.StatusTooManyRequests || (status >= 500 && status <= 599) {
+				return result{}, failure.Upstream(status,
+					fmt.Sprintf("upstream returned %d", status),
+					failure.WithDetails(map[string]any{"body": string(body)}),
+				)
+			}
+			return result{status: status, headers: hdrs, body: body}, nil
+		})
+	if f != nil {
+		return 0, nil, nil, f
+	}
+	return out.status, out.headers, out.body, nil
+}
+
 // sendOpenAI POSTs the given body to the configured OpenAI upstream,
 // preserving auth-relevant request headers from the original request.
-// Returns status, response headers, and the full response body. The
-// caller is responsible for inspecting the status — non-200 responses
-// are returned without error so they can be propagated to the agent
-// unchanged.
-func (e *Engine) sendOpenAI(orig *http.Request, body []byte) (int, http.Header, []byte, error) {
+// Used inside [Engine.sendOpenAIWithRetry]; tests of the proxy seam
+// without retry call this directly.
+func (e *Engine) sendOpenAI(ctx context.Context, orig *http.Request, body []byte) (int, http.Header, []byte, error) {
 	target := *e.openAIUpstream
 	if target.Path == "" || target.Path == "/" {
 		target.Path = "/v1/chat/completions"
 	} else {
 		target.Path = strings.TrimRight(target.Path, "/") + "/v1/chat/completions"
 	}
-	req, err := http.NewRequestWithContext(orig.Context(), http.MethodPost, target.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -226,15 +274,19 @@ func (e *Engine) executeOpenAIToolCalls(ctx context.Context, calls []map[string]
 		if err != nil {
 			return nil, err
 		}
-		content := res.Content
-		if res.IsError {
-			content = fmt.Sprintf(`{"error":true,"content":%s}`, jsonString(res.Content))
+		if res.Failure != nil {
+			// Audit-record the action-side failure so the audit_id is
+			// stamped onto the failure before it reaches the LLM.
+			e.recorder.RecordFailure(ctx, res.Failure,
+				model.ActorRef{ID: name, Type: model.ActorTypeConnectorRuntime})
+			out = append(out, failure.ToOpenAIToolMessage(res.Failure, id, name))
+			continue
 		}
 		out = append(out, map[string]any{
 			"role":         "tool",
 			"tool_call_id": id,
 			"name":         name,
-			"content":      content,
+			"content":      res.Content,
 		})
 	}
 	return out, nil

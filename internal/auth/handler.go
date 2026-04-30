@@ -113,13 +113,13 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	providerName := r.PathValue("provider")
 	provider, ok := h.registry.Get(providerName)
 	if !ok {
-		http.Error(w, `{"error":"unknown auth provider"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "unknown_provider", "unknown auth provider")
 		return
 	}
 
 	state, err := generateState()
 	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -137,7 +137,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	result, err := provider.AuthorizationURL(r.Context(), state, h.callbackURL(r, providerName))
 	if err != nil {
 		h.log.Error("failed to generate auth URL", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -177,7 +177,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	providerName := r.PathValue("provider")
 	provider, ok := h.registry.Get(providerName)
 	if !ok {
-		http.Error(w, `{"error":"unknown auth provider"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "unknown_provider", "unknown auth provider")
 		return
 	}
 
@@ -186,11 +186,11 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Validate CSRF state.
 	stateCookie, err := r.Cookie("oauth_state")
 	if err != nil || stateCookie.Value == "" {
-		http.Error(w, `{"error":"missing state cookie"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_state", "missing state cookie")
 		return
 	}
 	if stateParam != stateCookie.Value {
-		http.Error(w, `{"error":"state mismatch"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "state_mismatch", "state mismatch")
 		return
 	}
 	// Clear the state cookie.
@@ -204,7 +204,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// Check for error from provider.
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
 		h.log.Warn("auth provider returned error", "provider", providerName, "error", errParam)
-		http.Error(w, fmt.Sprintf(`{"error":"provider error: %s"}`, errParam), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "provider_error", "provider error: "+errParam)
 		return
 	}
 
@@ -230,7 +230,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.log.Error("callback exchange failed", "provider", providerName, "error", err)
-		http.Error(w, `{"error":"authentication failed"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "authentication failed")
 		return
 	}
 
@@ -246,7 +246,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		user, err = h.users.Get(ctx, link.UserID)
 		if err != nil {
 			h.log.Error("user lookup by link failed", "error", err)
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
 	} else if isNotFound(err) {
@@ -254,7 +254,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		user, err = h.users.GetByEmail(ctx, identity.Email)
 		if err != nil && !isNotFound(err) {
 			h.log.Error("user lookup failed", "error", err)
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
 		if isNotFound(err) {
@@ -262,7 +262,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 			user, err = h.createEnterpriseAndUser(ctx, identity)
 			if err != nil {
 				h.log.Error("failed to create enterprise/user", "error", err)
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+				writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 				return
 			}
 			// createEnterpriseAndUser already created the auth provider link.
@@ -282,7 +282,7 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		h.log.Error("auth provider lookup failed", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -291,22 +291,22 @@ func (h *Handler) handleCallback(w http.ResponseWriter, r *http.Request) {
 		allowed, err := h.enforcer.IsProviderAllowed(ctx, user.EnterpriseID, identity.Provider)
 		if err != nil {
 			h.log.Error("provider check failed", "error", err)
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
 		if !allowed {
-			http.Error(w, `{"error":"auth provider not allowed for this enterprise"}`, http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "provider_not_allowed", "auth provider not allowed for this enterprise")
 			return
 		}
 
 		domainAllowed, err := h.enforcer.IsEmailDomainAllowed(ctx, user.EnterpriseID, identity.Email)
 		if err != nil {
 			h.log.Error("domain check failed", "error", err)
-			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
 		if !domainAllowed {
-			http.Error(w, `{"error":"email domain not allowed for this enterprise"}`, http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "domain_not_allowed", "email domain not allowed for this enterprise")
 			return
 		}
 
@@ -327,14 +327,14 @@ issueTokens:
 	accessToken, err := h.issuer.Issue(user.ID, user.EnterpriseID, user.Email, string(user.Role))
 	if err != nil {
 		h.log.Error("failed to issue token", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
 	refreshRaw, refreshHash, err := GenerateRefreshToken()
 	if err != nil {
 		h.log.Error("failed to generate refresh token", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -349,7 +349,7 @@ issueTokens:
 	}
 	if err := h.sessions.Create(ctx, session); err != nil {
 		h.log.Error("failed to create session", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -395,7 +395,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if refreshToken == "" {
-		http.Error(w, `{"error":"missing refresh token"}`, http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_refresh_token", "missing refresh token")
 		return
 	}
 
@@ -403,32 +403,32 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	hash := HashToken(refreshToken)
 	session, err := h.sessions.GetByRefreshTokenHash(ctx, hash)
 	if err != nil {
-		http.Error(w, `{"error":"invalid refresh token"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "invalid_refresh_token", "invalid refresh token")
 		return
 	}
 	if time.Now().After(session.ExpiresAt) {
 		_ = h.sessions.Delete(ctx, session.ID)
-		http.Error(w, `{"error":"refresh token expired"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "refresh_token_expired", "refresh token expired")
 		return
 	}
 
 	user, err := h.users.Get(ctx, session.UserID)
 	if err != nil {
-		http.Error(w, `{"error":"user not found"}`, http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "user_not_found", "user not found")
 		return
 	}
 
 	// Issue new access token.
 	accessToken, err := h.issuer.Issue(user.ID, user.EnterpriseID, user.Email, string(user.Role))
 	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
 	// Rotate refresh token.
 	newRefreshRaw, newRefreshHash, err := GenerateRefreshToken()
 	if err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 
@@ -444,7 +444,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:        now,
 	}
 	if err := h.sessions.Create(ctx, newSession); err != nil {
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 

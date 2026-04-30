@@ -1650,20 +1650,20 @@ paths:
                   JSON objects (one per `data:` frame), terminated by
                   `data: [DONE]`.
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/Failure"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/Failure"
         "502":
           description: |
             Upstream provider request failed (network error, TLS error,
             or unreachable host). Upstream-returned 4xx/5xx statuses
             propagate with their original status code; this 502 is for
             failures Aileron observed before/around the upstream
-            transaction.
+            transaction. Body is a `FailureEnvelope` per ADR-0010.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/FailureEnvelope"
         "503":
           description: |
             Gateway upstream is not configured for this protocol. Set
@@ -1672,7 +1672,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/FailureEnvelope"
 
   /v1/messages:
     post:
@@ -1732,20 +1732,20 @@ paths:
                   `content_block_delta`, `content_block_stop`,
                   `message_delta`, `message_stop`).
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/Failure"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          $ref: "#/components/responses/Failure"
         "502":
           description: |
             Upstream provider request failed (network error, TLS error,
             or unreachable host). Upstream-returned 4xx/5xx statuses
             propagate with their original status code; this 502 is for
             failures Aileron observed before/around the upstream
-            transaction.
+            transaction. Body is a `FailureEnvelope` per ADR-0010.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/FailureEnvelope"
         "503":
           description: |
             Gateway upstream is not configured for this protocol. Set
@@ -1754,7 +1754,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Error"
+                $ref: "#/components/schemas/FailureEnvelope"
 
 components:
   securitySchemes:
@@ -1845,6 +1845,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    Failure:
+      description: |
+        Structured failure envelope per ADR-0010 (action-execution and
+        gateway responses).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FailureEnvelope"
 
   schemas:
     Jwks:
@@ -1897,6 +1905,10 @@ components:
     Error:
       type: object
       required: [error]
+      description: |
+        Generic error envelope used by CRUD endpoints (intents, approvals,
+        policies, accounts, auth). Action-execution and gateway endpoints
+        use the structured `FailureEnvelope` instead, per ADR-0010.
       properties:
         error:
           type: object
@@ -1910,6 +1922,71 @@ components:
                 type: object
                 additionalProperties: true
             request_id: { type: string }
+
+    FailureEnvelope:
+      type: object
+      required: [error]
+      description: |
+        Structured failure envelope ratified by [ADR-0010][adr10] for
+        errors returned to the calling action and through it to the
+        agent. Used on the gateway endpoints (`/v1/chat/completions`,
+        `/v1/messages`) and on action / connector install responses.
+
+        [adr10]: https://docs.withaileron.ai/adr/0010-failure-handling
+      properties:
+        error:
+          type: object
+          required: [class, message, retriable, boundary]
+          properties:
+            class:
+              $ref: "#/components/schemas/FailureClass"
+            message:
+              type: string
+              description: |
+                Human-readable description; safe to show end users. Does
+                not contain credentials or sensitive payload.
+            retriable:
+              type: boolean
+              description: Whether the failure is safe to retry.
+            boundary:
+              $ref: "#/components/schemas/FailureBoundary"
+            audit_id:
+              type: string
+              description: |
+                Reference into the audit log for full context. Stamped
+                by the audit recorder before the response is written.
+            details:
+              type: object
+              additionalProperties: true
+              description: Class-specific additional fields.
+
+    FailureClass:
+      type: string
+      description: |
+        Closed taxonomy of failure classes per ADR-0010. Adding a value
+        requires an ADR amendment.
+      enum:
+        - capability_denied
+        - binding_required
+        - binding_failed
+        - resource_limit_exceeded
+        - connector_runtime_error
+        - network_error
+        - external_api_error
+        - hash_mismatch
+        - signature_failure
+
+    FailureBoundary:
+      type: string
+      description: |
+        Layer that produced the failure. The closed set excludes `user`
+        which is reserved for post-MVP per-invocation approval flows.
+      enum:
+        - sandbox
+        - connector_manifest
+        - action
+        - runtime
+        - external
 
     Pagination:
       type: object

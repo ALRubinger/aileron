@@ -18,6 +18,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/intercept"
 )
 
@@ -420,6 +421,7 @@ func newGatewayTestServerWithActions(t *testing.T, openAIUpstream, anthropicUpst
 		Actions:           store,
 		Executor:          action.StubExecutor{},
 		Log:               s.log,
+		Recorder:          audit.NewRecorder(audit.NewMemStore(), nil, nil),
 	})
 	if err != nil {
 		t.Fatalf("intercept.New: %v", err)
