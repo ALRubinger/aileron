@@ -95,7 +95,7 @@ Examples:
 
 This is decentralized. The scheme plus full path uniquely identifies a publication source; there is no central naming authority. Two organizations both publishing a connector named `slack` cannot collide — `github://acme/slack` and `github://other/slack` are distinct identities and produce distinct content hashes.
 
-**Monorepo support is first-class.** A single repo can house many connectors (and many actions — see ADR-0003) at distinct subpaths. Each artifact has its own manifest at its own path within the repo. Publishers organize subpaths however they like; common conventions like `connectors/<name>/` or `integrations/<service>/` will emerge but nothing is enforced.
+**Monorepo support is first-class.** A single repo can house many connectors (and many actions — see [ADR-0003](/adr/0003-action-model)) at distinct subpaths. Each artifact has its own manifest at its own path within the repo. Publishers organize subpaths however they like; common conventions like `connectors/<name>/` or `integrations/<service>/` will emerge but nothing is enforced.
 
 **Initial scheme set:**
 
@@ -141,7 +141,7 @@ This drops out of the content-addressed model directly, but is worth stating exp
 
 **Compact reference form.** In commands and provenance fields, `@<version>` is the canonical compact form: `aileron connector install github://aileron/slack@1.2.0`, `source = "hub://aileron/ship-update@1.0.0"`. In TOML manifests, the canonical form is `name` and `version` as separate fields so each is queryable, diffable, and updatable independently. Both forms are equivalent; the FQN identity does not include the version.
 
-The mechanics of *how* a version maps to a concrete fetch (tag conventions, release-asset layout, update discovery, prerelease handling) are resolver concerns and are deferred to the dependency-resolution ADR.
+The mechanics of *how* a version maps to a concrete fetch (tag conventions, release-asset layout, update discovery, prerelease handling) are resolver concerns and are deferred to [ADR-0004](/adr/0004-dependency-resolution).
 
 ### Connectors declare their needs in a manifest
 
@@ -267,11 +267,11 @@ Rejected as deliberate scope reduction. Capability abstraction would require: a 
 
 ### Open implementation questions (deferred to subsequent ADRs)
 
-- *How does a `version` map to a concrete tag and release artifact in each scheme? How does `aileron connector check` discover available updates? How are pre-releases handled?* — deferred to the dependency-resolution ADR.
-- *How is the connector store laid out on disk, and how does the integrity-check pipeline interact with concurrent installs?* — deferred to the dependency-resolution ADR.
-- *Which sandbox technology is the default, and what are the OS-process escalation criteria?* — deferred to the sandbox-choice ADR.
-- *What does the install consent flow show, and what does the user actually click?* — deferred to the install-consent ADR.
-- *How does a user bind an abstract capability to a concrete vault entry?* — deferred to the capability-binding-UX ADR.
+- *How does a `version` map to a concrete tag and release artifact in each scheme? How does `aileron connector check` discover available updates? How are pre-releases handled?* — deferred to [ADR-0004](/adr/0004-dependency-resolution).
+- *How is the connector store laid out on disk, and how does the integrity-check pipeline interact with concurrent installs?* — deferred to [ADR-0004](/adr/0004-dependency-resolution).
+- *Which sandbox technology is the default, and what are the OS-process escalation criteria?* — deferred to [ADR-0005](/adr/0005-sandbox-choice).
+- *What does the install consent flow show, and what does the user actually click?* — deferred to [ADR-0007](/adr/0007-install-consent).
+- *How does a user bind an abstract capability to a concrete vault entry?* — deferred to [ADR-0006](/adr/0006-capability-binding-ux).
 
 ## Examples
 
