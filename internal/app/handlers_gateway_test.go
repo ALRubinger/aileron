@@ -10,10 +10,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 )
 
@@ -339,5 +342,263 @@ func TestPostChatCompletions_UpstreamUnreachable_Returns502(t *testing.T) {
 	}
 	if apiErr.Error.Code != "upstream_error" {
 		t.Errorf("error.code = %q, want upstream_error", apiErr.Error.Code)
+	}
+}
+
+// ----------------------------------------------------------------------
+// Stage 3 contract (#369): tool augmentation.
+//
+// When the user has actions installed in ~/.aileron/actions/, the
+// gateway derives a function definition for each and appends it to the
+// request's `tools` array before forwarding upstream. Provider-shape
+// is OpenAI-style for /v1/chat/completions and Anthropic-style for
+// /v1/messages. Name-collision rules are unit-tested in
+// internal/augment/augment_test.go; here we drive the e2e contract
+// through the proxy and capture what upstream actually sees.
+// ----------------------------------------------------------------------
+
+const stage3ShipUpdateAction = `+++
+name = "ship-update"
+version = "1.0.0"
+source = "hub://aileron/ship-update@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/slack"
+version = "1.2.0"
+hash = "sha256:abc"
+capabilities = ["chat:write"]
+
+[match]
+intent = "tell team I shipped"
+
+[[inputs]]
+name = "channel"
+type = "string"
+description = "Slack channel to post the announcement to."
+
+[[execute]]
+id = "post"
+connector = "github://aileron/slack"
+op = "post_message"
+
+[execute.inputs]
+channel = "${args.channel}"
++++
+
+# Ship Update
+
+Posts a 'shipped' announcement to a Slack channel.
+`
+
+// newGatewayTestServerWithActions wires a populated action.Store into
+// the test server so augmentation has something to derive from.
+func newGatewayTestServerWithActions(t *testing.T, openAIUpstream, anthropicUpstream *url.URL, manifests map[string]string) *apiServer {
+	t.Helper()
+	s := newGatewayTestServer(t, openAIUpstream, anthropicUpstream)
+
+	dir := t.TempDir()
+	for filename, body := range manifests {
+		path := filepath.Join(dir, filename)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+	}
+	store := action.NewStore(dir)
+	res, err := store.Load()
+	if err != nil {
+		t.Fatalf("load actions: %v", err)
+	}
+	if res.HasErrors() {
+		t.Fatalf("load errors: %+v", res.Errors)
+	}
+	s.actions = store
+	return s
+}
+
+func TestPostChatCompletions_NoActions_PassesBodyThrough(t *testing.T) {
+	var captured []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, _ := url.Parse(upstream.URL)
+
+	// Empty manifests: store loads but lists nothing.
+	s := newGatewayTestServerWithActions(t, upstreamURL, nil, nil)
+	srv := httptest.NewServer(muxFor(s))
+	t.Cleanup(srv.Close)
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if string(captured) != body {
+		t.Errorf("body modified despite no actions installed:\n got %s\nwant %s", captured, body)
+	}
+}
+
+func TestPostChatCompletions_AppendsActionToOpenAIToolsArray(t *testing.T) {
+	var captured []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, _ := url.Parse(upstream.URL)
+
+	s := newGatewayTestServerWithActions(t, upstreamURL, nil, map[string]string{
+		"ship-update.md": stage3ShipUpdateAction,
+	})
+	srv := httptest.NewServer(muxFor(s))
+	t.Cleanup(srv.Close)
+
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"tell team I shipped"}]}`
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var req map[string]any
+	if err := json.Unmarshal(captured, &req); err != nil {
+		t.Fatalf("decode upstream body: %v\n%s", err, captured)
+	}
+	tools, _ := req["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("got %d tools, want 1 (Aileron action appended)", len(tools))
+	}
+	tm, _ := tools[0].(map[string]any)
+	if tm["type"] != "function" {
+		t.Errorf("tool[0].type = %v, want function (OpenAI shape)", tm["type"])
+	}
+	fn, _ := tm["function"].(map[string]any)
+	if fn["name"] != "ship_update" {
+		t.Errorf("tool[0].function.name = %v, want ship_update", fn["name"])
+	}
+	if !strings.Contains(fn["description"].(string), "shipped") {
+		t.Errorf("description = %v; expected derived from action body", fn["description"])
+	}
+	params, _ := fn["parameters"].(map[string]any)
+	if params["type"] != "object" {
+		t.Errorf("parameters.type = %v, want object", params["type"])
+	}
+	props, _ := params["properties"].(map[string]any)
+	channel, _ := props["channel"].(map[string]any)
+	if channel["type"] != "string" || channel["description"] != "Slack channel to post the announcement to." {
+		t.Errorf("channel field = %v", channel)
+	}
+}
+
+func TestPostMessages_AppendsActionToAnthropicToolsArray(t *testing.T) {
+	var captured []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, _ := url.Parse(upstream.URL)
+
+	s := newGatewayTestServerWithActions(t, nil, upstreamURL, map[string]string{
+		"ship-update.md": stage3ShipUpdateAction,
+	})
+	srv := httptest.NewServer(muxFor(s))
+	t.Cleanup(srv.Close)
+
+	body := `{"model":"claude-sonnet-4-6","max_tokens":1024,"messages":[{"role":"user","content":"tell team I shipped"}]}`
+	resp, err := http.Post(srv.URL+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var req map[string]any
+	if err := json.Unmarshal(captured, &req); err != nil {
+		t.Fatalf("decode upstream body: %v\n%s", err, captured)
+	}
+	tools, _ := req["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("got %d tools, want 1", len(tools))
+	}
+	tm, _ := tools[0].(map[string]any)
+	// Anthropic shape — flat, no `function` wrapper.
+	if _, hasFn := tm["function"]; hasFn {
+		t.Error("Anthropic tool wrongly wrapped in `function`")
+	}
+	if tm["name"] != "ship_update" {
+		t.Errorf("tool[0].name = %v, want ship_update", tm["name"])
+	}
+	if _, ok := tm["input_schema"].(map[string]any); !ok {
+		t.Errorf("input_schema missing or wrong type: %T", tm["input_schema"])
+	}
+}
+
+func TestPostChatCompletions_AugmentationPreservesAgentTools(t *testing.T) {
+	var captured []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, _ := url.Parse(upstream.URL)
+
+	s := newGatewayTestServerWithActions(t, upstreamURL, nil, map[string]string{
+		"ship-update.md": stage3ShipUpdateAction,
+	})
+	srv := httptest.NewServer(muxFor(s))
+	t.Cleanup(srv.Close)
+
+	body := `{"model":"gpt-4","messages":[],"tools":[{"type":"function","function":{"name":"agent_search","description":"agent's own"}}]}`
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var req map[string]any
+	json.Unmarshal(captured, &req)
+	tools := req["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("got %d tools, want 2 (agent + aileron)", len(tools))
+	}
+	first := tools[0].(map[string]any)["function"].(map[string]any)
+	if first["name"] != "agent_search" {
+		t.Errorf("agent tool renamed: %v", first["name"])
+	}
+}
+
+func TestPostChatCompletions_InvalidJSON_Returns400(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream should not be reached when augmentation fails")
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, _ := url.Parse(upstream.URL)
+
+	s := newGatewayTestServerWithActions(t, upstreamURL, nil, map[string]string{
+		"ship-update.md": stage3ShipUpdateAction,
+	})
+	srv := httptest.NewServer(muxFor(s))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Post(srv.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{not-json`))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	var apiErr api.Error
+	json.NewDecoder(resp.Body).Decode(&apiErr)
+	if apiErr.Error.Code != "invalid_request" {
+		t.Errorf("error.code = %q, want invalid_request", apiErr.Error.Code)
 	}
 }

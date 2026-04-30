@@ -1,23 +1,44 @@
 package app
 
 import (
+	"bytes"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
+
+	"github.com/ALRubinger/aileron/internal/augment"
+)
+
+// gatewayProtocol identifies which augmenter applies to a request.
+type gatewayProtocol int
+
+const (
+	protocolOpenAI gatewayProtocol = iota
+	protocolAnthropic
 )
 
 // PostChatCompletions handles POST /v1/chat/completions.
 //
-// Stage 2: transparent reverse proxy to the upstream OpenAI provider.
-// Tool augmentation, name-collision handling, pre-LLM bypass, and
-// tool-call interception all land in subsequent stages — for now the
-// request is forwarded byte-for-byte (including streaming SSE) and the
-// upstream response is returned to the agent unchanged.
+// Stage 3: transparent reverse proxy to the upstream OpenAI provider
+// with tool augmentation. The agent's request body is decoded, the
+// user's installed actions ([ADR-0003]) are appended to the `tools`
+// array per ADR-0008's collision rules, and the modified body is
+// forwarded upstream. Tool-call interception lands in stage 4;
+// pre-LLM bypass in stage 5.
+//
+// [ADR-0003]: https://docs.withaileron.ai/adr/0003-action-model
 func (s *apiServer) PostChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.openAIProxy == nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured",
 			"OpenAI gateway upstream is not configured")
+		return
+	}
+	if err := s.augmentRequest(r, protocolOpenAI); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"failed to augment request: "+err.Error())
 		return
 	}
 	s.openAIProxy.ServeHTTP(w, r)
@@ -25,15 +46,59 @@ func (s *apiServer) PostChatCompletions(w http.ResponseWriter, r *http.Request) 
 
 // PostMessages handles POST /v1/messages.
 //
-// Stage 2: transparent reverse proxy to the upstream Anthropic provider.
-// See PostChatCompletions for the staged rollout plan.
+// Stage 3: transparent reverse proxy to the upstream Anthropic
+// provider with tool augmentation. Mirrors PostChatCompletions in
+// the Anthropic shape (`tools` array of name/description/input_schema).
 func (s *apiServer) PostMessages(w http.ResponseWriter, r *http.Request) {
 	if s.anthropicProxy == nil {
 		writeError(w, http.StatusServiceUnavailable, "gateway_not_configured",
 			"Anthropic gateway upstream is not configured")
 		return
 	}
+	if err := s.augmentRequest(r, protocolAnthropic); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request",
+			"failed to augment request: "+err.Error())
+		return
+	}
 	s.anthropicProxy.ServeHTTP(w, r)
+}
+
+// augmentRequest reads the request body, appends installed actions to
+// the appropriate `tools` shape, and rewires the body so the proxy
+// forwards the augmented payload. When no actions are installed the
+// body is left untouched (passthrough — the stage-2 behavior).
+func (s *apiServer) augmentRequest(r *http.Request, proto gatewayProtocol) error {
+	if s.actions == nil {
+		return nil
+	}
+	loaded := s.actions.List()
+	if len(loaded) == 0 {
+		return nil
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	_ = r.Body.Close()
+
+	derived := augment.DeriveAll(loaded)
+
+	var augmented []byte
+	switch proto {
+	case protocolOpenAI:
+		augmented, err = augment.AugmentOpenAI(body, derived, s.log)
+	case protocolAnthropic:
+		augmented, err = augment.AugmentAnthropic(body, derived, s.log)
+	}
+	if err != nil {
+		return err
+	}
+
+	r.Body = io.NopCloser(bytes.NewReader(augmented))
+	r.ContentLength = int64(len(augmented))
+	r.Header.Set("Content-Length", strconv.Itoa(len(augmented)))
+	return nil
 }
 
 // newGatewayProxy builds an HTTP reverse proxy that forwards requests

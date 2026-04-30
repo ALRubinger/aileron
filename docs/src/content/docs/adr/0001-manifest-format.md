@@ -209,6 +209,11 @@ capabilities = ["read"]
 [match]
 intent = "tell team I shipped"
 
+[[inputs]]
+name = "channel"
+type = "string"
+description = "Slack channel to post the announcement to (e.g. '#engineering')."
+
 [[execute]]
 id = "recent_merge"
 connector = "git"

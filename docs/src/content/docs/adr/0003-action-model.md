@@ -122,6 +122,51 @@ Defense in depth, with two practical benefits:
 - **Audit is precise without reading the execution body.** Anyone reading the action file can scan the `[[requires.connectors]]` blocks at the top and know exactly what the action will touch.
 - **Capability creep is visible.** If the user or an upstream template update adds a new capability to an action, the change shows up as a TOML diff in the same file. There is no hidden expansion of what the action is allowed to do.
 
+### Action inputs are declared in `[[inputs]]` blocks
+
+An action accepts call-time arguments — the values the agent (or the LLM) supplies when invoking the action. Each argument is declared in an `[[inputs]]` block:
+
+```toml
+[[inputs]]
+name = "channel"
+type = "string"
+description = "Slack channel to post to (e.g. '#engineering')."
+
+[[inputs]]
+name = "max_lines"
+type = "integer"
+required = false
+description = "Maximum lines of context to include in the post."
+```
+
+Fields:
+
+- `name` — the argument's identifier. Must match `^[a-z][a-z0-9_]*$`. Referenced in `[[execute]]` step inputs as `${args.<name>}`.
+- `type` — one of `string`, `integer`, `number`, `boolean`. Maps directly to the corresponding JSON Schema primitive.
+- `required` — optional, defaults to `true`. Set to `false` to make the argument optional.
+- `description` — required. Becomes the field-level description the LLM sees when the action is exposed as a tool.
+
+The `[[inputs]]` block is the contract between the action and the LLM (per [ADR-0008](/adr/0008-intent-matching)). When Aileron augments the agent's tool catalog with an action, it derives a JSON Schema `parameters` object directly from the inputs:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "channel":   { "type": "string",  "description": "Slack channel to post to..." },
+    "max_lines": { "type": "integer", "description": "Maximum lines of context..." }
+  },
+  "required": ["channel"]
+}
+```
+
+The shape is what the LLM uses to choose arguments at tool-call time. Authors who want the LLM to pick the right values write tight `description` prose and pick the narrowest type that fits; the LLM does the rest.
+
+Validation runs at parse time:
+
+- Every `[[execute]]` step's `${args.<name>}` reference must resolve to a declared input.
+- An action with no `[[inputs]]` and no `${args.*}` references is valid; its `parameters` schema is the empty object `{ "type": "object" }`.
+- Duplicate input names are rejected.
+
 ### The Markdown body is the documentation and the LLM-facing description
 
 Per [ADR-0001](/adr/0001-manifest-format), the body of the action file is Markdown. It serves three readers simultaneously:
@@ -236,6 +281,11 @@ capabilities = ["read"]
 
 [match]
 intent = "tell team I shipped"
+
+[[inputs]]
+name = "channel"
+type = "string"
+description = "Slack channel to post the announcement to (e.g. '#engineering')."
 
 [[execute]]
 id = "recent_merge"

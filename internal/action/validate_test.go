@@ -106,3 +106,100 @@ func TestValidate_NilManifest(t *testing.T) {
 		t.Fatal("Validate(nil) succeeded; want error")
 	}
 }
+
+// Inputs validation: per ADR-0003 the [[inputs]] block declares the
+// LLM-facing parameter schema. These tests pin the contract.
+
+func TestValidate_AcceptsAllInputTypes(t *testing.T) {
+	for _, typ := range []string{"string", "integer", "number", "boolean"} {
+		t.Run(typ, func(t *testing.T) {
+			m := goodManifest()
+			m.Inputs = []Input{{Name: "x", Type: typ, Description: "the x"}}
+			if err := Validate(m, "x.md"); err != nil {
+				t.Errorf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_AcceptsRequiredOverride(t *testing.T) {
+	m := goodManifest()
+	f := false
+	m.Inputs = []Input{
+		{Name: "must", Type: "string", Description: "required by default"},
+		{Name: "may", Type: "string", Required: &f, Description: "optional"},
+	}
+	if err := Validate(m, "x.md"); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if !m.Inputs[0].IsRequired() {
+		t.Error("first input IsRequired() = false, want true (default)")
+	}
+	if m.Inputs[1].IsRequired() {
+		t.Error("second input IsRequired() = true, want false")
+	}
+}
+
+func TestValidate_RejectsBadInputs(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Manifest)
+		want   string
+	}{
+		{"empty input name", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "", Type: "string", Description: "x"}}
+		}, "inputs[0].name is required"},
+		{"bad input name", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "Bad-Name", Type: "string", Description: "x"}}
+		}, "must match"},
+		{"duplicate input names", func(m *Manifest) {
+			m.Inputs = []Input{
+				{Name: "x", Type: "string", Description: "first"},
+				{Name: "x", Type: "string", Description: "second"},
+			}
+		}, "duplicated"},
+		{"missing input type", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "x", Type: "", Description: "x"}}
+		}, "type is required"},
+		{"unknown input type", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "x", Type: "object", Description: "x"}}
+		}, "must be one of"},
+		{"missing input description", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "x", Type: "string", Description: ""}}
+		}, "description is required"},
+		{"undeclared args ref", func(m *Manifest) {
+			m.Execute[0].Inputs = map[string]any{"channel": "${args.missing}"}
+		}, "no [[inputs]] block declares"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := goodManifest()
+			tc.mutate(m)
+			err := Validate(m, "x.md")
+			if err == nil {
+				t.Fatalf("Validate() succeeded; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q; want substring %q", err.Error(), tc.want)
+			}
+			var aerr *Error
+			if !errors.As(err, &aerr) || aerr.Class != ClassValidationError {
+				t.Errorf("expected *Error/ClassValidationError, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_AcceptsArgsRefAcrossNestedInputs(t *testing.T) {
+	m := goodManifest()
+	m.Inputs = []Input{{Name: "channel", Type: "string", Description: "..."}}
+	m.Execute[0].Inputs = map[string]any{
+		"target": map[string]any{
+			"primary": "${args.channel}",
+		},
+		"alts": []any{"${args.channel}", "static"},
+	}
+	if err := Validate(m, "x.md"); err != nil {
+		t.Errorf("Validate() error = %v", err)
+	}
+}

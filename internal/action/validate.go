@@ -16,6 +16,21 @@ var semverRe = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-
 // shape so listing endpoints and on-disk discovery agree.
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 
+// inputNameRe validates an action input's identifier. Inputs become
+// JSON Schema property names exposed to the LLM, so they're tighter
+// than the action's own name: lowercase snake_case, must start with a
+// letter.
+var inputNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+// inputTypes is the closed set of JSON Schema primitive types accepted
+// in an `[[inputs]]` block. Object/array types are post-MVP.
+var inputTypes = map[string]bool{
+	"string":  true,
+	"integer": true,
+	"number":  true,
+	"boolean": true,
+}
+
 // fqnSchemes is the closed set of FQN schemes recognized in v1, per ADR-0002.
 // Adding a scheme requires an ADR amendment (or a future ADR delegating
 // scheme registration).
@@ -85,6 +100,28 @@ func Validate(m *Manifest, file string) error {
 	if m.Match.Intent == "" {
 		return newValidationErr(file, "[match].intent is required")
 	}
+	inputNames := map[string]bool{}
+	for i, in := range m.Inputs {
+		if in.Name == "" {
+			return newValidationErr(file, "inputs[%d].name is required", i)
+		}
+		if !inputNameRe.MatchString(in.Name) {
+			return newValidationErr(file, "inputs[%d].name %q must match %s", i, in.Name, inputNameRe.String())
+		}
+		if inputNames[in.Name] {
+			return newValidationErr(file, "inputs[%d].name %q is duplicated", i, in.Name)
+		}
+		inputNames[in.Name] = true
+		if in.Type == "" {
+			return newValidationErr(file, "inputs[%d].type is required", i)
+		}
+		if !inputTypes[in.Type] {
+			return newValidationErr(file, "inputs[%d].type %q must be one of string|integer|number|boolean", i, in.Type)
+		}
+		if strings.TrimSpace(in.Description) == "" {
+			return newValidationErr(file, "inputs[%d].description is required (this is what the LLM sees)", i)
+		}
+	}
 	if len(m.Execute) == 0 {
 		return newValidationErr(file, "[[execute]] is required (at least one step)")
 	}
@@ -110,8 +147,44 @@ func Validate(m *Manifest, file string) error {
 		if s.Op == "" {
 			return newValidationErr(file, "execute[%d].op is required", i)
 		}
+		for k, v := range s.Inputs {
+			refs := argsRefs(v)
+			for _, ref := range refs {
+				if !inputNames[ref] {
+					return newValidationErr(file,
+						"execute[%d].inputs[%q] references ${args.%s} but no [[inputs]] block declares %q",
+						i, k, ref, ref)
+				}
+			}
+		}
 	}
 	return nil
+}
+
+// argsRe matches `${args.NAME}` interpolation references inside an
+// execute step's input value. The captured group is the argument name.
+var argsRe = regexp.MustCompile(`\$\{args\.([a-z][a-z0-9_]*)\}`)
+
+// argsRefs walks an execute step input value (which TOML decodes to
+// any of: string, []any, map[string]any) and returns every
+// `${args.NAME}` reference it finds.
+func argsRefs(v any) []string {
+	var out []string
+	switch val := v.(type) {
+	case string:
+		for _, m := range argsRe.FindAllStringSubmatch(val, -1) {
+			out = append(out, m[1])
+		}
+	case []any:
+		for _, item := range val {
+			out = append(out, argsRefs(item)...)
+		}
+	case map[string]any:
+		for _, item := range val {
+			out = append(out, argsRefs(item)...)
+		}
+	}
+	return out
 }
 
 // validateSourceFQN parses an action source URI of the shape

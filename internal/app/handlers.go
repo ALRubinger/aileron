@@ -1093,6 +1093,22 @@ func manifestToAPI(la action.LoadedAction) api.Action {
 	if path != "" {
 		out.Path = &path
 	}
+	if len(m.Inputs) > 0 {
+		inputs := make([]api.ActionInput, 0, len(m.Inputs))
+		for _, in := range m.Inputs {
+			ai := api.ActionInput{
+				Name:        in.Name,
+				Type:        api.ActionInputType(in.Type),
+				Description: in.Description,
+			}
+			if in.Required != nil {
+				r := *in.Required
+				ai.Required = &r
+			}
+			inputs = append(inputs, ai)
+		}
+		out.Inputs = &inputs
+	}
 	return out
 }
 

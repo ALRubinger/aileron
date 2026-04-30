@@ -2774,6 +2774,14 @@ components:
           $ref: "#/components/schemas/ActionRequires"
         match:
           $ref: "#/components/schemas/ActionMatch"
+        inputs:
+          type: array
+          description: |
+            Declared call-time arguments. Per ADR-0003, inputs map directly
+            to the JSON Schema `parameters` object the LLM sees when
+            Aileron exposes the action as a tool.
+          items:
+            $ref: "#/components/schemas/ActionInput"
         execute:
           type: array
           items:
@@ -2825,6 +2833,28 @@ components:
         intent:
           type: string
           description: Canonical phrase the runtime matches against agent intent.
+
+    ActionInput:
+      type: object
+      required: [name, type, description]
+      properties:
+        name:
+          type: string
+          description: Argument identifier matching `^[a-z][a-z0-9_]*$`.
+        type:
+          type: string
+          enum: [string, integer, number, boolean]
+          description: JSON Schema primitive type.
+        required:
+          type: boolean
+          description: |
+            Defaults to true when omitted. Set false to mark the argument
+            as optional in the LLM-facing parameter schema.
+        description:
+          type: string
+          description: |
+            Field-level prose surfaced to the LLM in the
+            `parameters.properties[name].description` slot.
 
     ActionExecuteStep:
       type: object
