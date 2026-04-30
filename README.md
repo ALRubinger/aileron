@@ -15,7 +15,7 @@ The agent points its API base URL at Aileron instead of OpenAI or Anthropic. Ail
 Everything lives at **[docs.withaileron.ai](https://docs.withaileron.ai)**:
 
 - [Overview](https://docs.withaileron.ai/) — what Aileron is and the pitch
-- [Concepts](https://docs.withaileron.ai/concepts/deterministic-agentic-execution/) — the architecture, layered: deterministic execution, the LLM gateway, actions, connectors, the vault
+- [Concepts](https://docs.withaileron.ai/concepts/deterministic-agentic-execution/) — the architecture, layered: deterministic execution, the LLM gateway, actions, connectors, the vault, proof of control
 - [Architecture Decisions](https://docs.withaileron.ai/adr/) — the eleven ADRs that ratify the post-Pivot architecture
 - [API Reference](https://docs.withaileron.ai/api) — full OpenAPI specification
 
