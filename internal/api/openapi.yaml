@@ -37,6 +37,14 @@ tags:
   - name: Connected Accounts
   - name: TEE
   - name: Health
+  - name: Gateway
+    description: |
+      Dual-protocol LLM gateway. Aileron speaks both OpenAI Chat Completions
+      and Anthropic Messages, augmenting the agent's tool catalog with the
+      user's installed actions, intercepting tool calls for those actions,
+      executing them deterministically, and injecting the synthesized
+      result back into the response stream. Behavior is ratified by
+      ADR-0008 (intent matching).
 
 paths:
   /v1/health:
@@ -1465,6 +1473,172 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "501":
           description: TEE not enabled
+
+  /v1/chat/completions:
+    post:
+      tags: [Gateway]
+      summary: OpenAI-compatible chat completions endpoint
+      description: |
+        Aileron's transparent dual-protocol LLM gateway. Drop-in replacement
+        for `https://api.openai.com/v1/chat/completions`: an agent that
+        worked unchanged against OpenAI's endpoint works unchanged when its
+        base URL is pointed at this server.
+
+        Behavior, ratified by ADR-0008 (intent matching):
+
+        - **Tool augmentation.** Aileron reads the user's installed actions
+          from `~/.aileron/actions/`, derives a function definition for each
+          (name, description from the action's Markdown body, parameter
+          schema from declared inputs), and appends them to the request's
+          `tools` array before forwarding upstream. The agent's declared
+          tools are preserved unchanged — augmentation is additive only.
+        - **Tool name collisions.** When an installed action's name collides
+          with an agent-declared tool, the agent's tool wins; Aileron
+          renames its action with the reserved `aileron.` prefix in the
+          forwarded request. An agent-declared tool whose name already uses
+          the `aileron.` prefix is renamed to `agent.<original-name>` and
+          a warning is logged.
+        - **Pre-LLM bypass (opt-in).** When the most recent user message
+          exactly matches the patterns of exactly one installed action whose
+          `[match.bypass]` is enabled, Aileron executes the action directly
+          and returns a synthesized response shaped like a normal chat
+          completion. The upstream LLM is never called. Bypass is strict:
+          single-match required, full-message match required, side-effecting
+          actions are forbidden from enabling bypass at action-publish time.
+        - **Tool-call interception.** When the upstream LLM emits a tool
+          call whose name matches an Aileron-augmented action, Aileron
+          executes the action deterministically (per ADR-0003), constructs
+          a `tool` message containing the result, and injects it back into
+          the response. Tool calls for agent-declared tools pass through
+          unchanged for the agent's host code to execute.
+        - **Streaming preservation.** Both streaming (`stream: true`) and
+          non-streaming modes are supported. In streaming mode, intermediate
+          tool-call deltas for Aileron-augmented actions are buffered until
+          the call is structurally complete; partial frames are never
+          emitted to the agent. After Aileron executes the action, the
+          stream resumes with a synthetic tool-result frame followed by
+          the upstream LLM's continuation.
+
+        Authentication: this endpoint forwards the request's `Authorization`
+        header to the upstream provider unchanged; Aileron does not require
+        its own bearer token. The upstream provider is selected by runtime
+        configuration.
+      operationId: postChatCompletions
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: |
+            Chat completion response. Content-Type is
+            `text/event-stream` when the request set `stream: true`,
+            otherwise `application/json`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Server-sent event stream of `ChatCompletionStreamChunk`
+                  JSON objects (one per `data:` frame), terminated by
+                  `data: [DONE]`.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "501":
+          description: |
+            Endpoint is registered but not yet fully implemented. Returned
+            during staged rollout of the gateway.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Upstream provider error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/messages:
+    post:
+      tags: [Gateway]
+      summary: Anthropic-compatible messages endpoint
+      description: |
+        Aileron's transparent dual-protocol LLM gateway. Drop-in replacement
+        for `https://api.anthropic.com/v1/messages`: an agent that worked
+        unchanged against Anthropic's endpoint works unchanged when its
+        base URL is pointed at this server.
+
+        Behavior matches `/v1/chat/completions` (tool augmentation,
+        collisions, pre-LLM bypass, tool-call interception, streaming
+        preservation) — see that endpoint's description. Differences are
+        provider-specific shapes only:
+
+        - Tools are appended to the Anthropic-shape `tools` array
+          (`{ name, description, input_schema }`), not the OpenAI-shape
+          function-wrapped form.
+        - Tool calls arrive and are emitted as `tool_use` content blocks
+          on assistant messages; tool results are injected as
+          `tool_result` content blocks on user messages, per Anthropic's
+          conversation contract.
+        - Streaming uses Anthropic's event types (`message_start`,
+          `content_block_start`, `content_block_delta`, etc.); buffering
+          for Aileron-augmented `tool_use` blocks holds until the block
+          is structurally complete.
+
+        Authentication: this endpoint forwards the request's `x-api-key`
+        and `anthropic-version` headers to the upstream provider unchanged.
+      operationId: postMessages
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessagesRequest"
+      responses:
+        "200":
+          description: |
+            Messages response. Content-Type is `text/event-stream` when
+            the request set `stream: true`, otherwise `application/json`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessagesResponse"
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Server-sent event stream of Anthropic Messages stream
+                  events (`message_start`, `content_block_start`,
+                  `content_block_delta`, `content_block_stop`,
+                  `message_delta`, `message_stop`).
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "501":
+          description: |
+            Endpoint is registered but not yet fully implemented. Returned
+            during staged rollout of the gateway.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Upstream provider error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
 components:
   securitySchemes:
@@ -3186,3 +3360,229 @@ components:
         escrowed_count:
           type: integer
           description: Number of credentials auto-escrowed into TEE
+
+    # --- Gateway: OpenAI Chat Completions shape ---
+    #
+    # Schemas mirror the OpenAI Chat Completions wire format with
+    # additionalProperties: true so unmodelled fields pass through
+    # untouched. Only the structurally significant fields (model,
+    # messages, tools, tool_calls) are explicitly modelled because they
+    # are the seams Aileron operates on (tool augmentation, name
+    # collisions, tool-call interception).
+
+    ChatCompletionRequest:
+      type: object
+      additionalProperties: true
+      required: [model, messages]
+      properties:
+        model:
+          type: string
+          description: Model identifier passed to the upstream provider.
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatCompletionMessage"
+        tools:
+          type: array
+          description: |
+            Agent-declared tools. Aileron preserves these unchanged and
+            appends installed actions to the array before forwarding
+            upstream.
+          items:
+            $ref: "#/components/schemas/ChatCompletionTool"
+        tool_choice:
+          description: Passed through to the upstream provider unchanged.
+        stream:
+          type: boolean
+          description: |
+            When true, the response is `text/event-stream`. Aileron
+            buffers tool-call deltas for augmented actions until the call
+            is structurally complete.
+
+    ChatCompletionMessage:
+      type: object
+      additionalProperties: true
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool, developer]
+        content:
+          description: |
+            String or array of content parts; shape follows the upstream
+            provider's contract. Aileron does not require parsing.
+        name:
+          type: string
+        tool_calls:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatCompletionToolCall"
+        tool_call_id:
+          type: string
+          description: Required on `tool` role messages.
+
+    ChatCompletionTool:
+      type: object
+      additionalProperties: true
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [function]
+        function:
+          $ref: "#/components/schemas/ChatCompletionFunctionDef"
+
+    ChatCompletionFunctionDef:
+      type: object
+      additionalProperties: true
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+          description: JSON Schema for the function's parameters.
+
+    ChatCompletionToolCall:
+      type: object
+      additionalProperties: true
+      required: [id, type, function]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [function]
+        function:
+          type: object
+          required: [name, arguments]
+          properties:
+            name:
+              type: string
+            arguments:
+              type: string
+              description: JSON-encoded argument object.
+
+    ChatCompletionResponse:
+      type: object
+      additionalProperties: true
+      required: [id, object, choices, model]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatCompletionChoice"
+        usage:
+          type: object
+          additionalProperties: true
+
+    ChatCompletionChoice:
+      type: object
+      additionalProperties: true
+      required: [index, message, finish_reason]
+      properties:
+        index:
+          type: integer
+        message:
+          $ref: "#/components/schemas/ChatCompletionMessage"
+        finish_reason:
+          type: string
+
+    # --- Gateway: Anthropic Messages shape ---
+
+    MessagesRequest:
+      type: object
+      additionalProperties: true
+      required: [model, messages, max_tokens]
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnthropicMessage"
+        max_tokens:
+          type: integer
+        system:
+          description: |
+            System prompt; string or array of content blocks (Anthropic
+            shape).
+        tools:
+          type: array
+          description: |
+            Agent-declared tools. Aileron preserves these unchanged and
+            appends installed actions to the array before forwarding
+            upstream (Anthropic shape).
+          items:
+            $ref: "#/components/schemas/AnthropicTool"
+        tool_choice:
+          description: Passed through to the upstream provider unchanged.
+        stream:
+          type: boolean
+
+    AnthropicMessage:
+      type: object
+      additionalProperties: true
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          description: |
+            String or array of content blocks (`text`, `tool_use`,
+            `tool_result`, `image`, ...). Shape follows Anthropic's
+            Messages contract.
+
+    AnthropicTool:
+      type: object
+      additionalProperties: true
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        input_schema:
+          type: object
+          additionalProperties: true
+          description: JSON Schema for the tool's input.
+
+    MessagesResponse:
+      type: object
+      additionalProperties: true
+      required: [id, type, role, content, model]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [message]
+        role:
+          type: string
+          enum: [assistant]
+        content:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        model:
+          type: string
+        stop_reason:
+          type: string
+        stop_sequence:
+          type: string
+        usage:
+          type: object
+          additionalProperties: true
