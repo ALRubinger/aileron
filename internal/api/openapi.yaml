@@ -1603,13 +1603,6 @@ paths:
           forwarded request. An agent-declared tool whose name already uses
           the `aileron.` prefix is renamed to `agent.<original-name>` and
           a warning is logged.
-        - **Pre-LLM bypass (opt-in).** When the most recent user message
-          exactly matches the patterns of exactly one installed action whose
-          `[match.bypass]` is enabled, Aileron executes the action directly
-          and returns a synthesized response shaped like a normal chat
-          completion. The upstream LLM is never called. Bypass is strict:
-          single-match required, full-message match required, side-effecting
-          actions are forbidden from enabling bypass at action-publish time.
         - **Tool-call interception.** When the upstream LLM emits a tool
           call whose name matches an Aileron-augmented action, Aileron
           executes the action deterministically (per ADR-0003), constructs
@@ -1692,8 +1685,8 @@ paths:
         base URL is pointed at this server.
 
         Behavior matches `/v1/chat/completions` (tool augmentation,
-        collisions, pre-LLM bypass, tool-call interception, streaming
-        preservation) — see that endpoint's description. Differences are
+        collisions, tool-call interception, streaming preservation) —
+        see that endpoint's description. Differences are
         provider-specific shapes only:
 
         - Tools are appended to the Anthropic-shape `tools` array

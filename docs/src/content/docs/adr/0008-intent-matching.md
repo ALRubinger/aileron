@@ -1,6 +1,6 @@
 ---
 title: "ADR-0008: Intent Matching Mechanisms"
-description: "Tool augmentation via function calling is the primary intent-matching mechanism; pre-LLM bypass for high-confidence patterns is an opt-in secondary path; agent-defined tools take precedence in name collisions"
+description: "Tool augmentation via function calling is the intent-matching mechanism; agent-defined tools take precedence in name collisions"
 order: 8
 ---
 
@@ -33,11 +33,11 @@ The decision rests on two observations:
 
 2. **The LLM is good at intent recognition.** Modern instruction-following models excel at choosing among well-described tools. Asking the LLM to disambiguate "tell the team I shipped" → `ship_update` from "draft a PR description" → `pr_draft` is exactly the work the LLM is built for. Bypassing the LLM for intent recognition is an *optimization*, not a default.
 
-These two observations together pin the design. The primary mechanism rides function calling; the LLM does the matching. A secondary mechanism for opt-in fast-path matches exists, but the primary path is what makes Aileron compatible with every agent that already exists.
+These two observations together pin the design. The mechanism rides function calling; the LLM does the matching. This is what makes Aileron compatible with every agent that already exists.
 
 ## Decision
 
-### Primary: tool augmentation via function calling
+### Tool augmentation via function calling
 
 When a chat completion request arrives, Aileron does the following before forwarding upstream:
 
@@ -53,61 +53,6 @@ When a chat completion request arrives, Aileron does the following before forwar
 The agent never sees the difference. From its perspective, it declared `[search_codebase, read_file]` and the LLM chose to call `ship_update` with arguments `{ channel: "#engineering" }`. The agent's host code sees the tool call, but `ship_update` isn't in its handlers — the host returns a normal tool result Aileron synthesized. The execution layer is invisible.
 
 This is the structural property: **the agent's tool calls have superpowers it can't perceive.** The agent posts to Slack with chat:write scope, and never holds the OAuth token. The agent files a Linear ticket, and never sees the API key. The capability boundary is enforced where the agent has no visibility, no SDK to bypass, no flag to flip.
-
-### Secondary: pre-LLM bypass for high-confidence matches (opt-in per action)
-
-For some intents, calling the LLM at all is wasteful. "What time is it?" → return the time. "Open the documentation" → open the browser. The user's intent is unambiguous; the LLM round-trip adds latency and cost without adding value.
-
-For these, Aileron supports a pre-LLM bypass path:
-
-1. Examine the most recent user message in the chat completion request.
-2. Match it against the `[[match.patterns]]` blocks of installed actions whose `[match].bypass` is enabled.
-3. If exactly one action matches with high confidence, execute it directly. Return a synthesized chat completion response — never call the upstream LLM.
-4. Otherwise (no match, multiple matches, or low confidence), proceed to the primary tool-augmentation path.
-
-The bypass is **strict**:
-
-- **Opt-in per action.** Action authors enable it explicitly in the manifest. Default is off.
-- **Conservative matching.** A pattern must match the entire user message (with optional argument extraction); ambiguous matches fall through.
-- **Single-match required.** If two actions both match the same input, neither bypasses; both go to the LLM, which can disambiguate.
-- **No bypass for side-effecting actions.** An action whose execution has external side effects — sends email, posts to Slack, charges a card — must never bypass the LLM. The LLM's interpretation of context (recipient names, message content, intent confidence) is part of the safety story for consequential actions. Action authors who set `bypass = true` on a side-effecting action will see install-time validation reject it.
-
-In practice, bypass is most useful for **read-only or informational actions**: time, weather, status checks, file lookups, "open the X" commands.
-
-### Pattern schema
-
-The `[match]` block in an action manifest:
-
-```toml
-[match]
-intent = "natural-language description used by the LLM in tool augmentation"
-
-# (Optional) Patterns for pre-LLM bypass. Only meaningful if [match.bypass]
-# is enabled. Patterns are also helpful as additional context for the LLM
-# in tool augmentation, but bypass requires the explicit opt-in.
-
-[[match.patterns]]
-phrase = "what time is it"
-
-[[match.patterns]]
-phrase = "what's the time"
-
-[[match.patterns]]
-regex = "^(show|open|view) (the )?docs?$"
-
-[match.bypass]
-enabled = true
-# Implicit assertion: this action is read-only and safe to execute
-# without LLM-mediated context interpretation.
-```
-
-The `intent` field is always required and is what the LLM sees in the function description for tool augmentation. Patterns are optional and only consumed when `bypass.enabled = true`.
-
-Pattern matching:
-
-- `phrase` — case-insensitive literal phrase match against the user's message after trimming whitespace. Supports inline argument capture: `phrase = "open {file}"` matches "open docs/api.md" and binds `file = "docs/api.md"`.
-- `regex` — full regex match. Captures by name bind to action arguments.
-- A pattern is high-confidence if it matches the message in full (modulo whitespace and case). Partial matches don't bypass.
 
 ### Tool name collisions: agent-defined tools take precedence
 
@@ -157,12 +102,9 @@ Each tool invocation is its own action invocation per [ADR-0003](/adr/0003-actio
 
 ### Streaming is preserved
 
-Chat completion responses stream from the upstream LLM through Aileron to the agent. Aileron's interception happens at well-defined boundary points:
+Chat completion responses stream from the upstream LLM through Aileron to the agent. When the upstream LLM emits a tool call delta for an Aileron-added tool, Aileron pauses the stream, executes the action, injects the result back into the conversation, and resumes. The agent sees a normal stream with a synthetic tool-result message.
 
-- Tool calls: when the upstream LLM emits a tool call delta for an Aileron-added tool, Aileron pauses the stream, executes the action, injects the result back into the conversation, and resumes. The agent sees a normal stream with a synthetic tool-result message.
-- Pre-LLM bypass: when bypass fires, no upstream LLM is called. Aileron streams a synthesized response that follows the same chunk format the upstream would have used.
-
-The agent's streaming code path doesn't need to know whether a given response came from the upstream LLM, an Aileron-executed action, or a bypass-path direct response. The transport contract is the same.
+The agent's streaming code path doesn't need to know whether a given response came from the upstream LLM or from an Aileron-executed action. The transport contract is the same.
 
 ## Alternatives Considered
 
@@ -178,13 +120,19 @@ Aileron does not augment the LLM's tools. Instead, it inspects every chat comple
 
 Rejected because it severely limits the surface where Aileron can act. The vast majority of useful agent intents are not expressible as exact-phrase patterns. "Tell the team I shipped the auth migration to staging by EOD" doesn't match a regex; it matches the LLM's understanding of "tell-the-team-something" semantics. Without tool augmentation, Aileron only catches the simplest cases and misses the conversational ones — exactly the cases where deterministic execution is most valuable.
 
-### Pre-LLM bypass enabled by default (rejected)
+### Pre-LLM pattern bypass (rejected)
 
-Pattern-matched bypass is the default path. The LLM is consulted only when no pattern matches.
+A complementary mechanism alongside tool augmentation: action authors register `[[match.patterns]]` (literal phrase or regex) and opt into `[match.bypass].enabled = true`. When the most recent user message matches a single bypass-enabled action's pattern in full, Aileron executes the action directly and returns a synthesized response — the upstream LLM is never called. Sold as a latency optimization for read-only actions ("what time is it" → ~5ms instead of a full LLM round-trip).
 
-Rejected because it makes "did the LLM see this?" a question the user has to answer per request, which destroys the trust story. Side-effecting actions that match a pattern would execute without LLM-mediated interpretation of context — "send the email" matched against a careless typo would post a message the user didn't intend. The LLM's job in modern agent flows includes reading the *full* context (prior messages, user style, conversational nuance) and refusing or modifying invocations that look wrong. Skipping that by default trades safety for a latency win that's not worth it.
+Rejected on a cost-benefit basis after closer inspection. The mechanism is structurally brittle:
 
-The opt-in posture (`bypass.enabled = true`) lets authors enable bypass for genuinely safe actions while keeping the safe default for everything else.
+- **The runtime doesn't see the user's raw input.** It sees the agent's serialized request body, where the latest `{role: "user", content: ...}` entry is whatever the agent chose to send. Modern coding agents (Claude Code, Cursor, Continue, anything with a system-prompt builder or RAG layer) commonly rewrite, wrap, or summarize the user's message before it reaches the API. A user typing "what time is it" can arrive as `"The user is asking: 'what time is it'. Please use available tools to..."`, which a `phrase = "what time is it"` pattern won't full-match. Bypass silently doesn't fire.
+- **The failure mode is invisible.** When bypass doesn't fire, the LLM-mediated path takes over and the action still runs (correctness preserved, latency lost). Action authors enable bypass, expect ~5ms, and have no signal that with their specific agent they'll always pay the LLM round-trip — an attractive nuisance.
+- **The trust story is fragile.** Even with strict matching rules (full-match, single-match, side-effect-disallowed), bypass means an agent's serialization choices determine whether the LLM gets to apply context interpretation. That's a property the architecture should not give to the agent.
+
+The two mitigations originally proposed — *opt-in by default off* and *side-effecting actions cannot bypass* — address the safety angle but not the brittleness. The latency win is rare in practice and the UX confusion is permanent.
+
+The right shape: drop bypass entirely. All requests flow through tool augmentation. Read-only "what time is it"-style actions still run via the normal interception path; the round-trip cost is the price of consistency. If a future agent integration emerges that genuinely passes user input through unchanged AND demonstrates a meaningful latency benefit, bypass can be reintroduced with a more honest characterization (best-effort, agent-dependent). Until then, one path keeps the architecture simple and the trust story tight.
 
 ### Match agent intent through a dedicated `aileron.match` tool (rejected)
 
@@ -214,13 +162,11 @@ Rejected because it requires LLM-side awareness of Aileron, which violates the "
 
 ### For action authors
 
-- The Markdown body of the action file is the LLM's prompt for whether to invoke the action. Write descriptions that match how users actually phrase intents.
-- Pre-LLM bypass is available for read-only, idempotent actions. Side-effecting actions cannot enable it. The Hub validates this at publish time.
-- Patterns serve double duty: they help the LLM understand intent (when included in the description) and they enable bypass (when explicitly opted in).
+- The Markdown body of the action file is the LLM's prompt for whether to invoke the action. Write descriptions that match how users actually phrase intents — that prose is the only signal the LLM uses to pick the action.
 
 ### For the runtime
 
-- The chat-completion handler is the heart of the runtime: parse incoming request → augment tools → match for bypass → forward upstream OR execute locally → stream response.
+- The chat-completion handler is the heart of the runtime: parse incoming request → augment tools → forward upstream → intercept tool calls → stream response.
 - Streaming preservation requires careful handling of partial tool-call deltas; the runtime buffers tool-call fragments until complete, then dispatches.
 - The audit log records every chat completion (request and response shape, not contents) plus every action execution (full detail). The two audit streams cross-reference.
 
@@ -228,7 +174,6 @@ Rejected because it requires LLM-side awareness of Aileron, which violates the "
 
 - Adding Aileron is a one-line change to the agent's API base URL. No SDK changes, no agent restart in workflow-disruptive ways.
 - Actions installed via `aileron action add` are immediately available to the agent on the next chat completion. There is no "register this with the agent" step.
-- Read-only actions enabled for bypass run faster than LLM-mediated ones. Agent's perceived latency for `what time is it` drops from seconds to milliseconds.
 
 ### Open implementation questions (deferred)
 
@@ -292,37 +237,6 @@ LLM continues the conversation, emits final assistant message: "Posted to #engin
 
 Agent sees a normal streaming response. It never knew `ship_update` wasn't one of its own tools.
 
-### Pre-LLM bypass
-
-Project has a `current_time` action with bypass enabled:
-
-```toml
-[match]
-intent = "answer 'what time is it' with the current local time"
-
-[[match.patterns]]
-phrase = "what time is it"
-
-[[match.patterns]]
-phrase = "what's the time"
-
-[[match.patterns]]
-phrase = "what time is it now"
-
-[match.bypass]
-enabled = true
-```
-
-User: "What time is it?"
-
-Aileron matches the pattern, executes `current_time` directly, returns synthesized response:
-
-```
-It's 4:23 PM (Pacific).
-```
-
-No upstream LLM call. Latency: ~5ms. Cost: $0.00.
-
 ### Tool name collision
 
 Agent declares `search`. Project has a `search` action. Augmented tools array:
@@ -336,33 +250,3 @@ Agent declares `search`. Project has a `search` action. Augmented tools array:
 
 The LLM sees both, picks based on which description fits the user's intent. The agent's `search` continues to work; the user's project-specific `search` is also available under `aileron.search`.
 
-### Bypass refused for side-effecting action
-
-Action manifest:
-
-```toml
-[match]
-intent = "send an email"
-
-[[match.patterns]]
-phrase = "send email to {recipient}"
-
-[match.bypass]
-enabled = true
-```
-
-The connector this action uses declares `oauth2(scope=gmail.send)` — a side-effecting credential. Hub validation at publish time:
-
-```
-ERROR: action 'send-email' enables match.bypass but uses a side-effecting capability:
-  oauth2 scope: gmail.send
-
-Side-effecting actions cannot bypass the LLM. The bypass mechanism is reserved
-for read-only, idempotent actions whose context interpretation does not need
-LLM mediation.
-
-Either remove `[match.bypass] enabled = true` or scope the action to a
-read-only operation.
-```
-
-The action is rejected from publish. The author either removes the bypass flag (action stays in the catalog, runs through tool augmentation as normal) or splits it into a read-only "draft email" action with bypass and a side-effecting "send email" action without.
