@@ -3,6 +3,7 @@ package binding_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,6 +331,129 @@ func TestVaultStore_NilReceiver(t *testing.T) {
 	var s *binding.VaultStore
 	if _, err := s.List(context.Background()); err == nil {
 		t.Error("nil receiver List = nil err; want failure")
+	}
+}
+
+func TestAmbiguousError_FormatNamesCandidates(t *testing.T) {
+	// Per ADR-0006 the runtime never picks silently — when the store
+	// hits multiple matches, the surfaced error must list the
+	// candidate names so the agent / CLI can guide the user.
+	err := &binding.AmbiguousError{
+		ConnectorFQN: "github://aileron/slack",
+		Kind:         "oauth2",
+		Candidates:   []binding.Name{"oauth2/slack/work", "oauth2/slack/personal"},
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"github://aileron/slack",
+		"oauth2",
+		"oauth2/slack/work",
+		"oauth2/slack/personal",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Error() = %q; missing %q", got, want)
+		}
+	}
+}
+
+func TestBinding_AllOptionalFieldsRoundTripThroughVault(t *testing.T) {
+	// Exercises every conditional in toMetadata + fromEntry: scope,
+	// account, last_used_at, last_refreshed_at, refresh_token_present.
+	// This is the path Inspect/List use to render to the API.
+	s := newStore(t)
+	ctx := context.Background()
+	now := time.Unix(1700000000, 0).UTC()
+	b := binding.Binding{
+		Name:                "oauth2/slack/work",
+		Kind:                "oauth2",
+		Service:             "slack",
+		Identity:            "work",
+		Scope:               "chat:write",
+		ConnectorFQN:        "github://aileron/slack",
+		Account:             "alr@workplace.com",
+		CreatedAt:           now,
+		LastUsedAt:          now.Add(time.Hour),
+		LastRefreshedAt:     now.Add(2 * time.Hour),
+		RefreshTokenPresent: true,
+		Status:              binding.StatusStale,
+	}
+	if err := s.Put(ctx, b, []byte("v"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := s.Get(ctx, b.Name)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Account != b.Account || got.Scope != b.Scope {
+		t.Errorf("optional strings lost: got %+v", got)
+	}
+	if !got.LastUsedAt.Equal(b.LastUsedAt) {
+		t.Errorf("LastUsedAt = %v, want %v", got.LastUsedAt, b.LastUsedAt)
+	}
+	if !got.LastRefreshedAt.Equal(b.LastRefreshedAt) {
+		t.Errorf("LastRefreshedAt = %v, want %v", got.LastRefreshedAt, b.LastRefreshedAt)
+	}
+	if !got.RefreshTokenPresent {
+		t.Errorf("RefreshTokenPresent lost")
+	}
+	if got.Status != binding.StatusStale {
+		t.Errorf("Status = %q, want stale", got.Status)
+	}
+}
+
+func TestVaultStore_ResolverFor(t *testing.T) {
+	// ResolverFor is the seam the executor calls during action
+	// execution: nil on miss/ambiguous, a wired VaultResolver on hit.
+	s := newStore(t)
+	ctx := context.Background()
+	if err := s.Put(ctx, binding.Binding{
+		Name: "api_key/linear/team", Kind: "api_key", Service: "linear",
+		Identity: "team", ConnectorFQN: "github://aileron/linear",
+	}, []byte("lin-secret"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Miss → nil.
+	if r := s.ResolverFor(ctx, "github://aileron/missing", "api_key"); r != nil {
+		t.Errorf("ResolverFor on miss = %v, want nil", r)
+	}
+
+	// Hit → resolver returns the bound bytes.
+	r := s.ResolverFor(ctx, "github://aileron/linear", "api_key")
+	if r == nil {
+		t.Fatal("ResolverFor on hit = nil")
+	}
+	cred, err := r.Resolve(ctx)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if string(cred.Value) != "lin-secret" {
+		t.Errorf("Value = %q, want lin-secret", cred.Value)
+	}
+	if cred.Kind != "api_key" {
+		t.Errorf("Kind = %q, want api_key", cred.Kind)
+	}
+
+	// Ambiguous → nil.
+	if err := s.Put(ctx, binding.Binding{
+		Name: "api_key/linear/personal", Kind: "api_key", Service: "linear",
+		Identity: "personal", ConnectorFQN: "github://aileron/linear",
+	}, []byte("v2"), binding.PutCreate); err != nil {
+		t.Fatalf("seed second: %v", err)
+	}
+	if r := s.ResolverFor(ctx, "github://aileron/linear", "api_key"); r != nil {
+		t.Errorf("ResolverFor on ambiguous = %v, want nil", r)
+	}
+}
+
+func TestVaultStore_ResolverFor_NilSafety(t *testing.T) {
+	var s *binding.VaultStore
+	if r := s.ResolverFor(context.Background(), "x", "y"); r != nil {
+		t.Errorf("nil receiver ResolverFor = %v, want nil", r)
+	}
+	s2 := &binding.VaultStore{} // nil Vault
+	if r := s2.ResolverFor(context.Background(), "x", "y"); r != nil {
+		t.Errorf("nil Vault ResolverFor = %v, want nil", r)
 	}
 }
 

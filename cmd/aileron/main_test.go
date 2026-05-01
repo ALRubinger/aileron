@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -1090,6 +1091,85 @@ func TestRunBinding_RevokeRequiresExactlyOneArg(t *testing.T) {
 	code := runBinding([]string{"revoke"}, strings.NewReader(""), &stdout, &stderr)
 	if code == 0 {
 		t.Error("revoke with no name accepted")
+	}
+}
+
+func TestRunBinding_TransportErrorIsExit1(t *testing.T) {
+	// Point at a closed listener so the HTTP request fails at dial.
+	t.Setenv("AILERON_API_URL", "http://127.0.0.1:1/v1")
+	for _, args := range [][]string{
+		{"binding", "list"},
+		{"binding", "inspect", "x"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run(args, newTestRegistry(), &stdout, &stderr)
+		if code == 0 {
+			t.Errorf("%v: expected nonzero exit on transport error", args)
+		}
+	}
+}
+
+func TestRunBinding_ListBadFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"list", "--bogus"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on bad flag")
+	}
+}
+
+func TestRunBinding_InvalidJSONFromServerIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "not json")
+	})
+	for _, args := range [][]string{
+		{"binding", "list"},
+		{"binding", "inspect", "x"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run(args, newTestRegistry(), &stdout, &stderr)
+		if code == 0 {
+			t.Errorf("%v: expected nonzero exit on bad JSON", args)
+		}
+	}
+}
+
+func TestRunBinding_SetupParsesPartialResponse(t *testing.T) {
+	// Server returns 201 but with garbage body — CLI should exit 1
+	// rather than crash trying to render the response.
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, "not json")
+	})
+	stdin := strings.NewReader("team\nval\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://aileron/x"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on bad response body")
+	}
+}
+
+func TestBindingAPIBaseURL_DefaultAndOverride(t *testing.T) {
+	t.Setenv("AILERON_API_URL", "")
+	if got := bindingAPIBaseURL(); got != "http://localhost:8721/v1" {
+		t.Errorf("default = %q", got)
+	}
+	t.Setenv("AILERON_API_URL", "https://example.com/v1/")
+	if got := bindingAPIBaseURL(); got != "https://example.com/v1" {
+		t.Errorf("override = %q", got)
+	}
+}
+
+func TestPromptLine_ReusesBufferedReader(t *testing.T) {
+	// promptLine must accept an existing *bufio.Reader without
+	// double-buffering, so two consecutive prompts read distinct
+	// lines from the same source.
+	r := bufio.NewReader(strings.NewReader("first\nsecond\n"))
+	var out bytes.Buffer
+	if got := promptLine(r, &out, "a: "); got != "first" {
+		t.Errorf("first = %q", got)
+	}
+	if got := promptLine(r, &out, "b: "); got != "second" {
+		t.Errorf("second = %q", got)
 	}
 }
 

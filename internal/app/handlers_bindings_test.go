@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/audit"
@@ -316,6 +317,58 @@ func TestListBindings_FiltersByConnectorAndKind(t *testing.T) {
 	}
 }
 
+func TestGetBinding_HappyPathRendersOptionalFields(t *testing.T) {
+	// Drives the happy path through GetBinding + toAPIBinding so the
+	// optional-field branches (Account, Scope, LastUsedAt,
+	// LastRefreshedAt, RefreshTokenPresent, Status) all render.
+	srv, _ := bindingTestServer(t)
+	now := time.Unix(1700000000, 0).UTC()
+	if err := srv.bindings.Put(context.Background(), binding.Binding{
+		Name:                "api_key/linear/team",
+		Kind:                "api_key",
+		Service:             "linear",
+		Identity:            "team",
+		Scope:               "issues:write",
+		ConnectorFQN:        "github://aileron/linear",
+		Account:             "alr@x",
+		CreatedAt:           now,
+		LastUsedAt:          now.Add(time.Hour),
+		LastRefreshedAt:     now.Add(2 * time.Hour),
+		RefreshTokenPresent: true,
+		Status:              binding.StatusActive,
+	}, []byte("v"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	srv.GetBinding(rec, httptest.NewRequest(http.MethodGet, "/v1/bindings/api_key/linear/team", nil),
+		"api_key/linear/team")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var b api.Binding
+	if err := json.NewDecoder(rec.Body).Decode(&b); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if b.Account == nil || *b.Account != "alr@x" {
+		t.Errorf("Account = %v", b.Account)
+	}
+	if b.Scope == nil || *b.Scope != "issues:write" {
+		t.Errorf("Scope = %v", b.Scope)
+	}
+	if b.LastUsedAt == nil || !b.LastUsedAt.Equal(now.Add(time.Hour)) {
+		t.Errorf("LastUsedAt = %v", b.LastUsedAt)
+	}
+	if b.LastRefreshedAt == nil || !b.LastRefreshedAt.Equal(now.Add(2*time.Hour)) {
+		t.Errorf("LastRefreshedAt = %v", b.LastRefreshedAt)
+	}
+	if b.RefreshTokenPresent == nil || !*b.RefreshTokenPresent {
+		t.Errorf("RefreshTokenPresent = %v", b.RefreshTokenPresent)
+	}
+	if b.Status == nil || *b.Status != "active" {
+		t.Errorf("Status = %v", b.Status)
+	}
+}
+
 func TestGetBinding_NotFoundReturns404(t *testing.T) {
 	srv, _ := bindingTestServer(t)
 	rec := httptest.NewRecorder()
@@ -596,6 +649,66 @@ func TestBindings_Disabled503WhenStoreNil(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) { fn() })
+	}
+}
+
+func TestItoa_FormatsNonZero(t *testing.T) {
+	for _, c := range []struct {
+		in   int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{42, "42"},
+		{100, "100"},
+		{2147483647, "2147483647"},
+	} {
+		if got := itoa(c.in); got != c.want {
+			t.Errorf("itoa(%d) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestDefaultServiceFromFQN(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"github://aileron/slack", "slack"},
+		{"hub://acme/linear", "linear"},
+		{"not-a-fqn", "unknown"},
+	} {
+		if got := defaultServiceFromFQN(c.in); got != c.want {
+			t.Errorf("defaultServiceFromFQN(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSetup_BadFQNRejected(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+	body := `{
+		"connector_fqn": "not-an-fqn",
+		"bindings": [{"identity": "team", "source": {"kind": "api_key", "value": "v"}}]
+	}`
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec,
+		httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body)))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (uninstalled FQN parses but not in store)", rec.Code)
+	}
+}
+
+func TestSetup_NoInstallerReturns503(t *testing.T) {
+	// When the cstore installer is not wired (dev edge case),
+	// SetupBindings short-circuits to 503 because connector lookups
+	// have nowhere to land.
+	srv := &apiServer{
+		log:           slog.Default(),
+		bindings:      &binding.VaultStore{Vault: vault.NewMemVault()},
+		auditRecorder: audit.NewRecorder(audit.NewMemStore(), nil, nil),
+	}
+	body := `{"connector_fqn": "github://aileron/x", "bindings": [{"identity": "y", "source": {"kind": "api_key", "value": "v"}}]}`
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
 	}
 }
 
