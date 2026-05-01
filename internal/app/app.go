@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/account"
@@ -577,11 +578,12 @@ func registerProviders(
 // newConnectorInstaller wires the cstore install pipeline (ADR-0004) with
 // the v1 production defaults: HTTP fetcher, default per-scheme resolver,
 // and an empty Ed25519 keyring. The keyring is intentionally empty —
-// signing-keys-and-rotation is deferred per ADR-0002, and an empty keyring
-// fails closed on every install (per ADR-0004's failure-modes table).
-// Operators register authority keys on the returned Installer's
-// `Verifier.(*cstore.Ed25519Keyring).Add` once a key-distribution
-// mechanism lands.
+// signing-keys-and-rotation is deferred per ADR-0002. The verifier is
+// loaded from `~/.aileron/keyring.json` (per the file-based scheme
+// introduced for #366); a missing or empty file means no publishers
+// are trusted, and the install pipeline fails closed on every call
+// (per ADR-0004's failure-modes table). Users opt in to a publisher
+// by adding its ed25519 public key to the keyring file.
 //
 // The store root is `~/.aileron/store` per ADR-0004 §"Content-addressed
 // store layout"; tests substitute their own Installer on the apiServer
@@ -593,10 +595,29 @@ func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
 			"root", store.Root(), "error", err)
 		_ = store.RebuildIndex()
 	}
+	keyringPath := defaultKeyringPath()
+	keyring, err := cstore.LoadKeyring(keyringPath)
+	if err != nil {
+		log.Warn("failed to load keyring; falling back to empty (fail-closed)",
+			"path", keyringPath, "error", err)
+		keyring = cstore.NewEd25519Keyring()
+	}
 	return &cstore.Installer{
 		Resolver: cstore.DefaultResolver(),
 		Fetcher:  &cstore.HTTPFetcher{},
-		Verifier: cstore.NewEd25519Keyring(),
+		Verifier: keyring,
 		Store:    store,
 	}
+}
+
+// defaultKeyringPath returns the conventional path for the user's
+// publisher trust file: `$HOME/.aileron/keyring.json`. When the home
+// directory cannot be determined (test environments, edge cases),
+// returns an empty string — LoadKeyring treats that as a missing file.
+func defaultKeyringPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".aileron", "keyring.json")
 }

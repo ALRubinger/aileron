@@ -219,3 +219,33 @@ func TestStore_LoadIndex_RoundtripsViaPersist(t *testing.T) {
 		t.Errorf("Lookup after roundtrip = (%q, %v)", got, ok)
 	}
 }
+
+func TestStore_LookupAnyVersion_ReturnsAnyInstalledVersion(t *testing.T) {
+	// The action install handler uses LookupAnyVersion to confirm a
+	// connector dependency is present without requiring a specific
+	// version pin. Returns false when no version is installed; returns
+	// (Ref, hash, true) when at least one is.
+	dir := t.TempDir()
+	store := NewStore(dir)
+	fqn, _ := ParseFQN("github://acme/x")
+
+	// Empty store → not found.
+	if _, _, ok := store.LookupAnyVersion(fqn); ok {
+		t.Error("LookupAnyVersion on empty store returned ok=true")
+	}
+
+	// Manually populate the index — Commit's signature varies and this
+	// test only cares about the lookup, not the install pipeline.
+	store.index["github://acme/x@1.0.0"] = "sha256:deadbeef"
+
+	gotRef, gotHash, ok := store.LookupAnyVersion(fqn)
+	if !ok {
+		t.Fatal("LookupAnyVersion = ok=false after index populate")
+	}
+	if gotRef.Version != "1.0.0" {
+		t.Errorf("Version = %q", gotRef.Version)
+	}
+	if gotHash != "sha256:deadbeef" {
+		t.Errorf("hash = %q", gotHash)
+	}
+}

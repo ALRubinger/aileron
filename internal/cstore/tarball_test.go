@@ -212,3 +212,127 @@ func TestTarball_CanonicalHashIsSignatureIndependent(t *testing.T) {
 		t.Errorf("hashes differ across signatures: %q vs %q", a.CanonicalHash(), b.CanonicalHash())
 	}
 }
+
+// --- ExtractActionTarball tests ---
+
+// buildActionTarball assembles an action tarball in-memory. signature
+// can be nil to omit the signature.sig entry entirely.
+func buildActionTarball(t *testing.T, actionMD, signature []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	mustWrite := func(name string, body []byte) {
+		t.Helper()
+		_ = tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body))})
+		_, _ = tw.Write(body)
+	}
+	mustWrite(tarActionFile, actionMD)
+	if signature != nil {
+		mustWrite(tarSignatureFile, signature)
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+	return buf.Bytes()
+}
+
+func TestExtractActionTarball_Signed(t *testing.T) {
+	md := []byte("+++\nname = \"x\"\n+++\n# X\n")
+	sig := []byte("SIG")
+	got, err := ExtractActionTarball(bytes.NewReader(buildActionTarball(t, md, sig)))
+	if err != nil {
+		t.Fatalf("ExtractActionTarball: %v", err)
+	}
+	if !bytes.Equal(got.Manifest, md) {
+		t.Errorf("Manifest = %q, want %q", got.Manifest, md)
+	}
+	if !bytes.Equal(got.Signature, sig) {
+		t.Errorf("Signature = %q, want %q", got.Signature, sig)
+	}
+	if !got.SignaturePresent() {
+		t.Error("SignaturePresent() = false on signed tarball")
+	}
+}
+
+func TestExtractActionTarball_Unsigned(t *testing.T) {
+	md := []byte("+++\n+++\n")
+	got, err := ExtractActionTarball(bytes.NewReader(buildActionTarball(t, md, nil)))
+	if err != nil {
+		t.Fatalf("ExtractActionTarball: %v", err)
+	}
+	if got.Signature != nil {
+		t.Errorf("Signature = %q, want nil", got.Signature)
+	}
+	if got.SignaturePresent() {
+		t.Error("SignaturePresent() = true on unsigned tarball")
+	}
+}
+
+func TestExtractActionTarball_RejectsMissingActionFile(t *testing.T) {
+	// Tarball with only signature.sig and nothing else.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Name: tarSignatureFile, Size: 3})
+	_, _ = tw.Write([]byte("sig"))
+	_ = tw.Close()
+	_ = gz.Close()
+
+	_, err := ExtractActionTarball(bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatal("expected error when action.md is missing")
+	}
+	var cerr *Error
+	if !errors.As(err, &cerr) || cerr.Class != ClassMalformedTarball {
+		t.Errorf("err class = %v, want ClassMalformedTarball", err)
+	}
+}
+
+func TestExtractActionTarball_RejectsExtraEntry(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, name := range []string{tarActionFile, "unexpected.txt"} {
+		_ = tw.WriteHeader(&tar.Header{Name: name, Size: 1})
+		_, _ = tw.Write([]byte("x"))
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+	if _, err := ExtractActionTarball(bytes.NewReader(buf.Bytes())); err == nil {
+		t.Fatal("expected error on unexpected entry")
+	}
+}
+
+func TestExtractActionTarball_RejectsTwoActionFiles(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for i := 0; i < 2; i++ {
+		_ = tw.WriteHeader(&tar.Header{Name: tarActionFile, Size: 1})
+		_, _ = tw.Write([]byte("x"))
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+	if _, err := ExtractActionTarball(bytes.NewReader(buf.Bytes())); err == nil {
+		t.Fatal("expected error on duplicate action.md")
+	}
+}
+
+func TestExtractActionTarball_RejectsNonGzip(t *testing.T) {
+	if _, err := ExtractActionTarball(bytes.NewReader([]byte("not gzip"))); err == nil {
+		t.Fatal("expected error on non-gzip input")
+	}
+}
+
+func TestExtractActionTarball_RejectsNestedPath(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Name: "nested/" + tarActionFile, Size: 1})
+	_, _ = tw.Write([]byte("x"))
+	_ = tw.Close()
+	_ = gz.Close()
+	if _, err := ExtractActionTarball(bytes.NewReader(buf.Bytes())); err == nil {
+		t.Fatal("expected error on nested path")
+	}
+}

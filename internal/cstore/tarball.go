@@ -18,6 +18,11 @@ const (
 	tarSignatureFile = "signature.sig"
 	tarBinaryWASM    = "connector.wasm"
 	tarBinaryNative  = "connector.bin"
+	// tarActionFile is the action manifest's filename in an action
+	// install tarball (ADR-0003 + the action install pipeline added
+	// for #366). The same `aileron.tar.gz` asset name is used for
+	// connector and action releases — the contents distinguish them.
+	tarActionFile = "action.md"
 )
 
 // Tarball holds the raw bytes of a connector tarball after extraction:
@@ -128,6 +133,89 @@ func ExtractTarball(r io.Reader) (*Tarball, error) {
 	if out.Signature == nil {
 		return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
 			"tarball missing %s", tarSignatureFile)
+	}
+	return out, nil
+}
+
+// ActionTarball holds the raw bytes of an action install tarball
+// (per ADR-0003 + the install pipeline added for #366): the
+// frontmatter+body Markdown plus an optional detached signature.
+type ActionTarball struct {
+	// Manifest is the raw `action.md` bytes. The action.Parse function
+	// decodes the TOML frontmatter + Markdown body from this slice.
+	Manifest []byte
+	// Signature is the detached signature over `Manifest`. v1 keeps
+	// signing optional; absent signature is allowed (and surfaced via
+	// SignaturePresent so callers can log the unsigned install).
+	Signature []byte
+}
+
+// SignaturePresent reports whether a signature.sig was included in the
+// tarball. Used by the install handler to decide whether to invoke the
+// keyring verifier.
+func (t ActionTarball) SignaturePresent() bool { return len(t.Signature) > 0 }
+
+// ExtractActionTarball reads a gzipped tar from r and returns the
+// extracted action.md bytes plus an optional signature. v1 action
+// tarballs ship with `action.md` and (optionally) `signature.sig`;
+// any other entry is rejected as ClassMalformedTarball.
+//
+// Returns ClassMalformedTarball when the layout is wrong, including
+// when action.md is missing.
+func ExtractActionTarball(r io.Reader) (*ActionTarball, error) {
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+			"gzip reader: %s", err.Error())
+	}
+	defer gz.Close()
+
+	tr := tar.NewReader(gz)
+	out := &ActionTarball{}
+	for {
+		hdr, hErr := tr.Next()
+		if errors.Is(hErr, io.EOF) {
+			break
+		}
+		if hErr != nil {
+			return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+				"read tar entry: %s", hErr.Error())
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			if hdr.Typeflag == tar.TypeDir {
+				continue
+			}
+			return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+				"unexpected tar entry type %d for %q", hdr.Typeflag, hdr.Name)
+		}
+		name := filepath.Base(hdr.Name)
+		if name != hdr.Name && hdr.Name != "./"+name {
+			return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+				"tar entry %q is not at archive root (nested paths are not allowed)", hdr.Name)
+		}
+		body, rErr := io.ReadAll(tr)
+		if rErr != nil {
+			return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+				"read tar entry %q: %s", name, rErr.Error())
+		}
+		switch name {
+		case tarActionFile:
+			if out.Manifest != nil {
+				return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+					"tarball contains more than one %s", tarActionFile)
+			}
+			out.Manifest = body
+		case tarSignatureFile:
+			out.Signature = body
+		default:
+			return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+				"unexpected tar entry %q in action tarball (expected %s or %s)",
+				name, tarActionFile, tarSignatureFile)
+		}
+	}
+	if out.Manifest == nil {
+		return nil, newError(ClassMalformedTarball, BoundaryExternal, false,
+			"action tarball missing %s", tarActionFile)
 	}
 	return out, nil
 }
