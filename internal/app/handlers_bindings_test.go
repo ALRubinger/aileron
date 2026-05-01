@@ -19,8 +19,11 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
-// installFakeAPIKeyConnector writes an api_key-capability connector
-// entry into the cstore at the path computed from the canonical hash.
+// installFakeAPIKeyConnector writes a connector entry into the cstore
+// at the path computed from the canonical hash. Despite the name, it
+// works for both api_key and oauth2 kinds — when kind == "oauth2" it
+// includes a stub `[capabilities.credential.oauth2]` table so the
+// manifest passes ValidateManifest (#388).
 // Returns the connector FQN string.
 func installFakeAPIKeyConnector(t *testing.T, store *cstore.Store, fqn, version, kind string) string {
 	t.Helper()
@@ -33,6 +36,15 @@ publisher = "test"
 kind = "` + kind + `"
 scope = "issues:write"
 `
+	if kind == "oauth2" {
+		manifestTOML += `
+[capabilities.credential.oauth2]
+authorize_url = "https://example.test/o/authorize"
+token_url = "https://example.test/o/token"
+client_id = "test-client-id"
+scopes = ["test:scope"]
+`
+	}
 	tb := &cstore.Tarball{
 		BinaryName: "connector.wasm",
 		Binary:     []byte("FAKE-BINARY"),

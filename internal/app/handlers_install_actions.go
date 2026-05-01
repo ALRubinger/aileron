@@ -79,6 +79,9 @@ func (s *apiServer) InstallAction(w http.ResponseWriter, r *http.Request) {
 		Source:  res.Source,
 		Path:    res.Path,
 	}
+	if unbound := s.unboundCapabilitiesFor(r.Context(), res.ConnectorFQNs); len(unbound) > 0 {
+		out.UnboundCapabilities = &unbound
+	}
 	if res.AlreadyInstalled {
 		already := true
 		out.AlreadyInstalled = &already
@@ -88,12 +91,65 @@ func (s *apiServer) InstallAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, out)
 }
 
+// unboundCapabilitiesFor scans the installed connectors the action
+// references, looks up their declared credential capabilities, and
+// returns one entry per capability that does not yet have a binding
+// in the user's vault. The CLI uses this list to prompt the user to
+// drop into `aileron binding setup` immediately, avoiding the
+// hit-binding_required-later UX.
+func (s *apiServer) unboundCapabilitiesFor(ctx context.Context, connectorFQNs []string) []api.UnboundCapability {
+	var out []api.UnboundCapability
+	for _, fqnStr := range connectorFQNs {
+		canonical, manifest, err := s.lookupConnector(fqnStr)
+		if err != nil {
+			continue
+		}
+		cred := manifest.Capabilities.Credential
+		if cred == nil || cred.Kind == "" {
+			continue
+		}
+		if s.bindings == nil {
+			// No binding store wired (dev edge case) — every capability
+			// is "unbound" by definition; surface them so the user
+			// knows.
+			out = append(out, api.UnboundCapability{
+				ConnectorFqn: canonical, Kind: cred.Kind, Scope: scopePtr(cred.Scope),
+			})
+			continue
+		}
+		// Existing binding for this (connector, kind)? If yes, no
+		// prompt needed.
+		if _, err := s.bindings.Resolve(ctx, canonical, cred.Kind); err == nil {
+			continue
+		}
+		out = append(out, api.UnboundCapability{
+			ConnectorFqn: canonical,
+			Kind:         cred.Kind,
+			Scope:        scopePtr(cred.Scope),
+		})
+	}
+	return out
+}
+
+// scopePtr returns a *string for a possibly-empty scope; the API
+// type uses an optional pointer for omittable strings.
+func scopePtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // installActionResult is the success payload of runInstallAction.
 type installActionResult struct {
 	Name             string
 	Path             string
 	Source           string
 	AlreadyInstalled bool
+	// ConnectorFQNs is the canonical list of connectors the action
+	// declares as dependencies, in declaration order. The handler
+	// uses these to scan for unbound credential capabilities.
+	ConnectorFQNs []string
 }
 
 // installActionError carries an HTTP-renderable failure.
@@ -219,11 +275,17 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force 
 			})
 	}
 
+	connectorFQNs := make([]string, 0, len(manifest.Requires.Connectors))
+	for _, c := range manifest.Requires.Connectors {
+		connectorFQNs = append(connectorFQNs, c.Name)
+	}
+
 	return &installActionResult{
 		Name:             manifest.Name,
 		Path:             dest,
 		Source:           manifest.Source,
 		AlreadyInstalled: already,
+		ConnectorFQNs:    connectorFQNs,
 	}, nil
 }
 

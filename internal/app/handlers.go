@@ -106,6 +106,8 @@ type apiServer struct {
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
 	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
 	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
+	oauth2Sessions     *oauth2Sessions   // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
+	oauth2HTTPClient   *http.Client      // for OAuth token exchanges; nil → http.DefaultClient
 }
 
 // --- JSON helpers ---

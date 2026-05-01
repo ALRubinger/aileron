@@ -63,6 +63,31 @@ This walks every capability type the connector's manifest declares and prompts t
 
 `aileron binding setup` is also the right primitive for `aileron sync` (per [ADR-0004](/adr/0004-dependency-resolution)) when called with `--bind-all`: walk the user's full set of installed connectors and bind each one's capabilities up front.
 
+### v1: pre-binding is the primary path
+
+First-use binding *through an agent surface* requires the user channel ratified by [ADR-0009](/adr/0009-user-channel) — the agent has to interrupt its conversation, surface the binding prompt, wait for the user to complete it, and resume. v1 doesn't have that surface yet. Until it does, the v1 primary path for binding is **explicit pre-binding**:
+
+1. The user runs `aileron action add <FQN>`. If the action requires unbound credentials, the CLI prompts: *"This action needs Google access. Set up now? [Y/n]"*. The user stays in their CLI; no surface switch.
+2. If yes, the CLI drops directly into the OAuth dance for that connector. Same shell, same session.
+3. After binding, the user runs the agent and invokes the action. No further prompts.
+
+If the user declines the auto-prompt, the action will fail at first invocation with `binding_required`. The agent surfaces the failure to the user; the user runs `aileron binding setup ...` and tries again. Functional fallback, but the auto-prompt keeps the friction at install time when the user is already in the CLI.
+
+First-use binding through the agent surface is post-MVP and lands when ADR-0009's user channel is real.
+
+### How the OAuth dance runs (server-driven, with future Web UI in mind)
+
+The OAuth dance is **server-driven** via two endpoints:
+
+1. `POST /v1/bindings/setup/oauth2/init` — server reads the connector's installed manifest, generates PKCE verifier + state, holds them in an in-memory session keyed by an opaque `session_id`, returns `{ session_id, authorize_url, redirect_uri }`. Verifier never crosses the wire.
+2. `POST /v1/bindings/setup/oauth2/finish` — body: `{ session_id, code, state }`. Server retrieves the session's verifier, exchanges the code at the connector's `token_url`, persists the resulting tokens as a binding, returns the `Binding` envelope. Session is cleared (TTL 10 minutes regardless).
+
+The CLI consumes both endpoints: calls init, spins up an HTTP listener at the redirect URI's port, opens the user's browser to the authorize URL, captures the callback locally, posts the code to finish.
+
+A future Web UI uses the same endpoints; the only difference is the redirect URI is a hosted Aileron callback page instead of loopback. Connectors that want web-UI binding register both URIs on their OAuth app. Out of scope until a hosted Aileron service exists.
+
+v1 redirect URI is **loopback only**: `http://localhost:<random-port>/callback`. The connector publisher must register `http://localhost` on their OAuth app.
+
 ### Bindings have stable identities, scoped per-capability-type
 
 Every binding has a name within the capability type's namespace:

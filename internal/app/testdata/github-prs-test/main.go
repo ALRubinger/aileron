@@ -90,10 +90,17 @@ func main() {
 	switch in.Op {
 	case "list_prs":
 		url, _ := in.Args["url"].(string)
+		// credential_kind in args lets the action template choose
+		// which kind the host should resolve. Defaults to api_key
+		// for back-compat with existing fixtures.
+		credKind, _ := in.Args["credential_kind"].(string)
+		if credKind == "" {
+			credKind = "api_key"
+		}
 		req, _ := json.Marshal(map[string]any{
 			"method":     "GET",
 			"url":        url,
-			"credential": "api_key",
+			"credential": credKind,
 			"headers":    map[string]string{"Accept": "application/json"},
 		})
 		rc := hostHTTPRequest(ptr(req), uint32(len(req)))

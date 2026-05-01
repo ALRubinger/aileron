@@ -181,6 +181,35 @@ Manifest fields:
 
 Each capability section is enumerable and bounded. There is no `*` and no implicit grant. A connector that did not declare network access cannot dial out, period.
 
+### OAuth credentials are publisher-owned
+
+A connector that declares `kind = "oauth2"` MUST also declare its OAuth provider configuration in a `[capabilities.credential.oauth2]` table:
+
+```toml
+[capabilities.credential]
+kind = "oauth2"
+scope = "Read your email and send messages"   # human-readable; surfaced in CLI prompts
+
+[capabilities.credential.oauth2]
+authorize_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url     = "https://oauth2.googleapis.com/token"
+client_id     = "1234567890-xxxxxxx.apps.googleusercontent.com"
+scopes = [
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/calendar.readonly",
+]
+```
+
+The `client_id` belongs to the **connector publisher**, not Aileron. Each publisher registers their own OAuth app per service (with Google, Slack, Notion, GitHub, etc.) and the consent screen the user sees names that publisher. This is the load-bearing trust property: the OAuth consent screen is a contract between the user and the entity identified on it. If a third-party connector's runtime use is granted under "Aileron"'s OAuth client, the trust attribution is wrong — the user authorized one entity but a different entity exercises the grant.
+
+Publisher-owned apps fix that. Aileron-the-runtime is just machinery (PKCE, callback listener, refresh); Aileron-the-business publishes its own connectors with its own OAuth apps under the exact same rules — no special privilege.
+
+**v1 OAuth requirements**:
+
+- **PKCE (S256) required.** No `client_secret` field exists in the manifest. For installed apps PKCE is the cryptographic protection; the "secret" most providers list is not actually secret in this flow per their own installed-app guidance.
+- **Loopback redirect only.** The runtime serves the OAuth callback at `http://localhost:<random-port>/callback`. The publisher MUST register `http://localhost` as a valid redirect URI on their OAuth app. Niche providers without loopback support are post-MVP.
+- **Token storage.** The runtime persists the resulting `{access_token, refresh_token, expires_at, ...}` envelope in the user's vault. The connector never sees the token bytes — the runtime injects `Authorization: Bearer <access_token>` host-side, refreshing transparently before injection when the token is near expiry.
+
 ### Capabilities are abstract types, not concrete resources
 
 A connector's manifest never names a concrete vault path or a specific account. It declares the *type* of credential it needs (e.g. "OAuth2 with this scope") and the user binds a specific account to that requirement at install or first use.

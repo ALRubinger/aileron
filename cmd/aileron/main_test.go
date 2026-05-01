@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/launch"
@@ -874,15 +876,23 @@ func TestRunBinding_SetupSendsAPIKeyBody(t *testing.T) {
 			} `json:"source"`
 		} `json:"bindings"`
 	}
+	// CLI now probes oauth2/init first; the connector under test is
+	// api_key, so the server returns 422 not_oauth2 and the CLI falls
+	// through to the api_key flow.
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/bindings/setup" {
-			t.Errorf("method/path = %s %s", r.Method, r.URL.Path)
+		switch r.URL.Path {
+		case "/bindings/setup/oauth2/init":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"not_oauth2","message":"connector declares api_key"}}`)
+		case "/bindings/setup":
+			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"created":[{"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team","connector_fqn":"github://aileron/linear","created_at":"2024-01-01T00:00:00Z"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		w.WriteHeader(http.StatusCreated)
-		_, _ = io.WriteString(w, `{"created":[{"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team","connector_fqn":"github://aileron/linear","created_at":"2024-01-01T00:00:00Z"}]}`)
 	})
 	stdin := strings.NewReader("team\nlin-secret\n")
 	var stdout, stderr bytes.Buffer
@@ -906,8 +916,15 @@ func TestRunBinding_SetupSendsAPIKeyBody(t *testing.T) {
 }
 
 func TestRunBinding_SetupRejectsEmptyValue(t *testing.T) {
+	// init returns 422 not_oauth2 → CLI falls through and rejects
+	// blank api_key value before hitting /bindings/setup.
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("server should not be hit when CLI rejects empty value")
+		if r.URL.Path == "/bindings/setup/oauth2/init" {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"not_oauth2"}}`)
+			return
+		}
+		t.Error("/bindings/setup should not be hit when value is empty")
 	})
 	stdin := strings.NewReader("team\n\n") // identity provided, value empty
 	var stdout, stderr bytes.Buffer
@@ -1960,5 +1977,319 @@ func TestSplitFQNVersion(t *testing.T) {
 			t.Errorf("splitFQNVersion(%q, %q) = (%q, %q); want (%q, %q)",
 				c.fqn, c.flag, fqn, ver, c.wantFQN, c.wantVersion)
 		}
+	}
+}
+
+// fakeBrowser captures URLs the CLI would have asked the system to
+// open, without actually spawning a process. Tests that exercise the
+// OAuth dance swap bindingBrowser to one of these so `go test`
+// doesn't pop real browser windows.
+type fakeBrowser struct{ opened []string }
+
+func (f *fakeBrowser) Open(url string) error { f.opened = append(f.opened, url); return nil }
+
+// withFakeBrowser swaps bindingBrowser to a fake for the duration of
+// a test, restoring the default on cleanup.
+func withFakeBrowser(t *testing.T) *fakeBrowser {
+	t.Helper()
+	prev := bindingBrowser
+	fb := &fakeBrowser{}
+	bindingBrowser = fb
+	t.Cleanup(func() { bindingBrowser = prev })
+	return fb
+}
+
+// TestRunBinding_SetupOAuth2DriveDance exercises the full
+// server-driven OAuth dance from the CLI's perspective: init returns
+// an authorize URL pointing at a fake provider, CLI spins up its
+// loopback listener, a goroutine simulates the user's browser
+// landing on the redirect URI with `code` + `state`, CLI POSTs
+// finish, prints the bound name.
+func TestRunBinding_SetupOAuth2DriveDance(t *testing.T) {
+	fb := withFakeBrowser(t)
+	_ = fb // verified at the end
+	var seenInitBody []byte
+	var seenFinishBody []byte
+	var redirectURI string
+	var sessionID = "test-session-id"
+	var state = "test-state-abc"
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/setup/oauth2/init":
+			seenInitBody, _ = io.ReadAll(r.Body)
+			// Pick a free port for the redirect_uri the CLI will use.
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("port pick: %v", err)
+			}
+			port := ln.Addr().(*net.TCPAddr).Port
+			_ = ln.Close()
+			redirectURI = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+			authorizeURL := fmt.Sprintf("http://provider.test/authorize?state=%s&redirect_uri=%s", state, redirectURI)
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"session_id":%q,"authorize_url":%q,"redirect_uri":%q}`,
+				sessionID, authorizeURL, redirectURI))
+
+			// Simulate the user clicking through the OAuth screen
+			// and the provider redirecting to the loopback callback.
+			// Small delay so the CLI has time to bind its listener.
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				_, _ = http.Get(redirectURI + "?code=auth-code&state=" + state)
+			}()
+		case "/bindings/setup/oauth2/finish":
+			seenFinishBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{
+				"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/aileron-connector-google","created_at":"2024-01-01T00:00:00Z"
+			}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+
+	// Stub the browser-open so tests don't pop a real browser.
+	// (The CLI calls SystemBrowser{}.Open which would invoke `open`/`xdg-open`/`start`;
+	// we tolerate the failure since the simulated callback fires regardless.)
+
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://acme/aileron-connector-google"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(string(seenInitBody), `"connector_fqn":"github://acme/aileron-connector-google"`) {
+		t.Errorf("init body missing connector_fqn: %s", seenInitBody)
+	}
+	if !strings.Contains(string(seenInitBody), `"identity":"work"`) {
+		t.Errorf("init body missing identity: %s", seenInitBody)
+	}
+	if !strings.Contains(string(seenFinishBody), `"session_id":"`+sessionID+`"`) {
+		t.Errorf("finish body missing session_id: %s", seenFinishBody)
+	}
+	if !strings.Contains(string(seenFinishBody), `"code":"auth-code"`) {
+		t.Errorf("finish body missing code: %s", seenFinishBody)
+	}
+	if !strings.Contains(string(seenFinishBody), `"state":"`+state+`"`) {
+		t.Errorf("finish body missing state: %s", seenFinishBody)
+	}
+	if !strings.Contains(stdout.String(), "Bound: oauth2/google/work") {
+		t.Errorf("stdout missing bound line: %s", stdout.String())
+	}
+	// Confirm the CLI asked the (fake) browser to open the authorize URL.
+	if len(fb.opened) != 1 {
+		t.Errorf("fake browser open count = %d, want 1", len(fb.opened))
+	}
+}
+
+func TestRunBinding_SetupOAuth2_InitErrorIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"oops"}`)
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://acme/x"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr = %s", stderr.String())
+	}
+}
+
+func TestPortFromRedirectURI(t *testing.T) {
+	cases := map[string]int{
+		"http://127.0.0.1:54321/callback":   54321,
+		"http://localhost:8080/x":           8080,
+		"http://127.0.0.1/callback":         0, // no port
+		"https://accounts.google.com/auth":  0, // standard port omitted
+		"":                                  0,
+		"not a url":                         0,
+	}
+	for in, want := range cases {
+		if got := portFromRedirectURI(in); got != want {
+			t.Errorf("portFromRedirectURI(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestRunAction_AddAutoPromptsForUnboundCapabilities(t *testing.T) {
+	// After install, the server returned `unbound_capabilities`; the
+	// CLI prompts the user, drops into binding setup for each yes,
+	// and runs the api_key flow when the connector declares api_key.
+	var initHits, setupHits int
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{
+				"name":"echo","fqn":"github://x/y/actions/echo",
+				"version":"1.0.0","source":"x","path":"/p",
+				"unbound_capabilities":[{"connector_fqn":"github://x/conn-a","kind":"api_key","scope":"read"}]
+			}`)
+		case "/bindings/setup/oauth2/init":
+			initHits++
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"not_oauth2"}}`)
+		case "/bindings/setup":
+			setupHits++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"created":[{"name":"api_key/conn-a/work","kind":"api_key","service":"conn-a","identity":"work","connector_fqn":"github://x/conn-a","created_at":"2024-01-01T00:00:00Z"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+	// Yes-to-prompt, identity "work", api_key value "k".
+	stdin := strings.NewReader("y\nwork\nk\n")
+	var stdout, stderr bytes.Buffer
+	code := runAction([]string{"add", "github://x/y/actions/echo@1.0.0"},
+		stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if initHits != 1 {
+		t.Errorf("oauth2/init hits = %d, want 1", initHits)
+	}
+	if setupHits != 1 {
+		t.Errorf("bindings/setup hits = %d, want 1", setupHits)
+	}
+	if !strings.Contains(stdout.String(), "github://x/conn-a") {
+		t.Errorf("stdout should mention the connector FQN: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Created: api_key/conn-a/work") {
+		t.Errorf("stdout missing binding-created line: %s", stdout.String())
+	}
+}
+
+func TestRunAction_AddDeclineDoesNotBindButPrintsHint(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/actions/install" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{
+				"name":"echo","fqn":"x","version":"1.0.0","source":"x","path":"/p",
+				"unbound_capabilities":[{"connector_fqn":"github://x/conn-a","kind":"oauth2"}]
+			}`)
+			return
+		}
+		t.Errorf("unexpected path %s", r.URL.Path)
+	})
+	stdin := strings.NewReader("n\n")
+	var stdout, stderr bytes.Buffer
+	code := runAction([]string{"add", "github://x/y/actions/echo@1.0.0"},
+		stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Skipped") {
+		t.Errorf("stdout should mention skipped: %s", stdout.String())
+	}
+}
+
+func TestRunAction_AddNoBindFlagSkipsPrompt(t *testing.T) {
+	hits := map[string]int{}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits[r.URL.Path]++
+		if r.URL.Path == "/actions/install" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{
+				"name":"echo","fqn":"x","version":"1.0.0","source":"x","path":"/p",
+				"unbound_capabilities":[{"connector_fqn":"github://x/conn-a","kind":"api_key"}]
+			}`)
+			return
+		}
+		t.Errorf("unexpected path with --no-bind: %s", r.URL.Path)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"action", "add", "github://x/y/actions/echo@1.0.0", "--no-bind"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if hits["/bindings/setup/oauth2/init"] != 0 {
+		t.Errorf("--no-bind should not call binding setup")
+	}
+	if !strings.Contains(stdout.String(), "Run `aileron binding setup") {
+		t.Errorf("stdout should print the manual-binding hint with --no-bind: %s", stdout.String())
+	}
+}
+
+func TestRunBinding_SetupOAuth2_MalformedInitResponse(t *testing.T) {
+	withFakeBrowser(t)
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Server claims 200 but body isn't valid JSON.
+		_, _ = io.WriteString(w, `{not json`)
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit on malformed init response; stderr=%s", stderr.String())
+	}
+}
+
+func TestRunBinding_SetupOAuth2_BadRedirectURIRejected(t *testing.T) {
+	withFakeBrowser(t)
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"session_id":"s","authorize_url":"http://x/auth","redirect_uri":"not-a-url"}`)
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when redirect_uri has no port; stderr=%s", stderr.String())
+	}
+}
+
+func TestRunBinding_SetupOAuth2_FinishErrorIsExit1(t *testing.T) {
+	withFakeBrowser(t)
+	var redirectURI string
+	state := "test-state"
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/setup/oauth2/init":
+			ln, _ := net.Listen("tcp", "127.0.0.1:0")
+			port := ln.Addr().(*net.TCPAddr).Port
+			_ = ln.Close()
+			redirectURI = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+			authorizeURL := fmt.Sprintf("http://provider.test/auth?state=%s&redirect_uri=%s", state, redirectURI)
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"session_id":"s","authorize_url":%q,"redirect_uri":%q}`,
+				authorizeURL, redirectURI))
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				_, _ = http.Get(redirectURI + "?code=c&state=" + state)
+			}()
+		case "/bindings/setup/oauth2/finish":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"token_exchange_failed"}}`)
+		}
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when finish fails; stderr=%s", stderr.String())
+	}
+}
+
+func TestRunBinding_SetupOAuth2_PortBindFailsWhenSamePortInUse(t *testing.T) {
+	withFakeBrowser(t)
+	// Bind a port and HOLD it; the CLI's listener.NewListener call
+	// for the same port will fail.
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("seed listener: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+	heldPort := holder.Addr().(*net.TCPAddr).Port
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Return the held port as the redirect URI; CLI's bind fails.
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"session_id":"s","authorize_url":"http://x/auth?state=s","redirect_uri":"http://127.0.0.1:%d/callback"}`,
+			heldPort))
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when listener bind fails")
 	}
 }

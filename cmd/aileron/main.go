@@ -18,6 +18,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/oauth"
 	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
@@ -102,7 +103,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "connector":
 		return runConnector(args[1:], stdout, stderr)
 	case "action":
-		return runAction(args[1:], stdout, stderr)
+		return runAction(args[1:], os.Stdin, stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "log":
@@ -531,6 +532,12 @@ func runBinding(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 }
 
+// bindingBrowser is the [oauth.Opener] the CLI uses to launch the
+// user's default browser during the OAuth dance. Package-level so
+// tests can swap in a no-op opener without spawning real browser
+// windows. Production code reads the default `oauth.SystemBrowser`.
+var bindingBrowser oauth.Opener = oauth.SystemBrowser{}
+
 const bindingUsage = `usage:
   aileron binding list   [--connector FQN] [--kind KIND]
   aileron binding inspect <name>
@@ -664,9 +671,20 @@ func runBindingInspect(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runBindingSetup prompts for a binding identity and api_key value,
-// then POSTs to /v1/bindings/setup. v1 supports api_key only; OAuth is
-// tracked in #388.
+// runBindingSetup prompts for an identity and dispatches by the
+// connector's declared credential kind:
+//
+//   - api_key: prompts for the key value and POSTs to
+//     /v1/bindings/setup.
+//   - oauth2: drives the server-side dance — POST init, spin up a
+//     loopback callback listener, open the user's browser to the
+//     authorize URL, await the callback, POST finish.
+//
+// Detection is via init-then-fall-through: the OAuth init endpoint
+// returns 422 `not_oauth2` for connectors declaring api_key, and the
+// CLI falls through to the api_key flow on that signal. One extra
+// round trip for api_key connectors; trivial cost for the cleaner
+// CLI surface.
 func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, "usage: aileron binding setup <connector-FQN>")
@@ -678,6 +696,32 @@ func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 		fmt.Fprintln(stderr, "identity is required")
 		return 1
 	}
+	// Try OAuth first.
+	initBody, _ := json.Marshal(map[string]any{
+		"connector_fqn": connectorFQN,
+		"identity":      identity,
+	})
+	initStatus, initRespBody, err := bindingDoRequest(http.MethodPost,
+		"/bindings/setup/oauth2/init", strings.NewReader(string(initBody)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	switch initStatus {
+	case http.StatusOK:
+		return runBindingSetupOAuth2Finish(initRespBody, stdout, stderr)
+	case http.StatusUnprocessableEntity:
+		// Connector isn't oauth2 — fall through to api_key flow.
+	default:
+		fmt.Fprintf(stderr, "server returned %d: %s\n", initStatus, string(initRespBody))
+		return 1
+	}
+	return runBindingSetupAPIKey(connectorFQN, identity, stdin, stdout, stderr)
+}
+
+// runBindingSetupAPIKey is the legacy api_key path: prompt for the
+// key bytes, POST /v1/bindings/setup with kind = "api_key".
+func runBindingSetupAPIKey(connectorFQN, identity string, stdin io.Reader, stdout, stderr io.Writer) int {
 	value := promptLine(stdin, stdout, "API key value: ")
 	if value == "" {
 		fmt.Fprintln(stderr, "value is required")
@@ -715,6 +759,99 @@ func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) i
 		fmt.Fprintf(stdout, "Skipped (already bound): %s\n", name)
 	}
 	return 0
+}
+
+// runBindingSetupOAuth2Finish completes a server-driven OAuth dance.
+// initRespBody is the body returned from the init endpoint.
+//
+// Flow:
+//
+//  1. Parse init response for session_id + authorize_url + redirect_uri.
+//  2. Bind a loopback HTTP listener at the redirect URI's port.
+//  3. Open the user's browser to the authorize URL.
+//  4. Await the callback (code + state).
+//  5. POST /v1/bindings/setup/oauth2/finish with the captured code.
+//  6. Print the resulting binding name.
+func runBindingSetupOAuth2Finish(initRespBody []byte, stdout, stderr io.Writer) int {
+	var initResp struct {
+		SessionID    string `json:"session_id"`
+		AuthorizeURL string `json:"authorize_url"`
+		RedirectURI  string `json:"redirect_uri"`
+	}
+	if err := json.Unmarshal(initRespBody, &initResp); err != nil {
+		fmt.Fprintf(stderr, "error parsing init response: %v\n", err)
+		return 1
+	}
+	port := portFromRedirectURI(initResp.RedirectURI)
+	if port == 0 {
+		fmt.Fprintf(stderr, "could not parse port from redirect_uri %q\n", initResp.RedirectURI)
+		return 1
+	}
+	listener, err := oauth.NewListener(port)
+	if err != nil {
+		fmt.Fprintf(stderr, "could not bind callback listener on port %d: %v\n", port, err)
+		return 1
+	}
+	defer listener.Close()
+
+	fmt.Fprintln(stdout, "Opening your browser to authorize. If it does not open, visit:")
+	fmt.Fprintln(stdout, "  "+initResp.AuthorizeURL)
+	if err := bindingBrowser.Open(initResp.AuthorizeURL); err != nil {
+		// Non-fatal — user can paste the URL manually.
+		fmt.Fprintf(stderr, "(browser open failed; paste the URL above): %v\n", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cb, err := listener.Await(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "OAuth callback error: %v\n", err)
+		return 1
+	}
+
+	finishBody, _ := json.Marshal(map[string]any{
+		"session_id": initResp.SessionID,
+		"code":       cb.Code,
+		"state":      cb.State,
+	})
+	status, respBody, err := bindingDoRequest(http.MethodPost,
+		"/bindings/setup/oauth2/finish", strings.NewReader(string(finishBody)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status != http.StatusCreated {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return 1
+	}
+	var got bindingRow
+	if err := json.Unmarshal(respBody, &got); err != nil {
+		fmt.Fprintf(stderr, "error parsing finish response: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Bound: %s\n", got.Name)
+	return 0
+}
+
+// portFromRedirectURI extracts the TCP port from a `http://host:port/...`
+// URL. Returns 0 on parse failure.
+func portFromRedirectURI(uri string) int {
+	u, err := url.Parse(uri)
+	if err != nil {
+		return 0
+	}
+	p := u.Port()
+	if p == "" {
+		return 0
+	}
+	port := 0
+	for _, r := range p {
+		if r < '0' || r > '9' {
+			return 0
+		}
+		port = port*10 + int(r-'0')
+	}
+	return port
 }
 
 // runBindingRebind prompts for a replacement api_key value and posts
@@ -1076,14 +1213,15 @@ func runConnector(args []string, stdout, stderr io.Writer) int {
 }
 
 // runAction dispatches `aileron action <subcommand>`.
-func runAction(args []string, stdout, stderr io.Writer) int {
+func runAction(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, actionUsage)
 		return 1
 	}
+	br := bufio.NewReader(stdin)
 	switch args[0] {
 	case "add":
-		return runActionAdd(args[1:], stdout, stderr)
+		return runActionAdd(args[1:], br, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown action command: %q\n", args[0])
 		fmt.Fprintln(stderr, actionUsage)
@@ -1150,8 +1288,12 @@ func runConnectorInstall(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runActionAdd posts to /v1/actions/install and renders the envelope.
-func runActionAdd(args []string, stdout, stderr io.Writer) int {
+// runActionAdd posts to /v1/actions/install, renders the envelope,
+// and (per ADR-0006 v1 UX) prompts the user to drop into the binding
+// setup flow for any unbound credential capabilities the action's
+// connectors declare. The user stays in the CLI surface throughout —
+// avoids the hit-binding_required-at-agent-invocation friction.
+func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fqnArg, rest, ok := extractPositional(args)
 	if !ok {
 		fmt.Fprintln(stderr, actionUsage)
@@ -1161,6 +1303,7 @@ func runActionAdd(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	version := flags.String("version", "", "strict SemVer (required if FQN omits @<version>)")
 	force := flags.Bool("force", false, "overwrite an existing action with the same name")
+	noBind := flags.Bool("no-bind", false, "skip the auto-prompt for unbound credentials (use in scripts)")
 	if err := flags.Parse(rest); err != nil {
 		return 1
 	}
@@ -1185,12 +1328,17 @@ func runActionAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	var resp struct {
-		Name             string `json:"name"`
-		Fqn              string `json:"fqn"`
-		Version          string `json:"version"`
-		Source           string `json:"source"`
-		Path             string `json:"path"`
-		AlreadyInstalled bool   `json:"already_installed"`
+		Name                string `json:"name"`
+		Fqn                 string `json:"fqn"`
+		Version             string `json:"version"`
+		Source              string `json:"source"`
+		Path                string `json:"path"`
+		AlreadyInstalled    bool   `json:"already_installed"`
+		UnboundCapabilities []struct {
+			ConnectorFQN string  `json:"connector_fqn"`
+			Kind         string  `json:"kind"`
+			Scope        *string `json:"scope,omitempty"`
+		} `json:"unbound_capabilities,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
@@ -1202,6 +1350,39 @@ func runActionAdd(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "%s: %s\n  source: %s\n  path: %s\n",
 		verb, resp.Name, resp.Source, resp.Path)
+
+	if *noBind || len(resp.UnboundCapabilities) == 0 {
+		if len(resp.UnboundCapabilities) > 0 {
+			fmt.Fprintln(stdout, "")
+			fmt.Fprintln(stdout, "Action has unbound credential capabilities:")
+			for _, u := range resp.UnboundCapabilities {
+				fmt.Fprintf(stdout, "  - %s (%s)\n", u.ConnectorFQN, u.Kind)
+			}
+			fmt.Fprintln(stdout, "Run `aileron binding setup <connector-FQN>` for each before invoking the action.")
+		}
+		return 0
+	}
+
+	// Prompt the user to bind each unbound capability now.
+	for _, u := range resp.UnboundCapabilities {
+		fmt.Fprintln(stdout, "")
+		desc := u.Kind
+		if u.Scope != nil && *u.Scope != "" {
+			desc = u.Kind + " — " + *u.Scope
+		}
+		answer := promptLine(stdin, stdout,
+			fmt.Sprintf("This action needs %s access for %s. Set up now? [Y/n]: ", desc, u.ConnectorFQN))
+		if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
+			fmt.Fprintf(stdout, "  Skipped. Run `aileron binding setup %s` later.\n", u.ConnectorFQN)
+			continue
+		}
+		if rc := runBindingSetup([]string{u.ConnectorFQN}, stdin, stdout, stderr); rc != 0 {
+			fmt.Fprintf(stderr, "  binding setup for %s exited %d\n", u.ConnectorFQN, rc)
+			// Continue to the next capability — partial bind is
+			// better than aborting; the user can retry the failing
+			// one later.
+		}
+	}
 	return 0
 }
 

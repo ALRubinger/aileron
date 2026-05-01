@@ -225,6 +225,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// to be unlocked; resolving a credential at execution time does.
 	bindingStore := &binding.VaultStore{Vault: v}
 	server.bindings = bindingStore
+	server.oauth2Sessions = newOAuth2Sessions()
 
 	// --- Sandbox runtime (ADR-0005) ---
 	// Per-call WASM instantiation. Falls back to the stub executor
