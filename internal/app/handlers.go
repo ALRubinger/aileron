@@ -18,6 +18,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/auth"
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
@@ -98,11 +99,13 @@ type apiServer struct {
 	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
 	interceptEngine    interceptEngineHandle       // tool-call intercept engine; nil disables interception (proxy passthrough only)
 	auditStore         *audit.MemStore             // ADR-0010 audit store; in-memory for v1, Postgres post-MVP
+	auditRecorder      audit.Recorder              // ADR-0010 recorder; mints audit IDs and emits binding-lifecycle events
 	vaultLocked        bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
 	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
+	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
 }
 
 // --- JSON helpers ---

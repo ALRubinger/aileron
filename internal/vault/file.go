@@ -126,6 +126,20 @@ func (fv *FileVault) Delete(_ context.Context, path string) error {
 	return fv.flush()
 }
 
+// List returns plaintext metadata for every entry. The encrypted
+// `Value` is not returned — listing must work without decrypting any
+// secret per ADR-0011.
+func (fv *FileVault) List(_ context.Context) ([]Entry, error) {
+	fv.mu.Lock()
+	defer fv.mu.Unlock()
+
+	entries := make([]Entry, 0, len(fv.data.Secrets))
+	for path, s := range fv.data.Secrets {
+		entries = append(entries, Entry{Path: path, Metadata: s.Metadata})
+	}
+	return entries, nil
+}
+
 // Names returns the paths of all stored secrets.
 func (fv *FileVault) Names() []string {
 	fv.mu.Lock()

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/sandbox"
@@ -49,69 +50,47 @@ kind = "` + kind + `"
 	return "sha256:" + hashHex
 }
 
-// installActionWithBinding writes an action manifest containing a
-// `[[bindings]]` entry that points the named connector at the given
-// vault path.
-func installActionWithBinding(t *testing.T, fqn, version, hash, vaultPath string) *Store {
+// bindingStoreWith builds a binding.VaultStore over an in-memory vault
+// pre-populated with the given binding for the given connector. The
+// service segment is taken from the binding name's middle segment.
+func bindingStoreWith(t *testing.T, name, kind, connectorFQN string, value []byte) binding.Store {
 	t.Helper()
-	dir := t.TempDir()
-	manifest := `+++
-name = "test-action"
-version = "1.0.0"
-source = "hub://test/test-action@1.0.0"
-
-[[requires.connectors]]
-name = "` + fqn + `"
-version = "` + version + `"
-hash = "` + hash + `"
-capabilities = ["call"]
-
-[match]
-intent = "test"
-
-[[execute]]
-id = "call"
-connector = "` + fqn + `"
-op = "call"
-
-[[bindings]]
-connector = "` + fqn + `"
-vault_path = "` + vaultPath + `"
-+++
-
-# Test Action
-`
-	if err := os.WriteFile(filepath.Join(dir, "test-action.md"), []byte(manifest), 0o644); err != nil {
-		t.Fatalf("write action: %v", err)
+	s := &binding.VaultStore{Vault: vault.NewMemVault()}
+	bn, _, service, identity, err := binding.Parse(name)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", name, err)
 	}
-	store := NewStore(dir)
-	if _, err := store.Load(); err != nil {
-		t.Fatalf("Load: %v", err)
+	if err := s.Put(context.Background(), binding.Binding{
+		Name:         bn,
+		Kind:         kind,
+		Service:      service,
+		Identity:     identity,
+		ConnectorFQN: connectorFQN,
+	}, value, binding.PutCreate); err != nil {
+		t.Fatalf("seed binding: %v", err)
 	}
-	return store
+	return s
 }
 
 func TestSandboxExecutor_WiresResolver_WhenBindingMatches(t *testing.T) {
-	// ADR-0005 credential mediation: when the connector manifest
-	// declares [capabilities.credential] and the action declares a
-	// matching [[bindings]] entry, the executor wires a per-step
-	// credential.Resolver into sandbox.Call. The resolver, when
-	// called, returns the bound vault entry.
+	// ADR-0005 + ADR-0006: when the connector manifest declares
+	// [capabilities.credential] and the user has created a matching
+	// binding, the executor wires a per-step credential.Resolver into
+	// sandbox.Call. The resolver, when called, returns the bound
+	// vault entry.
 	cstoreDir := t.TempDir()
 	store := cstore.NewStore(cstoreDir)
 	hash := installCredentialConnector(t, store, "github://test/oauth-echo", "1.0.0", "oauth2")
-	actions := installActionWithBinding(t, "github://test/oauth-echo", "1.0.0", hash, "oauth2/test")
+	actions := installFakeAction(t, "github://test/oauth-echo", "1.0.0", hash,
+		[]string{"call"}, []string{"call"})
 
-	v := vault.NewMemVault()
-	if err := v.Put(context.Background(), "oauth2/test",
-		[]byte("test-token"), vault.Metadata{Type: "oauth2"}); err != nil {
-		t.Fatalf("vault.Put: %v", err)
-	}
+	bs := bindingStoreWith(t, "oauth2/oauth-echo/work", "oauth2",
+		"github://test/oauth-echo", []byte("test-token"))
 
 	rt := &fakeRuntime{}
 	rt.connectors = map[string]*fakeConnector{"github://test/oauth-echo": {resp: map[string]any{"ok": true}}}
 
-	exec := NewSandboxExecutor(actions, store, rt, v)
+	exec := NewSandboxExecutor(actions, store, rt, bs)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
@@ -140,18 +119,21 @@ func TestSandboxExecutor_WiresResolver_WhenBindingMatches(t *testing.T) {
 
 func TestSandboxExecutor_NoResolver_WhenConnectorDeclaresNoCredential(t *testing.T) {
 	// Connector manifest declares no [capabilities.credential]; even
-	// when a binding is mistakenly authored, the executor passes nil
-	// because no credential mediation is needed for this connector.
+	// when a binding exists, the executor passes nil because no
+	// credential mediation is needed for this connector.
 	cstoreDir := t.TempDir()
 	store := cstore.NewStore(cstoreDir)
 	hash := installFakeConnector(t, store, "github://test/echo", "1.0.0")
-	actions := installActionWithBinding(t, "github://test/echo", "1.0.0", hash, "oauth2/anything")
+	actions := installFakeAction(t, "github://test/echo", "1.0.0", hash,
+		[]string{"call"}, []string{"call"})
 
-	v := vault.NewMemVault()
+	bs := bindingStoreWith(t, "api_key/echo/work", "api_key",
+		"github://test/echo", []byte("nope"))
+
 	rt := &fakeRuntime{}
 	rt.connectors = map[string]*fakeConnector{"github://test/echo": {resp: map[string]any{}}}
 
-	exec := NewSandboxExecutor(actions, store, rt, v)
+	exec := NewSandboxExecutor(actions, store, rt, bs)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
@@ -163,24 +145,21 @@ func TestSandboxExecutor_NoResolver_WhenConnectorDeclaresNoCredential(t *testing
 	}
 }
 
-func TestSandboxExecutor_NoResolver_WhenActionLacksBinding(t *testing.T) {
+func TestSandboxExecutor_NoResolver_WhenNoBindingExists(t *testing.T) {
 	// Connector manifest declares [capabilities.credential] but the
-	// action has no [[bindings]] entry → resolver is nil. The host
-	// will return `binding_required` if the connector tries to use
-	// the credential path at runtime; the executor itself does not
-	// pre-empt the call.
+	// binding store has no matching entry → resolver is nil. The host
+	// surfaces `binding_required` on the first credential reference.
 	cstoreDir := t.TempDir()
 	store := cstore.NewStore(cstoreDir)
 	hash := installCredentialConnector(t, store, "github://test/oauth-echo", "1.0.0", "oauth2")
-	// Same action but without the [[bindings]] block.
 	actions := installFakeAction(t, "github://test/oauth-echo", "1.0.0", hash,
 		[]string{"call"}, []string{"call"})
 
-	v := vault.NewMemVault()
+	bs := &binding.VaultStore{Vault: vault.NewMemVault()} // empty store
 	rt := &fakeRuntime{}
 	rt.connectors = map[string]*fakeConnector{"github://test/oauth-echo": {resp: map[string]any{}}}
 
-	exec := NewSandboxExecutor(actions, store, rt, v)
+	exec := NewSandboxExecutor(actions, store, rt, bs)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
@@ -192,20 +171,33 @@ func TestSandboxExecutor_NoResolver_WhenActionLacksBinding(t *testing.T) {
 	}
 }
 
-func TestSandboxExecutor_NoResolver_WhenVaultMissing(t *testing.T) {
-	// Connector declares credential, action declares binding, but the
-	// executor has no Vault wired. Mirrors a dev-mode launch where the
-	// vault hasn't been unlocked; the resolver field is nil and the
-	// host fails closed at credential reference time.
+func TestSandboxExecutor_NoResolver_WhenAmbiguousBinding(t *testing.T) {
+	// Per ADR-0006 the runtime never picks silently. Two bindings of
+	// the same connector+kind → resolver is nil; the sandbox returns
+	// `binding_required`. The agent's tool-result envelope carries
+	// the names so the user can disambiguate.
 	cstoreDir := t.TempDir()
 	store := cstore.NewStore(cstoreDir)
 	hash := installCredentialConnector(t, store, "github://test/oauth-echo", "1.0.0", "oauth2")
-	actions := installActionWithBinding(t, "github://test/oauth-echo", "1.0.0", hash, "oauth2/test")
+	actions := installFakeAction(t, "github://test/oauth-echo", "1.0.0", hash,
+		[]string{"call"}, []string{"call"})
+
+	bs := bindingStoreWith(t, "oauth2/oauth-echo/work", "oauth2",
+		"github://test/oauth-echo", []byte("v1"))
+	if err := bs.Put(context.Background(), binding.Binding{
+		Name:         "oauth2/oauth-echo/personal",
+		Kind:         "oauth2",
+		Service:      "oauth-echo",
+		Identity:     "personal",
+		ConnectorFQN: "github://test/oauth-echo",
+	}, []byte("v2"), binding.PutCreate); err != nil {
+		t.Fatalf("seed second binding: %v", err)
+	}
 
 	rt := &fakeRuntime{}
 	rt.connectors = map[string]*fakeConnector{"github://test/oauth-echo": {resp: map[string]any{}}}
 
-	exec := NewSandboxExecutor(actions, store, rt, nil) // nil Vault
+	exec := NewSandboxExecutor(actions, store, rt, bs)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
@@ -213,7 +205,31 @@ func TestSandboxExecutor_NoResolver_WhenVaultMissing(t *testing.T) {
 	}
 	c := rt.connectors["github://test/oauth-echo"]
 	if len(c.calls) == 0 || c.calls[0].CredentialResolver != nil {
-		t.Errorf("expected nil CredentialResolver with no Vault; got %v", c.calls[0].CredentialResolver)
+		t.Errorf("expected nil CredentialResolver on ambiguous binding; got %v", c.calls[0].CredentialResolver)
+	}
+}
+
+func TestSandboxExecutor_NoResolver_WhenBindingsNil(t *testing.T) {
+	// Mirrors a dev-mode launch with no vault wired. resolver is nil;
+	// the host fails closed at credential reference time.
+	cstoreDir := t.TempDir()
+	store := cstore.NewStore(cstoreDir)
+	hash := installCredentialConnector(t, store, "github://test/oauth-echo", "1.0.0", "oauth2")
+	actions := installFakeAction(t, "github://test/oauth-echo", "1.0.0", hash,
+		[]string{"call"}, []string{"call"})
+
+	rt := &fakeRuntime{}
+	rt.connectors = map[string]*fakeConnector{"github://test/oauth-echo": {resp: map[string]any{}}}
+
+	exec := NewSandboxExecutor(actions, store, rt, nil) // nil Bindings
+	t.Cleanup(func() { _ = exec.Close(context.Background()) })
+
+	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	c := rt.connectors["github://test/oauth-echo"]
+	if len(c.calls) == 0 || c.calls[0].CredentialResolver != nil {
+		t.Errorf("expected nil CredentialResolver with no Bindings; got %v", c.calls[0].CredentialResolver)
 	}
 }
 
@@ -225,9 +241,10 @@ func TestSandboxExecutor_BindingRequiredFromSandboxBecomesFailure(t *testing.T) 
 	cstoreDir := t.TempDir()
 	store := cstore.NewStore(cstoreDir)
 	hash := installCredentialConnector(t, store, "github://test/oauth-echo", "1.0.0", "oauth2")
-	actions := installActionWithBinding(t, "github://test/oauth-echo", "1.0.0", hash, "oauth2/test")
+	actions := installFakeAction(t, "github://test/oauth-echo", "1.0.0", hash,
+		[]string{"call"}, []string{"call"})
 
-	v := vault.NewMemVault() // empty vault — no entry
+	bs := &binding.VaultStore{Vault: vault.NewMemVault()} // empty
 
 	rt := &fakeRuntime{}
 	rt.connectors = map[string]*fakeConnector{"github://test/oauth-echo": {
@@ -238,7 +255,7 @@ func TestSandboxExecutor_BindingRequiredFromSandboxBecomesFailure(t *testing.T) 
 		},
 	}}
 
-	exec := NewSandboxExecutor(actions, store, rt, v)
+	exec := NewSandboxExecutor(actions, store, rt, bs)
 	t.Cleanup(func() { _ = exec.Close(context.Background()) })
 
 	res, err := exec.Execute(context.Background(), "test-action", nil)
@@ -253,21 +270,8 @@ func TestSandboxExecutor_BindingRequiredFromSandboxBecomesFailure(t *testing.T) 
 	}
 }
 
-func TestBindingFor_NilManifestReturnsNil(t *testing.T) {
-	if got := bindingFor(nil, "github://x/y"); got != nil {
-		t.Errorf("bindingFor(nil) = %v, want nil", got)
-	}
-}
-
-func TestBindingFor_UnmatchedConnectorReturnsNil(t *testing.T) {
-	m := &Manifest{Bindings: []Binding{{Connector: "github://a/b", VaultPath: "x"}}}
-	if got := bindingFor(m, "github://other/y"); got != nil {
-		t.Errorf("bindingFor unmatched = %v, want nil", got)
-	}
-}
-
-// stubResolverForTests is a Resolver that the executor pre-populates;
-// this test ensures the sentinel-error path stays Is-comparable.
+// stubResolverForTests retains coverage on the credential package's
+// VaultResolver sentinel-error path.
 func TestVaultResolver_Resolve_ReturnsSentinelOnMissing(t *testing.T) {
 	r := &credential.VaultResolver{
 		Vault:        vault.NewMemVault(),

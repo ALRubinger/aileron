@@ -30,6 +30,21 @@ type Vault interface {
 
 	// Delete permanently removes a secret.
 	Delete(ctx context.Context, path string) error
+
+	// List returns plaintext metadata for every entry in the vault. The
+	// credential bytes are NOT returned — listing must work without
+	// decrypting any value, so the operation succeeds on a locked vault.
+	// Per ADR-0011, this is the load-bearing property that makes
+	// `aileron binding list` and the binding-resolution lookup work
+	// without prompting for a passphrase. Order is unspecified.
+	List(ctx context.Context) ([]Entry, error)
+}
+
+// Entry is a vault listing row: the path plus its plaintext metadata,
+// without the encrypted value.
+type Entry struct {
+	Path     string
+	Metadata Metadata
 }
 
 // Secret is a resolved secret value.

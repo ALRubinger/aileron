@@ -27,6 +27,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/connector/git/github"
 	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/intercept"
@@ -205,6 +206,25 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		}
 	}
 
+	// --- Audit log (ADR-0010) ---
+	// The in-memory store is sufficient for v1 dev/test; Postgres
+	// persistence is post-MVP. The recorder mints audit IDs and
+	// stamps them onto failures so the agent's response carries a
+	// working back-reference into the audit log. Built before the
+	// sandbox executor and binding store so each can emit lifecycle
+	// events through the same recorder.
+	auditStore := audit.NewMemStore()
+	recorder := audit.NewRecorder(auditStore, nil, nil)
+	server.auditStore = auditStore
+	server.auditRecorder = recorder
+
+	// --- Binding store (ADR-0006) ---
+	// The vault is also the binding store: each binding's name is its
+	// vault path. Listing binding metadata does not require the vault
+	// to be unlocked; resolving a credential at execution time does.
+	bindingStore := &binding.VaultStore{Vault: v}
+	server.bindings = bindingStore
+
 	// --- Sandbox runtime (ADR-0005) ---
 	// Per-call WASM instantiation. Falls back to the stub executor
 	// when the sandbox runtime fails to come up — startup must not
@@ -214,18 +234,9 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	if sandboxErr != nil {
 		log.Warn("sandbox runtime unavailable; using stub executor", "error", sandboxErr)
 	} else {
-		executor = action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT, v)
+		executor = action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT, bindingStore)
 		server.sandboxRuntime = sandboxRT
 	}
-
-	// --- Audit log (ADR-0010) ---
-	// The in-memory store is sufficient for v1 dev/test; Postgres
-	// persistence is post-MVP. The recorder mints audit IDs and
-	// stamps them onto failures so the agent's response carries a
-	// working back-reference into the audit log.
-	auditStore := audit.NewMemStore()
-	recorder := audit.NewRecorder(auditStore, nil, nil)
-	server.auditStore = auditStore
 
 	// --- Intercept engine (stage 4) ---
 	engine, engineErr := intercept.New(intercept.Config{

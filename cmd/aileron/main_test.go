@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -748,49 +752,344 @@ func TestRunSecret_ListWithSecrets(t *testing.T) {
 // ADR-0011 acceptance: metadata is plaintext on disk, so the user
 // can inspect what's bound before paying the passphrase prompt.
 
+// fakeBindingServer stands up an in-process httptest.NewServer that
+// implements just enough of the /v1/bindings surface to drive the
+// CLI tests. Each test scopes AILERON_API_URL to this server's URL.
+func fakeBindingServer(t *testing.T, fn http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.StripPrefix("/v1", fn))
+	t.Cleanup(srv.Close)
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+	return srv
+}
+
 func TestRunBinding_ListEmpty(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bindings" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[]}`)
+	})
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"binding", "list"}, newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
-		t.Errorf("exit code = %d, want 0; stderr=%s", code, stderr.String())
+		t.Errorf("exit code = %d; stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "No bindings stored") {
-		t.Errorf("output = %q, want 'No bindings stored' message", stdout.String())
+	if !strings.Contains(stdout.String(), "No bindings.") {
+		t.Errorf("output = %q", stdout.String())
 	}
 }
 
-func TestRunBinding_ListShowsMetadata(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
-	os.MkdirAll(filepath.Dir(vaultPath), 0o700)
-	// metadata is plaintext per ADR-0011; the value can be opaque.
-	os.WriteFile(vaultPath, []byte(`{
-  "version": 1,
-  "salt": "AAAA",
-  "secrets": {
-    "oauth2/slack/work": {"value":"ZW5j","metadata":{"type":"oauth2","labels":{"connector":"slack","scope":"chat:write"}}},
-    "connectors/github/default": {"value":"ZW5j","metadata":{"type":"api_key","labels":{"connector":"github"}}}
-  }
-}`), 0o600)
-
+func TestRunBinding_ListShowsTable(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[
+			{"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team","connector_fqn":"github://aileron/linear","status":"active","created_at":"2024-01-01T00:00:00Z"},
+			{"name":"oauth2/slack/work","kind":"oauth2","service":"slack","identity":"work","connector_fqn":"github://aileron/slack","status":"active","created_at":"2024-01-01T00:00:00Z"}
+		]}`)
+	})
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"binding", "list"}, newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
-		t.Errorf("exit code = %d, want 0; stderr=%s", code, stderr.String())
+		t.Errorf("exit code = %d; stderr = %s", code, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{
-		"PATH", "TYPE", "LABELS",
-		"oauth2/slack/work", "oauth2", "connector=slack",
-		"connectors/github/default", "api_key", "connector=github",
+	for _, want := range []string{"NAME", "KIND", "STATUS",
+		"api_key/linear/team", "oauth2/slack/work", "github://aileron/linear",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestRunBinding_ListPropagatesFilters(t *testing.T) {
+	var seenQuery url.Values
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seenQuery = r.URL.Query()
+		_, _ = io.WriteString(w, `{"items":[]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	run([]string{"binding", "list", "--connector", "github://aileron/linear", "--kind", "api_key"},
+		newTestRegistry(), &stdout, &stderr)
+	if got := seenQuery.Get("connector_fqn"); got != "github://aileron/linear" {
+		t.Errorf("connector_fqn = %q", got)
+	}
+	if got := seenQuery.Get("kind"); got != "api_key" {
+		t.Errorf("kind = %q", got)
+	}
+}
+
+func TestRunBinding_InspectPrintsDetails(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bindings/api_key/linear/team" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{
+			"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team",
+			"connector_fqn":"github://aileron/linear","scope":"issues:write","account":"alr@x",
+			"created_at":"2024-01-01T12:00:00Z","status":"active"
+		}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "inspect", "api_key/linear/team"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit code = %d; stderr = %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"Name:       api_key/linear/team",
+		"Kind:       api_key",
+		"Connector:  github://aileron/linear",
+		"Account:    alr@x",
+		"Scope:      issues:write",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunBinding_InspectNotFoundIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"code":"not_found"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "inspect", "api_key/missing/x"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit code")
+	}
+}
+
+func TestRunBinding_SetupSendsAPIKeyBody(t *testing.T) {
+	var got struct {
+		ConnectorFQN string `json:"connector_fqn"`
+		Bindings     []struct {
+			Identity string `json:"identity"`
+			Source   struct {
+				Kind  string `json:"kind"`
+				Value string `json:"value"`
+			} `json:"source"`
+		} `json:"bindings"`
+	}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/bindings/setup" {
+			t.Errorf("method/path = %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"created":[{"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team","connector_fqn":"github://aileron/linear","created_at":"2024-01-01T00:00:00Z"}]}`)
+	})
+	stdin := strings.NewReader("team\nlin-secret\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://aileron/linear"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr = %s", code, stderr.String())
+	}
+	if got.ConnectorFQN != "github://aileron/linear" {
+		t.Errorf("connector_fqn = %q", got.ConnectorFQN)
+	}
+	if len(got.Bindings) != 1 {
+		t.Fatalf("len(bindings) = %d", len(got.Bindings))
+	}
+	if got.Bindings[0].Identity != "team" || got.Bindings[0].Source.Kind != "api_key" ||
+		got.Bindings[0].Source.Value != "lin-secret" {
+		t.Errorf("body = %+v", got)
+	}
+	if !strings.Contains(stdout.String(), "Created: api_key/linear/team") {
+		t.Errorf("stdout missing created line: %s", stdout.String())
+	}
+}
+
+func TestRunBinding_SetupRejectsEmptyValue(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be hit when CLI rejects empty value")
+	})
+	stdin := strings.NewReader("team\n\n") // identity provided, value empty
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://aileron/linear"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when value is blank")
+	}
+}
+
+func TestRunBinding_RebindPostsValue(t *testing.T) {
+	var seenBody []byte
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bindings/api_key/linear/team/rebind" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		seenBody, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, `{"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team","connector_fqn":"github://aileron/linear","created_at":"2024-01-01T00:00:00Z"}`)
+	})
+	stdin := strings.NewReader("new-secret\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"rebind", "api_key/linear/team"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(string(seenBody), `"value":"new-secret"`) {
+		t.Errorf("body = %s", seenBody)
+	}
+	if !strings.Contains(stdout.String(), "Rebound: api_key/linear/team") {
+		t.Errorf("stdout: %s", stdout.String())
+	}
+}
+
+func TestRunBinding_RevokeRequiresConfirmation(t *testing.T) {
+	hits := 0
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusNoContent)
+	})
+	// Cancel.
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"revoke", "api_key/linear/team"}, strings.NewReader("n\n"), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("cancel exit = %d", code)
+	}
+	if hits != 0 {
+		t.Errorf("server called %d times on cancel", hits)
+	}
+	if !strings.Contains(stdout.String(), "cancelled") {
+		t.Errorf("missing cancel message: %s", stdout.String())
+	}
+
+	// Confirm.
+	stdout.Reset()
+	stderr.Reset()
+	code = runBinding([]string{"revoke", "api_key/linear/team"}, strings.NewReader("y\n"), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("confirm exit = %d; stderr = %s", code, stderr.String())
+	}
+	if hits != 1 {
+		t.Errorf("server called %d times on confirm", hits)
+	}
+	if !strings.Contains(stdout.String(), "Revoked: api_key/linear/team") {
+		t.Errorf("missing revoked line: %s", stdout.String())
+	}
+}
+
+func TestRunBinding_ListServerErrorIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"code":"oops"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stdout = %s", stdout.String())
+	}
+}
+
+func TestRunBinding_SetupServerErrorIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"code":"oauth_setup_not_yet_supported"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://aileron/x"},
+		strings.NewReader("work\nval\n"), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr = %s", stderr.String())
+	}
+}
+
+func TestRunBinding_RebindNotFoundIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"rebind", "api_key/x/y"},
+		strings.NewReader("v\n"), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr = %s", stderr.String())
+	}
+}
+
+func TestRunBinding_RevokeServerErrorIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"revoke", "api_key/x/y"},
+		strings.NewReader("y\n"), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr = %s", stderr.String())
+	}
+}
+
+func TestRunBinding_RevokeNotFoundIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"revoke", "api_key/x/y"},
+		strings.NewReader("y\n"), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on 404")
+	}
+}
+
+func TestRunBinding_SetupRequiresIdentity(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be hit when CLI rejects empty identity")
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://aileron/x"},
+		strings.NewReader("\n"), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for empty identity")
+	}
+}
+
+func TestRunBinding_RebindRequiresValue(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be hit when CLI rejects empty value")
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"rebind", "api_key/x/y"},
+		strings.NewReader("\n"), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for empty value")
+	}
+}
+
+func TestRunBinding_InspectRequiresExactlyOneArg(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"inspect"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("inspect with no name accepted")
+	}
+}
+
+func TestRunBinding_SetupRequiresExactlyOneArg(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("setup with no FQN accepted")
+	}
+}
+
+func TestRunBinding_RebindRequiresExactlyOneArg(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"rebind"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("rebind with no name accepted")
+	}
+}
+
+func TestRunBinding_RevokeRequiresExactlyOneArg(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"revoke"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("revoke with no name accepted")
 	}
 }
 
@@ -807,7 +1106,7 @@ func TestRunBinding_NoSubcommand(t *testing.T) {
 
 func TestRunBinding_UnknownSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"binding", "rebind"}, newTestRegistry(), &stdout, &stderr)
+	code := run([]string{"binding", "wibble"}, newTestRegistry(), &stdout, &stderr)
 	if code == 0 {
 		t.Error("expected nonzero exit code for unknown subcommand")
 	}

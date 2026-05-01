@@ -45,22 +45,6 @@ type Manifest struct {
 	// [ADR-0003]: https://docs.withaileron.ai/adr/0003-action-model
 	Inputs []Input `toml:"inputs"`
 
-	// Bindings maps each connector that requires a credential to a
-	// vault entry where the runtime should fetch it. Per [ADR-0005]'s
-	// credential-mediation rule, the connector never sees the bytes
-	// — the runtime resolves the binding at outbound-request time and
-	// injects the credential into the actual request. Empty when no
-	// connector in [[requires.connectors]] declares a credential
-	// capability.
-	//
-	// This field is the v1 stand-in for the binding API ratified by
-	// [ADR-0006]; #362 will replace the manifest-declared binding
-	// with a per-user CLI-managed binding store.
-	//
-	// [ADR-0005]: https://docs.withaileron.ai/adr/0005-sandbox-choice
-	// [ADR-0006]: https://docs.withaileron.ai/adr/0006-capability-binding-ux
-	Bindings []Binding `toml:"bindings"`
-
 	// Execute is the ordered list of connector operations the action runs.
 	// v1 actions are linear chains with first-failure-terminates semantics
 	// (per ADR-0010).
@@ -107,25 +91,6 @@ type Match struct {
 	// Intent is the canonical natural-language phrase the runtime matches
 	// against agent requests when surfacing this action.
 	Intent string `toml:"intent"`
-}
-
-// Binding is one entry in `[[bindings]]`. It maps a connector by FQN
-// to a vault path where the runtime should fetch the credential when
-// the connector emits an outbound request that references its
-// declared `[capabilities.credential]`. Per ADR-0005, the connector
-// never sees the bytes — the runtime injects them host-side.
-type Binding struct {
-	// Connector is the fully-qualified URI of the connector this
-	// binding belongs to. Must match an entry in
-	// `[[requires.connectors]]`.
-	Connector string `toml:"connector"`
-
-	// VaultPath is the path under which the credential lives in the
-	// user's local vault (per ADR-0011). The vault entry's
-	// `Metadata.Type` must equal the connector's declared
-	// `[capabilities.credential].kind` at resolution time, or the
-	// runtime returns a `capability_denied` failure.
-	VaultPath string `toml:"vault_path"`
 }
 
 // Input is one declared call-time argument. The set of inputs maps

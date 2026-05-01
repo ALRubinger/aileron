@@ -158,26 +158,6 @@ func Validate(m *Manifest, file string) error {
 			}
 		}
 	}
-	bindingByConnector := map[string]string{}
-	for i, b := range m.Bindings {
-		if b.Connector == "" {
-			return newValidationErr(file, "bindings[%d].connector is required", i)
-		}
-		if !connectorByFQN[b.Connector] {
-			return newValidationErr(file,
-				"bindings[%d].connector %q is not declared in [[requires.connectors]]",
-				i, b.Connector)
-		}
-		if b.VaultPath == "" {
-			return newValidationErr(file, "bindings[%d].vault_path is required", i)
-		}
-		if existing, dup := bindingByConnector[b.Connector]; dup {
-			return newValidationErr(file,
-				"bindings[%d].connector %q is bound twice (also at vault_path %q); v1 supports one binding per connector",
-				i, b.Connector, existing)
-		}
-		bindingByConnector[b.Connector] = b.VaultPath
-	}
 	return nil
 }
 

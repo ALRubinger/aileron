@@ -272,4 +272,13 @@ const (
 	EventTypeToolCallForwarded      EventType = "tool.call.forwarded"
 	EventTypeToolCallDenied         EventType = "tool.call.denied"
 	EventTypeToolCallPendingApproval EventType = "tool.call.pending_approval"
+
+	// Binding lifecycle events (ADR-0006). Payloads carry the binding
+	// name, connector FQN, and capability kind — never the credential
+	// bytes.
+	EventTypeBindingCreated   EventType = "binding.created"
+	EventTypeBindingResolved  EventType = "binding.resolved"
+	EventTypeBindingRebound   EventType = "binding.rebound"
+	EventTypeBindingRevoked   EventType = "binding.revoked"
+	EventTypeBindingRefreshed EventType = "binding.refreshed"
 )
