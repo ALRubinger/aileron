@@ -1076,6 +1076,66 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/actions/install:
+    post:
+      tags: [Actions]
+      summary: Install an action template into the user's actions directory
+      description: |
+        Runs the action install pipeline (parallels ADR-0004's connector
+        install) for the given FQN+version reference: resolve fetch URL →
+        download tarball → optionally verify ed25519 signature against the
+        publisher's keys → extract `action.md` → parse + validate → confirm
+        every `[[requires.connectors]]` entry is already installed in the
+        cstore → copy to `~/.aileron/actions/<name>.md`.
+
+        Per ADR-0003 the user owns the file post-install; this endpoint is
+        equivalent to `aileron action add <FQN>@<version>`. Refuses to
+        clobber an existing action with the same name unless `force: true`.
+
+        v1 makes action signing optional: an action tarball with no
+        `signature.sig` installs (with a debug log) so publishers can ship
+        templates before signing infrastructure is wired. Mandatory
+        signing lands with the install consent flow (#363).
+
+        On any failure the on-disk state is unchanged. Structured failures
+        per ADR-0010: `binding_required` is not raised here; signature
+        failures bubble as `signature_failure`; missing connector deps
+        bubble as `validation_error` with the names in `details`.
+      operationId: installAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallActionRequest"
+      responses:
+        "200":
+          description: Action was already present (no overwrite)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledAction"
+        "201":
+          description: Action installed (new file written)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstalledAction"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Install pipeline failed (signature failure, missing connector deps, malformed action, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/actions:
     get:
       tags: [Actions]
@@ -3080,6 +3140,52 @@ components:
             True when the install was a no-op because an entry with the
             matching hash already existed (offline reinstall path per
             ADR-0004).
+
+    InstallActionRequest:
+      type: object
+      required: [fqn, version]
+      properties:
+        fqn:
+          type: string
+          description: |
+            Fully-qualified URI of the action template per ADR-0002 / ADR-0003
+            (e.g. `github://ALRubinger/aileron-connector-github/actions/list-recent-prs`).
+            Subpath references are supported for actions published alongside
+            their connector.
+        version:
+          type: string
+          description: Strict SemVer (e.g. `0.1.0`).
+        force:
+          type: boolean
+          default: false
+          description: |
+            When true, overwrite an existing action with the same name.
+            When false (default), refuse with `409 Conflict` if an action
+            of the same name already exists.
+
+    InstalledAction:
+      type: object
+      required: [name, fqn, version, source, path]
+      properties:
+        name:
+          type: string
+          description: Bare local handle of the installed action (the action manifest's `name`).
+        fqn:
+          type: string
+          description: FQN the action was installed from.
+        version:
+          type: string
+        source:
+          type: string
+          description: Provenance URI recorded on the installed manifest's `source` field.
+        path:
+          type: string
+          description: Absolute path of the installed action file on disk.
+        already_installed:
+          type: boolean
+          description: |
+            True when the action was already present and the install was a no-op
+            (the file on disk matched the bytes that would have been written).
 
     Action:
       type: object

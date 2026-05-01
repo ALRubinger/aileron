@@ -281,4 +281,8 @@ const (
 	EventTypeBindingRebound   EventType = "binding.rebound"
 	EventTypeBindingRevoked   EventType = "binding.revoked"
 	EventTypeBindingRefreshed EventType = "binding.refreshed"
+
+	// Action install event (ADR-0003 + #366). Payload carries the
+	// action name, FQN, version, source, and on-disk path.
+	EventTypeActionInstalled EventType = "action.installed"
 )

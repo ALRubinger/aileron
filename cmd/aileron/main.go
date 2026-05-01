@@ -99,6 +99,10 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runSecret(args[1:], stdout, stderr)
 	case "binding":
 		return runBinding(args[1:], os.Stdin, stdout, stderr)
+	case "connector":
+		return runConnector(args[1:], stdout, stderr)
+	case "action":
+		return runAction(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "log":
@@ -124,6 +128,8 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
 	fmt.Fprintln(w, "  aileron binding list               List credential bindings (metadata only — no unlock)")
+	fmt.Fprintln(w, "  aileron connector install <FQN>    Install a connector binary from its FQN")
+	fmt.Fprintln(w, "  aileron action add <FQN>           Install an action template from its FQN")
 	fmt.Fprintln(w, "  aileron status [section]           Show merged config (policy, env, notifications, vault)")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
@@ -1043,4 +1049,201 @@ func resolveShim() (string, error) {
 		return "", fmt.Errorf("resolving self symlinks: %w", err)
 	}
 	return launch.ResolveShim(self)
+}
+
+// --- Connector / action install (ADR-0004 / ADR-0003 + #366) ---
+
+const connectorUsage = `usage:
+  aileron connector install <FQN> [--version=<v>] [--hash=<sha256:...>] [--force]`
+
+const actionUsage = `usage:
+  aileron action add <FQN> [--version=<v>] [--force]`
+
+// runConnector dispatches `aileron connector <subcommand>`.
+func runConnector(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, connectorUsage)
+		return 1
+	}
+	switch args[0] {
+	case "install":
+		return runConnectorInstall(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown connector command: %q\n", args[0])
+		fmt.Fprintln(stderr, connectorUsage)
+		return 1
+	}
+}
+
+// runAction dispatches `aileron action <subcommand>`.
+func runAction(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, actionUsage)
+		return 1
+	}
+	switch args[0] {
+	case "add":
+		return runActionAdd(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown action command: %q\n", args[0])
+		fmt.Fprintln(stderr, actionUsage)
+		return 1
+	}
+}
+
+// runConnectorInstall posts to /v1/connectors/install and renders the
+// returned envelope. Accepts either a bare FQN (`github://...`) or an
+// FQN+version (`github://...@1.0.0`); --version is required when the
+// bare form is used.
+func runConnectorInstall(args []string, stdout, stderr io.Writer) int {
+	fqnArg, rest, ok := extractPositional(args)
+	if !ok {
+		fmt.Fprintln(stderr, connectorUsage)
+		return 1
+	}
+	flags := flag.NewFlagSet("connector install", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	version := flags.String("version", "", "strict SemVer to install (required if FQN omits @<version>)")
+	hash := flags.String("hash", "", "expected sha256:<hex>; install aborts if computed hash does not match")
+	force := flags.Bool("force", false, "(reserved for future use)")
+	if err := flags.Parse(rest); err != nil {
+		return 1
+	}
+	_ = force
+	resolvedFQN, resolvedVersion, perr := splitFQNVersion(fqnArg, *version)
+	if perr != nil {
+		fmt.Fprintf(stderr, "%v\n", perr)
+		return 1
+	}
+	body := map[string]any{"fqn": resolvedFQN, "version": resolvedVersion}
+	if *hash != "" {
+		body["expected_hash"] = *hash
+	}
+	bodyJSON, _ := json.Marshal(body)
+	status, respBody, err := bindingDoRequest(http.MethodPost, "/connectors/install",
+		strings.NewReader(string(bodyJSON)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status != http.StatusCreated && status != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return 1
+	}
+	var resp struct {
+		Fqn              string `json:"fqn"`
+		Version          string `json:"version"`
+		Hash             string `json:"hash"`
+		EntryDir         string `json:"entry_dir"`
+		AlreadyInstalled bool   `json:"already_installed"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		return 1
+	}
+	verb := "Installed"
+	if resp.AlreadyInstalled {
+		verb = "Already installed"
+	}
+	fmt.Fprintf(stdout, "%s: %s@%s\n  hash: %s\n  path: %s\n",
+		verb, resp.Fqn, resp.Version, resp.Hash, resp.EntryDir)
+	return 0
+}
+
+// runActionAdd posts to /v1/actions/install and renders the envelope.
+func runActionAdd(args []string, stdout, stderr io.Writer) int {
+	fqnArg, rest, ok := extractPositional(args)
+	if !ok {
+		fmt.Fprintln(stderr, actionUsage)
+		return 1
+	}
+	flags := flag.NewFlagSet("action add", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	version := flags.String("version", "", "strict SemVer (required if FQN omits @<version>)")
+	force := flags.Bool("force", false, "overwrite an existing action with the same name")
+	if err := flags.Parse(rest); err != nil {
+		return 1
+	}
+	resolvedFQN, resolvedVersion, perr := splitFQNVersion(fqnArg, *version)
+	if perr != nil {
+		fmt.Fprintf(stderr, "%v\n", perr)
+		return 1
+	}
+	body := map[string]any{"fqn": resolvedFQN, "version": resolvedVersion}
+	if *force {
+		body["force"] = true
+	}
+	bodyJSON, _ := json.Marshal(body)
+	status, respBody, err := bindingDoRequest(http.MethodPost, "/actions/install",
+		strings.NewReader(string(bodyJSON)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status != http.StatusCreated && status != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return 1
+	}
+	var resp struct {
+		Name             string `json:"name"`
+		Fqn              string `json:"fqn"`
+		Version          string `json:"version"`
+		Source           string `json:"source"`
+		Path             string `json:"path"`
+		AlreadyInstalled bool   `json:"already_installed"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		return 1
+	}
+	verb := "Added"
+	if resp.AlreadyInstalled {
+		verb = "Already installed"
+	}
+	fmt.Fprintf(stdout, "%s: %s\n  source: %s\n  path: %s\n",
+		verb, resp.Name, resp.Source, resp.Path)
+	return 0
+}
+
+// extractPositional pulls the first non-flag argument out of args and
+// returns it plus the remaining slice. Used by `aileron connector
+// install <FQN> [--flags]` and `aileron action add <FQN> [--flags]`
+// because Go's stdlib flag.Parse stops at the first non-flag, so a
+// positional FQN before flags would prevent flag parsing.
+//
+// Returns ok=false when args is empty or has only flag-shaped entries
+// (i.e. no FQN). The "first positional" heuristic is the simplest one
+// that matches `<command> <FQN> --flag=value` ergonomics.
+func extractPositional(args []string) (string, []string, bool) {
+	for i, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		rest := append([]string(nil), args[:i]...)
+		rest = append(rest, args[i+1:]...)
+		return a, rest, true
+	}
+	return "", nil, false
+}
+
+// splitFQNVersion accepts either "<fqn>" + a separate version flag, or
+// "<fqn>@<version>" with no flag. Returns the FQN and version; errors
+// when both forms supply a version (ambiguous) or neither does
+// (missing version).
+func splitFQNVersion(fqnArg, versionFlag string) (string, string, error) {
+	if at := strings.LastIndex(fqnArg, "@"); at >= 0 {
+		fqn := fqnArg[:at]
+		v := fqnArg[at+1:]
+		if versionFlag != "" && versionFlag != v {
+			return "", "", fmt.Errorf("FQN already includes @%s; --version=%s conflicts", v, versionFlag)
+		}
+		if v == "" {
+			return "", "", fmt.Errorf("FQN ends with @ but no version follows")
+		}
+		return fqn, v, nil
+	}
+	if versionFlag == "" {
+		return "", "", fmt.Errorf("version is required (use --version=<v> or <FQN>@<version>)")
+	}
+	return fqnArg, versionFlag, nil
 }

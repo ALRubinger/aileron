@@ -1680,3 +1680,285 @@ func TestRunSecretSet_MismatchedConfirmation(t *testing.T) {
 		t.Error("expected mismatch error")
 	}
 }
+
+// --- Connector + action install tests (#366) ---
+
+func TestRunConnector_InstallHappyPath(t *testing.T) {
+	var seenBody []byte
+	var seenPath string
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/x",
+			"version":"1.0.0",
+			"hash":"sha256:abc",
+			"entry_dir":"/path/to/entry"
+		}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x", "--version=1.0.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit = %d, body=%s", code, stderr.String())
+	}
+	if seenPath != "/connectors/install" {
+		t.Errorf("path = %q", seenPath)
+	}
+	if !strings.Contains(string(seenBody), `"fqn":"github://acme/x"`) ||
+		!strings.Contains(string(seenBody), `"version":"1.0.0"`) {
+		t.Errorf("body = %s", seenBody)
+	}
+	for _, want := range []string{"Installed:", "github://acme/x@1.0.0", "sha256:abc", "/path/to/entry"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunConnector_InstallAcceptsAtVersionInFQN(t *testing.T) {
+	var seenBody []byte
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"x","entry_dir":"y"}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(string(seenBody), `"version":"1.0.0"`) {
+		t.Errorf("body = %s", seenBody)
+	}
+}
+
+func TestRunConnector_InstallAlreadyInstalledIs200(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/x","version":"1.0.0","hash":"x","entry_dir":"y","already_installed":true
+		}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Already installed") {
+		t.Errorf("expected 'Already installed' in output: %s", stdout.String())
+	}
+}
+
+func TestRunConnector_InstallMissingVersionRejected(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called when version is missing")
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x"},
+		newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when version is missing")
+	}
+}
+
+func TestRunConnector_InstallVersionConflictRejected(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called when version conflicts")
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0", "--version=2.0.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when --version conflicts with @<v> in FQN")
+	}
+}
+
+func TestRunConnector_InstallServerErrorIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"signature_failure"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr=%s", stderr.String())
+	}
+}
+
+func TestRunConnector_NoSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit with no subcommand")
+	}
+}
+
+func TestRunConnector_UnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "wibble"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on unknown subcommand")
+	}
+}
+
+func TestRunConnector_InstallExpectedHashPropagated(t *testing.T) {
+	var seenBody []byte
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"fqn":"x","version":"1.0.0","hash":"h","entry_dir":"d"}`)
+	})
+	var stdout, stderr bytes.Buffer
+	run([]string{"connector", "install", "github://acme/x@1.0.0", "--hash=sha256:abcd"},
+		newTestRegistry(), &stdout, &stderr)
+	if !strings.Contains(string(seenBody), `"expected_hash":"sha256:abcd"`) {
+		t.Errorf("body should include expected_hash: %s", seenBody)
+	}
+}
+
+func TestRunAction_AddHappyPath(t *testing.T) {
+	var seenBody []byte
+	var seenPath string
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{
+			"name":"list-recent-prs",
+			"fqn":"github://acme/x/actions/list-recent-prs",
+			"version":"0.1.0",
+			"source":"github://acme/x/actions/list-recent-prs@0.1.0",
+			"path":"/path/list-recent-prs.md"
+		}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"action", "add", "github://acme/x/actions/list-recent-prs", "--version=0.1.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if seenPath != "/actions/install" {
+		t.Errorf("path = %q", seenPath)
+	}
+	if !strings.Contains(string(seenBody), `"version":"0.1.0"`) {
+		t.Errorf("body = %s", seenBody)
+	}
+	for _, want := range []string{"Added:", "list-recent-prs", "/path/list-recent-prs.md"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
+func TestRunAction_AddForceFlagPropagated(t *testing.T) {
+	var seenBody []byte
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"name":"x","fqn":"y","version":"1.0.0","source":"y","path":"z"}`)
+	})
+	var stdout, stderr bytes.Buffer
+	run([]string{"action", "add", "github://acme/x/actions/y@0.1.0", "--force"},
+		newTestRegistry(), &stdout, &stderr)
+	if !strings.Contains(string(seenBody), `"force":true`) {
+		t.Errorf("force flag not propagated: %s", seenBody)
+	}
+}
+
+func TestRunAction_AddAlreadyInstalledIs200(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"name":"x","fqn":"y","version":"1","source":"y","path":"z","already_installed":true
+		}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"action", "add", "github://acme/x/actions/y@0.1.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("exit = %d", code)
+	}
+	if !strings.Contains(stdout.String(), "Already installed") {
+		t.Errorf("output: %s", stdout.String())
+	}
+}
+
+func TestRunAction_AddMissingVersionRejected(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called")
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"action", "add", "github://acme/x/actions/y"},
+		newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when version missing")
+	}
+}
+
+func TestRunAction_AddServerErrorIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"action", "add", "github://acme/x/actions/y@0.1.0"},
+		newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit")
+	}
+}
+
+func TestRunAction_NoSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"action"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit")
+	}
+}
+
+func TestRunAction_UnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"action", "wibble"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit")
+	}
+}
+
+func TestSplitFQNVersion(t *testing.T) {
+	cases := []struct {
+		fqn         string
+		flag        string
+		wantFQN     string
+		wantVersion string
+		wantErr     bool
+	}{
+		{"github://x/y", "1.0.0", "github://x/y", "1.0.0", false},
+		{"github://x/y@1.0.0", "", "github://x/y", "1.0.0", false},
+		{"github://x/y@1.0.0", "1.0.0", "github://x/y", "1.0.0", false},
+		{"github://x/y@1.0.0", "2.0.0", "", "", true},
+		{"github://x/y", "", "", "", true},
+		{"github://x/y@", "", "", "", true},
+	}
+	for _, c := range cases {
+		fqn, ver, err := splitFQNVersion(c.fqn, c.flag)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("splitFQNVersion(%q, %q) = no error; want error", c.fqn, c.flag)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("splitFQNVersion(%q, %q): %v", c.fqn, c.flag, err)
+			continue
+		}
+		if fqn != c.wantFQN || ver != c.wantVersion {
+			t.Errorf("splitFQNVersion(%q, %q) = (%q, %q); want (%q, %q)",
+				c.fqn, c.flag, fqn, ver, c.wantFQN, c.wantVersion)
+		}
+	}
+}

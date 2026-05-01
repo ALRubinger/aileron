@@ -332,18 +332,62 @@ func (e *SandboxExecutor) resolverFor(ctx context.Context, connManifest *cstore.
 }
 
 // mergeArgs combines the call-time args with the action's declared
-// step inputs. Caller args win on key conflict (the LLM's
-// interpretation of the user message takes precedence over the
-// author's static defaults).
+// step inputs. Step inputs are run through `${args.<name>}`
+// interpolation against the call-time args first, then call-time
+// args overwrite any same-key entries (the LLM's interpretation of
+// the user message takes precedence over the author's static
+// defaults).
+//
+// Per ADR-0003, validation already guarantees every `${args.X}`
+// reference resolves to a declared input — by the time we get here,
+// any unresolved reference is a runtime args mismatch (the agent
+// failed to supply a declared input). Unmatched references are left
+// as the literal `${args.X}` so the connector can either accept the
+// raw token or surface its own error.
 func mergeArgs(args, stepInputs map[string]any) map[string]any {
 	out := make(map[string]any, len(args)+len(stepInputs))
 	for k, v := range stepInputs {
-		out[k] = v
+		out[k] = interpolateArgs(v, args)
 	}
 	for k, v := range args {
 		out[k] = v
 	}
 	return out
+}
+
+// interpolateArgs walks v (which TOML decodes to a string, []any, or
+// map[string]any) and substitutes `${args.NAME}` tokens with the
+// corresponding entry from args. Non-string leaves are returned
+// unchanged.
+func interpolateArgs(v any, args map[string]any) any {
+	switch val := v.(type) {
+	case string:
+		return argsRe.ReplaceAllStringFunc(val, func(match string) string {
+			m := argsRe.FindStringSubmatch(match)
+			if len(m) != 2 {
+				return match
+			}
+			rep, ok := args[m[1]]
+			if !ok {
+				return match
+			}
+			return fmt.Sprintf("%v", rep)
+		})
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = interpolateArgs(item, args)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, item := range val {
+			out[k] = interpolateArgs(item, args)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // allowedAuthorityFor returns the network authority subset the action
