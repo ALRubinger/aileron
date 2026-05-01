@@ -389,3 +389,47 @@ func canonicalManifestForTest() *Manifest {
 		},
 	}
 }
+
+func TestValidateManifest_AllowsLoopbackHTTPForLocalDev(t *testing.T) {
+	// RFC 8252 §7.3 explicitly allows http for loopback addresses.
+	// The validator carves out localhost / 127.0.0.1 so test
+	// harnesses (httptest.NewServer) work without TLS gymnastics.
+	for _, host := range []string{"http://localhost:1234/auth", "http://127.0.0.1/auth"} {
+		t.Run(host, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			m.Capabilities.Credential = &ManifestCredential{
+				Kind: "oauth2",
+				OAuth2: &ManifestOAuth2{
+					AuthorizeURL: host,
+					TokenURL:     "https://provider.test/token",
+					ClientID:     "cid",
+					Scopes:       []string{"x"},
+				},
+			}
+			if err := ValidateManifest(m, "x.toml"); err != nil {
+				t.Errorf("loopback http should be allowed: %v", err)
+			}
+		})
+	}
+}
+
+func TestIsAllowedOAuthURL(t *testing.T) {
+	cases := map[string]bool{
+		"https://provider.test/auth":      true,
+		"https://accounts.google.com/x":   true,
+		"http://localhost/auth":           true,
+		"http://localhost:8080/auth":      true,
+		"http://127.0.0.1/auth":           true,
+		"http://127.0.0.1:1234/auth":      true,
+		"http://example.com/auth":         false,
+		"ftp://provider.test/x":           false,
+		"":                                false,
+		"not a url":                       false,
+		"http://localhost.attacker.com/x": false, // host-prefix attack
+	}
+	for url, want := range cases {
+		if got := isAllowedOAuthURL(url); got != want {
+			t.Errorf("isAllowedOAuthURL(%q) = %v, want %v", url, got, want)
+		}
+	}
+}

@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -359,3 +361,273 @@ func TestOAuth2Sessions_TakeIsOneShot(t *testing.T) {
 	}
 }
 
+
+func TestInitOAuth2Binding_RejectsMissingFields(t *testing.T) {
+	srv := &apiServer{
+		log:            slog.Default(),
+		bindings:       &binding.VaultStore{Vault: vault.NewMemVault()},
+		installer:      &cstore.Installer{Store: cstore.NewStore(t.TempDir())},
+		oauth2Sessions: newOAuth2Sessions(),
+	}
+	for _, body := range []string{
+		`{}`,
+		`{"connector_fqn":""}`,
+		`{"connector_fqn":"github://x/y"}`,
+		`{"identity":"work"}`,
+	} {
+		rec := httptest.NewRecorder()
+		srv.InitOAuth2Binding(rec,
+			httptest.NewRequest(http.MethodPost, "/v1/bindings/setup/oauth2/init",
+				strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest && rec.Code != http.StatusNotFound {
+			t.Errorf("body=%s status = %d, want 400 or 404", body, rec.Code)
+		}
+	}
+}
+
+func TestInitOAuth2Binding_MalformedJSONReturns400(t *testing.T) {
+	srv := &apiServer{
+		log:            slog.Default(),
+		bindings:       &binding.VaultStore{Vault: vault.NewMemVault()},
+		installer:      &cstore.Installer{Store: cstore.NewStore(t.TempDir())},
+		oauth2Sessions: newOAuth2Sessions(),
+	}
+	rec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init", strings.NewReader(`{not json`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestInitOAuth2Binding_DisabledWhenInstallerNil(t *testing.T) {
+	srv := &apiServer{
+		log:            slog.Default(),
+		bindings:       &binding.VaultStore{Vault: vault.NewMemVault()},
+		oauth2Sessions: newOAuth2Sessions(),
+	}
+	rec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init",
+		strings.NewReader(`{"connector_fqn":"github://x/y","identity":"w"}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestInitOAuth2Binding_DisabledWhenBindingsNil(t *testing.T) {
+	srv := &apiServer{
+		log:            slog.Default(),
+		installer:      &cstore.Installer{Store: cstore.NewStore(t.TempDir())},
+		oauth2Sessions: newOAuth2Sessions(),
+	}
+	rec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init",
+		strings.NewReader(`{"connector_fqn":"github://x/y","identity":"w"}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestInitOAuth2Binding_LazyInitializesSessionsMap(t *testing.T) {
+	// When oauth2Sessions is nil (production startup edge case), the
+	// handler initializes it lazily on first call.
+	const fqn = "github://acme/aileron-connector-google"
+	fp := newFakeOAuthProvider(t)
+	srv := oauth2TestServer(t, fp, fqn)
+	srv.oauth2Sessions = nil
+	rec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init",
+		strings.NewReader(`{"connector_fqn":"`+fqn+`","identity":"work"}`)))
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if srv.oauth2Sessions == nil {
+		t.Error("oauth2Sessions should have been lazy-initialized")
+	}
+}
+
+func TestInitOAuth2Binding_ServiceOverrideAndAccount(t *testing.T) {
+	const fqn = "github://acme/aileron-connector-google"
+	fp := newFakeOAuthProvider(t)
+	srv := oauth2TestServer(t, fp, fqn)
+	body := `{"connector_fqn":"` + fqn + `","identity":"work","service":"custom-svc","account":"alr@example.com"}`
+	rec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(rec,
+		httptest.NewRequest(http.MethodPost, "/v1/bindings/setup/oauth2/init", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFinishOAuth2Binding_MalformedJSONReturns400(t *testing.T) {
+	srv := &apiServer{
+		log:            slog.Default(),
+		bindings:       &binding.VaultStore{Vault: vault.NewMemVault()},
+		oauth2Sessions: newOAuth2Sessions(),
+	}
+	rec := httptest.NewRecorder()
+	srv.FinishOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/finish", strings.NewReader(`{not json`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestFinishOAuth2Binding_DisabledWhenBindingsNil(t *testing.T) {
+	srv := &apiServer{log: slog.Default()}
+	rec := httptest.NewRecorder()
+	srv.FinishOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/finish",
+		strings.NewReader(`{"session_id":"x","code":"y","state":"z"}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestFinishOAuth2Binding_LazyInitializesSessionsMap(t *testing.T) {
+	srv := &apiServer{
+		log:      slog.Default(),
+		bindings: &binding.VaultStore{Vault: vault.NewMemVault()},
+	}
+	rec := httptest.NewRecorder()
+	srv.FinishOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/finish",
+		strings.NewReader(`{"session_id":"x","code":"y","state":"z"}`)))
+	// 404 because the session is unknown, but this exercises the
+	// nil-map → lazy-init path.
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+	if srv.oauth2Sessions == nil {
+		t.Error("oauth2Sessions should have been lazy-initialized")
+	}
+}
+
+func TestPickFreePort_ReturnsListenablePort(t *testing.T) {
+	port, err := pickFreePort()
+	if err != nil {
+		t.Fatalf("pickFreePort: %v", err)
+	}
+	if port <= 0 {
+		t.Errorf("port = %d", port)
+	}
+}
+
+func TestNewSessionID_IsUniqueAndURLSafe(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 32; i++ {
+		s, err := newSessionID()
+		if err != nil {
+			t.Fatalf("newSessionID: %v", err)
+		}
+		if seen[s] {
+			t.Fatalf("duplicate session id on draw %d", i)
+		}
+		seen[s] = true
+		for _, r := range s {
+			ok := (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') ||
+				(r >= '0' && r <= '9') || r == '-' || r == '_'
+			if !ok {
+				t.Errorf("session id contains non-URL-safe character %q", r)
+			}
+		}
+	}
+}
+
+func TestBuildAuthorizeURL_ComposesQueryString(t *testing.T) {
+	o := &cstore.ManifestOAuth2{
+		AuthorizeURL: "https://provider.test/auth",
+		ClientID:     "abc",
+		Scopes:       []string{"read", "write"},
+	}
+	got := buildAuthorizeURL(o, "http://127.0.0.1:1234/callback", "state-x", "challenge-y")
+	for _, want := range []string{
+		"https://provider.test/auth?",
+		"client_id=abc",
+		"redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback",
+		"response_type=code",
+		"code_challenge=challenge-y",
+		"code_challenge_method=S256",
+		"state=state-x",
+		"scope=read+write",
+		"access_type=offline",
+		"prompt=consent",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("authorize URL missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildAuthorizeURL_AppendsToURLWithExistingQuery(t *testing.T) {
+	// Some providers' authorize URLs already include query params.
+	// The builder must use `&` not `?` to append.
+	o := &cstore.ManifestOAuth2{
+		AuthorizeURL: "https://provider.test/auth?prompt=login",
+		ClientID:     "abc",
+		Scopes:       []string{"read"},
+	}
+	got := buildAuthorizeURL(o, "http://127.0.0.1/callback", "s", "c")
+	if !strings.Contains(got, "?prompt=login&") {
+		t.Errorf("URL with existing query not joined with `&`: %s", got)
+	}
+}
+
+func TestExchangeOAuth2Code_ProviderResponseMissingAccessToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"refresh_token":"only"}`) // no access_token
+	}))
+	t.Cleanup(srv.Close)
+	api := &apiServer{oauth2HTTPClient: srv.Client()}
+	_, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+		clientID:    "cid",
+		tokenURL:    srv.URL,
+		redirectURI: "http://127.0.0.1:0/callback",
+		verifier:    "v",
+	}, "code")
+	if herr == nil {
+		t.Fatal("expected error when response omits access_token")
+	}
+	if !strings.Contains(herr.message, "access_token") {
+		t.Errorf("err = %q", herr.message)
+	}
+}
+
+func TestExchangeOAuth2Code_NetworkErrorIsBadGateway(t *testing.T) {
+	api := &apiServer{
+		oauth2HTTPClient: &http.Client{Transport: errTransport{}},
+	}
+	_, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+		clientID: "cid", tokenURL: "https://wont.respond.test",
+		redirectURI: "http://127.0.0.1:0/cb", verifier: "v",
+	}, "code")
+	if herr == nil || herr.status != http.StatusBadGateway {
+		t.Errorf("herr = %+v, want 502", herr)
+	}
+}
+
+func TestExchangeOAuth2Code_MalformedResponseIs422(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{not json`)
+	}))
+	t.Cleanup(srv.Close)
+	api := &apiServer{oauth2HTTPClient: srv.Client()}
+	_, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+		clientID: "cid", tokenURL: srv.URL, redirectURI: "http://127.0.0.1:0/cb", verifier: "v",
+	}, "code")
+	if herr == nil || herr.status != http.StatusUnprocessableEntity {
+		t.Errorf("herr = %+v, want 422", herr)
+	}
+}
+
+// errTransport is an http.RoundTripper that always errors. Used to
+// drive the network-error branch of exchangeOAuth2Code without actually
+// attempting an outbound dial.
+type errTransport struct{}
+
+func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("simulated network error")
+}

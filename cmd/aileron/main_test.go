@@ -2211,3 +2211,85 @@ func TestRunAction_AddNoBindFlagSkipsPrompt(t *testing.T) {
 		t.Errorf("stdout should print the manual-binding hint with --no-bind: %s", stdout.String())
 	}
 }
+
+func TestRunBinding_SetupOAuth2_MalformedInitResponse(t *testing.T) {
+	withFakeBrowser(t)
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Server claims 200 but body isn't valid JSON.
+		_, _ = io.WriteString(w, `{not json`)
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit on malformed init response; stderr=%s", stderr.String())
+	}
+}
+
+func TestRunBinding_SetupOAuth2_BadRedirectURIRejected(t *testing.T) {
+	withFakeBrowser(t)
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"session_id":"s","authorize_url":"http://x/auth","redirect_uri":"not-a-url"}`)
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when redirect_uri has no port; stderr=%s", stderr.String())
+	}
+}
+
+func TestRunBinding_SetupOAuth2_FinishErrorIsExit1(t *testing.T) {
+	withFakeBrowser(t)
+	var redirectURI string
+	state := "test-state"
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/setup/oauth2/init":
+			ln, _ := net.Listen("tcp", "127.0.0.1:0")
+			port := ln.Addr().(*net.TCPAddr).Port
+			_ = ln.Close()
+			redirectURI = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+			authorizeURL := fmt.Sprintf("http://provider.test/auth?state=%s&redirect_uri=%s", state, redirectURI)
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"session_id":"s","authorize_url":%q,"redirect_uri":%q}`,
+				authorizeURL, redirectURI))
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				_, _ = http.Get(redirectURI + "?code=c&state=" + state)
+			}()
+		case "/bindings/setup/oauth2/finish":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"token_exchange_failed"}}`)
+		}
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when finish fails; stderr=%s", stderr.String())
+	}
+}
+
+func TestRunBinding_SetupOAuth2_PortBindFailsWhenSamePortInUse(t *testing.T) {
+	withFakeBrowser(t)
+	// Bind a port and HOLD it; the CLI's listener.NewListener call
+	// for the same port will fail.
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("seed listener: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+	heldPort := holder.Addr().(*net.TCPAddr).Port
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Return the held port as the redirect URI; CLI's bind fails.
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"session_id":"s","authorize_url":"http://x/auth?state=s","redirect_uri":"http://127.0.0.1:%d/callback"}`,
+			heldPort))
+	})
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"setup", "github://x/y"}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when listener bind fails")
+	}
+}
