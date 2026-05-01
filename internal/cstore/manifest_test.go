@@ -18,6 +18,12 @@ hosts = ["slack.com:443", "files.slack.com:443"]
 kind = "oauth2"
 scope = "chat:write,channels:read"
 
+[capabilities.credential.oauth2]
+authorize_url = "https://slack.com/oauth/v2/authorize"
+token_url = "https://slack.com/api/oauth.v2.access"
+client_id = "1234567890.0987654321"
+scopes = ["chat:write", "channels:read"]
+
 [capabilities.runtime]
 imports = ["wasi:http/outgoing-handler"]
 
@@ -211,5 +217,175 @@ func TestParseManifest_AcceptsIdempotencyTOML(t *testing.T) {
 	}
 	if m.Connector.Idempotency.Default != IdempotencyNotIdempotent {
 		t.Errorf("Default = %q", m.Connector.Idempotency.Default)
+	}
+}
+
+// --- credential validation tests (#388) ---
+
+func TestValidateManifest_AcceptsAPIKeyKind(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:  "api_key",
+		Scope: "Read your account",
+	}
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsAPIKeyWithOAuth2Block(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:   "api_key",
+		OAuth2: &ManifestOAuth2{},
+	}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error when api_key kind has [capabilities.credential.oauth2]")
+	}
+	if !strings.Contains(err.Error(), "must be absent") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidateManifest_AcceptsOAuth2WithFullConfig(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:  "oauth2",
+		Scope: "Read email and send messages",
+		OAuth2: &ManifestOAuth2{
+			AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+			TokenURL:     "https://oauth2.googleapis.com/token",
+			ClientID:     "1234.apps.googleusercontent.com",
+			Scopes:       []string{"https://www.googleapis.com/auth/gmail.send"},
+		},
+	}
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsOAuth2WithoutBlock(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{Kind: "oauth2"}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error when oauth2 kind has no [capabilities.credential.oauth2]")
+	}
+	if !strings.Contains(err.Error(), "is required") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsBadOAuth2Fields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*ManifestOAuth2)
+		want   string
+	}{
+		{"missing authorize_url", func(o *ManifestOAuth2) { o.AuthorizeURL = "" },
+			"authorize_url is required"},
+		{"non-https authorize_url", func(o *ManifestOAuth2) { o.AuthorizeURL = "http://example.com" },
+			"must be https://"},
+		{"missing token_url", func(o *ManifestOAuth2) { o.TokenURL = "" },
+			"token_url is required"},
+		{"non-https token_url", func(o *ManifestOAuth2) { o.TokenURL = "http://example.com" },
+			"must be https://"},
+		{"missing client_id", func(o *ManifestOAuth2) { o.ClientID = "" },
+			"client_id is required"},
+		{"empty scopes", func(o *ManifestOAuth2) { o.Scopes = nil },
+			"scopes is required"},
+		{"blank scope entry", func(o *ManifestOAuth2) { o.Scopes = []string{"   "} },
+			"is empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			oauth := &ManifestOAuth2{
+				AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+				TokenURL:     "https://oauth2.googleapis.com/token",
+				ClientID:     "1234",
+				Scopes:       []string{"openid"},
+			}
+			tc.mutate(oauth)
+			m.Capabilities.Credential = &ManifestCredential{Kind: "oauth2", OAuth2: oauth}
+			err := ValidateManifest(m, "x.toml")
+			if err == nil {
+				t.Fatalf("Validate accepted; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q; want substring %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_RejectsUnknownKind(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{Kind: "basic"}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error for unknown kind")
+	}
+	if !strings.Contains(err.Error(), "v1 closed set") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsEmptyKindWhenCredentialBlockPresent(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{Scope: "x"}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error when kind is empty")
+	}
+	if !strings.Contains(err.Error(), "kind is required") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestParseManifest_AcceptsOAuth2TOML(t *testing.T) {
+	tomlBody := []byte(`[connector]
+name = "github://acme/foo"
+version = "1.0.0"
+publisher = "acme"
+
+[capabilities.credential]
+kind = "oauth2"
+scope = "Read your email"
+
+[capabilities.credential.oauth2]
+authorize_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+client_id = "1234.apps.googleusercontent.com"
+scopes = ["https://www.googleapis.com/auth/gmail.send"]
+`)
+	m, err := ParseManifest("x.toml", tomlBody)
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	cred := m.Capabilities.Credential
+	if cred == nil || cred.OAuth2 == nil {
+		t.Fatal("OAuth2 block not parsed")
+	}
+	if cred.OAuth2.ClientID != "1234.apps.googleusercontent.com" {
+		t.Errorf("ClientID = %q", cred.OAuth2.ClientID)
+	}
+	if len(cred.OAuth2.Scopes) != 1 {
+		t.Errorf("scopes = %v", cred.OAuth2.Scopes)
+	}
+	if err := ValidateManifest(m, "x.toml"); err != nil {
+		t.Errorf("ValidateManifest after Parse: %v", err)
+	}
+}
+
+// canonicalManifestForTest returns a minimum-valid Manifest the OAuth
+// tests mutate. Mirrors goodManifest() in the validate_test.go pattern.
+func canonicalManifestForTest() *Manifest {
+	return &Manifest{
+		Connector: ManifestConnector{
+			Name:    "github://acme/foo",
+			Version: "1.0.0",
+		},
 	}
 }

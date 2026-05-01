@@ -133,8 +133,20 @@ func (s *VaultStore) Delete(ctx context.Context, name Name) error {
 
 // ResolverFor implements [Store]. Returns nil when no usable binding
 // exists (no match or ambiguous) — the sandbox surfaces
-// `binding_required` on the first credential reference. Returns a
-// VaultResolver pointed at the binding's vault path on success.
+// `binding_required` on the first credential reference. Branches by
+// kind to return the right resolver:
+//
+//   - api_key: [credential.VaultResolver] reads the secret bytes
+//     verbatim and validates the entry's metadata kind.
+//   - oauth2: [credential.OAuth2VaultResolver] parses the JSON token
+//     envelope, refreshes transparently when the access token nears
+//     expiry, persists the new envelope, and returns the access
+//     token as the credential bytes.
+//
+// Unknown kinds return nil — the host then surfaces
+// `binding_required` even though a binding metadata entry exists,
+// which is the correct fail-closed behavior for a kind the runtime
+// doesn't know how to use.
 func (s *VaultStore) ResolverFor(ctx context.Context, connectorFQN, kind string) credential.Resolver {
 	if s == nil || s.Vault == nil {
 		return nil
@@ -143,11 +155,20 @@ func (s *VaultStore) ResolverFor(ctx context.Context, connectorFQN, kind string)
 	if err != nil {
 		return nil
 	}
-	return &credential.VaultResolver{
-		Vault:        s.Vault,
-		VaultPath:    string(b.Name),
-		ExpectedKind: kind,
+	switch kind {
+	case "api_key":
+		return &credential.VaultResolver{
+			Vault:        s.Vault,
+			VaultPath:    string(b.Name),
+			ExpectedKind: kind,
+		}
+	case "oauth2":
+		return &credential.OAuth2VaultResolver{
+			Vault:     s.Vault,
+			VaultPath: string(b.Name),
+		}
 	}
+	return nil
 }
 
 // Resolve implements [Store]. Walks the vault listing for entries

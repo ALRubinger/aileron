@@ -1314,6 +1314,102 @@ paths:
         "423":
           $ref: "#/components/responses/VaultLocked"
 
+  /v1/bindings/setup/oauth2/init:
+    post:
+      tags: [Bindings]
+      summary: Begin an OAuth2 binding flow
+      description: |
+        Starts the OAuth2 dance for a connector that declares
+        `[capabilities.credential] kind = "oauth2"`. The server reads
+        the connector's installed manifest, generates a PKCE verifier
+        + challenge + state, holds them in an in-memory session keyed
+        by an opaque session_id (TTL 10 minutes), and returns the
+        authorize URL the caller should direct the user's browser to.
+
+        The PKCE verifier never crosses the wire; only the challenge
+        appears in the authorize URL. The session_id is the handle the
+        caller uses to complete the flow via `oauth2/finish`.
+
+        The caller is responsible for opening the user's browser to
+        `authorize_url` and serving the loopback callback at
+        `redirect_uri`. The connector's OAuth app must register
+        `http://localhost` as a redirect URI (loopback-only in v1 per
+        ADR-0002).
+      operationId: initOAuth2Binding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuth2InitRequest"
+      responses:
+        "200":
+          description: OAuth flow initialized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuth2InitResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: Connector does not declare an OAuth2 capability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/bindings/setup/oauth2/finish:
+    post:
+      tags: [Bindings]
+      summary: Complete an OAuth2 binding flow
+      description: |
+        Exchanges an authorization code for tokens and persists the
+        resulting OAuth2 binding. Looks up the session created by
+        `oauth2/init` (verifier + state stored server-side), validates
+        the returned `state`, posts a code-exchange request to the
+        connector's `token_url`, and writes the resulting tokens as a
+        binding in the user's vault.
+
+        Returns the standard `Binding` envelope on success. The
+        session is cleared on success, on validation failure, and on
+        TTL expiry (10 minutes).
+
+        The vault must be unlocked.
+      operationId: finishOAuth2Binding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OAuth2FinishRequest"
+      responses:
+        "201":
+          description: Binding created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Binding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: Session not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: Token exchange failed at the provider
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          $ref: "#/components/responses/VaultLocked"
+
   /v1/bindings/{name}/rebind:
     post:
       tags: [Bindings]
@@ -3186,6 +3282,30 @@ components:
           description: |
             True when the action was already present and the install was a no-op
             (the file on disk matched the bytes that would have been written).
+        unbound_capabilities:
+          type: array
+          description: |
+            Credential capabilities the action's connectors declare that
+            do not yet have a binding in the user's vault. The CLI uses
+            this list to prompt the user to drop into `aileron binding
+            setup` immediately after install — the user stays in the CLI
+            and avoids hitting `binding_required` later.
+          items:
+            $ref: "#/components/schemas/UnboundCapability"
+
+    UnboundCapability:
+      type: object
+      required: [connector_fqn, kind]
+      properties:
+        connector_fqn:
+          type: string
+          description: FQN of the connector that needs a binding.
+        kind:
+          type: string
+          description: Declared credential kind (`api_key`, `oauth2`).
+        scope:
+          type: string
+          description: Human-readable scope description from the connector manifest.
 
     Action:
       type: object
@@ -3492,6 +3612,72 @@ components:
       properties:
         source:
           $ref: "#/components/schemas/BindingSource"
+
+    OAuth2InitRequest:
+      type: object
+      required: [connector_fqn, identity]
+      properties:
+        connector_fqn:
+          type: string
+          description: |
+            Fully-qualified connector name. Connector must be installed
+            and must declare `[capabilities.credential] kind = "oauth2"`.
+        identity:
+          type: string
+          description: |
+            User-chosen handle for the new binding (e.g. `work`,
+            `personal`). Combined with the connector's declared kind
+            and service to form the full binding name.
+        service:
+          type: string
+          description: |
+            Optional service override. Defaults to the service segment
+            derived from the connector FQN's repo segment.
+        account:
+          type: string
+          description: Optional human-readable account label.
+
+    OAuth2InitResponse:
+      type: object
+      required: [session_id, authorize_url, redirect_uri]
+      properties:
+        session_id:
+          type: string
+          description: |
+            Opaque token the caller passes back to oauth2/finish.
+            Server-side state (PKCE verifier, expected state value)
+            is keyed by this id; TTL is 10 minutes.
+        authorize_url:
+          type: string
+          description: |
+            URL the caller should direct the user's browser to. Already
+            includes client_id, redirect_uri, response_type=code,
+            scope, state, code_challenge, and code_challenge_method=S256.
+        redirect_uri:
+          type: string
+          description: |
+            Loopback URL the caller must serve to capture the OAuth
+            callback (e.g. `http://localhost:54321/callback`). The
+            server has already chosen a free port and embedded the
+            URI in `authorize_url`.
+
+    OAuth2FinishRequest:
+      type: object
+      required: [session_id, code, state]
+      properties:
+        session_id:
+          type: string
+          description: The session id returned by oauth2/init.
+        code:
+          type: string
+          description: |
+            Authorization code captured from the OAuth callback.
+        state:
+          type: string
+          description: |
+            State token captured from the OAuth callback. Server
+            compares against the session's stored state and rejects
+            on mismatch (CSRF protection).
 
     ExecutionGrant:
       type: object

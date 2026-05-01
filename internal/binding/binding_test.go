@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/binding"
+	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -474,5 +475,60 @@ func TestVaultStore_NilVault(t *testing.T) {
 	}
 	if _, err := s.Get(context.Background(), "api_key/x/y"); err == nil {
 		t.Error("nil Vault Get = nil err; want failure")
+	}
+}
+
+func TestVaultStore_ResolverFor_BranchesByKind(t *testing.T) {
+	// api_key bindings get a VaultResolver; oauth2 bindings get an
+	// OAuth2VaultResolver. The two have different runtime semantics —
+	// the oauth2 one performs refresh — so the binding store has to
+	// pick the right one per kind.
+	s := newStore(t)
+	ctx := context.Background()
+
+	// Seed an api_key binding.
+	if err := s.Put(ctx, binding.Binding{
+		Name: "api_key/linear/team", Kind: "api_key", Service: "linear",
+		Identity: "team", ConnectorFQN: "github://acme/linear",
+	}, []byte("v"), binding.PutCreate); err != nil {
+		t.Fatalf("Put api_key: %v", err)
+	}
+	// Seed an oauth2 binding (with a valid envelope so OAuth2VaultResolver.Resolve will succeed).
+	envelope := `{"access_token":"at","refresh_token":"rt","expires_at":"2099-01-01T00:00:00Z","client_id":"cid","token_url":"https://example.test/t"}`
+	if err := s.Put(ctx, binding.Binding{
+		Name: "oauth2/google/work", Kind: "oauth2", Service: "google",
+		Identity: "work", ConnectorFQN: "github://acme/google",
+	}, []byte(envelope), binding.PutCreate); err != nil {
+		t.Fatalf("Put oauth2: %v", err)
+	}
+
+	r1 := s.ResolverFor(ctx, "github://acme/linear", "api_key")
+	if r1 == nil {
+		t.Fatal("api_key ResolverFor = nil")
+	}
+	if _, ok := r1.(*credential.VaultResolver); !ok {
+		t.Errorf("api_key resolver type = %T, want *credential.VaultResolver", r1)
+	}
+
+	r2 := s.ResolverFor(ctx, "github://acme/google", "oauth2")
+	if r2 == nil {
+		t.Fatal("oauth2 ResolverFor = nil")
+	}
+	if _, ok := r2.(*credential.OAuth2VaultResolver); !ok {
+		t.Errorf("oauth2 resolver type = %T, want *credential.OAuth2VaultResolver", r2)
+	}
+}
+
+func TestVaultStore_ResolverFor_UnknownKindReturnsNil(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if err := s.Put(ctx, binding.Binding{
+		Name: "x509/treasury/prod", Kind: "x509", Service: "treasury",
+		Identity: "prod", ConnectorFQN: "github://acme/treasury",
+	}, []byte("v"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if r := s.ResolverFor(ctx, "github://acme/treasury", "x509"); r != nil {
+		t.Errorf("unknown-kind ResolverFor = %v, want nil", r)
 	}
 }

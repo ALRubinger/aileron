@@ -51,6 +51,48 @@ scope = "repo:read"
 imports = ["log", "http_request", "http_response_size", "http_response_status", "http_response_read"]
 ```
 
+### OAuth2 connectors
+
+A connector that needs OAuth2 access declares the OAuth provider config inside `[capabilities.credential.oauth2]`:
+
+```toml
+[capabilities.credential]
+kind = "oauth2"
+scope = "Read your email and send messages"   # human-readable; surfaced in CLI prompts
+
+[capabilities.credential.oauth2]
+authorize_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url     = "https://oauth2.googleapis.com/token"
+client_id     = "1234567890-xxxxxxx.apps.googleusercontent.com"
+scopes = [
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/calendar.readonly",
+]
+```
+
+**Trust model: publishers register their own OAuth apps.** Each connector publisher creates an OAuth app on the target service (Google Cloud Console, Slack API dashboard, Notion integrations panel, etc.) and pastes the resulting `client_id` into the manifest. The user's consent screen names the publisher — *your* app name appears, not Aileron's. This is the load-bearing trust property of ADR-0002: the OAuth client is whoever wrote the code that will use the access.
+
+**No `client_secret` field.** v1 requires PKCE (S256) for installed-app flows. The "secret" most providers list for installed apps isn't actually secret per their own guidance — PKCE is the cryptographic protection. The manifest carries no secrets.
+
+**Loopback redirect required.** When you register your OAuth app with the provider, register `http://localhost` (and/or `http://127.0.0.1`) as a valid redirect URI. The Aileron runtime allocates a free loopback port at bind time and serves the callback locally. Niche providers without loopback support are post-MVP.
+
+**Validation.** Aileron's manifest validator requires every OAuth field at install time: `authorize_url`, `token_url`, `client_id`, and at least one entry in `scopes`. URLs must be `https://` (or `http://localhost` / `http://127.0.0.1` for tests).
+
+#### Registering an OAuth app — Google quickstart
+
+For reference, here's the rough Google flow (other providers are similar):
+
+1. Visit [console.cloud.google.com](https://console.cloud.google.com), create a project named after your connector.
+2. Enable the APIs your connector calls (Gmail API, Calendar API, etc.).
+3. Configure the OAuth consent screen — application name, user-facing logo, scopes you'll request. This is what users see.
+4. Create an **OAuth 2.0 Client ID** of type "Desktop app". Add `http://localhost` and `http://127.0.0.1` to the authorized redirect URIs.
+5. Copy the resulting Client ID into your connector manifest's `[capabilities.credential.oauth2].client_id` field. Ignore the "client secret" — PKCE replaces it for installed-app flows.
+6. Submit your consent screen for verification when you're ready to ship to users (Google requires verification for production OAuth apps requesting sensitive scopes).
+
+#### Token storage and refresh
+
+When the user runs `aileron binding setup <connector-FQN>` (or `aileron action add` triggers the auto-prompt), the runtime drives the OAuth dance, exchanges the code at your `token_url`, and stores the resulting `{access_token, refresh_token, expires_at}` envelope in the user's vault. Aileron-runtime refreshes the access token transparently when it nears expiry — your connector never sees expired tokens, never sees the refresh, and never holds the bytes. The host injects `Authorization: Bearer <fresh-token>` into your connector's outbound HTTP request before it leaves the sandbox.
+
 Every field is enforced by the install pipeline:
 
 - `name` must match the FQN used at install time (no spoofing).
