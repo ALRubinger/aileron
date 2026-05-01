@@ -60,3 +60,11 @@ func (v *EncryptedVault) Put(ctx context.Context, path string, value []byte, met
 func (v *EncryptedVault) Delete(ctx context.Context, path string) error {
 	return v.inner.Delete(ctx, path)
 }
+
+// List delegates to the inner vault. Metadata is stored unencrypted, so
+// the encryption decorator passes the entries through unchanged. The
+// caller never receives ciphertext from this path because Entry omits
+// the value bytes by construction.
+func (v *EncryptedVault) List(ctx context.Context) ([]Entry, error) {
+	return v.inner.List(ctx)
+}

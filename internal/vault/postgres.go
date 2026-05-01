@@ -87,3 +87,30 @@ func (v *PostgresVault) Delete(ctx context.Context, path string) error {
 	}
 	return nil
 }
+
+func (v *PostgresVault) List(ctx context.Context) ([]Entry, error) {
+	rows, err := v.pool.Query(ctx,
+		fmt.Sprintf(`SELECT path, metadata FROM %s`, v.table))
+	if err != nil {
+		return nil, fmt.Errorf("vault: list failed: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []Entry
+	for rows.Next() {
+		var path string
+		var metaJSON []byte
+		if err := rows.Scan(&path, &metaJSON); err != nil {
+			return nil, fmt.Errorf("vault: list scan: %w", err)
+		}
+		var meta Metadata
+		if len(metaJSON) > 0 {
+			_ = json.Unmarshal(metaJSON, &meta)
+		}
+		entries = append(entries, Entry{Path: path, Metadata: meta})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("vault: list rows: %w", err)
+	}
+	return entries, nil
+}

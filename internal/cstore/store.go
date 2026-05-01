@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -99,6 +100,24 @@ func (s *Store) Lookup(ref Ref) (string, bool) {
 	defer s.mu.RUnlock()
 	h, ok := s.index[key]
 	return h, ok
+}
+
+// LookupAnyVersion returns one installed (Ref, hash) pair for the
+// given FQN, or `false` when no version of the connector is installed.
+// Multiple installed versions return an unspecified one — callers that
+// need a specific version should use Lookup. Used by the binding setup
+// flow which is FQN-scoped, not version-scoped.
+func (s *Store) LookupAnyVersion(fqn FQN) (Ref, string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	prefix := fqn.String() + "@"
+	for k, h := range s.index {
+		if strings.HasPrefix(k, prefix) {
+			version := strings.TrimPrefix(k, prefix)
+			return Ref{FQN: fqn, Version: version}, h, true
+		}
+	}
+	return Ref{}, "", false
 }
 
 // LoadIndex reads the index file from disk into memory. A missing index

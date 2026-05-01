@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/launch"
@@ -94,7 +98,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "secret":
 		return runSecret(args[1:], stdout, stderr)
 	case "binding":
-		return runBinding(args[1:], stdout, stderr)
+		return runBinding(args[1:], os.Stdin, stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "log":
@@ -489,79 +493,323 @@ func runSecretList(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runBinding handles `aileron binding <subcommand>`.
-func runBinding(args []string, stdout, stderr io.Writer) int {
+// runBinding handles `aileron binding <subcommand>`. Per ADR-0006 the
+// binding lifecycle is exposed as five HTTP endpoints; the CLI is a
+// thin client that calls the running aileron server. The default
+// server URL is http://localhost:8721/v1, overridable via the
+// AILERON_API_URL environment variable.
+func runBinding(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aileron binding <list>")
+		fmt.Fprintln(stderr, bindingUsage)
 		return 1
 	}
+	// Wrap stdin once so multiple promptLine calls share the same
+	// buffered reader; otherwise bufio's read-ahead would drop the
+	// trailing input on subsequent prompts.
+	br := bufio.NewReader(stdin)
 	switch args[0] {
 	case "list":
-		return runBindingList(stdout, stderr)
+		return runBindingList(args[1:], stdout, stderr)
+	case "inspect":
+		return runBindingInspect(args[1:], stdout, stderr)
+	case "setup":
+		return runBindingSetup(args[1:], br, stdout, stderr)
+	case "rebind":
+		return runBindingRebind(args[1:], br, stdout, stderr)
+	case "revoke":
+		return runBindingRevoke(args[1:], br, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown binding command: %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: aileron binding <list>")
+		fmt.Fprintln(stderr, bindingUsage)
 		return 1
 	}
 }
 
-// runBindingList prints every entry in the local vault as a binding
-// row: path, type, and labels. Per ADR-0011, this works without the
-// vault being unlocked — metadata is stored plaintext alongside the
-// encrypted value, so listing requires no KEK. The use of a binding
-// (e.g., resolving its credential during action execution) is the
-// step that triggers an unlock prompt.
-func runBindingList(stdout, stderr io.Writer) int {
-	vaultPath := launch.DefaultVaultPath()
-	fv, err := vault.NewFileVault(vaultPath)
+const bindingUsage = `usage:
+  aileron binding list   [--connector FQN] [--kind KIND]
+  aileron binding inspect <name>
+  aileron binding setup  <connector-FQN>
+  aileron binding rebind <name>
+  aileron binding revoke <name>`
+
+// bindingAPIBaseURL returns the server's binding API base URL,
+// overridable via AILERON_API_URL for tests and non-default ports.
+func bindingAPIBaseURL() string {
+	if u := os.Getenv("AILERON_API_URL"); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	return "http://localhost:8721/v1"
+}
+
+// bindingDoRequest issues an HTTP request to the server and returns
+// the parsed body. Status codes are surfaced to callers.
+func bindingDoRequest(method, path string, body io.Reader) (int, []byte, error) {
+	req, err := http.NewRequest(method, bindingAPIBaseURL()+path, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, out, nil
+}
+
+// runBindingList renders the user's bindings as a fixed-width table.
+// Per ADR-0011, listing does not require the vault to be unlocked;
+// the server returns plaintext metadata only.
+func runBindingList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("binding list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	connector := flags.String("connector", "", "filter by connector FQN")
+	kind := flags.String("kind", "", "filter by credential kind")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	q := url.Values{}
+	if *connector != "" {
+		q.Set("connector_fqn", *connector)
+	}
+	if *kind != "" {
+		q.Set("kind", *kind)
+	}
+	path := "/bindings"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	status, body, err := bindingDoRequest(http.MethodGet, path, nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	names := fv.Names()
-	if len(names) == 0 {
-		fmt.Fprintln(stdout, "No bindings stored.")
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(body))
+		return 1
+	}
+	var resp struct {
+		Items []bindingRow `json:"items"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		return 1
+	}
+	if len(resp.Items) == 0 {
+		fmt.Fprintln(stdout, "No bindings.")
 		return 0
 	}
-
-	// Resolve each entry's metadata via Get. The FileVault stores
-	// metadata plaintext, so this works even though the vault is not
-	// formally "unlocked" with a KEK — Get on a FileVault returns
-	// the raw stored bytes (the EncryptedVault decorator is what
-	// would attempt decryption, and we deliberately read the inner
-	// FileVault directly here).
-	fmt.Fprintf(stdout, "%-40s  %-12s  %s\n", "PATH", "TYPE", "LABELS")
-	for _, name := range names {
-		s, err := fv.Get(context.Background(), name)
-		if err != nil {
-			fmt.Fprintf(stdout, "%-40s  %-12s  (metadata unreadable: %v)\n", name, "?", err)
-			continue
+	fmt.Fprintf(stdout, "%-40s  %-10s  %-30s  %s\n", "NAME", "KIND", "CONNECTOR", "STATUS")
+	for _, b := range resp.Items {
+		st := b.Status
+		if st == "" {
+			st = "active"
 		}
-		labels := formatLabels(s.Metadata.Labels)
-		typ := s.Metadata.Type
-		if typ == "" {
-			typ = "-"
-		}
-		fmt.Fprintf(stdout, "%-40s  %-12s  %s\n", name, typ, labels)
+		fmt.Fprintf(stdout, "%-40s  %-10s  %-30s  %s\n", b.Name, b.Kind, b.ConnectorFQN, st)
 	}
 	return 0
 }
 
-// formatLabels renders a label map as `k=v,k=v` for terminal display.
-func formatLabels(m map[string]string) string {
-	if len(m) == 0 {
-		return "-"
+// runBindingInspect prints the full metadata for a single binding.
+func runBindingInspect(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron binding inspect <name>")
+		return 1
 	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+	name := args[0]
+	status, body, err := bindingDoRequest(http.MethodGet, "/bindings/"+name, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
 	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, k+"="+m[k])
+	if status == http.StatusNotFound {
+		fmt.Fprintf(stderr, "binding not found: %s\n", name)
+		return 1
 	}
-	return strings.Join(parts, ",")
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(body))
+		return 1
+	}
+	var b bindingRow
+	if err := json.Unmarshal(body, &b); err != nil {
+		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Name:       %s\n", b.Name)
+	fmt.Fprintf(stdout, "Kind:       %s\n", b.Kind)
+	fmt.Fprintf(stdout, "Service:    %s\n", b.Service)
+	fmt.Fprintf(stdout, "Identity:   %s\n", b.Identity)
+	fmt.Fprintf(stdout, "Connector:  %s\n", b.ConnectorFQN)
+	if b.Account != "" {
+		fmt.Fprintf(stdout, "Account:    %s\n", b.Account)
+	}
+	if b.Scope != "" {
+		fmt.Fprintf(stdout, "Scope:      %s\n", b.Scope)
+	}
+	if !b.CreatedAt.IsZero() {
+		fmt.Fprintf(stdout, "Created:    %s\n", b.CreatedAt.Format("2006-01-02 15:04:05 UTC"))
+	}
+	return 0
+}
+
+// runBindingSetup prompts for a binding identity and api_key value,
+// then POSTs to /v1/bindings/setup. v1 supports api_key only; OAuth is
+// tracked in #388.
+func runBindingSetup(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron binding setup <connector-FQN>")
+		return 1
+	}
+	connectorFQN := args[0]
+	identity := promptLine(stdin, stdout, "Identity (e.g. work, personal): ")
+	if identity == "" {
+		fmt.Fprintln(stderr, "identity is required")
+		return 1
+	}
+	value := promptLine(stdin, stdout, "API key value: ")
+	if value == "" {
+		fmt.Fprintln(stderr, "value is required")
+		return 1
+	}
+	body, _ := json.Marshal(map[string]any{
+		"connector_fqn": connectorFQN,
+		"bindings": []map[string]any{{
+			"identity": identity,
+			"source":   map[string]any{"kind": "api_key", "value": value},
+		}},
+	})
+	status, respBody, err := bindingDoRequest(http.MethodPost, "/bindings/setup",
+		strings.NewReader(string(body)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status != http.StatusCreated {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return 1
+	}
+	var resp struct {
+		Created []bindingRow `json:"created"`
+		Skipped []string     `json:"skipped"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		return 1
+	}
+	for _, b := range resp.Created {
+		fmt.Fprintf(stdout, "Created: %s\n", b.Name)
+	}
+	for _, name := range resp.Skipped {
+		fmt.Fprintf(stdout, "Skipped (already bound): %s\n", name)
+	}
+	return 0
+}
+
+// runBindingRebind prompts for a replacement api_key value and posts
+// it to /v1/bindings/{name}/rebind, keeping the binding's identity
+// and metadata intact.
+func runBindingRebind(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron binding rebind <name>")
+		return 1
+	}
+	name := args[0]
+	value := promptLine(stdin, stdout, "New API key value: ")
+	if value == "" {
+		fmt.Fprintln(stderr, "value is required")
+		return 1
+	}
+	body, _ := json.Marshal(map[string]any{
+		"source": map[string]any{"kind": "api_key", "value": value},
+	})
+	status, respBody, err := bindingDoRequest(http.MethodPost, "/bindings/"+name+"/rebind",
+		strings.NewReader(string(body)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status == http.StatusNotFound {
+		fmt.Fprintf(stderr, "binding not found: %s\n", name)
+		return 1
+	}
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return 1
+	}
+	fmt.Fprintf(stdout, "Rebound: %s\n", name)
+	return 0
+}
+
+// runBindingRevoke confirms with the user and DELETEs the binding.
+func runBindingRevoke(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron binding revoke <name>")
+		return 1
+	}
+	name := args[0]
+	answer := promptLine(stdin, stdout, fmt.Sprintf("Revoke %s? [y/N]: ", name))
+	if !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
+		fmt.Fprintln(stdout, "cancelled")
+		return 0
+	}
+	status, respBody, err := bindingDoRequest(http.MethodDelete, "/bindings/"+name, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status == http.StatusNotFound {
+		fmt.Fprintf(stderr, "binding not found: %s\n", name)
+		return 1
+	}
+	if status != http.StatusNoContent {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return 1
+	}
+	fmt.Fprintf(stdout, "Revoked: %s\n", name)
+	return 0
+}
+
+// bindingRow is the local subset of api.Binding the CLI renders.
+// Defined here so the cmd/aileron module doesn't pull in the full
+// internal/api/gen package as a dependency.
+type bindingRow struct {
+	Name         string    `json:"name"`
+	Kind         string    `json:"kind"`
+	Service      string    `json:"service"`
+	Identity     string    `json:"identity"`
+	Scope        string    `json:"scope"`
+	ConnectorFQN string    `json:"connector_fqn"`
+	Account      string    `json:"account"`
+	CreatedAt    time.Time `json:"created_at"`
+	Status       string    `json:"status"`
+}
+
+// promptLine writes prompt to stdout and reads one line from stdin
+// (newline-stripped). Empty input returns an empty string.
+//
+// stdin is wrapped once per call only when it isn't already a
+// *bufio.Reader. The runBindingX commands that prompt more than once
+// must pass a *bufio.Reader so subsequent reads see the bytes left in
+// the buffer after the first ReadString. (A fresh bufio.NewReader on
+// each call would buffer-ahead and consume the rest of the input,
+// dropping it on the floor when discarded.)
+func promptLine(stdin io.Reader, stdout io.Writer, prompt string) string {
+	fmt.Fprint(stdout, prompt)
+	br, ok := stdin.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(stdin)
+	}
+	line, err := br.ReadString('\n')
+	if err != nil && line == "" {
+		return ""
+	}
+	return strings.TrimRight(line, "\r\n")
 }
 
 // promptPassphrase reads a password from the terminal without echoing.

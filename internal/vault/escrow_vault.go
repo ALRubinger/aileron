@@ -28,3 +28,10 @@ func (v *DenyPlaintextVault) Put(_ context.Context, path string, _ []byte, _ Met
 func (v *DenyPlaintextVault) Delete(_ context.Context, path string) error {
 	return fmt.Errorf("vault: credential delete denied for %q — source connectors must execute inside the enclave", path)
 }
+
+// List returns no entries. The deny-plaintext vault is only consulted
+// inside the enclave for credential resolution; listing has no caller
+// in the host process and the safe default is empty.
+func (v *DenyPlaintextVault) List(_ context.Context) ([]Entry, error) {
+	return nil, nil
+}

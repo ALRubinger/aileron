@@ -291,6 +291,9 @@ func (v *failPutVault) Put(_ context.Context, _ string, _ []byte, _ vault.Metada
 func (v *failPutVault) Delete(_ context.Context, _ string) error {
 	return nil
 }
+func (v *failPutVault) List(_ context.Context) ([]vault.Entry, error) {
+	return nil, nil
+}
 
 func TestDefaultSlackBotTokenExchange_Success(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

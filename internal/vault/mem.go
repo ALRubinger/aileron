@@ -41,6 +41,16 @@ func (v *MemVault) Delete(_ context.Context, path string) error {
 	return nil
 }
 
+func (v *MemVault) List(_ context.Context) ([]Entry, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	entries := make([]Entry, 0, len(v.secrets))
+	for path, s := range v.secrets {
+		entries = append(entries, Entry{Path: path, Metadata: s.Metadata})
+	}
+	return entries, nil
+}
+
 type errNotFound struct {
 	path string
 }

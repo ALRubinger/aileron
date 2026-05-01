@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/sandbox"
-	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 // Executor runs an installed action with the given call-time arguments
@@ -105,14 +105,15 @@ type SandboxExecutor struct {
 	Store   *cstore.Store
 	Runtime sandbox.Runtime
 
-	// Vault resolves the credentials referenced by the action's
-	// `[[bindings]]` block at call time. Per ADR-0005, the vault read
-	// happens host-side and the connector never sees the bytes; the
-	// executor builds a per-step credential.Resolver from the vault
-	// and the action's binding metadata. Nil disables the credential
-	// path — connectors that emit a `credential` field on their
-	// http_request envelope receive `binding_required`.
-	Vault vault.Vault
+	// Bindings resolves the credentials connectors need at call time
+	// per ADR-0005 + ADR-0006. The store is keyed by (connector FQN,
+	// capability kind); the executor consults it on each step that
+	// references a connector with a declared `[capabilities.credential]`
+	// and threads the matching `credential.Resolver` into the sandbox
+	// Call. Nil disables the credential path — connectors that emit a
+	// `credential` field on their http_request envelope receive
+	// `binding_required` from the sandbox boundary.
+	Bindings binding.Store
 
 	mu    sync.Mutex
 	cache map[string]cachedConnector // keyed by canonical hash "sha256:<hex>"
@@ -130,17 +131,17 @@ type cachedConnector struct {
 // NewSandboxExecutor builds a SandboxExecutor with the supplied
 // dependencies. Callers must Close it (which closes cached
 // sandbox.Connectors) when finished; the runtime itself is not
-// owned by the executor and must be closed separately. Vault may be
-// nil — the credential-mediation path is then disabled and any
+// owned by the executor and must be closed separately. Bindings may
+// be nil — the credential-mediation path is then disabled and any
 // connector that emits a `credential` field will receive
 // `binding_required` from the sandbox boundary.
-func NewSandboxExecutor(actions *Store, store *cstore.Store, runtime sandbox.Runtime, v vault.Vault) *SandboxExecutor {
+func NewSandboxExecutor(actions *Store, store *cstore.Store, runtime sandbox.Runtime, bindings binding.Store) *SandboxExecutor {
 	return &SandboxExecutor{
-		Actions: actions,
-		Store:   store,
-		Runtime: runtime,
-		Vault:   v,
-		cache:   map[string]cachedConnector{},
+		Actions:  actions,
+		Store:    store,
+		Runtime:  runtime,
+		Bindings: bindings,
+		cache:    map[string]cachedConnector{},
 	}
 }
 
@@ -201,14 +202,17 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 		opArgs := mergeArgs(args, step.Inputs)
 
 		// Build a per-step credential resolver. When the connector
-		// manifest declares `[capabilities.credential]` and the action
-		// supplies a matching `[[bindings]]` entry, the host-side
-		// http_request handler resolves the bound vault entry on the
-		// connector's behalf (per ADR-0005). When either is missing
-		// the resolver is nil and the sandbox returns
-		// `binding_required` the moment the connector emits a
-		// credential reference.
-		resolver := e.resolverFor(connManifest, step.Connector, manifest)
+		// manifest declares `[capabilities.credential]` and the user
+		// has created a matching binding via `aileron binding setup`,
+		// the host-side http_request handler resolves the bound vault
+		// entry on the connector's behalf (per ADR-0005 + ADR-0006).
+		// When no binding exists, the resolver is nil and the sandbox
+		// returns `binding_required` the moment the connector emits a
+		// credential reference. Ambiguous resolution (multiple bindings
+		// for the same connector+kind) also yields nil — the failure
+		// envelope's details carry the candidates so the agent can
+		// guide the user.
+		resolver := e.resolverFor(ctx, connManifest, step.Connector)
 
 		allowed := allowedAuthorityFor(manifest, step.Connector)
 		res, invErr := conn.Invoke(ctx, sandbox.Call{
@@ -299,50 +303,32 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 }
 
 // resolverFor returns the credential.Resolver for the named connector,
-// or nil when no credential mediation is needed for this step.
+// or nil when no credential mediation is needed (or possible) for this
+// step.
 //
-// Returns nil when:
+// Returns nil when any of the following holds:
 //   - the connector manifest declares no [capabilities.credential]
 //     (the connector won't request a credential at runtime); or
-//   - the action manifest has no [[bindings]] entry for the connector
-//     (the connector will request one but the host short-circuits to
-//     `binding_required`); or
-//   - the executor has no Vault wired (dev-mode without credentials).
+//   - the executor has no binding store wired (dev-mode without a
+//     vault); or
+//   - the binding store has no entry for the (connector FQN, kind)
+//     tuple — the host then surfaces `binding_required` on the first
+//     credential reference; or
+//   - the binding store has more than one matching entry — the
+//     ambiguity also surfaces as `binding_required`, and the failure
+//     envelope's details (populated by the host) name the candidates.
 //
 // When non-nil, the returned resolver is scoped to a single Invoke —
 // the host drops the reference on completion, satisfying the
 // per-invocation lifetime requirement of ADR-0005.
-func (e *SandboxExecutor) resolverFor(connManifest *cstore.Manifest, connectorFQN string, action *Manifest) credential.Resolver {
+func (e *SandboxExecutor) resolverFor(ctx context.Context, connManifest *cstore.Manifest, connectorFQN string) credential.Resolver {
 	if connManifest == nil || connManifest.Capabilities.Credential == nil {
 		return nil
 	}
-	if e.Vault == nil {
+	if e.Bindings == nil {
 		return nil
 	}
-	binding := bindingFor(action, connectorFQN)
-	if binding == nil {
-		return nil
-	}
-	return &credential.VaultResolver{
-		Vault:        e.Vault,
-		VaultPath:    binding.VaultPath,
-		ExpectedKind: connManifest.Capabilities.Credential.Kind,
-	}
-}
-
-// bindingFor returns the action's [[bindings]] entry for the named
-// connector, or nil when none exists. Validate() guarantees at most
-// one binding per connector.
-func bindingFor(action *Manifest, connectorFQN string) *Binding {
-	if action == nil {
-		return nil
-	}
-	for i := range action.Bindings {
-		if action.Bindings[i].Connector == connectorFQN {
-			return &action.Bindings[i]
-		}
-	}
-	return nil
+	return e.Bindings.ResolverFor(ctx, connectorFQN, connManifest.Capabilities.Credential.Kind)
 }
 
 // mergeArgs combines the call-time args with the action's declared

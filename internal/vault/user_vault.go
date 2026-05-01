@@ -74,6 +74,12 @@ func (v *UserScopedVault) Delete(ctx context.Context, path string) error {
 	return v.inner.Delete(ctx, path)
 }
 
+// List delegates to the inner vault. No KEK is required because
+// metadata is plaintext.
+func (v *UserScopedVault) List(ctx context.Context) ([]Entry, error) {
+	return v.inner.List(ctx)
+}
+
 // IsEncrypted reports whether a secret's metadata indicates it was encrypted
 // with a user KEK.
 func IsEncrypted(meta Metadata) bool {

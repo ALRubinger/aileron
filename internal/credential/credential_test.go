@@ -103,6 +103,9 @@ func (stubErroringVault) Put(_ context.Context, _ string, _ []byte, _ vault.Meta
 	return nil
 }
 func (stubErroringVault) Delete(_ context.Context, _ string) error { return nil }
+func (stubErroringVault) List(_ context.Context) ([]vault.Entry, error) {
+	return nil, nil
+}
 
 func TestVaultResolver_Resolve_GenericVaultErrorPropagates(t *testing.T) {
 	r := &credential.VaultResolver{
