@@ -251,6 +251,14 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	}
 	server.executor = executor
 
+	// --- Action-level approval queue (#418) ---
+	// In-memory; per-process. Surfaced to webapp/CLI via
+	// /v1/action-approvals; consumed by RunAction when an action's
+	// manifest declares [approval] required = true. Distinct from the
+	// rich governance orchestrator above; converges with it post-MVP.
+	server.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	server.actionApprovalTTL = 5 * time.Minute
+
 	// --- Intercept engine (stage 4) ---
 	// When augmentation is disabled (e.g. `aileron launch` with MCP as
 	// the canonical action-exposure surface) the engine is not built;

@@ -670,6 +670,65 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/action-approvals:
+    get:
+      tags: [Approvals]
+      summary: List pending action-level approval requests
+      description: |
+        Returns the queue of pending approvals minted by the runtime
+        when an action whose manifest declares `[approval] required = true`
+        is invoked. Distinct from the rich governance flow under
+        `/v1/approvals` (intents, multi-approver workflows, execution
+        grants) — this surface is the runtime-blocking shape: each
+        entry corresponds to one held-open `POST /v1/actions/{name}/run`
+        response waiting for a single yes/no decision.
+
+        v0.x is in-memory and per-process; the queue resets on server
+        restart. Persistent backing parallels the audit-log persistence
+        work (#412).
+      operationId: listActionApprovals
+      responses:
+        "200":
+          description: Pending action-approval queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionApprovalListResponse"
+
+  /v1/action-approvals/{approval_id}/decide:
+    post:
+      tags: [Approvals]
+      summary: Approve or deny a pending action-level approval
+      description: |
+        Resolves a pending action-level approval. The runtime's
+        held-open `POST /v1/actions/{name}/run` response unblocks on
+        the next tick; on `approved = true` the action proceeds and
+        returns its normal result, on `approved = false` it returns
+        an `approval_denied` failure envelope per ADR-0010 with the
+        supplied reason.
+      operationId: decideActionApproval
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionApprovalDecision"
+      responses:
+        "200":
+          description: Decision recorded
+        "404":
+          description: Approval id is unknown or already resolved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/approvals:
     get:
       tags: [Approvals]
@@ -3495,6 +3554,65 @@ components:
           description: |
             When true, `POST /v1/actions/{name}/run` blocks on user approval
             before executing. Default false.
+
+    PendingActionApproval:
+      type: object
+      required: [id, action_name, requested_at]
+      description: |
+        One pending action-level approval request. Surfaced to the
+        webapp / CLI for user decision. The runtime is blocked on the
+        corresponding action-run HTTP response and will resume the
+        moment a decision is posted to `/v1/action-approvals/{id}/decide`.
+      properties:
+        id:
+          type: string
+          description: Opaque server-minted identifier for this request.
+        action_name:
+          type: string
+          description: Manifest name of the gated action (e.g. "send-email").
+        connector_fqn:
+          type: string
+          description: |
+            Connector FQN the action's first execute step targets, surfaced
+            so the user can see which integration would actually run.
+        args:
+          type: object
+          additionalProperties: true
+          description: |
+            Call-time arguments the agent passed in. Surfaced verbatim so
+            the user reviews exactly what would be sent.
+        session_id:
+          type: string
+          description: |
+            Launch session that initiated the request, when one is in
+            scope; empty for daemon-direct callers.
+        requested_at:
+          type: string
+          format: date-time
+          description: When the queue minted this request.
+
+    ActionApprovalListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PendingActionApproval"
+
+    ActionApprovalDecision:
+      type: object
+      required: [approved]
+      properties:
+        approved:
+          type: boolean
+          description: True to allow the action to run; false to deny.
+        reason:
+          type: string
+          description: |
+            Optional commentary from the user. Surfaced to the agent in
+            the deny path so it can recover gracefully (e.g. "wrong
+            recipient — I'll redraft").
 
     ActionRequires:
       type: object

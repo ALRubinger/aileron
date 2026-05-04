@@ -12,9 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/failure"
 )
 
@@ -388,6 +390,166 @@ func TestRunAction_ExecutorError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
+}
+
+// actionsTestManifestApproval is `ship-update` annotated with
+// `[approval] required = true`, used to exercise the runtime's
+// approval gate.
+const actionsTestManifestApproval = `+++
+name = "ship-update"
+version = "1.0.0"
+source = "hub://aileron/ship-update@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/slack"
+version = "1.2.0"
+hash = "sha256:abc123"
+capabilities = ["chat:write"]
+
+[match]
+intent = "tell team I shipped"
+
+[[execute]]
+id = "post"
+connector = "github://aileron/slack"
+op = "post_message"
+
+[approval]
+required = true
++++
+
+# Ship Update
+`
+
+// TestRunAction_ApprovalRequired_ApprovedReturnsResult is the load-bearing
+// regression for the approve path: an action with `[approval] required = true`
+// blocks RunAction; a concurrent Decide(approved=true) unblocks; the action
+// then runs through the executor and returns the normal 200 + audit_id +
+// result body. This is the path the agent's MCP tool call rides through
+// when the user clicks Approve in the webapp.
+func TestRunAction_ApprovalRequired_ApprovedReturnsResult(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifestApproval,
+	})
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	srv.actionApprovalTTL = 5 * time.Second
+
+	body := bytes.NewReader([]byte(`{"args":{"channel":"#engineering"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+
+	// Decide concurrently while RunAction is blocked. Poll List() so
+	// we don't race the Register call.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			pending := srv.actionApprovals.List()
+			if len(pending) == 1 {
+				if err := srv.actionApprovals.Decide(pending[0].ID, true, ""); err != nil {
+					t.Errorf("Decide: %v", err)
+				}
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Errorf("approval never registered")
+	}()
+
+	srv.RunAction(rec, req, "ship-update")
+	<-done
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"audit_id"`)) {
+		t.Errorf("expected audit_id in body; got %s", rec.Body.String())
+	}
+}
+
+// TestRunAction_ApprovalRequired_DeniedReturnsForbidden asserts the
+// deny path: a concurrent Decide(approved=false) returns the 403
+// approval_denied envelope to the agent without ever invoking the
+// executor. The reason is forwarded so the agent can surface it to
+// the user ("the user denied: wrong recipient").
+func TestRunAction_ApprovalRequired_DeniedReturnsForbidden(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifestApproval,
+	})
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	srv.actionApprovalTTL = 5 * time.Second
+	// Tracking executor — proves we DON'T execute on deny.
+	tracker := &countingExecutor{}
+	srv.executor = tracker
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			pending := srv.actionApprovals.List()
+			if len(pending) == 1 {
+				_ = srv.actionApprovals.Decide(pending[0].ID, false, "wrong recipient")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	srv.RunAction(rec, req, "ship-update")
+	<-done
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("approval_denied")) {
+		t.Errorf("expected approval_denied class; got %s", rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("wrong recipient")) {
+		t.Errorf("expected deny reason in body; got %s", rec.Body.String())
+	}
+	if tracker.calls != 0 {
+		t.Errorf("executor was called %d times on deny path; want 0", tracker.calls)
+	}
+}
+
+// TestRunAction_ApprovalRequired_TimeoutReturns408 covers the path
+// where the user never decides. The held-open response returns
+// 408 Request Timeout with class `approval_timeout` so the agent has
+// a clean error to recover from rather than an opaque connection drop.
+func TestRunAction_ApprovalRequired_TimeoutReturns408(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifestApproval,
+	})
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	srv.actionApprovalTTL = 50 * time.Millisecond
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusRequestTimeout {
+		t.Fatalf("status = %d, want 408; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("approval_timeout")) {
+		t.Errorf("expected approval_timeout class; got %s", rec.Body.String())
+	}
+}
+
+// countingExecutor counts how many times Execute was called. Used to
+// assert the deny path never reaches the executor.
+type countingExecutor struct {
+	calls int
+}
+
+func (c *countingExecutor) Execute(_ context.Context, _ string, _ map[string]any) (action.Result, error) {
+	c.calls++
+	return action.Result{Content: `{"action":"ship-update"}`}, nil
 }
 
 func TestRunAction_NilExecutor(t *testing.T) {

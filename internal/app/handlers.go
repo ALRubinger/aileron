@@ -107,6 +107,8 @@ type apiServer struct {
 	executor           action.Executor   // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
 	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
+	actionApprovals    *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
+	actionApprovalTTL  time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
 	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
 	oauth2Sessions     *oauth2Sessions   // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
 	oauth2HTTPClient   *http.Client      // for OAuth token exchanges; nil → http.DefaultClient
@@ -1172,7 +1174,8 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 		writeError(w, http.StatusNotFound, "not_found", "action not found")
 		return
 	}
-	if _, err := s.actions.Get(name); errors.Is(err, action.ErrNotFound) {
+	loaded, err := s.actions.Get(name)
+	if errors.Is(err, action.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "action not found")
 		return
 	} else if err != nil {
@@ -1188,6 +1191,43 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 	args := map[string]any{}
 	if req.Args != nil {
 		args = *req.Args
+	}
+
+	// Approval gate. When the action's manifest declares
+	// `[approval] required = true` the runtime registers a pending
+	// approval and holds the response open until the user decides
+	// (via the webapp at #418 or `aileron approval` CLI). The agent
+	// learns to surface the approval URL to the user during this
+	// pause via templated MCP tool descriptions in `aileron-mcp`.
+	if loaded.Manifest.ApprovalRequired() && s.actionApprovals != nil {
+		connFQN := ""
+		if len(loaded.Manifest.Execute) > 0 {
+			connFQN = loaded.Manifest.Execute[0].Connector
+		}
+		sessionID := r.Header.Get("X-Aileron-Session-Id")
+		entry := s.actionApprovals.Register(name, connFQN, sessionID, args)
+		decision, waitErr := entry.Wait(r.Context(), s.actionApprovalTimeout())
+		if errors.Is(waitErr, approval.ErrActionApprovalTimeout) {
+			writeError(w, http.StatusRequestTimeout, "approval_timeout",
+				"action requires user approval; no decision received before timeout")
+			return
+		}
+		if waitErr != nil {
+			// Most likely r.Context() cancelled (client disconnect);
+			// surface as a generic failure for the audit log. Don't
+			// emit a body when the client is gone.
+			writeError(w, http.StatusInternalServerError, "approval_wait_error", waitErr.Error())
+			return
+		}
+		if !decision.Approved {
+			msg := "user denied approval"
+			if decision.Reason != "" {
+				msg = msg + ": " + decision.Reason
+			}
+			writeError(w, http.StatusForbidden, "approval_denied", msg)
+			return
+		}
+		// Approved; fall through to execute.
 	}
 
 	result, err := s.executor.Execute(r.Context(), name, args)
