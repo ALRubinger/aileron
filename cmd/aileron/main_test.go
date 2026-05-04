@@ -2293,3 +2293,119 @@ func TestRunBinding_SetupOAuth2_PortBindFailsWhenSamePortInUse(t *testing.T) {
 		t.Error("expected nonzero exit when listener bind fails")
 	}
 }
+
+// --- runActionAdd: auto-install missing connectors (issue #413) ---
+
+func TestRunActionAdd_PromptsAndRetriesOnConnectorsMissing(t *testing.T) {
+	// First POST returns 422 connectors_missing; user accepts at the
+	// prompt; second POST is sent with auto_install_connectors=true
+	// and the server replies 201.
+	var calls []map[string]any
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/actions/install" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		calls = append(calls, body)
+
+		auto, _ := body["auto_install_connectors"].(bool)
+		w.Header().Set("Content-Type", "application/json")
+		if !auto {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"connectors_missing","message":"need deps","details":[
+				{"name":"github://acme/conn","version":"1.0.0","hash":"sha256:abc"}
+			]}}`)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"github://acme/conn/actions/run@0.1.0","path":"/tmp/my-action.md"}`)
+	})
+
+	stdin := strings.NewReader("y\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"github://acme/conn/actions/run@0.1.0"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 install calls, got %d", len(calls))
+	}
+	if got, _ := calls[0]["auto_install_connectors"].(bool); got {
+		t.Error("first call must not set auto_install_connectors")
+	}
+	if got, _ := calls[1]["auto_install_connectors"].(bool); !got {
+		t.Error("second call must set auto_install_connectors=true")
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"github://acme/conn@1.0.0",
+		"sha256:abc",
+		"Install the connector(s) before adding this action?",
+		"Added: my-action",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunActionAdd_DeclinesPromptExitsCleanly(t *testing.T) {
+	// User answers "n" — the CLI does not retry, prints a "Skipped"
+	// hint, and exits 1 without dumping the raw error envelope.
+	var callCount int
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"connectors_missing","message":"need deps","details":[
+			{"name":"github://acme/conn","version":"1.0.0","hash":"sha256:abc"}
+		]}}`)
+	})
+	stdin := strings.NewReader("n\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"github://acme/conn/actions/run@0.1.0"}, stdin, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1; stderr = %s", code, stderr.String())
+	}
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 install call, got %d", callCount)
+	}
+	if !strings.Contains(stdout.String(), "Skipped.") {
+		t.Errorf("output should include 'Skipped.', got: %s", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "server returned") {
+		t.Errorf("must not dump raw envelope on user decline, stderr: %s", stderr.String())
+	}
+}
+
+func TestRunActionAdd_NoAutoInstallFlagSkipsPrompt(t *testing.T) {
+	// --no-auto-install → CLI does not prompt; the original 422 is
+	// surfaced verbatim. Lets scripts opt out of the interactive
+	// retry while keeping the structural pre-check intact.
+	var callCount int
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"connectors_missing","message":"need deps","details":[
+			{"name":"github://acme/conn","version":"1.0.0","hash":"sha256:abc"}
+		]}}`)
+	})
+	// Stdin is empty — if the prompt fired we'd hit EOF. The flag
+	// suppresses the prompt entirely.
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0", "--no-auto-install"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if callCount != 1 {
+		t.Errorf("expected exactly 1 install call, got %d", callCount)
+	}
+	if !strings.Contains(stderr.String(), "connectors_missing") {
+		t.Errorf("stderr should contain raw envelope, got: %s", stderr.String())
+	}
+}

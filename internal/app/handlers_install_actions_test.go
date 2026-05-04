@@ -94,9 +94,11 @@ func installActionTestServer(t *testing.T, ref cstore.Ref, tarball []byte, pub e
 }
 
 // goodActionMD returns a valid action manifest referencing the
-// supplied connector FQN at version 1.0.0. The hash field is a
-// placeholder — Validate accepts any sha256: prefix string.
-func goodActionMD(connectorFQN string) []byte {
+// supplied connector FQN at version 1.0.0 with the given pinned
+// `sha256:<hex>` hash. Tests that exercise the install pipeline must
+// pass the hash that the dependency connector actually produces (see
+// fakeConnectorHash) so the cross-check passes.
+func goodActionMD(connectorFQN, hash string) []byte {
 	return []byte(`+++
 name = "list-recent-prs"
 version = "0.1.0"
@@ -105,7 +107,7 @@ source = "github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0
 [[requires.connectors]]
 name = "` + connectorFQN + `"
 version = "1.0.0"
-hash = "sha256:placeholder"
+hash = "` + hash + `"
 capabilities = ["list_prs"]
 
 [match]
@@ -135,7 +137,7 @@ func TestInstallAction_HappyPathSignedTarball(t *testing.T) {
 	ref, _ := cstore.ParseRef("github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.1.0")
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	depFQN := "github://ALRubinger/aileron-connector-github"
-	md := goodActionMD(depFQN)
+	md := goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key"))
 	tarball := buildActionTarball(t, md, priv)
 
 	srv := installActionTestServer(t, ref, tarball, pub, depFQN)
@@ -177,7 +179,7 @@ func TestInstallAction_UnsignedTarballAccepted(t *testing.T) {
 	// with #363 install consent.
 	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
 	depFQN := "github://acme/aileron-connector-x"
-	md := goodActionMD(depFQN)
+	md := goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key"))
 	tarball := buildActionTarball(t, md, nil) // no private key → no signature
 
 	srv := installActionTestServer(t, ref, tarball, nil, depFQN)
@@ -195,7 +197,7 @@ func TestInstallAction_BadSignatureRejected(t *testing.T) {
 	// different key for the authority → signature_failure.
 	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
 	depFQN := "github://acme/aileron-connector-x"
-	md := goodActionMD(depFQN)
+	md := goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key"))
 	_, signingPriv, _ := ed25519.GenerateKey(rand.Reader)
 	tarball := buildActionTarball(t, md, signingPriv)
 
@@ -214,12 +216,14 @@ func TestInstallAction_BadSignatureRejected(t *testing.T) {
 }
 
 func TestInstallAction_MissingConnectorDepRejected(t *testing.T) {
-	// Action references a connector that is not installed → 422
-	// validation_error naming the missing connector. Per ADR-0007 the
-	// install consent flow ratifies "no surprise installs"; this
-	// pre-check enforces the structural part of that.
+	// Action references a connector whose pinned hash isn't in the
+	// store → 422 connectors_missing with structured details per
+	// missing entry. Per ADR-0007 the install consent flow ratifies
+	// "no surprise installs"; the structured details let the CLI
+	// surface FQN, version, and hash to the user before retrying
+	// with auto_install_connectors=true (issue #413).
 	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
-	md := goodActionMD("github://nobody/missing")
+	md := goodActionMD("github://nobody/missing", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
 	tarball := buildActionTarball(t, md, priv)
@@ -232,8 +236,29 @@ func TestInstallAction_MissingConnectorDepRejected(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), "connectors_missing") {
+		t.Errorf("expected error code connectors_missing in body: %s", rec.Body.String())
+	}
 	if !strings.Contains(rec.Body.String(), "github://nobody/missing") {
 		t.Errorf("body should name missing connector: %s", rec.Body.String())
+	}
+	// Structured details — name, version, hash for each missing entry.
+	var env api.Error
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if env.Error.Details == nil || len(*env.Error.Details) != 1 {
+		t.Fatalf("expected exactly one details entry, got %v", env.Error.Details)
+	}
+	d := (*env.Error.Details)[0]
+	if d["name"] != "github://nobody/missing" {
+		t.Errorf("details.name = %v", d["name"])
+	}
+	if d["version"] != "1.0.0" {
+		t.Errorf("details.version = %v", d["version"])
+	}
+	if got, ok := d["hash"].(string); !ok || got == "" {
+		t.Errorf("details.hash = %v (must be non-empty)", d["hash"])
 	}
 }
 
@@ -261,7 +286,7 @@ name = "broken
 func TestInstallAction_AlreadyInstalledIs200WhenBytesMatch(t *testing.T) {
 	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
 	depFQN := "github://acme/aileron-connector-x"
-	md := goodActionMD(depFQN)
+	md := goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key"))
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
 	tarball := buildActionTarball(t, md, priv)
@@ -287,7 +312,7 @@ func TestInstallAction_AlreadyInstalledIs200WhenBytesMatch(t *testing.T) {
 func TestInstallAction_ConflictWhenContentDiffers(t *testing.T) {
 	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
 	depFQN := "github://acme/aileron-connector-x"
-	md1 := goodActionMD(depFQN)
+	md1 := goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key"))
 	md2 := append([]byte(nil), md1...)
 	md2[len(md2)-1] = '?' // changed bytes → looks like a different version of the action
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -309,7 +334,7 @@ func TestInstallAction_ConflictWhenContentDiffers(t *testing.T) {
 func TestInstallAction_ForceOverridesConflict(t *testing.T) {
 	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
 	depFQN := "github://acme/aileron-connector-x"
-	md1 := goodActionMD(depFQN)
+	md1 := goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key"))
 	md2 := append([]byte(nil), md1...)
 	md2[len(md2)-1] = '?'
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -383,7 +408,7 @@ func TestInstallAction_ContextCarriesAuditPayload(t *testing.T) {
 	depFQN := "github://acme/aileron-connector-x"
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
-	srv := installActionTestServer(t, ref, buildActionTarball(t, goodActionMD(depFQN), priv), pub, depFQN)
+	srv := installActionTestServer(t, ref, buildActionTarball(t, goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key")), priv), pub, depFQN)
 	postInstallAction(srv, `{"fqn":"github://acme/aileron-connector-x/actions/run","version":"0.1.0"}`)
 
 	traces, _ := srv.auditStore.ListTraces(context.Background(), audit.Filter{})
@@ -413,3 +438,230 @@ func TestInstallAction_ContextCarriesAuditPayload(t *testing.T) {
 // package's other test files); the import here is for future test
 // helpers that stream bodies.
 var _ io.Reader = (*bytes.Reader)(nil)
+
+// signedConnectorTarball builds a real, signed connector tarball that
+// can be fed through the actual Installer.Install pipeline (signature
+// verification, hash compute, store commit). Used by the
+// auto-install-connectors tests for action add (issue #413).
+//
+// Returns the tarball bytes and the canonical `sha256:<hex>` hash they
+// produce, which is what the action manifest must pin.
+func signedConnectorTarball(t *testing.T, fqn, version string, priv ed25519.PrivateKey) (tarball []byte, hash string) {
+	t.Helper()
+	manifest := []byte(`[connector]
+name = "` + fqn + `"
+version = "` + version + `"
+publisher = "test"
+
+[capabilities.credential]
+kind = "api_key"
+scope = "issues:write"
+`)
+	binary := []byte("BIN-AUTO-INSTALL")
+	payload := append(append([]byte{}, binary...), manifest...)
+	sig := ed25519.Sign(priv, payload)
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, e := range []struct {
+		name string
+		body []byte
+	}{
+		{"connector.wasm", binary},
+		{"manifest.toml", manifest},
+		{"signature.sig", sig},
+	} {
+		_ = tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.body)), ModTime: time.Unix(0, 0)})
+		_, _ = tw.Write(e.body)
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+
+	tb := &cstore.Tarball{Binary: binary, Manifest: manifest}
+	return buf.Bytes(), "sha256:" + tb.CanonicalHashHex()
+}
+
+// buildAutoInstallServer assembles an apiServer where:
+//   - the action tarball is served at the resolver URL for actionRef
+//   - the connector tarball is served at the resolver URL for connectorRef
+//   - the keyring trusts the action publisher and the connector publisher
+//     against the same ed25519 key (test convenience)
+//   - the connector store starts empty so the auto-install path is
+//     exercised end-to-end by the action install pipeline
+func buildAutoInstallServer(t *testing.T,
+	actionRef cstore.Ref, actionTarball []byte,
+	connectorRef cstore.Ref, connectorTarball []byte,
+	pub ed25519.PublicKey,
+) *apiServer {
+	t.Helper()
+
+	resolver := cstore.DefaultResolver()
+	actionURL, err := resolver.ResolveTarball(actionRef)
+	if err != nil {
+		t.Fatalf("resolve action: %v", err)
+	}
+	connectorURL, err := resolver.ResolveTarball(connectorRef)
+	if err != nil {
+		t.Fatalf("resolve connector: %v", err)
+	}
+
+	keyring := cstore.NewEd25519Keyring()
+	keyring.Add(actionRef.FQN.Authority(), pub)
+	keyring.Add(connectorRef.FQN.Authority(), pub)
+
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		log:     slog.Default(),
+		actions: action.NewStore(t.TempDir()),
+		installer: &cstore.Installer{
+			Resolver: resolver,
+			Fetcher: &fakeFetcher{bytesAt: map[string][]byte{
+				actionURL:    actionTarball,
+				connectorURL: connectorTarball,
+			}},
+			Verifier: keyring,
+			Store:    cstore.NewStore(t.TempDir()),
+		},
+		auditStore:    auditStore,
+		auditRecorder: audit.NewRecorder(auditStore, nil, nil),
+	}
+	if _, err := srv.actions.Load(); err != nil {
+		t.Fatalf("actions.Load: %v", err)
+	}
+	return srv
+}
+
+func TestInstallAction_AutoInstallConnectorsSucceeds(t *testing.T) {
+	// auto_install_connectors=true on the request makes the server
+	// run the connector install pipeline for every missing
+	// `[[requires.connectors]]` entry before completing the action
+	// install. The connector tarball is fetched, signature-verified,
+	// and committed to the store at the canonical hash; the action
+	// install's HasHash check then passes and the action lands.
+	depFQN := "github://acme/aileron-connector-x"
+	depVersion := "1.0.0"
+	connectorRef, _ := cstore.ParseRef(depFQN + "@" + depVersion)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	connectorTarball, depHash := signedConnectorTarball(t, depFQN, depVersion, priv)
+
+	actionRef, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
+	md := goodActionMD(depFQN, depHash)
+	actionTarball := buildActionTarball(t, md, priv)
+
+	srv := buildAutoInstallServer(t, actionRef, actionTarball, connectorRef, connectorTarball, pub)
+
+	// Sanity: without the flag, the server returns connectors_missing.
+	rec := postInstallAction(srv, `{
+		"fqn": "github://acme/aileron-connector-x/actions/run",
+		"version": "0.1.0"
+	}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("preflight (no flag) status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "connectors_missing") {
+		t.Fatalf("preflight body should contain connectors_missing: %s", rec.Body.String())
+	}
+
+	// With the flag set, the server fetches the connector and the
+	// action install completes.
+	rec = postInstallAction(srv, `{
+		"fqn": "github://acme/aileron-connector-x/actions/run",
+		"version": "0.1.0",
+		"auto_install_connectors": true
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("auto-install status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// The connector landed in the store at the canonical hash.
+	has, err := srv.installer.Store.HasHash(depHash)
+	if err != nil {
+		t.Fatalf("HasHash: %v", err)
+	}
+	if !has {
+		t.Errorf("connector at %s not in store after auto-install", depHash)
+	}
+}
+
+func TestInstallAction_AutoInstallHashMismatchAborts(t *testing.T) {
+	// The action manifest pins a hash that does NOT match what the
+	// connector tarball produces. Auto-install runs the connector
+	// pipeline with ExpectedHash set; ADR-0004 requires hash mismatch
+	// to fail-closed. The action install must abort with the
+	// connector's structured failure (`hash_mismatch`).
+	depFQN := "github://acme/aileron-connector-x"
+	depVersion := "1.0.0"
+	connectorRef, _ := cstore.ParseRef(depFQN + "@" + depVersion)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	connectorTarball, _ := signedConnectorTarball(t, depFQN, depVersion, priv)
+
+	bogusHash := "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	actionRef, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
+	md := goodActionMD(depFQN, bogusHash)
+	actionTarball := buildActionTarball(t, md, priv)
+
+	srv := buildAutoInstallServer(t, actionRef, actionTarball, connectorRef, connectorTarball, pub)
+
+	rec := postInstallAction(srv, `{
+		"fqn": "github://acme/aileron-connector-x/actions/run",
+		"version": "0.1.0",
+		"auto_install_connectors": true
+	}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), string(cstore.ClassHashMismatch)) {
+		t.Errorf("body should surface hash_mismatch class: %s", rec.Body.String())
+	}
+	// Nothing was committed to the action store.
+	if entries, _ := os.ReadDir(srv.actions.Dir()); len(entries) != 0 {
+		t.Errorf("action dir should be empty after hash mismatch, got %d entries", len(entries))
+	}
+}
+
+func TestInstallAction_AutoInstallConnectorFetchFailureAborts(t *testing.T) {
+	// auto_install_connectors=true with no connector tarball wired in
+	// the fetcher → fetch_failed bubbles up. Confirms the autoinstall
+	// path doesn't silently swallow connector pipeline failures.
+	depFQN := "github://acme/aileron-connector-x"
+	depVersion := "1.0.0"
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	depHash := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	actionRef, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
+	md := goodActionMD(depFQN, depHash)
+	actionTarball := buildActionTarball(t, md, priv)
+
+	resolver := cstore.DefaultResolver()
+	actionURL, _ := resolver.ResolveTarball(actionRef)
+	keyring := cstore.NewEd25519Keyring()
+	keyring.Add(actionRef.FQN.Authority(), pub)
+	srv := &apiServer{
+		log:     slog.Default(),
+		actions: action.NewStore(t.TempDir()),
+		installer: &cstore.Installer{
+			Resolver: resolver,
+			// Connector URL is intentionally absent → fetch_failed.
+			Fetcher:  &fakeFetcher{bytesAt: map[string][]byte{actionURL: actionTarball}},
+			Verifier: keyring,
+			Store:    cstore.NewStore(t.TempDir()),
+		},
+	}
+	if _, err := srv.actions.Load(); err != nil {
+		t.Fatalf("actions.Load: %v", err)
+	}
+	_ = depVersion
+
+	rec := postInstallAction(srv, `{
+		"fqn": "github://acme/aileron-connector-x/actions/run",
+		"version": "0.1.0",
+		"auto_install_connectors": true
+	}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), string(cstore.ClassFetchFailed)) {
+		t.Errorf("body should surface fetch_failed: %s", rec.Body.String())
+	}
+}

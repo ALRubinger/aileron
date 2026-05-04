@@ -19,14 +19,11 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
-// installFakeAPIKeyConnector writes a connector entry into the cstore
-// at the path computed from the canonical hash. Despite the name, it
-// works for both api_key and oauth2 kinds — when kind == "oauth2" it
-// includes a stub `[capabilities.credential.oauth2]` table so the
-// manifest passes ValidateManifest (#388).
-// Returns the connector FQN string.
-func installFakeAPIKeyConnector(t *testing.T, store *cstore.Store, fqn, version, kind string) string {
-	t.Helper()
+// fakeConnectorTarball builds the in-memory tarball used by tests for
+// the "fake api_key/oauth2 connector" fixture. Pure factory: same
+// inputs → same bytes → same canonical hash. Tests that need to pin a
+// connector hash in an action manifest before installing rely on this.
+func fakeConnectorTarball(fqn, version, kind string) *cstore.Tarball {
 	manifestTOML := `[connector]
 name = "` + fqn + `"
 version = "` + version + `"
@@ -45,12 +42,29 @@ client_id = "test-client-id"
 scopes = ["test:scope"]
 `
 	}
-	tb := &cstore.Tarball{
+	return &cstore.Tarball{
 		BinaryName: "connector.wasm",
 		Binary:     []byte("FAKE-BINARY"),
 		Manifest:   []byte(manifestTOML),
 		Signature:  []byte("FAKE-SIG"),
 	}
+}
+
+// fakeConnectorHash returns the canonical `sha256:<hex>` of the fake
+// connector tarball for (fqn, version, kind).
+func fakeConnectorHash(fqn, version, kind string) string {
+	return "sha256:" + fakeConnectorTarball(fqn, version, kind).CanonicalHashHex()
+}
+
+// installFakeAPIKeyConnector writes a connector entry into the cstore
+// at the path computed from the canonical hash. Despite the name, it
+// works for both api_key and oauth2 kinds — when kind == "oauth2" it
+// includes a stub `[capabilities.credential.oauth2]` table so the
+// manifest passes ValidateManifest (#388).
+// Returns the connector FQN string.
+func installFakeAPIKeyConnector(t *testing.T, store *cstore.Store, fqn, version, kind string) string {
+	t.Helper()
+	tb := fakeConnectorTarball(fqn, version, kind)
 	hashHex := tb.CanonicalHashHex()
 	dir := filepath.Join(store.Root(), "connectors", "sha256", hashHex)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

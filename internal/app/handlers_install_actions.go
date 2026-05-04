@@ -33,7 +33,15 @@ import (
 //     lands with #363 install consent.
 //  5. Parse + validate the action manifest.
 //  6. Cross-check that every `[[requires.connectors]]` entry is
-//     installed in the cstore. Refuse otherwise.
+//     present in the cstore. Hash-pinned dependencies are checked by
+//     content address (`HasHash`); unpinned dependencies fall back to
+//     "any version of the FQN is installed" (`LookupAnyVersion`).
+//     When some hashes are missing and the request set
+//     `auto_install_connectors: true`, the server runs the connector
+//     install pipeline for each missing entry (using the version+hash
+//     declared in the action manifest) before continuing. Otherwise
+//     the install aborts with `connectors_missing` and structured
+//     details so the CLI can prompt the user.
 //  7. Write to `~/.aileron/actions/<name>.md`, refusing to clobber
 //     unless `force=true` was set.
 //
@@ -66,10 +74,11 @@ func (s *apiServer) InstallAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	force := req.Force != nil && *req.Force
+	autoInstall := req.AutoInstallConnectors != nil && *req.AutoInstallConnectors
 
-	res, herr := s.runInstallAction(r.Context(), ref, force)
+	res, herr := s.runInstallAction(r.Context(), ref, force, autoInstall)
 	if herr != nil {
-		writeError(w, herr.status, herr.code, herr.message)
+		writeInstallActionErr(w, herr)
 		return
 	}
 	out := api.InstalledAction{
@@ -152,16 +161,43 @@ type installActionResult struct {
 	ConnectorFQNs []string
 }
 
-// installActionError carries an HTTP-renderable failure.
+// installActionError carries an HTTP-renderable failure. When details
+// is non-nil the error envelope includes structured per-entry detail
+// objects (used by the `connectors_missing` failure to enumerate the
+// missing connector deps so the CLI can render and prompt).
 type installActionError struct {
 	status  int
 	code    string
 	message string
+	details []map[string]any
+}
+
+// writeInstallActionErr renders an installActionError as the standard
+// api.Error envelope, optionally including the structured details
+// array.
+func writeInstallActionErr(w http.ResponseWriter, e *installActionError) {
+	if len(e.details) == 0 {
+		writeError(w, e.status, e.code, e.message)
+		return
+	}
+	details := e.details
+	writeJSON(w, e.status, api.Error{
+		Error: struct {
+			Code      string                    `json:"code"`
+			Details   *[]map[string]interface{} `json:"details,omitempty"`
+			Message   string                    `json:"message"`
+			RequestId *string                   `json:"request_id,omitempty"`
+		}{
+			Code:    e.code,
+			Message: e.message,
+			Details: &details,
+		},
+	})
 }
 
 // runInstallAction is the pipeline. Split out so it can return a
 // structured error type the handler maps onto an HTTP envelope.
-func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force bool) (*installActionResult, *installActionError) {
+func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force, autoInstall bool) (*installActionResult, *installActionError) {
 	// Step 1 + 2: resolve + fetch.
 	url, err := s.installer.Resolver.ResolveTarball(ref)
 	if err != nil {
@@ -200,7 +236,30 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force 
 	}
 
 	// Step 6: cross-check connector deps.
-	missing := []string{}
+	//
+	// A `[[requires.connectors]]` entry that pins a `hash` is checked
+	// by content address (HasHash): the action installs only when the
+	// exact connector bytes the publisher tested against are in the
+	// store. An entry that omits `hash` (legacy/unpinned) falls back
+	// to "any version of the FQN is installed" via LookupAnyVersion.
+	//
+	// When some hash-pinned dependencies are missing, the response
+	// shape depends on autoInstall:
+	//   - false → return `connectors_missing` with structured details
+	//             (name, version, hash) per entry. The CLI uses this
+	//             to prompt the user before retrying with the flag.
+	//   - true  → run the connector install pipeline for each missing
+	//             entry (using the version+hash from the manifest)
+	//             and continue. Any failure aborts with the
+	//             connector's structured class (`hash_mismatch`,
+	//             `signature_failure`, `fetch_failed`, …).
+	type missingConnector struct {
+		name    string
+		version string
+		hash    string
+	}
+	var missing []missingConnector
+	var missingNames []string
 	for _, c := range manifest.Requires.Connectors {
 		fqn, perr := cstore.ParseFQN(c.Name)
 		if perr != nil {
@@ -210,17 +269,77 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force 
 				message: fmt.Sprintf("requires.connectors[%s]: %s", c.Name, perr.Error()),
 			}
 		}
+		if c.Hash != "" {
+			has, hErr := s.installer.Store.HasHash(c.Hash)
+			if hErr != nil {
+				return nil, &installActionError{
+					status:  http.StatusInternalServerError,
+					code:    string(cstore.ClassStoreUnwritable),
+					message: hErr.Error(),
+				}
+			}
+			if !has {
+				missing = append(missing, missingConnector{name: c.Name, version: c.Version, hash: c.Hash})
+				missingNames = append(missingNames, c.Name)
+			}
+			continue
+		}
+		// No hash pinned in the manifest — fall back to FQN presence.
 		if _, _, ok := s.installer.Store.LookupAnyVersion(fqn); !ok {
-			missing = append(missing, c.Name)
+			missing = append(missing, missingConnector{name: c.Name, version: c.Version})
+			missingNames = append(missingNames, c.Name)
 		}
 	}
 	if len(missing) > 0 {
-		return nil, &installActionError{
-			status: http.StatusUnprocessableEntity,
-			code:   string(cstore.ClassValidationError),
-			message: fmt.Sprintf(
-				"action requires connectors that are not installed: %v — install them first via `aileron connector install <FQN>`",
-				missing),
+		if !autoInstall {
+			details := make([]map[string]any, 0, len(missing))
+			for _, m := range missing {
+				details = append(details, map[string]any{
+					"name":    m.name,
+					"version": m.version,
+					"hash":    m.hash,
+				})
+			}
+			return nil, &installActionError{
+				status: http.StatusUnprocessableEntity,
+				code:   "connectors_missing",
+				message: fmt.Sprintf(
+					"action requires connectors that are not installed: %v — install them first via `aileron connector install <FQN>@<version>` or retry with auto_install_connectors=true",
+					missingNames),
+				details: details,
+			}
+		}
+		// Auto-install path: run the connector install pipeline for
+		// each missing entry. The action manifest carries name,
+		// version, and hash, so we never need release-listing or
+		// hash→tag resolution — the connector pipeline is invoked
+		// with ExpectedHash set, and a mismatch surfaces as
+		// `hash_mismatch` per ADR-0004.
+		for _, m := range missing {
+			depFQN, perr := cstore.ParseFQN(m.name)
+			if perr != nil {
+				return nil, &installActionError{
+					status:  http.StatusBadRequest,
+					code:    string(cstore.ClassValidationError),
+					message: fmt.Sprintf("requires.connectors[%s]: %s", m.name, perr.Error()),
+				}
+			}
+			if m.version == "" {
+				return nil, &installActionError{
+					status: http.StatusUnprocessableEntity,
+					code:   string(cstore.ClassValidationError),
+					message: fmt.Sprintf(
+						"requires.connectors[%s]: cannot auto-install without a pinned version",
+						m.name),
+				}
+			}
+			depRef := cstore.Ref{FQN: depFQN, Version: m.version}
+			if _, iErr := s.installer.Install(ctx, cstore.InstallRequest{
+				Ref:          depRef,
+				ExpectedHash: m.hash,
+			}); iErr != nil {
+				return nil, classifyInstallActionErr(iErr)
+			}
 		}
 	}
 
