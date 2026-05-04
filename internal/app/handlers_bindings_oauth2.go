@@ -54,6 +54,7 @@ type oauth2Session struct {
 	redirectURI  string
 	scopes       []string
 	clientID     string
+	clientSecret string
 	tokenURL     string
 	expiresAt    time.Time
 }
@@ -188,6 +189,7 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 		redirectURI:  redirectURI,
 		scopes:       cred.OAuth2.Scopes,
 		clientID:     cred.OAuth2.ClientID,
+		clientSecret: cred.OAuth2.ClientSecret,
 		tokenURL:     cred.OAuth2.TokenURL,
 	})
 
@@ -284,6 +286,13 @@ func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Sessi
 		"client_id":     {session.clientID},
 		"code_verifier": {session.verifier},
 	}
+	// Some providers (Google Desktop client type) reject token
+	// exchange without client_secret even when PKCE is used. Forward
+	// it when the manifest declared one; PKCE is still what binds
+	// the code to this session.
+	if session.clientSecret != "" {
+		body.Set("client_secret", session.clientSecret)
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, session.tokenURL,
 		strings.NewReader(body.Encode()))
 	if err != nil {
@@ -340,6 +349,7 @@ func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Sessi
 		ExpiresAt:    expiresAt,
 		TokenType:    parsed.TokenType,
 		ClientID:     session.clientID,
+		ClientSecret: session.clientSecret,
 		TokenURL:     session.tokenURL,
 		Scopes:       session.scopes,
 	}, nil

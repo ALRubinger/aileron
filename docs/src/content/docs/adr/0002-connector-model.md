@@ -206,7 +206,14 @@ Publisher-owned apps fix that. Aileron-the-runtime is just machinery (PKCE, call
 
 **v1 OAuth requirements**:
 
-- **PKCE (S256) required.** No `client_secret` field exists in the manifest. For installed apps PKCE is the cryptographic protection; the "secret" most providers list is not actually secret in this flow per their own installed-app guidance.
+- **PKCE (S256) required.** PKCE is the binding security mechanism for the loopback installed-app flow.
+- **`client_secret` is optional and treated as a release-time bound value, not a source-repo value.** Some providers (Google's "Desktop app" OAuth client type, notably) reject token-exchange requests that omit a registered `client_secret` even when PKCE is used. The publisher MAY declare `client_secret` in the connector manifest's `[capabilities.credential.oauth2]` block; the runtime forwards it on token exchange and refresh when present.
+
+  The value belongs in the **released artifact** — bound into the manifest by the publisher's release pipeline from a CI secret, distributed inside the signed connector tarball. It MUST NOT be committed to the connector's source repository. Public source repos are scanned by automated systems (GitHub's secret scanning forwards Google OAuth client secrets to Google, which auto-rotates them) and a committed `client_secret` will be revoked the moment it's pushed. Source manifests should keep a placeholder (e.g. `client_secret = "bound-at-release"`) and use the same template-substitution pattern as the connector's content hash.
+
+  Inside the released tarball the value is recoverable by anyone who installs — that's the same exposure that `gcloud`, `gh`, and every distributed installed-app client accepts; per the providers' own installed-app guidance the value is not cryptographically secret in this flow. PKCE remains what binds an authorization code to the session that started it; the `client_secret` (when required) is provider plumbing.
+
+  Providers that genuinely treat `client_secret` as a server-only credential (web-app flows behind a hosted backend) MUST NOT have it set in a connector manifest at all.
 - **Loopback redirect only.** The runtime serves the OAuth callback at `http://localhost:<random-port>/callback`. The publisher MUST register `http://localhost` as a valid redirect URI on their OAuth app. Niche providers without loopback support are post-MVP.
 - **Token storage.** The runtime persists the resulting `{access_token, refresh_token, expires_at, ...}` envelope in the user's vault. The connector never sees the token bytes — the runtime injects `Authorization: Bearer <access_token>` host-side, refreshing transparently before injection when the token is near expiry.
 

@@ -631,3 +631,62 @@ type errTransport struct{}
 func (errTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("simulated network error")
 }
+
+// TestExchangeOAuth2Code_ForwardsClientSecretWhenSet asserts that a
+// connector manifest declaring `client_secret` causes the runtime to
+// forward it on token exchange. This is the Google "Desktop app" code
+// path: the provider rejects token exchanges without a registered
+// client_secret even with PKCE present.
+func TestExchangeOAuth2Code_ForwardsClientSecretWhenSet(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		got = r.PostForm
+		_, _ = io.WriteString(w, `{"access_token":"at","refresh_token":"rt","expires_in":3600}`)
+	}))
+	t.Cleanup(srv.Close)
+	api := &apiServer{oauth2HTTPClient: srv.Client()}
+	tok, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+		clientID:     "cid",
+		clientSecret: "csecret",
+		tokenURL:     srv.URL,
+		redirectURI:  "http://127.0.0.1:0/callback",
+		verifier:     "verifier",
+	}, "code")
+	if herr != nil {
+		t.Fatalf("unexpected error: %+v", herr)
+	}
+	if got.Get("client_secret") != "csecret" {
+		t.Errorf("client_secret in body = %q, want csecret", got.Get("client_secret"))
+	}
+	if got.Get("client_id") != "cid" || got.Get("code_verifier") != "verifier" {
+		t.Errorf("PKCE/client_id fields not preserved: %v", got)
+	}
+	if tok.ClientSecret != "csecret" {
+		t.Errorf("returned envelope ClientSecret = %q, want csecret (refresh path needs it)", tok.ClientSecret)
+	}
+}
+
+// TestExchangeOAuth2Code_OmitsClientSecretWhenUnset asserts the default
+// PKCE-only path: when the manifest does not declare client_secret, the
+// runtime MUST NOT add an empty value to the form (some providers reject
+// empty client_secret as a malformed request).
+func TestExchangeOAuth2Code_OmitsClientSecretWhenUnset(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		got = r.PostForm
+		_, _ = io.WriteString(w, `{"access_token":"at","expires_in":3600}`)
+	}))
+	t.Cleanup(srv.Close)
+	api := &apiServer{oauth2HTTPClient: srv.Client()}
+	if _, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+		clientID: "cid", tokenURL: srv.URL,
+		redirectURI: "http://127.0.0.1:0/cb", verifier: "v",
+	}, "code"); herr != nil {
+		t.Fatalf("unexpected error: %+v", herr)
+	}
+	if _, present := got["client_secret"]; present {
+		t.Errorf("client_secret unexpectedly present in form when manifest didn't declare one: %v", got)
+	}
+}
