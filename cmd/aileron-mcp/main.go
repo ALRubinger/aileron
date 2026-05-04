@@ -192,7 +192,7 @@ var draftReplyTool = toolDef{
 
 var httpRequestTool = toolDef{
 	Name:        "http_request",
-	Description: "Make an authenticated HTTP request. Aileron matches the URL against configured secrets and injects credentials. Requires human approval.",
+	Description: "Make an authenticated HTTP request to a URL covered by an api_key binding. Aileron matches the URL against configured api_key bindings (vault entries with kind=api_key and a url-pattern label) and injects the secret as a Bearer token. Does NOT inject OAuth credentials — OAuth bindings are scoped per-connector and reachable only via the bound connector's actions (see `aileron action add` for installed actions and `aileron binding list` for OAuth bindings). Requires human approval.",
 	InputSchema: schema{
 		Type: "object",
 		Properties: map[string]schemaProp{
