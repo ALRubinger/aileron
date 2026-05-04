@@ -104,6 +104,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runConnector(args[1:], stdout, stderr)
 	case "action":
 		return runAction(args[1:], os.Stdin, stdout, stderr)
+	case "keyring":
+		return runKeyring(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "log":
@@ -131,6 +133,9 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron binding list               List credential bindings (metadata only — no unlock)")
 	fmt.Fprintln(w, "  aileron connector install <FQN>    Install a connector binary from its FQN")
 	fmt.Fprintln(w, "  aileron action add <FQN>           Install an action template from its FQN")
+	fmt.Fprintln(w, "  aileron keyring trust <auth> <key> Authorize a publisher's signing key for installs")
+	fmt.Fprintln(w, "  aileron keyring list               List trusted publishers and key fingerprints")
+	fmt.Fprintln(w, "  aileron keyring revoke <auth>      Remove a publisher's keys from the trust list")
 	fmt.Fprintln(w, "  aileron status [section]           Show merged config (policy, env, notifications, vault)")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
