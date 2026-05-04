@@ -124,10 +124,22 @@ type ManifestCredential struct {
 // service (Google, Slack, Notion, etc.), and the consent screen the
 // user sees names that publisher.
 //
-// v1 requires PKCE (S256) and uses loopback redirect only — no
-// `client_secret` field exists, no static redirect URI is configured.
-// The "secret" most providers list for installed apps is not actually
-// secret in PKCE flows per their own installed-app guidance.
+// v1 requires PKCE (S256) and uses loopback redirect only. PKCE is the
+// binding security mechanism — `client_secret` (when present) is a
+// public client identifier that some providers nonetheless require at
+// the token endpoint for installed-app client types.
+//
+// `ClientSecret` is optional. Some providers (Google's "Desktop app"
+// OAuth client type, notably) reject token-exchange requests that
+// omit a registered client_secret even when PKCE is used. The
+// "secret" Google issues for installed apps ships in distributed
+// binaries (gcloud, gh, and every IDE extension does this) and is
+// not cryptographically secret per Google's own installed-app
+// guidance — but the API enforces its presence. Providers that
+// genuinely treat client_secret as a server-only credential
+// (web-app OAuth flows behind a hosted backend) MUST NOT set this
+// field on a connector manifest; PKCE alone protects loopback
+// installed-app flows where it does.
 type ManifestOAuth2 struct {
 	// AuthorizeURL is the provider's authorization endpoint. The CLI
 	// directs the user's browser here with the connector's client_id,
@@ -143,6 +155,14 @@ type ManifestOAuth2 struct {
 	// ClientID is the connector publisher's OAuth client id, as
 	// registered with the provider.
 	ClientID string `toml:"client_id"`
+
+	// ClientSecret is the publisher's OAuth client secret. Optional
+	// and only meaningful for installed-app client types whose
+	// providers require it at the token endpoint despite PKCE
+	// (Google Desktop). The value ships in the connector binary;
+	// PKCE remains the binding security mechanism. Leave unset
+	// for providers where the loopback flow does not require it.
+	ClientSecret string `toml:"client_secret,omitempty"`
 
 	// Scopes is the list of technical scope strings the provider
 	// expects (e.g. `https://www.googleapis.com/auth/gmail.send`).

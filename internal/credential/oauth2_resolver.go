@@ -26,17 +26,20 @@ var ErrOAuth2RefreshFailed = errors.New("credential: oauth2 refresh failed")
 // an oauth2-kind binding. Stored as JSON in the entry's Value; the
 // vault encrypts it like any other secret.
 //
-// `ClientID` and `TokenURL` are duplicated from the connector's
-// manifest so the resolver can refresh without re-reading the
-// connector's `[capabilities.credential.oauth2]` block on every
-// request. They're not secrets; they're persisted alongside the
-// tokens for self-containment.
+// `ClientID`, `ClientSecret`, and `TokenURL` are duplicated from the
+// connector's manifest so the resolver can refresh without re-reading
+// the connector's `[capabilities.credential.oauth2]` block on every
+// request. The vault encrypts the whole envelope, so persisting
+// `ClientSecret` (when the publisher set one) does not change the
+// security posture — see ManifestOAuth2's docstring for why it ships
+// in the connector binary in the first place.
 type OAuth2Token struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	TokenType    string    `json:"token_type,omitempty"` // "Bearer" if absent
 	ClientID     string    `json:"client_id"`
+	ClientSecret string    `json:"client_secret,omitempty"`
 	TokenURL     string    `json:"token_url"`
 	Scopes       []string  `json:"scopes,omitempty"`
 }
@@ -162,6 +165,12 @@ func (r *OAuth2VaultResolver) refresh(ctx context.Context, tok OAuth2Token) (OAu
 		"refresh_token": {tok.RefreshToken},
 		"client_id":     {tok.ClientID},
 	}
+	// Mirror exchangeOAuth2Code: forward client_secret when the
+	// envelope was minted with one (Google Desktop, etc.). Refresh
+	// uses the same provider quirk as the initial exchange.
+	if tok.ClientSecret != "" {
+		body.Set("client_secret", tok.ClientSecret)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tok.TokenURL,
 		strings.NewReader(body.Encode()))
 	if err != nil {
@@ -214,6 +223,7 @@ func (r *OAuth2VaultResolver) refresh(ctx context.Context, tok OAuth2Token) (OAu
 		ExpiresAt:    expires,
 		TokenType:    parsed.TokenType,
 		ClientID:     tok.ClientID,
+		ClientSecret: tok.ClientSecret,
 		TokenURL:     tok.TokenURL,
 		Scopes:       tok.Scopes, // scope reductions are rare; preserve what was bound
 	}

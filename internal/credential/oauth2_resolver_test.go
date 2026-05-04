@@ -153,6 +153,46 @@ func TestOAuth2VaultResolver_PreservesRefreshTokenWhenProviderOmitsIt(t *testing
 	}
 }
 
+// TestOAuth2VaultResolver_RefreshForwardsClientSecretWhenSet asserts
+// that an OAuth2Token envelope minted from a manifest declaring
+// client_secret carries that secret on the refresh request as well.
+// Mirrors exchangeOAuth2Code behavior — Google Desktop's token
+// endpoint enforces client_secret on refresh, not just exchange.
+func TestOAuth2VaultResolver_RefreshForwardsClientSecretWhenSet(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), "client_secret=csecret") {
+			t.Errorf("refresh body missing client_secret: %s", body)
+		}
+		_, _ = io.WriteString(w, `{"access_token":"new","expires_in":3600}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	v := vault.NewMemVault()
+	putToken(t, v, "oauth2/google/work", credential.OAuth2Token{
+		AccessToken:  "old",
+		RefreshToken: "rt",
+		ExpiresAt:    now.Add(5 * time.Second),
+		ClientID:     "cid",
+		ClientSecret: "csecret",
+		TokenURL:     srv.URL,
+	})
+	r := &credential.OAuth2VaultResolver{
+		Vault: v, VaultPath: "oauth2/google/work",
+		Now: fixedNow(now), HTTPClient: srv.Client(),
+	}
+	if _, err := r.Resolve(context.Background()); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	stored, _ := v.Get(context.Background(), "oauth2/google/work")
+	var got credential.OAuth2Token
+	_ = json.Unmarshal(stored.Value, &got)
+	if got.ClientSecret != "csecret" {
+		t.Errorf("persisted ClientSecret = %q, want csecret (lost on refresh persist)", got.ClientSecret)
+	}
+}
+
 func TestOAuth2VaultResolver_RefreshFailureSurfacesAsErrOAuth2RefreshFailed(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
