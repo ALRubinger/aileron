@@ -104,6 +104,11 @@ tasks:
     cmds:
       - go build -o build/aileron-sh ./cmd/aileron-sh
 
+  build:connector-dev-run:
+    desc: Build the connector dev test harness (developer-only; not shipped)
+    cmds:
+      - go build -o build/aileron-connector-dev-run ./cmd/aileron-connector-dev-run
+
   build:ui:
     desc: Install UI dependencies and build
     dir: ui
@@ -180,7 +185,7 @@ tasks:
   lint:go:
     desc: Vet Go code
     cmds:
-      - go vet ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
+      - go vet ./internal/... ./cmd/aileron/... ./cmd/aileron-connector-dev-run/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
 
   lint:ui:
     desc: Check the UI for type errors

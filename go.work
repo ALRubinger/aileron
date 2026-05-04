@@ -2,6 +2,7 @@ go 1.25.0
 
 use (
 	./cmd/aileron
+	./cmd/aileron-connector-dev-run
 	./cmd/aileron-enclave
 	./cmd/aileron-mcp
 	./cmd/aileron-sh
