@@ -1,15 +1,30 @@
 // Package main implements the Aileron MCP server.
 //
-// Aileron acts as an MCP server installed into agent hosts (Claude Code, etc.).
-// It exposes a submit_intent tool that agents use to submit governed intents to
-// the Aileron execution plane for policy evaluation and execution.
+// Aileron acts as an MCP server installed into agent hosts (Claude Code,
+// Cursor, Continue, etc.). When AILERON_URL is set, the server queries
+// the Aileron daemon's /v1/actions endpoint at startup, generates an MCP
+// tool definition for each installed action, and routes incoming
+// tools/call invocations to /v1/actions/{name}/run for synchronous
+// execution. This is the "MCP canonical" path for action exposure
+// ratified during the working session on 2026-05-03.
 //
-// It communicates over stdio using JSON-RPC 2.0, per the MCP specification.
+// When AILERON_COMMS_SOCKET is set (e.g. when launched by `aileron
+// launch`), the server additionally exposes comms tools — read_messages,
+// send_message, draft_reply, http_request — that talk to the launch
+// product's CommsServer over a Unix socket for Slack/Discord inbound
+// push handling.
+//
+// The binary communicates over stdio using JSON-RPC 2.0, per the MCP
+// specification.
 //
 // Configuration:
 //
-//	AILERON_URL   - URL of the Aileron API server (required)
-//	AILERON_TOKEN - Bearer token for authenticating with the Aileron API
+//	AILERON_URL          - URL of the Aileron daemon (e.g. http://127.0.0.1:54321).
+//	                       When set, action tools are discovered and exposed.
+//	AILERON_TOKEN        - Optional bearer token for authenticating with
+//	                       the Aileron API.
+//	AILERON_COMMS_SOCKET - Path to the launch product's comms Unix
+//	                       socket. When set, comms tools are exposed.
 package main
 
 import (
@@ -18,6 +33,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -83,6 +100,42 @@ type toolContent struct {
 	Text string `json:"text"`
 }
 
+// --- Action discovery / execution (Aileron daemon) ---
+
+// actionMeta is the subset of the daemon's /v1/actions response we
+// need to derive an MCP tool definition. Mirrors api.Action without
+// pulling the generated types into this binary.
+type actionMeta struct {
+	Name   string        `json:"name"`
+	Body   string        `json:"body"`
+	Inputs []actionInput `json:"inputs"`
+	Match  *actionMatch  `json:"match,omitempty"`
+}
+
+type actionInput struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Required    *bool  `json:"required"`
+	Description string `json:"description"`
+}
+
+type actionMatch struct {
+	Intent string `json:"intent"`
+}
+
+type actionListResponse struct {
+	Items []actionMeta `json:"items"`
+}
+
+type actionRunRequest struct {
+	Args map[string]any `json:"args"`
+}
+
+type actionRunResponse struct {
+	AuditID string  `json:"audit_id"`
+	Result  *string `json:"result,omitempty"`
+}
+
 // --- Server ---
 
 type server struct {
@@ -90,6 +143,12 @@ type server struct {
 	aileronToken string
 	commsSocket  string
 	httpClient   *http.Client
+
+	// Discovered actions, populated at startup when AILERON_URL is set.
+	// Keys of actionNameMap are snake_case (LLM-facing) tool names;
+	// values are manifest names (kebab-case) used in /v1/actions/{name}/run.
+	actionTools   []toolDef
+	actionNameMap map[string]string
 }
 
 var readMessagesTool = toolDef{
@@ -146,102 +205,25 @@ var httpRequestTool = toolDef{
 	},
 }
 
-// submitIntentTool is the legacy cloud tool.
-var submitIntentTool = toolDef{
-	Name:        "submit_intent",
-	Description: "Submit a governed intent to Aileron for execution",
-	InputSchema: schema{
-		Type: "object",
-		Properties: map[string]schemaProp{
-			"intent": {
-				Type:        "string",
-				Description: "Natural language description of the action to perform",
-			},
-		},
-		Required: []string{"intent"},
-	},
-}
-
-// --- Typed write tools ---
-// These submit structured intents to the Aileron execution plane.
-// The policy engine evaluates each one (write actions default to
-// RequireApproval), the human approves, and the connector executes.
-
-var sendEmailTool = toolDef{
-	Name:        "send_email",
-	Description: "Send an email or save a draft via Gmail. Requires human approval before sending. Use send_mode=draft_only to save without sending.",
-	InputSchema: schema{
-		Type: "object",
-		Properties: map[string]schemaProp{
-			"to":        {Type: "string", Description: "Comma-separated recipient email addresses"},
-			"cc":        {Type: "string", Description: "Comma-separated CC email addresses (optional)"},
-			"bcc":       {Type: "string", Description: "Comma-separated BCC email addresses (optional)"},
-			"subject":   {Type: "string", Description: "Email subject line"},
-			"body_text": {Type: "string", Description: "Plain text email body"},
-			"body_html": {Type: "string", Description: "HTML email body (optional, overrides body_text for rich formatting)"},
-			"send_mode": {Type: "string", Description: "send_now (default) or draft_only"},
-			"thread_ref": {Type: "string", Description: "Thread/message ID to reply to (optional, for threading)"},
-		},
-		Required: []string{"to", "subject", "body_text"},
-	},
-}
-
-var createCalendarEventTool = toolDef{
-	Name:        "create_calendar_event",
-	Description: "Create a Google Calendar event. Requires human approval. Times must be RFC3339 format (e.g. 2025-03-15T10:00:00-05:00).",
-	InputSchema: schema{
-		Type: "object",
-		Properties: map[string]schemaProp{
-			"title":           {Type: "string", Description: "Event title"},
-			"description":     {Type: "string", Description: "Event description (optional)"},
-			"start_time":      {Type: "string", Description: "Start time in RFC3339 format"},
-			"end_time":        {Type: "string", Description: "End time in RFC3339 format"},
-			"timezone":        {Type: "string", Description: "IANA timezone (e.g. America/New_York). Defaults to UTC."},
-			"location":        {Type: "string", Description: "Event location (optional)"},
-			"attendees":       {Type: "string", Description: "Comma-separated attendee email addresses (optional)"},
-			"conference_type": {Type: "string", Description: "none (default), google_meet, or zoom"},
-			"calendar_id":     {Type: "string", Description: "Calendar ID (optional, defaults to primary)"},
-		},
-		Required: []string{"title", "start_time", "end_time"},
-	},
-}
-
-var createGithubIssueTool = toolDef{
-	Name:        "create_github_issue",
-	Description: "Create a GitHub issue. Requires human approval.",
-	InputSchema: schema{
-		Type: "object",
-		Properties: map[string]schemaProp{
-			"repository": {Type: "string", Description: "Repository in owner/repo format (e.g. acme/backend)"},
-			"title":      {Type: "string", Description: "Issue title"},
-			"body":       {Type: "string", Description: "Issue body in Markdown (optional)"},
-			"labels":     {Type: "string", Description: "Comma-separated label names (optional)"},
-			"assignees":  {Type: "string", Description: "Comma-separated GitHub usernames to assign (optional)"},
-		},
-		Required: []string{"repository", "title"},
-	},
-}
-
-var commentOnGithubIssueTool = toolDef{
-	Name:        "comment_on_github_issue",
-	Description: "Add a comment to an existing GitHub issue or pull request. Requires human approval.",
-	InputSchema: schema{
-		Type: "object",
-		Properties: map[string]schemaProp{
-			"repository":   {Type: "string", Description: "Repository in owner/repo format (e.g. acme/backend)"},
-			"issue_number": {Type: "string", Description: "Issue or PR number"},
-			"body":         {Type: "string", Description: "Comment body in Markdown"},
-		},
-		Required: []string{"repository", "issue_number", "body"},
-	},
-}
-
 func main() {
 	s := &server{
 		aileronURL:   os.Getenv("AILERON_URL"),
 		aileronToken: os.Getenv("AILERON_TOKEN"),
 		commsSocket:  os.Getenv("AILERON_COMMS_SOCKET"),
 		httpClient:   &http.Client{},
+	}
+
+	// Discover installed actions from the Aileron daemon. Best-effort:
+	// if discovery fails (daemon not running yet, vault locked, etc.)
+	// we proceed without action tools. Comms tools remain available.
+	if s.aileronURL != "" {
+		if tools, nameMap, err := s.discoverActions(context.Background()); err != nil {
+			slog.Warn("action discovery failed; continuing without action tools",
+				"url", s.aileronURL, "error", err)
+		} else {
+			s.actionTools = tools
+			s.actionNameMap = nameMap
+		}
 	}
 
 	// Handle SIGTERM and SIGINT for graceful shutdown.
@@ -335,22 +317,21 @@ func (s *server) availableTools() []toolDef {
 	if s.commsSocket != "" {
 		tools = append(tools, readMessagesTool, draftReplyTool, sendMessageTool, httpRequestTool)
 	}
-	if s.aileronURL != "" {
-		tools = append(tools,
-			submitIntentTool,
-			sendEmailTool,
-			createCalendarEventTool,
-			createGithubIssueTool,
-			commentOnGithubIssueTool,
-		)
-	}
+	// Dynamically discovered Aileron actions from the daemon's
+	// /v1/actions endpoint (per ADR-0008 — kept in MCP shape rather
+	// than the OpenAI/Anthropic shape because the agent host's MCP
+	// integration is the consumer here).
+	tools = append(tools, s.actionTools...)
 	return tools
 }
 
 func (s *server) dispatchTool(ctx context.Context, name string, args map[string]any) toolResult {
+	// Discovered actions: route to /v1/actions/{name}/run on the daemon.
+	if manifestName, ok := s.actionNameMap[name]; ok {
+		return s.runAction(ctx, manifestName, args)
+	}
+	// Comms tools: handled in-process via the launch product's Unix socket.
 	switch name {
-	case "submit_intent":
-		return s.submitIntent(ctx, args)
 	case "read_messages":
 		return s.readMessages(args)
 	case "draft_reply":
@@ -359,14 +340,6 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 		return s.sendMessage(args)
 	case "http_request":
 		return s.httpRequest(args)
-	case "send_email":
-		return s.sendEmail(ctx, args)
-	case "create_calendar_event":
-		return s.createCalendarEvent(ctx, args)
-	case "create_github_issue":
-		return s.createGithubIssue(ctx, args)
-	case "comment_on_github_issue":
-		return s.commentOnGithubIssue(ctx, args)
 	default:
 		return errorResult("unknown tool: " + name)
 	}
@@ -521,261 +494,161 @@ func requestComms(socketPath string, req commsRequest) commsResponse {
 	return resp
 }
 
-func (s *server) submitIntent(ctx context.Context, args map[string]any) toolResult {
-	intentText, ok := args["intent"].(string)
-	if !ok || intentText == "" {
-		return errorResult("intent parameter is required")
-	}
+// --- Action discovery / execution against the Aileron daemon ---
 
-	body, err := json.Marshal(map[string]any{
-		"action": map[string]any{
-			"summary": intentText,
-			"type":    "custom",
-		},
-		"agent_id":     "aileron-mcp",
-		"workspace_id": "default",
-	})
-	if err != nil {
-		return errorResult("failed to encode request: " + err.Error())
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.aileronURL+"/v1/intents", bytes.NewReader(body))
-	if err != nil {
-		return errorResult("failed to create request: " + err.Error())
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if s.aileronToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return errorResult("failed to submit intent: " + err.Error())
-	}
-	defer resp.Body.Close()
-
-	var result any
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return errorResult("failed to decode response: " + err.Error())
-	}
-
-	return jsonResult(result)
-}
-
-// --- Write tool handlers ---
-
-func (s *server) sendEmail(ctx context.Context, args map[string]any) toolResult {
-	to, _ := args["to"].(string)
-	subject, _ := args["subject"].(string)
-	bodyText, _ := args["body_text"].(string)
-
-	if to == "" || subject == "" || bodyText == "" {
-		return errorResult("to, subject, and body_text are required")
-	}
-
-	cc, _ := args["cc"].(string)
-	bcc, _ := args["bcc"].(string)
-	bodyHTML, _ := args["body_html"].(string)
-	sendMode, _ := args["send_mode"].(string)
-	threadRef, _ := args["thread_ref"].(string)
-
-	if sendMode == "" {
-		sendMode = "send_now"
-	}
-
-	actionType := "email.send"
-	if sendMode == "draft_only" {
-		actionType = "email.draft"
-	}
-
-	return s.submitStructuredIntent(ctx, actionType,
-		fmt.Sprintf("Send email to %s: %s", to, subject),
-		map[string]any{
-			"email": map[string]any{
-				"to":         splitRecipients(to),
-				"cc":         splitRecipients(cc),
-				"bcc":        splitRecipients(bcc),
-				"subject":    subject,
-				"body_text":  bodyText,
-				"body_html":  bodyHTML,
-				"send_mode":  sendMode,
-				"thread_ref": threadRef,
-			},
-		},
-	)
-}
-
-func (s *server) createCalendarEvent(ctx context.Context, args map[string]any) toolResult {
-	title, _ := args["title"].(string)
-	startTime, _ := args["start_time"].(string)
-	endTime, _ := args["end_time"].(string)
-
-	if title == "" || startTime == "" || endTime == "" {
-		return errorResult("title, start_time, and end_time are required")
-	}
-
-	description, _ := args["description"].(string)
-	timezone, _ := args["timezone"].(string)
-	location, _ := args["location"].(string)
-	attendees, _ := args["attendees"].(string)
-	conferenceType, _ := args["conference_type"].(string)
-	calendarID, _ := args["calendar_id"].(string)
-
-	calendarDomain := map[string]any{
-		"provider":    "google_calendar",
-		"title":       title,
-		"description": description,
-		"start_time":  startTime,
-		"end_time":    endTime,
-		"timezone":    timezone,
-		"location":    location,
-		"calendar_id": calendarID,
-	}
-	if conferenceType != "" {
-		calendarDomain["conference_type"] = conferenceType
-	}
-	if attendees != "" {
-		calendarDomain["attendees"] = splitAttendees(attendees)
-	}
-
-	return s.submitStructuredIntent(ctx, "calendar.event.create",
-		fmt.Sprintf("Create calendar event: %s", title),
-		map[string]any{"calendar": calendarDomain},
-	)
-}
-
-func (s *server) createGithubIssue(ctx context.Context, args map[string]any) toolResult {
-	repository, _ := args["repository"].(string)
-	title, _ := args["title"].(string)
-
-	if repository == "" || title == "" {
-		return errorResult("repository and title are required")
-	}
-
-	body, _ := args["body"].(string)
-	labels, _ := args["labels"].(string)
-	assignees, _ := args["assignees"].(string)
-
-	return s.submitStructuredIntent(ctx, "git.issue.create",
-		fmt.Sprintf("Create GitHub issue in %s: %s", repository, title),
-		map[string]any{
-			"git": map[string]any{
-				"provider":        "github",
-				"repository":      repository,
-				"issue_title":     title,
-				"issue_body":      body,
-				"issue_labels":    splitCSV(labels),
-				"issue_assignees": splitCSV(assignees),
-			},
-		},
-	)
-}
-
-func (s *server) commentOnGithubIssue(ctx context.Context, args map[string]any) toolResult {
-	repository, _ := args["repository"].(string)
-	issueNumber, _ := args["issue_number"].(string)
-	body, _ := args["body"].(string)
-
-	if repository == "" || issueNumber == "" || body == "" {
-		return errorResult("repository, issue_number, and body are required")
-	}
-
-	return s.submitStructuredIntent(ctx, "git.issue.comment",
-		fmt.Sprintf("Comment on %s#%s", repository, issueNumber),
-		map[string]any{
-			"git": map[string]any{
-				"provider":   "github",
-				"repository": repository,
-				"issue_body": body,
-			},
-		},
-	)
-}
-
-// submitStructuredIntent posts a typed intent to the Aileron API.
-func (s *server) submitStructuredIntent(ctx context.Context, actionType, summary string, domain map[string]any) toolResult {
+// discoverActions queries /v1/actions and returns one MCP tool def per
+// installed action plus a snake_case → manifest-name lookup map. Per
+// ADR-0008 the LLM-facing tool name is snake_case (mapped from the
+// kebab-case manifest name); /v1/actions/{name}/run uses the manifest
+// name, so the map lets dispatchTool route correctly.
+func (s *server) discoverActions(ctx context.Context) ([]toolDef, map[string]string, error) {
 	if s.aileronURL == "" {
-		return errorResult("Aileron API not configured (AILERON_URL not set)")
+		return nil, nil, nil
 	}
-
-	body, err := json.Marshal(map[string]any{
-		"action": map[string]any{
-			"type":    actionType,
-			"summary": summary,
-			"domain":  domain,
-		},
-		"agent_id":     "aileron-mcp",
-		"workspace_id": "default",
-	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.aileronURL+"/v1/actions", nil)
 	if err != nil {
-		return errorResult("failed to encode request: " + err.Error())
+		return nil, nil, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.aileronURL+"/v1/intents", bytes.NewReader(body))
+	if s.aileronToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
+	}
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return errorResult("failed to create request: " + err.Error())
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("/v1/actions: %s", resp.Status)
+	}
+	var alr actionListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&alr); err != nil {
+		return nil, nil, fmt.Errorf("decoding /v1/actions: %w", err)
+	}
+	tools := make([]toolDef, 0, len(alr.Items))
+	nameMap := make(map[string]string, len(alr.Items))
+	for _, a := range alr.Items {
+		td := actionToolDef(a)
+		tools = append(tools, td)
+		nameMap[td.Name] = a.Name
+	}
+	return tools, nameMap, nil
+}
+
+// runAction synchronously executes an action via the Aileron daemon's
+// /v1/actions/{name}/run endpoint and returns an MCP tool result.
+// Failures are surfaced as toolResult{IsError: true} so the agent host
+// reports them to the LLM as normal tool errors per MCP semantics.
+func (s *server) runAction(ctx context.Context, manifestName string, args map[string]any) toolResult {
+	if s.aileronURL == "" {
+		return errorResult("Aileron daemon not configured (AILERON_URL not set)")
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	body, err := json.Marshal(actionRunRequest{Args: args})
+	if err != nil {
+		return errorResult("encoding request: " + err.Error())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.aileronURL+"/v1/actions/"+manifestName+"/run", bytes.NewReader(body))
+	if err != nil {
+		return errorResult("creating request: " + err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if s.aileronToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
 	}
-
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return errorResult("failed to submit intent: " + err.Error())
+		return errorResult("daemon unreachable: " + err.Error())
 	}
 	defer resp.Body.Close()
-
-	var result any
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return errorResult("failed to decode response: " + err.Error())
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errorResult("reading response: " + err.Error())
 	}
-
-	return jsonResult(result)
+	if resp.StatusCode != http.StatusOK {
+		// Non-2xx: surface the FailureEnvelope (or whatever body the
+		// daemon returned) so the agent sees the actionable detail.
+		return errorResult(string(rawBody))
+	}
+	var arr actionRunResponse
+	if err := json.Unmarshal(rawBody, &arr); err != nil {
+		return errorResult("decoding response: " + err.Error())
+	}
+	content := ""
+	if arr.Result != nil {
+		content = *arr.Result
+	}
+	return toolResult{
+		Content: []toolContent{{Type: "text", Text: content}},
+	}
 }
 
-// splitCSV splits a comma-separated string into a slice, trimming whitespace.
-// Returns nil for empty input.
-func splitCSV(s string) []string {
-	if s == "" {
-		return nil
+// actionToolDef converts an action manifest into an MCP tool
+// definition, mirroring augment.Derive (internal/augment/augment.go)
+// but in MCP shape (name/description/inputSchema).
+func actionToolDef(a actionMeta) toolDef {
+	return toolDef{
+		Name:        toolName(a.Name),
+		Description: deriveDescription(a),
+		InputSchema: deriveInputSchema(a),
 	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if trimmed := strings.TrimSpace(p); trimmed != "" {
-			out = append(out, trimmed)
+}
+
+// toolName maps a manifest's kebab-case name to the snake_case
+// identifier the LLM sees, per ADR-0008.
+func toolName(manifestName string) string {
+	return strings.ReplaceAll(manifestName, "-", "_")
+}
+
+// deriveDescription extracts the LLM-facing description from the
+// action body. Strips a leading "# Heading" line; falls back to
+// match.intent when the body is empty.
+func deriveDescription(a actionMeta) string {
+	body := strings.TrimSpace(a.Body)
+	if body == "" {
+		if a.Match != nil {
+			return strings.TrimSpace(a.Match.Intent)
+		}
+		return ""
+	}
+	lines := strings.SplitN(body, "\n", 2)
+	if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[0]), "# ") {
+		if len(lines) == 1 {
+			if a.Match != nil {
+				return strings.TrimSpace(a.Match.Intent)
+			}
+			return ""
+		}
+		return strings.TrimSpace(lines[1])
+	}
+	return body
+}
+
+// deriveInputSchema builds the JSON Schema parameters object from the
+// manifest's inputs. Mirrors augment.deriveParameters: type=object
+// always, properties only when inputs exist, required when the input
+// has Required=true (default true when omitted, per ADR-0003).
+func deriveInputSchema(a actionMeta) schema {
+	s := schema{Type: "object"}
+	if len(a.Inputs) == 0 {
+		return s
+	}
+	s.Properties = make(map[string]schemaProp, len(a.Inputs))
+	for _, in := range a.Inputs {
+		s.Properties[in.Name] = schemaProp{
+			Type:        in.Type,
+			Description: in.Description,
+		}
+		required := true
+		if in.Required != nil {
+			required = *in.Required
+		}
+		if required {
+			s.Required = append(s.Required, in.Name)
 		}
 	}
-	return out
-}
-
-// splitRecipients converts a comma-separated list of email addresses into
-// the []Recipient format expected by the email domain model.
-func splitRecipients(s string) []map[string]string {
-	addrs := splitCSV(s)
-	if len(addrs) == 0 {
-		return nil
-	}
-	out := make([]map[string]string, len(addrs))
-	for i, addr := range addrs {
-		out[i] = map[string]string{"email": addr}
-	}
-	return out
-}
-
-// splitAttendees converts a comma-separated list of email addresses into
-// the []CalendarAttendee format expected by the calendar domain model.
-func splitAttendees(s string) []map[string]string {
-	addrs := splitCSV(s)
-	if len(addrs) == 0 {
-		return nil
-	}
-	out := make([]map[string]string, len(addrs))
-	for i, addr := range addrs {
-		out[i] = map[string]string{"email": addr}
-	}
-	return out
+	return s
 }
 
 // --- Helpers ---
