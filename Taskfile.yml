@@ -4,7 +4,7 @@ vars:
   COMPOSE_FILE: deploy/docker-compose.yml
   # Single source of truth for Go test/vet package set, shared by local
   # (test:go, vet:go) and CI (test:go:ci) targets.
-  GO_TEST_PACKAGES: ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/... ./sdk/go/...
+  GO_TEST_PACKAGES: ./internal/... ./cmd/aileron/... ./cmd/aileron-connector-dev-run/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/... ./sdk/go/...
 
 tasks:
   default:
