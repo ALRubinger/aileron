@@ -1262,6 +1262,10 @@ func manifestToAPI(la action.LoadedAction) api.Action {
 	if path != "" {
 		out.Path = &path
 	}
+	if m.Approval != nil {
+		req := m.Approval.Required
+		out.Approval = &api.ActionApprovalPolicy{Required: &req}
+	}
 	if len(m.Inputs) > 0 {
 		inputs := make([]api.ActionInput, 0, len(m.Inputs))
 		for _, in := range m.Inputs {

@@ -3468,6 +3468,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActionExecuteStep"
+        approval:
+          $ref: "#/components/schemas/ActionApprovalPolicy"
         body:
           type: string
           description: |
@@ -3477,6 +3479,22 @@ components:
         path:
           type: string
           description: Absolute path of the source file on disk.
+
+    ActionApprovalPolicy:
+      type: object
+      description: |
+        Approval gating for an action. When `required` is true, the runtime
+        holds the action-run HTTP response open while it queues an approval
+        request to the orchestrator; the response unblocks only when the user
+        approves (action runs normally) or denies (returns an
+        `approval_denied` failure envelope). The agent surfaces the approval
+        URL to the user via tool descriptions templated by `aileron-mcp`.
+      properties:
+        required:
+          type: boolean
+          description: |
+            When true, `POST /v1/actions/{name}/run` blocks on user approval
+            before executing. Default false.
 
     ActionRequires:
       type: object
