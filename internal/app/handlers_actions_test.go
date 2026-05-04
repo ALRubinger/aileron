@@ -1,7 +1,10 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/failure"
 )
 
 const actionsTestManifest = `+++
@@ -58,8 +62,10 @@ func newActionsTestServer(t *testing.T, files map[string]string) *apiServer {
 		t.Fatalf("Load(): %v", err)
 	}
 	return &apiServer{
-		log:     slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		actions: store,
+		log:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		actions:  store,
+		executor: action.StubExecutor{},
+		newID:    func() string { return "audit_test_id" },
 	}
 }
 
@@ -256,5 +262,146 @@ func TestManifestToAPI_OmitsBlankBodyAndPath(t *testing.T) {
 	}
 	if got.Path != nil {
 		t.Errorf("Path = %v, want nil when blank", got.Path)
+	}
+}
+
+func TestRunAction_HappyPath(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+
+	body := bytes.NewReader([]byte(`{"args":{"channel":"#engineering"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.ActionRunResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AuditId == "" {
+		t.Error("expected non-empty audit_id")
+	}
+	if got.Result == nil || *got.Result == "" {
+		t.Error("expected non-empty result content from stub executor")
+	}
+}
+
+func TestRunAction_NotFound(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/missing/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "missing")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunAction_VaultLocked(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	srv.vaultLocked = true
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want 412; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunAction_InvalidJSON(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+
+	body := bytes.NewReader([]byte(`{not-json`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// failingExecutor is a test stub that returns a structured ADR-0010
+// failure for the action-side error path (not a Go error).
+type failingExecutor struct{ failure *failure.Failure }
+
+func (f failingExecutor) Execute(_ context.Context, _ string, _ map[string]any) (action.Result, error) {
+	return action.Result{Failure: f.failure}, nil
+}
+
+// erroringExecutor is a test stub that returns a Go error to exercise
+// the gateway-fatal branch in RunAction.
+type erroringExecutor struct{}
+
+func (erroringExecutor) Execute(_ context.Context, _ string, _ map[string]any) (action.Result, error) {
+	return action.Result{}, errors.New("executor blew up")
+}
+
+func TestRunAction_ActionSideFailure(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	srv.executor = failingExecutor{failure: failure.BindingRequiredFailure(
+		"slack binding missing",
+	)}
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	// ADR-0010: binding_required maps to 412 Precondition Failed.
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want 412; body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"binding_required"`)) {
+		t.Errorf("expected envelope class in body; got %s", rec.Body.String())
+	}
+}
+
+func TestRunAction_ExecutorError(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	srv.executor = erroringExecutor{}
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunAction_NilExecutor(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	srv.executor = nil
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }

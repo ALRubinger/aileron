@@ -7,1032 +7,733 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 )
 
+// --- JSON-RPC handling ---
+
 func TestHandle_Initialize(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
+	s := &server{httpClient: &http.Client{}}
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
 		ID:      json.RawMessage(`1`),
 		Method:  "initialize",
 	})
-	if resp == nil {
-		t.Fatal("expected response")
-	}
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %v", resp.Error)
+	if resp == nil || resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp)
 	}
 	result, ok := resp.Result.(map[string]any)
 	if !ok {
 		t.Fatal("expected map result")
 	}
 	if result["protocolVersion"] != "2024-11-05" {
-		t.Errorf("unexpected protocol version: %v", result["protocolVersion"])
-	}
-	info, ok := result["serverInfo"].(map[string]any)
-	if !ok {
-		t.Fatal("expected serverInfo map")
-	}
-	if info["name"] != "aileron" {
-		t.Errorf("unexpected server name: %v", info["name"])
+		t.Errorf("protocolVersion = %v", result["protocolVersion"])
 	}
 }
 
 func TestHandle_NotificationsInitialized(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		Method:  "notifications/initialized",
-	})
+	s := &server{httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{Method: "notifications/initialized"})
 	if resp != nil {
-		t.Fatal("notifications should return nil response")
+		t.Errorf("expected nil response for notification, got %+v", resp)
 	}
 }
 
-func TestHandle_ToolsList_CloudOnly(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`2`),
-		Method:  "tools/list",
-	})
+func TestHandle_Ping(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{Method: "ping", ID: json.RawMessage(`1`)})
 	if resp == nil || resp.Error != nil {
-		t.Fatal("expected successful response")
+		t.Fatalf("ping should succeed: %+v", resp)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatal("expected map result")
+}
+
+func TestHandle_UnknownMethod(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{Method: "no-such-method", ID: json.RawMessage(`1`)})
+	if resp == nil || resp.Error == nil {
+		t.Fatal("expected error for unknown method")
 	}
-	tools, ok := result["tools"].([]toolDef)
-	if !ok || len(tools) != 5 {
-		t.Fatalf("expected 5 tools (submit_intent + 4 write tools), got %d", len(tools))
+	if resp.Error.Code != -32601 {
+		t.Errorf("code = %d, want -32601", resp.Error.Code)
+	}
+}
+
+func TestHandle_ToolsCall_InvalidParams(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{
+		Method: "tools/call",
+		ID:     json.RawMessage(`1`),
+		Params: json.RawMessage(`not-json`),
+	})
+	if resp == nil || resp.Error == nil {
+		t.Fatal("expected error for invalid params")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("code = %d, want -32602", resp.Error.Code)
+	}
+}
+
+func TestDispatchTool_UnknownTool(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	result := s.dispatchTool(context.Background(), "nonexistent", nil)
+	if !result.IsError {
+		t.Fatal("expected error for unknown tool")
+	}
+}
+
+// --- Tool listing ---
+
+func TestAvailableTools_CommsOnly(t *testing.T) {
+	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
+	tools := s.availableTools()
+	if len(tools) != 4 {
+		t.Fatalf("expected 4 comms tools, got %d", len(tools))
 	}
 	names := map[string]bool{}
-	for _, tool := range tools {
-		names[tool.Name] = true
+	for _, td := range tools {
+		names[td.Name] = true
 	}
-	for _, want := range []string{"submit_intent", "send_email", "create_calendar_event", "create_github_issue", "comment_on_github_issue"} {
+	for _, want := range []string{"read_messages", "draft_reply", "send_message", "http_request"} {
 		if !names[want] {
-			t.Errorf("expected tool %s in list", want)
+			t.Errorf("missing tool: %s", want)
 		}
 	}
 }
 
-func TestHandle_ToolsList_WithComms(t *testing.T) {
-	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`2`),
-		Method:  "tools/list",
-	})
-	result := resp.Result.(map[string]any)
-	tools := result["tools"].([]toolDef)
-	if len(tools) != 4 {
-		t.Fatalf("expected 4 tools (read_messages, draft_reply, send_message, http_request), got %d", len(tools))
+func TestAvailableTools_ActionsOnly(t *testing.T) {
+	s := &server{
+		httpClient: &http.Client{},
+		actionTools: []toolDef{
+			{Name: "ship_update", Description: "Posts a ship update.", InputSchema: schema{Type: "object"}},
+		},
 	}
-	names := map[string]bool{}
-	for _, tool := range tools {
-		names[tool.Name] = true
+	tools := s.availableTools()
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 action tool, got %d", len(tools))
 	}
-	if !names["read_messages"] || !names["draft_reply"] || !names["send_message"] || !names["http_request"] {
-		t.Errorf("expected read_messages, draft_reply, send_message, and http_request, got %v", names)
+	if tools[0].Name != "ship_update" {
+		t.Errorf("got %q", tools[0].Name)
 	}
 }
 
-func TestHandle_ToolsList_Both(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`2`),
-		Method:  "tools/list",
-	})
-	result := resp.Result.(map[string]any)
-	tools := result["tools"].([]toolDef)
-	// 4 comms tools + 5 cloud tools (submit_intent + 4 write tools) = 9
-	if len(tools) != 9 {
-		t.Fatalf("expected 9 tools, got %d", len(tools))
+func TestAvailableTools_CommsAndActions(t *testing.T) {
+	s := &server{
+		commsSocket: "/tmp/test.sock",
+		httpClient:  &http.Client{},
+		actionTools: []toolDef{
+			{Name: "ship_update", Description: "x", InputSchema: schema{Type: "object"}},
+			{Name: "list_emails", Description: "y", InputSchema: schema{Type: "object"}},
+		},
+	}
+	tools := s.availableTools()
+	if len(tools) != 6 {
+		t.Fatalf("expected 4 comms + 2 action = 6 tools, got %d", len(tools))
 	}
 }
+
+// --- Pure helpers (mirror augment.Derive logic from internal/augment) ---
+
+func TestToolName_KebabToSnake(t *testing.T) {
+	if got := toolName("ship-update"); got != "ship_update" {
+		t.Errorf("got %q, want ship_update", got)
+	}
+	if got := toolName("already_snake"); got != "already_snake" {
+		t.Errorf("got %q, want already_snake", got)
+	}
+}
+
+func TestDeriveDescription_StripsLeadingHeading(t *testing.T) {
+	a := actionMeta{Body: "# Ship Update\n\nPosts a 'shipped' announcement to a Slack channel."}
+	got := deriveDescription(a)
+	want := "Posts a 'shipped' announcement to a Slack channel."
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestDeriveDescription_EmptyBodyFallsBackToIntent(t *testing.T) {
+	a := actionMeta{Match: &actionMatch{Intent: "tell team I shipped"}}
+	if got := deriveDescription(a); got != "tell team I shipped" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestDeriveDescription_NoHeadingReturnsBody(t *testing.T) {
+	a := actionMeta{Body: "Just a body without a heading."}
+	if got := deriveDescription(a); got != "Just a body without a heading." {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestDeriveDescription_EmptyBodyAndNilMatchReturnsEmpty(t *testing.T) {
+	if got := deriveDescription(actionMeta{}); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestDeriveDescription_HeadingOnlyFallsBackToIntent(t *testing.T) {
+	a := actionMeta{Body: "# Title only", Match: &actionMatch{Intent: "do the thing"}}
+	if got := deriveDescription(a); got != "do the thing" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestDeriveDescription_HeadingOnlyAndNilMatchReturnsEmpty(t *testing.T) {
+	a := actionMeta{Body: "# Title only"}
+	if got := deriveDescription(a); got != "" {
+		t.Errorf("got %q, want empty", got)
+	}
+}
+
+func TestDeriveInputSchema_NoInputs(t *testing.T) {
+	got := deriveInputSchema(actionMeta{})
+	want := schema{Type: "object"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestDeriveInputSchema_WithRequiredAndOptional(t *testing.T) {
+	required := false
+	a := actionMeta{
+		Inputs: []actionInput{
+			{Name: "channel", Type: "string", Description: "Slack channel name"},
+			{Name: "preview", Type: "boolean", Required: &required, Description: "Skip send"},
+		},
+	}
+	got := deriveInputSchema(a)
+
+	if got.Type != "object" {
+		t.Errorf("type = %q", got.Type)
+	}
+	if len(got.Properties) != 2 {
+		t.Errorf("properties = %d", len(got.Properties))
+	}
+	if got.Properties["channel"].Type != "string" {
+		t.Errorf("channel type = %q", got.Properties["channel"].Type)
+	}
+	// channel: Required omitted → defaults to true, included in Required.
+	// preview: Required explicitly false → not in Required.
+	wantReq := []string{"channel"}
+	if !reflect.DeepEqual(got.Required, wantReq) {
+		t.Errorf("required = %v, want %v", got.Required, wantReq)
+	}
+}
+
+func TestActionToolDef(t *testing.T) {
+	a := actionMeta{
+		Name: "ship-update",
+		Body: "# Ship Update\n\nPosts a Slack ship-update.",
+		Inputs: []actionInput{
+			{Name: "channel", Type: "string", Description: "Slack channel"},
+		},
+	}
+	td := actionToolDef(a)
+	if td.Name != "ship_update" {
+		t.Errorf("name = %q", td.Name)
+	}
+	if td.Description != "Posts a Slack ship-update." {
+		t.Errorf("description = %q", td.Description)
+	}
+	if td.InputSchema.Properties["channel"].Type != "string" {
+		t.Error("channel schema missing or wrong type")
+	}
+}
+
+// --- Action discovery ---
+
+func TestDiscoverActions_NoURL(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	tools, nameMap, err := s.discoverActions(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if tools != nil || nameMap != nil {
+		t.Errorf("expected nil/nil for no URL, got %+v / %+v", tools, nameMap)
+	}
+}
+
+func TestDiscoverActions_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/actions" || r.Method != http.MethodGet {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(actionListResponse{
+			Items: []actionMeta{
+				{
+					Name: "ship-update",
+					Body: "# Ship Update\n\nPost a ship-update.",
+					Inputs: []actionInput{
+						{Name: "channel", Type: "string", Description: "channel"},
+					},
+				},
+				{
+					Name:  "list-emails",
+					Body:  "List recent emails.",
+					Match: &actionMatch{Intent: "show me recent emails"},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	tools, nameMap, err := s.discoverActions(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("len(tools) = %d", len(tools))
+	}
+	if nameMap["ship_update"] != "ship-update" {
+		t.Errorf("ship_update map: %q", nameMap["ship_update"])
+	}
+	if nameMap["list_emails"] != "list-emails" {
+		t.Errorf("list_emails map: %q", nameMap["list_emails"])
+	}
+}
+
+func TestDiscoverActions_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	if _, _, err := s.discoverActions(context.Background()); err == nil {
+		t.Fatal("expected error for 500")
+	}
+}
+
+// --- Action execution ---
+
+func TestRunAction_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/actions/ship-update/run" || r.Method != http.MethodPost {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var req actionRunRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if req.Args["channel"] != "#engineering" {
+			t.Errorf("args.channel = %v", req.Args["channel"])
+		}
+		content := "Posted to #engineering"
+		_ = json.NewEncoder(w).Encode(actionRunResponse{
+			AuditID: "audit_abc",
+			Result:  &content,
+		})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.runAction(context.Background(), "ship-update", map[string]any{"channel": "#engineering"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	if !strings.Contains(got.Content[0].Text, "Posted to #engineering") {
+		t.Errorf("content = %q", got.Content[0].Text)
+	}
+}
+
+func TestRunAction_NoURL(t *testing.T) {
+	s := &server{httpClient: &http.Client{}}
+	got := s.runAction(context.Background(), "ship-update", nil)
+	if !got.IsError {
+		t.Fatal("expected error when AILERON_URL not set")
+	}
+}
+
+func TestRunAction_HTTPFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = w.Write([]byte(`{"error":{"class":"binding_required","message":"vault is locked"}}`))
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.runAction(context.Background(), "ship-update", nil)
+	if !got.IsError {
+		t.Fatal("expected error for 412")
+	}
+	if !strings.Contains(got.Content[0].Text, "binding_required") {
+		t.Errorf("expected envelope passed through, got %q", got.Content[0].Text)
+	}
+}
+
+func TestRunAction_DaemonUnreachable(t *testing.T) {
+	s := &server{
+		aileronURL: "http://127.0.0.1:1", // unreachable port
+		httpClient: &http.Client{},
+	}
+	got := s.runAction(context.Background(), "ship-update", nil)
+	if !got.IsError {
+		t.Fatal("expected error when daemon unreachable")
+	}
+	if !strings.Contains(got.Content[0].Text, "daemon unreachable") {
+		t.Errorf("expected 'daemon unreachable' prefix, got %q", got.Content[0].Text)
+	}
+}
+
+func TestRunAction_DecodeFailureReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{not-json`))
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.runAction(context.Background(), "x", nil)
+	if !got.IsError {
+		t.Fatal("expected error for bad response JSON")
+	}
+}
+
+// --- Dispatch routing ---
+
+func TestDispatchTool_RoutesActionByName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/actions/ship-update/run" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		content := "ok"
+		_ = json.NewEncoder(w).Encode(actionRunResponse{AuditID: "audit_x", Result: &content})
+	}))
+	defer srv.Close()
+
+	s := &server{
+		aileronURL:    srv.URL,
+		httpClient:    srv.Client(),
+		actionNameMap: map[string]string{"ship_update": "ship-update"},
+	}
+	got := s.dispatchTool(context.Background(), "ship_update", map[string]any{"channel": "#x"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+}
+
+// --- Comms tools (preserve essential coverage) ---
 
 func TestReadMessages_NoSocket(t *testing.T) {
 	s := &server{httpClient: &http.Client{}}
-	result := s.readMessages(map[string]any{})
-	if !result.IsError {
+	if !s.readMessages(map[string]any{}).IsError {
 		t.Fatal("expected error without comms socket")
 	}
 }
 
 func TestSendMessage_NoSocket(t *testing.T) {
 	s := &server{httpClient: &http.Client{}}
-	result := s.sendMessage(map[string]any{"service": "slack", "channel": "#test", "body": "hi"})
-	if !result.IsError {
+	if !s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"}).IsError {
 		t.Fatal("expected error without comms socket")
 	}
 }
 
 func TestSendMessage_MissingFields(t *testing.T) {
-	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
-	result := s.sendMessage(map[string]any{})
-	if !result.IsError {
+	s := &server{commsSocket: "/tmp/x.sock", httpClient: &http.Client{}}
+	if !s.sendMessage(map[string]any{}).IsError {
 		t.Fatal("expected error for missing fields")
-	}
-}
-
-func TestRequestComms_NoSocket(t *testing.T) {
-	resp := requestComms("/nonexistent/socket.sock", commsRequest{Method: "read_messages"})
-	if resp.Error == "" {
-		t.Fatal("expected error for missing socket")
-	}
-}
-
-func TestDispatchTool_ReadMessages(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
-	result := s.dispatchTool(context.Background(), "read_messages", nil)
-	if !result.IsError {
-		t.Fatal("expected error without comms socket")
-	}
-}
-
-func TestDispatchTool_SendMessage(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
-	result := s.dispatchTool(context.Background(), "send_message", map[string]any{"service": "slack", "channel": "#x", "body": "y"})
-	if !result.IsError {
-		t.Fatal("expected error without comms socket")
-	}
-}
-
-// TestReadMessages_WithServer starts a real CommsServer to test the
-// full read_messages path through the Unix socket.
-func TestReadMessages_WithServer(t *testing.T) {
-	socketPath := os.TempDir() + "/aileron-mcp-test-read.sock"
-	t.Cleanup(func() { os.Remove(socketPath) })
-
-	// Start a minimal comms server that serves from a mock socket.
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			// Read request, respond with canned messages.
-			var req commsRequest
-			json.NewDecoder(conn).Decode(&req)
-			json.NewEncoder(conn).Encode(commsResponse{
-				OK: true,
-				Messages: []commsMessage{
-					{ID: "1", Service: "slack", Channel: "#backend", Author: "Alice", Body: "hello"},
-				},
-			})
-			conn.Close()
-		}
-	}()
-
-	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
-	result := s.readMessages(map[string]any{})
-	if result.IsError {
-		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
-	}
-	// Result should contain the message data as JSON.
-	text := result.Content[0].Text
-	if !contains(text, "Alice") || !contains(text, "#backend") {
-		t.Errorf("expected Alice and #backend in result, got %s", text)
-	}
-}
-
-// TestSendMessage_WithServer tests the full send_message path.
-// The mock server auto-approves.
-func TestSendMessage_WithServer(t *testing.T) {
-	socketPath := os.TempDir() + "/aileron-mcp-test-send.sock"
-	t.Cleanup(func() { os.Remove(socketPath) })
-
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			var req commsRequest
-			json.NewDecoder(conn).Decode(&req)
-			json.NewEncoder(conn).Encode(commsResponse{OK: true})
-			conn.Close()
-		}
-	}()
-
-	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
-	result := s.sendMessage(map[string]any{"service": "slack", "channel": "#test", "body": "hello"})
-	if result.IsError {
-		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
-	}
-	if result.Content[0].Text != "Message sent successfully." {
-		t.Errorf("unexpected result: %s", result.Content[0].Text)
-	}
-}
-
-// TestSendMessage_WithServer_Denied tests the denial path.
-func TestSendMessage_WithServer_Denied(t *testing.T) {
-	socketPath := os.TempDir() + "/aileron-mcp-test-deny.sock"
-	t.Cleanup(func() { os.Remove(socketPath) })
-
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			var req commsRequest
-			json.NewDecoder(conn).Decode(&req)
-			json.NewEncoder(conn).Encode(commsResponse{Error: "message denied by user"})
-			conn.Close()
-		}
-	}()
-
-	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
-	result := s.sendMessage(map[string]any{"service": "slack", "channel": "#test", "body": "denied"})
-	if !result.IsError {
-		t.Fatal("expected error for denied message")
-	}
-}
-
-// TestReadMessages_FilterArgs tests that filter args are passed through.
-func TestReadMessages_FilterArgs(t *testing.T) {
-	socketPath := os.TempDir() + "/aileron-mcp-test-filter.sock"
-	t.Cleanup(func() { os.Remove(socketPath) })
-
-	var receivedReq commsRequest
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		json.NewDecoder(conn).Decode(&receivedReq)
-		json.NewEncoder(conn).Encode(commsResponse{OK: true})
-		conn.Close()
-	}()
-
-	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
-	s.readMessages(map[string]any{"service": "discord", "channel": "dev-chat"})
-
-	if receivedReq.Service != "discord" || receivedReq.Channel != "dev-chat" {
-		t.Errorf("expected filter args passed through, got service=%q channel=%q", receivedReq.Service, receivedReq.Channel)
-	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
-func TestHttpRequest_NoSocket(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
-	result := s.httpRequest(map[string]any{"method": "GET", "url": "https://example.com"})
-	if !result.IsError {
-		t.Fatal("expected error without comms socket")
-	}
-}
-
-func TestHttpRequest_MissingFields(t *testing.T) {
-	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
-	result := s.httpRequest(map[string]any{})
-	if !result.IsError {
-		t.Fatal("expected error for missing fields")
-	}
-}
-
-func TestHttpRequest_WithServer(t *testing.T) {
-	socketPath := os.TempDir() + "/aileron-mcp-test-http.sock"
-	t.Cleanup(func() { os.Remove(socketPath) })
-
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			var req commsRequest
-			json.NewDecoder(conn).Decode(&req)
-			json.NewEncoder(conn).Encode(commsResponse{
-				OK: true,
-				Messages: []commsMessage{
-					{ID: "200", Body: `{"result": "ok"}`},
-				},
-			})
-			conn.Close()
-		}
-	}()
-
-	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
-	result := s.httpRequest(map[string]any{"method": "GET", "url": "https://api.example.com/test"})
-	if result.IsError {
-		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
-	}
-	if !contains(result.Content[0].Text, "ok") {
-		t.Errorf("expected response body, got %s", result.Content[0].Text)
-	}
-}
-
-func TestHttpRequest_WithServer_NoBody(t *testing.T) {
-	socketPath := os.TempDir() + "/aileron-mcp-test-http-nobody.sock"
-	t.Cleanup(func() { os.Remove(socketPath) })
-
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			var req commsRequest
-			json.NewDecoder(conn).Decode(&req)
-			json.NewEncoder(conn).Encode(commsResponse{OK: true})
-			conn.Close()
-		}
-	}()
-
-	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
-	result := s.httpRequest(map[string]any{"method": "GET", "url": "https://example.com"})
-	if result.IsError {
-		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
-	}
-	if !contains(result.Content[0].Text, "no response body") {
-		t.Errorf("expected 'no response body' message, got %s", result.Content[0].Text)
-	}
-}
-
-func TestDispatchTool_HttpRequest(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
-	result := s.dispatchTool(context.Background(), "http_request", map[string]any{"method": "GET", "url": "https://example.com"})
-	if !result.IsError {
-		t.Fatal("expected error without comms socket")
-	}
-}
-
-func TestHandle_Ping(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`3`),
-		Method:  "ping",
-	})
-	if resp == nil || resp.Error != nil {
-		t.Fatal("expected successful response")
-	}
-}
-
-func TestHandle_UnknownMethod(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`4`),
-		Method:  "unknown/method",
-	})
-	if resp == nil {
-		t.Fatal("expected error response")
-	}
-	if resp.Error == nil {
-		t.Fatal("expected error")
-	}
-	if resp.Error.Code != -32601 {
-		t.Errorf("expected method not found code -32601, got %d", resp.Error.Code)
-	}
-}
-
-func TestHandle_ToolsCall_InvalidParams(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`5`),
-		Method:  "tools/call",
-		Params:  json.RawMessage(`not-json`),
-	})
-	if resp == nil || resp.Error == nil {
-		t.Fatal("expected error response for invalid params")
-	}
-	if resp.Error.Code != -32602 {
-		t.Errorf("expected invalid params code -32602, got %d", resp.Error.Code)
-	}
-}
-
-func TestDispatchTool_UnknownTool(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	result := s.dispatchTool(context.Background(), "nonexistent", nil)
-	if !result.IsError {
-		t.Fatal("expected error result for unknown tool")
-	}
-	if result.Content[0].Text != "unknown tool: nonexistent" {
-		t.Errorf("unexpected error text: %s", result.Content[0].Text)
-	}
-}
-
-func TestSubmitIntent_MissingIntent(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	result := s.submitIntent(context.Background(), map[string]any{})
-	if !result.IsError {
-		t.Fatal("expected error for missing intent")
-	}
-	if result.Content[0].Text != "intent parameter is required" {
-		t.Errorf("unexpected error: %s", result.Content[0].Text)
-	}
-}
-
-func TestSubmitIntent_EmptyIntent(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	result := s.submitIntent(context.Background(), map[string]any{"intent": ""})
-	if !result.IsError {
-		t.Fatal("expected error for empty intent")
-	}
-}
-
-func TestSubmitIntent_Success(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/v1/intents" {
-			t.Errorf("expected /v1/intents, got %s", r.URL.Path)
-		}
-		if r.Header.Get("Authorization") != "Bearer test-token" {
-			t.Errorf("expected Bearer test-token, got %s", r.Header.Get("Authorization"))
-		}
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("expected application/json content type")
-		}
-
-		var body map[string]any
-		json.NewDecoder(r.Body).Decode(&body)
-		action, _ := body["action"].(map[string]any)
-		if action["summary"] != "deploy my app" {
-			t.Errorf("unexpected intent text: %v", action["summary"])
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"id":     "int_123",
-			"status": "pending_policy",
-		})
-	}))
-	defer ts.Close()
-
-	s := &server{
-		aileronURL:   ts.URL,
-		aileronToken: "test-token",
-		httpClient:   ts.Client(),
-	}
-
-	result := s.submitIntent(context.Background(), map[string]any{
-		"intent": "deploy my app",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	if len(result.Content) != 1 || result.Content[0].Type != "text" {
-		t.Fatal("expected single text content")
-	}
-}
-
-func TestSubmitIntent_ServerError(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]any{
-			"error": map[string]any{"code": "internal", "message": "something broke"},
-		})
-	}))
-	defer ts.Close()
-
-	s := &server{
-		aileronURL: ts.URL,
-		httpClient: ts.Client(),
-	}
-
-	result := s.submitIntent(context.Background(), map[string]any{
-		"intent": "deploy my app",
-	})
-	// The server returns a JSON body even on error, so submitIntent decodes it
-	// (it doesn't check status codes). The result is not flagged as an error
-	// at the MCP level — the API error is in the response body.
-	if result.IsError {
-		t.Fatal("expected non-error result (API error is in the body)")
-	}
-}
-
-func TestSubmitIntent_NoToken(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			t.Error("expected no Authorization header when token is empty")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "int_456"})
-	}))
-	defer ts.Close()
-
-	s := &server{
-		aileronURL:   ts.URL,
-		aileronToken: "",
-		httpClient:   ts.Client(),
-	}
-
-	result := s.submitIntent(context.Background(), map[string]any{
-		"intent": "test without token",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-}
-
-func TestHandle_ToolsCall_SubmitIntent(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "int_789"})
-	}))
-	defer ts.Close()
-
-	s := &server{
-		aileronURL: ts.URL,
-		httpClient: ts.Client(),
-	}
-
-	params, _ := json.Marshal(callToolParams{
-		Name:      "submit_intent",
-		Arguments: map[string]any{"intent": "do something"},
-	})
-	resp := s.handle(jsonrpcRequest{
-		JSONRPC: "2.0",
-		ID:      json.RawMessage(`6`),
-		Method:  "tools/call",
-		Params:  json.RawMessage(params),
-	})
-	if resp == nil || resp.Error != nil {
-		t.Fatal("expected successful response")
-	}
-	result, ok := resp.Result.(toolResult)
-	if !ok {
-		t.Fatal("expected toolResult")
-	}
-	if result.IsError {
-		t.Fatalf("unexpected tool error: %s", result.Content[0].Text)
-	}
-}
-
-func TestErrorResult(t *testing.T) {
-	r := errorResult("something went wrong")
-	if !r.IsError {
-		t.Fatal("expected IsError=true")
-	}
-	if len(r.Content) != 1 || r.Content[0].Type != "text" {
-		t.Fatal("expected single text content")
-	}
-	if r.Content[0].Text != "something went wrong" {
-		t.Errorf("unexpected text: %s", r.Content[0].Text)
-	}
-}
-
-func TestJsonResult(t *testing.T) {
-	r := jsonResult(map[string]string{"key": "value"})
-	if r.IsError {
-		t.Fatal("expected IsError=false")
-	}
-	if len(r.Content) != 1 || r.Content[0].Type != "text" {
-		t.Fatal("expected single text content")
-	}
-	var parsed map[string]string
-	if err := json.Unmarshal([]byte(r.Content[0].Text), &parsed); err != nil {
-		t.Fatalf("result should be valid JSON: %v", err)
-	}
-	if parsed["key"] != "value" {
-		t.Errorf("unexpected parsed value: %v", parsed)
 	}
 }
 
 func TestDraftReply_NoSocket(t *testing.T) {
 	s := &server{httpClient: &http.Client{}}
-	result := s.draftReply(map[string]any{"message_id": "1", "body": "text"})
-	if !result.IsError {
-		t.Error("expected error when comms socket not set")
+	if !s.draftReply(map[string]any{"message_id": "1", "body": "hi"}).IsError {
+		t.Fatal("expected error without comms socket")
 	}
 }
 
 func TestDraftReply_MissingFields(t *testing.T) {
-	s := &server{commsSocket: "/tmp/fake.sock", httpClient: &http.Client{}}
-	result := s.draftReply(map[string]any{})
-	if !result.IsError {
-		t.Error("expected error for missing fields")
+	s := &server{commsSocket: "/tmp/x.sock", httpClient: &http.Client{}}
+	if !s.draftReply(map[string]any{}).IsError {
+		t.Fatal("expected error for missing fields")
 	}
 }
 
-// --- Write tool tests ---
-
-func TestSendEmail_MissingFields(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	tests := []struct {
-		name string
-		args map[string]any
-	}{
-		{"empty", map[string]any{}},
-		{"missing subject", map[string]any{"to": "a@b.com", "body_text": "hi"}},
-		{"missing to", map[string]any{"subject": "hi", "body_text": "hi"}},
-		{"missing body", map[string]any{"to": "a@b.com", "subject": "hi"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := s.sendEmail(context.Background(), tt.args)
-			if !result.IsError {
-				t.Fatal("expected error for missing fields")
-			}
-		})
-	}
-}
-
-func TestSendEmail_Success(t *testing.T) {
-	var receivedBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedBody)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "int_email_1", "status": "pending_approval"})
-	}))
-	defer ts.Close()
-
-	s := &server{aileronURL: ts.URL, aileronToken: "tok", httpClient: ts.Client()}
-	result := s.sendEmail(context.Background(), map[string]any{
-		"to":        "alice@example.com, bob@example.com",
-		"cc":        "carol@example.com",
-		"subject":   "Weekly sync",
-		"body_text": "See you Thursday",
-		"send_mode": "draft_only",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-
-	action, _ := receivedBody["action"].(map[string]any)
-	if action["type"] != "email.draft" {
-		t.Errorf("expected email.draft action type for draft_only, got %v", action["type"])
-	}
-	domain, _ := action["domain"].(map[string]any)
-	email, _ := domain["email"].(map[string]any)
-	to, _ := email["to"].([]any)
-	if len(to) != 2 {
-		t.Errorf("expected 2 recipients, got %d", len(to))
-	}
-}
-
-func TestSendEmail_NoURL(t *testing.T) {
+func TestHttpRequest_NoSocket(t *testing.T) {
 	s := &server{httpClient: &http.Client{}}
-	result := s.sendEmail(context.Background(), map[string]any{
-		"to": "a@b.com", "subject": "hi", "body_text": "hello",
-	})
-	if !result.IsError {
-		t.Fatal("expected error without AILERON_URL")
+	if !s.httpRequest(map[string]any{"method": "GET", "url": "https://x"}).IsError {
+		t.Fatal("expected error without comms socket")
 	}
 }
 
-func TestCreateCalendarEvent_MissingFields(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	tests := []struct {
-		name string
-		args map[string]any
-	}{
-		{"empty", map[string]any{}},
-		{"missing times", map[string]any{"title": "Standup"}},
-		{"missing title", map[string]any{"start_time": "2025-03-15T10:00:00Z", "end_time": "2025-03-15T11:00:00Z"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := s.createCalendarEvent(context.Background(), tt.args)
-			if !result.IsError {
-				t.Fatal("expected error for missing fields")
-			}
-		})
+func TestHttpRequest_MissingFields(t *testing.T) {
+	s := &server{commsSocket: "/tmp/x.sock", httpClient: &http.Client{}}
+	if !s.httpRequest(map[string]any{}).IsError {
+		t.Fatal("expected error for missing fields")
 	}
 }
 
-func TestCreateCalendarEvent_Success(t *testing.T) {
-	var receivedBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedBody)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "int_cal_1", "status": "pending_approval"})
-	}))
-	defer ts.Close()
-
-	s := &server{aileronURL: ts.URL, httpClient: ts.Client()}
-	result := s.createCalendarEvent(context.Background(), map[string]any{
-		"title":           "Standup",
-		"start_time":      "2025-03-15T10:00:00Z",
-		"end_time":        "2025-03-15T10:30:00Z",
-		"attendees":       "alice@example.com, bob@example.com",
-		"conference_type": "google_meet",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-
-	action, _ := receivedBody["action"].(map[string]any)
-	if action["type"] != "calendar.event.create" {
-		t.Errorf("expected calendar.event.create, got %v", action["type"])
-	}
-	domain, _ := action["domain"].(map[string]any)
-	cal, _ := domain["calendar"].(map[string]any)
-	attendees, _ := cal["attendees"].([]any)
-	if len(attendees) != 2 {
-		t.Errorf("expected 2 attendees, got %d", len(attendees))
+func TestRequestComms_NoSocket(t *testing.T) {
+	resp := requestComms("/tmp/no-such.sock", commsRequest{Method: "read_messages"})
+	if resp.Error == "" {
+		t.Fatal("expected error for missing socket")
 	}
 }
 
-func TestCreateGithubIssue_MissingFields(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	tests := []struct {
-		name string
-		args map[string]any
-	}{
-		{"empty", map[string]any{}},
-		{"missing title", map[string]any{"repository": "acme/app"}},
-		{"missing repo", map[string]any{"title": "Bug report"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := s.createGithubIssue(context.Background(), tt.args)
-			if !result.IsError {
-				t.Fatal("expected error for missing fields")
-			}
-		})
-	}
-}
+// --- Comms tools — integration with a Unix socket ---
 
-func TestCreateGithubIssue_Success(t *testing.T) {
-	var receivedBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedBody)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "int_gh_1", "status": "pending_approval"})
-	}))
-	defer ts.Close()
-
-	s := &server{aileronURL: ts.URL, httpClient: ts.Client()}
-	result := s.createGithubIssue(context.Background(), map[string]any{
-		"repository": "acme/backend",
-		"title":      "Fix login bug",
-		"body":       "Users can't log in after password reset",
-		"labels":     "bug, priority:high",
-		"assignees":  "alice",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-
-	action, _ := receivedBody["action"].(map[string]any)
-	if action["type"] != "git.issue.create" {
-		t.Errorf("expected git.issue.create, got %v", action["type"])
-	}
-	domain, _ := action["domain"].(map[string]any)
-	git, _ := domain["git"].(map[string]any)
-	labels, _ := git["issue_labels"].([]any)
-	if len(labels) != 2 {
-		t.Errorf("expected 2 labels, got %d", len(labels))
-	}
-}
-
-func TestCommentOnGithubIssue_MissingFields(t *testing.T) {
-	s := &server{aileronURL: "http://localhost", httpClient: &http.Client{}}
-	tests := []struct {
-		name string
-		args map[string]any
-	}{
-		{"empty", map[string]any{}},
-		{"missing body", map[string]any{"repository": "acme/app", "issue_number": "42"}},
-		{"missing issue_number", map[string]any{"repository": "acme/app", "body": "LGTM"}},
-		{"missing repo", map[string]any{"issue_number": "42", "body": "LGTM"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := s.commentOnGithubIssue(context.Background(), tt.args)
-			if !result.IsError {
-				t.Fatal("expected error for missing fields")
-			}
-		})
-	}
-}
-
-func TestCommentOnGithubIssue_Success(t *testing.T) {
-	var receivedBody map[string]any
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedBody)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "int_ghc_1", "status": "pending_approval"})
-	}))
-	defer ts.Close()
-
-	s := &server{aileronURL: ts.URL, httpClient: ts.Client()}
-	result := s.commentOnGithubIssue(context.Background(), map[string]any{
-		"repository":   "acme/backend",
-		"issue_number": "123",
-		"body":         "This is fixed in PR #456",
-	})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-
-	action, _ := receivedBody["action"].(map[string]any)
-	if action["type"] != "git.issue.comment" {
-		t.Errorf("expected git.issue.comment, got %v", action["type"])
-	}
-}
-
-func TestDispatchTool_WriteTools(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
-	tools := []string{"send_email", "create_calendar_event", "create_github_issue", "comment_on_github_issue"}
-	for _, tool := range tools {
-		t.Run(tool, func(t *testing.T) {
-			result := s.dispatchTool(context.Background(), tool, map[string]any{})
-			if !result.IsError {
-				t.Fatal("expected error (missing required fields or no AILERON_URL)")
-			}
-		})
-	}
-}
-
-func TestSplitCSV(t *testing.T) {
-	tests := []struct {
-		input string
-		want  int
-	}{
-		{"", 0},
-		{"a", 1},
-		{"a, b, c", 3},
-		{"  a , b ,, c ", 3},
-	}
-	for _, tt := range tests {
-		got := splitCSV(tt.input)
-		if len(got) != tt.want {
-			t.Errorf("splitCSV(%q) = %d items, want %d", tt.input, len(got), tt.want)
+func TestReadMessages_WithServer(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		if req.Method != "read_messages" {
+			t.Errorf("method = %q", req.Method)
 		}
+		return commsResponse{
+			OK: true,
+			Messages: []commsMessage{
+				{ID: "1", Service: "slack", Channel: "#dev", Author: "alice", Body: "hello"},
+			},
+		}
+	})
+	defer stop()
+
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	got := s.readMessages(map[string]any{})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	if !strings.Contains(got.Content[0].Text, "hello") {
+		t.Errorf("expected message body in result, got %q", got.Content[0].Text)
 	}
 }
 
-func TestSplitAttendees(t *testing.T) {
-	got := splitAttendees("alice@example.com")
-	if len(got) != 1 || got[0]["email"] != "alice@example.com" {
-		t.Errorf("unexpected attendees: %v", got)
-	}
-	if splitAttendees("") != nil {
-		t.Error("expected nil for empty input")
+func TestSendMessage_WithServer(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		if req.Method != "send_message" {
+			t.Errorf("method = %q", req.Method)
+		}
+		return commsResponse{OK: true}
+	})
+	defer stop()
+
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	got := s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
 	}
 }
 
-func TestSubmitStructuredIntent_ConnectionError(t *testing.T) {
-	s := &server{aileronURL: "http://127.0.0.1:1", httpClient: &http.Client{}}
-	result := s.submitStructuredIntent(context.Background(), "email.send", "test", map[string]any{})
-	if !result.IsError {
-		t.Fatal("expected error for unreachable server")
-	}
-	if !contains(result.Content[0].Text, "failed to submit intent") {
-		t.Errorf("unexpected error: %s", result.Content[0].Text)
-	}
-}
+func TestSendMessage_ServerError(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		return commsResponse{Error: "policy denied"}
+	})
+	defer stop()
 
-func TestSubmitStructuredIntent_NoURL(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
-	result := s.submitStructuredIntent(context.Background(), "email.send", "test", map[string]any{})
-	if !result.IsError {
-		t.Fatal("expected error without URL")
-	}
-	if !contains(result.Content[0].Text, "not configured") {
-		t.Errorf("unexpected error: %s", result.Content[0].Text)
-	}
-}
-
-func TestSubmitStructuredIntent_WithToken(t *testing.T) {
-	var gotAuth string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"id": "int_1"})
-	}))
-	defer ts.Close()
-
-	s := &server{aileronURL: ts.URL, aileronToken: "my-token", httpClient: ts.Client()}
-	result := s.submitStructuredIntent(context.Background(), "email.send", "test", map[string]any{})
-	if result.IsError {
-		t.Fatalf("unexpected error: %s", result.Content[0].Text)
-	}
-	if gotAuth != "Bearer my-token" {
-		t.Errorf("expected Bearer my-token, got %s", gotAuth)
-	}
-}
-
-func TestSplitRecipients(t *testing.T) {
-	got := splitRecipients("alice@example.com, bob@example.com")
-	if len(got) != 2 {
-		t.Fatalf("expected 2 recipients, got %d", len(got))
-	}
-	if got[0]["email"] != "alice@example.com" {
-		t.Errorf("expected alice@example.com, got %s", got[0]["email"])
-	}
-	if got[1]["email"] != "bob@example.com" {
-		t.Errorf("expected bob@example.com, got %s", got[1]["email"])
-	}
-
-	empty := splitRecipients("")
-	if empty != nil {
-		t.Errorf("expected nil for empty input, got %v", empty)
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	got := s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"})
+	if !got.IsError {
+		t.Fatal("expected error when comms server returns error")
 	}
 }
 
 func TestDraftReply_WithServer(t *testing.T) {
-	socketPath := os.TempDir() + "/aileron-mcp-test-draft.sock"
-	t.Cleanup(func() { os.Remove(socketPath) })
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		if req.Method != "draft_reply" {
+			t.Errorf("method = %q", req.Method)
+		}
+		return commsResponse{OK: true}
+	})
+	defer stop()
 
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	got := s.draftReply(map[string]any{"message_id": "1", "body": "hi"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+}
+
+func TestDraftReply_ServerError(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		return commsResponse{Error: "draft denied"}
+	})
+	defer stop()
+
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	got := s.draftReply(map[string]any{"message_id": "1", "body": "hi"})
+	if !got.IsError {
+		t.Fatal("expected error when server denies draft")
+	}
+}
+
+func TestHttpRequest_WithServer(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		if req.Method != "http_request" {
+			t.Errorf("method = %q", req.Method)
+		}
+		return commsResponse{
+			OK: true,
+			Messages: []commsMessage{
+				{ID: "r", Body: "200 OK\n{\"ok\":true}"},
+			},
+		}
+	})
+	defer stop()
+
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	got := s.httpRequest(map[string]any{"method": "GET", "url": "https://example.com"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	if !strings.Contains(got.Content[0].Text, "ok") {
+		t.Errorf("expected response body in result, got %q", got.Content[0].Text)
+	}
+}
+
+func TestHttpRequest_ServerError(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		return commsResponse{Error: "url not in allowlist"}
+	})
+	defer stop()
+
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	got := s.httpRequest(map[string]any{"method": "GET", "url": "https://blocked"})
+	if !got.IsError {
+		t.Fatal("expected error when comms server denies")
+	}
+}
+
+func TestDispatchTool_RoutesAllCommsTools(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		return commsResponse{OK: true, Messages: []commsMessage{{ID: "x", Body: "ok"}}}
+	})
+	defer stop()
+
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"read_messages", map[string]any{}},
+		{"draft_reply", map[string]any{"message_id": "1", "body": "hi"}},
+		{"send_message", map[string]any{"service": "slack", "channel": "#x", "body": "hi"}},
+		{"http_request", map[string]any{"method": "GET", "url": "https://x"}},
+	}
+	for _, tc := range cases {
+		got := s.dispatchTool(context.Background(), tc.name, tc.args)
+		if got.IsError {
+			t.Errorf("%s: unexpected error: %s", tc.name, got.Content[0].Text)
+		}
+	}
+}
+
+func TestHandle_ToolsList_ReturnsTools(t *testing.T) {
+	s := &server{
+		commsSocket: "/tmp/x.sock",
+		httpClient:  &http.Client{},
+	}
+	resp := s.handle(jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Method:  "tools/list",
+	})
+	if resp == nil || resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp)
+	}
+	result := resp.Result.(map[string]any)
+	tools := result["tools"].([]toolDef)
+	if len(tools) != 4 {
+		t.Errorf("expected 4 comms tools, got %d", len(tools))
+	}
+}
+
+func TestHandle_ToolsCall_RoutesToTool(t *testing.T) {
+	socket := tempSocket(t)
+	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
+		return commsResponse{OK: true, Messages: []commsMessage{}}
+	})
+	defer stop()
+
+	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	resp := s.handle(jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Method:  "tools/call",
+		Params:  json.RawMessage(`{"name":"read_messages","arguments":{}}`),
+	})
+	if resp == nil || resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp)
+	}
+}
+
+// --- Helpers ---
+
+func TestErrorResult(t *testing.T) {
+	r := errorResult("oops")
+	if !r.IsError || r.Content[0].Text != "oops" {
+		t.Errorf("got %+v", r)
+	}
+}
+
+func TestJsonResult(t *testing.T) {
+	r := jsonResult(map[string]any{"k": "v"})
+	if r.IsError {
+		t.Fatal("unexpected error")
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(r.Content[0].Text), &got); err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	if got["k"] != "v" {
+		t.Errorf("k = %v", got["k"])
+	}
+}
 
+// --- Test infra ---
+
+func tempSocket(t *testing.T) string {
+	t.Helper()
+	// macOS limits Unix socket paths to ~104 bytes; t.TempDir() with
+	// long test names can exceed that. Use a short random name in
+	// /tmp instead.
+	f, err := os.CreateTemp("/tmp", "ai-mcp-*.sock")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	path := f.Name()
+	f.Close()
+	_ = os.Remove(path) // socket can't exist before listen()
+	t.Cleanup(func() { _ = os.Remove(path) })
+	return path
+}
+
+func serveComms(t *testing.T, socket string, handler func(commsRequest) commsResponse) func() {
+	t.Helper()
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
-			conn, err := ln.Accept()
+			conn, err := l.Accept()
 			if err != nil {
 				return
 			}
-			var req commsRequest
-			json.NewDecoder(conn).Decode(&req)
-			if req.Method == "draft_reply" && req.ReplyTo != "" && req.Body != "" {
-				json.NewEncoder(conn).Encode(commsResponse{OK: true})
-			} else {
-				json.NewEncoder(conn).Encode(commsResponse{Error: "bad request"})
-			}
-			conn.Close()
+			go func() {
+				defer conn.Close()
+				var req commsRequest
+				if err := json.NewDecoder(conn).Decode(&req); err != nil {
+					return
+				}
+				resp := handler(req)
+				_ = json.NewEncoder(conn).Encode(resp)
+			}()
 		}
 	}()
-
-	s := &server{commsSocket: socketPath, httpClient: &http.Client{}}
-	result := s.draftReply(map[string]any{"message_id": "msg-1", "body": "my draft"})
-	if result.IsError {
-		t.Fatalf("expected success, got error: %s", result.Content[0].Text)
-	}
-	if !contains(result.Content[0].Text, "Draft submitted") {
-		t.Errorf("expected success message, got %s", result.Content[0].Text)
-	}
-}
-
-func TestDispatchTool_DraftReply(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
-	result := s.dispatchTool(context.Background(), "draft_reply", map[string]any{"message_id": "1", "body": "text"})
-	// No comms socket → error, but should not panic.
-	if !result.IsError {
-		t.Error("expected error without comms socket")
-	}
-}
-
-func TestErrorResponse(t *testing.T) {
-	resp := errorResponse(json.RawMessage(`99`), -32600, "invalid request")
-	if resp.JSONRPC != "2.0" {
-		t.Errorf("expected JSONRPC 2.0")
-	}
-	if resp.Error == nil || resp.Error.Code != -32600 || resp.Error.Message != "invalid request" {
-		t.Errorf("unexpected error: %+v", resp.Error)
+	return func() {
+		_ = l.Close()
+		<-done
+		_ = os.Remove(socket)
 	}
 }

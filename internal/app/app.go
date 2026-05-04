@@ -57,6 +57,17 @@ type Config struct {
 	// land in the user's encrypted file at ~/.aileron/secrets.json
 	// rather than in a process-lifetime memory vault.
 	Vault vault.Vault
+
+	// DisableAugmentation, when true, skips the gateway's
+	// tool-augmentation + intercept loop. Chat-completion and Messages
+	// requests pass through unchanged to the upstream LLM. Used by
+	// `aileron launch` when MCP is the canonical surface for action
+	// discovery (per the working-session decision on 2026-05-03): the
+	// gateway then provides only the action-discovery / -execution
+	// HTTP endpoints (consumed by `aileron-mcp`) and serves as the
+	// substrate for Phase 2 request mediation, without exposing
+	// duplicate action tools to the LLM in-band.
+	DisableAugmentation bool
 }
 
 // NewHandler creates a fully-wired Aileron control plane HTTP handler
@@ -239,20 +250,27 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		executor = action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT, bindingStore)
 		server.sandboxRuntime = sandboxRT
 	}
+	server.executor = executor
 
 	// --- Intercept engine (stage 4) ---
-	engine, engineErr := intercept.New(intercept.Config{
-		OpenAIUpstream:    gatewayCfg.OpenAIBaseURL,
-		AnthropicUpstream: gatewayCfg.AnthropicBaseURL,
-		Actions:           server.actions,
-		Executor:          executor,
-		Log:               log,
-		Recorder:          recorder,
-	})
-	if engineErr != nil {
-		return nil, fmt.Errorf("intercept engine: %w", engineErr)
+	// When augmentation is disabled (e.g. `aileron launch` with MCP as
+	// the canonical action-exposure surface) the engine is not built;
+	// the gateway handler degrades to a pass-through proxy and action
+	// discovery / execution flow through `/v1/actions*` only.
+	if !cfg.DisableAugmentation {
+		engine, engineErr := intercept.New(intercept.Config{
+			OpenAIUpstream:    gatewayCfg.OpenAIBaseURL,
+			AnthropicUpstream: gatewayCfg.AnthropicBaseURL,
+			Actions:           server.actions,
+			Executor:          executor,
+			Log:               log,
+			Recorder:          recorder,
+		})
+		if engineErr != nil {
+			return nil, fmt.Errorf("intercept engine: %w", engineErr)
+		}
+		server.interceptEngine = engine
 	}
-	server.interceptEngine = engine
 
 	if teeCfg.TEEEnabled() {
 		server.teeState = newTeeState()

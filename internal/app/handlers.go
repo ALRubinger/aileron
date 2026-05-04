@@ -25,6 +25,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
@@ -103,6 +104,7 @@ type apiServer struct {
 	vaultLocked        bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
+	executor           action.Executor   // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
 	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
 	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
@@ -1145,6 +1147,72 @@ func (s *apiServer) GetAction(w http.ResponseWriter, r *http.Request, name strin
 		return
 	}
 	writeJSON(w, http.StatusOK, manifestToAPI(la))
+}
+
+// RunAction synchronously executes an installed action with the supplied
+// arguments and returns the result. Used by `cmd/aileron-mcp` to route
+// MCP `tools/call` invocations into Aileron's action runtime when MCP
+// is the canonical surface for action exposure (per the working-session
+// decision on 2026-05-03).
+//
+// The vault must be unlocked (ADR-0011) before any action can resolve
+// its bound credentials; calls against a locked vault return a 412
+// FailureEnvelope with class `binding_required`.
+//
+// Action-side failures are surfaced as ADR-0010 envelopes with the
+// canonical class-to-status mapping in failure.HTTPStatus. The 200
+// response body matches [api.ActionRunResponse] and carries the
+// successful Result.Content payload alongside the audit ID.
+func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name string) {
+	if s.vaultLocked {
+		writeVaultLocked(w)
+		return
+	}
+	if s.actions == nil || s.executor == nil {
+		writeError(w, http.StatusNotFound, "not_found", "action not found")
+		return
+	}
+	if _, err := s.actions.Get(name); errors.Is(err, action.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "action not found")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, "actions_lookup_failed", err.Error())
+		return
+	}
+
+	var req api.ActionRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+		return
+	}
+	args := map[string]any{}
+	if req.Args != nil {
+		args = *req.Args
+	}
+
+	result, err := s.executor.Execute(r.Context(), name, args)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "executor_error", err.Error())
+		return
+	}
+	if result.Failure != nil {
+		failure.WriteHTTP(w, result.Failure)
+		return
+	}
+
+	// Mint an audit ID so callers have a stable back-reference into the
+	// audit log per ADR-0010. The recorder may also produce one
+	// upstream; both forms are acceptable.
+	auditID := ""
+	if s.newID != nil {
+		auditID = s.newID()
+	}
+	resp := api.ActionRunResponse{AuditId: auditID}
+	if result.Content != "" {
+		content := result.Content
+		resp.Result = &content
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func manifestToAPI(la action.LoadedAction) api.Action {

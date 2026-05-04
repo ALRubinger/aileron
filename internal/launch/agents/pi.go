@@ -28,6 +28,13 @@ func (p Pi) Env() map[string]string {
 	}
 }
 
+// LLMEndpointEnv returns "" — Pi resolves its API endpoint via its
+// settings file rather than an environment variable, so launch does not
+// route Pi's LLM calls through the embedded gateway today. Adding gateway
+// support for Pi would require extending ConfigureShell to write the
+// gateway URL into .pi/settings.json.
+func (p Pi) LLMEndpointEnv() string { return "" }
+
 // NormalizeCommand returns the command as-is for policy evaluation.
 // Pi does not wrap commands in a template like Claude Code does.
 func (p Pi) NormalizeCommand(raw string) (string, bool) {

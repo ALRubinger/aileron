@@ -1192,6 +1192,73 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/actions/{name}/run:
+    post:
+      tags: [Actions]
+      summary: Execute an installed action synchronously
+      description: |
+        Synchronously executes an installed action by name with the
+        supplied arguments. Used by `cmd/aileron-mcp` to route MCP
+        `tools/call` invocations to Aileron's action runtime when MCP is
+        the canonical surface for action exposure.
+
+        Per ADR-0010 and ADR-0011, the runtime requires an unlocked
+        vault before any action can resolve its bound credentials; calls
+        against a locked vault fail with `binding_required`.
+
+        Action-side failures (capability denied, binding required,
+        connector runtime error, etc.) are returned as a 4xx/5xx
+        FailureEnvelope per ADR-0010 — callers should branch on the
+        envelope's `class` field to decide how to surface the failure
+        to their caller. The 200 response carries a successful Result
+        whose `result` is the action's output payload.
+      operationId: runAction
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionRunRequest"
+      responses:
+        "200":
+          description: Action executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionRunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "412":
+          description: Vault locked or required binding missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+        "500":
+          description: Connector or runtime error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+        "502":
+          description: Network or external API error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FailureEnvelope"
+
   /v1/bindings:
     get:
       tags: [Bindings]
@@ -3471,6 +3538,40 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActionLoadError"
+
+    ActionRunRequest:
+      type: object
+      description: |
+        Arguments for synchronously executing an installed action. The
+        `args` map is passed to the action's executor after validation
+        against the action's declared `inputs`.
+      properties:
+        args:
+          type: object
+          additionalProperties: true
+          description: Per-call arguments matching the action's declared inputs.
+
+    ActionRunResponse:
+      type: object
+      description: |
+        Successful result from synchronously executing an action.
+        Action-side failures are returned as a 4xx/5xx FailureEnvelope
+        instead of this shape, so a 200 response always carries a
+        successful payload.
+      required: [audit_id]
+      properties:
+        audit_id:
+          type: string
+          description: |
+            Audit log ID for this execution per ADR-0010. Always present
+            so callers can cross-reference into the audit log.
+        result:
+          type: string
+          description: |
+            Action output payload — the same Content the LLM observes
+            as a tool result when the action runs through the gateway's
+            intercept path. Typically a JSON document; may be plain
+            prose for actions whose output is naturally a sentence.
 
     Binding:
       type: object

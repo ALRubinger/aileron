@@ -18,6 +18,16 @@ type Agent interface {
 	// process, beyond the standard SHELL/AILERON_REAL_SHELL manipulation.
 	// Returns nil if no extra env is needed.
 	Env() map[string]string
+	// LLMEndpointEnv returns the name of the environment variable the
+	// agent's LLM client honours to override its default API endpoint
+	// (e.g. "ANTHROPIC_BASE_URL" for Claude Code, "OPENAI_BASE_URL" for
+	// OpenAI-compatible clients). Returns "" when the agent does not
+	// support endpoint override via env (some agents resolve the
+	// endpoint from a settings file, requiring per-agent ConfigureShell
+	// adjustments instead). When non-empty and the launcher has a
+	// gateway URL available, the launcher routes the agent's LLM calls
+	// through Aileron's embedded gateway by setting this variable.
+	LLMEndpointEnv() string
 	// NormalizeCommand extracts the user command from the agent's shell
 	// wrapper before policy evaluation. Returns the normalized command and
 	// whether policy should evaluate it. Agents that don't wrap commands

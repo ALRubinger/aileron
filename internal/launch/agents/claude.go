@@ -35,6 +35,11 @@ func (c Claude) Env() map[string]string {
 	return env
 }
 
+// LLMEndpointEnv returns the env var Claude Code reads to override the
+// Anthropic API base URL. Setting this routes Claude's LLM calls through
+// Aileron's embedded gateway when launch starts one.
+func (c Claude) LLMEndpointEnv() string { return "ANTHROPIC_BASE_URL" }
+
 // ConfigureShell installs a wrapper script at ~/.aileron/bash whose path
 // contains "bash" so Claude Code accepts it as a valid shell. The wrapper
 // delegates to aileron-sh for policy enforcement.

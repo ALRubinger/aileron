@@ -3,6 +3,7 @@ package launch
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -97,10 +98,30 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// (tests, CI, headless integrations) fall through to the lazy
 	// on-demand path via OpenVaultFunc, preserving backward
 	// compatibility with the existing test surface.
+	var unlockedVault vault.Vault
 	if term.IsTerminal(int(os.Stdin.Fd())) {
-		if _, err := EnsureVault(DefaultVaultPath(), nil, os.Stderr, 3); err != nil {
+		v, err := EnsureVault(DefaultVaultPath(), nil, os.Stderr, 3)
+		if err != nil {
 			return LaunchResult{}, fmt.Errorf("vault: %w", err)
 		}
+		unlockedVault = v
+	}
+
+	// Start the embedded Aileron gateway when the vault is unlocked
+	// and the agent supports LLM-endpoint override via env var. The
+	// gateway shares the user's just-unlocked vault, so credential
+	// resolution at action-execution time uses the same KEK without a
+	// second prompt. Agents whose endpoint is configured via a settings
+	// file (see [Pi.LLMEndpointEnv]) bypass this — adding gateway
+	// support for those agents requires extending [Agent.ConfigureShell].
+	var gateway *Gateway
+	if unlockedVault != nil && config.Agent.LLMEndpointEnv() != "" {
+		gw, err := StartGateway(ctx, unlockedVault, slog.Default())
+		if err != nil {
+			return LaunchResult{}, fmt.Errorf("starting gateway: %w", err)
+		}
+		gateway = gw
+		defer func() { _ = gateway.Close(context.Background()) }()
 	}
 
 	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
@@ -120,20 +141,31 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	approvalSocket := filepath.Join(os.TempDir(), "ai-"+sessionID+".sock")
 	commsSocket := filepath.Join(os.TempDir(), "ai-comms-"+sessionID+".sock")
 
-	env := buildEnv(config.ShellShim, config.Agent.Name(), sessionID, auditLog, envConfig, config.Agent.Env())
+	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), gatewayURL(gateway))
+	env := buildEnv(config.ShellShim, config.Agent.Name(), sessionID, auditLog, envConfig, agentEnv)
 	env = append(env, "AILERON_APPROVAL_SOCKET="+approvalSocket)
 	env = append(env, "AILERON_COMMS_SOCKET="+commsSocket)
 
 	// Agent-required args come first, then user-supplied args.
 	allArgs := append(config.Agent.Args(), config.Args...)
 
-	// If the comms socket is set, register aileron-mcp as an MCP server
-	// so the agent has access to read_messages, draft_reply, etc.
+	// Register aileron-mcp as an MCP server so the agent has access to
+	// read_messages, draft_reply, etc. — and, when the embedded gateway
+	// is up, AILERON_URL so aileron-mcp can route action discovery
+	// (`tools/list`) and execution (`tools/call`) to the same daemon
+	// the agent's LLM calls flow through.
 	selfPath, _ := os.Executable()
 	if mcpBin, err := resolveSibling(selfPath, "aileron-mcp"); err == nil {
+		mcpEnv := map[string]string{
+			"AILERON_COMMS_SOCKET": commsSocket,
+		}
+		if gateway != nil {
+			mcpEnv["AILERON_URL"] = gateway.URL
+		}
+		envJSON, _ := json.Marshal(mcpEnv)
 		mcpConfig := fmt.Sprintf(
-			`{"mcpServers":{"aileron":{"command":%q,"env":{"AILERON_COMMS_SOCKET":%q}}}}`,
-			mcpBin, commsSocket,
+			`{"mcpServers":{"aileron":{"command":%q,"env":%s}}}`,
+			mcpBin, string(envJSON),
 		)
 		allArgs = append(allArgs, "--mcp-config", mcpConfig)
 	}
