@@ -1298,6 +1298,12 @@ func runConnectorInstall(args []string, stdout, stderr io.Writer) int {
 // setup flow for any unbound credential capabilities the action's
 // connectors declare. The user stays in the CLI surface throughout —
 // avoids the hit-binding_required-at-agent-invocation friction.
+//
+// When the server returns `connectors_missing` (issue #413), the CLI
+// shows the resolved FQN, version, and hash for each missing
+// connector and prompts the user; on confirmation it retries the
+// install with `auto_install_connectors=true` so the server runs the
+// connector pipeline transparently.
 func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fqnArg, rest, ok := extractPositional(args)
 	if !ok {
@@ -1309,6 +1315,7 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	version := flags.String("version", "", "strict SemVer (required if FQN omits @<version>)")
 	force := flags.Bool("force", false, "overwrite an existing action with the same name")
 	noBind := flags.Bool("no-bind", false, "skip the auto-prompt for unbound credentials (use in scripts)")
+	noAutoInstall := flags.Bool("no-auto-install", false, "skip the auto-prompt for missing connector deps (use in scripts)")
 	if err := flags.Parse(rest); err != nil {
 		return 1
 	}
@@ -1327,6 +1334,18 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
+	}
+	if status == http.StatusUnprocessableEntity && !*noAutoInstall {
+		newStatus, newBody, action := maybeAutoInstallMissingConnectors(respBody, body, stdin, stdout, stderr)
+		switch action {
+		case autoInstallRetried:
+			status, respBody = newStatus, newBody
+		case autoInstallDeclined:
+			// User opted out of the implicit install — the missing
+			// list was already printed by the helper. Exit cleanly
+			// without re-dumping the raw envelope.
+			return 1
+		}
 	}
 	if status != http.StatusCreated && status != http.StatusOK {
 		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
@@ -1389,6 +1408,80 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		}
 	}
 	return 0
+}
+
+// autoInstallAction enumerates the outcomes of
+// maybeAutoInstallMissingConnectors so the caller can render
+// appropriate output without re-parsing the response body.
+type autoInstallAction int
+
+const (
+	// autoInstallPassthrough means the response was not
+	// `connectors_missing` (or it was malformed) — the caller should
+	// continue handling the original status/body unchanged.
+	autoInstallPassthrough autoInstallAction = iota
+	// autoInstallRetried means the user confirmed and the install
+	// was re-issued with auto_install_connectors=true. The returned
+	// (status, body) reflect the retry's response.
+	autoInstallRetried
+	// autoInstallDeclined means the user declined the prompt. The
+	// missing list is already printed; the caller should exit
+	// cleanly without re-rendering the original envelope.
+	autoInstallDeclined
+)
+
+// maybeAutoInstallMissingConnectors inspects an `action install` 422
+// response and, when the server reports `connectors_missing`, prints
+// the resolved FQN/version/hash for each entry, prompts the user, and
+// retries the install with `auto_install_connectors=true` on yes.
+//
+// Per issue #413 and ADR-0007's "no surprise installs" rule: the user
+// must consent before any implicit connector install. An empty answer
+// (just Enter) is treated as the default Y, matching the
+// unbound-bindings prompt shape elsewhere in this command.
+func maybeAutoInstallMissingConnectors(respBody []byte, origBody map[string]any, stdin io.Reader, stdout, stderr io.Writer) (int, []byte, autoInstallAction) {
+	var env struct {
+		Error struct {
+			Code    string           `json:"code"`
+			Message string           `json:"message"`
+			Details []map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(respBody, &env); err != nil {
+		return 0, nil, autoInstallPassthrough
+	}
+	if env.Error.Code != "connectors_missing" || len(env.Error.Details) == 0 {
+		return 0, nil, autoInstallPassthrough
+	}
+
+	fmt.Fprintln(stdout, "")
+	fmt.Fprintf(stdout, "This action requires %d connector(s) that are not installed:\n", len(env.Error.Details))
+	for _, d := range env.Error.Details {
+		name, _ := d["name"].(string)
+		version, _ := d["version"].(string)
+		hash, _ := d["hash"].(string)
+		fmt.Fprintf(stdout, "  - %s@%s\n      hash: %s\n", name, version, hash)
+	}
+	answer := promptLine(stdin, stdout, "Install the connector(s) before adding this action? [Y/n]: ")
+	if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
+		fmt.Fprintln(stdout, "  Skipped. Run `aileron connector install <FQN>@<version>` for each before retrying.")
+		return 0, nil, autoInstallDeclined
+	}
+
+	retryBody := map[string]any{}
+	for k, v := range origBody {
+		retryBody[k] = v
+	}
+	retryBody["auto_install_connectors"] = true
+	retryJSON, _ := json.Marshal(retryBody)
+
+	status, body, err := bindingDoRequest(http.MethodPost, "/actions/install",
+		strings.NewReader(string(retryJSON)))
+	if err != nil {
+		fmt.Fprintf(stderr, "auto-install retry failed: %v\n", err)
+		return 0, nil, autoInstallDeclined
+	}
+	return status, body, autoInstallRetried
 }
 
 // extractPositional pulls the first non-flag argument out of args and

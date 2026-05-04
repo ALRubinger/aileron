@@ -1100,7 +1100,11 @@ paths:
         On any failure the on-disk state is unchanged. Structured failures
         per ADR-0010: `binding_required` is not raised here; signature
         failures bubble as `signature_failure`; missing connector deps
-        bubble as `validation_error` with the names in `details`.
+        bubble as `connectors_missing` with `error.details[]` listing the
+        FQN, version, and hash of each missing connector. Setting
+        `auto_install_connectors: true` on the request transparently
+        installs the missing connectors before the action install
+        proceeds.
       operationId: installAction
       requestBody:
         required: true
@@ -1130,7 +1134,14 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
         "422":
-          description: Install pipeline failed (signature failure, missing connector deps, malformed action, etc.)
+          description: |
+            Install pipeline failed. `error.code` is one of
+            `signature_failure`, `connectors_missing` (with structured
+            `MissingConnector` entries in `details[]`), `validation_error`,
+            or any other structured class from the underlying connector
+            install pipeline (e.g. `hash_mismatch`, `fetch_failed`) when
+            `auto_install_connectors: true` triggers an implicit
+            connector install that fails.
           content:
             application/json:
               schema:
@@ -3325,6 +3336,24 @@ components:
             When true, overwrite an existing action with the same name.
             When false (default), refuse with `409 Conflict` if an action
             of the same name already exists.
+        auto_install_connectors:
+          type: boolean
+          default: false
+          description: |
+            When true, the server transparently installs any
+            `[[requires.connectors]]` whose pinned hash is not already in
+            the local content-addressed store, using the connector's
+            declared version and hash from the action manifest. Each
+            implicit install runs the full connector pipeline (resolve →
+            fetch → verify signature → match `expected_hash`) and any
+            failure aborts the action install with the connector's
+            structured error.
+
+            When false (default), missing connector deps abort the
+            install with a `422` carrying `error.code = connectors_missing`
+            and `error.details[]` listing each missing connector's
+            `name`, `version`, and `hash` so the CLI can prompt the user
+            for confirmation before retrying with the flag set.
 
     InstalledAction:
       type: object
@@ -3373,6 +3402,28 @@ components:
         scope:
           type: string
           description: Human-readable scope description from the connector manifest.
+
+    MissingConnector:
+      type: object
+      required: [name, version, hash]
+      description: |
+        One entry in the `error.details[]` array returned with the
+        `connectors_missing` failure on `POST /v1/actions/install`. Names
+        a connector dependency the action pins via
+        `[[requires.connectors]]` whose `hash` is not present in the
+        local content-addressed store. The CLI uses this to display the
+        resolved FQN, version, and hash to the user before prompting for
+        an implicit install.
+      properties:
+        name:
+          type: string
+          description: Connector FQN per ADR-0002.
+        version:
+          type: string
+          description: Strict SemVer pinned by the action manifest.
+        hash:
+          type: string
+          description: Canonical `sha256:<hex>` pinned by the action manifest.
 
     Action:
       type: object
