@@ -187,6 +187,68 @@ func TestDeriveDescription_HeadingOnlyAndNilMatchReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestDeriveDescription_AppendsApprovalNoticeWhenRequired asserts that
+// when an action's manifest declares `[approval] required = true`, the
+// derived MCP tool description ends with a notice naming the approval
+// URL. The agent reads this as part of MCP tool discovery and surfaces
+// it to the user when invoking the tool.
+func TestDeriveDescription_AppendsApprovalNoticeWhenRequired(t *testing.T) {
+	t.Setenv("AILERON_APPROVAL_URL", "http://127.0.0.1:54321/approvals")
+	required := true
+	a := actionMeta{
+		Body:     "# Send Email\n\nSends a Gmail message.",
+		Approval: &actionApprovalPolicy{Required: &required},
+	}
+	got := deriveDescription(a)
+	if !strings.Contains(got, "Sends a Gmail message.") {
+		t.Errorf("base description lost; got %q", got)
+	}
+	if !strings.Contains(got, "http://127.0.0.1:54321/approvals") {
+		t.Errorf("approval URL not present in description; got %q", got)
+	}
+	if !strings.Contains(got, "requires user approval") {
+		t.Errorf("approval notice phrasing missing; got %q", got)
+	}
+}
+
+// TestDeriveDescription_NoNoticeWhenApprovalNotRequired asserts that
+// actions without `[approval] required = true` get the unmodified
+// description — the legacy path is unchanged.
+func TestDeriveDescription_NoNoticeWhenApprovalNotRequired(t *testing.T) {
+	t.Setenv("AILERON_APPROVAL_URL", "http://127.0.0.1:54321/approvals")
+	a := actionMeta{
+		Body: "# Read Mail\n\nLists recent inbox messages.",
+	}
+	got := deriveDescription(a)
+	if strings.Contains(got, "approval") {
+		t.Errorf("unrequested approval notice in description; got %q", got)
+	}
+	if got != "Lists recent inbox messages." {
+		t.Errorf("base description altered; got %q", got)
+	}
+}
+
+// TestDeriveDescription_FallbackPhrasingWhenURLUnset asserts that when
+// AILERON_APPROVAL_URL is not set (e.g. running aileron-mcp standalone
+// without launch), the notice still fires but uses generic "the Aileron
+// webapp" wording rather than dropping the warning entirely. Better to
+// keep the agent informed even without an actionable URL.
+func TestDeriveDescription_FallbackPhrasingWhenURLUnset(t *testing.T) {
+	t.Setenv("AILERON_APPROVAL_URL", "")
+	required := true
+	a := actionMeta{
+		Body:     "# Send Email\n\nSends a Gmail message.",
+		Approval: &actionApprovalPolicy{Required: &required},
+	}
+	got := deriveDescription(a)
+	if !strings.Contains(got, "the Aileron webapp") {
+		t.Errorf("fallback phrasing missing; got %q", got)
+	}
+	if strings.Contains(got, "http://") {
+		t.Errorf("unexpected URL in fallback path; got %q", got)
+	}
+}
+
 func TestDeriveInputSchema_NoInputs(t *testing.T) {
 	got := deriveInputSchema(actionMeta{})
 	want := schema{Type: "object"}
