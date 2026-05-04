@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/account"
@@ -614,7 +613,7 @@ func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
 			"root", store.Root(), "error", err)
 		_ = store.RebuildIndex()
 	}
-	keyringPath := defaultKeyringPath()
+	keyringPath := cstore.DefaultKeyringPath()
 	keyring, err := cstore.LoadKeyring(keyringPath)
 	if err != nil {
 		log.Warn("failed to load keyring; falling back to empty (fail-closed)",
@@ -627,16 +626,4 @@ func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
 		Verifier: keyring,
 		Store:    store,
 	}
-}
-
-// defaultKeyringPath returns the conventional path for the user's
-// publisher trust file: `$HOME/.aileron/keyring.json`. When the home
-// directory cannot be determined (test environments, edge cases),
-// returns an empty string — LoadKeyring treats that as a missing file.
-func defaultKeyringPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	return filepath.Join(home, ".aileron", "keyring.json")
 }

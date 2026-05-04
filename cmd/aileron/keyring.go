@@ -1,0 +1,240 @@
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+
+	"github.com/ALRubinger/aileron/internal/cstore"
+)
+
+// runKeyring dispatches `aileron keyring <subcommand>` to one of the
+// keyring management subcommands. The keyring is the v1 source of
+// trust for connector signature verification (per ADR-0002): every
+// `aileron connector install` checks the binary's signature against
+// keys registered for the FQN's authority. Without an entry, install
+// fails closed with class signature_failure.
+//
+// The keyring file lives at `~/.aileron/keyring.json`; users edit it
+// to authorize a publisher (or use these subcommands).
+func runKeyring(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, "usage: aileron keyring <trust|list|revoke> [args...]")
+		return 1
+	}
+	switch args[0] {
+	case "trust":
+		return runKeyringTrust(args[1:], stdout, stderr)
+	case "list":
+		return runKeyringList(args[1:], stdout, stderr)
+	case "revoke":
+		return runKeyringRevoke(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown keyring subcommand: %q\n", args[0])
+		fmt.Fprintln(stderr, "usage: aileron keyring <trust|list|revoke> [args...]")
+		return 1
+	}
+}
+
+// runKeyringTrust adds a publisher's ed25519 public key to the local
+// keyring. The key file may be a PEM-encoded SubjectPublicKeyInfo (as
+// produced by `openssl pkey -pubout`) or a raw 32-byte ed25519 public
+// key encoded in base64. Adding a key the keyring already trusts for
+// the same authority is a no-op (so re-running the command after a
+// non-rotation is safe).
+func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 2 {
+		fmt.Fprintln(stderr, "usage: aileron keyring trust <authority> <pubkey-file>")
+		fmt.Fprintln(stderr, "  authority: e.g. github://ALRubinger/aileron-connector-google")
+		fmt.Fprintln(stderr, "  pubkey-file: PEM (openssl pkey -pubout) or base64 raw key file")
+		return 1
+	}
+	authority := args[0]
+	if authority == "" {
+		fmt.Fprintln(stderr, "error: authority cannot be empty")
+		return 1
+	}
+
+	pub, err := readPublicKey(args[1])
+	if err != nil {
+		fmt.Fprintf(stderr, "error: read public key: %v\n", err)
+		return 1
+	}
+
+	path := cstore.DefaultKeyringPath()
+	if path == "" {
+		fmt.Fprintln(stderr, "error: cannot determine home directory; set $HOME or write ~/.aileron/keyring.json by hand")
+		return 1
+	}
+	keyring, err := cstore.LoadKeyring(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: load keyring %q: %v\n", path, err)
+		return 1
+	}
+
+	if keyring.HasKey(authority, pub) {
+		fmt.Fprintf(stdout, "Already trusted: %s\n", authority)
+		fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
+		fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+		return 0
+	}
+
+	keyring.Add(authority, pub)
+	if err := keyring.SaveKeyring(path); err != nil {
+		fmt.Fprintf(stderr, "error: save keyring: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "✓ Trusted publisher %s\n", authority)
+	fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
+	fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+	return 0
+}
+
+// runKeyringList prints the trusted publishers and a fingerprint per
+// registered key. Stable output order — authorities sorted, keys
+// printed in the order the keyring loaded them.
+func runKeyringList(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "usage: aileron keyring list")
+		return 1
+	}
+	path := cstore.DefaultKeyringPath()
+	if path == "" {
+		fmt.Fprintln(stderr, "error: cannot determine home directory")
+		return 1
+	}
+	keyring, err := cstore.LoadKeyring(path)
+	if err != nil {
+		// Missing file → empty keyring; LoadKeyring returns nil error.
+		// Anything else here is a real malformation.
+		fmt.Fprintf(stderr, "error: load keyring %q: %v\n", path, err)
+		return 1
+	}
+
+	authorities := keyring.Authorities()
+	if len(authorities) == 0 {
+		fmt.Fprintln(stdout, "No trusted publishers.")
+		fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+		fmt.Fprintln(stdout, "  Add one with `aileron keyring trust <authority> <pubkey-file>`.")
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "Trusted publishers (%d):\n", len(authorities))
+	for _, authority := range authorities {
+		keys := keyring.Keys(authority)
+		fmt.Fprintf(stdout, "  %s  (%d %s)\n", authority, len(keys), pluralKeys(len(keys)))
+		for _, key := range keys {
+			fmt.Fprintf(stdout, "    %s\n", fingerprint(key))
+		}
+	}
+	fmt.Fprintf(stdout, "\nKeyring: %s\n", path)
+	return 0
+}
+
+// runKeyringRevoke removes every key registered for a publisher.
+// Subsequent install attempts for that authority fail closed until
+// the publisher is re-trusted. There is no per-key revocation in v1 —
+// rotation under one authority is rare enough that the additional
+// flag space is not worth carrying.
+func runKeyringRevoke(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron keyring revoke <authority>")
+		return 1
+	}
+	authority := args[0]
+	path := cstore.DefaultKeyringPath()
+	if path == "" {
+		fmt.Fprintln(stderr, "error: cannot determine home directory")
+		return 1
+	}
+	keyring, err := cstore.LoadKeyring(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: load keyring %q: %v\n", path, err)
+		return 1
+	}
+	if !keyring.Remove(authority) {
+		fmt.Fprintf(stdout, "Not trusted: %s (no change)\n", authority)
+		return 0
+	}
+	if err := keyring.SaveKeyring(path); err != nil {
+		fmt.Fprintf(stderr, "error: save keyring: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "✓ Revoked publisher %s\n", authority)
+	fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+	return 0
+}
+
+// readPublicKey decodes an ed25519 public key from a file. Tries PEM
+// first (the format `openssl pkey -pubout` produces); falls back to
+// trimming whitespace and treating the contents as a base64 raw key.
+// Either form is acceptable in v1 — connector authors typically ship
+// PEM as their `keys/publisher.pub`, but operators wiring up a
+// keyring from a recovery snippet often paste the raw base64.
+func readPublicKey(path string) (ed25519.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("file not found: %s", path)
+		}
+		return nil, err
+	}
+	if pub, pemErr := cstore.ParsePEMPublicKey(data); pemErr == nil {
+		return pub, nil
+	}
+	// Fall back to base64 raw form: strip whitespace then decode.
+	trimmed := stripWhitespace(string(data))
+	for _, enc := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		if raw, err := enc.DecodeString(trimmed); err == nil {
+			if len(raw) == ed25519.PublicKeySize {
+				return ed25519.PublicKey(raw), nil
+			}
+			return nil, fmt.Errorf("decoded %d bytes; ed25519 public key must be %d bytes",
+				len(raw), ed25519.PublicKeySize)
+		}
+	}
+	return nil, fmt.Errorf("file %q is neither PEM nor base64-encoded raw ed25519 public key", path)
+}
+
+// stripWhitespace removes ASCII whitespace from s. Used to tolerate
+// pasted keys with stray newlines / spaces.
+func stripWhitespace(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			out = append(out, s[i])
+		}
+	}
+	return string(out)
+}
+
+// fingerprint returns a short, stable identifier for a public key —
+// the first 16 hex characters of SHA-256(key). Long enough to
+// disambiguate keys at a glance, short enough to fit on a terminal
+// line without wrapping. Same shape of fingerprint as the canonical
+// ssh-keygen / git short-hash idioms.
+func fingerprint(pub ed25519.PublicKey) string {
+	sum := sha256.Sum256(pub)
+	return "sha256:" + base64.RawStdEncoding.EncodeToString(sum[:])[:22]
+}
+
+func pluralKeys(n int) string {
+	if n == 1 {
+		return "key"
+	}
+	return "keys"
+}

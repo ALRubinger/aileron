@@ -2,12 +2,16 @@ package cstore
 
 import (
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"sort"
 )
 
 // keyringFile is the JSON shape persisted at ~/.aileron/keyring.json
@@ -97,4 +101,137 @@ func decodeEd25519Pub(s string) (ed25519.PublicKey, error) {
 		return ed25519.PublicKey(bytes), nil
 	}
 	return nil, fmt.Errorf("not valid base64")
+}
+
+// SaveKeyring writes the keyring's current state to disk as the v1
+// JSON shape. Authorities are emitted in sorted order so successive
+// saves produce stable diffs. The file is written with mode 0600 to
+// match the surrounding ~/.aileron/ files (vault, secrets); parent
+// directories are created with 0700 if missing.
+//
+// Save is the inverse of LoadKeyring: a subsequent Load reads back an
+// equivalent keyring (modulo key ordering within each authority,
+// which the file format does not guarantee).
+func (k *Ed25519Keyring) SaveKeyring(path string) error {
+	k.mu.RLock()
+	doc := keyringFile{
+		Version:    1,
+		Publishers: make(map[string][]string, len(k.keys)),
+	}
+	for authority, pubs := range k.keys {
+		encoded := make([]string, 0, len(pubs))
+		for _, pub := range pubs {
+			encoded = append(encoded, base64.StdEncoding.EncodeToString(pub))
+		}
+		doc.Publishers[authority] = encoded
+	}
+	k.mu.RUnlock()
+
+	body, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal keyring: %w", err)
+	}
+	body = append(body, '\n')
+
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create keyring directory %q: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		return fmt.Errorf("write keyring %q: %w", path, err)
+	}
+	return nil
+}
+
+// Authorities returns the authority strings the keyring has at least
+// one key registered for, in sorted order.
+func (k *Ed25519Keyring) Authorities() []string {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	out := make([]string, 0, len(k.keys))
+	for authority := range k.keys {
+		out = append(out, authority)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Keys returns a copy of the keys registered for an authority. Returns
+// nil if the authority is not present.
+func (k *Ed25519Keyring) Keys(authority string) []ed25519.PublicKey {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	src := k.keys[authority]
+	if src == nil {
+		return nil
+	}
+	out := make([]ed25519.PublicKey, len(src))
+	copy(out, src)
+	return out
+}
+
+// Remove drops every key registered for the authority. Returns true
+// when the authority was present (and its keys were removed), false
+// when the authority was not registered.
+func (k *Ed25519Keyring) Remove(authority string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.keys[authority]; !ok {
+		return false
+	}
+	delete(k.keys, authority)
+	return true
+}
+
+// HasKey reports whether the keyring already trusts the given public
+// key for the authority. Used by callers (e.g. `aileron keyring trust`)
+// to detect duplicate adds and avoid bloating the file with copies of
+// the same key on repeated invocation.
+func (k *Ed25519Keyring) HasKey(authority string, pub ed25519.PublicKey) bool {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	for _, existing := range k.keys[authority] {
+		if ed25519.PublicKey(existing).Equal(pub) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParsePEMPublicKey decodes a PEM-encoded ed25519 public key
+// (SubjectPublicKeyInfo as produced by `openssl pkey -pubout`) into
+// the raw ed25519.PublicKey form Aileron's keyring stores. Returns
+// an error when the PEM block is missing, the algorithm is not
+// ed25519, or the encoded length is wrong.
+func ParsePEMPublicKey(pemBytes []byte) (ed25519.PublicKey, error) {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKIX public key: %w", err)
+	}
+	edPub, ok := pub.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("public key is not ed25519 (got %T)", pub)
+	}
+	if len(edPub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("ed25519 public key has wrong length %d (want %d)",
+			len(edPub), ed25519.PublicKeySize)
+	}
+	return edPub, nil
+}
+
+// DefaultKeyringPath returns the conventional path
+// `$HOME/.aileron/keyring.json`. Returns "" when the user's home
+// directory cannot be determined; LoadKeyring treats that as a
+// missing file (empty keyring, fail-closed at install).
+func DefaultKeyringPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".aileron", "keyring.json")
 }
