@@ -2099,6 +2099,180 @@ func TestRunConnectorCheck_FetcherSendsQueryParam(t *testing.T) {
 	}
 }
 
+// TestRunSync_Empty asserts the empty-state path: no actions, no
+// requireds, no installs. The CLI prints a "no dependencies" line
+// and exits 0 — what an operator running sync on a fresh project
+// sees before installing anything.
+func TestRunSync_Empty(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No connector dependencies") {
+		t.Errorf("expected empty-state message; got: %s", stdout.String())
+	}
+}
+
+// TestRunSync_InstallsAndUnbound asserts the canonical happy path:
+// one action declares a connector, sync installs it, and reports an
+// unbound capability so the operator knows to run `aileron binding
+// setup <FQN>` next.
+func TestRunSync_InstallsAndUnbound(t *testing.T) {
+	scope := "test scope"
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			ActionsSeen: 1,
+			Required:    []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+			Installed: []installedConnectorWire{
+				{Fqn: "github://acme/widget", Version: "1.0.0", Hash: "sha256:abc"},
+			},
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/widget", Kind: "api_key", Scope: &scope},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Walked 1 action", "github://acme/widget", "Installed 1", "1 unbound", "api_key", "test scope", "aileron binding setup"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output; got: %s", want, out)
+		}
+	}
+}
+
+// TestRunSync_AlreadyInstalledIdempotent asserts the second-run path:
+// every connector already present, no failures, no unbound. A clean
+// idempotent re-run should print "already installed" and exit 0.
+func TestRunSync_AlreadyInstalledIdempotent(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			ActionsSeen:      1,
+			Required:         []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+			AlreadyInstalled: []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "already installed") {
+		t.Errorf("expected 'already installed'; got: %s", out)
+	}
+	if strings.Contains(out, "Installed 1") {
+		t.Errorf("did not expect 'Installed 1' line on idempotent re-run; got: %s", out)
+	}
+}
+
+// TestRunSync_InstallFailureExits1 asserts the script-friendly path:
+// any install failure exits 1 so operators wiring sync into CI / Make
+// targets can branch on the exit code.
+func TestRunSync_InstallFailureExits1(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			ActionsSeen: 1,
+			Required:    []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+			InstallFailures: []connectorFailureWire{
+				{Fqn: "github://acme/widget", Version: "1.0.0", Error: "connection refused"},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 on install failure", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "1 install failure") {
+		t.Errorf("expected '1 install failure'; got: %s", out)
+	}
+	if !strings.Contains(out, "connection refused") {
+		t.Errorf("expected error message in output; got: %s", out)
+	}
+}
+
+// TestRunSync_BindAllWarns asserts that --bind-all prints a clear
+// "not yet implemented" warning so operators learn the limitation
+// without filing a "broken" bug. When --bind-all lands as a real
+// feature, this test will be replaced.
+func TestRunSync_BindAllWarns(t *testing.T) {
+	scope := "test"
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/widget", Kind: "api_key", Scope: &scope},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"sync", "--bind-all"}, newTestRegistry(), &stdout, &stderr)
+	if !strings.Contains(stderr.String(), "not yet implemented") {
+		t.Errorf("expected '--bind-all not yet implemented' warning; got stderr: %s", stderr.String())
+	}
+}
+
+// TestRunSync_YesFlagPropagated asserts the --yes flag flows through
+// to the fetcher (and thence to the daemon's auto_install body
+// field). Without this propagation the flag would be silently dropped.
+func TestRunSync_YesFlagPropagated(t *testing.T) {
+	var sawAutoInstall bool
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		sawAutoInstall = autoInstall
+		return &syncResult{}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"sync", "--yes"}, newTestRegistry(), &stdout, &stderr)
+	if !sawAutoInstall {
+		t.Error("expected fetcher to be called with autoInstall=true")
+	}
+}
+
+// TestRunSync_FetcherError asserts the daemon-down path: a network
+// or 5xx error from the daemon exits 1 and prints the error to stderr.
+func TestRunSync_FetcherError(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on fetcher error")
+	}
+	if !strings.Contains(stderr.String(), "connection refused") {
+		t.Errorf("expected error in stderr; got: %s", stderr.String())
+	}
+}
+
 func TestRunAction_AddHappyPath(t *testing.T) {
 	var seenBody []byte
 	var seenPath string
