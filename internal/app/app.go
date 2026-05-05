@@ -317,13 +317,15 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	}
 
 	// --- Audit log (ADR-0010) ---
-	// The in-memory store is sufficient for v1 dev/test; Postgres
-	// persistence is post-MVP. The recorder mints audit IDs and
-	// stamps them onto failures so the agent's response carries a
-	// working back-reference into the audit log. Built before the
-	// sandbox executor and binding store so each can emit lifecycle
-	// events through the same recorder.
-	auditStore := audit.NewMemStore()
+	// File-backed JSONL by default so events survive daemon restart;
+	// fall back to the in-memory store when no path is configured (the
+	// AILERON_AUDIT_PATH env var explicitly set to empty) or when the
+	// file path can't be opened. Postgres persistence is post-MVP. The
+	// recorder mints audit IDs and stamps them onto failures so the
+	// agent's response carries a working back-reference into the audit
+	// log. Built before the sandbox executor and binding store so each
+	// can emit lifecycle events through the same recorder.
+	auditStore := newAuditStore(log)
 	recorder := audit.NewRecorder(auditStore, nil, nil)
 	server.auditStore = auditStore
 	server.auditRecorder = recorder

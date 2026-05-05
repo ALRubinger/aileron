@@ -740,8 +740,10 @@ func TestSetup_NoInstallerReturns503(t *testing.T) {
 
 // --- audit helpers ---
 
-// dumpEvents reads every recorded event from the in-memory audit store.
-func dumpEvents(t *testing.T, store *audit.MemStore) []audit.Event {
+// dumpEvents reads every recorded event from the audit store. Accepts
+// any EventStore so tests written against MemStore continue to work
+// after the production wiring switched to FileStore.
+func dumpEvents(t *testing.T, store audit.EventStore) []audit.Event {
 	t.Helper()
 	traces, err := store.ListTraces(context.Background(), audit.Filter{})
 	if err != nil {

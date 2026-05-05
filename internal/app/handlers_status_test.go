@@ -3,13 +3,17 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -256,5 +260,74 @@ func TestDefaultVaultPath_FromHome(t *testing.T) {
 	want := filepath.Join("/test/home", ".aileron", "secrets.json")
 	if got != want {
 		t.Errorf("defaultVaultPath = %q, want %q", got, want)
+	}
+}
+
+// TestResolveAuditPath_DefaultsToHome asserts the env-unset path
+// lands at `<home>/.aileron/audit.jsonl`.
+func TestResolveAuditPath_DefaultsToHome(t *testing.T) {
+	t.Setenv("HOME", "/test/home")
+	os.Unsetenv("AILERON_AUDIT_PATH")
+	got := resolveAuditPath()
+	want := filepath.Join("/test/home", ".aileron", "audit.jsonl")
+	if got != want {
+		t.Errorf("resolveAuditPath = %q, want %q", got, want)
+	}
+}
+
+// TestResolveAuditPath_RespectsEnvVar asserts that an explicit env
+// value (including an empty string for the in-memory opt-out)
+// supersedes the home-based default.
+func TestResolveAuditPath_RespectsEnvVar(t *testing.T) {
+	t.Setenv("AILERON_AUDIT_PATH", "/tmp/x/y/audit.jsonl")
+	if got := resolveAuditPath(); got != "/tmp/x/y/audit.jsonl" {
+		t.Errorf("resolveAuditPath = %q, want explicit", got)
+	}
+	t.Setenv("AILERON_AUDIT_PATH", "")
+	if got := resolveAuditPath(); got != "" {
+		t.Errorf("resolveAuditPath with empty env = %q, want empty (memory opt-out)", got)
+	}
+}
+
+// TestNewAuditStore_FileBackedByDefault asserts that the wiring
+// chooses FileStore when AILERON_AUDIT_PATH points at a writable
+// path. Regression guard for the bug behind issue #412: events
+// recorded under aileron launch did not survive process exit.
+func TestNewAuditStore_FileBackedByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	t.Setenv("AILERON_AUDIT_PATH", path)
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := newAuditStore(log)
+	if _, ok := store.(*audit.FileStore); !ok {
+		t.Fatalf("got %T, want *audit.FileStore", store)
+	}
+
+	// Round-trip through the file: append, then a fresh FileStore
+	// must surface the same event after replay.
+	if err := store.Append(context.Background(), audit.Event{
+		EventID: "wired", Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	reopened, err := audit.NewFileStore(path, log)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	if _, ok := reopened.GetByEventID("wired"); !ok {
+		t.Error("event 'wired' did not survive into a fresh reader")
+	}
+}
+
+// TestNewAuditStore_FallsBackToMemoryWhenEnvEmpty asserts the explicit
+// in-memory opt-out path: tests and ephemeral contexts that set
+// `AILERON_AUDIT_PATH=` (empty) get a MemStore back.
+func TestNewAuditStore_FallsBackToMemoryWhenEnvEmpty(t *testing.T) {
+	t.Setenv("AILERON_AUDIT_PATH", "")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := newAuditStore(log)
+	if _, ok := store.(*audit.MemStore); !ok {
+		t.Errorf("got %T, want *audit.MemStore for empty AILERON_AUDIT_PATH", store)
 	}
 }

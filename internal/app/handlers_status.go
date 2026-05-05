@@ -1,11 +1,13 @@
 package app
 
 import (
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
 )
@@ -115,4 +117,41 @@ func defaultVaultPath() string {
 		return filepath.Join(".aileron", "secrets.json")
 	}
 	return filepath.Join(home, ".aileron", "secrets.json")
+}
+
+// resolveAuditPath returns the JSONL path the action-execution audit
+// store should write to, honoring AILERON_AUDIT_PATH.
+//
+//   - env unset → default `<home>/.aileron/audit.jsonl`
+//   - env explicitly empty → "" (caller falls back to in-memory store)
+//   - env set → that exact path
+func resolveAuditPath() string {
+	if p, ok := os.LookupEnv("AILERON_AUDIT_PATH"); ok {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".aileron", "audit.jsonl")
+	}
+	return filepath.Join(home, ".aileron", "audit.jsonl")
+}
+
+// newAuditStore picks the audit-store implementation per
+// resolveAuditPath. A file-open failure logs a warning and falls back
+// to in-memory so the daemon still starts (degraded durability beats
+// no daemon).
+func newAuditStore(log *slog.Logger) audit.EventStore {
+	path := resolveAuditPath()
+	if path == "" {
+		log.Info("audit store: in-memory; events will not survive daemon restart (set AILERON_AUDIT_PATH to enable persistence)")
+		return audit.NewMemStore()
+	}
+	fs, err := audit.NewFileStore(path, log)
+	if err != nil {
+		log.Warn("audit store: could not open file, falling back to in-memory",
+			"path", path, "error", err.Error())
+		return audit.NewMemStore()
+	}
+	log.Info("audit store: file-backed", "path", path)
+	return fs
 }
