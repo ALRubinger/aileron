@@ -29,6 +29,20 @@ The schema is durable: every payload field uses the OpenTelemetry-namespaced key
 
 ## OpenTelemetry traces (opt-in)
 
+### What this gives you
+
+[OpenTelemetry](https://opentelemetry.io/) (OTel) is the vendor-neutral industry standard for distributed tracing, metrics, and logs — the substrate Grafana, Datadog, Jaeger, Honeycomb, and most modern observability tools agree on. A *trace* is a tree of *spans*; each span is a timed unit of work with a name, attributes (key/value tags), a status, and a parent. The [W3C TraceContext](https://www.w3.org/TR/trace-context/) spec defines a `traceparent` HTTP header that carries the trace ID and parent span ID across service boundaries so a multi-service request stays connected end-to-end, regardless of which language or framework each service is written in.
+
+Aileron's role here is thin and consistent: when the agent calls Aileron, Aileron starts spans for the work it does (action execution, connector calls, capability checks, approval waits), parents them to the agent's incoming `traceparent` if one was passed, and emits them through a configurable exporter. The spans plug into your existing observability stack without bespoke integration — Aileron looks like any other instrumented service in the trace tree. If you don't have an observability practice yet, the **stdout exporter** described below works as a development aid: pipe the JSON-per-line output through `jq` to inspect what the runtime is doing.
+
+A few terms you'll see:
+
+- **Exporter** — the component that ships spans out of the process. Aileron currently supports `noop` (the default — drops spans, zero overhead) and `stdout` (writes JSON-per-line to stderr). A file exporter and an OTLP exporter are pending.
+- **OTLP** — the OpenTelemetry Protocol, the wire format collectors expect. When Aileron's OTLP exporter ships, you'll point it at an **OTel endpoint** — typically the URL of an [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) deployed alongside your other services, which fans the spans out to whichever backend (Grafana, Datadog, etc.) you've configured.
+- **Span status** — `Ok` (default), `Error`, or `Unset`. Aileron sets `Error` on any span whose underlying operation failed, with the failure message as the status description.
+
+### Enabling tracing
+
 When tracing is enabled, Aileron starts a server-root span on every request and child spans for the work inside. Spans propagate via [W3C TraceContext](https://www.w3.org/TR/trace-context/), so an inbound `traceparent` header from the calling agent makes Aileron's spans children of the agent's trace — your end-to-end view stays coherent.
 
 To turn it on for local development:
