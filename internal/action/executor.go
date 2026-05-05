@@ -14,7 +14,18 @@ import (
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/sandbox"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName names the OTel instrumentation library reported on
+// spans this package emits. Distinct from the resource service.name
+// (which identifies Aileron itself); per OTel conventions this names
+// the *instrumentation*, so traces carry a stable provenance for
+// the action-execution layer.
+const tracerName = "github.com/ALRubinger/aileron/internal/action"
 
 // Executor runs an installed action with the given call-time arguments
 // and returns a Result whose Content becomes the tool-result message
@@ -160,7 +171,20 @@ func (e *SandboxExecutor) Close(ctx context.Context) error {
 }
 
 // Execute implements [Executor].
-func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[string]any) (Result, error) {
+//
+// Emits an `aileron.action.execute` span around the full call and a
+// nested `aileron.connector.call` span around each step's
+// connector invocation. Span attributes use the OTel-namespaced shape
+// shared with the audit log (PR #452) so spans and audit events carry
+// identical keys — single source of truth.
+func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[string]any) (res Result, err error) {
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "aileron.action.execute",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(attribute.String("aileron.action.name", name)),
+	)
+	defer func() { annotateActionSpan(span, res, err); span.End() }()
+
 	if e.Actions == nil || e.Store == nil || e.Runtime == nil {
 		return Result{}, fmt.Errorf("SandboxExecutor: Actions, Store, and Runtime are all required")
 	}
@@ -175,6 +199,7 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 	if len(manifest.Execute) == 0 {
 		return Result{}, fmt.Errorf("action %q has no execute steps", name)
 	}
+	span.SetAttributes(attribute.Int("aileron.action.steps_count", len(manifest.Execute)))
 
 	// Build per-step output map keyed by step ID; later steps may
 	// reference prior outputs via interpolation. Interpolation itself
@@ -189,7 +214,7 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 			return errorResult(capErr), nil
 		}
 
-		conn, connManifest, compileErr := e.connectorFor(ctx, manifest, step.Connector)
+		conn, connManifest, connHash, compileErr := e.connectorFor(ctx, manifest, step.Connector)
 		if compileErr != nil {
 			return errorResult(compileErr), nil
 		}
@@ -215,7 +240,7 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 		resolver := e.resolverFor(ctx, connManifest, step.Connector)
 
 		allowed := allowedAuthorityFor(manifest, step.Connector)
-		res, invErr := conn.Invoke(ctx, sandbox.Call{
+		stepRes, invErr := e.invokeWithSpan(ctx, conn, step.Connector, step.Op, connHash, sandbox.Call{
 			Op:                 step.Op,
 			Args:               opArgs,
 			AllowedAuthority:   allowed,
@@ -224,13 +249,13 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 		if invErr != nil {
 			return errorResult(invErr), nil
 		}
-		stepOutputs[step.ID] = res.Output
+		stepOutputs[step.ID] = stepRes.Output
 
 		// Last step's output is the action's output by convention.
 		if i == len(manifest.Execute)-1 {
 			body, mErr := json.Marshal(map[string]any{
 				"action": name,
-				"output": res.Output,
+				"output": stepRes.Output,
 				"steps":  stepOutputs,
 			})
 			if mErr != nil {
@@ -244,15 +269,69 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 	return Result{}, nil
 }
 
-// connectorFor returns a compiled sandbox.Connector and the parsed
-// connector manifest for the connector FQN referenced by
-// `connectorFQN`. The connector is looked up in the action's
-// [[requires.connectors]] block (for hash + version), the matching
-// entry is fetched from the content-addressed store, and the binary
-// is compiled — cached by hash for subsequent calls. The connector
-// manifest is returned so the caller can read the connector's
-// declared `[capabilities.credential].kind` without re-parsing.
-func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connectorFQN string) (sandbox.Connector, *cstore.Manifest, error) {
+// invokeWithSpan wraps a single connector.Invoke call in an
+// `aileron.connector.call` span. Attributes follow the OTel-shaped
+// audit schema: aileron.connector.{fqn,op,hash}. Invoke errors mark
+// the span as Error; success leaves status Unset.
+func (e *SandboxExecutor) invokeWithSpan(ctx context.Context, conn sandbox.Connector, fqn, op, hash string, call sandbox.Call) (sandbox.Result, error) {
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "aileron.connector.call",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("aileron.connector.fqn", fqn),
+			attribute.String("aileron.connector.op", op),
+			attribute.String("aileron.connector.hash", hash),
+		),
+	)
+	defer span.End()
+	res, err := conn.Invoke(ctx, call)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return res, err
+}
+
+// annotateActionSpan reflects the execute outcome onto the
+// aileron.action.execute span. Two failure modes per ADR-0010:
+//
+//   - Result.Failure non-nil: structured action-side failure
+//     (capability_denied, binding_required, etc.). The LLM sees
+//     these as tool results and can decide how to proceed; the span
+//     is still marked Error because the action's operation did fail
+//     in the OTel sense, with the failure attributes attached for
+//     filtering.
+//   - err non-nil: gateway-fatal Go error (executor misconfigured,
+//     action not found). Span Error with the err's message.
+func annotateActionSpan(span trace.Span, res Result, err error) {
+	if !span.IsRecording() {
+		return
+	}
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return
+	}
+	if res.Failure != nil {
+		span.SetStatus(codes.Error, res.Failure.Message())
+		span.SetAttributes(
+			attribute.String("aileron.failure.class", string(res.Failure.Class())),
+			attribute.String("aileron.failure.boundary", string(res.Failure.Boundary())),
+			attribute.Bool("aileron.failure.retriable", res.Failure.Retriable()),
+		)
+	}
+}
+
+// connectorFor returns a compiled sandbox.Connector, the parsed
+// connector manifest, and the resolved content hash for the
+// connector FQN referenced by `connectorFQN`. The connector is
+// looked up in the action's [[requires.connectors]] block (for hash
+// + version), the matching entry is fetched from the content-
+// addressed store, and the binary is compiled — cached by hash for
+// subsequent calls. The connector manifest is returned so the
+// caller can read the connector's declared
+// `[capabilities.credential].kind` without re-parsing; the hash is
+// returned so observability spans can attach `aileron.connector.hash`
+// without re-walking the manifest.
+func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connectorFQN string) (sandbox.Connector, *cstore.Manifest, string, error) {
 	// Find the [[requires.connectors]] entry that matches this FQN.
 	var dep *RequiresConnector
 	for i := range m.Requires.Connectors {
@@ -262,27 +341,27 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 		}
 	}
 	if dep == nil {
-		return nil, nil, fmt.Errorf("action does not declare connector %q in [[requires.connectors]]", connectorFQN)
+		return nil, nil, "", fmt.Errorf("action does not declare connector %q in [[requires.connectors]]", connectorFQN)
 	}
 
 	e.mu.Lock()
 	if cached, ok := e.cache[dep.Hash]; ok {
 		e.mu.Unlock()
-		return cached.conn, cached.manifest, nil
+		return cached.conn, cached.manifest, dep.Hash, nil
 	}
 	e.mu.Unlock()
 
 	entryDir, err := e.Store.EntryDir(dep.Hash)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connector %s: %w", connectorFQN, err)
+		return nil, nil, "", fmt.Errorf("connector %s: %w", connectorFQN, err)
 	}
 	manifestBytes, err := os.ReadFile(filepath.Join(entryDir, "manifest.toml"))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read connector manifest: %w", err)
+		return nil, nil, "", fmt.Errorf("read connector manifest: %w", err)
 	}
 	cmf, err := cstore.ParseManifest(filepath.Join(entryDir, "manifest.toml"), manifestBytes)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	binPath := filepath.Join(entryDir, "connector.wasm")
 	if _, statErr := os.Stat(binPath); errors.Is(statErr, os.ErrNotExist) {
@@ -290,16 +369,16 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 	}
 	binBytes, err := os.ReadFile(binPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read connector binary: %w", err)
+		return nil, nil, "", fmt.Errorf("read connector binary: %w", err)
 	}
 	conn, err := e.Runtime.Compile(ctx, cmf, binBytes)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	e.mu.Lock()
 	e.cache[dep.Hash] = cachedConnector{conn: conn, manifest: cmf}
 	e.mu.Unlock()
-	return conn, cmf, nil
+	return conn, cmf, dep.Hash, nil
 }
 
 // resolverFor returns the credential.Resolver for the named connector,
