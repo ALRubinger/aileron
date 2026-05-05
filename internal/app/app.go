@@ -331,6 +331,11 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// server elsewhere) → empty, which falls back to a generic prompt
 	// inside the desktop notifier so the user at least learns
 	// something needs attention.
+	webappURL := cfg.WebappURL
+	if webappURL == "" {
+		webappURL = os.Getenv("AILERON_WEBAPP_URL")
+	}
+	server.webappURL = webappURL
 	reviewURL := buildApprovalsReviewURL(cfg.WebappURL, os.Getenv("AILERON_WEBAPP_URL"))
 	server.actionApprovals.SetOnRegister(func(a *approval.ActionApproval) {
 		summary := a.ActionName

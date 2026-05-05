@@ -70,6 +70,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
 
+  /v1/status:
+    get:
+      tags: [Health]
+      summary: Get runtime status (version, listen address, action / connector / binding counts, vault state)
+      description: |
+        Read-only snapshot of the running daemon's state, ratified by
+        ADR-0004's "operational primitives" line. Surfaced through the
+        `aileron status` CLI and as the in-band `/aileron status`
+        agent slash-command per ADR-0009. Safe to call frequently —
+        no side effects, no vault unlock, no lookups outside the
+        process's in-memory state.
+
+        Distinct from `GET /v1/health` (which is a liveness probe).
+        `/v1/status` is the operator's "what's installed and working"
+        snapshot.
+      operationId: getStatus
+      security: []
+      responses:
+        "200":
+          description: Runtime status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+
   /auth/{provider}/login:
     get:
       tags: [Auth]
@@ -2416,6 +2441,60 @@ components:
         timestamp:
           type: string
           format: date-time
+
+    StatusResponse:
+      type: object
+      required: [version, vault_state, action_count, connector_count, binding_count]
+      description: |
+        Operational snapshot returned by `GET /v1/status`. Surfaced
+        through the `aileron status` CLI and the `/aileron status`
+        agent slash-command. Read-only; safe to poll.
+      properties:
+        version:
+          type: string
+          description: Daemon version string (matches `aileron version`).
+        commit:
+          type: string
+          description: Short git commit the daemon was built from. May be empty for unstamped builds.
+        listen_addr:
+          type: string
+          description: |
+            Address the daemon is listening on (e.g. `127.0.0.1:54321`).
+            Best-effort; empty when the runtime can't introspect its
+            own listener (most embedded contexts).
+        action_count:
+          type: integer
+          description: Number of installed actions in `~/.aileron/actions/`.
+        connector_count:
+          type: integer
+          description: |
+            Number of connector tarballs in the content-addressed
+            store (`~/.aileron/store/connectors/sha256/`).
+        binding_count:
+          type: integer
+          description: |
+            Number of credential bindings in the vault. Surfaced as
+            metadata-only — the vault doesn't have to be unlocked
+            to count them.
+        vault_state:
+          type: string
+          enum: [missing, locked, unlocked, dev]
+          description: |
+            `missing` — no vault file at the canonical path.
+            `locked` — file exists but the daemon hasn't unlocked it.
+            `unlocked` — daemon holds the KEK; bindings are resolvable.
+            `dev` — daemon is using the in-memory dev-mode vault
+            (random per-process KEK; not the persistent file).
+        gateway_url:
+          type: string
+          description: |
+            URL of the embedded gateway, when running under
+            `aileron launch`. Empty for standalone-server invocations.
+        session_id:
+          type: string
+          description: |
+            Launch session id when the daemon is part of an
+            `aileron launch` session. Empty otherwise.
 
     Error:
       type: object

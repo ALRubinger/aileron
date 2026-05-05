@@ -102,6 +102,16 @@ func (s *Store) Lookup(ref Ref) (string, bool) {
 	return h, ok
 }
 
+// Count returns the number of installed (FQN, version) entries in the
+// index. Each entry corresponds to one connector tarball under
+// `~/.aileron/store/connectors/sha256/`. Surfaced through `GET /v1/status`
+// for the operator's "what's installed" snapshot per ADR-0004.
+func (s *Store) Count() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.index)
+}
+
 // LookupAnyVersion returns one installed (Ref, hash) pair for the
 // given FQN, or `false` when no version of the connector is installed.
 // Multiple installed versions return an unspecified one — callers that
