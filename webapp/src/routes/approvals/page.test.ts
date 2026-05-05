@@ -377,3 +377,124 @@ describe('Approvals page — comms-MCP kinds (#428)', () => {
 		});
 	});
 });
+
+describe('Approvals page — shell approvals (#427)', () => {
+	const shellApproval: PendingActionApproval = {
+		id: 'act-shell-1',
+		kind: 'shell',
+		action_name: 'shell',
+		args: {
+			command: 'git push origin main',
+			reason: 'matches ask rule',
+			cwd: '/work/repo'
+		},
+		session_id: 'session-9',
+		requested_at: '2026-05-04T12:00:00Z'
+	};
+
+	it('renders the shell-kind summary with command, reason, and cwd', async () => {
+		setupWatcher([shellApproval]);
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('shell-summary')).toBeInTheDocument();
+		});
+		expect(screen.getByTestId('shell-command').textContent).toBe('git push origin main');
+		expect(screen.getByText('matches ask rule')).toBeInTheDocument();
+		expect(screen.getByTestId('shell-cwd').textContent).toContain('/work/repo');
+	});
+
+	it('renders four decision buttons on a shell-kind card', async () => {
+		setupWatcher([shellApproval]);
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('approve-once-button')).toBeInTheDocument();
+		});
+		expect(screen.getByTestId('deny-button')).toBeInTheDocument();
+		expect(screen.getByTestId('approve-project-button')).toBeInTheDocument();
+		expect(screen.getByTestId('approve-user-button')).toBeInTheDocument();
+	});
+
+	it('approves once with no edited_payload', async () => {
+		setupWatcher([shellApproval]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByTestId('approve-once-button')).toBeInTheDocument();
+		});
+
+		await fireEvent.click(screen.getByTestId('approve-once-button'));
+
+		await waitFor(() => {
+			expect(decideActionApproval).toHaveBeenCalledWith('act-shell-1', true, '', undefined);
+		});
+	});
+
+	it('approves and saves to project policy via edited_payload.save_policy', async () => {
+		setupWatcher([shellApproval]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByTestId('approve-project-button')).toBeInTheDocument();
+		});
+
+		await fireEvent.click(screen.getByTestId('approve-project-button'));
+
+		await waitFor(() => {
+			expect(decideActionApproval).toHaveBeenCalledWith('act-shell-1', true, '', {
+				save_policy: 'project'
+			});
+		});
+	});
+
+	it('approves and saves to user policy via edited_payload.save_policy', async () => {
+		setupWatcher([shellApproval]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByTestId('approve-user-button')).toBeInTheDocument();
+		});
+
+		await fireEvent.click(screen.getByTestId('approve-user-button'));
+
+		await waitFor(() => {
+			expect(decideActionApproval).toHaveBeenCalledWith('act-shell-1', true, '', {
+				save_policy: 'user'
+			});
+		});
+	});
+
+	it('denies a shell command with the typed reason', async () => {
+		setupWatcher([shellApproval]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByTestId('shell-summary')).toBeInTheDocument();
+		});
+
+		const reasonInput = screen.getByTestId('deny-reason-input') as HTMLInputElement;
+		await fireEvent.input(reasonInput, { target: { value: 'destructive command' } });
+		await fireEvent.click(screen.getByTestId('deny-button'));
+
+		await waitFor(() => {
+			expect(decideActionApproval).toHaveBeenCalledWith(
+				'act-shell-1',
+				false,
+				'destructive command',
+				undefined
+			);
+		});
+	});
+
+	it('omits the cwd line when args.cwd is missing', async () => {
+		setupWatcher([
+			{
+				...shellApproval,
+				args: { command: 'ls', reason: 'matches ask rule' }
+			}
+		]);
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('shell-summary')).toBeInTheDocument();
+		});
+		expect(screen.queryByTestId('shell-cwd')).not.toBeInTheDocument();
+	});
+});

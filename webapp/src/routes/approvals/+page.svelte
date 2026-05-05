@@ -2,7 +2,8 @@
 	import {
 		decideActionApproval,
 		watchActionApprovals,
-		type PendingActionApproval
+		type PendingActionApproval,
+		type SavePolicy
 	} from '$lib/api';
 	import { onMount } from 'svelte';
 	import * as Card from '$lib/components/ui/card';
@@ -12,11 +13,12 @@
 	// whose manifest declared `[approval] required = true`. Each entry
 	// represents one held-open `RunAction` HTTP response.
 	//
-	// #428 broadens the surface to four kinds:
+	// #428 broadens the surface to four kinds; #427 adds shell:
 	//   - `action`        — the original manifest-driven gate
 	//   - `comms_send`    — `aileron-mcp`'s send_message tool
 	//   - `comms_draft`   — draft_reply with editable body
 	//   - `http_request`  — http_request with credential transparency
+	//   - `shell`         — aileron-sh per-command approval, four-option
 	let actionApprovals = $state<PendingActionApproval[]>([]);
 
 	// Per-id deny-reason state. Surfaced inline next to the action's
@@ -89,6 +91,15 @@
 		// "approve as-is" case.
 		const payload =
 			edited && edited !== originalDraft.trim() ? { body: edited } : undefined;
+		await decide(id, true, { editedPayload: payload });
+	}
+
+	// approveShell rides save_policy through edited_payload (#427).
+	// "" means approve-once; "project" / "user" tell the launch-side
+	// approval socket to reply allow_project / allow_user so
+	// aileron-sh writes the allow rule.
+	async function approveShell(id: string, savePolicy: SavePolicy) {
+		const payload = savePolicy ? { save_policy: savePolicy } : undefined;
 		await decide(id, true, { editedPayload: payload });
 	}
 
@@ -245,13 +256,29 @@
 										data-testid="http-request-body">{asString(approval.args?.body)}</pre>
 								{/if}
 							</div>
+						{:else if kind === 'shell'}
+							<div data-testid="shell-summary" class="space-y-1 text-sm">
+								{#if asString(approval.args?.reason)}
+									<div class="text-muted-foreground">
+										{asString(approval.args?.reason)}
+									</div>
+								{/if}
+								<pre
+									class="overflow-x-auto rounded bg-muted p-3 text-xs"
+									data-testid="shell-command">{asString(approval.args?.command)}</pre>
+								{#if asString(approval.args?.cwd)}
+									<div class="text-xs text-muted-foreground" data-testid="shell-cwd">
+										in {asString(approval.args?.cwd)}
+									</div>
+								{/if}
+							</div>
 						{:else}
 							<pre
 								class="overflow-x-auto rounded bg-muted p-3 text-xs"
 								data-testid="approval-args">{formatArgs(approval.args)}</pre>
 						{/if}
 
-						<div class="flex items-center gap-2">
+						<div class="flex flex-wrap items-center gap-2">
 							<input
 								type="text"
 								placeholder="Optional reason (deny only)"
@@ -277,6 +304,39 @@
 									onclick={() => decide(approval.id, false)}
 								>
 									Discard
+								</Button>
+							{:else if kind === 'shell'}
+								<Button
+									variant="default"
+									disabled={deciding[approval.id]}
+									data-testid="approve-once-button"
+									onclick={() => approveShell(approval.id, '')}
+								>
+									Approve once
+								</Button>
+								<Button
+									variant="destructive"
+									disabled={deciding[approval.id]}
+									data-testid="deny-button"
+									onclick={() => decide(approval.id, false)}
+								>
+									Deny
+								</Button>
+								<Button
+									variant="secondary"
+									disabled={deciding[approval.id]}
+									data-testid="approve-project-button"
+									onclick={() => approveShell(approval.id, 'project')}
+								>
+									Approve + save for project
+								</Button>
+								<Button
+									variant="secondary"
+									disabled={deciding[approval.id]}
+									data-testid="approve-user-button"
+									onclick={() => approveShell(approval.id, 'user')}
+								>
+									Approve + save for me
 								</Button>
 							{:else}
 								<Button

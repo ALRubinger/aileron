@@ -42,6 +42,18 @@ const (
 	// (#428). Card layout: method + URL + body + which credential
 	// would be injected (name only, never the value), approve / deny.
 	ApprovalKindHTTPRequest ApprovalKind = "http_request"
+
+	// ApprovalKindShell is the policy-enforced shell shim's per-
+	// command approval (#427). aileron-sh dials the launch session's
+	// approval socket when a command matches an `ask:` rule; the
+	// launcher registers a [ApprovalKindShell] entry on this queue,
+	// the webapp prompts the user with four options (approve once /
+	// deny / approve and save for project / approve and save for me),
+	// and the decision flows back over the socket as the wire string
+	// aileron-sh expects. The "save" decisions ride through
+	// [ActionDecision.EditedPayload] under the `save_policy` key
+	// (`""` | `"project"` | `"user"`).
+	ApprovalKindShell ApprovalKind = "shell"
 )
 
 // ActionApproval is a pending request to gate one action invocation.
@@ -409,6 +421,29 @@ func (q *ActionApprovalQueue) RegisterHTTPRequest(method, url, body, secretName,
 		"secret_name": secretName,
 	}
 	return q.RegisterKind(ApprovalKindHTTPRequest, "http_request", "", sessionID, args)
+}
+
+// RegisterShell creates a [ApprovalKindShell] entry (#427) for the
+// policy-enforced shell shim's per-command approval. command is the
+// literal command line aileron-sh saw; reason is the matched policy
+// rule's description; cwd is the working directory the agent was in
+// when the command ran. All three are surfaced verbatim on the
+// webapp card.
+//
+// The launch-side [ApprovalSocketServer] consumes the resulting
+// [ActionDecision]; on approve, it reads `save_policy` from
+// [ActionDecision.EditedPayload] (`""` | `"project"` | `"user"`) to
+// pick the wire string aileron-sh writes back as the rule's
+// disposition.
+func (q *ActionApprovalQueue) RegisterShell(command, reason, sessionID, cwd string) *ActionApproval {
+	args := map[string]any{
+		"command": command,
+		"reason":  reason,
+	}
+	if cwd != "" {
+		args["cwd"] = cwd
+	}
+	return q.RegisterKind(ApprovalKindShell, "shell", "", sessionID, args)
 }
 
 // List returns the snapshot of currently pending approvals, ordered
