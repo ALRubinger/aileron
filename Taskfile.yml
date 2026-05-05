@@ -112,11 +112,13 @@ tasks:
     cmds:
       - pnpm install
       - pnpm run build
-      # Replace the embed dir with the fresh build output. The committed
-      # stub `index.html` is overwritten; everything else under
-      # webapp_dist/ is gitignored so this isn't a source change.
+      # Replace the embed dir with the fresh build output. Everything
+      # under webapp_dist/ is gitignored except `.gitkeep`, which we
+      # restore after the copy so the embed pattern still matches the
+      # tracked file and `git status` stays clean.
       - rm -rf ../internal/app/webapp_dist
       - cp -r build ../internal/app/webapp_dist
+      - touch ../internal/app/webapp_dist/.gitkeep
 
   build:ui:
     desc: (Frozen) Install ui dependencies and build. The cloud-tier UI; not embedded into the daemon. New work belongs in webapp/.
@@ -160,10 +162,13 @@ tasks:
       - rm -rf ui/.svelte-kit ui/build ui/node_modules
       - rm -rf docs/.astro docs/dist docs/node_modules
       - rm -f docs/public/openapi.yaml
-      # Reset the embed dir to just the committed stub so a subsequent
-      # `go build` still succeeds without running `task build:webapp`.
-      - git checkout -- internal/app/webapp_dist/index.html
-      - find internal/app/webapp_dist -mindepth 1 -not -path internal/app/webapp_dist/index.html -delete
+      # Reset the embed dir to just the committed `.gitkeep` so a
+      # subsequent `go build` still succeeds without running
+      # `task build:webapp`. The handler's `webappNotBuiltStub`
+      # fallback covers the page render.
+      - rm -rf internal/app/webapp_dist
+      - mkdir -p internal/app/webapp_dist
+      - touch internal/app/webapp_dist/.gitkeep
 
   logs:
     desc: Tail service logs

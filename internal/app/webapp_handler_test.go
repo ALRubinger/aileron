@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // TestWebappHandler_ServesIndexAtRoot covers the most basic load:
@@ -31,11 +32,65 @@ func TestWebappHandler_ServesIndexAtRoot(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	// The committed stub or the real build both satisfy this — both
-	// produce a doctype-html page. After `task build:webapp`, the
-	// real SvelteKit shell ships; before it, the stub does.
+	// The inlined "not built" stub or the real SvelteKit build both
+	// satisfy this — both produce a doctype-html page. After
+	// `task build:webapp` the real shell ships; before it, the
+	// fallback in serveIndex covers.
 	if !strings.Contains(strings.ToLower(string(body)), "<!doctype html>") {
 		t.Errorf("body lacks doctype; got %q", body[:min(len(body), 200)])
+	}
+}
+
+// TestServeIndex_FallsBackToStubWhenIndexMissing pins the fresh-clone
+// behavior: when the embedded fs has no index.html (only a .gitkeep
+// because nobody ran task build:webapp yet), serveIndex returns 200
+// with the inlined "webapp not built" stub rather than 500. The
+// stub names task build:webapp so the operator knows the next step.
+func TestServeIndex_FallsBackToStubWhenIndexMissing(t *testing.T) {
+	emptyFS := fstest.MapFS{
+		".gitkeep": &fstest.MapFile{Data: []byte{}},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	serveIndex(emptyFS, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (stub fallback)", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html…", ct)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"<!doctype html>", "Aileron webapp not built", "task build:webapp"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("stub body missing %q; got first 200 bytes: %q", want, body[:min(len(body), 200)])
+		}
+	}
+}
+
+// TestServeIndex_PrefersRealIndexOverStub asserts that when the
+// embedded fs DOES carry an index.html (post-build), serveIndex
+// serves that file instead of the stub. Guards against a refactor
+// where the fallback accidentally wins over the real shell.
+func TestServeIndex_PrefersRealIndexOverStub(t *testing.T) {
+	const realShell = "<!doctype html><html><body>real shell</body></html>"
+	withIndex := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte(realShell)},
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+	serveIndex(withIndex, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != realShell {
+		t.Errorf("body = %q, want %q (stub leaked through)", got, realShell)
 	}
 }
 

@@ -25,10 +25,12 @@ webapp/node_modules/
 
 # The webapp embed dir lives next to its embed directive so `//go:embed`
 # can reach it. Everything in there is build output overwritten by
-# `task build:webapp` — except the committed stub `index.html` that
-# guarantees `go build` succeeds on a fresh clone.
+# `task build:webapp` — except a committed `.gitkeep` that guarantees
+# the directory exists so the embed pattern matches at least one file
+# on a fresh clone (otherwise `go build` would fail). The "webapp not
+# built" fallback page is inlined in `internal/app/webapp_handler.go`.
 internal/app/webapp_dist/*
-!internal/app/webapp_dist/index.html
+!internal/app/webapp_dist/.gitkeep
 
 # Go test artifacts (task test:go:ci output)
 /junit.xml
