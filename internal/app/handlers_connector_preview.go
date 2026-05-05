@@ -77,7 +77,7 @@ func (s *apiServer) PreviewConnector(w http.ResponseWriter, r *http.Request) {
 		Version:          ref.Version,
 		Hash:             preview.Hash,
 		Publisher:        publisher,
-		SignatureStatus:  api.Verified,
+		SignatureStatus:  api.ConnectorPreviewSignatureStatusVerified,
 		AlreadyInstalled: preview.AlreadyInstalled,
 		Capabilities:     buildPreviewCapabilities(preview.Manifest),
 	}

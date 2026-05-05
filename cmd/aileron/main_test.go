@@ -2610,11 +2610,11 @@ func TestPostSyncRequest_NetworkErrorReturnsError(t *testing.T) {
 }
 
 func TestRunAction_AddHappyPath(t *testing.T) {
-	var seenBody []byte
-	var seenPath string
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		seenPath = r.URL.Path
-		seenBody, _ = io.ReadAll(r.Body)
+	var seenInstallBody []byte
+	var seenInstallPath string
+	actionInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		seenInstallPath = r.URL.Path
+		seenInstallBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{
 			"name":"list-recent-prs",
@@ -2625,18 +2625,18 @@ func TestRunAction_AddHappyPath(t *testing.T) {
 		}`)
 	})
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"action", "add", "github://acme/x/actions/list-recent-prs", "--version=0.1.0"},
+	code := run([]string{"action", "add", "github://acme/x/actions/list-recent-prs", "--version=0.1.0", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if seenPath != "/actions/install" {
-		t.Errorf("path = %q", seenPath)
+	if seenInstallPath != "/actions/install" {
+		t.Errorf("install path = %q", seenInstallPath)
 	}
-	if !strings.Contains(string(seenBody), `"version":"0.1.0"`) {
-		t.Errorf("body = %s", seenBody)
+	if !strings.Contains(string(seenInstallBody), `"version":"0.1.0"`) {
+		t.Errorf("install body = %s", seenInstallBody)
 	}
-	for _, want := range []string{"Added:", "list-recent-prs", "/path/list-recent-prs.md"} {
+	for _, want := range []string{"Action install preview", "Added:", "list-recent-prs", "/path/list-recent-prs.md"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
 		}
@@ -2644,26 +2644,26 @@ func TestRunAction_AddHappyPath(t *testing.T) {
 }
 
 func TestRunAction_AddForceFlagPropagated(t *testing.T) {
-	var seenBody []byte
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		seenBody, _ = io.ReadAll(r.Body)
+	var seenInstallBody []byte
+	actionInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		seenInstallBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"name":"x","fqn":"y","version":"1.0.0","source":"y","path":"z"}`)
 	})
 	var stdout, stderr bytes.Buffer
-	run([]string{"action", "add", "github://acme/x/actions/y@0.1.0", "--force"},
+	run([]string{"action", "add", "github://acme/x/actions/y@0.1.0", "--force", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
-	if !strings.Contains(string(seenBody), `"force":true`) {
-		t.Errorf("force flag not propagated: %s", seenBody)
+	if !strings.Contains(string(seenInstallBody), `"force":true`) {
+		t.Errorf("force flag not propagated: %s", seenInstallBody)
 	}
 }
 
 func TestRunAction_AddAlreadyInstalledIs200(t *testing.T) {
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{
-			"name":"x","fqn":"y","version":"1","source":"y","path":"z","already_installed":true
-		}`)
+		_, _ = io.WriteString(w, `{"fqn":"y","version":"1","hash":"sha256:a","name":"x","already_installed":true,"connector_deps":[]}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("install endpoint must not be hit when preview reports already_installed=true")
 	})
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"action", "add", "github://acme/x/actions/y@0.1.0"},
@@ -2677,7 +2677,9 @@ func TestRunAction_AddAlreadyInstalledIs200(t *testing.T) {
 }
 
 func TestRunAction_AddMissingVersionRejected(t *testing.T) {
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called")
+	}, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("server should not be called")
 	})
 	var stdout, stderr bytes.Buffer
@@ -2689,12 +2691,12 @@ func TestRunAction_AddMissingVersionRejected(t *testing.T) {
 }
 
 func TestRunAction_AddServerErrorIsExit1(t *testing.T) {
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_, _ = io.WriteString(w, `{}`)
-	})
+	}, nil)
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"action", "add", "github://acme/x/actions/y@0.1.0"},
+	code := run([]string{"action", "add", "github://acme/x/actions/y@0.1.0", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
 	if code == 0 {
 		t.Error("expected nonzero exit")
@@ -2890,6 +2892,9 @@ func TestRunAction_AddAutoPromptsForUnboundCapabilities(t *testing.T) {
 	var initHits, setupHits int
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://x/y/actions/echo","version":"1.0.0","hash":"sha256:a","name":"echo","signature_status":"verified","connector_deps":[]}`)
 		case "/actions/install":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{
@@ -2909,8 +2914,8 @@ func TestRunAction_AddAutoPromptsForUnboundCapabilities(t *testing.T) {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 	})
-	// Yes-to-prompt, identity "work", api_key value "k".
-	stdin := strings.NewReader("y\nwork\nk\n")
+	// Action-add consent "y", unbound-binding prompt "y", identity "work", api_key value "k".
+	stdin := strings.NewReader("y\ny\nwork\nk\n")
 	var stdout, stderr bytes.Buffer
 	code := runAction([]string{"add", "github://x/y/actions/echo@1.0.0"},
 		stdin, &stdout, &stderr)
@@ -2933,17 +2938,22 @@ func TestRunAction_AddAutoPromptsForUnboundCapabilities(t *testing.T) {
 
 func TestRunAction_AddDeclineDoesNotBindButPrintsHint(t *testing.T) {
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/actions/install" {
+		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"x","version":"1.0.0","hash":"sha256:a","name":"echo","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{
 				"name":"echo","fqn":"x","version":"1.0.0","source":"x","path":"/p",
 				"unbound_capabilities":[{"connector_fqn":"github://x/conn-a","kind":"oauth2"}]
 			}`)
-			return
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
 		}
-		t.Errorf("unexpected path %s", r.URL.Path)
 	})
-	stdin := strings.NewReader("n\n")
+	// Action-add consent "y", then "n" to the binding-setup prompt.
+	stdin := strings.NewReader("y\nn\n")
 	var stdout, stderr bytes.Buffer
 	code := runAction([]string{"add", "github://x/y/actions/echo@1.0.0"},
 		stdin, &stdout, &stderr)
@@ -2959,18 +2969,22 @@ func TestRunAction_AddNoBindFlagSkipsPrompt(t *testing.T) {
 	hits := map[string]int{}
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		hits[r.URL.Path]++
-		if r.URL.Path == "/actions/install" {
+		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"x","version":"1.0.0","hash":"sha256:a","name":"echo","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{
 				"name":"echo","fqn":"x","version":"1.0.0","source":"x","path":"/p",
 				"unbound_capabilities":[{"connector_fqn":"github://x/conn-a","kind":"api_key"}]
 			}`)
-			return
+		default:
+			t.Errorf("unexpected path with --no-bind: %s", r.URL.Path)
 		}
-		t.Errorf("unexpected path with --no-bind: %s", r.URL.Path)
 	})
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"action", "add", "github://x/y/actions/echo@1.0.0", "--no-bind"},
+	code := run([]string{"action", "add", "github://x/y/actions/echo@1.0.0", "--no-bind", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
@@ -3067,28 +3081,57 @@ func TestRunBinding_SetupOAuth2_PortBindFailsWhenSamePortInUse(t *testing.T) {
 
 // --- runActionAdd: auto-install missing connectors (issue #413) ---
 
-func TestRunActionAdd_PromptsAndRetriesOnConnectorsMissing(t *testing.T) {
-	// First POST returns 422 connectors_missing; user accepts at the
-	// prompt; second POST is sent with auto_install_connectors=true
-	// and the server replies 201.
-	var calls []map[string]any
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/actions/install" {
-			t.Errorf("path = %q", r.URL.Path)
+// actionInstallServer routes preview + install requests to two
+// separate handler functions. Mirrors connectorInstallServer.
+// Either handler may be nil to default to a simple OK response.
+func actionInstallServer(t *testing.T, onPreview, onInstall http.HandlerFunc) *httptest.Server {
+	return fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/preview":
+			if onPreview != nil {
+				onPreview(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			if onInstall != nil {
+				onInstall(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"github://acme/conn/actions/run@0.1.0","path":"/tmp/my-action.md"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		calls = append(calls, body)
+	})
+}
 
-		auto, _ := body["auto_install_connectors"].(bool)
-		w.Header().Set("Content-Type", "application/json")
-		if !auto {
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = io.WriteString(w, `{"error":{"code":"connectors_missing","message":"need deps","details":[
-				{"name":"github://acme/conn","version":"1.0.0","hash":"sha256:abc"}
-			]}}`)
-			return
-		}
+// TestRunActionAdd_PreviewThenInstallOnYes asserts the canonical
+// consent flow: POST /actions/preview, render preview, prompt y/N,
+// then POST /actions/install with auto_install_connectors=true on
+// "y". This is the path operators see for any new action with
+// connector deps.
+func TestRunActionAdd_PreviewThenInstallOnYes(t *testing.T) {
+	var previewCalled, installCalled bool
+	var installBody []byte
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		previewCalled = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/conn/actions/run",
+			"version":"0.1.0",
+			"hash":"sha256:abc",
+			"name":"my-action",
+			"intent":"do the thing",
+			"signature_status":"verified",
+			"connector_deps":[
+				{"fqn":"github://acme/conn","version":"1.0.0","hash":"sha256:depabc","capabilities":["op_a"],"already_installed":false}
+			]
+		}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		installBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"github://acme/conn/actions/run@0.1.0","path":"/tmp/my-action.md"}`)
 	})
@@ -3099,20 +3142,25 @@ func TestRunActionAdd_PromptsAndRetriesOnConnectorsMissing(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
 	}
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 install calls, got %d", len(calls))
+	if !previewCalled {
+		t.Error("preview endpoint not called")
 	}
-	if got, _ := calls[0]["auto_install_connectors"].(bool); got {
-		t.Error("first call must not set auto_install_connectors")
+	if !installCalled {
+		t.Error("install endpoint not called after 'y' confirmation")
 	}
-	if got, _ := calls[1]["auto_install_connectors"].(bool); !got {
-		t.Error("second call must set auto_install_connectors=true")
+	if !strings.Contains(string(installBody), `"auto_install_connectors":true`) {
+		t.Errorf("install body should set auto_install_connectors=true: %s", installBody)
 	}
 	out := stdout.String()
 	for _, want := range []string{
+		"Action install preview",
+		"my-action",
+		"do the thing",
+		"verified",
+		"Connectors that will be installed",
 		"github://acme/conn@1.0.0",
-		"sha256:abc",
-		"Install the connector(s) before adding this action?",
+		"op_a",
+		"Install? [y/N]:",
 		"Added: my-action",
 	} {
 		if !strings.Contains(out, want) {
@@ -3121,63 +3169,142 @@ func TestRunActionAdd_PromptsAndRetriesOnConnectorsMissing(t *testing.T) {
 	}
 }
 
-func TestRunActionAdd_DeclinesPromptExitsCleanly(t *testing.T) {
-	// User answers "n" — the CLI does not retry, prints a "Skipped"
-	// hint, and exits 1 without dumping the raw error envelope.
-	var callCount int
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = io.WriteString(w, `{"error":{"code":"connectors_missing","message":"need deps","details":[
-			{"name":"github://acme/conn","version":"1.0.0","hash":"sha256:abc"}
-		]}}`)
+// TestRunActionAdd_PromptNoCancels asserts the cancel path: the
+// operator types "n", install endpoint is not called, CLI prints
+// "Cancelled." and exits 0.
+func TestRunActionAdd_PromptNoCancels(t *testing.T) {
+	installCalled := false
+	actionInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
 	})
+
 	stdin := strings.NewReader("n\n")
 	var stdout, stderr bytes.Buffer
 	code := runActionAdd([]string{"github://acme/conn/actions/run@0.1.0"}, stdin, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("exit = %d, want 1; stderr = %s", code, stderr.String())
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if callCount != 1 {
-		t.Errorf("expected exactly 1 install call, got %d", callCount)
+	if installCalled {
+		t.Error("install endpoint was called after operator typed 'n'")
 	}
-	if !strings.Contains(stdout.String(), "Skipped.") {
-		t.Errorf("output should include 'Skipped.', got: %s", stdout.String())
-	}
-	if strings.Contains(stderr.String(), "server returned") {
-		t.Errorf("must not dump raw envelope on user decline, stderr: %s", stderr.String())
+	if !strings.Contains(stdout.String(), "Cancelled.") {
+		t.Errorf("expected 'Cancelled.' in output; got: %s", stdout.String())
 	}
 }
 
-func TestRunActionAdd_NoAutoInstallFlagSkipsPrompt(t *testing.T) {
-	// --no-auto-install → CLI does not prompt; the original 422 is
-	// surfaced verbatim. Lets scripts opt out of the interactive
-	// retry while keeping the structural pre-check intact.
-	var callCount int
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = io.WriteString(w, `{"error":{"code":"connectors_missing","message":"need deps","details":[
-			{"name":"github://acme/conn","version":"1.0.0","hash":"sha256:abc"}
-		]}}`)
+// TestRunActionAdd_YesFlagSkipsPrompt asserts the --yes flag: skip
+// the prompt, go directly to install. Useful for scripts.
+func TestRunActionAdd_YesFlagSkipsPrompt(t *testing.T) {
+	installCalled := false
+	actionInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"name":"my-action","fqn":"x","version":"0.1.0","source":"x","path":"/p"}`)
 	})
-	// Stdin is empty — if the prompt fired we'd hit EOF. The flag
+
+	// Empty stdin — if the prompt fires we'd hit EOF. --yes
 	// suppresses the prompt entirely.
 	var stdout, stderr bytes.Buffer
 	code := runActionAdd(
-		[]string{"github://acme/conn/actions/run@0.1.0", "--no-auto-install"},
+		[]string{"github://acme/conn/actions/run@0.1.0", "--yes"},
 		strings.NewReader(""), &stdout, &stderr,
 	)
-	if code != 1 {
-		t.Errorf("exit = %d, want 1", code)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if callCount != 1 {
-		t.Errorf("expected exactly 1 install call, got %d", callCount)
+	if !installCalled {
+		t.Error("install endpoint not called with --yes")
 	}
-	if !strings.Contains(stderr.String(), "connectors_missing") {
-		t.Errorf("stderr should contain raw envelope, got: %s", stderr.String())
+}
+
+// TestRunActionAdd_AlreadyInstalledShortCircuits: when preview
+// reports already_installed=true, the CLI prints "Already installed"
+// and exits without prompting or hitting install.
+func TestRunActionAdd_AlreadyInstalledShortCircuits(t *testing.T) {
+	installCalled := false
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","already_installed":true,"connector_deps":[]}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if installCalled {
+		t.Error("install endpoint was called after preview reported already_installed=true")
+	}
+	if !strings.Contains(stdout.String(), "Already installed") {
+		t.Errorf("expected 'Already installed' in output; got: %s", stdout.String())
+	}
+}
+
+// TestRunActionAdd_PreviewSignatureFailureExits1 asserts ADR-0007's
+// "signature failure is a hard fail" contract from the action
+// path: preview returns 422, CLI exits 1 BEFORE prompting, install
+// endpoint is never called.
+func TestRunActionAdd_PreviewSignatureFailureExits1(t *testing.T) {
+	installCalled := false
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"signature_failure","message":"signature_failure"}}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+	})
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0", "--yes"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr=%s", stderr.String())
+	}
+	if installCalled {
+		t.Error("install endpoint was called after preview signature_failure; --yes must NOT bypass")
+	}
+}
+
+// TestRunActionAdd_PreviewRendersAlreadyInstalledDeps asserts the
+// rendering split: deps with already_installed=true render under
+// "already installed" (informational), deps with =false render
+// under "will be installed". Lets the operator see exactly which
+// connectors are new vs. existing.
+func TestRunActionAdd_PreviewRendersAlreadyInstalledDeps(t *testing.T) {
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/conn/actions/run",
+			"version":"0.1.0",
+			"hash":"sha256:abc",
+			"name":"my-action",
+			"signature_status":"verified",
+			"connector_deps":[
+				{"fqn":"github://acme/conn-new","version":"1.0.0","hash":"sha256:new","already_installed":false},
+				{"fqn":"github://acme/conn-existing","version":"2.0.0","hash":"sha256:exists","already_installed":true}
+			]
+		}`)
+	}, nil)
+
+	stdin := strings.NewReader("n\n") // cancel — we just want the rendering
+	var stdout, stderr bytes.Buffer
+	runActionAdd([]string{"github://acme/conn/actions/run@0.1.0"}, stdin, &stdout, &stderr)
+
+	out := stdout.String()
+	for _, want := range []string{
+		"will be installed",
+		"github://acme/conn-new",
+		"already installed",
+		"github://acme/conn-existing",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 }
 

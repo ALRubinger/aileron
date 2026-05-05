@@ -1529,6 +1529,59 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/actions/preview:
+    post:
+      tags: [Actions]
+      summary: Preview an action install without committing
+      description: |
+        Runs the action install pipeline up through fetch + parse +
+        validate but does NOT write the action file to
+        `~/.aileron/actions/`. Returns the action's metadata plus its
+        declared `[[requires.connectors]]` list with each connector's
+        already-installed status.
+
+        Used by the CLI's `aileron action add` consent flow per
+        ADR-0007: fetch and parse, show the operator the action and
+        its connector dependencies, then call `/v1/actions/install`
+        on confirmation.
+
+        Like the connector preview endpoint, signature failures and
+        manifest parse errors surface as 422 BEFORE the consent
+        prompt — `--yes` cannot bypass them.
+
+        This endpoint does NOT walk into each connector dep's
+        manifest; the CLI shows each declared connector's FQN,
+        version, hash, and whether it's already installed.
+        Operators who want a full per-connector preview can run
+        `aileron connector install <FQN>@<version>` separately on
+        the deps before the action add.
+      operationId: previewAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallActionRequest"
+      responses:
+        "200":
+          description: Preview succeeded; caller may now POST /v1/actions/install to commit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionPreview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Preview pipeline failed (parse, validate, fetch, signature)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/actions/install:
     post:
       tags: [Actions]
@@ -4130,6 +4183,87 @@ components:
             and `error.details[]` listing each missing connector's
             `name`, `version`, and `hash` so the CLI can prompt the user
             for confirmation before retrying with the flag set.
+
+    ActionPreview:
+      type: object
+      required: [fqn, version, hash, name, connector_deps]
+      properties:
+        fqn:
+          type: string
+          description: Canonical FQN of the previewed action.
+        version:
+          type: string
+          description: Strict SemVer.
+        hash:
+          type: string
+          description: |
+            Canonical `sha256:<hex>` of the fetched action manifest.
+            Same value the install endpoint will record.
+        name:
+          type: string
+          description: |
+            Action name from the manifest's `name = "<name>"` field —
+            the slug under `~/.aileron/actions/<name>.md`.
+        intent:
+          type: string
+          description: |
+            Action's `[match] intent` — the canonical natural-language
+            phrase the runtime matches against agent requests. Used in
+            the consent prompt so the operator knows when this action
+            will fire. Optional.
+        signature_status:
+          type: string
+          enum: [verified, unsigned]
+          description: |
+            Action signatures are optional in v1 — manifests without a
+            signature surface as `unsigned` rather than as an error.
+            Operators see this in the consent prompt and decide
+            whether to proceed.
+        already_installed:
+          type: boolean
+          description: |
+            True when an action with this name is already installed
+            and its hash matches. The CLI uses this to short-circuit
+            past the consent prompt.
+        connector_deps:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionConnectorDep"
+          description: |
+            One entry per `[[requires.connectors]]` in the action's
+            manifest, in declaration order.
+
+    ActionConnectorDep:
+      type: object
+      required: [fqn, version, hash, already_installed]
+      properties:
+        fqn:
+          type: string
+          description: Connector FQN per ADR-0002.
+        version:
+          type: string
+          description: Strict SemVer pinned by the action.
+        hash:
+          type: string
+          description: |
+            Connector content hash the action pins (`sha256:<hex>`).
+            The runtime verifies this before every connector
+            invocation per ADR-0004.
+        capabilities:
+          type: array
+          items:
+            type: string
+          description: |
+            Subset of the connector's declared capabilities the
+            action will exercise. Empty means the action declared no
+            capability subset.
+        already_installed:
+          type: boolean
+          description: |
+            True when an entry with this hash is already in the
+            cstore. The CLI renders this so the operator sees which
+            deps are new (will be installed) versus existing (no
+            change).
 
     InstalledAction:
       type: object

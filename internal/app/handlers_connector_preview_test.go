@@ -45,8 +45,8 @@ func TestPreviewConnector_HappyPath(t *testing.T) {
 	if !strings.HasPrefix(got.Hash, "sha256:") {
 		t.Errorf("Hash = %q, want sha256: prefix", got.Hash)
 	}
-	if got.SignatureStatus != api.Verified {
-		t.Errorf("SignatureStatus = %q, want %q", got.SignatureStatus, api.Verified)
+	if got.SignatureStatus != api.ConnectorPreviewSignatureStatusVerified {
+		t.Errorf("SignatureStatus = %q, want %q", got.SignatureStatus, api.ConnectorPreviewSignatureStatusVerified)
 	}
 	if got.AlreadyInstalled {
 		t.Error("AlreadyInstalled = true on a fresh store, want false")

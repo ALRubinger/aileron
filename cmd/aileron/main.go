@@ -1292,7 +1292,7 @@ const connectorUsage = `usage:
   aileron connector check [--include-prerelease]`
 
 const actionUsage = `usage:
-  aileron action add <FQN> [--version=<v>] [--force]`
+  aileron action add <FQN> [--version=<v>] [--force] [--yes] [--no-bind]`
 
 // runConnector dispatches `aileron connector <subcommand>`.
 func runConnector(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -1758,6 +1758,91 @@ func renderConnectorPreview(w io.Writer, p *connectorPreviewWire) {
 	fmt.Fprintln(w)
 }
 
+// actionPreviewWire mirrors api.ActionPreview on the wire. Defined
+// locally so the CLI binary doesn't pull the full generated types
+// graph just to render this surface.
+type actionPreviewWire struct {
+	Fqn              string `json:"fqn"`
+	Version          string `json:"version"`
+	Hash             string `json:"hash"`
+	Name             string `json:"name"`
+	Intent           string `json:"intent,omitempty"`
+	SignatureStatus  string `json:"signature_status,omitempty"`
+	AlreadyInstalled bool   `json:"already_installed,omitempty"`
+	ConnectorDeps    []struct {
+		Fqn              string   `json:"fqn"`
+		Version          string   `json:"version"`
+		Hash             string   `json:"hash"`
+		Capabilities     []string `json:"capabilities,omitempty"`
+		AlreadyInstalled bool     `json:"already_installed"`
+	} `json:"connector_deps"`
+}
+
+// renderActionPreview prints the consent-prompt summary for an
+// action add. Sections: action metadata (name, version, hash,
+// intent, signature status), then the connector deps split into
+// "already installed" (informational) vs. "will be installed"
+// (the operator's actual consent decision).
+func renderActionPreview(w io.Writer, p *actionPreviewWire) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "\033[1mAction install preview\033[0m")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Name:       %s\n", p.Name)
+	fmt.Fprintf(w, "  Version:    %s\n", p.Version)
+	fmt.Fprintf(w, "  Source:     %s@%s\n", p.Fqn, p.Version)
+	fmt.Fprintf(w, "  Hash:       %s\n", shortHash(p.Hash))
+	if p.Intent != "" {
+		fmt.Fprintf(w, "  Intent:     %s\n", p.Intent)
+	}
+	switch p.SignatureStatus {
+	case "verified":
+		fmt.Fprintf(w, "  Signature:  \033[32mverified\033[0m\n")
+	case "unsigned":
+		fmt.Fprintf(w, "  Signature:  \033[33munsigned\033[0m (v1 makes signing optional)\n")
+	}
+
+	var newDeps, existingDeps int
+	for _, d := range p.ConnectorDeps {
+		if d.AlreadyInstalled {
+			existingDeps++
+		} else {
+			newDeps++
+		}
+	}
+
+	if newDeps > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  \033[1mConnectors that will be installed (%d):\033[0m\n", newDeps)
+		for _, d := range p.ConnectorDeps {
+			if d.AlreadyInstalled {
+				continue
+			}
+			fmt.Fprintf(w, "    + %s@%s\n", d.Fqn, d.Version)
+			if d.Hash != "" {
+				fmt.Fprintf(w, "      hash: %s\n", shortHash(d.Hash))
+			}
+			if len(d.Capabilities) > 0 {
+				fmt.Fprintf(w, "      capabilities: %s\n", strings.Join(d.Capabilities, ", "))
+			}
+		}
+	}
+	if existingDeps > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  \033[2mConnectors already installed (%d):\033[0m\n", existingDeps)
+		for _, d := range p.ConnectorDeps {
+			if !d.AlreadyInstalled {
+				continue
+			}
+			fmt.Fprintf(w, "    \033[2m✓ %s@%s\033[0m\n", d.Fqn, d.Version)
+		}
+	}
+	if newDeps == 0 && existingDeps == 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  \033[2mNo connector dependencies declared.\033[0m")
+	}
+	fmt.Fprintln(w)
+}
+
 // shortHash renders only the first 12 hex chars after the algorithm
 // prefix — enough to disambiguate but readable in the consent prompt.
 // Operators who want the full hash can read it from `aileron status`.
@@ -1795,7 +1880,7 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	version := flags.String("version", "", "strict SemVer (required if FQN omits @<version>)")
 	force := flags.Bool("force", false, "overwrite an existing action with the same name")
 	noBind := flags.Bool("no-bind", false, "skip the auto-prompt for unbound credentials (use in scripts)")
-	noAutoInstall := flags.Bool("no-auto-install", false, "skip the auto-prompt for missing connector deps (use in scripts)")
+	yes := flags.Bool("yes", false, "skip the consent prompt and proceed without confirmation")
 	if err := flags.Parse(rest); err != nil {
 		return 1
 	}
@@ -1804,7 +1889,58 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		fmt.Fprintf(stderr, "%v\n", perr)
 		return 1
 	}
-	body := map[string]any{"fqn": resolvedFQN, "version": resolvedVersion}
+
+	// Step 1: preview. Fetches + parses the action manifest plus
+	// enumerates connector deps with their already-installed status.
+	// Signature failure or parse error aborts here, before the
+	// consent prompt — `--yes` does not bypass.
+	previewBody := map[string]any{"fqn": resolvedFQN, "version": resolvedVersion}
+	previewJSON, _ := json.Marshal(previewBody)
+	previewStatus, previewRaw, err := bindingDoRequest(http.MethodPost, "/actions/preview",
+		strings.NewReader(string(previewJSON)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if previewStatus != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", previewStatus, string(previewRaw))
+		return 1
+	}
+	var preview actionPreviewWire
+	if err := json.Unmarshal(previewRaw, &preview); err != nil {
+		fmt.Fprintf(stderr, "error parsing preview: %v\n", err)
+		return 1
+	}
+
+	// Already-installed short-circuit: same name + same hash → no
+	// prompt, no install. Mirrors the connector-install pattern.
+	if preview.AlreadyInstalled {
+		fmt.Fprintf(stdout, "Already installed: %s\n  hash: %s\n", preview.Name, preview.Hash)
+		return 0
+	}
+
+	// Step 2: render the consent prompt. Shows action metadata plus
+	// the connector deps split into "already installed" vs. "will
+	// be installed alongside this action".
+	renderActionPreview(stdout, &preview)
+
+	// Step 3: prompt unless --yes.
+	if !*yes {
+		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/N]: ")))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(stdout, "Cancelled.")
+			return 0
+		}
+	}
+
+	// Step 4: install. The server walks the connector deps server-
+	// side via auto_install_connectors=true. Failures abort the
+	// chain atomically — nothing commits unless every step succeeds.
+	body := map[string]any{
+		"fqn":                     resolvedFQN,
+		"version":                 resolvedVersion,
+		"auto_install_connectors": true,
+	}
 	if *force {
 		body["force"] = true
 	}
@@ -1814,18 +1950,6 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
-	}
-	if status == http.StatusUnprocessableEntity && !*noAutoInstall {
-		newStatus, newBody, action := maybeAutoInstallMissingConnectors(respBody, body, stdin, stdout, stderr)
-		switch action {
-		case autoInstallRetried:
-			status, respBody = newStatus, newBody
-		case autoInstallDeclined:
-			// User opted out of the implicit install — the missing
-			// list was already printed by the helper. Exit cleanly
-			// without re-dumping the raw envelope.
-			return 1
-		}
 	}
 	if status != http.StatusCreated && status != http.StatusOK {
 		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
@@ -1888,80 +2012,6 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		}
 	}
 	return 0
-}
-
-// autoInstallAction enumerates the outcomes of
-// maybeAutoInstallMissingConnectors so the caller can render
-// appropriate output without re-parsing the response body.
-type autoInstallAction int
-
-const (
-	// autoInstallPassthrough means the response was not
-	// `connectors_missing` (or it was malformed) — the caller should
-	// continue handling the original status/body unchanged.
-	autoInstallPassthrough autoInstallAction = iota
-	// autoInstallRetried means the user confirmed and the install
-	// was re-issued with auto_install_connectors=true. The returned
-	// (status, body) reflect the retry's response.
-	autoInstallRetried
-	// autoInstallDeclined means the user declined the prompt. The
-	// missing list is already printed; the caller should exit
-	// cleanly without re-rendering the original envelope.
-	autoInstallDeclined
-)
-
-// maybeAutoInstallMissingConnectors inspects an `action install` 422
-// response and, when the server reports `connectors_missing`, prints
-// the resolved FQN/version/hash for each entry, prompts the user, and
-// retries the install with `auto_install_connectors=true` on yes.
-//
-// Per issue #413 and ADR-0007's "no surprise installs" rule: the user
-// must consent before any implicit connector install. An empty answer
-// (just Enter) is treated as the default Y, matching the
-// unbound-bindings prompt shape elsewhere in this command.
-func maybeAutoInstallMissingConnectors(respBody []byte, origBody map[string]any, stdin io.Reader, stdout, stderr io.Writer) (int, []byte, autoInstallAction) {
-	var env struct {
-		Error struct {
-			Code    string           `json:"code"`
-			Message string           `json:"message"`
-			Details []map[string]any `json:"details"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(respBody, &env); err != nil {
-		return 0, nil, autoInstallPassthrough
-	}
-	if env.Error.Code != "connectors_missing" || len(env.Error.Details) == 0 {
-		return 0, nil, autoInstallPassthrough
-	}
-
-	fmt.Fprintln(stdout, "")
-	fmt.Fprintf(stdout, "This action requires %d connector(s) that are not installed:\n", len(env.Error.Details))
-	for _, d := range env.Error.Details {
-		name, _ := d["name"].(string)
-		version, _ := d["version"].(string)
-		hash, _ := d["hash"].(string)
-		fmt.Fprintf(stdout, "  - %s@%s\n      hash: %s\n", name, version, hash)
-	}
-	answer := promptLine(stdin, stdout, "Install the connector(s) before adding this action? [Y/n]: ")
-	if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
-		fmt.Fprintln(stdout, "  Skipped. Run `aileron connector install <FQN>@<version>` for each before retrying.")
-		return 0, nil, autoInstallDeclined
-	}
-
-	retryBody := map[string]any{}
-	for k, v := range origBody {
-		retryBody[k] = v
-	}
-	retryBody["auto_install_connectors"] = true
-	retryJSON, _ := json.Marshal(retryBody)
-
-	status, body, err := bindingDoRequest(http.MethodPost, "/actions/install",
-		strings.NewReader(string(retryJSON)))
-	if err != nil {
-		fmt.Fprintf(stderr, "auto-install retry failed: %v\n", err)
-		return 0, nil, autoInstallDeclined
-	}
-	return status, body, autoInstallRetried
 }
 
 // extractPositional pulls the first non-flag argument out of args and
