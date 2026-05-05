@@ -17,7 +17,7 @@ This shapes how you author. The file is the artifact. There is nothing else.
 
 ## Project skeleton
 
-For an action template you are publishing, the file lives inside a connector repo per the layout in [Publishing a connector](/connectors/publishing/):
+For an action template you are publishing, the file lives inside a connector repo per the layout in [Publishing a connector](/guides/publishing-a-connector/):
 
 ```
 aileron-connector-slack/
@@ -284,7 +284,7 @@ To exercise the action end-to-end, drive it through `aileron launch` — the age
 ## Where to go next
 
 - [Authoring a Connector](/guides/authoring-a-connector/) — the connector your action depends on. Action capability subsets are meaningful only against a connector's declared capability set.
-- [Publishing a connector](/connectors/publishing/) — once you have an action template you want others to install, the same repo and signing flow applies. Action tarballs ship alongside the connector.
+- [Publishing a connector](/guides/publishing-a-connector/) — once you have an action template you want others to install, the same repo and signing flow applies. Action tarballs ship alongside the connector.
 - [ADR-0001: Manifest Format](/adr/0001-manifest-format/) — why TOML, why `+++`, why the frontmatter shape.
 - [ADR-0003: Action Model](/adr/0003-action-model/) — the design constraints behind everything in this guide.
 - [ADR-0010: Failure Handling](/adr/0010-failure-handling/) — first-failure-terminates, no auto-rollback, structured error envelopes.

@@ -1,5 +1,5 @@
 ---
-title: "Publishing a connector"
+title: "Publishing a Connector"
 description: "How to author, sign, and release a connector + action templates that Aileron users can install via aileron connector install / aileron action add."
 ---
 
