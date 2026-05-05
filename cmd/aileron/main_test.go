@@ -1794,12 +1794,47 @@ func TestRunSecretSet_MismatchedConfirmation(t *testing.T) {
 
 // --- Connector + action install tests (#366) ---
 
+// previewBody returns a canonical preview JSON payload used by tests
+// that don't care about the preview-specific contents (capabilities,
+// already_installed). For tests that DO care, write the payload
+// inline.
+func previewBody(fqn, version, hash string) string {
+	return `{"fqn":"` + fqn + `","version":"` + version + `","hash":"` + hash + `","publisher":"test","signature_status":"verified","already_installed":false,"capabilities":{}}`
+}
+
+// connectorInstallServer routes preview + install requests to two
+// separate handler functions. Mirrors the two-endpoint consent flow
+// the CLI now drives. Either handler may be nil to default to a
+// simple OK response.
+func connectorInstallServer(t *testing.T, onPreview, onInstall http.HandlerFunc) *httptest.Server {
+	return fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connectors/preview":
+			if onPreview != nil {
+				onPreview(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, previewBody("github://acme/x", "1.0.0", "sha256:abc"))
+		case "/connectors/install":
+			if onInstall != nil {
+				onInstall(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","entry_dir":"/path"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
 func TestRunConnector_InstallHappyPath(t *testing.T) {
-	var seenBody []byte
-	var seenPath string
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		seenPath = r.URL.Path
-		seenBody, _ = io.ReadAll(r.Body)
+	var seenInstallBody []byte
+	var seenInstallPath string
+	connectorInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		seenInstallPath = r.URL.Path
+		seenInstallBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{
 			"fqn":"github://acme/x",
@@ -1809,19 +1844,19 @@ func TestRunConnector_InstallHappyPath(t *testing.T) {
 		}`)
 	})
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connector", "install", "github://acme/x", "--version=1.0.0"},
+	code := run([]string{"connector", "install", "github://acme/x", "--version=1.0.0", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("exit = %d, body=%s", code, stderr.String())
 	}
-	if seenPath != "/connectors/install" {
-		t.Errorf("path = %q", seenPath)
+	if seenInstallPath != "/connectors/install" {
+		t.Errorf("path = %q", seenInstallPath)
 	}
-	if !strings.Contains(string(seenBody), `"fqn":"github://acme/x"`) ||
-		!strings.Contains(string(seenBody), `"version":"1.0.0"`) {
-		t.Errorf("body = %s", seenBody)
+	if !strings.Contains(string(seenInstallBody), `"fqn":"github://acme/x"`) ||
+		!strings.Contains(string(seenInstallBody), `"version":"1.0.0"`) {
+		t.Errorf("body = %s", seenInstallBody)
 	}
-	for _, want := range []string{"Installed:", "github://acme/x@1.0.0", "sha256:abc", "/path/to/entry"} {
+	for _, want := range []string{"Connector install preview", "Installed:", "github://acme/x@1.0.0", "sha256:abc", "/path/to/entry"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q:\n%s", want, stdout.String())
 		}
@@ -1829,35 +1864,45 @@ func TestRunConnector_InstallHappyPath(t *testing.T) {
 }
 
 func TestRunConnector_InstallAcceptsAtVersionInFQN(t *testing.T) {
-	var seenBody []byte
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		seenBody, _ = io.ReadAll(r.Body)
+	var seenInstallBody []byte
+	connectorInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		seenInstallBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"x","entry_dir":"y"}`)
 	})
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connector", "install", "github://acme/x@1.0.0"},
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(string(seenBody), `"version":"1.0.0"`) {
-		t.Errorf("body = %s", seenBody)
+	if !strings.Contains(string(seenInstallBody), `"version":"1.0.0"`) {
+		t.Errorf("body = %s", seenInstallBody)
 	}
 }
 
-func TestRunConnector_InstallAlreadyInstalledIs200(t *testing.T) {
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+// TestRunConnector_InstallAlreadyInstalledShortCircuits asserts the
+// preview-driven short-circuit: when the preview reports
+// already_installed=true, the CLI skips the prompt AND the install
+// endpoint, rendering "Already installed" directly. The install
+// handler must not be hit.
+func TestRunConnector_InstallAlreadyInstalledShortCircuits(t *testing.T) {
+	installCalled := false
+	connectorInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{
-			"fqn":"github://acme/x","version":"1.0.0","hash":"x","entry_dir":"y","already_installed":true
-		}`)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","publisher":"test","signature_status":"verified","already_installed":true,"capabilities":{}}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		w.WriteHeader(http.StatusOK)
 	})
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"connector", "install", "github://acme/x@1.0.0"},
 		newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if installCalled {
+		t.Error("install endpoint was called even though preview reported already_installed=true")
 	}
 	if !strings.Contains(stdout.String(), "Already installed") {
 		t.Errorf("expected 'Already installed' in output: %s", stdout.String())
@@ -1865,7 +1910,9 @@ func TestRunConnector_InstallAlreadyInstalledIs200(t *testing.T) {
 }
 
 func TestRunConnector_InstallMissingVersionRejected(t *testing.T) {
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+	connectorInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called when version is missing")
+	}, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("server should not be called when version is missing")
 	})
 	var stdout, stderr bytes.Buffer
@@ -1877,7 +1924,9 @@ func TestRunConnector_InstallMissingVersionRejected(t *testing.T) {
 }
 
 func TestRunConnector_InstallVersionConflictRejected(t *testing.T) {
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+	connectorInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("server should not be called when version conflicts")
+	}, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("server should not be called when version conflicts")
 	})
 	var stdout, stderr bytes.Buffer
@@ -1888,16 +1937,26 @@ func TestRunConnector_InstallVersionConflictRejected(t *testing.T) {
 	}
 }
 
-func TestRunConnector_InstallServerErrorIsExit1(t *testing.T) {
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+// TestRunConnector_InstallSignatureFailureExits1 asserts ADR-0007's
+// "signature failure is a hard fail" contract from the CLI side: the
+// preview endpoint returns 422, the CLI exits 1 BEFORE prompting,
+// and the install endpoint is never called.
+func TestRunConnector_InstallSignatureFailureExits1(t *testing.T) {
+	installCalled := false
+	connectorInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
-		_, _ = io.WriteString(w, `{"error":{"code":"signature_failure"}}`)
+		_, _ = io.WriteString(w, `{"error":{"code":"signature_failure","message":"signature_failure"}}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
 	})
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"connector", "install", "github://acme/x@1.0.0"},
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
 	if code == 0 {
 		t.Errorf("expected nonzero exit; stderr=%s", stderr.String())
+	}
+	if installCalled {
+		t.Error("install endpoint was called after preview signature_failure; --yes must NOT bypass")
 	}
 }
 
@@ -1917,18 +1976,160 @@ func TestRunConnector_UnknownSubcommand(t *testing.T) {
 	}
 }
 
+// TestRunConnector_InstallExpectedHashPropagated asserts the
+// --hash flag flows through both the preview and install request
+// bodies. The preview path matters because that's where signature
+// verification happens — the hash check needs to fire there too.
 func TestRunConnector_InstallExpectedHashPropagated(t *testing.T) {
-	var seenBody []byte
-	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
-		seenBody, _ = io.ReadAll(r.Body)
+	var previewBody, installBody []byte
+	connectorInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		previewBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abcd","publisher":"test","signature_status":"verified","already_installed":false,"capabilities":{}}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installBody, _ = io.ReadAll(r.Body)
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"fqn":"x","version":"1.0.0","hash":"h","entry_dir":"d"}`)
 	})
 	var stdout, stderr bytes.Buffer
-	run([]string{"connector", "install", "github://acme/x@1.0.0", "--hash=sha256:abcd"},
+	run([]string{"connector", "install", "github://acme/x@1.0.0", "--hash=sha256:abcd", "--yes"},
 		newTestRegistry(), &stdout, &stderr)
-	if !strings.Contains(string(seenBody), `"expected_hash":"sha256:abcd"`) {
-		t.Errorf("body should include expected_hash: %s", seenBody)
+	for _, body := range [][]byte{previewBody, installBody} {
+		if !strings.Contains(string(body), `"expected_hash":"sha256:abcd"`) {
+			t.Errorf("body should include expected_hash: %s", body)
+		}
+	}
+}
+
+// TestRunConnector_InstallPromptYesProceeds asserts the operator's
+// happy-path: preview shown, "y\n" piped, install called. This is
+// the canonical interactive flow per ADR-0007.
+func TestRunConnector_InstallPromptYesProceeds(t *testing.T) {
+	installCalled := false
+	connectorInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","entry_dir":"/path"}`)
+	})
+
+	r := newTestRegistry()
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("y\n")
+
+	// We can't drive run() with a custom stdin because run() takes
+	// os.Stdin via `runConnector`. Reach into runConnectorInstall
+	// directly with our stdin reader.
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !installCalled {
+		t.Error("install endpoint not called after 'y' confirmation")
+	}
+	if !strings.Contains(stdout.String(), "Install? [y/N]:") {
+		t.Errorf("expected prompt in stdout; got: %s", stdout.String())
+	}
+	_ = r // silence unused if compiler complains
+}
+
+// TestRunConnector_InstallPromptNoCancels asserts the cancel path:
+// when the operator types anything other than y/yes, the install
+// endpoint is not called and the CLI prints "Cancelled."
+func TestRunConnector_InstallPromptNoCancels(t *testing.T) {
+	installCalled := false
+	connectorInstallServer(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("n\n")
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if installCalled {
+		t.Error("install endpoint was called after operator typed 'n'")
+	}
+	if !strings.Contains(stdout.String(), "Cancelled.") {
+		t.Errorf("expected 'Cancelled.' in output; got: %s", stdout.String())
+	}
+}
+
+// TestRunConnector_InstallPreviewRendersCapabilities asserts the
+// consent prompt renders network hosts and credential kind/scope
+// from the preview response. This is the load-bearing UX assertion
+// — operators decide whether to install based on what's rendered
+// here.
+func TestRunConnector_InstallPreviewRendersCapabilities(t *testing.T) {
+	connectorInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://aileron/slack",
+			"version":"1.2.0",
+			"hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			"publisher":"Aileron Engineering",
+			"signature_status":"verified",
+			"already_installed":false,
+			"capabilities":{
+				"network_hosts":["slack.com:443"],
+				"credential":{"kind":"api_key","scope":"Send Slack messages"}
+			}
+		}`)
+	}, nil)
+
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("n\n") // cancel — we just want the rendering
+	runConnectorInstall(
+		[]string{"github://aileron/slack@1.2.0"},
+		stdin, &stdout, &stderr,
+	)
+	out := stdout.String()
+	for _, want := range []string{
+		"Connector install preview",
+		"github://aileron/slack",
+		"1.2.0",
+		"sha256:0123456789ab",
+		"Aileron Engineering",
+		"verified",
+		"Network access:",
+		"slack.com:443",
+		"Credential required:",
+		"api_key",
+		"Send Slack messages",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preview output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunConnector_InstallPreviewServerErrorExits1 asserts that a
+// preview-side failure (e.g. fetch_failed because the source is
+// down) exits 1 with the error visible. The install endpoint must
+// not be reached.
+func TestRunConnector_InstallPreviewServerErrorExits1(t *testing.T) {
+	installCalled := false
+	connectorInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"fetch_failed"}}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "install", "github://acme/x@1.0.0", "--yes"},
+		newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when preview fails")
+	}
+	if installCalled {
+		t.Error("install endpoint was called after preview failed")
 	}
 }
 

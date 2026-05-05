@@ -1334,6 +1334,56 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /v1/connectors/preview:
+    post:
+      tags: [Connectors]
+      summary: Preview a connector install without committing
+      description: |
+        Runs the install pipeline up through fetch + verify + parse
+        but does NOT commit the tarball to the content-addressed
+        store. Returns the manifest, computed hash, signature
+        status, and a flag for whether an entry with this hash is
+        already installed.
+
+        Used by the CLI's `aileron connector install` consent flow
+        per ADR-0007: fetch and verify, show the operator what they
+        are about to install (FQN, version, hash, publisher,
+        capabilities), then call `/v1/connectors/install` on
+        confirmation.
+
+        Failure modes match the install endpoint: signature failure,
+        FQN mismatch, hash mismatch (when `expected_hash` is
+        supplied), and fetch failure surface as 422 with structured
+        errors. ADR-0007 makes signature failure a hard fail —
+        `--yes` does not bypass it because the failure happens here,
+        before the consent prompt.
+      operationId: previewConnector
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallConnectorRequest"
+      responses:
+        "200":
+          description: Preview succeeded; caller may now POST /v1/connectors/install to commit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorPreview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          description: Preview pipeline failed (hash mismatch, signature failure, malformed tarball, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/connectors/install:
     post:
       tags: [Connectors]
@@ -3788,6 +3838,84 @@ components:
             nothing is written to the store. When omitted (typical for
             first install), the pipeline records whatever hash the bytes
             produce.
+
+    ConnectorPreview:
+      type: object
+      required: [fqn, version, hash, publisher, signature_status, capabilities, already_installed]
+      properties:
+        fqn:
+          type: string
+          description: Canonical FQN of the previewed connector.
+        version:
+          type: string
+          description: Strict SemVer.
+        hash:
+          type: string
+          description: |
+            Canonical `sha256:<hex>` of the fetched tarball's
+            (binary || manifest) bytes. Same value the install
+            endpoint will produce.
+        publisher:
+          type: string
+          description: |
+            FQN authority — the entity that signed the connector. For
+            `github://owner/repo` this is `owner`. The CLI surfaces
+            this so the operator knows whose key trust is being
+            consumed for this install.
+        signature_status:
+          type: string
+          enum: [verified]
+          description: |
+            Always `verified` when this preview is returned: a
+            signature failure short-circuits earlier in the pipeline
+            and surfaces as a 422 error per ADR-0007. The field
+            exists on the wire so future verification states (e.g.
+            `experimental_unsigned` for a trusted-but-unsigned dev
+            mode) can be added without breaking the response shape.
+        description:
+          type: string
+          description: |
+            Human-readable description from the connector manifest.
+            May be empty.
+        capabilities:
+          $ref: "#/components/schemas/PreviewCapabilities"
+        already_installed:
+          type: boolean
+          description: |
+            True when an entry with this hash is already in the
+            cstore. The CLI uses this to skip the consent prompt and
+            short-circuit to a "already installed" message — operators
+            running install twice in a row should not see the prompt
+            twice.
+
+    PreviewCapabilities:
+      type: object
+      description: |
+        Flattened view of the connector manifest's `[capabilities.*]`
+        blocks. Optional sub-tables that are absent in the manifest
+        are absent here too — the CLI renders only what the connector
+        actually declares.
+      properties:
+        network_hosts:
+          type: array
+          items:
+            type: string
+          description: |
+            `[capabilities.network] hosts`: pinned `host:port` pairs
+            the connector will reach. Order matches the manifest.
+        credential:
+          type: object
+          required: [kind]
+          properties:
+            kind:
+              type: string
+              description: Credential kind (`api_key`, `oauth2`).
+            scope:
+              type: string
+              description: |
+                Human-readable scope from `[capabilities.credential]
+                scope`. Useful for the CLI's "what does this connector
+                want?" prompt.
 
     InstalledConnector:
       type: object

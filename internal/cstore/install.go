@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -97,6 +99,180 @@ type InstallResult struct {
 	// this case unless the entry was present *before* fetch — see
 	// "Reinstall of an already-stored hash is offline" in ADR-0004.
 	AlreadyInstalled bool
+}
+
+// PreviewResult is what Preview returns: enough information for the
+// CLI to render a consent prompt per ADR-0007 ("show the user what
+// they're about to install"). Fetch + verify + parse have already
+// run; the only thing Preview does NOT do is commit.
+//
+// The caller distinguishes "already installed at this hash" (no-op,
+// no prompt needed) from "different hash for the same FQN+version"
+// (hash-mismatch error) using AlreadyInstalled and the Manifest's
+// content compared against what's on disk.
+type PreviewResult struct {
+	// Manifest is the parsed connector manifest from the fetched
+	// tarball. Used to render capabilities, description, publisher,
+	// etc. in the consent prompt.
+	Manifest *Manifest
+
+	// Hash is the canonical `sha256:<hex>` of the canonical hash
+	// input. Same shape as InstallResult.Hash.
+	Hash string
+
+	// SignatureVerified is true when the verifier accepted the
+	// tarball under one of the FQN authority's keys. Per ADR-0007
+	// signature failure is a hard fail and surfaces as an error
+	// (not as `false` here) — this field exists for the rare case
+	// where Verify is structurally a no-op (test verifier, etc.).
+	SignatureVerified bool
+
+	// AlreadyInstalled is true when an entry with the matching hash
+	// already exists in the cstore. Per ADR-0007 the CLI should not
+	// re-prompt in this case — install is a no-op.
+	AlreadyInstalled bool
+}
+
+// Preview runs the install pipeline up through verification and hash
+// computation but does NOT commit to the store. Used by the CLI's
+// consent flow per ADR-0007: fetch + verify + parse → show the user
+// what they're about to install → commit on confirmation.
+//
+// Failure modes match Install: signature failure, hash mismatch (when
+// ExpectedHash is supplied), FQN/version mismatch, fetch failure
+// surface as structured *cstore.Error and the CLI maps them to user-
+// visible messages. ADR-0007: "signature failure is a hard fail;
+// `--yes` does not bypass."
+//
+// Per ADR-0004, when an entry with the matching expected_hash is
+// already in the store this short-circuits to AlreadyInstalled=true
+// without re-fetching — same offline-reinstall path Install honors.
+func (i *Installer) Preview(ctx context.Context, req InstallRequest) (*PreviewResult, error) {
+	if i.Store == nil {
+		return nil, fmt.Errorf("Installer.Store is nil")
+	}
+	if i.Resolver == nil {
+		return nil, fmt.Errorf("Installer.Resolver is nil")
+	}
+	if i.Fetcher == nil {
+		return nil, fmt.Errorf("Installer.Fetcher is nil")
+	}
+	if i.Verifier == nil {
+		return nil, fmt.Errorf("Installer.Verifier is nil")
+	}
+
+	// Offline reinstall: caller declared the expected hash and we
+	// already have it. We still need the manifest for the consent
+	// prompt, so read it back from the on-disk entry rather than
+	// re-fetching.
+	if req.ExpectedHash != "" {
+		exists, err := i.Store.HasHash(req.ExpectedHash)
+		if err != nil {
+			return nil, wrapStoreErr(err)
+		}
+		if exists {
+			dir, _ := i.Store.EntryDir(req.ExpectedHash)
+			manifestBytes, mErr := readInstalledManifest(dir)
+			if mErr != nil {
+				return nil, wrapStoreErr(mErr)
+			}
+			parsed, pErr := ParseManifest("", manifestBytes)
+			if pErr != nil {
+				return nil, pErr
+			}
+			return &PreviewResult{
+				Manifest:          parsed,
+				Hash:              req.ExpectedHash,
+				SignatureVerified: true,
+				AlreadyInstalled:  true,
+			}, nil
+		}
+	}
+
+	url, err := i.Resolver.ResolveTarball(req.Ref)
+	if err != nil {
+		return nil, err
+	}
+
+	body, err := i.Fetcher.Fetch(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
+	tarball, err := ExtractTarball(body)
+	if err != nil {
+		return nil, err
+	}
+
+	parsedManifest, err := ParseManifest("", tarball.Manifest)
+	if err != nil {
+		return nil, err
+	}
+	if vErr := ValidateManifest(parsedManifest, ""); vErr != nil {
+		return nil, vErr
+	}
+	if parsedManifest.Connector.Name != req.Ref.FQN.String() {
+		return nil, &Error{
+			Class:    ClassFQNMismatch,
+			Boundary: BoundaryRuntime,
+			Message:  "manifest FQN does not match requested FQN",
+			Details: map[string]any{
+				"requested_fqn": req.Ref.FQN.String(),
+				"manifest_fqn":  parsedManifest.Connector.Name,
+			},
+		}
+	}
+	if parsedManifest.Connector.Version != req.Ref.Version {
+		return nil, &Error{
+			Class:    ClassFQNMismatch,
+			Boundary: BoundaryRuntime,
+			Message:  "manifest version does not match requested version",
+			Details: map[string]any{
+				"requested_version": req.Ref.Version,
+				"manifest_version":  parsedManifest.Connector.Version,
+			},
+		}
+	}
+
+	if err := i.Verifier.Verify(req.Ref.FQN.Authority(), tarball.Binary, tarball.Manifest, tarball.Signature); err != nil {
+		return nil, err
+	}
+
+	computed := "sha256:" + tarball.CanonicalHashHex()
+	if req.ExpectedHash != "" && !strings.EqualFold(req.ExpectedHash, computed) {
+		return nil, &Error{
+			Class:    ClassHashMismatch,
+			Boundary: BoundaryRuntime,
+			Message:  "computed hash does not match declared hash",
+			Details: map[string]any{
+				"expected": req.ExpectedHash,
+				"computed": computed,
+				"ref":      req.Ref.String(),
+			},
+		}
+	}
+
+	// Already-installed-at-this-hash detection without ExpectedHash:
+	// the caller didn't declare a hash but we just computed one and
+	// the store already has it. CLI uses this to avoid re-prompting
+	// when the operator runs `install` twice for the same artifact.
+	already, _ := i.Store.HasHash(computed)
+
+	return &PreviewResult{
+		Manifest:          parsedManifest,
+		Hash:              computed,
+		SignatureVerified: true,
+		AlreadyInstalled:  already,
+	}, nil
+}
+
+// readInstalledManifest reads the manifest.toml under an installed
+// entry's directory. Used by Preview's offline-reinstall path so the
+// CLI consent prompt has the same metadata it would get from a fresh
+// fetch.
+func readInstalledManifest(entryDir string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(entryDir, tarManifestFile))
 }
 
 // Install runs the pipeline. Returns a structured *Error on any failure

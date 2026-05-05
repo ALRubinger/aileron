@@ -101,7 +101,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "binding":
 		return runBinding(args[1:], os.Stdin, stdout, stderr)
 	case "connector":
-		return runConnector(args[1:], stdout, stderr)
+		return runConnector(args[1:], os.Stdin, stdout, stderr)
 	case "action":
 		return runAction(args[1:], os.Stdin, stdout, stderr)
 	case "keyring":
@@ -1284,21 +1284,21 @@ func resolveShim() (string, error) {
 // --- Connector / action install (ADR-0004 / ADR-0003 + #366) ---
 
 const connectorUsage = `usage:
-  aileron connector install <FQN> [--version=<v>] [--hash=<sha256:...>] [--force]
+  aileron connector install <FQN> [--version=<v>] [--hash=<sha256:...>] [--yes]
   aileron connector check [--include-prerelease]`
 
 const actionUsage = `usage:
   aileron action add <FQN> [--version=<v>] [--force]`
 
 // runConnector dispatches `aileron connector <subcommand>`.
-func runConnector(args []string, stdout, stderr io.Writer) int {
+func runConnector(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, connectorUsage)
 		return 1
 	}
 	switch args[0] {
 	case "install":
-		return runConnectorInstall(args[1:], stdout, stderr)
+		return runConnectorInstall(args[1:], stdin, stdout, stderr)
 	case "check":
 		return runConnectorCheck(args[1:], stdout, stderr)
 	default:
@@ -1579,11 +1579,53 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// runConnectorInstall posts to /v1/connectors/install and renders the
-// returned envelope. Accepts either a bare FQN (`github://...`) or an
-// FQN+version (`github://...@1.0.0`); --version is required when the
-// bare form is used.
-func runConnectorInstall(args []string, stdout, stderr io.Writer) int {
+// connectorPreviewWire mirrors the JSON shape of api.ConnectorPreview
+// on the wire. Locally defined so the CLI binary doesn't pull in the
+// full generated types graph for this single endpoint.
+type connectorPreviewWire struct {
+	Fqn              string `json:"fqn"`
+	Version          string `json:"version"`
+	Hash             string `json:"hash"`
+	Publisher        string `json:"publisher"`
+	SignatureStatus  string `json:"signature_status"`
+	AlreadyInstalled bool   `json:"already_installed"`
+	Capabilities     struct {
+		NetworkHosts []string `json:"network_hosts,omitempty"`
+		Credential   *struct {
+			Kind  string  `json:"kind"`
+			Scope *string `json:"scope,omitempty"`
+		} `json:"credential,omitempty"`
+	} `json:"capabilities"`
+}
+
+// installedConnectorWireForInstall mirrors api.InstalledConnector for
+// the install response. Same locality argument as the preview wire.
+type installedConnectorWireForInstall struct {
+	Fqn              string `json:"fqn"`
+	Version          string `json:"version"`
+	Hash             string `json:"hash"`
+	EntryDir         string `json:"entry_dir"`
+	AlreadyInstalled bool   `json:"already_installed"`
+}
+
+// runConnectorInstall implements the consent flow per ADR-0007:
+//
+//  1. POST /v1/connectors/preview to fetch + verify + parse without
+//     committing. Signature failure or hash mismatch aborts here.
+//  2. Render the preview (FQN, version, hash, publisher, signature
+//     status, capabilities) for the operator.
+//  3. Prompt y/N for confirmation. `--yes` skips the prompt.
+//  4. POST /v1/connectors/install on confirmation. Server runs the
+//     same pipeline a second time — the small re-fetch cost buys a
+//     much cleaner two-phase API surface (no server-side staging).
+//
+// Already-installed-at-this-hash short-circuits: if the preview
+// reports AlreadyInstalled=true, the CLI skips the prompt and prints
+// "already installed" without re-running the install endpoint.
+//
+// `--yes` skips the prompt but does NOT bypass signature verification
+// (that happens server-side, before the prompt fires).
+func runConnectorInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fqnArg, rest, ok := extractPositional(args)
 	if !ok {
 		fmt.Fprintln(stderr, connectorUsage)
@@ -1593,6 +1635,7 @@ func runConnectorInstall(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	version := flags.String("version", "", "strict SemVer to install (required if FQN omits @<version>)")
 	hash := flags.String("hash", "", "expected sha256:<hex>; install aborts if computed hash does not match")
+	yes := flags.Bool("yes", false, "skip the consent prompt and proceed without confirmation")
 	force := flags.Bool("force", false, "(reserved for future use)")
 	if err := flags.Parse(rest); err != nil {
 		return 1
@@ -1603,29 +1646,62 @@ func runConnectorInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%v\n", perr)
 		return 1
 	}
-	body := map[string]any{"fqn": resolvedFQN, "version": resolvedVersion}
+
+	// Step 1: preview.
+	previewBody := map[string]any{"fqn": resolvedFQN, "version": resolvedVersion}
 	if *hash != "" {
-		body["expected_hash"] = *hash
+		previewBody["expected_hash"] = *hash
 	}
-	bodyJSON, _ := json.Marshal(body)
-	status, respBody, err := bindingDoRequest(http.MethodPost, "/connectors/install",
-		strings.NewReader(string(bodyJSON)))
+	previewJSON, _ := json.Marshal(previewBody)
+	previewStatus, previewResp, err := bindingDoRequest(http.MethodPost, "/connectors/preview",
+		strings.NewReader(string(previewJSON)))
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	if status != http.StatusCreated && status != http.StatusOK {
-		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+	if previewStatus != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", previewStatus, string(previewResp))
 		return 1
 	}
-	var resp struct {
-		Fqn              string `json:"fqn"`
-		Version          string `json:"version"`
-		Hash             string `json:"hash"`
-		EntryDir         string `json:"entry_dir"`
-		AlreadyInstalled bool   `json:"already_installed"`
+	var preview connectorPreviewWire
+	if err := json.Unmarshal(previewResp, &preview); err != nil {
+		fmt.Fprintf(stderr, "error parsing preview: %v\n", err)
+		return 1
 	}
-	if err := json.Unmarshal(respBody, &resp); err != nil {
+
+	// Already-installed short-circuit: skip prompt, skip install.
+	if preview.AlreadyInstalled {
+		fmt.Fprintf(stdout, "Already installed: %s@%s\n  hash: %s\n",
+			preview.Fqn, preview.Version, preview.Hash)
+		return 0
+	}
+
+	// Step 2: render the preview.
+	renderConnectorPreview(stdout, &preview)
+
+	// Step 3: prompt unless --yes.
+	if !*yes {
+		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/N]: ")))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(stdout, "Cancelled.")
+			return 0
+		}
+	}
+
+	// Step 4: real install.
+	installJSON, _ := json.Marshal(previewBody)
+	installStatus, installResp, err := bindingDoRequest(http.MethodPost, "/connectors/install",
+		strings.NewReader(string(installJSON)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if installStatus != http.StatusCreated && installStatus != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", installStatus, string(installResp))
+		return 1
+	}
+	var resp installedConnectorWireForInstall
+	if err := json.Unmarshal(installResp, &resp); err != nil {
 		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
 		return 1
 	}
@@ -1636,6 +1712,61 @@ func runConnectorInstall(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "%s: %s@%s\n  hash: %s\n  path: %s\n",
 		verb, resp.Fqn, resp.Version, resp.Hash, resp.EntryDir)
 	return 0
+}
+
+// renderConnectorPreview prints the consent-prompt summary the
+// operator reads before deciding whether to install. Sections shown:
+// FQN + version, short hash, publisher, signature status,
+// capabilities (network hosts, credential kind + scope). Absent
+// capability sub-tables are skipped — the prompt renders only what
+// the connector actually declares.
+func renderConnectorPreview(w io.Writer, p *connectorPreviewWire) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "\033[1mConnector install preview\033[0m")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  FQN:        %s\n", p.Fqn)
+	fmt.Fprintf(w, "  Version:    %s\n", p.Version)
+	fmt.Fprintf(w, "  Hash:       %s\n", shortHash(p.Hash))
+	fmt.Fprintf(w, "  Publisher:  %s\n", p.Publisher)
+	fmt.Fprintf(w, "  Signature:  \033[32m%s\033[0m\n", p.SignatureStatus)
+	hasAny := false
+	if len(p.Capabilities.NetworkHosts) > 0 {
+		hasAny = true
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  \033[1mNetwork access:\033[0m")
+		for _, h := range p.Capabilities.NetworkHosts {
+			fmt.Fprintf(w, "    - %s\n", h)
+		}
+	}
+	if p.Capabilities.Credential != nil {
+		hasAny = true
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  \033[1mCredential required:\033[0m")
+		fmt.Fprintf(w, "    kind:  %s\n", p.Capabilities.Credential.Kind)
+		if p.Capabilities.Credential.Scope != nil && *p.Capabilities.Credential.Scope != "" {
+			fmt.Fprintf(w, "    scope: %s\n", *p.Capabilities.Credential.Scope)
+		}
+	}
+	if !hasAny {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  Capabilities: \033[2m(none declared)\033[0m")
+	}
+	fmt.Fprintln(w)
+}
+
+// shortHash renders only the first 12 hex chars after the algorithm
+// prefix — enough to disambiguate but readable in the consent prompt.
+// Operators who want the full hash can read it from `aileron status`.
+func shortHash(h string) string {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(h, prefix) {
+		return h
+	}
+	rest := h[len(prefix):]
+	if len(rest) > 12 {
+		return prefix + rest[:12] + "…"
+	}
+	return h
 }
 
 // runActionAdd posts to /v1/actions/install, renders the envelope,
