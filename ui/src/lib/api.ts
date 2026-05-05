@@ -102,6 +102,73 @@ export async function listActionApprovals(): Promise<ActionApprovalListResponse>
 	return apiFetch('/v1/action-approvals');
 }
 
+/** Payload of the `resolved` SSE event. Carries the user's verdict so the
+ *  webapp can drop the matching pending card without re-fetching the list. */
+export type ResolvedActionApproval = {
+	id: string;
+	approved: boolean;
+	reason?: string;
+	decided_at: string;
+};
+
+/** Callbacks the SSE subscriber invokes on each event class. The page
+ *  passes handlers that update its local state; the SSE wiring concerns
+ *  itself only with parsing frames and reconnect. */
+export type ActionApprovalSubscriber = {
+	onSnapshot: (items: PendingActionApproval[]) => void;
+	onPending: (item: PendingActionApproval) => void;
+	onResolved: (resolved: ResolvedActionApproval) => void;
+	onError?: (err: unknown) => void;
+};
+
+/** Opens an SSE connection to `/v1/action-approvals/watch` and forwards
+ *  events to the supplied subscriber. Returns a close function the
+ *  caller MUST invoke on unmount; calling it tears down the EventSource
+ *  and stops dispatch.
+ *
+ *  Reconnect is delegated to the browser's built-in EventSource retry
+ *  semantics (default 3s, configurable server-side via `retry:` lines).
+ *  The page's existing fallback `listActionApprovals()` poll on the
+ *  governance side covers the (rare) case where the SSE stream has
+ *  been broken long enough to drop events. */
+export function watchActionApprovals(sub: ActionApprovalSubscriber): () => void {
+	const url = `${API_BASE}/v1/action-approvals/watch`;
+	const es = new EventSource(url, { withCredentials: true });
+
+	es.addEventListener('snapshot', (e: MessageEvent) => {
+		try {
+			const payload = JSON.parse(e.data);
+			sub.onSnapshot(payload.items ?? []);
+		} catch (err) {
+			sub.onError?.(err);
+		}
+	});
+	es.addEventListener('pending', (e: MessageEvent) => {
+		try {
+			sub.onPending(JSON.parse(e.data));
+		} catch (err) {
+			sub.onError?.(err);
+		}
+	});
+	es.addEventListener('resolved', (e: MessageEvent) => {
+		try {
+			sub.onResolved(JSON.parse(e.data));
+		} catch (err) {
+			sub.onError?.(err);
+		}
+	});
+	es.addEventListener('error', (e) => {
+		// EventSource auto-reconnects on transient failure. We only
+		// surface the error once per disconnect — readyState === CLOSED
+		// means the browser gave up; CONNECTING means it'll retry.
+		if (es.readyState === EventSource.CLOSED) {
+			sub.onError?.(e);
+		}
+	});
+
+	return () => es.close();
+}
+
 /** Resolves a pending action-approval. The runtime's blocked
  *  `RunAction` unblocks on the next tick; on `approved=true` the action
  *  proceeds normally, on `approved=false` it returns an

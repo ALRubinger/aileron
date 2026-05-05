@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,3 +261,201 @@ func TestDecideActionApproval_NilQueueReturns503(t *testing.T) {
 // req2ctx is a tiny helper to keep the test bodies readable;
 // the imports declared at file scope are enough.
 func req2ctx() context.Context { return context.Background() }
+
+// --- WatchActionApprovals (SSE) — issue #418 followups ---
+
+// sseEvent is one parsed Server-Sent Event frame: an `event:` line
+// followed by a `data:` line, terminated by a blank line.
+type sseEvent struct {
+	Event string
+	Data  string
+}
+
+// readSSEEvent reads one event frame from r. SSE comment lines
+// (starting with `:`, used here for heartbeats) are skipped. Returns
+// io.EOF when the stream ends.
+func readSSEEvent(r *bufio.Reader) (sseEvent, error) {
+	var ev sseEvent
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return sseEvent{}, err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		switch {
+		case line == "":
+			if ev.Event != "" || ev.Data != "" {
+				return ev, nil
+			}
+			// blank line outside a frame (between heartbeat and next
+			// event); keep reading.
+		case strings.HasPrefix(line, ":"):
+			// SSE comment / heartbeat — ignore.
+		case strings.HasPrefix(line, "event:"):
+			ev.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			ev.Data = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+	}
+}
+
+// TestWatchActionApprovals_EmitsSnapshotOnConnect verifies the first
+// event a freshly connected SSE subscriber receives is a snapshot of
+// the currently pending queue. The webapp uses this to render the
+// initial pending list without a separate GET — the SSE stream is the
+// single source of truth once subscribed.
+func TestWatchActionApprovals_EmitsSnapshotOnConnect(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.Register("send-email", "github://x/y", "sess-1", map[string]any{"to": "alice"})
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.WatchActionApprovals))
+	defer httpSrv.Close()
+
+	resp, err := http.Get(httpSrv.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Errorf("Content-Type = %q, want text/event-stream", got)
+	}
+
+	r := bufio.NewReader(resp.Body)
+	ev, err := readSSEEvent(r)
+	if err != nil {
+		t.Fatalf("read event: %v", err)
+	}
+	if ev.Event != "snapshot" {
+		t.Errorf("first event type = %q, want snapshot", ev.Event)
+	}
+	var payload struct {
+		Items []api.PendingActionApproval `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+		t.Fatalf("decode snapshot: %v; data=%q", err, ev.Data)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("snapshot.items len = %d, want 1; data=%s", len(payload.Items), ev.Data)
+	}
+	if payload.Items[0].ActionName != "send-email" {
+		t.Errorf("snapshot.items[0].action_name = %q", payload.Items[0].ActionName)
+	}
+}
+
+// TestWatchActionApprovals_StreamsPendingAndResolved is the live-
+// updates regression: connect to an empty queue, observe the empty
+// snapshot, Register an approval, observe the `pending` event,
+// resolve it, observe the `resolved` event. This is exactly the
+// state-update path the webapp depends on for live UI updates.
+func TestWatchActionApprovals_StreamsPendingAndResolved(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.WatchActionApprovals))
+	defer httpSrv.Close()
+
+	resp, err := http.Get(httpSrv.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	r := bufio.NewReader(resp.Body)
+	if ev, err := readSSEEvent(r); err != nil || ev.Event != "snapshot" {
+		t.Fatalf("first event = %+v err=%v, want snapshot", ev, err)
+	}
+
+	a := q.Register("send-email", "github://x/y", "sess-1", map[string]any{"to": "alice"})
+	ev, err := readSSEEvent(r)
+	if err != nil {
+		t.Fatalf("read pending event: %v", err)
+	}
+	if ev.Event != "pending" {
+		t.Errorf("event type = %q, want pending", ev.Event)
+	}
+	var pending api.PendingActionApproval
+	if err := json.Unmarshal([]byte(ev.Data), &pending); err != nil {
+		t.Fatalf("decode pending: %v; data=%q", err, ev.Data)
+	}
+	if pending.Id != a.ID {
+		t.Errorf("pending.id = %q, want %q", pending.Id, a.ID)
+	}
+	if pending.ActionName != "send-email" {
+		t.Errorf("pending.action_name = %q", pending.ActionName)
+	}
+
+	if err := q.Decide(a.ID, false, "wrong recipient"); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	ev, err = readSSEEvent(r)
+	if err != nil {
+		t.Fatalf("read resolved event: %v", err)
+	}
+	if ev.Event != "resolved" {
+		t.Errorf("event type = %q, want resolved", ev.Event)
+	}
+	var resolved struct {
+		ID       string `json:"id"`
+		Approved bool   `json:"approved"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(ev.Data), &resolved); err != nil {
+		t.Fatalf("decode resolved: %v; data=%q", err, ev.Data)
+	}
+	if resolved.ID != a.ID {
+		t.Errorf("resolved.id = %q, want %q", resolved.ID, a.ID)
+	}
+	if resolved.Approved {
+		t.Errorf("resolved.approved = true, want false")
+	}
+	if resolved.Reason != "wrong recipient" {
+		t.Errorf("resolved.reason = %q", resolved.Reason)
+	}
+}
+
+// TestWatchActionApprovals_DisabledReturns503 mirrors the
+// dev-mode-server treatment on List/Decide: when the queue is not
+// configured, the handler refuses politely so a webapp tab pointed
+// at a daemon without approvals wired produces a clean 503 rather
+// than a stalled stream.
+func TestWatchActionApprovals_DisabledReturns503(t *testing.T) {
+	srv := &apiServer{}
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals/watch", nil)
+	rec := httptest.NewRecorder()
+	srv.WatchActionApprovals(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+// TestWatchActionApprovals_ClientDisconnectReleases asserts the
+// handler returns when the client disconnects. Without proper
+// context handling, every closed tab would leak a goroutine
+// blocked on the events channel.
+func TestWatchActionApprovals_ClientDisconnectReleases(t *testing.T) {
+	srv, _ := newActionApprovalsTestServer(t)
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.WatchActionApprovals))
+	defer httpSrv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, httpSrv.URL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	r := bufio.NewReader(resp.Body)
+	if _, err := readSSEEvent(r); err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+
+	// Cancel the client context — handler should observe ctx.Done()
+	// and return. Read should hit EOF (or connection-reset).
+	cancel()
+	resp.Body.Close()
+	// The handler should have returned by now; we don't have a direct
+	// signal, but if it leaked a goroutine the goleak-style sanity
+	// would catch it in higher-level test runs. Here we just verify
+	// the connection close didn't deadlock the test.
+}

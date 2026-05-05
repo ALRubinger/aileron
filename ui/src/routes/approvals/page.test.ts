@@ -3,17 +3,44 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
 
 vi.mock('$lib/api', () => ({
 	listApprovals: vi.fn(),
-	listActionApprovals: vi.fn(),
+	watchActionApprovals: vi.fn(),
 	decideActionApproval: vi.fn()
 }));
 
 import Page from './+page.svelte';
-import { listApprovals, listActionApprovals, decideActionApproval } from '$lib/api';
+import {
+	listApprovals,
+	watchActionApprovals,
+	decideActionApproval,
+	type ActionApprovalSubscriber,
+	type PendingActionApproval
+} from '$lib/api';
+
+// captured holds the most recent subscriber the page handed to
+// watchActionApprovals. Tests fire pending / resolved events by
+// invoking these callbacks directly — same shape the SSE handler
+// would, without needing to stand up an EventSource.
+let captured: ActionApprovalSubscriber | null = null;
+
+function setupWatcher(initial: PendingActionApproval[] = []) {
+	vi.mocked(watchActionApprovals).mockImplementation((sub) => {
+		captured = sub;
+		// Snapshot delivery has to be deferred so the page's onMount
+		// has fully run by the time the state update fires; otherwise
+		// the reactive update lands before the component is mounted
+		// and Svelte logs a warning.
+		queueMicrotask(() => sub.onSnapshot(initial));
+		return () => {
+			captured = null;
+		};
+	});
+}
 
 beforeEach(() => {
+	captured = null;
 	vi.mocked(listApprovals).mockResolvedValue({ items: [] });
-	vi.mocked(listActionApprovals).mockResolvedValue({ items: [] });
 	vi.mocked(decideActionApproval).mockResolvedValue(null);
+	setupWatcher();
 });
 
 describe('Approvals page — empty state', () => {
@@ -28,19 +55,17 @@ describe('Approvals page — empty state', () => {
 });
 
 describe('Approvals page — action approvals (#418)', () => {
-	it('renders pending action approvals with action name, connector, and args', async () => {
-		vi.mocked(listActionApprovals).mockResolvedValue({
-			items: [
-				{
-					id: 'act-test-1',
-					action_name: 'send-email',
-					connector_fqn: 'github://x/aileron-connector-google',
-					args: { to: 'alice@example.com', subject: 'hi' },
-					session_id: 'session-42',
-					requested_at: '2026-05-04T12:00:00Z'
-				}
-			]
-		});
+	it('renders pending action approvals from the SSE snapshot', async () => {
+		setupWatcher([
+			{
+				id: 'act-test-1',
+				action_name: 'send-email',
+				connector_fqn: 'github://x/aileron-connector-google',
+				args: { to: 'alice@example.com', subject: 'hi' },
+				session_id: 'session-42',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
 
 		render(Page);
 
@@ -48,44 +73,101 @@ describe('Approvals page — action approvals (#418)', () => {
 			expect(screen.getByText('send-email')).toBeInTheDocument();
 		});
 		expect(screen.getByText(/github:\/\/x\/aileron-connector-google/)).toBeInTheDocument();
-		// Args are rendered as JSON; recipient and subject must both appear in
-		// the rendered <pre> so the user can review what would be sent.
 		const argsBlock = screen.getByTestId('approval-args');
 		expect(argsBlock.textContent).toContain('alice@example.com');
 		expect(argsBlock.textContent).toContain('subject');
-		// Session id is surfaced verbatim.
 		expect(screen.getByText(/Session: session-42/)).toBeInTheDocument();
 	});
 
-	it('does not render the args block when an entry has no args', async () => {
-		vi.mocked(listActionApprovals).mockResolvedValue({
-			items: [
-				{
-					id: 'act-test-1',
-					action_name: 'noop',
-					requested_at: '2026-05-04T12:00:00Z'
-				}
-			]
-		});
+	it('renders the (no args) placeholder when an entry has no args', async () => {
+		setupWatcher([
+			{
+				id: 'act-test-1',
+				action_name: 'noop',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
 		render(Page);
 		await waitFor(() => {
 			expect(screen.getByText('noop')).toBeInTheDocument();
 		});
-		// `(no args)` placeholder keeps the layout stable rather than
-		// collapsing the args row entirely — easier to scan a list.
 		expect(screen.getByTestId('approval-args').textContent).toBe('(no args)');
 	});
 
-	it('approves an action and removes it from the list optimistically', async () => {
-		vi.mocked(listActionApprovals).mockResolvedValue({
-			items: [
-				{
-					id: 'act-test-1',
-					action_name: 'send-email',
-					requested_at: '2026-05-04T12:00:00Z'
-				}
-			]
+	it('appends a card when a `pending` SSE event arrives', async () => {
+		render(Page);
+		await waitFor(() => {
+			expect(captured).not.toBeNull();
 		});
+
+		captured!.onPending({
+			id: 'act-test-2',
+			action_name: 'send-email',
+			requested_at: '2026-05-04T12:00:01Z'
+		});
+
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+	});
+
+	it('removes a card when a `resolved` SSE event arrives', async () => {
+		setupWatcher([
+			{
+				id: 'act-test-3',
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+
+		captured!.onResolved({
+			id: 'act-test-3',
+			approved: true,
+			decided_at: '2026-05-04T12:00:05Z'
+		});
+
+		await waitFor(() => {
+			expect(screen.queryByText('send-email')).not.toBeInTheDocument();
+		});
+	});
+
+	it('de-dupes when a snapshot replay covers the same id', async () => {
+		setupWatcher([
+			{
+				id: 'act-test-4',
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+
+		// Simulate a `pending` event for the same id (could happen on
+		// reconnect race between snapshot and Subscribe). The card
+		// must not duplicate.
+		captured!.onPending({
+			id: 'act-test-4',
+			action_name: 'send-email',
+			requested_at: '2026-05-04T12:00:00Z'
+		});
+		const cards = await screen.findAllByTestId('action-approval-card');
+		expect(cards).toHaveLength(1);
+	});
+
+	it('approves an action and removes it from the list optimistically', async () => {
+		setupWatcher([
+			{
+				id: 'act-test-1',
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
 
 		render(Page);
 		await waitFor(() => {
@@ -98,24 +180,19 @@ describe('Approvals page — action approvals (#418)', () => {
 		await waitFor(() => {
 			expect(decideActionApproval).toHaveBeenCalledWith('act-test-1', true, '');
 		});
-		// After resolution, the card disappears even before the next poll
-		// — this is the optimistic-update path the user perceives as
-		// instant feedback. Reconciliation happens on the next interval tick.
 		await waitFor(() => {
 			expect(screen.queryByText('send-email')).not.toBeInTheDocument();
 		});
 	});
 
 	it('denies an action with the typed reason', async () => {
-		vi.mocked(listActionApprovals).mockResolvedValue({
-			items: [
-				{
-					id: 'act-test-1',
-					action_name: 'send-email',
-					requested_at: '2026-05-04T12:00:00Z'
-				}
-			]
-		});
+		setupWatcher([
+			{
+				id: 'act-test-1',
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
 
 		render(Page);
 		await waitFor(() => {
@@ -128,24 +205,18 @@ describe('Approvals page — action approvals (#418)', () => {
 		await fireEvent.click(denyButton);
 
 		await waitFor(() => {
-			expect(decideActionApproval).toHaveBeenCalledWith(
-				'act-test-1',
-				false,
-				'wrong recipient'
-			);
+			expect(decideActionApproval).toHaveBeenCalledWith('act-test-1', false, 'wrong recipient');
 		});
 	});
 
 	it('surfaces server errors from decideActionApproval', async () => {
-		vi.mocked(listActionApprovals).mockResolvedValue({
-			items: [
-				{
-					id: 'act-test-1',
-					action_name: 'send-email',
-					requested_at: '2026-05-04T12:00:00Z'
-				}
-			]
-		});
+		setupWatcher([
+			{
+				id: 'act-test-1',
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
 		vi.mocked(decideActionApproval).mockRejectedValue(
 			new Error('approval is unknown or already resolved')
 		);
@@ -158,9 +229,7 @@ describe('Approvals page — action approvals (#418)', () => {
 		await fireEvent.click(screen.getByTestId('approve-button'));
 
 		await waitFor(() => {
-			expect(
-				screen.getByText('approval is unknown or already resolved')
-			).toBeInTheDocument();
+			expect(screen.getByText('approval is unknown or already resolved')).toBeInTheDocument();
 		});
 	});
 });

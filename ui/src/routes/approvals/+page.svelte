@@ -1,8 +1,8 @@
 <script lang="ts">
 	import {
 		listApprovals,
-		listActionApprovals,
 		decideActionApproval,
+		watchActionApprovals,
 		type PendingActionApproval
 	} from '$lib/api';
 	import { onMount } from 'svelte';
@@ -36,19 +36,28 @@
 	let loading = $state(true);
 	let error = $state('');
 
-	async function load() {
+	// Action-level approvals stream live over SSE — no polling. The
+	// stream emits a `snapshot` on connect, then `pending` / `resolved`
+	// events as the queue mutates. The browser's EventSource handles
+	// reconnect.
+	function applyPending(item: PendingActionApproval) {
+		// De-dupe by id so a snapshot replay (after reconnect) doesn't
+		// double the card.
+		if (actionApprovals.some((a) => a.id === item.id)) return;
+		actionApprovals = [...actionApprovals, item];
+	}
+
+	function applyResolved(id: string) {
+		actionApprovals = actionApprovals.filter((a) => a.id !== id);
+		delete denyReasons[id];
+	}
+
+	async function loadGovernance() {
 		try {
-			const [g, a] = await Promise.all([
-				listApprovals().catch(() => ({ items: [] })),
-				listActionApprovals().catch(() => ({ items: [] }))
-			]);
+			const g = await listApprovals().catch(() => ({ items: [] }));
 			governanceApprovals = g.items || [];
-			actionApprovals = a.items || [];
-			error = '';
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
-		} finally {
-			loading = false;
 		}
 	}
 
@@ -59,11 +68,10 @@
 		deciding[id] = true;
 		try {
 			await decideActionApproval(id, approved, reason);
-			// Optimistically drop the entry rather than waiting for the
-			// next poll cycle. The next `load()` will reconcile if the
-			// server view differs.
-			actionApprovals = actionApprovals.filter((a) => a.id !== id);
-			delete denyReasons[id];
+			// Optimistically drop the entry; the SSE `resolved` event
+			// will arrive shortly and reconcile if the server view
+			// differs.
+			applyResolved(id);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -89,9 +97,31 @@
 	}
 
 	onMount(() => {
-		load();
-		const interval = setInterval(load, 5000);
-		return () => clearInterval(interval);
+		// Action approvals: live-streamed via SSE. The first event is
+		// the snapshot, which doubles as the initial render and lets
+		// us drop the loading spinner.
+		const closeStream = watchActionApprovals({
+			onSnapshot: (items) => {
+				actionApprovals = items;
+				loading = false;
+				error = '';
+			},
+			onPending: applyPending,
+			onResolved: (r) => applyResolved(r.id),
+			onError: (e) => {
+				error = e instanceof Error ? e.message : String(e);
+			}
+		});
+
+		// Governance approvals: keep the 5s poll for now. Migrating
+		// /v1/approvals to SSE is its own change; out of scope for #418.
+		loadGovernance();
+		const govInterval = setInterval(loadGovernance, 5000);
+
+		return () => {
+			closeStream();
+			clearInterval(govInterval);
+		};
 	});
 </script>
 
