@@ -1,7 +1,6 @@
 ---
 title: "Observability"
 description: "Aileron records every consequential decision in a local audit log and emits OpenTelemetry-compatible traces for action execution. This page covers what's emitted, how to enable trace export, and the env vars that control both surfaces."
-order: 6
 ---
 
 Aileron emits two complementary surfaces of structured data: an **audit log** that's always on, and **OpenTelemetry traces** that are off by default and opt-in. They share attribute keys 1:1, so a span and an audit event for the same operation carry identical names — your trace tooling and your audit reader read the same vocabulary.

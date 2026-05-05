@@ -52,8 +52,7 @@ export const navigation: NavItem[] = [
       { label: 'Actions', href: '/concepts/actions/' },
       { label: 'Connectors', href: '/concepts/connectors/' },
       { label: 'The Vault', href: '/concepts/the-vault/' },
-      { label: 'Proof of Control', href: '/concepts/proof-of-control/' },
-      { label: 'Observability', href: '/concepts/observability/' }
+      { label: 'Proof of Control', href: '/concepts/proof-of-control/' }
     ]
   },
   {
@@ -61,7 +60,8 @@ export const navigation: NavItem[] = [
     children: [
       { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' },
       { label: 'Authoring an Action', href: '/guides/authoring-an-action/' },
-      { label: 'Publishing a Connector', href: '/guides/publishing-a-connector/' }
+      { label: 'Publishing a Connector', href: '/guides/publishing-a-connector/' },
+      { label: 'Observability', href: '/guides/observability/' }
     ]
   },
   {
