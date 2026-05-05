@@ -49,6 +49,20 @@ func StartGateway(ctx context.Context, v vault.Vault, log *slog.Logger) (*Gatewa
 		log = slog.Default()
 	}
 
+	// Allocate the listener first so the gateway's own URL is known by
+	// the time the handler is constructed. The handler stamps that URL
+	// into action-approval notifications via Config.WebappURL — once
+	// the daemon serves ui/build directly, that URL is the canonical
+	// webapp entry point and notifications carry a working
+	// click-through target out of the box. Closing the listener on
+	// any subsequent error keeps the port from leaking.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("gateway: binding listener: %w", err)
+	}
+	addr := listener.Addr().(*net.TCPAddr)
+	url := fmt.Sprintf("http://127.0.0.1:%d", addr.Port)
+
 	// Under launch, MCP is the canonical surface for action discovery
 	// (cmd/aileron-mcp queries /v1/actions and routes tools/call to
 	// /v1/actions/{name}/run). The gateway therefore disables in-band
@@ -59,18 +73,12 @@ func StartGateway(ctx context.Context, v vault.Vault, log *slog.Logger) (*Gatewa
 	handler, err := app.NewHandlerWithConfig(log, app.Config{
 		Vault:               v,
 		DisableAugmentation: true,
+		WebappURL:           url,
 	})
 	if err != nil {
+		_ = listener.Close()
 		return nil, fmt.Errorf("gateway: building handler: %w", err)
 	}
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("gateway: binding listener: %w", err)
-	}
-
-	addr := listener.Addr().(*net.TCPAddr)
-	url := fmt.Sprintf("http://127.0.0.1:%d", addr.Port)
 
 	srv := &http.Server{
 		Handler:           handler,
