@@ -272,6 +272,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		newID:              idGen,
 		actions:            action.NewStore(action.DefaultDir()),
 		installer:          newConnectorInstaller(log),
+		versionLister:      cstore.DefaultVersionLister(),
 	}
 	if res, err := server.actions.Load(); err != nil {
 		log.Warn("failed to load actions directory", "dir", server.actions.Dir(), "error", err)
