@@ -59,7 +59,7 @@ Aileron is not intended for children under 13, and we do not knowingly collect d
 
 ## Contact
 
-Questions about this policy or how Aileron handles your data: [alr@alrubinger.com](mailto:alr@alrubinger.com).
+Questions about this policy or how Aileron handles your data: [fly@withaileron.ai](mailto:fly@withaileron.ai).
 
 ---
 
