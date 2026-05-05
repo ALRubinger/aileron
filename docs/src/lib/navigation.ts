@@ -48,7 +48,6 @@ export const navigation: NavItem[] = [
     label: 'Concepts',
     children: [
       { label: 'Deterministic Agentic Execution', href: '/concepts/deterministic-agentic-execution/' },
-      { label: 'The LLM Gateway', href: '/concepts/llm-gateway/' },
       { label: 'Actions', href: '/concepts/actions/' },
       { label: 'Connectors', href: '/concepts/connectors/' },
       { label: 'The Vault', href: '/concepts/the-vault/' },

@@ -44,9 +44,9 @@ MCP standardizes the surface for tool exposure across hosts. It turns "build N t
 
 ## Executing — Aileron
 
-Aileron is a **deterministic execution path** for what the LLM proposes. It sits at the LLM endpoint (the agent points its API base URL at Aileron instead of OpenAI's or Anthropic's). For every chat completion request, Aileron augments the agent's tool catalog with installed *actions* — declarative, version-pinned, capability-bounded units of work.
+Aileron is a **deterministic execution path** for what the LLM proposes. Installed *actions* — declarative, version-pinned, capability-bounded units of work — are surfaced to the agent through Aileron's MCP server. Any agent that already speaks tool calling and consumes MCP servers can use them: no SDK changes, no framework integration, no plugin in the agent host.
 
-When the LLM picks an Aileron-augmented tool, Aileron intercepts the call, executes it deterministically, and feeds the result back through the chat stream. The agent never knew the tool wasn't one of its own.
+When the LLM picks an Aileron action, the agent routes the tool call back to the Aileron runtime, which executes it through the connector sandbox, returns the result, and writes the audit record.
 
 What this gets you:
 
@@ -66,13 +66,13 @@ When an agent is configured to use all three, the picture looks like this:
 
 1. **The agent host** (Claude Code, your custom app) declares its own tools using **tool calling**. Things like file reads, codebase search, terminal execution.
 2. **MCP servers** the host has registered expose more tools. Maybe a documentation MCP, a database MCP, a Kubernetes MCP.
-3. **Aileron** at the LLM endpoint augments the tool catalog further with installed actions. Slack-post, linear-ticket, gmail-send.
+3. **Aileron** publishes your installed actions through its own MCP server: slack-post, linear-ticket, gmail-send. They appear in the agent's tool catalog like any other MCP-served tool.
 
-The LLM sees one merged set of tools. It picks among them based on which best fits the user's request. Tool name collisions resolve in favor of the agent's own tools ([ADR-0008](/adr/0008-intent-matching)) — Aileron renames its own with an `aileron.` prefix so the agent's existing workflows keep working.
+The LLM sees one merged set of tools and picks among them based on which best fits the user's request.
 
-When the LLM picks a host tool, the host runs it. When it picks an MCP tool, the MCP server runs it. When it picks an Aileron action, Aileron runs it — deterministically, with sealed credentials, against capability bounds, with audit.
+When the LLM picks a host tool, the host runs it. When it picks an MCP tool, the MCP server runs it. When it picks an Aileron action, the Aileron runtime runs it — deterministically, with sealed credentials, against capability bounds, with audit.
 
-The three don't compete. If you want all three, point the agent at Aileron's endpoint and the picture composes. If you don't need Aileron, drop it and the rest still works.
+The three don't compete. If you don't need Aileron, drop it and the rest still works.
 
 ## Where each is the right answer
 
