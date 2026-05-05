@@ -3,14 +3,17 @@ package launch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/comms"
 	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
@@ -51,29 +54,44 @@ type CommsMessageDTO struct {
 
 // CommsServer handles IPC requests from aileron-mcp.
 //
-// Pre-#419, this server rendered an in-pty approval panel before
-// every send / draft / http call. The pty rendering is gone; the
-// IPC interface stays so aileron-mcp's tools keep their schemas.
-// Send / draft / http now fail-closed with a clear message until the
-// shell-shim → webapp wire-through ships as a follow-up to #419.
-// `read_messages` is unaffected — it's a pure queue read.
+// `read_messages` is a pure queue read. `send_message`, `draft_reply`,
+// and `http_request` register an entry on the shared
+// [approval.ActionApprovalQueue] so the webapp's `/approvals` page
+// surfaces the request and the user decides; on Approve the server
+// dispatches the actual send / HTTP call, on Deny it returns an
+// agent-facing error. The shape replaces the pre-#419 in-pty overlay
+// with the (#418) webapp surface (#428).
+//
+// Approvals is nil only in legacy callers that haven't been updated
+// to the queue-aware constructor; in that fallback the send-shaped
+// methods fail-closed with a clear regression message so the agent
+// learns to route around them.
 type CommsServer struct {
-	socketPath string
-	listener   net.Listener
-	queue      *NotifyQueue
-	senders    map[string]comms.Listener
-	auditLog   string
-	sessionID  string
-	secrets    launchpolicy.SecretsConfig
-	vault      vault.Vault
-	httpClient *http.Client
+	socketPath  string
+	listener    net.Listener
+	queue       *NotifyQueue
+	senders     map[string]comms.Listener
+	auditLog    string
+	sessionID   string
+	secrets     launchpolicy.SecretsConfig
+	vault       vault.Vault
+	httpClient  *http.Client
+	approvals   *approval.ActionApprovalQueue
+	approvalTTL time.Duration
 
 	mu   sync.Mutex
 	done bool
 }
 
 // NewCommsServer creates a comms IPC server. Run in a goroutine via Serve.
-func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, auditLog, sessionID string) (*CommsServer, error) {
+//
+// approvals is the shared action-approval queue the daemon also
+// exposes via `/v1/action-approvals`. Send-shaped tool calls
+// (`send_message`, `draft_reply`, `http_request`) register kind-
+// specific entries here and wait for the user to decide via the
+// webapp. Pass nil for the legacy fail-closed behaviour preserved
+// for callers that don't yet route through the queue.
+func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, auditLog, sessionID string, approvals *approval.ActionApprovalQueue) (*CommsServer, error) {
 	os.Remove(socketPath)
 
 	ln, err := net.Listen("unix", socketPath)
@@ -87,14 +105,24 @@ func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Liste
 	}
 
 	return &CommsServer{
-		socketPath: socketPath,
-		listener:   ln,
-		queue:      queue,
-		senders:    senderMap,
-		auditLog:   auditLog,
-		sessionID:  sessionID,
+		socketPath:  socketPath,
+		listener:    ln,
+		queue:       queue,
+		senders:     senderMap,
+		auditLog:    auditLog,
+		sessionID:   sessionID,
+		approvals:   approvals,
+		approvalTTL: defaultCommsApprovalTimeout,
 	}, nil
 }
+
+// defaultCommsApprovalTimeout is how long a send-shaped CommsServer
+// method holds the IPC response open waiting for the user to decide
+// in the webapp. Matches the apiServer's RunAction timeout (5
+// minutes) so all kinds of pending approvals share the same upper
+// bound — predictable for the user and bounded for upstream MCP /
+// HTTP timeouts.
+const defaultCommsApprovalTimeout = 5 * time.Minute
 
 // Serve accepts connections. Blocks until Close. Run in a goroutine.
 func (cs *CommsServer) Serve() {
@@ -170,39 +198,256 @@ func (cs *CommsServer) readMessages(req CommsRequest) CommsResponse {
 	return CommsResponse{OK: true, Messages: dtos}
 }
 
-// sendMessage previously prompted the developer for approval in the
-// pty before dispatching. With the pty gone (#419), the prompt
-// surface is gone too. Fail-closed until the webapp wire-through
-// lands — agents calling this tool see the error and can fall back
-// to other mechanisms.
+// sendMessage registers a [approval.ApprovalKindCommsSend] entry on
+// the shared action-approval queue, blocks until the user decides
+// via the webapp, and on Approve dispatches the message via the
+// matched [comms.Listener]. The IPC response holds open for up to
+// [CommsServer.approvalTTL]; on Deny / Timeout / context cancel the
+// agent receives a structured error (#428).
 func (cs *CommsServer) sendMessage(req CommsRequest) CommsResponse {
-	cs.logMessage("message_denied_no_surface", req.Service, req.Channel, "", req.Body, "")
-	return CommsResponse{Error: errSendApprovalUnavailable}
+	if req.Service == "" || req.Channel == "" || req.Body == "" {
+		return CommsResponse{Error: "service, channel, and body are required"}
+	}
+	sender, ok := cs.senders[req.Service]
+	if !ok {
+		return CommsResponse{Error: "no listener for service: " + req.Service}
+	}
+	if cs.approvals == nil {
+		cs.logMessage("message_denied_no_surface", req.Service, req.Channel, "", req.Body, "")
+		return CommsResponse{Error: errSendApprovalUnavailable}
+	}
+
+	entry := cs.approvals.RegisterCommsSend(req.Service, req.Channel, req.Body, cs.sessionID)
+	decision, err := entry.Wait(context.Background(), cs.approvalTTL)
+	if errors.Is(err, approval.ErrActionApprovalTimeout) {
+		cs.logMessage("message_denied_timeout", req.Service, req.Channel, "", req.Body, "")
+		return CommsResponse{Error: "send_message: user did not respond before timeout"}
+	}
+	if err != nil {
+		cs.logMessage("message_denied_error", req.Service, req.Channel, "", req.Body, "")
+		return CommsResponse{Error: "send_message: " + err.Error()}
+	}
+	if !decision.Approved {
+		cs.logMessage("message_denied", req.Service, req.Channel, "", req.Body, "")
+		msg := "send_message: user denied"
+		if decision.Reason != "" {
+			msg += ": " + decision.Reason
+		}
+		return CommsResponse{Error: msg}
+	}
+
+	if sendErr := sender.Send(context.Background(), comms.OutgoingMessage{
+		Channel: req.Channel,
+		Body:    req.Body,
+	}); sendErr != nil {
+		cs.logMessage("message_send_failed", req.Service, req.Channel, "", req.Body, "")
+		return CommsResponse{Error: "send_message: dispatch failed: " + sendErr.Error()}
+	}
+	cs.logMessage("message_sent", req.Service, req.Channel, "", req.Body, "")
+	return CommsResponse{OK: true}
 }
 
-// draftReply previously polled the in-pty overlay for an approve /
-// edit / discard decision. Same pty-removal regression as sendMessage:
-// fail-closed until the webapp wire-through ships.
+// draftReply registers a [approval.ApprovalKindCommsDraft] entry —
+// the user reviews the original incoming message alongside the
+// proposed reply, optionally edits the reply body, and approves or
+// discards. On approve the (possibly edited) body is dispatched
+// through the listener for the same service/channel as the original
+// message; on discard the agent receives a structured error.
+//
+// The original message is looked up in the [NotifyQueue] by
+// [CommsRequest.ReplyTo]. If the message is no longer in the queue
+// (TTL'd / cleared) the user can still approve the draft body in
+// isolation; the dispatch path then surfaces an error rather than
+// guessing at routing (#428).
 func (cs *CommsServer) draftReply(req CommsRequest) CommsResponse {
-	cs.logMessage("draft_denied_no_surface", "", "", "", req.Body, req.ReplyTo)
-	return CommsResponse{Error: errSendApprovalUnavailable}
+	if req.ReplyTo == "" || req.Body == "" {
+		return CommsResponse{Error: "reply_to and body are required"}
+	}
+	if cs.approvals == nil {
+		cs.logMessage("draft_denied_no_surface", "", "", "", req.Body, req.ReplyTo)
+		return CommsResponse{Error: errSendApprovalUnavailable}
+	}
+
+	original, found := cs.queue.FindByID(req.ReplyTo)
+	service := original.Source
+	channel := original.Channel
+	originalAuthor := original.Author
+	originalBody := original.Body
+	if !found {
+		service = ""
+		channel = ""
+		originalAuthor = ""
+		originalBody = ""
+	}
+
+	entry := cs.approvals.RegisterCommsDraft(service, channel, originalAuthor, originalBody, req.Body, req.ReplyTo, cs.sessionID)
+	decision, err := entry.Wait(context.Background(), cs.approvalTTL)
+	if errors.Is(err, approval.ErrActionApprovalTimeout) {
+		cs.logMessage("draft_denied_timeout", service, channel, "", req.Body, req.ReplyTo)
+		return CommsResponse{Error: "draft_reply: user did not respond before timeout"}
+	}
+	if err != nil {
+		cs.logMessage("draft_denied_error", service, channel, "", req.Body, req.ReplyTo)
+		return CommsResponse{Error: "draft_reply: " + err.Error()}
+	}
+	if !decision.Approved {
+		cs.logMessage("draft_discarded", service, channel, "", req.Body, req.ReplyTo)
+		msg := "draft_reply: user discarded"
+		if decision.Reason != "" {
+			msg += ": " + decision.Reason
+		}
+		return CommsResponse{Error: msg}
+	}
+
+	body := req.Body
+	if edited, ok := decision.EditedPayload["body"].(string); ok && edited != "" {
+		body = edited
+		cs.logMessage("draft_edited", service, channel, "", body, req.ReplyTo)
+	}
+	if !found || service == "" || channel == "" {
+		return CommsResponse{Error: "draft_reply: original message is no longer available; cannot dispatch"}
+	}
+	sender, ok := cs.senders[service]
+	if !ok {
+		return CommsResponse{Error: "draft_reply: no listener for service: " + service}
+	}
+	if sendErr := sender.Send(context.Background(), comms.OutgoingMessage{
+		Channel: channel,
+		Body:    body,
+	}); sendErr != nil {
+		cs.logMessage("draft_send_failed", service, channel, "", body, req.ReplyTo)
+		return CommsResponse{Error: "draft_reply: dispatch failed: " + sendErr.Error()}
+	}
+	cs.logMessage("reply_sent", service, channel, "", body, req.ReplyTo)
+	return CommsResponse{OK: true}
 }
 
-// httpRequest had a pty approval prompt before issuing the call.
-// Same regression — fail-closed for now. Agents wanting to make
-// HTTP calls should go through the connector + sandbox pipeline,
-// which has its own approval surface (action manifests with
-// `[approval] required = true`).
+// httpRequest registers an [approval.ApprovalKindHTTPRequest] entry
+// with the matched api_key binding name (never the value), waits for
+// the user to decide via the webapp, and on Approve issues the HTTP
+// call with the binding's bytes injected as a Bearer token.
+//
+// CommsRequest field reuse (preserved from pre-#419 for protocol
+// continuity): Service = HTTP method, Channel = URL, Body = request
+// body, ReplyTo = a JSON object of additional headers (#428).
 func (cs *CommsServer) httpRequest(req CommsRequest) CommsResponse {
-	cs.logMessage("http_request_denied_no_surface", req.Service, req.Channel, "", req.Body, "")
-	return CommsResponse{Error: errSendApprovalUnavailable}
+	method := req.Service
+	url := req.Channel
+	body := req.Body
+	headersJSON := req.ReplyTo
+	if method == "" || url == "" {
+		return CommsResponse{Error: "method and url are required"}
+	}
+	if cs.approvals == nil {
+		cs.logMessage("http_request_denied_no_surface", method, url, "", body, "")
+		return CommsResponse{Error: errSendApprovalUnavailable}
+	}
+
+	secretName, _ := cs.matchSecret(url)
+
+	entry := cs.approvals.RegisterHTTPRequest(method, url, body, secretName, cs.sessionID)
+	decision, err := entry.Wait(context.Background(), cs.approvalTTL)
+	if errors.Is(err, approval.ErrActionApprovalTimeout) {
+		cs.logMessage("http_request_denied_timeout", method, url, "", body, "")
+		return CommsResponse{Error: "http_request: user did not respond before timeout"}
+	}
+	if err != nil {
+		cs.logMessage("http_request_denied_error", method, url, "", body, "")
+		return CommsResponse{Error: "http_request: " + err.Error()}
+	}
+	if !decision.Approved {
+		cs.logMessage("http_request_denied", method, url, "", body, "")
+		msg := "http_request: user denied"
+		if decision.Reason != "" {
+			msg += ": " + decision.Reason
+		}
+		return CommsResponse{Error: msg}
+	}
+
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+	httpReq, err := http.NewRequest(method, url, bodyReader)
+	if err != nil {
+		return CommsResponse{Error: "http_request: invalid request: " + err.Error()}
+	}
+	if headersJSON != "" {
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(headersJSON), &headers); err == nil {
+			for k, v := range headers {
+				httpReq.Header.Set(k, v)
+			}
+		}
+	}
+	if secretName != "" && cs.vault != nil {
+		secret, err := cs.vault.Get(context.Background(), secretName)
+		if err == nil {
+			httpReq.Header.Set("Authorization", "Bearer "+string(secret.Value))
+		}
+	}
+
+	client := cs.httpClient
+	if client == nil {
+		client = &http.Client{}
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return CommsResponse{Error: "http_request: dispatch failed: " + err.Error()}
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	cs.logMessage("http_request_sent", method, url, "", string(respBody), "")
+	return CommsResponse{
+		OK: true,
+		Messages: []CommsMessageDTO{{
+			ID:   fmt.Sprintf("%d", resp.StatusCode),
+			Body: string(respBody),
+		}},
+	}
+}
+
+// matchSecret finds the first secret whose target patterns match the
+// URL. The match is best-effort and prefix-based; multiple matches
+// resolve in iteration order. Returns the binding name (not the
+// value) so the user surface can show "credential: <name>" without
+// exposing bytes.
+func (cs *CommsServer) matchSecret(url string) (string, bool) {
+	for name, def := range cs.secrets {
+		for _, pattern := range def.Targets {
+			if URLMatchesPattern(url, pattern) {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// URLMatchesPattern checks if a URL matches a target pattern.
+// Patterns use simple containment with optional trailing wildcard.
+// Examples:
+//
+//   - "slack.com/api/*" matches "https://slack.com/api/chat.postMessage".
+//   - "api.github.com" matches "https://api.github.com/repos/foo/bar".
+//
+// Exact regex / glob expressiveness is out of scope; the pre-#419
+// code shipped this exact matcher and its behaviour is what
+// `aileron-mcp`'s `http_request` tool descriptions promise.
+func URLMatchesPattern(url, pattern string) bool {
+	if strings.HasSuffix(pattern, "*") {
+		prefix := strings.TrimSuffix(pattern, "*")
+		return strings.Contains(url, prefix)
+	}
+	return strings.Contains(url, pattern)
 }
 
 // errSendApprovalUnavailable is the agent-facing message when a
-// send-shaped CommsRequest hits the post-#419 launch path. Surfaces
-// in `aileron-mcp`'s tool error so the LLM can route around it (e.g.
-// suggest the user run the action via a connector instead).
-const errSendApprovalUnavailable = "send / draft / http_request approval surface is currently unavailable in `aileron launch` (pty removed in #419; webapp wire-through tracked as a follow-up)"
+// send-shaped CommsRequest hits a CommsServer that wasn't given an
+// [approval.ActionApprovalQueue] — the legacy fallback for callers
+// that haven't been updated. Production wiring under `aileron launch`
+// always supplies the queue, so this surface is reachable only by
+// stale code paths or tests that don't construct the queue.
+const errSendApprovalUnavailable = "send / draft / http_request approval surface is unavailable: comms server has no action-approval queue wired (production launch always supplies one — this is a legacy / test fallback)"
 
 // DirectSend sends a message without an approval prompt. Used by
 // downstream callers that have already received explicit user
@@ -286,7 +531,3 @@ func (cs *CommsServer) logMessage(event, service, channel, author, body, inReply
 	})
 }
 
-// Touch the io import so it stays in the imports list. Used by the
-// pre-#419 httpRequest path; preserved so the followup wire-through
-// doesn't have to re-add the import.
-var _ = io.Discard
