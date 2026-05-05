@@ -34,6 +34,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/intercept"
 	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/notify"
+	"github.com/ALRubinger/aileron/internal/observability"
 	"github.com/ALRubinger/aileron/internal/policy"
 	"github.com/ALRubinger/aileron/internal/source"
 	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
@@ -156,6 +157,22 @@ func buildApprovalsReviewURL(cfgURL, envURL string) string {
 // binary uses NewHandler (dev-mode fallback).
 func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	ctx := context.Background()
+
+	// --- OpenTelemetry bootstrap (issue #390 Phase 7 foundation) ---
+	// Installs the global tracer provider and W3C TraceContext
+	// propagator. Off by default; opt in with AILERON_OTEL_ENABLED.
+	// The propagator is registered unconditionally so an inbound
+	// `traceparent` is parsed even when this process emits no spans.
+	// Span emission at action / connector / capability / approval
+	// boundaries lands in follow-up PRs (gated on the audit-log file
+	// rotation work — both surfaces will share a rotating writer so
+	// spans and audit events can land on disk with the same retention
+	// story).
+	obsCfg, err := config.LoadObservabilityConfig()
+	if err != nil {
+		return nil, fmt.Errorf("observability config: %w", err)
+	}
+	_ = observability.Init(obsCfg, log)
 
 	// --- In-memory stores ---
 	intentStore := mem.NewIntentStore()
@@ -667,10 +684,35 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	}
 
 	handler = loggingMiddleware(log, handler)
+	// Tracing middleware sits just outside the route handlers (and
+	// auth) so the server-root span captures the full handler-side
+	// latency. It runs inside requestID and cors so the per-request
+	// log fields the upper middlewares depend on still appear in
+	// log output even when tracing is off (the no-op default).
+	handler = observability.HTTPMiddleware(spanNameForRequest)(handler)
 	handler = requestIDMiddleware(handler)
 	handler = corsMiddleware(handler)
 
 	return handler, nil
+}
+
+// spanNameForRequest shapes server-root span names for the tracing
+// middleware. Default-style "METHOD /path" is fine for static paths
+// (`POST /v1/chat/completions`), but path-templated routes carrying
+// IDs (`POST /v1/actions/{name}/run`) blow up cardinality if the
+// raw URL is used as the span name. We collapse the two known
+// templated routes back to their template form so trace tooling
+// groups them correctly.
+func spanNameForRequest(r *http.Request) string {
+	switch {
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/actions/") && strings.HasSuffix(r.URL.Path, "/run"):
+		return "POST /v1/actions/{name}/run"
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
+		return "POST /v1/chat/completions"
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages":
+		return "POST /v1/messages"
+	}
+	return r.Method + " " + r.URL.Path
 }
 
 // newMailer returns a ResendMailer when a Resend API key is configured,

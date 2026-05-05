@@ -6,7 +6,6 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/anthropics/anthropic-sdk-go v1.36.0
 	github.com/bwmarrin/discordgo v0.29.0
-	github.com/creack/pty/v2 v2.0.1
 	github.com/getkin/kin-openapi v0.133.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/go-github/v69 v69.2.0
@@ -17,6 +16,10 @@ require (
 	github.com/slack-go/slack v0.21.1
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/tetratelabs/wazero v1.11.0
+	go.opentelemetry.io/otel v1.43.0
+	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.43.0
+	go.opentelemetry.io/otel/sdk v1.43.0
+	go.opentelemetry.io/otel/trace v1.43.0
 	golang.org/x/crypto v0.49.0
 	golang.org/x/mod v0.33.0
 	golang.org/x/oauth2 v0.36.0
@@ -100,9 +103,7 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
-	go.opentelemetry.io/otel v1.43.0 // indirect
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
-	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
