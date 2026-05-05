@@ -1,0 +1,41 @@
+{
+  "name": "@aileron/webapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Aileron webapp surfaced under `aileron launch`. Static-built; embedded into the daemon binary; served at the gateway origin. See ../ui/ for the (frozen) cloud-tier reference UI.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@sveltejs/adapter-static": "^3.0.0",
+    "@sveltejs/kit": "^2.55.0",
+    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "bits-ui": "^2.16.5",
+    "clsx": "^2.1.1",
+    "svelte": "^5.55.0",
+    "tailwind-merge": "^3.5.0",
+    "tailwind-variants": "^3.2.2",
+    "tw-animate-css": "^1.4.0",
+    "vite": "^6.0.0"
+  },
+  "devDependencies": {
+    "@lucide/svelte": "^1.7.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/node": "^22.0.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/svelte": "^5.3.1",
+    "@testing-library/user-event": "^14.6.1",
+    "@vitest/coverage-v8": "^4.1.4",
+    "jsdom": "^29.0.2",
+    "svelte-check": "^4.0.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.4"
+  }
+}

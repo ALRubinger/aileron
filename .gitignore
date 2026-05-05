@@ -18,6 +18,18 @@ ui/.svelte-kit/
 ui/build/
 ui/node_modules/
 
+# Local webapp build output (the static site embedded into the daemon)
+webapp/.svelte-kit/
+webapp/build/
+webapp/node_modules/
+
+# The webapp embed dir lives next to its embed directive so `//go:embed`
+# can reach it. Everything in there is build output overwritten by
+# `task build:webapp` — except the committed stub `index.html` that
+# guarantees `go build` succeeds on a fresh clone.
+internal/app/webapp_dist/*
+!internal/app/webapp_dist/index.html
+
 # Go test artifacts (task test:go:ci output)
 /junit.xml
 /coverage.txt
@@ -29,6 +41,10 @@ ui/coverage-e2e/
 ui/.nyc_output/
 ui/test-results/
 ui/playwright-report/
+
+# Webapp test artifacts
+webapp/coverage/
+webapp/test-results/
 
 # Docs build output
 docs/.astro/
