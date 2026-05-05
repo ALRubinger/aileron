@@ -11,4 +11,4 @@ if [ -n "$AILERON_DATABASE_URL" ]; then
   echo "Schema applied successfully."
 fi
 
-exec aileron-server
+exec aileron-server --bind "${AILERON_BIND:-0.0.0.0:8080}"

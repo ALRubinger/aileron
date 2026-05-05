@@ -44,7 +44,7 @@ services:
       enclave:
         condition: service_healthy
     environment:
-      AILERON_ADDR: ":8080"
+      AILERON_BIND: "0.0.0.0:8080"
       AILERON_DATABASE_URL: "postgres://aileron:aileron@postgres:5432/aileron?sslmode=disable"
       AILERON_JWT_SIGNING_KEY: "${AILERON_JWT_SIGNING_KEY}"
       AILERON_AUTO_VERIFY_EMAIL: "${AILERON_AUTO_VERIFY_EMAIL:-false}"
