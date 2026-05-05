@@ -164,7 +164,10 @@ func TestWebappHandler_DoesNotShadowAPIPaths(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	// /v1/health → API handler wins.
-	resp, _ := http.Get(srv.URL + "/v1/health")
+	resp, err := http.Get(srv.URL + "/v1/health")
+	if err != nil {
+		t.Fatalf("GET /v1/health: %v", err)
+	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != `{"status":"ok"}` {
@@ -175,7 +178,10 @@ func TestWebappHandler_DoesNotShadowAPIPaths(t *testing.T) {
 	}
 
 	// /approvals → SPA fallback (webapp handler).
-	resp2, _ := http.Get(srv.URL + "/approvals")
+	resp2, err := http.Get(srv.URL + "/approvals")
+	if err != nil {
+		t.Fatalf("GET /approvals: %v", err)
+	}
 	defer resp2.Body.Close()
 	if ct := resp2.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Errorf("/approvals Content-Type = %q, want HTML", ct)
