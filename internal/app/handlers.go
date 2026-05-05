@@ -1072,6 +1072,7 @@ func (s *apiServer) InstallConnector(w http.ResponseWriter, r *http.Request) {
 		Hash:     res.Hash,
 		EntryDir: res.EntryDir,
 	}
+	s.recordConnectorInstalled(r.Context(), ref, res)
 	if res.AlreadyInstalled {
 		already := true
 		out.AlreadyInstalled = &already
@@ -1079,6 +1080,29 @@ func (s *apiServer) InstallConnector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
+}
+
+// recordConnectorInstalled emits the install-consent audit event
+// required by ADR-0007: every successful install records the FQN,
+// version, hash, signature status, and the consent decision so a
+// reviewer can answer "what did I install, and what did I agree it
+// could do?" from the audit log alone. The install pipeline always
+// runs Verify (or short-circuits to a previously-verified entry), so
+// reaching this point implies a verified signature.
+func (s *apiServer) recordConnectorInstalled(ctx context.Context, ref cstore.Ref, res *cstore.InstallResult) {
+	if s.auditRecorder == nil || res == nil {
+		return
+	}
+	s.auditRecorder.RecordSuccess(ctx, model.EventTypeConnectorInstalled,
+		model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
+		map[string]any{
+			"fqn":               ref.FQN.String(),
+			"version":           ref.Version,
+			"hash":              res.Hash,
+			"signature_status":  "verified",
+			"decision":          "approved",
+			"already_installed": res.AlreadyInstalled,
+		})
 }
 
 // installHTTPStatus maps a cstore failure class to an HTTP status. Per

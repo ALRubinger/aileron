@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -216,10 +218,12 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force,
 	}
 
 	// Step 4: optional signature verification.
+	signatureStatus := "unsigned"
 	if tb.SignaturePresent() {
 		if err := s.installer.Verifier.Verify(ref.FQN.Authority(), nil, tb.Manifest, tb.Signature); err != nil {
 			return nil, classifyInstallActionErr(err)
 		}
+		signatureStatus = "verified"
 	} else if s.log != nil {
 		s.log.Debug("installing unsigned action tarball",
 			"fqn", ref.FQN.String(), "version", ref.Version)
@@ -382,21 +386,41 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force,
 		}
 	}
 
-	if s.auditRecorder != nil {
-		s.auditRecorder.RecordSuccess(ctx, model.EventTypeActionInstalled,
-			model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
-			map[string]any{
-				"name":    manifest.Name,
-				"fqn":     ref.FQN.String(),
-				"version": ref.Version,
-				"source":  manifest.Source,
-				"path":    dest,
-			})
-	}
-
 	connectorFQNs := make([]string, 0, len(manifest.Requires.Connectors))
 	for _, c := range manifest.Requires.Connectors {
 		connectorFQNs = append(connectorFQNs, c.Name)
+	}
+
+	if s.auditRecorder != nil {
+		// Action manifests sign just the manifest bytes (no separate
+		// binary), so the canonical hash is sha256 over those bytes —
+		// matching what the verifier checked above and what
+		// `[[requires.connectors]] hash` pins reference per ADR-0004.
+		manifestHashHex := sha256.Sum256(tb.Manifest)
+		deps := make([]map[string]any, 0, len(manifest.Requires.Connectors))
+		for _, c := range manifest.Requires.Connectors {
+			dep := map[string]any{"name": c.Name}
+			if c.Version != "" {
+				dep["version"] = c.Version
+			}
+			if c.Hash != "" {
+				dep["hash"] = c.Hash
+			}
+			deps = append(deps, dep)
+		}
+		s.auditRecorder.RecordSuccess(ctx, model.EventTypeActionInstalled,
+			model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
+			map[string]any{
+				"name":             manifest.Name,
+				"fqn":              ref.FQN.String(),
+				"version":          ref.Version,
+				"hash":             "sha256:" + hex.EncodeToString(manifestHashHex[:]),
+				"signature_status": signatureStatus,
+				"decision":         "approved",
+				"source":           manifest.Source,
+				"path":             dest,
+				"dependencies":     deps,
+			})
 	}
 
 	return &installActionResult{

@@ -400,15 +400,18 @@ func TestInstallAction_MissingVersionReturns400(t *testing.T) {
 }
 
 func TestInstallAction_ContextCarriesAuditPayload(t *testing.T) {
-	// Sanity: the audit event names the action and never the file body
-	// (which is fine because the tarball only contains the manifest,
-	// not credentials). The structured payload includes name + fqn +
-	// version + source + path.
+	// ADR-0007 §"For audit and security": every consent decision is
+	// logged with FQN, version, hash, signature status, decision, and
+	// (for actions) the dependency list — so a reviewer can answer
+	// "what did I install, and what did I agree it could do?" from the
+	// audit log alone. The signed-tarball path here exercises the
+	// happy case where signature_status = "verified".
 	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
 	depFQN := "github://acme/aileron-connector-x"
+	depHash := fakeConnectorHash(depFQN, "1.0.0", "api_key")
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pub := priv.Public().(ed25519.PublicKey)
-	srv := installActionTestServer(t, ref, buildActionTarball(t, goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key")), priv), pub, depFQN)
+	srv := installActionTestServer(t, ref, buildActionTarball(t, goodActionMD(depFQN, depHash), priv), pub, depFQN)
 	postInstallAction(srv, `{"fqn":"github://acme/aileron-connector-x/actions/run","version":"0.1.0"}`)
 
 	traces, _ := srv.auditStore.ListTraces(context.Background(), audit.Filter{})
@@ -422,15 +425,67 @@ func TestInstallAction_ContextCarriesAuditPayload(t *testing.T) {
 				continue
 			}
 			found = true
-			for _, key := range []string{"name", "fqn", "version", "path"} {
+			for _, key := range []string{"name", "fqn", "version", "hash", "signature_status", "decision", "path", "dependencies"} {
 				if _, ok := e.Payload[key]; !ok {
 					t.Errorf("payload missing %q", key)
+				}
+			}
+			if got, _ := e.Payload["signature_status"].(string); got != "verified" {
+				t.Errorf("signature_status = %q, want \"verified\"", got)
+			}
+			if got, _ := e.Payload["decision"].(string); got != "approved" {
+				t.Errorf("decision = %q, want \"approved\"", got)
+			}
+			hash, _ := e.Payload["hash"].(string)
+			if !strings.HasPrefix(hash, "sha256:") || len(hash) != len("sha256:")+64 {
+				t.Errorf("hash = %q, want sha256:<64 hex>", hash)
+			}
+			deps, ok := e.Payload["dependencies"].([]map[string]any)
+			if !ok || len(deps) != 1 {
+				t.Errorf("dependencies = %#v, want one entry", e.Payload["dependencies"])
+			} else {
+				if deps[0]["name"] != depFQN {
+					t.Errorf("dependencies[0].name = %v, want %q", deps[0]["name"], depFQN)
+				}
+				if deps[0]["version"] != "1.0.0" {
+					t.Errorf("dependencies[0].version = %v, want \"1.0.0\"", deps[0]["version"])
+				}
+				if deps[0]["hash"] != depHash {
+					t.Errorf("dependencies[0].hash = %v, want %q", deps[0]["hash"], depHash)
 				}
 			}
 		}
 	}
 	if !found {
 		t.Error("expected an action.installed event")
+	}
+}
+
+func TestInstallAction_AuditUnsignedTarball(t *testing.T) {
+	// ADR-0007 keeps action signing optional in v1: an unsigned
+	// tarball still installs but the audit event must record
+	// signature_status = "unsigned" so reviewers can tell the two
+	// trust postures apart.
+	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
+	depFQN := "github://acme/aileron-connector-x"
+	srv := installActionTestServer(t, ref, buildActionTarball(t, goodActionMD(depFQN, fakeConnectorHash(depFQN, "1.0.0", "api_key")), nil), nil, depFQN)
+	if rec := postInstallAction(srv, `{"fqn":"github://acme/aileron-connector-x/actions/run","version":"0.1.0"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	events := dumpEvents(t, srv.auditStore)
+	var got *audit.Event
+	for i := range events {
+		if events[i].EventType == "action.installed" {
+			got = &events[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("expected an action.installed event")
+	}
+	if status, _ := got.Payload["signature_status"].(string); status != "unsigned" {
+		t.Errorf("signature_status = %q, want \"unsigned\"", status)
 	}
 }
 

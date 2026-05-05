@@ -17,6 +17,7 @@ import (
 	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/cstore"
 )
 
@@ -83,6 +84,7 @@ publisher = "test"
 	store := cstore.NewStore(t.TempDir())
 	tb := &cstore.Tarball{Binary: binary, Manifest: manifest}
 
+	auditStore := audit.NewMemStore()
 	srv := &apiServer{
 		log: slog.Default(),
 		installer: &cstore.Installer{
@@ -91,6 +93,8 @@ publisher = "test"
 			Verifier: keyring,
 			Store:    store,
 		},
+		auditStore:    auditStore,
+		auditRecorder: audit.NewRecorder(auditStore, nil, nil),
 	}
 	return srv, "sha256:" + tb.CanonicalHashHex()
 }
@@ -147,6 +151,85 @@ func TestInstallConnector_OfflineReinstallReturns200WithAlreadyInstalled(t *test
 	}
 	if got.AlreadyInstalled == nil || !*got.AlreadyInstalled {
 		t.Errorf("AlreadyInstalled = %v, want true", got.AlreadyInstalled)
+	}
+}
+
+func TestInstallConnector_AuditPayloadHasConsentFields(t *testing.T) {
+	// ADR-0007 §"For audit and security": every consent decision is
+	// logged with FQN, version, hash, signature status, and decision.
+	// Reaching the success path implies the install pipeline ran
+	// Verify, so signature_status records "verified".
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+	srv, expectedHash := installTestServer(t, ref)
+
+	if rec := postInstall(srv, `{"fqn":"github://aileron/slack","version":"1.2.0"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	events := dumpEvents(t, srv.auditStore)
+	var got *audit.Event
+	for i := range events {
+		if events[i].EventType == "connector.installed" {
+			got = &events[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("expected a connector.installed event; got %d events", len(events))
+	}
+	if got.Payload["fqn"] != "github://aileron/slack" {
+		t.Errorf("fqn = %v", got.Payload["fqn"])
+	}
+	if got.Payload["version"] != "1.2.0" {
+		t.Errorf("version = %v", got.Payload["version"])
+	}
+	if got.Payload["hash"] != expectedHash {
+		t.Errorf("hash = %v, want %q", got.Payload["hash"], expectedHash)
+	}
+	if got.Payload["signature_status"] != "verified" {
+		t.Errorf("signature_status = %v, want \"verified\"", got.Payload["signature_status"])
+	}
+	if got.Payload["decision"] != "approved" {
+		t.Errorf("decision = %v, want \"approved\"", got.Payload["decision"])
+	}
+	if got.Payload["already_installed"] != false {
+		t.Errorf("already_installed = %v, want false", got.Payload["already_installed"])
+	}
+}
+
+func TestInstallConnector_AuditOnOfflineReinstall(t *testing.T) {
+	// Offline reinstall (already-stored hash) still represents a user
+	// consent decision in the install flow, so it gets its own audit
+	// event with already_installed = true. This lets a reviewer count
+	// every install attempt — including the no-ops — when answering
+	// "what did this user agree to?".
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+	srv, expectedHash := installTestServer(t, ref)
+
+	if rec := postInstall(srv, `{"fqn":"github://aileron/slack","version":"1.2.0"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("first install: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := postInstall(srv, `{"fqn":"github://aileron/slack","version":"1.2.0","expected_hash":"`+expectedHash+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("reinstall: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	events := dumpEvents(t, srv.auditStore)
+	count := 0
+	var reinstall *audit.Event
+	for i := range events {
+		if events[i].EventType != "connector.installed" {
+			continue
+		}
+		count++
+		if v, _ := events[i].Payload["already_installed"].(bool); v {
+			reinstall = &events[i]
+		}
+	}
+	if count != 2 {
+		t.Errorf("connector.installed count = %d, want 2", count)
+	}
+	if reinstall == nil {
+		t.Errorf("expected an event with already_installed=true")
 	}
 }
 
