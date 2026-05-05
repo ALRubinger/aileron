@@ -29,15 +29,15 @@ tasks:
       - api/gen/server.gen.go
 
   build:
-    desc: Build everything (containers, server, MCP, enclave, CLI, shell shim, UI, docs)
+    desc: Build everything (containers, server, MCP, enclave, CLI, shell shim, webapp, docs)
     cmds:
       - task: build:docker
+      - task: build:webapp
       - task: build:server
       - task: build:mcp
       - task: build:enclave
       - task: build:cli
       - task: build:sh
-      - task: build:ui
       - task: build:docs
 
   build:docker:
@@ -46,7 +46,9 @@ tasks:
       - docker compose -f {{.COMPOSE_FILE}} build
 
   build:server:
-    desc: Build the Go server binary locally
+    desc: Build the Go server binary locally (embeds webapp/build via internal/app/webapp_dist)
+    deps:
+      - build:webapp
     vars:
       VERSION: dev
       COMMIT:
@@ -104,8 +106,20 @@ tasks:
     cmds:
       - go build -o build/aileron-sh ./cmd/aileron-sh
 
+  build:webapp:
+    desc: Install webapp dependencies, build static output, copy into internal/app/webapp_dist for Go embed
+    dir: webapp
+    cmds:
+      - pnpm install
+      - pnpm run build
+      # Replace the embed dir with the fresh build output. The committed
+      # stub `index.html` is overwritten; everything else under
+      # webapp_dist/ is gitignored so this isn't a source change.
+      - rm -rf ../internal/app/webapp_dist
+      - cp -r build ../internal/app/webapp_dist
+
   build:ui:
-    desc: Install UI dependencies and build
+    desc: (Frozen) Install ui dependencies and build. The cloud-tier UI; not embedded into the daemon. New work belongs in webapp/.
     dir: ui
     cmds:
       - pnpm install
@@ -142,9 +156,14 @@ tasks:
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} down -v --remove-orphans
       - rm -rf build
+      - rm -rf webapp/.svelte-kit webapp/build webapp/node_modules
       - rm -rf ui/.svelte-kit ui/build ui/node_modules
       - rm -rf docs/.astro docs/dist docs/node_modules
       - rm -f docs/public/openapi.yaml
+      # Reset the embed dir to just the committed stub so a subsequent
+      # `go build` still succeeds without running `task build:webapp`.
+      - git checkout -- internal/app/webapp_dist/index.html
+      - find internal/app/webapp_dist -mindepth 1 -not -path internal/app/webapp_dist/index.html -delete
 
   logs:
     desc: Tail service logs
@@ -156,8 +175,14 @@ tasks:
     cmds:
       - docker compose -f {{.COMPOSE_FILE}} ps
 
+  dev:webapp:
+    desc: Run the local webapp dev server. Iterate without rebuilding the daemon — `aileron launch` still serves the embedded build, but the dev server at localhost:5173 hot-reloads on edits.
+    dir: webapp
+    cmds:
+      - pnpm dev
+
   dev:ui:
-    desc: Run the UI dev server locally
+    desc: (Frozen) Run the cloud-tier UI dev server. The local webapp lives in webapp/; use `dev:webapp` instead unless you're working on the (currently dormant) cloud-hosted UI.
     dir: ui
     cmds:
       - pnpm dev
@@ -174,6 +199,7 @@ tasks:
     desc: Run linters
     cmds:
       - task: lint:go
+      - task: lint:webapp
       - task: lint:ui
       - task: lint:docs
 
@@ -182,8 +208,14 @@ tasks:
     cmds:
       - go vet ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/...
 
+  lint:webapp:
+    desc: Check the local webapp for type errors
+    dir: webapp
+    cmds:
+      - pnpm check
+
   lint:ui:
-    desc: Check the UI for type errors
+    desc: (Frozen) Check the cloud-tier UI for type errors. Local webapp is `lint:webapp`.
     dir: ui
     cmds:
       - pnpm check

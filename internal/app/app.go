@@ -404,6 +404,18 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 
 	registerDocsRoutes(mux)
 
+	// Local webapp (#418): mount the embedded static build at `/`
+	// as a catch-all. ServeMux gives more-specific paths their
+	// handlers first, so every `/v1/*`, `/docs`, `/openapi.yaml`,
+	// and `/auth/*` route registered above takes precedence — the
+	// webapp handler only sees paths none of those claimed. Must
+	// be the LAST registration on `mux`; subsequent specific
+	// routes added in front of this one would still win, but
+	// keeping the catch-all at the end matches the conventional
+	// readability cue ("everything not handled above falls through
+	// to the webapp"). See internal/app/webapp_handler.go.
+	mux.Handle("/", webappHandler())
+
 	// --- Auth (optional — enabled when AILERON_DATABASE_URL is set) ---
 	authCfg, err := config.LoadAuthConfig()
 	if err != nil {
