@@ -2273,6 +2273,141 @@ func TestRunSync_FetcherError(t *testing.T) {
 	}
 }
 
+// TestPostSyncRequest_HappyPath asserts the actual HTTP fetcher (not
+// the stub) hits the right URL, sends the right method + headers, and
+// decodes the daemon's response into syncResult correctly. The other
+// runSync tests stub the fetcher; this is the only path that
+// exercises the real network code.
+func TestPostSyncRequest_HappyPath(t *testing.T) {
+	var sawMethod, sawPath, sawContentType string
+	var sawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawMethod = r.Method
+		sawPath = r.URL.Path
+		sawContentType = r.Header.Get("Content-Type")
+		sawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"actions_seen": 2,
+			"required": [{"fqn":"github://acme/x","version":"1.0.0"}],
+			"installed": [],
+			"already_installed": [{"fqn":"github://acme/x","version":"1.0.0"}],
+			"install_failures": [],
+			"unbound": []
+		}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	got, err := postSyncRequest(false)
+	if err != nil {
+		t.Fatalf("postSyncRequest: %v", err)
+	}
+	if sawMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", sawMethod)
+	}
+	if sawPath != "/v1/sync" {
+		t.Errorf("path = %q, want /v1/sync", sawPath)
+	}
+	if sawContentType != "application/json" {
+		t.Errorf("content-type = %q, want application/json", sawContentType)
+	}
+	if !strings.Contains(string(sawBody), `"auto_install":false`) {
+		t.Errorf("body should contain auto_install=false; got: %s", sawBody)
+	}
+	if got.ActionsSeen != 2 {
+		t.Errorf("ActionsSeen = %d, want 2", got.ActionsSeen)
+	}
+	if len(got.Required) != 1 || got.Required[0].Fqn != "github://acme/x" {
+		t.Errorf("Required = %v, want [github://acme/x]", got.Required)
+	}
+	if len(got.AlreadyInstalled) != 1 {
+		t.Errorf("AlreadyInstalled = %v, want 1", got.AlreadyInstalled)
+	}
+}
+
+// TestPostSyncRequest_AutoInstallTrueInBody asserts the autoInstall
+// argument flows into the JSON body. Mirrors --yes propagation
+// from the runSync test, but checks the wire shape directly.
+func TestPostSyncRequest_AutoInstallTrueInBody(t *testing.T) {
+	var sawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"actions_seen":0,"required":[],"installed":[],"already_installed":[],"install_failures":[],"unbound":[]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	if _, err := postSyncRequest(true); err != nil {
+		t.Fatalf("postSyncRequest: %v", err)
+	}
+	if !strings.Contains(string(sawBody), `"auto_install":true`) {
+		t.Errorf("body should contain auto_install=true; got: %s", sawBody)
+	}
+}
+
+// TestPostSyncRequest_Non200ReturnsError asserts daemon-side errors
+// (e.g. 401 unauthorized, 500 internal) surface as a Go error with
+// the status code embedded in the message. Operators wiring sync
+// into shell scripts can grep for the code if needed.
+func TestPostSyncRequest_Non200ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"code":"internal_error","message":"oops"}}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	_, err := postSyncRequest(false)
+	if err == nil {
+		t.Fatal("expected error on 500")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention 500; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "oops") {
+		t.Errorf("error should include response body; got: %v", err)
+	}
+}
+
+// TestPostSyncRequest_MalformedJSONReturnsError asserts that a
+// truncated or otherwise unparseable response surfaces as a wrapped
+// "decoding response" error. Without this, a daemon bug producing
+// bad JSON would crash the CLI rather than reporting cleanly.
+func TestPostSyncRequest_MalformedJSONReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"actions_seen": not_a_number}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	_, err := postSyncRequest(false)
+	if err == nil {
+		t.Fatal("expected error on malformed JSON")
+	}
+	if !strings.Contains(err.Error(), "decoding response") {
+		t.Errorf("error should mention 'decoding response'; got: %v", err)
+	}
+}
+
+// TestPostSyncRequest_NetworkErrorReturnsError asserts a closed
+// listener (server already shut down) surfaces as a Go error rather
+// than a panic. Same robustness contract as fetchRuntimeStatus and
+// fetchConnectorCheck.
+func TestPostSyncRequest_NetworkErrorReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.URL
+	srv.Close() // shut down listener immediately
+	t.Setenv("AILERON_API_URL", addr+"/v1")
+
+	_, err := postSyncRequest(false)
+	if err == nil {
+		t.Fatal("expected error on closed listener")
+	}
+}
+
 func TestRunAction_AddHappyPath(t *testing.T) {
 	var seenBody []byte
 	var seenPath string
