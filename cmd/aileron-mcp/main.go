@@ -42,8 +42,20 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/ALRubinger/aileron/internal/config"
+	"github.com/ALRubinger/aileron/internal/observability"
 	"github.com/ALRubinger/aileron/internal/version"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName names the OTel instrumentation library reported on
+// spans this binary emits. Mirrors the convention in
+// internal/action and internal/observability.
+const tracerName = "github.com/ALRubinger/aileron/cmd/aileron-mcp"
 
 // --- JSON-RPC types ---
 
@@ -219,6 +231,21 @@ var httpRequestTool = toolDef{
 }
 
 func main() {
+	// Initialize OpenTelemetry. Off by default; AILERON_OTEL_ENABLED
+	// opts in. Outbound HTTP calls inject `traceparent` so the
+	// daemon's middleware can root spans into the same trace tree
+	// regardless of whether the agent (Claude Code, etc.) propagated
+	// context across the MCP transport — MCP itself doesn't carry
+	// W3C TraceContext today, so this binary is the trace's root in
+	// the typical case.
+	obsCfg, err := config.LoadObservabilityConfig()
+	if err != nil {
+		slog.Warn("observability config invalid; tracing disabled", "error", err.Error())
+		obsCfg = nil
+	}
+	tp := observability.Init(obsCfg, slog.Default())
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
 	s := &server{
 		aileronURL:   os.Getenv("AILERON_URL"),
 		aileronToken: os.Getenv("AILERON_TOKEN"),
@@ -551,7 +578,33 @@ func (s *server) discoverActions(ctx context.Context) ([]toolDef, map[string]str
 // /v1/actions/{name}/run endpoint and returns an MCP tool result.
 // Failures are surfaced as toolResult{IsError: true} so the agent host
 // reports them to the LLM as normal tool errors per MCP semantics.
+//
+// Emits an `aileron.mcp.tool.call` span around the outbound HTTP call
+// and injects W3C TraceContext (`traceparent`) so the daemon's
+// middleware extracts the trace and parents its action.execute /
+// connector.call spans to this one. With tracing off (the default)
+// span operations are no-ops — call shape unchanged.
 func (s *server) runAction(ctx context.Context, manifestName string, args map[string]any) toolResult {
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "aileron.mcp.tool.call",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("aileron.action.name", manifestName)),
+	)
+	defer span.End()
+
+	res := s.runActionInner(ctx, manifestName, args)
+	if res.IsError {
+		span.SetStatus(codes.Error, errorText(res))
+	}
+	return res
+}
+
+// runActionInner is the unwrapped implementation, separated so the
+// span lifecycle in [runAction] reads cleanly. Inject traceparent on
+// the outbound request via the registered text-map propagator —
+// W3C TraceContext is always installed (even when emission is off)
+// so this is safe regardless of OTel state.
+func (s *server) runActionInner(ctx context.Context, manifestName string, args map[string]any) toolResult {
 	if s.aileronURL == "" {
 		return errorResult("Aileron daemon not configured (AILERON_URL not set)")
 	}
@@ -570,6 +623,7 @@ func (s *server) runAction(ctx context.Context, manifestName string, args map[st
 	if s.aileronToken != "" {
 		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
 	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return errorResult("daemon unreachable: " + err.Error())
@@ -595,6 +649,18 @@ func (s *server) runAction(ctx context.Context, manifestName string, args map[st
 	return toolResult{
 		Content: []toolContent{{Type: "text", Text: content}},
 	}
+}
+
+// errorText extracts the human-readable error text from a
+// toolResult{IsError: true} for use as a span status description.
+// Falls back to a generic message if the result is malformed.
+func errorText(r toolResult) string {
+	for _, c := range r.Content {
+		if c.Type == "text" && c.Text != "" {
+			return c.Text
+		}
+	}
+	return "tool error"
 }
 
 // actionToolDef converts an action manifest into an MCP tool

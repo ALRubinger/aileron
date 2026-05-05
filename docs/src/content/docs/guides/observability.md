@@ -63,12 +63,12 @@ Today (as the Phase 7 emission integrations land slice by slice in [issue #390](
 
 | Span name | Where it's emitted | Status |
 |---|---|---|
+| `aileron.mcp.tool.call` | `aileron-mcp` outbound to `/v1/actions/{name}/run` — typically the trace root under `aileron launch` | ✅ shipped |
 | `aileron.action.execute` | `SandboxExecutor.Execute` — root for an action invocation | ✅ shipped |
 | `aileron.connector.call` | per-step `conn.Invoke` inside the executor | ✅ shipped |
-| HTTP server-root span | gateway and `/v1/actions/{name}/run` entry points | ✅ shipped (#457) |
+| HTTP server-root span | gateway and `/v1/actions/{name}/run` entry points | ✅ shipped |
 | `aileron.capability.check` | the action-boundary capability enforcement | ⏳ pending |
 | `aileron.approval.wait` | the approval-queue blocking wait | ⏳ pending |
-| `aileron.mcp.tool.call` | `aileron-mcp` outbound to `/v1/actions/{name}/run` | ⏳ pending |
 | `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway | ⏳ pending |
 
 The file exporter (writing spans to `~/.aileron/traces/spans.jsonl` with date-based rotation) is also pending — it's gated on the parallel audit-log file rotation work so spans and audit events share a rotating writer with the same retention story.
