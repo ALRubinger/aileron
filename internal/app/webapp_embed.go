@@ -7,17 +7,18 @@ import "embed"
 // SvelteKit build at `webapp/` (configured with `@sveltejs/adapter-static`)
 // and copies the resulting `webapp/build/` into this directory.
 //
-// A stub `index.html` is committed alongside this file so plain
-// `go build` always succeeds, even on a fresh clone where the
-// webapp hasn't been built yet — the daemon then serves a "Aileron
-// webapp not built" page that points the operator at the build
-// command. CI / `task build` runs the webapp build before `go build`,
-// so production binaries always carry the real assets. The
-// .gitignore pattern under `internal/app/webapp_dist/` excludes
-// every file except the committed stub `index.html`.
+// `webapp_dist/` is fully gitignored except for a single committed
+// `.gitkeep` — that file exists only to satisfy `//go:embed`'s
+// compile-time requirement that the pattern match at least one file.
+// On a fresh clone where the webapp hasn't been built, `go build`
+// still compiles, the daemon still starts, and a request to `/`
+// renders an inlined "Aileron webapp not built" stub from
+// `webapp_handler.go`'s fallback path. After `task build:webapp`,
+// the same handler serves the real shell.
 //
 // `all:` matters: without it, `go:embed` skips files starting with
-// `.` or `_`, which excludes SvelteKit's `_app/` directory entirely.
+// `.` or `_`, which excludes SvelteKit's `_app/` directory entirely
+// and our own `.gitkeep`.
 //
 //go:embed all:webapp_dist
 var webappFS embed.FS

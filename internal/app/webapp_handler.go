@@ -84,16 +84,47 @@ func webappHandler() http.Handler {
 // build hash changes. Assets under `_app/` carry their own
 // content-hashed filenames, so they're safe to cache long-term —
 // only the shell needs to be no-store.
+//
+// When index.html isn't present in the embedded fs (the fresh-clone
+// case: nothing here but a `.gitkeep` to satisfy `//go:embed`), we
+// serve [webappNotBuiltStub] instead so the daemon still produces a
+// useful page that tells the operator how to build the webapp.
 func serveIndex(dist fs.FS, w http.ResponseWriter, r *http.Request) {
-	body, err := fs.ReadFile(dist, "index.html")
-	if err != nil {
-		http.Error(w, "webapp index missing", http.StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	body, err := fs.ReadFile(dist, "index.html")
+	if err != nil {
+		_, _ = w.Write([]byte(webappNotBuiltStub))
+		return
+	}
 	_, _ = w.Write(body)
 }
+
+// webappNotBuiltStub is the minimal page rendered when the embedded
+// webapp directory has no `index.html` — i.e. someone ran `go build`
+// without first running `task build:webapp`. Production binaries
+// (built via `task build`) always carry the real shell here.
+const webappNotBuiltStub = `<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>Aileron webapp not built</title>
+	</head>
+	<body style="font-family: -apple-system, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem">
+		<h1>Aileron webapp not built</h1>
+		<p>
+			The daemon is running, but no static webapp has been embedded into this binary.
+			Run <code>task build:webapp</code> from the repo root to build the SvelteKit app
+			at <code>webapp/</code> and rebuild the daemon. The webapp will then be served
+			from this URL.
+		</p>
+		<p>
+			See <code>webapp/README.md</code> for the dev loop (use <code>task dev:webapp</code>
+			to iterate against the daemon without rebuilding it).
+		</p>
+	</body>
+</html>
+`
 
 // hasAssetExtension reports whether the request path looks like a
 // static asset rather than a client-side route. The check is
