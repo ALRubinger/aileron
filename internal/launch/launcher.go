@@ -154,6 +154,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// is up, AILERON_URL so aileron-mcp can route action discovery
 	// (`tools/list`) and execution (`tools/call`) to the same daemon
 	// the agent's LLM calls flow through.
+	//
+	// AILERON_APPROVAL_URL is the user-facing approval surface. Until the
+	// webapp ships (#418), this points at the standalone server's API; the
+	// agent uses it in templated tool descriptions to tell the user
+	// exactly where to approve gated actions. Without launch setting it,
+	// aileron-mcp falls back to a generic "check the Aileron webapp"
+	// phrasing, which still works but is less actionable.
 	selfPath, _ := os.Executable()
 	if mcpBin, err := resolveSibling(selfPath, "aileron-mcp"); err == nil {
 		mcpEnv := map[string]string{
@@ -161,6 +168,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		}
 		if gateway != nil {
 			mcpEnv["AILERON_URL"] = gateway.URL
+			mcpEnv["AILERON_APPROVAL_URL"] = gateway.URL + "/approvals"
 		}
 		envJSON, _ := json.Marshal(mcpEnv)
 		mcpConfig := fmt.Sprintf(

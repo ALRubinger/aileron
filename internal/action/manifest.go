@@ -50,10 +50,42 @@ type Manifest struct {
 	// (per ADR-0010).
 	Execute []ExecuteStep `toml:"execute"`
 
+	// Approval declares whether invocations of this action require explicit
+	// user approval before the runtime executes the underlying connector
+	// ops. When `Approval.Required` is true, `POST /v1/actions/{name}/run`
+	// holds its HTTP response open while it queues an approval request to
+	// the orchestrator; the response unblocks only when the user approves
+	// (success path: action runs, normal result returned) or denies (the
+	// runtime returns a `binding_required`-style failure with class
+	// `approval_denied`). Absent or `Required: false` means the action
+	// runs immediately as before. Per the action-approval design (#418),
+	// the user surface is Aileron's webapp; the agent learns to surface
+	// the approval URL to the user via templated tool descriptions in
+	// `aileron-mcp`.
+	Approval *ApprovalPolicy `toml:"approval"`
+
 	// Body is the Markdown content following the closing `+++` delimiter.
 	// The first paragraph (or a designated section) is surfaced to the LLM
 	// as the function `description` when the action is exposed as a tool.
 	Body string `toml:"-"`
+}
+
+// ApprovalPolicy describes the approval gating for an action. v1 carries
+// only `Required`; future fields (prompt templates, default-deny timeout
+// overrides, allow-list of identities that can approve) attach here
+// without breaking the existing manifest shape.
+type ApprovalPolicy struct {
+	// Required gates execution on a user decision when true. Default
+	// false (i.e. absent block ⇒ no approval needed).
+	Required bool `toml:"required"`
+}
+
+// ApprovalRequired reports whether the action's manifest declares
+// `[approval] required = true`. Returns false when `Approval` is nil
+// or `Required` is unset, matching the default-no-approval behavior
+// of unannotated actions.
+func (m Manifest) ApprovalRequired() bool {
+	return m.Approval != nil && m.Approval.Required
 }
 
 // Requires is the `[requires]` table holding connector dependencies.

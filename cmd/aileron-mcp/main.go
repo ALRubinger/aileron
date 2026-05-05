@@ -106,10 +106,23 @@ type toolContent struct {
 // need to derive an MCP tool definition. Mirrors api.Action without
 // pulling the generated types into this binary.
 type actionMeta struct {
-	Name   string        `json:"name"`
-	Body   string        `json:"body"`
-	Inputs []actionInput `json:"inputs"`
-	Match  *actionMatch  `json:"match,omitempty"`
+	Name     string                `json:"name"`
+	Body     string                `json:"body"`
+	Inputs   []actionInput         `json:"inputs"`
+	Match    *actionMatch          `json:"match,omitempty"`
+	Approval *actionApprovalPolicy `json:"approval,omitempty"`
+}
+
+type actionApprovalPolicy struct {
+	Required *bool `json:"required,omitempty"`
+}
+
+// requiresApproval reports whether the action's manifest gates
+// execution on user approval. Treats unset / nil as "no approval
+// required" — matching the runtime's default behavior for actions
+// without an [approval] block.
+func (a actionMeta) requiresApproval() bool {
+	return a.Approval != nil && a.Approval.Required != nil && *a.Approval.Required
 }
 
 type actionInput struct {
@@ -604,7 +617,42 @@ func toolName(manifestName string) string {
 // deriveDescription extracts the LLM-facing description from the
 // action body. Strips a leading "# Heading" line; falls back to
 // match.intent when the body is empty.
+//
+// When the action's manifest declares `[approval] required = true`,
+// appends a notice instructing the agent to surface the approval URL
+// to the user immediately on tool invocation. The URL is read from
+// AILERON_APPROVAL_URL (set by launch's embedded gateway) so the
+// agent's prompt to the user names a real, clickable target rather
+// than a generic "check the webapp." Tool descriptions are part of
+// the MCP system context the LLM factors into planning, so this is
+// the natural place for the signal — no mid-conversation injection.
 func deriveDescription(a actionMeta) string {
+	desc := deriveBaseDescription(a)
+	if a.requiresApproval() {
+		approvalURL := os.Getenv("AILERON_APPROVAL_URL")
+		if approvalURL == "" {
+			// Fall back to a generic instruction when launch hasn't
+			// set the URL (e.g. running aileron-mcp standalone).
+			// Better than dropping the notice entirely.
+			approvalURL = "the Aileron webapp"
+		}
+		notice := fmt.Sprintf(
+			"\n\n⚠️ This action requires user approval before it runs. When you call this tool, "+
+				"immediately tell the user: \"This action needs your approval — please review and "+
+				"approve at %s\". The tool call will block until they decide. Do not paraphrase the "+
+				"URL; deliver it verbatim so the user can click through.",
+			approvalURL,
+		)
+		desc = strings.TrimSpace(desc) + notice
+	}
+	return desc
+}
+
+// deriveBaseDescription is the original deriveDescription logic
+// without the approval-notice templating. Split out so the templating
+// step is the only thing future readers need to understand to follow
+// the approval signaling path.
+func deriveBaseDescription(a actionMeta) string {
 	body := strings.TrimSpace(a.Body)
 	if body == "" {
 		if a.Match != nil {

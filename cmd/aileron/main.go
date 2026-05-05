@@ -106,6 +106,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runAction(args[1:], os.Stdin, stdout, stderr)
 	case "keyring":
 		return runKeyring(args[1:], stdout, stderr)
+	case "approval":
+		return runApproval(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "log":
@@ -136,6 +138,9 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron keyring trust <auth> <key> Authorize a publisher's signing key for installs")
 	fmt.Fprintln(w, "  aileron keyring list               List trusted publishers and key fingerprints")
 	fmt.Fprintln(w, "  aileron keyring revoke <auth>      Remove a publisher's keys from the trust list")
+	fmt.Fprintln(w, "  aileron approval list              List pending action-approval requests")
+	fmt.Fprintln(w, "  aileron approval approve <id>      Approve a pending action — agent's tool call unblocks")
+	fmt.Fprintln(w, "  aileron approval deny <id>         Deny a pending action — agent receives approval_denied")
 	fmt.Fprintln(w, "  aileron status [section]           Show merged config (policy, env, notifications, vault)")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")

@@ -191,6 +191,83 @@ func TestParse_LeadingBlankLinesTolerated(t *testing.T) {
 	}
 }
 
+// TestParse_ApprovalRequired verifies that an action manifest declaring
+// `[approval] required = true` produces an Approval policy with
+// `Required: true`, so the runtime can later gate execution on a user
+// decision. The default-no-approval behavior is verified separately.
+func TestParse_ApprovalRequired(t *testing.T) {
+	data := `+++
+name = "send-email"
+version = "1.0.0"
+source = "hub://aileron/send-email@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["send"]
+
+[match]
+intent = "send an email"
+
+[[execute]]
+id = "send"
+connector = "github://aileron/google"
+op = "send_email"
+
+[approval]
+required = true
++++
+`
+	m, err := Parse("send-email.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !m.ApprovalRequired() {
+		t.Errorf("ApprovalRequired() = false, want true (manifest declares [approval] required = true)")
+	}
+	if m.Approval == nil || !m.Approval.Required {
+		t.Errorf("Approval = %+v, want non-nil with Required=true", m.Approval)
+	}
+}
+
+// TestParse_NoApprovalBlockDefaultsFalse asserts that an action manifest
+// without an `[approval]` block leaves Approval nil, and ApprovalRequired
+// reports false. This is the legacy-action behavior the runtime already
+// supports — actions run immediately without gating.
+func TestParse_NoApprovalBlockDefaultsFalse(t *testing.T) {
+	data := `+++
+name = "ping"
+version = "1.0.0"
+source = "hub://aileron/ping@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/x"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["read"]
+
+[match]
+intent = "ping"
+
+[[execute]]
+id = "p"
+connector = "github://aileron/x"
+op = "ping"
++++
+`
+	m, err := Parse("ping.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if m.Approval != nil {
+		t.Errorf("Approval = %+v, want nil for action without [approval] block", m.Approval)
+	}
+	if m.ApprovalRequired() {
+		t.Errorf("ApprovalRequired() = true, want false (no [approval] block)")
+	}
+}
+
 func TestParse_NoBodyIsAllowed(t *testing.T) {
 	data := `+++
 name = "noop"
