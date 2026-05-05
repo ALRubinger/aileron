@@ -390,6 +390,12 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		server.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
 	}
 	server.actionApprovalTTL = 5 * time.Minute
+	// Wire the audit recorder so approval.requested / approval.approved
+	// / approval.denied land in the audit log. Before this, the
+	// approval flow left no audit trail — the user could grant or
+	// deny consequential actions and a later "what did I approve
+	// today?" lookup would come back empty.
+	server.actionApprovals.SetAuditRecorder(recorder)
 
 	// On Register, fire a notification so the user knows the agent is
 	// blocked. The notification's ReviewURL points at the webapp's

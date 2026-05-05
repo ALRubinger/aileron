@@ -7,6 +7,9 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/model"
 )
 
 // ApprovalKind discriminates the user-facing card layout the webapp
@@ -238,6 +241,21 @@ type ActionApprovalQueue struct {
 	// drops events past the buffer rather than back-pressuring Register
 	// or Decide.
 	subscribers map[chan ActionApprovalEvent]struct{}
+
+	// auditRec records approval lifecycle events to the audit log:
+	// approval.requested on Register, approval.approved /
+	// approval.denied on Decide. Nil disables emission — the queue
+	// still works, the audit trail just doesn't reflect approval
+	// flow. Set via [SetAuditRecorder] from the wiring site so
+	// production callers get a durable record without changing the
+	// queue's constructor signature.
+	//
+	// Attribute keys are the OTel-namespaced shape locked-in by
+	// PR #452 (`aileron.connector.fqn`, `aileron.approval.*`,
+	// `aileron.session.id`); when issue #390's span emission lands,
+	// the spans wrap these same events with identical attribute
+	// keys — single source of truth.
+	auditRec audit.Recorder
 }
 
 // NewActionApprovalQueue returns an empty queue using the supplied
@@ -269,6 +287,21 @@ func (q *ActionApprovalQueue) SetOnRegister(fn func(*ActionApproval)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.onRegister = fn
+}
+
+// SetAuditRecorder installs the audit.Recorder the queue calls into
+// on Register / Decide. Pass nil to disable emission. Safe to call
+// concurrently with the queue's other methods; the swap is mutex-
+// protected.
+//
+// Production wiring sets this once at daemon startup to the same
+// recorder the connector-install / binding-lifecycle paths use, so
+// the approval flow appears in `~/.aileron/audit.jsonl` alongside
+// every other significant event.
+func (q *ActionApprovalQueue) SetAuditRecorder(rec audit.Recorder) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.auditRec = rec
 }
 
 // Subscribe registers a streaming consumer of queue events and
@@ -364,6 +397,7 @@ func (q *ActionApprovalQueue) RegisterKind(kind ApprovalKind, actionName, connec
 	}
 	q.pending[a.ID] = a
 	cb := q.onRegister
+	rec := q.auditRec
 	q.mu.Unlock()
 	if cb != nil {
 		// Defer the panic recover so a misbehaving notifier never
@@ -374,6 +408,7 @@ func (q *ActionApprovalQueue) RegisterKind(kind ApprovalKind, actionName, connec
 			cb(a)
 		}()
 	}
+	q.recordRequested(rec, a)
 	q.broadcast(ActionApprovalEvent{Type: ActionApprovalEventPending, Pending: a})
 	return a
 }
@@ -495,6 +530,7 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 	}
 	delete(q.pending, id)
 	kind := a.Kind
+	rec := q.auditRec
 	q.mu.Unlock()
 	decidedAt := q.now()
 	a.decision <- ActionDecision{
@@ -503,6 +539,7 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 		EditedPayload: editedPayload,
 		DecidedAt:     decidedAt,
 	}
+	q.recordDecided(rec, a, approved, reason, editedPayload != nil, decidedAt)
 	q.broadcast(ActionApprovalEvent{
 		Type: ActionApprovalEventResolved,
 		Resolved: &ResolvedActionApproval{
@@ -514,6 +551,72 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 		},
 	})
 	return nil
+}
+
+// recordRequested emits an approval.requested audit event. Best-
+// effort: a nil recorder is a no-op; the recorder itself swallows
+// store errors per ADR-0010 (audit must not block the runtime).
+//
+// Actor is the agent — the agent's tool call is what triggered the
+// gate, even though the runtime is the caller doing the registration.
+// Attributes use the OTel-namespaced shape locked-in by PR #452.
+func (q *ActionApprovalQueue) recordRequested(rec audit.Recorder, a *ActionApproval) {
+	if rec == nil {
+		return
+	}
+	payload := map[string]any{
+		"aileron.approval.id":     a.ID,
+		"aileron.approval.kind":   string(a.Kind),
+		"aileron.approval.action": a.ActionName,
+	}
+	if a.ConnectorFQN != "" {
+		payload["aileron.connector.fqn"] = a.ConnectorFQN
+	}
+	if a.SessionID != "" {
+		payload["aileron.session.id"] = a.SessionID
+	}
+	rec.RecordSuccess(context.Background(),
+		model.EventTypeApprovalRequested,
+		model.ActorRef{Type: model.ActorTypeAgent, ID: "agent"},
+		payload)
+}
+
+// recordDecided emits approval.approved or approval.denied. Carries
+// the same approval.id as the requested event so the two are
+// trivially correlated by audit consumers. wait_ms is the time
+// between Register and Decide — a useful production signal (slow
+// human responses block the agent).
+func (q *ActionApprovalQueue) recordDecided(rec audit.Recorder, a *ActionApproval, approved bool, reason string, edited bool, decidedAt time.Time) {
+	if rec == nil {
+		return
+	}
+	decision := "denied"
+	evt := model.EventTypeApprovalDenied
+	if approved {
+		decision = "approved"
+		evt = model.EventTypeApprovalApproved
+	}
+	payload := map[string]any{
+		"aileron.approval.id":       a.ID,
+		"aileron.approval.kind":     string(a.Kind),
+		"aileron.approval.action":   a.ActionName,
+		"aileron.approval.decision": decision,
+		"aileron.approval.edited":   edited,
+		"aileron.approval.wait_ms":  decidedAt.Sub(a.RequestedAt).Milliseconds(),
+	}
+	if a.ConnectorFQN != "" {
+		payload["aileron.connector.fqn"] = a.ConnectorFQN
+	}
+	if a.SessionID != "" {
+		payload["aileron.session.id"] = a.SessionID
+	}
+	if reason != "" {
+		payload["aileron.approval.reason"] = reason
+	}
+	rec.RecordSuccess(context.Background(),
+		evt,
+		model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
+		payload)
 }
 
 // defaultActionApprovalID returns an opaque identifier suitable for
