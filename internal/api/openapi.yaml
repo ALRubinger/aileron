@@ -1290,6 +1290,103 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /v1/audit:
+    get:
+      tags: [Audit]
+      summary: List audit events
+      description: |
+        Lists events recorded by the ADR-0010 audit recorder
+        (action installs, binding lifecycle, intercept failures, etc).
+        Read-only; safe to poll.
+
+        Filters compose with AND semantics. `since` is an inclusive
+        lower bound on the event timestamp. `connector_fqn` matches
+        events that name the FQN under any of the recorded payload
+        keys (`connector_fqn`, `fqn`, or `details.connector`). `class`
+        matches the failure class on failure events (no effect on
+        success events). `audit_id` collapses the result to the single
+        event with that id, mirroring `/v1/audit/{audit_id}` but in a
+        list shape so callers can branch on length without a 404.
+
+        For now the recorder is in-memory; events are scoped to the
+        running daemon process and disappear on restart. Persistent
+        backing is post-MVP.
+      operationId: listAudit
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Lower-bound (inclusive) on event timestamp; RFC 3339.
+        - name: audit_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Match events with this exact `audit_id`.
+        - name: connector_fqn
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Match events that reference this connector FQN.
+        - name: class
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Match failure events with this `class` (e.g. `binding_required`).
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+          description: Maximum events to return; newest first.
+      responses:
+        "200":
+          description: Audit events matching the filter, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/audit/{audit_id}:
+    get:
+      tags: [Audit]
+      summary: Get a single audit event by id
+      description: |
+        Direct lookup by `audit_id`. Returns 404 when no event with
+        the given id is in the store.
+      operationId: getAudit
+      parameters:
+        - name: audit_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The matching audit event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEvent"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/connectors/check:
     get:
       tags: [Connectors]
@@ -2667,6 +2764,62 @@ components:
         timestamp:
           type: string
           format: date-time
+
+    AuditEvent:
+      type: object
+      required: [audit_id, event_type, timestamp, actor, payload]
+      description: |
+        A single audit-log entry. Shape is stable across the events
+        the ADR-0010 recorder emits (failures, action installs,
+        binding lifecycle). Specific keys inside `payload` depend on
+        `event_type` and are documented in the recorder.
+      properties:
+        audit_id:
+          type: string
+          description: |
+            Stable id minted by the recorder. For failures, also
+            stamped onto the `FailureEnvelope.error.audit_id` so the
+            envelope returned to the caller is a working back-reference.
+        event_type:
+          type: string
+          description: |
+            Discriminator for the payload shape (e.g.
+            `execution.failed`, `action.installed`, `binding.created`).
+        timestamp:
+          type: string
+          format: date-time
+          description: When the event was recorded; RFC 3339, UTC.
+        actor:
+          type: object
+          required: [type, id]
+          properties:
+            type:
+              type: string
+              description: Actor kind (`human`, `agent`, `connector_runtime`, etc.)
+            id:
+              type: string
+              description: Stable identifier within the actor type.
+        payload:
+          type: object
+          additionalProperties: true
+          description: |
+            Event-shaped payload. For failures, contains
+            `class`/`boundary`/`retriable`/`message`/`details`. For
+            success events, contains the event-specific fields the
+            recorder set (e.g. `name`, `connector_fqn`, `kind` for a
+            binding event).
+
+    AuditListResponse:
+      type: object
+      required: [events]
+      description: |
+        Response shape for `GET /v1/audit`. `events` is ordered
+        newest-first; truncation to `limit` is applied after filtering.
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEvent"
 
     StatusResponse:
       type: object

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,6 +115,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runSync(args[1:], stdout, stderr)
 	case "log":
 		return runLog(args[1:], stdout, stderr)
+	case "audit":
+		return runAudit(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout, registry)
 		return 0
@@ -146,7 +149,8 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron approval deny <id>         Deny a pending action — agent receives approval_denied")
 	fmt.Fprintln(w, "  aileron status [section]           Show daemon runtime + merged config (runtime, policy, env, notifications, vault)")
 	fmt.Fprintln(w, "  aileron sync [--bind-all] [--yes]  Reconcile installed actions: install missing connectors; report unbound capabilities")
-	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
+	fmt.Fprintln(w, "  aileron log [flags]                View the shell-policy log")
+	fmt.Fprintln(w, "  aileron audit [list|show]          View the action-execution audit log (ADR-0010)")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
 	fmt.Fprintln(w)
@@ -2001,4 +2005,235 @@ func splitFQNVersion(fqnArg, versionFlag string) (string, string, error) {
 		return "", "", fmt.Errorf("version is required (use --version=<v> or <FQN>@<version>)")
 	}
 	return fqnArg, versionFlag, nil
+}
+
+// auditEventWire mirrors api.AuditEvent. Local copy so the CLI binary
+// doesn't pull in the full generated types graph for one read.
+type auditEventWire struct {
+	AuditID   string         `json:"audit_id"`
+	EventType string         `json:"event_type"`
+	Timestamp time.Time      `json:"timestamp"`
+	Actor     auditActorWire `json:"actor"`
+	Payload   map[string]any `json:"payload"`
+}
+
+type auditActorWire struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+type auditListWire struct {
+	Events []auditEventWire `json:"events"`
+}
+
+const auditUsage = `usage:
+  aileron audit list  [--since RFC3339] [--audit-id ID] [--connector FQN] [--class CLASS] [--limit N] [--json]
+  aileron audit show  <audit-id>`
+
+// auditListFetcher and auditGetFetcher are the HTTP clients for the
+// two audit endpoints. Replaceable in tests so they don't depend on a
+// running daemon (same pattern as runtimeStatusFetcher / connectorCheckFetcher).
+var (
+	auditListFetcher = fetchAuditList
+	auditGetFetcher  = fetchAuditGet
+)
+
+type auditListQuery struct {
+	since     string
+	auditID   string
+	connector string
+	class     string
+	limit     int
+}
+
+func fetchAuditList(q auditListQuery) (*auditListWire, error) {
+	u, err := url.Parse(bindingAPIBaseURL() + "/audit")
+	if err != nil {
+		return nil, err
+	}
+	qs := u.Query()
+	if q.since != "" {
+		qs.Set("since", q.since)
+	}
+	if q.auditID != "" {
+		qs.Set("audit_id", q.auditID)
+	}
+	if q.connector != "" {
+		qs.Set("connector_fqn", q.connector)
+	}
+	if q.class != "" {
+		qs.Set("class", q.class)
+	}
+	if q.limit > 0 {
+		qs.Set("limit", strconv.Itoa(q.limit))
+	}
+	u.RawQuery = qs.Encode()
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(u.String())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, string(raw))
+	}
+	var out auditListWire
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &out, nil
+}
+
+func fetchAuditGet(auditID string) (*auditEventWire, int, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(bindingAPIBaseURL() + "/audit/" + url.PathEscape(auditID))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, http.StatusNotFound, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, resp.StatusCode, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, string(raw))
+	}
+	var out auditEventWire
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("decoding response: %w", err)
+	}
+	return &out, resp.StatusCode, nil
+}
+
+// runAudit dispatches `aileron audit <subcommand>`. With no subcommand
+// it lists; that mirrors `aileron log`'s "no-flag → list" shape.
+func runAudit(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		return runAuditList(nil, stdout, stderr)
+	}
+	switch args[0] {
+	case "list":
+		return runAuditList(args[1:], stdout, stderr)
+	case "show":
+		return runAuditShow(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown audit command: %q\n", args[0])
+		fmt.Fprintln(stderr, auditUsage)
+		return 1
+	}
+}
+
+func runAuditList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("audit list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	since := flags.String("since", "", "Lower-bound on event timestamp (RFC 3339, e.g. 2026-05-01T00:00:00Z)")
+	auditID := flags.String("audit-id", "", "Match events with this exact audit_id")
+	connector := flags.String("connector", "", "Match events that reference this connector FQN")
+	class := flags.String("class", "", "Match failure events with this class (e.g. binding_required)")
+	limit := flags.Int("limit", 0, "Maximum events to return (default: server default of 100)")
+	asJSON := flags.Bool("json", false, "Render full event records as JSON, one per line")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+
+	resp, err := auditListFetcher(auditListQuery{
+		since:     *since,
+		auditID:   *auditID,
+		connector: *connector,
+		class:     *class,
+		limit:     *limit,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if len(resp.Events) == 0 {
+		fmt.Fprintln(stdout, "No audit events.")
+		return 0
+	}
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		for _, e := range resp.Events {
+			if err := enc.Encode(e); err != nil {
+				fmt.Fprintf(stderr, "encode: %v\n", err)
+				return 1
+			}
+		}
+		return 0
+	}
+	for _, e := range resp.Events {
+		ts := e.Timestamp.Local().Format("2006-01-02 15:04:05")
+		fmt.Fprintf(stdout, "%s  %-20s  %-22s  %s\n", ts, e.AuditID, e.EventType, auditPayloadSummary(e))
+	}
+	return 0
+}
+
+func runAuditShow(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("audit show", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	rest := flags.Args()
+	if len(rest) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron audit show <audit-id>")
+		return 1
+	}
+	ev, status, err := auditGetFetcher(rest[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status == http.StatusNotFound {
+		fmt.Fprintf(stderr, "audit event %q not found\n", rest[0])
+		return 1
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(ev); err != nil {
+		fmt.Fprintf(stderr, "encode: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// auditPayloadSummary renders a one-line, human-readable hint about
+// the event. Pulls the most identifying fields from each event shape
+// the recorder emits today.
+func auditPayloadSummary(e auditEventWire) string {
+	if e.EventType == "execution.failed" {
+		class, _ := e.Payload["class"].(string)
+		conn := payloadConnector(e.Payload)
+		if conn != "" {
+			return fmt.Sprintf("class=%s connector=%s", class, conn)
+		}
+		return "class=" + class
+	}
+	if name, _ := e.Payload["name"].(string); name != "" {
+		conn := payloadConnector(e.Payload)
+		if conn != "" {
+			return fmt.Sprintf("name=%s connector=%s", name, conn)
+		}
+		return "name=" + name
+	}
+	if conn := payloadConnector(e.Payload); conn != "" {
+		return "connector=" + conn
+	}
+	return ""
+}
+
+func payloadConnector(p map[string]any) string {
+	if s, _ := p["connector_fqn"].(string); s != "" {
+		return s
+	}
+	if s, _ := p["fqn"].(string); s != "" {
+		return s
+	}
+	if d, ok := p["details"].(map[string]any); ok {
+		if s, _ := d["connector"].(string); s != "" {
+			return s
+		}
+	}
+	return ""
 }

@@ -4,10 +4,101 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store"
 )
+
+// EventFilter scopes a flat-event list query against the audit store
+// (as opposed to [Filter], which scopes a trace-grouped query). The
+// filter is the on-the-wire shape for `GET /v1/audit`: every field
+// is optional, and they compose with AND semantics.
+type EventFilter struct {
+	// Since is an inclusive lower bound on Event.Timestamp. Zero
+	// disables the bound.
+	Since time.Time
+	// EventID, when non-empty, restricts the result to the single
+	// event with this id (or empty when no such event exists).
+	EventID string
+	// ConnectorFQN, when non-empty, matches events whose payload
+	// references this FQN under any of the recorder's connector
+	// keys: top-level `connector_fqn`, top-level `fqn` (action
+	// install events), or `details.connector` (failure events).
+	ConnectorFQN string
+	// Class, when non-empty, matches events whose payload carries
+	// this failure class. Has no effect on success events (they
+	// don't record `class`), so a Class filter naturally narrows
+	// to failures.
+	Class string
+	// Limit caps the number of events returned. <=0 means no cap.
+	Limit int
+}
+
+// ListEvents returns a flat slice of recorded events matching the
+// filter, ordered newest-first. The store is in-memory and the scan
+// is linear; suitable for v1 dev/test volumes.
+func (m *MemStore) ListEvents(_ context.Context, f EventFilter) ([]Event, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Event, 0, len(m.events))
+	for _, e := range m.events {
+		if !matchEventFilter(e.event, f) {
+			continue
+		}
+		out = append(out, e.event)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Timestamp.After(out[j].Timestamp)
+	})
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
+	return out, nil
+}
+
+// matchEventFilter returns true when ev passes every non-zero field
+// of f. Connector matching deliberately walks the three keys the
+// recorder uses today; if a future event type adds another connector
+// key, extend this helper rather than the caller.
+func matchEventFilter(ev Event, f EventFilter) bool {
+	if !f.Since.IsZero() && ev.Timestamp.Before(f.Since) {
+		return false
+	}
+	if f.EventID != "" && ev.EventID != f.EventID {
+		return false
+	}
+	if f.Class != "" {
+		got, _ := ev.Payload["class"].(string)
+		if got != f.Class {
+			return false
+		}
+	}
+	if f.ConnectorFQN != "" && !payloadMatchesConnector(ev.Payload, f.ConnectorFQN) {
+		return false
+	}
+	return true
+}
+
+// payloadMatchesConnector returns true when the payload carries the
+// given connector FQN under any of the keys the recorder uses today:
+//   - `connector_fqn` (binding lifecycle events)
+//   - `fqn`           (action.installed events)
+//   - `details.connector` (failure events)
+func payloadMatchesConnector(p map[string]any, fqn string) bool {
+	if got, _ := p["connector_fqn"].(string); got == fqn {
+		return true
+	}
+	if got, _ := p["fqn"].(string); got == fqn {
+		return true
+	}
+	if details, ok := p["details"].(map[string]any); ok {
+		if got, _ := details["connector"].(string); got == fqn {
+			return true
+		}
+	}
+	return false
+}
 
 // MemStore is an in-memory implementation of the [Store] SPI suitable
 // for v1 dev/test environments. Events are kept in a single ordered

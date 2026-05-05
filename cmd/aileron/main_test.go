@@ -3180,3 +3180,351 @@ func TestRunActionAdd_NoAutoInstallFlagSkipsPrompt(t *testing.T) {
 		t.Errorf("stderr should contain raw envelope, got: %s", stderr.String())
 	}
 }
+
+// --- aileron audit ---
+
+// TestRunAudit_EmptyPrintsNoEntries: with no events the CLI prints a
+// useful message and exits 0. This is the bare-server path operators
+// see before any audit-emitting actions have run.
+func TestRunAudit_EmptyPrintsNoEntries(t *testing.T) {
+	prev := auditListFetcher
+	auditListFetcher = func(_ auditListQuery) (*auditListWire, error) {
+		return &auditListWire{Events: []auditEventWire{}}, nil
+	}
+	defer func() { auditListFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No audit events") {
+		t.Errorf("expected 'No audit events'; got: %s", stdout.String())
+	}
+}
+
+// TestRunAudit_TabularRendersTimestampIDTypeAndSummary: the default
+// rendering is a one-line-per-event table whose columns are stable
+// for shell pipelines.
+func TestRunAudit_TabularRendersTimestampIDTypeAndSummary(t *testing.T) {
+	prev := auditListFetcher
+	auditListFetcher = func(_ auditListQuery) (*auditListWire, error) {
+		return &auditListWire{Events: []auditEventWire{{
+			AuditID:   "audit-xyz",
+			EventType: "execution.failed",
+			Timestamp: time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC),
+			Payload: map[string]any{
+				"class":   "binding_required",
+				"details": map[string]any{"connector": "github://aileron/slack"},
+			},
+		}}}, nil
+	}
+	defer func() { auditListFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"audit-xyz",
+		"execution.failed",
+		"class=binding_required",
+		"connector=github://aileron/slack",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output; got: %s", want, out)
+		}
+	}
+}
+
+// TestRunAudit_FlagsForwardedToFetcher: every documented filter flag
+// ends up on the auditListQuery sent to the daemon. Drift between
+// the CLI flags and the wire query is the most likely regression.
+func TestRunAudit_FlagsForwardedToFetcher(t *testing.T) {
+	var seen auditListQuery
+	prev := auditListFetcher
+	auditListFetcher = func(q auditListQuery) (*auditListWire, error) {
+		seen = q
+		return &auditListWire{}, nil
+	}
+	defer func() { auditListFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	args := []string{
+		"audit", "list",
+		"--since", "2026-05-01T00:00:00Z",
+		"--audit-id", "audit-xyz",
+		"--connector", "github://aileron/slack",
+		"--class", "binding_required",
+		"--limit", "50",
+	}
+	code := run(args, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if seen.since != "2026-05-01T00:00:00Z" ||
+		seen.auditID != "audit-xyz" ||
+		seen.connector != "github://aileron/slack" ||
+		seen.class != "binding_required" ||
+		seen.limit != 50 {
+		t.Errorf("query = %+v; some flags didn't reach fetcher", seen)
+	}
+}
+
+// TestRunAudit_JSONRendersOnePerLine: --json switches to one
+// JSON-encoded event per line. Round-trips back through json.Decode.
+func TestRunAudit_JSONRendersOnePerLine(t *testing.T) {
+	prev := auditListFetcher
+	auditListFetcher = func(_ auditListQuery) (*auditListWire, error) {
+		return &auditListWire{Events: []auditEventWire{
+			{AuditID: "a1", EventType: "action.installed", Timestamp: time.Now()},
+			{AuditID: "a2", EventType: "binding.created", Timestamp: time.Now()},
+		}}, nil
+	}
+	defer func() { auditListFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %q", len(lines), stdout.String())
+	}
+	for _, line := range lines {
+		var ev auditEventWire
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Errorf("line %q is not JSON: %v", line, err)
+		}
+	}
+}
+
+// TestRunAudit_FetcherErrorExitsNonZero: a daemon error (network,
+// 500, etc.) exits non-zero with a useful stderr line. Operators can
+// rely on the exit code in scripts.
+func TestRunAudit_FetcherErrorExitsNonZero(t *testing.T) {
+	prev := auditListFetcher
+	auditListFetcher = func(_ auditListQuery) (*auditListWire, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	defer func() { auditListFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected non-zero exit on fetcher error")
+	}
+	if !strings.Contains(stderr.String(), "connection refused") {
+		t.Errorf("expected error in stderr; got: %s", stderr.String())
+	}
+}
+
+// TestRunAuditShow_HappyPath: `aileron audit show <id>` prints the
+// event as pretty JSON.
+func TestRunAuditShow_HappyPath(t *testing.T) {
+	prev := auditGetFetcher
+	auditGetFetcher = func(id string) (*auditEventWire, int, error) {
+		if id != "audit-xyz" {
+			t.Errorf("fetcher saw id=%q", id)
+		}
+		return &auditEventWire{
+			AuditID:   "audit-xyz",
+			EventType: "action.installed",
+			Timestamp: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			Payload:   map[string]any{"name": "ship-update"},
+		}, http.StatusOK, nil
+	}
+	defer func() { auditGetFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "show", "audit-xyz"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var got auditEventWire
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v; out=%s", err, stdout.String())
+	}
+	if got.AuditID != "audit-xyz" || got.EventType != "action.installed" {
+		t.Errorf("got = %+v", got)
+	}
+}
+
+// TestRunAuditShow_NotFoundExitsNonZero: 404 from the daemon translates
+// to a non-zero exit and a stderr line naming the missing id.
+func TestRunAuditShow_NotFoundExitsNonZero(t *testing.T) {
+	prev := auditGetFetcher
+	auditGetFetcher = func(_ string) (*auditEventWire, int, error) {
+		return nil, http.StatusNotFound, nil
+	}
+	defer func() { auditGetFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "show", "missing"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected non-zero exit on 404")
+	}
+	if !strings.Contains(stderr.String(), "missing") {
+		t.Errorf("stderr should name the id; got: %s", stderr.String())
+	}
+}
+
+// TestRunAuditShow_RequiresAuditID: with no positional argument the
+// CLI prints usage and exits non-zero; the fetcher is not called.
+func TestRunAuditShow_RequiresAuditID(t *testing.T) {
+	called := false
+	prev := auditGetFetcher
+	auditGetFetcher = func(_ string) (*auditEventWire, int, error) {
+		called = true
+		return nil, http.StatusOK, nil
+	}
+	defer func() { auditGetFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "show"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected non-zero exit when audit-id is missing")
+	}
+	if called {
+		t.Error("fetcher should not be called without an audit-id")
+	}
+	if !strings.Contains(stderr.String(), "audit-id") {
+		t.Errorf("stderr should mention audit-id; got: %s", stderr.String())
+	}
+}
+
+// TestRunAudit_UnknownSubcommand: unrecognized subcommand prints
+// usage and exits non-zero.
+func TestRunAudit_UnknownSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "bogus"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected non-zero exit on unknown subcommand")
+	}
+	if !strings.Contains(stderr.String(), "unknown audit command") {
+		t.Errorf("stderr should explain the failure; got: %s", stderr.String())
+	}
+}
+
+// TestFetchAuditGet_HitsCorrectURL: the production fetcher hits
+// `/v1/audit/<id>` (with PathEscape), decodes the wire shape on 200,
+// and returns http.StatusNotFound without an error on 404 so the
+// caller can branch on status without parsing the error string.
+func TestFetchAuditGet_HitsCorrectURL(t *testing.T) {
+	var sawPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/audit/", func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		if r.URL.Path == "/v1/audit/audit-known" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"audit_id":"audit-known","event_type":"action.installed","timestamp":"2026-05-01T00:00:00Z","actor":{"type":"human","id":"user"},"payload":{"name":"ship-update"}}`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	got, status, err := fetchAuditGet("audit-known")
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("known: status=%d err=%v", status, err)
+	}
+	if got.AuditID != "audit-known" || got.EventType != "action.installed" {
+		t.Errorf("got = %+v", got)
+	}
+	if sawPath != "/v1/audit/audit-known" {
+		t.Errorf("path = %q", sawPath)
+	}
+
+	_, status, err = fetchAuditGet("missing")
+	if err != nil {
+		t.Errorf("404 should not surface as error; got %v", err)
+	}
+	if status != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", status)
+	}
+}
+
+// TestAuditPayloadSummary_PerEventShape exercises the renderer
+// branches the tabular tests don't reach: action-installed (name
+// + fqn), binding event (connector_fqn only), and an event with
+// no useful keys.
+func TestAuditPayloadSummary_PerEventShape(t *testing.T) {
+	cases := []struct {
+		name string
+		in   auditEventWire
+		want string
+	}{
+		{
+			name: "action-installed-with-fqn",
+			in: auditEventWire{
+				EventType: "action.installed",
+				Payload: map[string]any{
+					"name": "ship-update",
+					"fqn":  "github://aileron/ship-update",
+				},
+			},
+			want: "name=ship-update connector=github://aileron/ship-update",
+		},
+		{
+			name: "binding-created",
+			in: auditEventWire{
+				EventType: "binding.created",
+				Payload:   map[string]any{"connector_fqn": "github://aileron/slack"},
+			},
+			want: "connector=github://aileron/slack",
+		},
+		{
+			name: "empty-payload",
+			in:   auditEventWire{EventType: "unknown", Payload: map[string]any{}},
+			want: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := auditPayloadSummary(c.in); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestFetchAuditList_BuildsURL: the production fetcher (not the stub)
+// builds the right URL with all filter params and decodes the wire
+// shape. Single test that exercises the actual HTTP path.
+func TestFetchAuditList_BuildsURL(t *testing.T) {
+	var sawQuery url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"events":[]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	_, err := fetchAuditList(auditListQuery{
+		since:     "2026-05-01T00:00:00Z",
+		auditID:   "audit-x",
+		connector: "github://aileron/slack",
+		class:     "binding_required",
+		limit:     25,
+	})
+	if err != nil {
+		t.Fatalf("fetchAuditList: %v", err)
+	}
+	for k, want := range map[string]string{
+		"since":         "2026-05-01T00:00:00Z",
+		"audit_id":      "audit-x",
+		"connector_fqn": "github://aileron/slack",
+		"class":         "binding_required",
+		"limit":         "25",
+	} {
+		if got := sawQuery.Get(k); got != want {
+			t.Errorf("query[%s] = %q, want %q", k, got, want)
+		}
+	}
+}
