@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -255,6 +256,111 @@ func TestDecideActionApproval_NilQueueReturns503(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+// TestDecideActionApproval_EditedPayloadFlowsToWaiter asserts the
+// `edited_payload` field surfaced in #428: the webapp ships the
+// user-edited reply body via the decide endpoint, the queue carries
+// it through Decide → ActionApproval.Wait so the dispatcher (e.g.
+// CommsServer) can send the user's bytes rather than the agent's
+// original draft.
+func TestDecideActionApproval_EditedPayloadFlowsToWaiter(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	entry := q.RegisterCommsDraft("slack", "#general", "alice", "ping", "pong", "msg-1", "")
+
+	type result struct {
+		decision approval.ActionDecision
+		err      error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		d, err := entry.Wait(req2ctx(), 2*time.Second)
+		resultCh <- result{d, err}
+	}()
+
+	body := bytes.NewReader([]byte(`{"approved":true,"edited_payload":{"body":"pong — got it"}}`))
+	req := httptest.NewRequest(http.MethodPost,
+		"/v1/action-approvals/"+entry.ID+"/decide", body)
+	rec := httptest.NewRecorder()
+	srv.DecideActionApproval(rec, req, entry.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got := <-resultCh
+	if got.err != nil {
+		t.Fatalf("Wait err: %v", got.err)
+	}
+	if !got.decision.Approved {
+		t.Errorf("decision.Approved = false, want true")
+	}
+	body2, ok := got.decision.EditedPayload["body"].(string)
+	if !ok || body2 != "pong — got it" {
+		t.Errorf("EditedPayload.body = %v, want \"pong — got it\"", got.decision.EditedPayload["body"])
+	}
+}
+
+// TestListActionApprovals_KindIsSurfaced asserts each pending entry
+// carries its kind on the wire so the webapp's per-kind cards can
+// render the right layout. Default kind for a Register call is
+// `action`; explicit kinds round-trip verbatim.
+func TestListActionApprovals_KindIsSurfaced(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.Register("send-email", "github://x/y", "", nil)
+	q.RegisterCommsSend("slack", "#general", "hi", "")
+	q.RegisterCommsDraft("slack", "#general", "a", "b", "c", "m1", "")
+	q.RegisterHTTPRequest("GET", "https://x", "", "linear-key", "")
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals", nil)
+	rec := httptest.NewRecorder()
+	srv.ListActionApprovals(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got api.ActionApprovalListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Items) != 4 {
+		t.Fatalf("Items len = %d, want 4", len(got.Items))
+	}
+	wantKinds := []api.PendingActionApprovalKind{
+		api.PendingActionApprovalKindAction,
+		api.PendingActionApprovalKindCommsSend,
+		api.PendingActionApprovalKindCommsDraft,
+		api.PendingActionApprovalKindHttpRequest,
+	}
+	for i, want := range wantKinds {
+		if got.Items[i].Kind != want {
+			t.Errorf("Items[%d].Kind = %q, want %q", i, got.Items[i].Kind, want)
+		}
+	}
+}
+
+// TestNewHandlerWithConfig_ReusesSuppliedActionApprovals confirms
+// that when launch passes its shared queue via Config.ActionApprovals,
+// the apiServer routes through it rather than creating a fresh one.
+// This is the wiring that lets CommsServer's send-shaped tools and
+// the gateway's `/v1/action-approvals` API see the same SSE stream.
+func TestNewHandlerWithConfig_ReusesSuppliedActionApprovals(t *testing.T) {
+	q := approval.NewActionApprovalQueue(nil, nil)
+	q.RegisterCommsSend("slack", "#general", "hi", "")
+
+	h, err := NewHandlerWithConfig(slog.Default(), Config{ActionApprovals: q})
+	if err != nil {
+		t.Fatalf("NewHandlerWithConfig: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"kind":"comms_send"`) {
+		t.Errorf("body = %s, want a comms_send entry routed through the supplied queue", body)
 	}
 }
 

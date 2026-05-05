@@ -39,3 +39,17 @@ func PushIncomingForTest(cs *CommsServer, msg IncomingForTest) {
 		Timestamp: time.Now(),
 	})
 }
+
+// SetApprovalTTLForTest overrides the CommsServer's approval-wait
+// timeout so timeout-path tests can drive the deadline deterministically
+// without sleeping for minutes.
+func SetApprovalTTLForTest(cs *CommsServer, d time.Duration) {
+	cs.approvalTTL = d
+}
+
+// MatchSecretForTest exposes matchSecret so tests can assert the
+// per-name URL pattern matching without round-tripping through the
+// httpRequest dispatch path.
+func MatchSecretForTest(cs *CommsServer, url string) (string, bool) {
+	return cs.matchSecret(url)
+}
