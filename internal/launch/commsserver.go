@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,8 +18,13 @@ import (
 )
 
 // CommsRequest is sent by aileron-mcp to read or send messages.
+// Wire shape preserved across the pty-removal in #419 — aileron-mcp's
+// tool definitions don't change. The behaviors of `send_message`,
+// `draft_reply`, and `http_request` regressed from "in-pty user
+// approval prompt" to "deny pending webapp wire-through" (tracked
+// as a #419 follow-up); the protocol itself is unchanged.
 type CommsRequest struct {
-	Method  string `json:"method"` // "read_messages" or "send_message"
+	Method  string `json:"method"` // "read_messages", "send_message", "draft_reply", or "http_request"
 	Service string `json:"service,omitempty"`
 	Channel string `json:"channel,omitempty"`
 	Body    string `json:"body,omitempty"`
@@ -42,20 +46,22 @@ type CommsMessageDTO struct {
 	Author       string `json:"author"`
 	Body         string `json:"body"`
 	Timestamp    string `json:"timestamp"`
-	DraftRequest bool   `json:"draft_request,omitempty"` // true if a reply draft is requested
+	DraftRequest bool   `json:"draft_request,omitempty"`
 }
 
-// CommsServer handles IPC requests from aileron-mcp for reading and
-// sending messages. It bridges MCP tools to the NotifyQueue and
-// comms Listeners.
+// CommsServer handles IPC requests from aileron-mcp.
+//
+// Pre-#419, this server rendered an in-pty approval panel before
+// every send / draft / http call. The pty rendering is gone; the
+// IPC interface stays so aileron-mcp's tools keep their schemas.
+// Send / draft / http now fail-closed with a clear message until the
+// shell-shim → webapp wire-through ships as a follow-up to #419.
+// `read_messages` is unaffected — it's a pure queue read.
 type CommsServer struct {
 	socketPath string
 	listener   net.Listener
 	queue      *NotifyQueue
-	senders    map[string]comms.Listener // keyed by service name
-	bar        *StatusBar
-	copier     *OutputCopier
-	router     *KeyRouter
+	senders    map[string]comms.Listener
 	auditLog   string
 	sessionID  string
 	secrets    launchpolicy.SecretsConfig
@@ -66,9 +72,8 @@ type CommsServer struct {
 	done bool
 }
 
-// NewCommsServer creates a comms IPC server. The auditLog and sessionID
-// parameters are used to log message events to the audit trail.
-func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, bar *StatusBar, copier *OutputCopier, router *KeyRouter, auditLog, sessionID string) (*CommsServer, error) {
+// NewCommsServer creates a comms IPC server. Run in a goroutine via Serve.
+func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, auditLog, sessionID string) (*CommsServer, error) {
 	os.Remove(socketPath)
 
 	ln, err := net.Listen("unix", socketPath)
@@ -86,9 +91,6 @@ func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Liste
 		listener:   ln,
 		queue:      queue,
 		senders:    senderMap,
-		bar:        bar,
-		copier:     copier,
-		router:     router,
 		auditLog:   auditLog,
 		sessionID:  sessionID,
 	}, nil
@@ -137,6 +139,10 @@ func (cs *CommsServer) handleConn(conn net.Conn) {
 	json.NewEncoder(conn).Encode(resp)
 }
 
+// readMessages returns messages currently in the notification queue.
+// Filters by service and channel when provided. Marks messages read
+// after surfacing them so the agent doesn't see the same message
+// twice across consecutive calls.
 func (cs *CommsServer) readMessages(req CommsRequest) CommsResponse {
 	msgs := cs.queue.Messages()
 	var dtos []CommsMessageDTO
@@ -164,218 +170,47 @@ func (cs *CommsServer) readMessages(req CommsRequest) CommsResponse {
 	return CommsResponse{OK: true, Messages: dtos}
 }
 
-// draftReply stores a draft reply on a message without sending it.
-// The user reviews the draft in the overlay and decides to send,
-// edit, or discard. Aileron handles sending — not the agent.
-func (cs *CommsServer) draftReply(req CommsRequest) CommsResponse {
-	if req.ReplyTo == "" || req.Body == "" {
-		return CommsResponse{Error: "reply_to and body are required"}
-	}
-
-	if !cs.queue.SetDraft(req.ReplyTo, req.Body) {
-		return CommsResponse{Error: "message not found: " + req.ReplyTo}
-	}
-
-	cs.logMessage("draft_queued", "", "", "", req.Body, req.ReplyTo)
-	return CommsResponse{OK: true}
-}
-
+// sendMessage previously prompted the developer for approval in the
+// pty before dispatching. With the pty gone (#419), the prompt
+// surface is gone too. Fail-closed until the webapp wire-through
+// lands — agents calling this tool see the error and can fall back
+// to other mechanisms.
 func (cs *CommsServer) sendMessage(req CommsRequest) CommsResponse {
-	if req.Service == "" || req.Channel == "" || req.Body == "" {
-		return CommsResponse{Error: "service, channel, and body are required"}
-	}
-
-	sender, ok := cs.senders[req.Service]
-	if !ok {
-		return CommsResponse{Error: "no listener for service: " + req.Service}
-	}
-
-	// Check if this is a reply to an auto-drafted message. If so,
-	// present the draft in the overlay for review instead of the
-	// generic approval prompt.
-	if orig, found := cs.queue.RecentByChannel(req.Service, req.Channel, 5*time.Minute); found {
-		cs.queue.SetDraft(orig.ID, req.Body)
-		cs.logMessage("draft_queued", req.Service, req.Channel, "", req.Body, orig.ID)
-
-		// Wait for the user to approve or discard via the overlay.
-		// The overlay sets the Draft field to "" on discard or sends
-		// directly on approve. We poll for the draft to be resolved.
-		decision := cs.waitForDraftDecision(orig.ID, req.Body)
-		switch decision {
-		case "approve":
-			if err := sender.Send(nil, comms.OutgoingMessage{
-				Channel: req.Channel,
-				Body:    req.Body,
-			}); err != nil {
-				return CommsResponse{Error: "send failed: " + err.Error()}
-			}
-			cs.logMessage("message_sent", req.Service, req.Channel, "", req.Body, orig.ID)
-			return CommsResponse{OK: true}
-		case "edited":
-			// The user edited and sent directly from the overlay.
-			// The overlay already called DirectSend, so just return OK.
-			cs.logMessage("draft_edited", req.Service, req.Channel, "", req.Body, orig.ID)
-			return CommsResponse{OK: true}
-		default:
-			cs.logMessage("draft_discarded", req.Service, req.Channel, "", req.Body, orig.ID)
-			return CommsResponse{Error: "draft discarded by user"}
-		}
-	}
-
-	// Prompt the developer for approval before sending.
-	decision := cs.promptSendApproval(req.Service, req.Channel, req.Body)
-	if decision != "approve" {
-		cs.logMessage("message_denied", req.Service, req.Channel, "", req.Body, "")
-		return CommsResponse{Error: "message denied by user"}
-	}
-
-	if err := sender.Send(nil, comms.OutgoingMessage{
-		Channel: req.Channel,
-		Body:    req.Body,
-	}); err != nil {
-		return CommsResponse{Error: "send failed: " + err.Error()}
-	}
-
-	cs.logMessage("message_sent", req.Service, req.Channel, "", req.Body, "")
-	return CommsResponse{OK: true}
+	cs.logMessage("message_denied_no_surface", req.Service, req.Channel, "", req.Body, "")
+	return CommsResponse{Error: errSendApprovalUnavailable}
 }
 
-// waitForDraftDecision polls the queue until the user resolves the draft
-// in the overlay. Returns "approve", "edited", or "discard".
-func (cs *CommsServer) waitForDraftDecision(msgID, originalDraft string) string {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(10 * time.Minute)
-
-	for {
-		select {
-		case <-ticker.C:
-			msg, found := cs.queue.FindByID(msgID)
-			decision := ResolveDraft(msg, found, originalDraft)
-			switch decision {
-			case DraftApprove:
-				cs.queue.ClearDraft(msgID)
-				return "approve"
-			case DraftEdited:
-				cs.queue.ClearDraft(msgID)
-				return "edited"
-			case DraftDiscard:
-				return "discard"
-			default:
-				// DraftPending — keep polling.
-			}
-		case <-timeout:
-			cs.queue.ClearDraft(msgID)
-			return "discard"
-		}
-	}
+// draftReply previously polled the in-pty overlay for an approve /
+// edit / discard decision. Same pty-removal regression as sendMessage:
+// fail-closed until the webapp wire-through ships.
+func (cs *CommsServer) draftReply(req CommsRequest) CommsResponse {
+	cs.logMessage("draft_denied_no_surface", "", "", "", req.Body, req.ReplyTo)
+	return CommsResponse{Error: errSendApprovalUnavailable}
 }
 
-// draftApproved is a sentinel value set on the Draft field when the
-// user approves the draft as-is from the overlay.
-const draftApproved = "\x00approved"
-
-// DraftDecision represents the outcome of draft resolution.
-// Possible values: "pending", "approve", "edited", "discard".
-type DraftDecision string
-
-const (
-	DraftPending  DraftDecision = "pending"
-	DraftApprove  DraftDecision = "approve"
-	DraftEdited   DraftDecision = "edited"
-	DraftDiscard  DraftDecision = "discard"
-)
-
-// ResolveDraft examines a message's current draft state and returns the
-// decision. If the message has not been found (pass found=false), the
-// result is DraftDiscard. If the draft is still the original text, the
-// result is DraftPending — the caller should keep polling.
-func ResolveDraft(msg Message, found bool, originalDraft string) DraftDecision {
-	if !found {
-		return DraftDiscard
-	}
-	if msg.Draft == "" && msg.DraftFor == "" {
-		return DraftDiscard
-	}
-	if msg.Draft == draftApproved {
-		return DraftApprove
-	}
-	if msg.Draft != originalDraft && msg.Draft != "" && msg.Draft != draftApproved {
-		return DraftEdited
-	}
-	return DraftPending
+// httpRequest had a pty approval prompt before issuing the call.
+// Same regression — fail-closed for now. Agents wanting to make
+// HTTP calls should go through the connector + sandbox pipeline,
+// which has its own approval surface (action manifests with
+// `[approval] required = true`).
+func (cs *CommsServer) httpRequest(req CommsRequest) CommsResponse {
+	cs.logMessage("http_request_denied_no_surface", req.Service, req.Channel, "", req.Body, "")
+	return CommsResponse{Error: errSendApprovalUnavailable}
 }
 
-// promptSendApproval shows the developer a draft message for approval
-// using the same alternate-screen pattern as the shell approval prompt.
-func (cs *CommsServer) promptSendApproval(service, channel, body string) string {
-	var inputCh <-chan byte
-	if cs.router != nil {
-		inputCh = cs.router.StealInput()
-		defer cs.router.ReleaseInput()
-	}
+// errSendApprovalUnavailable is the agent-facing message when a
+// send-shaped CommsRequest hits the post-#419 launch path. Surfaces
+// in `aileron-mcp`'s tool error so the LLM can route around it (e.g.
+// suggest the user run the action via a connector instead).
+const errSendApprovalUnavailable = "send / draft / http_request approval surface is currently unavailable in `aileron launch` (pty removed in #419; webapp wire-through tracked as a follow-up)"
 
-	if cs.copier != nil {
-		cs.copier.SetPaused(true)
-	}
-	defer func() {
-		if cs.copier != nil {
-			cs.copier.SetPaused(false)
-		}
-	}()
-
-	termRows, termCols := 24, 80
-	if cs.bar != nil {
-		termRows, termCols = cs.bar.Dims()
-	}
-	panel := NewPanel(PanelConfig{
-		Title: "✈️ Aileron ─ Send Message",
-	}, termRows, termCols)
-
-	var content []string
-	content = append(content, "")
-	content = append(content, fmt.Sprintf("  To: \033[1m%s %s\033[0m", service, channel))
-	content = append(content, "")
-	for _, bl := range wrapText(body, panel.ContentWidth()-4) {
-		content = append(content, "  "+bl)
-	}
-	content = append(content, "")
-	content = append(content, "  \033[1m[y]\033[0m  Send")
-	content = append(content, "  \033[1m[n]\033[0m  Discard")
-	content = append(content, "")
-
-	prompt := panel.RenderToAltScreen(content) + "\r\n  > "
-
-	if cs.copier != nil {
-		cs.copier.WriteExclusive([]byte(prompt))
-	}
-
-	if inputCh == nil {
-		return "deny"
-	}
-	for {
-		b := <-inputCh
-		switch b {
-		case 'y', 'Y':
-			// Restore screen.
-			if cs.copier != nil {
-				cs.copier.WriteExclusive([]byte("\033[?1049l"))
-			}
-			return "approve"
-		case 'n', 'N':
-			if cs.copier != nil {
-				cs.copier.WriteExclusive([]byte("\033[?1049l"))
-			}
-			return "deny"
-		default:
-			continue
-		}
-	}
-}
-
-// DirectSend sends a message without an approval prompt. Used for
-// user-authored replies from the overlay (the user typed it, so no
-// approval is needed).
+// DirectSend sends a message without an approval prompt. Used by
+// downstream callers that have already received explicit user
+// authorization via some other surface. Pre-#419, the in-pty overlay
+// drove this; under the new launch path nothing currently calls
+// DirectSend, but the method is preserved so any future webapp-driven
+// reply path can dispatch through it without re-implementing send
+// plumbing.
 func (cs *CommsServer) DirectSend(service, channel, body string) error {
 	sender, ok := cs.senders[service]
 	if !ok {
@@ -392,129 +227,16 @@ func (cs *CommsServer) DirectSend(service, channel, body string) error {
 }
 
 // SetSecrets configures the secrets mapping and vault for http_request
-// credential injection. Called after vault is opened at launch time.
+// credential injection. Currently unused — httpRequest fail-closes
+// before reaching credential lookup — but preserved for the eventual
+// rewire so call sites don't have to re-add it.
 func (cs *CommsServer) SetSecrets(secrets launchpolicy.SecretsConfig, v vault.Vault) {
 	cs.secrets = secrets
 	cs.vault = v
 	cs.httpClient = &http.Client{}
 }
 
-func (cs *CommsServer) httpRequest(req CommsRequest) CommsResponse {
-	// Fields are repurposed: Service=HTTP method, Channel=URL, Body=body, ReplyTo=headers JSON.
-	method := req.Service
-	url := req.Channel
-	body := req.Body
-	headersJSON := req.ReplyTo
-
-	if method == "" || url == "" {
-		return CommsResponse{Error: "method and url are required"}
-	}
-
-	// Match URL against secrets config to find credential.
-	secretName, _ := cs.matchSecret(url)
-
-	// Prompt user approval.
-	detail := fmt.Sprintf("%s %s", method, url)
-	if secretName != "" {
-		detail += fmt.Sprintf(" (credential: %s)", secretName)
-	}
-	decision := cs.promptSendApproval("http", detail, body)
-	if decision != "approve" {
-		cs.logMessage("http_request_denied", method, url, "", body, "")
-		return CommsResponse{Error: "request denied by user"}
-	}
-
-	// Build HTTP request.
-	var bodyReader io.Reader
-	if body != "" {
-		bodyReader = strings.NewReader(body)
-	}
-	httpReq, err := http.NewRequest(method, url, bodyReader)
-	if err != nil {
-		return CommsResponse{Error: "invalid request: " + err.Error()}
-	}
-
-	// Parse and set headers.
-	if headersJSON != "" {
-		var headers map[string]string
-		if err := json.Unmarshal([]byte(headersJSON), &headers); err == nil {
-			for k, v := range headers {
-				httpReq.Header.Set(k, v)
-			}
-		}
-	}
-
-	// Inject credential if matched.
-	if secretName != "" && cs.vault != nil {
-		secret, err := cs.vault.Get(nil, secretName)
-		if err == nil {
-			httpReq.Header.Set("Authorization", "Bearer "+string(secret.Value))
-		}
-	}
-
-	// Execute request.
-	client := cs.httpClient
-	if client == nil {
-		client = &http.Client{}
-	}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return CommsResponse{Error: "request failed: " + err.Error()}
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
-	cs.logMessage("http_request_sent", method, url, "", string(respBody), "")
-
-	return CommsResponse{
-		OK: true,
-		Messages: []CommsMessageDTO{{
-			ID:   fmt.Sprintf("%d", resp.StatusCode),
-			Body: string(respBody),
-		}},
-	}
-}
-
-// matchSecret finds the first secret whose target patterns match the URL.
-func (cs *CommsServer) matchSecret(url string) (string, bool) {
-	for name, def := range cs.secrets {
-		for _, pattern := range def.Targets {
-			if URLMatchesPattern(url, pattern) {
-				return name, true
-			}
-		}
-	}
-	return "", false
-}
-
-// URLMatchesPattern checks if a URL matches a target pattern.
-// Patterns use simple prefix matching with optional trailing wildcard.
-// Examples: "slack.com/api/*" matches "https://slack.com/api/chat.postMessage"
-func URLMatchesPattern(url, pattern string) bool {
-	if strings.HasSuffix(pattern, "*") {
-		prefix := strings.TrimSuffix(pattern, "*")
-		return strings.Contains(url, prefix)
-	}
-	return strings.Contains(url, pattern)
-}
-
-func (cs *CommsServer) logMessage(event, service, channel, author, body, inReplyTo string) {
-	if cs.auditLog == "" {
-		return
-	}
-	audit.AppendMessageEntry(cs.auditLog, audit.MessageEntry{
-		Timestamp: time.Now(),
-		SessionID: cs.sessionID,
-		Event:     event,
-		Service:   service,
-		Channel:   channel,
-		Author:    author,
-		Body:      body,
-		InReplyTo: inReplyTo,
-	})
-}
-
-// SocketPath returns the socket path.
+// SocketPath returns the path to the Unix socket.
 func (cs *CommsServer) SocketPath() string {
 	return cs.socketPath
 }
@@ -548,9 +270,23 @@ func RequestComms(socketPath string, req CommsRequest) CommsResponse {
 	return resp
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
+func (cs *CommsServer) logMessage(event, service, channel, author, body, inReplyTo string) {
+	if cs.auditLog == "" {
+		return
 	}
-	return b
+	audit.AppendMessageEntry(cs.auditLog, audit.MessageEntry{
+		Timestamp: time.Now(),
+		SessionID: cs.sessionID,
+		Event:     event,
+		Service:   service,
+		Channel:   channel,
+		Author:    author,
+		Body:      body,
+		InReplyTo: inReplyTo,
+	})
 }
+
+// Touch the io import so it stays in the imports list. Used by the
+// pre-#419 httpRequest path; preserved so the followup wire-through
+// doesn't have to re-add the import.
+var _ = io.Discard

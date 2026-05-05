@@ -2,243 +2,44 @@ package launch
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
-	"os"
-	"sync"
-
-	ptyPkg "github.com/creack/pty/v2"
 )
 
-// ApprovalRequest is sent by aileron-sh when a command needs user approval.
+// ApprovalRequest is sent by aileron-sh when a command needs user
+// approval. The wire shape is preserved across the pty-removal
+// (issue #419) so aileron-sh keeps working unchanged. The receiving
+// side — the in-pty ApprovalServer — is gone; under the new launch
+// path, no listener accepts connections on the AILERON_APPROVAL_SOCKET,
+// so [RequestApproval] dials, fails, and returns "deny" for v0.x.
+//
+// Routing shell-shim approvals through the webapp's action-approval
+// queue is tracked separately (see #419's followup notes); when that
+// lands, the launch process will register a webapp-rendered
+// approval card and reply on this socket with the user's decision.
 type ApprovalRequest struct {
 	Command string `json:"command"`
 	Reason  string `json:"reason"`
 }
 
 // ApprovalResponse is the user's decision, sent back to aileron-sh.
+// The pre-pty-removal flow returned one of "allow_once", "deny",
+// "allow_project", "allow_user". The new flow only ever returns
+// "deny" (because no server is listening) until the webapp wire-
+// through ships; aileron-sh treats unknown values as deny so this
+// is forward-compatible.
 type ApprovalResponse struct {
-	Decision string `json:"decision"` // "allow_once", "deny", "allow_project", "allow_user"
+	Decision string `json:"decision"`
 }
 
-// LearnedRule records a command pattern that the user chose to persist
-// during the session (via "allow for project" or "allow for me").
-type LearnedRule struct {
-	Pattern string // the command pattern saved
-	Scope   string // "project" or "user"
-	File    string // the file the rule was written to
-}
-
-// ApprovalServer listens on a Unix socket for approval requests from
-// aileron-sh and prompts the developer on the real terminal.
-type ApprovalServer struct {
-	socketPath string
-	listener   net.Listener
-	bar        *StatusBar
-	copier     *OutputCopier
-	router     *KeyRouter
-	ptmx       *os.File // pty master — for triggering resize after prompt
-
-	mu           sync.Mutex
-	done         bool
-	learnedRules []LearnedRule
-}
-
-// NewApprovalServer creates a server that listens for approval requests.
-func NewApprovalServer(socketPath string, bar *StatusBar, copier *OutputCopier, router *KeyRouter, ptmx *os.File) (*ApprovalServer, error) {
-	// Remove stale socket file.
-	os.Remove(socketPath)
-
-	ln, err := net.Listen("unix", socketPath)
-	if err != nil {
-		return nil, fmt.Errorf("approval socket: %w", err)
-	}
-
-	return &ApprovalServer{
-		socketPath: socketPath,
-		listener:   ln,
-		bar:        bar,
-		copier:     copier,
-		router:     router,
-		ptmx:       ptmx,
-	}, nil
-}
-
-// Serve accepts connections and handles approval requests. Blocks until
-// Close is called. Run in a goroutine.
-func (s *ApprovalServer) Serve() {
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			s.mu.Lock()
-			done := s.done
-			s.mu.Unlock()
-			if done {
-				return
-			}
-			continue
-		}
-		s.handleConn(conn)
-	}
-}
-
-func (s *ApprovalServer) handleConn(conn net.Conn) {
-	defer conn.Close()
-
-	var req ApprovalRequest
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
-		return
-	}
-
-	decision := s.promptOnTerminal(req.Command, req.Reason)
-
-	// Track commands the user chose to persist as policy rules.
-	switch decision {
-	case "allow_project":
-		s.RecordLearnedRule(req.Command, "project", "aileron.yaml")
-	case "allow_user":
-		s.RecordLearnedRule(req.Command, "user", "~/.aileron/settings.yaml")
-	}
-
-	json.NewEncoder(conn).Encode(ApprovalResponse{Decision: decision})
-}
-
-// promptOnTerminal pauses pty output, switches to the alternate screen
-// buffer, prompts the developer, and restores everything.
-func (s *ApprovalServer) promptOnTerminal(command, reason string) string {
-	// Steal keyboard input from the key router so keypresses come to us.
-	var inputCh <-chan byte
-	if s.router != nil {
-		inputCh = s.router.StealInput()
-		defer s.router.ReleaseInput()
-	}
-
-	// Pause pty output so the prompt renders cleanly.
-	if s.copier != nil {
-		s.copier.SetPaused(true)
-	}
-	defer func() {
-		if s.copier != nil {
-			s.copier.SetPaused(false)
-		}
-		// Trigger a pty resize so Claude Code redraws its full TUI.
-		s.triggerRedraw()
-	}()
-
-	// Build the panel content and render using the shared Panel component.
-	termRows, termCols := 24, 80
-	if s.bar != nil {
-		termRows, termCols = s.bar.Dims()
-	}
-	panel := NewPanel(PanelConfig{
-		Title: "✈️ Aileron",
-	}, termRows, termCols)
-
-	type opt struct {
-		key, label, desc string
-	}
-	opts := []opt{
-		{"y", "Yes, this time          ", "Run this command; ask again next time"},
-		{"n", "No, not this time       ", "Block this command; ask again next time"},
-		{"a", "Allow for this project  ", "Add a rule to the project policy"},
-		{"m", "Allow for me            ", "Add a rule in my personal policy"},
-	}
-
-	var content []string
-	content = append(content, "")
-	content = append(content, "  ⚠️  The agent wants to run:")
-	content = append(content, "  \033[1;36m"+command+"\033[0m")
-	if reason != "" {
-		content = append(content, "  \033[2m"+reason+"\033[0m")
-	}
-	content = append(content, "")
-	for _, o := range opts {
-		content = append(content, fmt.Sprintf("  \033[1m[%s]\033[0m  %s%s", o.key, o.label, o.desc))
-	}
-	content = append(content, "")
-
-	prompt := panel.RenderToAltScreen(content) + "\r\n  > "
-
-	if s.copier != nil {
-		s.copier.WriteExclusive([]byte(prompt))
-	}
-
-	// Read keypresses until we get a valid response.
-	if inputCh == nil {
-		return "deny"
-	}
-	for {
-		b := <-inputCh
-		switch b {
-		case 'y', 'Y':
-			return "allow_once"
-		case 'n', 'N':
-			return "deny"
-		case 'a', 'A':
-			return "allow_project"
-		case 'm', 'M':
-			return "allow_user"
-		default:
-			continue
-		}
-	}
-}
-
-// triggerRedraw clears the screen and sends a SIGWINCH to the agent's
-// pty so it redraws its entire TUI. The status bar re-renders via the
-// idle timer.
-func (s *ApprovalServer) triggerRedraw() {
-	// Restore normal screen buffer — scrollback history is preserved.
-	if s.copier != nil {
-		s.copier.WriteExclusive([]byte("\033[?1049l"))
-	}
-	if s.ptmx != nil {
-		// Re-set the pty to its current size — this triggers SIGWINCH
-		// in the agent, causing it to redraw.
-		if ws, err := ptyPkg.GetsizeFull(s.ptmx); err == nil {
-			ptyPkg.Setsize(s.ptmx, ws)
-		}
-	}
-}
-
-// RecordLearnedRule records a command pattern that the user chose to
-// persist during the session. Thread-safe.
-func (s *ApprovalServer) RecordLearnedRule(pattern, scope, file string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.learnedRules = append(s.learnedRules, LearnedRule{
-		Pattern: pattern,
-		Scope:   scope,
-		File:    file,
-	})
-}
-
-// LearnedRules returns a copy of the rules learned during the session.
-// Thread-safe.
-func (s *ApprovalServer) LearnedRules() []LearnedRule {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]LearnedRule, len(s.learnedRules))
-	copy(out, s.learnedRules)
-	return out
-}
-
-// Close shuts down the approval server and removes the socket file.
-func (s *ApprovalServer) Close() {
-	s.mu.Lock()
-	s.done = true
-	s.mu.Unlock()
-	s.listener.Close()
-	os.Remove(s.socketPath)
-}
-
-// SocketPath returns the path to the Unix socket.
-func (s *ApprovalServer) SocketPath() string {
-	return s.socketPath
-}
-
-// RequestApproval connects to the approval server and requests user
+// RequestApproval connects to the approval socket and requests user
 // approval for a command. Called from aileron-sh.
+//
+// Under the new launch (no pty wrap), no ApprovalServer is started,
+// so the dial fails and we return "deny" — the policy-enforced
+// shell behaves as if the user denied. Claude Code's own shell-tool
+// approval still runs, so the agent doesn't bypass user consent;
+// aileron-sh's role here is policy enforcement + audit logging,
+// not the second-prompt UX it used to render in the pty.
 func RequestApproval(socketPath, command, reason string) string {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
@@ -246,10 +47,12 @@ func RequestApproval(socketPath, command, reason string) string {
 	}
 	defer conn.Close()
 
-	json.NewEncoder(conn).Encode(ApprovalRequest{
+	if err := json.NewEncoder(conn).Encode(ApprovalRequest{
 		Command: command,
 		Reason:  reason,
-	})
+	}); err != nil {
+		return "deny"
+	}
 
 	var resp ApprovalResponse
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
@@ -257,4 +60,3 @@ func RequestApproval(socketPath, command, reason string) string {
 	}
 	return resp.Decision
 }
-

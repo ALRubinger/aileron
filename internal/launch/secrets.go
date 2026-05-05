@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	ptyPkg "github.com/creack/pty/v2"
-
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"golang.org/x/term"
@@ -104,94 +102,6 @@ func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
 	return OpenLocalVault(DefaultVaultPath(), string(passphrase))
 }
 
-// PromptVaultWithPanel shows a Panel-based passphrase prompt with retry.
-// The user can enter their passphrase, see errors on wrong input, and
-// retry or press Esc to skip. Returns nil if the user skips. The ptmx
-// parameter is the agent's pty master — used to trigger a SIGWINCH
-// redraw after the prompt closes.
-func PromptVaultWithPanel(copier *OutputCopier, router *KeyRouter, bar *StatusBar, ptmx *os.File) vault.Vault {
-	inputCh := router.StealInput()
-	defer router.ReleaseInput()
-
-	copier.SetPaused(true)
-	defer copier.SetPaused(false)
-
-	// restoreScreen exits the alt-screen buffer and triggers a SIGWINCH
-	// on the agent's pty so it redraws its TUI.
-	restoreScreen := func() {
-		copier.WriteExclusive([]byte("\033[?1049l"))
-		if ptmx != nil {
-			if ws, err := ptyPkg.GetsizeFull(ptmx); err == nil {
-				ptyPkg.Setsize(ptmx, ws)
-			}
-		}
-	}
-
-	termRows, termCols := 24, 80
-	if bar != nil {
-		termRows, termCols = bar.Dims()
-	}
-
-	var passBuf []byte
-	var errMsg string
-
-	for {
-		panel := NewPanel(PanelConfig{
-			Title: "✈️ Aileron ─ Vault",
-		}, termRows, termCols)
-
-		var content []string
-		content = append(content, "")
-		content = append(content, "  Enter your vault passphrase to unlock notifications.")
-		content = append(content, "")
-		masked := strings.Repeat("*", len(passBuf))
-		content = append(content, "  Passphrase: "+masked+"\033[7m \033[0m")
-		content = append(content, "")
-		if errMsg != "" {
-			content = append(content, "  \033[31m"+errMsg+"\033[0m")
-			content = append(content, "")
-		}
-		content = append(content, "  \033[2mEnter to unlock  Esc to skip\033[0m")
-		content = append(content, "")
-
-		screen := panel.RenderToAltScreen(content)
-		copier.WriteExclusive([]byte(screen))
-
-		// Read one byte at a time.
-		b := <-inputCh
-		switch {
-		case b == 0x1B: // Esc — skip vault
-			restoreScreen()
-			return nil
-		case b == '\r' || b == '\n': // Enter — try unlock
-			if len(passBuf) == 0 {
-				errMsg = "Passphrase cannot be empty."
-				continue
-			}
-			v, err := OpenLocalVault(DefaultVaultPath(), string(passBuf))
-			if err != nil {
-				passBuf = passBuf[:0]
-				if strings.Contains(err.Error(), "decryption failed") {
-					errMsg = "Wrong passphrase. Try again or press Esc to skip."
-				} else {
-					errMsg = err.Error()
-				}
-				continue
-			}
-			// Success — restore screen and return.
-			restoreScreen()
-			return v
-		case b == 0x7F || b == 0x08: // Backspace
-			if len(passBuf) > 0 {
-				passBuf = passBuf[:len(passBuf)-1]
-			}
-		default:
-			if b >= 0x20 && b < 0x7F { // printable ASCII
-				passBuf = append(passBuf, b)
-			}
-		}
-	}
-}
 
 // ResolveTokens resolves a slice of token values that may contain vault
 // references. Returns the resolved values in the same order. If any token
