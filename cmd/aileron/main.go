@@ -2325,17 +2325,19 @@ func runAuditShow(args []string, stdout, stderr io.Writer) int {
 
 // auditPayloadSummary renders a one-line, human-readable hint about
 // the event. Pulls the most identifying fields from each event shape
-// the recorder emits today.
+// the recorder emits today. Payload field names follow the
+// OTel-namespaced audit schema (issue #390 Phase 6.5).
 func auditPayloadSummary(e auditEventWire) string {
 	if e.EventType == "execution.failed" {
-		class, _ := e.Payload["class"].(string)
+		class, _ := e.Payload["aileron.failure.class"].(string)
 		conn := payloadConnector(e.Payload)
 		if conn != "" {
 			return fmt.Sprintf("class=%s connector=%s", class, conn)
 		}
 		return "class=" + class
 	}
-	if name, _ := e.Payload["name"].(string); name != "" {
+	name := payloadName(e.Payload)
+	if name != "" {
 		conn := payloadConnector(e.Payload)
 		if conn != "" {
 			return fmt.Sprintf("name=%s connector=%s", name, conn)
@@ -2348,14 +2350,27 @@ func auditPayloadSummary(e auditEventWire) string {
 	return ""
 }
 
+// payloadName pulls a human-identifying name from the namespaced
+// audit payload. Action and binding events surface different keys;
+// either resolves to the same single-line summary slot.
+func payloadName(p map[string]any) string {
+	if s, _ := p["aileron.action.name"].(string); s != "" {
+		return s
+	}
+	if s, _ := p["aileron.binding.name"].(string); s != "" {
+		return s
+	}
+	return ""
+}
+
 func payloadConnector(p map[string]any) string {
-	if s, _ := p["connector_fqn"].(string); s != "" {
+	if s, _ := p["aileron.connector.fqn"].(string); s != "" {
 		return s
 	}
-	if s, _ := p["fqn"].(string); s != "" {
+	if s, _ := p["aileron.action.fqn"].(string); s != "" {
 		return s
 	}
-	if d, ok := p["details"].(map[string]any); ok {
+	if d, ok := p["aileron.failure.details"].(map[string]any); ok {
 		if s, _ := d["connector"].(string); s != "" {
 			return s
 		}

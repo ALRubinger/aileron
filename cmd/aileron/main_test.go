@@ -3565,8 +3565,8 @@ func TestRunAudit_TabularRendersTimestampIDTypeAndSummary(t *testing.T) {
 			EventType: "execution.failed",
 			Timestamp: time.Date(2026, 5, 1, 12, 30, 0, 0, time.UTC),
 			Payload: map[string]any{
-				"class":   "binding_required",
-				"details": map[string]any{"connector": "github://aileron/slack"},
+				"aileron.failure.class":   "binding_required",
+				"aileron.failure.details": map[string]any{"connector": "github://aileron/slack"},
 			},
 		}}}, nil
 	}
@@ -3801,9 +3801,10 @@ func TestFetchAuditGet_HitsCorrectURL(t *testing.T) {
 }
 
 // TestAuditPayloadSummary_PerEventShape exercises the renderer
-// branches the tabular tests don't reach: action-installed (name
-// + fqn), binding event (connector_fqn only), and an event with
-// no useful keys.
+// branches the tabular tests don't reach: action-installed (action
+// name + FQN), binding event (connector FQN only), and an event with
+// no useful keys. Payload field names follow the OTel-namespaced
+// audit schema (issue #390 Phase 6.5).
 func TestAuditPayloadSummary_PerEventShape(t *testing.T) {
 	cases := []struct {
 		name string
@@ -3815,8 +3816,8 @@ func TestAuditPayloadSummary_PerEventShape(t *testing.T) {
 			in: auditEventWire{
 				EventType: "action.installed",
 				Payload: map[string]any{
-					"name": "ship-update",
-					"fqn":  "github://aileron/ship-update",
+					"aileron.action.name": "ship-update",
+					"aileron.action.fqn":  "github://aileron/ship-update",
 				},
 			},
 			want: "name=ship-update connector=github://aileron/ship-update",
@@ -3825,7 +3826,7 @@ func TestAuditPayloadSummary_PerEventShape(t *testing.T) {
 			name: "binding-created",
 			in: auditEventWire{
 				EventType: "binding.created",
-				Payload:   map[string]any{"connector_fqn": "github://aileron/slack"},
+				Payload:   map[string]any{"aileron.connector.fqn": "github://aileron/slack"},
 			},
 			want: "connector=github://aileron/slack",
 		},

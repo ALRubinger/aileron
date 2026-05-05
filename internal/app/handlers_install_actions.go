@@ -399,27 +399,27 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force,
 		manifestHashHex := sha256.Sum256(tb.Manifest)
 		deps := make([]map[string]any, 0, len(manifest.Requires.Connectors))
 		for _, c := range manifest.Requires.Connectors {
-			dep := map[string]any{"name": c.Name}
+			dep := map[string]any{"aileron.connector.fqn": c.Name}
 			if c.Version != "" {
-				dep["version"] = c.Version
+				dep["aileron.connector.version"] = c.Version
 			}
 			if c.Hash != "" {
-				dep["hash"] = c.Hash
+				dep["aileron.connector.hash"] = c.Hash
 			}
 			deps = append(deps, dep)
 		}
 		s.auditRecorder.RecordSuccess(ctx, model.EventTypeActionInstalled,
 			model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
 			map[string]any{
-				"name":             manifest.Name,
-				"fqn":              ref.FQN.String(),
-				"version":          ref.Version,
-				"hash":             "sha256:" + hex.EncodeToString(manifestHashHex[:]),
-				"signature_status": signatureStatus,
-				"decision":         "approved",
-				"source":           manifest.Source,
-				"path":             dest,
-				"dependencies":     deps,
+				"aileron.action.name":          manifest.Name,
+				"aileron.action.fqn":           ref.FQN.String(),
+				"aileron.action.version":       ref.Version,
+				"aileron.action.hash":          "sha256:" + hex.EncodeToString(manifestHashHex[:]),
+				"aileron.signature.status":     signatureStatus,
+				"aileron.consent.decision":     "approved",
+				"aileron.action.source":        manifest.Source,
+				"aileron.action.path":          dest,
+				"aileron.action.dependencies":  deps,
 			})
 	}
 

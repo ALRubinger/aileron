@@ -85,20 +85,20 @@ func TestListEvents_FilterByClassMatchesFailures(t *testing.T) {
 		audit.Event{
 			EventID:   "fail-1",
 			EventType: model.EventTypeExecutionFailed,
-			Payload:   map[string]any{"class": "binding_required"},
+			Payload:   map[string]any{"aileron.failure.class": "binding_required"},
 			Timestamp: time.Now(),
 		},
 		audit.Event{
 			EventID:   "fail-2",
 			EventType: model.EventTypeExecutionFailed,
-			Payload:   map[string]any{"class": "policy_denied"},
+			Payload:   map[string]any{"aileron.failure.class": "policy_denied"},
 			Timestamp: time.Now(),
 		},
 		audit.Event{
-			// Success event has no `class` — must be filtered out.
+			// Success event carries no failure class — must be filtered out.
 			EventID:   "ok",
 			EventType: model.EventTypeActionInstalled,
-			Payload:   map[string]any{"name": "ship-update"},
+			Payload:   map[string]any{"aileron.action.name": "ship-update"},
 			Timestamp: time.Now(),
 		},
 	)
@@ -114,28 +114,28 @@ func TestListEvents_FilterByConnectorFQNAcrossKnownKeys(t *testing.T) {
 		// Binding-lifecycle event
 		audit.Event{
 			EventID:   "bind",
-			Payload:   map[string]any{"connector_fqn": fqn},
+			Payload:   map[string]any{"aileron.connector.fqn": fqn},
 			Timestamp: time.Now(),
 		},
-		// Action-installed event
+		// Action-installed event keyed on the action's own FQN
 		audit.Event{
 			EventID:   "act",
-			Payload:   map[string]any{"fqn": fqn},
+			Payload:   map[string]any{"aileron.action.fqn": fqn},
 			Timestamp: time.Now(),
 		},
-		// Failure event with details.connector
+		// Failure event with nested details.connector
 		audit.Event{
 			EventID: "fail",
 			Payload: map[string]any{
-				"class":   "binding_required",
-				"details": map[string]any{"connector": fqn},
+				"aileron.failure.class":   "binding_required",
+				"aileron.failure.details": map[string]any{"connector": fqn},
 			},
 			Timestamp: time.Now(),
 		},
 		// Unrelated event
 		audit.Event{
 			EventID:   "other",
-			Payload:   map[string]any{"connector_fqn": "github://x/y"},
+			Payload:   map[string]any{"aileron.connector.fqn": "github://x/y"},
 			Timestamp: time.Now(),
 		},
 	)
@@ -186,19 +186,19 @@ func TestListEvents_FiltersCompose(t *testing.T) {
 		// Match: right class, right connector, after Since.
 		audit.Event{
 			EventID:   "want",
-			Payload:   map[string]any{"class": "binding_required", "details": map[string]any{"connector": fqn}},
+			Payload:   map[string]any{"aileron.failure.class": "binding_required", "aileron.failure.details": map[string]any{"connector": fqn}},
 			Timestamp: t0.Add(time.Hour),
 		},
 		// Right class + connector, but BEFORE Since.
 		audit.Event{
 			EventID:   "too-old",
-			Payload:   map[string]any{"class": "binding_required", "details": map[string]any{"connector": fqn}},
+			Payload:   map[string]any{"aileron.failure.class": "binding_required", "aileron.failure.details": map[string]any{"connector": fqn}},
 			Timestamp: t0.Add(-time.Hour),
 		},
 		// Right class + Since, but different connector.
 		audit.Event{
 			EventID:   "wrong-fqn",
-			Payload:   map[string]any{"class": "binding_required", "details": map[string]any{"connector": "github://x/y"}},
+			Payload:   map[string]any{"aileron.failure.class": "binding_required", "aileron.failure.details": map[string]any{"connector": "github://x/y"}},
 			Timestamp: t0.Add(time.Hour),
 		},
 	)

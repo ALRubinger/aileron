@@ -177,23 +177,23 @@ func TestInstallConnector_AuditPayloadHasConsentFields(t *testing.T) {
 	if got == nil {
 		t.Fatalf("expected a connector.installed event; got %d events", len(events))
 	}
-	if got.Payload["fqn"] != "github://aileron/slack" {
-		t.Errorf("fqn = %v", got.Payload["fqn"])
+	if got.Payload["aileron.connector.fqn"] != "github://aileron/slack" {
+		t.Errorf("aileron.connector.fqn = %v", got.Payload["aileron.connector.fqn"])
 	}
-	if got.Payload["version"] != "1.2.0" {
-		t.Errorf("version = %v", got.Payload["version"])
+	if got.Payload["aileron.connector.version"] != "1.2.0" {
+		t.Errorf("aileron.connector.version = %v", got.Payload["aileron.connector.version"])
 	}
-	if got.Payload["hash"] != expectedHash {
-		t.Errorf("hash = %v, want %q", got.Payload["hash"], expectedHash)
+	if got.Payload["aileron.connector.hash"] != expectedHash {
+		t.Errorf("aileron.connector.hash = %v, want %q", got.Payload["aileron.connector.hash"], expectedHash)
 	}
-	if got.Payload["signature_status"] != "verified" {
-		t.Errorf("signature_status = %v, want \"verified\"", got.Payload["signature_status"])
+	if got.Payload["aileron.signature.status"] != "verified" {
+		t.Errorf("aileron.signature.status = %v, want \"verified\"", got.Payload["aileron.signature.status"])
 	}
-	if got.Payload["decision"] != "approved" {
-		t.Errorf("decision = %v, want \"approved\"", got.Payload["decision"])
+	if got.Payload["aileron.consent.decision"] != "approved" {
+		t.Errorf("aileron.consent.decision = %v, want \"approved\"", got.Payload["aileron.consent.decision"])
 	}
-	if got.Payload["already_installed"] != false {
-		t.Errorf("already_installed = %v, want false", got.Payload["already_installed"])
+	if got.Payload["aileron.install.already_installed"] != false {
+		t.Errorf("aileron.install.already_installed = %v, want false", got.Payload["aileron.install.already_installed"])
 	}
 }
 
@@ -221,7 +221,7 @@ func TestInstallConnector_AuditOnOfflineReinstall(t *testing.T) {
 			continue
 		}
 		count++
-		if v, _ := events[i].Payload["already_installed"].(bool); v {
+		if v, _ := events[i].Payload["aileron.install.already_installed"].(bool); v {
 			reinstall = &events[i]
 		}
 	}

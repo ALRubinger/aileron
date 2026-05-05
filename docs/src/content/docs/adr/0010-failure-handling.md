@@ -236,7 +236,7 @@ Rejected because it imposes a class-hierarchy ceremony that doesn't pay off in t
 - The runtime implements bounded retry with exponential backoff for `retriable: true` errors. v1 default: 3 retries; uniform across actions. Implementation lives in [`internal/retry`](https://github.com/ALRubinger/aileron/blob/main/internal/retry); the [`internal/clock`](https://github.com/ALRubinger/aileron/blob/main/internal/clock) abstraction makes retry tests deterministic.
 - Idempotency is checked at the runtime/connector boundary; the runtime trusts the connector's `[connector.idempotency]` declaration but enforces the default-on-retry policy.
 - The structured error envelope is constructed at the boundary that produced the error and passed through unchanged. Boundaries don't rewrap each other's errors. The closed taxonomy lives in [`internal/failure`](https://github.com/ALRubinger/aileron/blob/main/internal/failure); only the package's per-class constructors can produce a valid Failure value, so handlers cannot synthesize an arbitrary class string.
-- Audit logging records every failure with full context: class, message, boundary, retried-count, actor identity, time, audit ID. Implementation lives in [`internal/audit`](https://github.com/ALRubinger/aileron/blob/main/internal/audit) on top of the existing `Store` SPI; v1 ships an in-memory implementation, with Postgres persistence post-MVP.
+- Audit logging records every failure with full context: class, message, boundary, retried-count, actor identity, time, audit ID. Implementation lives in [`internal/audit`](https://github.com/ALRubinger/aileron/blob/main/internal/audit) on top of the existing `Store` SPI; v1 ships an in-memory implementation, with Postgres persistence post-MVP. Audit-log payload field names follow OTel span-attribute conventions (`aileron.failure.class`, `aileron.failure.boundary`, `aileron.failure.retriable`, `aileron.failure.message`, `aileron.failure.details`) — see [the audit-vs-wire split below](#audit-payload-vs-wire-envelope) for why the audit log diverges from the wire envelope shape.
 
 ### Scope: which envelope applies where
 
@@ -245,6 +245,17 @@ The ADR-0010 envelope applies to **errors returned to the calling action and thr
 Other API endpoints (intents, approvals, policies, accounts, auth) retain the existing `api.Error` envelope (`{error: {code, message, details, request_id}}`). Those errors are CRUD-shaped and don't fit ADR-0010's runtime taxonomy of `network_error` / `capability_denied` / etc. Forcing them in would either expand the closed taxonomy beyond its semantic anchor or drop fidelity. Consumers that want a single unified shape can layer one in their own client; the server emits two stable envelopes by design.
 
 The `internal/auth` package was previously emitting a third, ad-hoc shape (`{"error": "<string>"}`). Stage 5 of #356 normalised those handlers to the standard `api.Error` shape so the v1 server emits exactly two envelope shapes — the gateway/action `FailureEnvelope` and the CRUD `api.Error`.
+
+### Audit payload vs wire envelope
+
+The wire failure envelope and the audit-log record describe the same underlying failure but live on two surfaces with two different conventions:
+
+- **Wire envelope** (HTTP error response body): flat REST/JSON keys — `class`, `message`, `retriable`, `boundary`, `audit_id`, `details` — as documented above. Stable contract for agents and action authors.
+- **Audit-log payload** (`audit.Event.Payload`): the same fields under OTel span-attribute names — `aileron.failure.class`, `aileron.failure.message`, `aileron.failure.retriable`, `aileron.failure.boundary`, `aileron.failure.details`. The OTel `aileron.` prefix scopes the attributes for vendor ownership when audit events are exported as spans (see [#390](https://github.com/ALRubinger/aileron/issues/390) Phase 6.5 schema alignment).
+
+The recorder in [`internal/audit/record.go`](https://github.com/ALRubinger/aileron/blob/main/internal/audit/record.go) translates the wire envelope into the audit shape at write time. Other audit events (binding lifecycle, install consent, etc.) follow the same OTel-namespaced convention — `aileron.binding.name`, `aileron.connector.fqn`, `aileron.capability.kind`, `aileron.action.fqn`, `aileron.signature.status`, `aileron.consent.decision`, etc. The split is deliberate: the wire envelope is part of an HTTP API contract that uses standard REST conventions; the audit payload is a telemetry record whose field names need to survive co-existing in a span/trace alongside attributes from any other instrumented library, which is what OTel's prefix convention exists to handle.
+
+Phase 7 (post-MVP) wires the actual OTLP exporter and `traceparent` propagation per [#390](https://github.com/ALRubinger/aileron/issues/390); the names are pre-aligned so that emission becomes a wiring change, not a schema break.
 
 ### For users
 

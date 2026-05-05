@@ -1096,12 +1096,12 @@ func (s *apiServer) recordConnectorInstalled(ctx context.Context, ref cstore.Ref
 	s.auditRecorder.RecordSuccess(ctx, model.EventTypeConnectorInstalled,
 		model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
 		map[string]any{
-			"fqn":               ref.FQN.String(),
-			"version":           ref.Version,
-			"hash":              res.Hash,
-			"signature_status":  "verified",
-			"decision":          "approved",
-			"already_installed": res.AlreadyInstalled,
+			"aileron.connector.fqn":             ref.FQN.String(),
+			"aileron.connector.version":         ref.Version,
+			"aileron.connector.hash":            res.Hash,
+			"aileron.signature.status":          "verified",
+			"aileron.consent.decision":          "approved",
+			"aileron.install.already_installed": res.AlreadyInstalled,
 		})
 }
 
