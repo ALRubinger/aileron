@@ -76,14 +76,20 @@ func (r *recorder) RecordFailure(ctx context.Context, f *failure.Failure, actor 
 	if f != nil {
 		f.SetAuditID(id)
 	}
+	// Audit-log payload uses OTel-namespaced field names per the
+	// Phase 6.5 schema alignment for issue #390. The wire error
+	// envelope keeps its flat REST-style keys (`class`, `boundary`,
+	// …) per ADR-0010; the recorder translates between the two
+	// surfaces at write time. `details` stays nested for now —
+	// flattening into indexed attributes is deferred to Phase 7.
 	payload := map[string]any{}
 	if f != nil {
-		payload["class"] = string(f.Class())
-		payload["boundary"] = string(f.Boundary())
-		payload["retriable"] = f.Retriable()
-		payload["message"] = f.Message()
+		payload["aileron.failure.class"] = string(f.Class())
+		payload["aileron.failure.boundary"] = string(f.Boundary())
+		payload["aileron.failure.retriable"] = f.Retriable()
+		payload["aileron.failure.message"] = f.Message()
 		if d := f.Details(); len(d) > 0 {
-			payload["details"] = d
+			payload["aileron.failure.details"] = d
 		}
 	}
 	_ = r.store.Append(ctx, Event{

@@ -13,7 +13,10 @@ import (
 // Recorder contract:
 //   - RecordFailure mints an audit_id, stamps it on the failure, and
 //     appends an EventTypeExecutionFailed event whose payload carries
-//     class/boundary/retriable/message/details.
+//     the namespaced failure attributes (aileron.failure.class,
+//     aileron.failure.boundary, aileron.failure.retriable,
+//     aileron.failure.message, aileron.failure.details) per the
+//     OTel-aligned audit schema (issue #390 Phase 6.5).
 //   - RecordSuccess appends an event with the given type/payload.
 //   - Clock and idFn are injectable for deterministic tests.
 //   - Store.Append errors are swallowed (best-effort audit per ADR-0010).
@@ -53,17 +56,17 @@ func TestRecordFailure_StampsAuditIDAndAppends(t *testing.T) {
 	if ev.EventType != model.EventTypeExecutionFailed {
 		t.Errorf("event type = %q, want execution.failed", ev.EventType)
 	}
-	if ev.Payload["class"] != string(failure.ExternalAPIError) {
-		t.Errorf("payload.class = %v", ev.Payload["class"])
+	if ev.Payload["aileron.failure.class"] != string(failure.ExternalAPIError) {
+		t.Errorf("payload[aileron.failure.class] = %v", ev.Payload["aileron.failure.class"])
 	}
-	if ev.Payload["retriable"] != true {
-		t.Errorf("payload.retriable = %v", ev.Payload["retriable"])
+	if ev.Payload["aileron.failure.retriable"] != true {
+		t.Errorf("payload[aileron.failure.retriable] = %v", ev.Payload["aileron.failure.retriable"])
 	}
-	if ev.Payload["message"] != "service unavailable" {
-		t.Errorf("payload.message = %v", ev.Payload["message"])
+	if ev.Payload["aileron.failure.message"] != "service unavailable" {
+		t.Errorf("payload[aileron.failure.message] = %v", ev.Payload["aileron.failure.message"])
 	}
-	if d, ok := ev.Payload["details"].(map[string]any); !ok || d["retried"] != 2 {
-		t.Errorf("payload.details = %v", ev.Payload["details"])
+	if d, ok := ev.Payload["aileron.failure.details"].(map[string]any); !ok || d["retried"] != 2 {
+		t.Errorf("payload[aileron.failure.details] = %v", ev.Payload["aileron.failure.details"])
 	}
 	if ev.Actor.ID != "agent-1" {
 		t.Errorf("actor.id = %q", ev.Actor.ID)

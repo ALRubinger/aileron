@@ -1324,7 +1324,7 @@ func TestHandleOpenAI_ActionFailure_FlowsAsToolResult_AuditRecorded(t *testing.T
 	hasFailure := false
 	for _, tr := range traces {
 		for _, ev := range tr.Events {
-			if class, _ := ev.Payload["class"].(string); class == "capability_denied" {
+			if class, _ := ev.Payload["aileron.failure.class"].(string); class == "capability_denied" {
 				hasFailure = true
 			}
 		}

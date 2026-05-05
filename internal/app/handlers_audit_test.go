@@ -85,8 +85,8 @@ func TestListAudit_FiltersForwardedToStore(t *testing.T) {
 			EventID:   "match",
 			EventType: model.EventTypeExecutionFailed,
 			Payload: map[string]any{
-				"class":   "binding_required",
-				"details": map[string]any{"connector": fqn},
+				"aileron.failure.class":   "binding_required",
+				"aileron.failure.details": map[string]any{"connector": fqn},
 			},
 			Timestamp: time.Now(),
 		},
@@ -94,8 +94,8 @@ func TestListAudit_FiltersForwardedToStore(t *testing.T) {
 			EventID:   "wrong-class",
 			EventType: model.EventTypeExecutionFailed,
 			Payload: map[string]any{
-				"class":   "policy_denied",
-				"details": map[string]any{"connector": fqn},
+				"aileron.failure.class":   "policy_denied",
+				"aileron.failure.details": map[string]any{"connector": fqn},
 			},
 			Timestamp: time.Now(),
 		},
@@ -138,7 +138,7 @@ func TestGetAudit_FoundReturnsEvent(t *testing.T) {
 			EventID:   "audit-xyz",
 			EventType: model.EventTypeActionInstalled,
 			Actor:     model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
-			Payload:   map[string]any{"name": "ship-update"},
+			Payload:   map[string]any{"aileron.action.name": "ship-update"},
 			Timestamp: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
 		},
 	)
@@ -160,8 +160,8 @@ func TestGetAudit_FoundReturnsEvent(t *testing.T) {
 	if got.Actor.Id != "user" || got.Actor.Type != string(model.ActorTypeHuman) {
 		t.Errorf("Actor = %+v", got.Actor)
 	}
-	if got.Payload["name"] != "ship-update" {
-		t.Errorf("Payload.name = %v", got.Payload["name"])
+	if got.Payload["aileron.action.name"] != "ship-update" {
+		t.Errorf("Payload[aileron.action.name] = %v", got.Payload["aileron.action.name"])
 	}
 }
 

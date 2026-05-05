@@ -425,33 +425,42 @@ func TestInstallAction_ContextCarriesAuditPayload(t *testing.T) {
 				continue
 			}
 			found = true
-			for _, key := range []string{"name", "fqn", "version", "hash", "signature_status", "decision", "path", "dependencies"} {
+			for _, key := range []string{
+				"aileron.action.name",
+				"aileron.action.fqn",
+				"aileron.action.version",
+				"aileron.action.hash",
+				"aileron.signature.status",
+				"aileron.consent.decision",
+				"aileron.action.path",
+				"aileron.action.dependencies",
+			} {
 				if _, ok := e.Payload[key]; !ok {
 					t.Errorf("payload missing %q", key)
 				}
 			}
-			if got, _ := e.Payload["signature_status"].(string); got != "verified" {
-				t.Errorf("signature_status = %q, want \"verified\"", got)
+			if got, _ := e.Payload["aileron.signature.status"].(string); got != "verified" {
+				t.Errorf("aileron.signature.status = %q, want \"verified\"", got)
 			}
-			if got, _ := e.Payload["decision"].(string); got != "approved" {
-				t.Errorf("decision = %q, want \"approved\"", got)
+			if got, _ := e.Payload["aileron.consent.decision"].(string); got != "approved" {
+				t.Errorf("aileron.consent.decision = %q, want \"approved\"", got)
 			}
-			hash, _ := e.Payload["hash"].(string)
+			hash, _ := e.Payload["aileron.action.hash"].(string)
 			if !strings.HasPrefix(hash, "sha256:") || len(hash) != len("sha256:")+64 {
-				t.Errorf("hash = %q, want sha256:<64 hex>", hash)
+				t.Errorf("aileron.action.hash = %q, want sha256:<64 hex>", hash)
 			}
-			deps, ok := e.Payload["dependencies"].([]map[string]any)
+			deps, ok := e.Payload["aileron.action.dependencies"].([]map[string]any)
 			if !ok || len(deps) != 1 {
-				t.Errorf("dependencies = %#v, want one entry", e.Payload["dependencies"])
+				t.Errorf("aileron.action.dependencies = %#v, want one entry", e.Payload["aileron.action.dependencies"])
 			} else {
-				if deps[0]["name"] != depFQN {
-					t.Errorf("dependencies[0].name = %v, want %q", deps[0]["name"], depFQN)
+				if deps[0]["aileron.connector.fqn"] != depFQN {
+					t.Errorf("dep[0].aileron.connector.fqn = %v, want %q", deps[0]["aileron.connector.fqn"], depFQN)
 				}
-				if deps[0]["version"] != "1.0.0" {
-					t.Errorf("dependencies[0].version = %v, want \"1.0.0\"", deps[0]["version"])
+				if deps[0]["aileron.connector.version"] != "1.0.0" {
+					t.Errorf("dep[0].aileron.connector.version = %v, want \"1.0.0\"", deps[0]["aileron.connector.version"])
 				}
-				if deps[0]["hash"] != depHash {
-					t.Errorf("dependencies[0].hash = %v, want %q", deps[0]["hash"], depHash)
+				if deps[0]["aileron.connector.hash"] != depHash {
+					t.Errorf("dep[0].aileron.connector.hash = %v, want %q", deps[0]["aileron.connector.hash"], depHash)
 				}
 			}
 		}
@@ -484,8 +493,8 @@ func TestInstallAction_AuditUnsignedTarball(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected an action.installed event")
 	}
-	if status, _ := got.Payload["signature_status"].(string); status != "unsigned" {
-		t.Errorf("signature_status = %q, want \"unsigned\"", status)
+	if status, _ := got.Payload["aileron.signature.status"].(string); status != "unsigned" {
+		t.Errorf("aileron.signature.status = %q, want \"unsigned\"", status)
 	}
 }
 

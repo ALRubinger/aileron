@@ -284,17 +284,19 @@ func (s *apiServer) lookupConnector(fqnStr string) (string, *cstore.Manifest, er
 }
 
 // recordBindingEvent persists an audit event for a binding lifecycle
-// transition. Payload deliberately excludes credential bytes.
+// transition. Payload deliberately excludes credential bytes. Field
+// names follow the OTel-namespaced audit schema (issue #390 Phase
+// 6.5) so Phase 7 emission can map them straight to span attributes.
 func (s *apiServer) recordBindingEvent(ctx context.Context, evt model.EventType, name, connectorFQN, kind string) {
 	if s.auditRecorder == nil {
 		return
 	}
-	payload := map[string]any{"name": name}
+	payload := map[string]any{"aileron.binding.name": name}
 	if connectorFQN != "" {
-		payload["connector_fqn"] = connectorFQN
+		payload["aileron.connector.fqn"] = connectorFQN
 	}
 	if kind != "" {
-		payload["kind"] = kind
+		payload["aileron.capability.kind"] = kind
 	}
 	s.auditRecorder.RecordSuccess(ctx, evt, model.ActorRef{Type: model.ActorTypeHuman, ID: "user"}, payload)
 }

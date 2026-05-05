@@ -43,7 +43,7 @@ func TestFileStore_AppendThenReopen_RoundTrip(t *testing.T) {
 		EventID:   "audit-xyz",
 		EventType: model.EventTypeActionInstalled,
 		Actor:     model.ActorRef{Type: model.ActorTypeHuman, ID: "user"},
-		Payload:   map[string]any{"name": "ship-update", "fqn": "github://aileron/slack"},
+		Payload:   map[string]any{"aileron.action.name": "ship-update", "aileron.action.fqn": "github://aileron/slack"},
 		Timestamp: t0,
 	}
 	if err := store.Append(context.Background(), ev); err != nil {
@@ -62,7 +62,7 @@ func TestFileStore_AppendThenReopen_RoundTrip(t *testing.T) {
 	if got.EventID != "audit-xyz" || got.EventType != model.EventTypeActionInstalled {
 		t.Errorf("got = %+v", got)
 	}
-	if got.Payload["name"] != "ship-update" || got.Payload["fqn"] != "github://aileron/slack" {
+	if got.Payload["aileron.action.name"] != "ship-update" || got.Payload["aileron.action.fqn"] != "github://aileron/slack" {
 		t.Errorf("payload = %+v", got.Payload)
 	}
 	if !got.Timestamp.Equal(t0) {
@@ -265,7 +265,7 @@ func TestFileStore_FilterAndLimitDelegateToMem(t *testing.T) {
 		_ = store.Append(ctx, audit.Event{
 			EventID:   string(rune('a' + i)),
 			Timestamp: t0.Add(time.Duration(i) * time.Hour),
-			Payload:   map[string]any{"class": "binding_required"},
+			Payload:   map[string]any{"aileron.failure.class": "binding_required"},
 		})
 	}
 	got, err := store.ListEvents(ctx, audit.EventFilter{

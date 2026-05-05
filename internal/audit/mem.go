@@ -23,12 +23,14 @@ type EventFilter struct {
 	EventID string
 	// ConnectorFQN, when non-empty, matches events whose payload
 	// references this FQN under any of the recorder's connector
-	// keys: top-level `connector_fqn`, top-level `fqn` (action
-	// install events), or `details.connector` (failure events).
+	// keys: `aileron.connector.fqn` (binding lifecycle and
+	// connector install events), `aileron.action.fqn` (action
+	// install events — when filtering by the action's own FQN),
+	// or `aileron.failure.details.connector` (failure events).
 	ConnectorFQN string
 	// Class, when non-empty, matches events whose payload carries
 	// this failure class. Has no effect on success events (they
-	// don't record `class`), so a Class filter naturally narrows
+	// don't record a class), so a Class filter naturally narrows
 	// to failures.
 	Class string
 	// Limit caps the number of events returned. <=0 means no cap.
@@ -69,7 +71,7 @@ func matchEventFilter(ev Event, f EventFilter) bool {
 		return false
 	}
 	if f.Class != "" {
-		got, _ := ev.Payload["class"].(string)
+		got, _ := ev.Payload["aileron.failure.class"].(string)
 		if got != f.Class {
 			return false
 		}
@@ -81,18 +83,22 @@ func matchEventFilter(ev Event, f EventFilter) bool {
 }
 
 // payloadMatchesConnector returns true when the payload carries the
-// given connector FQN under any of the keys the recorder uses today:
-//   - `connector_fqn` (binding lifecycle events)
-//   - `fqn`           (action.installed events)
-//   - `details.connector` (failure events)
+// given connector FQN under any of the namespaced keys the recorder
+// uses today:
+//   - `aileron.connector.fqn` (binding lifecycle, connector install)
+//   - `aileron.action.fqn`    (action install — matches when the user
+//     filters by the action's own FQN, since actions are addressed
+//     under the same FQN namespace as connectors)
+//   - `aileron.failure.details.connector` (failure events that
+//     surface a connector identity in nested details)
 func payloadMatchesConnector(p map[string]any, fqn string) bool {
-	if got, _ := p["connector_fqn"].(string); got == fqn {
+	if got, _ := p["aileron.connector.fqn"].(string); got == fqn {
 		return true
 	}
-	if got, _ := p["fqn"].(string); got == fqn {
+	if got, _ := p["aileron.action.fqn"].(string); got == fqn {
 		return true
 	}
-	if details, ok := p["details"].(map[string]any); ok {
+	if details, ok := p["aileron.failure.details"].(map[string]any); ok {
 		if got, _ := details["connector"].(string); got == fqn {
 			return true
 		}
