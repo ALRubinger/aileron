@@ -108,6 +108,7 @@ type apiServer struct {
 	installer          *cstore.Installer // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
 	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
 	actionApprovals    *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
+	webappURL          string                        // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
 	actionApprovalTTL  time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
 	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
 	oauth2Sessions     *oauth2Sessions   // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use

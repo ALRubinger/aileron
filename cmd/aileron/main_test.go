@@ -673,6 +673,100 @@ func TestRunStatus_NotificationsNoPolicy(t *testing.T) {
 	}
 }
 
+// TestRunStatus_RuntimeUnreachable covers the offline path: with no
+// daemon listening, `aileron status runtime` must exit cleanly and
+// surface a "(not reachable)" line. The CLI is a thin client; users
+// run it from arbitrary shells where the daemon may or may not be up.
+func TestRunStatus_RuntimeUnreachable(t *testing.T) {
+	// Force the fetcher to fail so the test doesn't depend on the host
+	// having an actual server listening on the default port.
+	prev := runtimeStatusFetcher
+	runtimeStatusFetcher = func() (*runtimeStatus, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	defer func() { runtimeStatusFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "runtime"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Runtime") {
+		t.Error("expected Runtime header")
+	}
+	if !strings.Contains(out, "not reachable") {
+		t.Errorf("expected 'not reachable' hint when daemon is down; got: %s", out)
+	}
+}
+
+// TestRunStatus_RuntimeReachable asserts the happy path: when the
+// daemon answers /v1/status, the CLI surfaces version + counts +
+// vault state. This is the primary `aileron status` deliverable from
+// ADR-0004 (operational primitives).
+func TestRunStatus_RuntimeReachable(t *testing.T) {
+	commit := "abc1234"
+	listen := "127.0.0.1:8721"
+	gw := "http://127.0.0.1:54321"
+	prev := runtimeStatusFetcher
+	runtimeStatusFetcher = func() (*runtimeStatus, error) {
+		return &runtimeStatus{
+			Version:        "v0.0.42",
+			Commit:         &commit,
+			ListenAddr:     &listen,
+			ActionCount:    3,
+			ConnectorCount: 2,
+			BindingCount:   5,
+			VaultState:     "unlocked",
+			GatewayUrl:     &gw,
+		}, nil
+	}
+	defer func() { runtimeStatusFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status", "runtime"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"v0.0.42", "abc1234", "127.0.0.1:8721", "http://127.0.0.1:54321", "unlocked", "3 installed", "2 installed", "5 active"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in runtime output; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunStatus_RuntimeIncludedInDefault asserts the bare `aileron
+// status` (no section) renders the Runtime header alongside the
+// existing sections. Operators reach for `aileron status` first; the
+// daemon snapshot must be there without an extra subcommand.
+func TestRunStatus_RuntimeIncludedInDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	prev := runtimeStatusFetcher
+	runtimeStatusFetcher = func() (*runtimeStatus, error) {
+		return &runtimeStatus{Version: "v0.0.42", VaultState: "missing"}, nil
+	}
+	defer func() { runtimeStatusFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"status"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Runtime") {
+		t.Error("expected Runtime section in default status output")
+	}
+	if !strings.Contains(out, "v0.0.42") {
+		t.Error("expected daemon version in default status output")
+	}
+}
+
 func TestRunLog_HelpShownInUsage(t *testing.T) {
 	var stdout bytes.Buffer
 	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})

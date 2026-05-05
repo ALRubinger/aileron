@@ -141,7 +141,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron approval list              List pending action-approval requests")
 	fmt.Fprintln(w, "  aileron approval approve <id>      Approve a pending action — agent's tool call unblocks")
 	fmt.Fprintln(w, "  aileron approval deny <id>         Deny a pending action — agent receives approval_denied")
-	fmt.Fprintln(w, "  aileron status [section]           Show merged config (policy, env, notifications, vault)")
+	fmt.Fprintln(w, "  aileron status [section]           Show daemon runtime + merged config (runtime, policy, env, notifications, vault)")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
@@ -1006,6 +1006,8 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 
 	switch section {
 	case "":
+		showStatusRuntime(stdout)
+		fmt.Fprintln(stdout)
 		showStatusPolicy(dir, stdout)
 		fmt.Fprintln(stdout)
 		showStatusEnv(dir, stdout)
@@ -1013,6 +1015,9 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		showStatusNotifications(dir, stdout)
 		fmt.Fprintln(stdout)
 		showStatusVault(dir, stdout)
+		return 0
+	case "runtime":
+		showStatusRuntime(stdout)
 		return 0
 	case "policy":
 		showStatusPolicy(dir, stdout)
@@ -1028,9 +1033,83 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown status section: %q\n", section)
-		fmt.Fprintln(stderr, "usage: aileron status [policy|env|notifications|vault]")
+		fmt.Fprintln(stderr, "usage: aileron status [runtime|policy|env|notifications|vault]")
 		return 1
 	}
+}
+
+// runtimeStatusFetcher fetches the daemon's GET /v1/status snapshot.
+// Replaceable in tests so they don't depend on a running server.
+var runtimeStatusFetcher = fetchRuntimeStatus
+
+// runtimeStatus mirrors the JSON shape of api.StatusResponse. We don't
+// import the generated types here to keep the CLI binary's dependency
+// graph slim — the wire shape is what's stable per ADR-0004.
+type runtimeStatus struct {
+	Version        string  `json:"version"`
+	Commit         *string `json:"commit,omitempty"`
+	ListenAddr     *string `json:"listen_addr,omitempty"`
+	ActionCount    int     `json:"action_count"`
+	ConnectorCount int     `json:"connector_count"`
+	BindingCount   int     `json:"binding_count"`
+	VaultState     string  `json:"vault_state"`
+	GatewayUrl     *string `json:"gateway_url,omitempty"`
+	SessionId      *string `json:"session_id,omitempty"`
+}
+
+// fetchRuntimeStatus calls GET /v1/status against the local daemon.
+// A short timeout keeps `aileron status` snappy when the daemon isn't
+// running — the CLI prints a "(daemon not reachable)" hint and moves
+// on rather than blocking the operator.
+func fetchRuntimeStatus() (*runtimeStatus, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, bindingAPIBaseURL()+"/status", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("daemon returned %d", resp.StatusCode)
+	}
+	var rs runtimeStatus
+	if err := json.NewDecoder(resp.Body).Decode(&rs); err != nil {
+		return nil, fmt.Errorf("decoding status: %w", err)
+	}
+	return &rs, nil
+}
+
+func showStatusRuntime(w io.Writer) {
+	fmt.Fprintln(w, "\033[1mRuntime\033[0m")
+
+	rs, err := runtimeStatusFetcher()
+	if err != nil {
+		fmt.Fprintf(w, "  Daemon:            (not reachable at %s)\n", bindingAPIBaseURL())
+		fmt.Fprintln(w, "  Hint:              start the daemon with 'aileron launch <agent>' or 'aileron serve'.")
+		return
+	}
+
+	fmt.Fprintf(w, "  Version:           %s", rs.Version)
+	if rs.Commit != nil && *rs.Commit != "" {
+		fmt.Fprintf(w, " (%s)", *rs.Commit)
+	}
+	fmt.Fprintln(w)
+	if rs.ListenAddr != nil && *rs.ListenAddr != "" {
+		fmt.Fprintf(w, "  Listen:            %s\n", *rs.ListenAddr)
+	}
+	if rs.GatewayUrl != nil && *rs.GatewayUrl != "" {
+		fmt.Fprintf(w, "  Gateway:           %s\n", *rs.GatewayUrl)
+	}
+	if rs.SessionId != nil && *rs.SessionId != "" {
+		fmt.Fprintf(w, "  Session:           %s\n", *rs.SessionId)
+	}
+	fmt.Fprintf(w, "  Vault state:       %s\n", rs.VaultState)
+	fmt.Fprintf(w, "  Actions:           %d installed\n", rs.ActionCount)
+	fmt.Fprintf(w, "  Connectors:        %d installed\n", rs.ConnectorCount)
+	fmt.Fprintf(w, "  Bindings:          %d active\n", rs.BindingCount)
 }
 
 func showStatusPolicy(dir string, w io.Writer) {
