@@ -5,7 +5,7 @@ description: "Write a connector from scratch: project layout, the JSON I/O envel
 
 This guide walks you from an empty directory to a working connector binary. By the end you will have a `wasip1` Go program that reads a JSON envelope from stdin, calls an external HTTP API through the runtime, and writes a JSON result to stdout.
 
-If you have not read it yet, start with [Connectors](/concepts/connectors/) for the model. This guide is the *how*; that page is the *what* and *why*. Once your connector compiles and behaves the way you want, [Publishing a connector](/connectors/publishing/) covers signing, tagging, and the keyring trust model.
+If you have not read it yet, start with [Connectors](/concepts/connectors/) for the model. This guide is the *how*; that page is the *what* and *why*. Once your connector compiles and behaves the way you want, [Publishing a connector](/guides/publishing-a-connector/) covers signing, tagging, and the keyring trust model.
 
 ## What you are building
 
@@ -279,7 +279,7 @@ A few non-obvious rules:
 - `kind` must match the kind on the user's binding. If your code passes `credential: "oauth2"` but the manifest declares `api_key`, the request is denied at the sandbox boundary even before the network gate fires.
 - `imports` lists the host functions you actually import. Declaring an import you never call is harmless; calling one you did not declare is a load-time failure.
 
-OAuth2 connectors need a `[capabilities.credential.oauth2]` block too — that part is covered in [Publishing a connector](/connectors/publishing/) since it's tied to OAuth-app registration with the upstream provider.
+OAuth2 connectors need a `[capabilities.credential.oauth2]` block too — that part is covered in [Publishing a connector](/guides/publishing-a-connector/) since it's tied to OAuth-app registration with the upstream provider.
 
 ## Limits
 
@@ -316,6 +316,6 @@ To smoke-test before publishing, install the unsigned binary into a local store 
 
 Once your connector behaves the way you want:
 
-- [Publishing a connector](/connectors/publishing/) — repo layout, signing, tag conventions, keyring trust, action templates.
+- [Publishing a connector](/guides/publishing-a-connector/) — repo layout, signing, tag conventions, keyring trust, action templates.
 - [ADR-0002: Connector Model](/adr/0002-connector-model/) — the design constraints behind everything in this guide.
 - [ADR-0005: Sandbox Choice](/adr/0005-sandbox-choice/) — why WASM, why these limits, why this ABI.
