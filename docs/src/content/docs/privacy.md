@@ -1,17 +1,18 @@
 ---
 title: "Privacy Policy"
-description: "Aileron is open source and runs locally on your computer. We don't see your data, because we're not in the loop."
+description: "Aileron is open source and runs locally on your computer. We don't capture or store your data — and you can read the code to verify it."
 ---
 
 *Effective: May 5, 2026*
 
 ## The short version
 
-Aileron is an open-source project, maintained by a project lead — no company runs it. The purpose of Aileron is to give you security and confidence that no agent, no LLM, and not Aileron itself has direct access to your protected information beyond what you explicitly provide.
+Aileron is an open-source project, stewarded by its creator. No company or organization runs it. The purpose of Aileron is to give you security and confidence that no agent, no LLM, and not Aileron itself has direct access to your protected information beyond what you explicitly provide.
 
 - Aileron runs entirely on your computer.
 - Your credentials live in a local, encrypted vault. They never reach Aileron, your LLM, or anyone else.
-- The data your agent works with (emails, files, calendar events) flows between you, the services you've connected, and the LLM provider you've configured. Aileron has no servers in that data path.
+- The data your agent works with (emails, files, calendar events) passes through Aileron on the way to the services you've connected and the LLM provider you've configured. Aileron does not capture or store any of it.
+- Aileron is open source. You can read the code and verify these claims for yourself.
 - We don't want or collect your personal information.
 - You are not the product.
 - The Aileron website and runtime use standard, anonymous web analytics. That's it.
@@ -26,9 +27,11 @@ When you run Aileron on your computer (the server daemon started by `aileron lau
 
 - Your credential vault is stored locally and encrypted.
 - OAuth tokens for connected services are held in that vault.
-- Actions run on your machine. The data they read or write flows directly between you and the third-party service (Gmail, Slack, and so on). Aileron has no servers in that data path.
+- Actions run on your machine. They call third-party services (Gmail, Slack, and so on) directly from your computer, using credentials from your local vault.
 
-Your agent itself runs through whichever LLM provider you've configured (Anthropic, OpenAI, etc.). The provider sees the prompts you write and the action results your agent processes. That's how agentic LLMs work, with or without Aileron. Their privacy policies govern what happens to your data once it reaches them.
+Your agent talks to your chosen LLM provider (Anthropic, OpenAI, etc.) through Aileron's LLM Gateway, which runs locally as part of `aileron launch`. The gateway proxies the agent's requests to the provider. The provider sees the prompts you write and the action results your agent processes; that's how agentic LLMs work, with or without Aileron. Their privacy policies govern what happens to your data once it reaches them.
+
+Aileron does not capture or store any of the traffic flowing through these local components. Aileron is open source, so you can verify that for yourself.
 
 ## Anonymous analytics
 
@@ -38,7 +41,7 @@ No content of your work is captured. No prompts, no action arguments, no action 
 
 ## Data from connected services
 
-When you connect a service (Gmail, Google Drive, Slack, GitHub, etc.), Aileron uses OAuth to obtain tokens that let it act on your behalf. Those tokens are stored in your local, encrypted vault. Aileron never holds them on any server, and the data those services return flows between you, the service, and your configured LLM provider. It does not pass through Aileron.
+When you connect a service (Gmail, Google Drive, Slack, GitHub, etc.), Aileron uses OAuth to obtain tokens that let it act on your behalf. Those tokens are stored in your local, encrypted vault. The data your agent fetches from these services is not captured or stored by Aileron.
 
 ### Google services
 
@@ -50,7 +53,7 @@ Google requires apps that access Gmail, Drive, or Calendar to publish how they u
 - **No human reading.** Humans do not read Google user data, except: with your explicit consent; for security purposes such as investigating abuse; to comply with applicable law; or where the data has been aggregated and anonymized for internal operations.
 - **No sale.** Google user data is never sold.
 
-Because Aileron runs on your computer, the practical effect of all of these commitments is that Google user data flows directly between Google and your machine. Aileron is never in the path.
+Because Aileron runs on your computer, Google user data goes directly between Google and your machine. None of it is captured or stored by Aileron.
 
 ## Children's privacy
 
