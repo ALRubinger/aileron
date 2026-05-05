@@ -96,6 +96,44 @@ func (a *ActionApproval) Wait(ctx context.Context, timeout time.Duration) (Actio
 // failure envelope so the agent can recover gracefully.
 var ErrActionApprovalTimeout = errors.New("action approval timed out")
 
+// ActionApprovalEventType discriminates the union of events the queue
+// publishes to subscribers. The webapp consumes these via SSE
+// ([#418]) so the pending list updates live without polling.
+//
+// [#418]: https://github.com/ALRubinger/aileron/issues/418
+type ActionApprovalEventType string
+
+const (
+	// ActionApprovalEventPending fires when [ActionApprovalQueue.Register]
+	// adds a new pending entry. Event.Pending is the entry; Event.Resolved
+	// is nil.
+	ActionApprovalEventPending ActionApprovalEventType = "pending"
+
+	// ActionApprovalEventResolved fires when [ActionApprovalQueue.Decide]
+	// resolves an entry. Event.Resolved carries the user's verdict;
+	// Event.Pending is nil.
+	ActionApprovalEventResolved ActionApprovalEventType = "resolved"
+)
+
+// ActionApprovalEvent is the shape carried on the channel returned by
+// [ActionApprovalQueue.Subscribe]. Exactly one of Pending / Resolved
+// is populated per the Type discriminant.
+type ActionApprovalEvent struct {
+	Type     ActionApprovalEventType
+	Pending  *ActionApproval
+	Resolved *ResolvedActionApproval
+}
+
+// ResolvedActionApproval describes a queue entry that has been
+// decided. Carried on [ActionApprovalEvent] so the webapp can drop
+// the matching card without re-fetching the list.
+type ResolvedActionApproval struct {
+	ID        string
+	Approved  bool
+	Reason    string
+	DecidedAt time.Time
+}
+
 // ErrActionApprovalNotFound is returned by [ActionApprovalQueue.Decide]
 // when the requested approval id is unknown or already resolved.
 var ErrActionApprovalNotFound = errors.New("action approval not found")
@@ -130,6 +168,13 @@ type ActionApprovalQueue struct {
 	// not propagated to Register's caller; this is a notification path,
 	// not a gating one.
 	onRegister func(*ActionApproval)
+
+	// subscribers receive ActionApprovalEvent on Register / Decide.
+	// Surface for SSE/streaming consumers (the webapp). Each subscriber
+	// owns one channel; broadcast is non-blocking — a slow consumer
+	// drops events past the buffer rather than back-pressuring Register
+	// or Decide.
+	subscribers map[chan ActionApprovalEvent]struct{}
 }
 
 // NewActionApprovalQueue returns an empty queue using the supplied
@@ -143,9 +188,10 @@ func NewActionApprovalQueue(idGen func() string, now func() time.Time) *ActionAp
 		now = time.Now
 	}
 	return &ActionApprovalQueue{
-		pending: map[string]*ActionApproval{},
-		idGen:   idGen,
-		now:     now,
+		pending:     map[string]*ActionApproval{},
+		idGen:       idGen,
+		now:         now,
+		subscribers: map[chan ActionApprovalEvent]struct{}{},
 	}
 }
 
@@ -160,6 +206,65 @@ func (q *ActionApprovalQueue) SetOnRegister(fn func(*ActionApproval)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.onRegister = fn
+}
+
+// Subscribe registers a streaming consumer of queue events and
+// returns the receive channel plus a cancel function the caller MUST
+// invoke on disconnect. The channel is buffered; if a subscriber
+// stops draining it, broadcast drops events for that subscriber
+// rather than blocking Register / Decide. Slow consumers can resync
+// from [List] when they reconnect.
+//
+// Used by the SSE handler (`GET /v1/action-approvals/watch`, [#418])
+// so the webapp's pending list updates live without polling. Each
+// open SSE connection holds one subscription for the duration of the
+// HTTP request.
+//
+// [#418]: https://github.com/ALRubinger/aileron/issues/418
+func (q *ActionApprovalQueue) Subscribe() (<-chan ActionApprovalEvent, func()) {
+	ch := make(chan ActionApprovalEvent, actionApprovalSubscriberBuffer)
+	q.mu.Lock()
+	q.subscribers[ch] = struct{}{}
+	q.mu.Unlock()
+	cancel := func() {
+		q.mu.Lock()
+		if _, ok := q.subscribers[ch]; ok {
+			delete(q.subscribers, ch)
+			close(ch)
+		}
+		q.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+// actionApprovalSubscriberBuffer is the per-subscriber channel
+// buffer. v0.x sees a handful of pending approvals at a time; 32
+// keeps a slow webapp tab from missing events under any realistic
+// load and is still small enough to bound memory under a runaway
+// register storm.
+const actionApprovalSubscriberBuffer = 32
+
+// broadcast fans an event out to every current subscriber. Non-
+// blocking: if a subscriber's buffer is full the event is dropped
+// for that subscriber only — the queue's invariants and the runtime
+// (Register / Decide) must not be held up by a slow webapp tab.
+//
+// Called with q.mu unheld so a misbehaving subscriber can't deadlock
+// the queue; the snapshot of subscribers is taken under the lock.
+func (q *ActionApprovalQueue) broadcast(e ActionApprovalEvent) {
+	q.mu.Lock()
+	subs := make([]chan ActionApprovalEvent, 0, len(q.subscribers))
+	for ch := range q.subscribers {
+		subs = append(subs, ch)
+	}
+	q.mu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- e:
+		default:
+			// Drop for this subscriber; they'll resync on reconnect.
+		}
+	}
 }
 
 // Register creates and tracks a new pending approval. The returned
@@ -190,6 +295,7 @@ func (q *ActionApprovalQueue) Register(actionName, connectorFQN, sessionID strin
 			cb(a)
 		}()
 	}
+	q.broadcast(ActionApprovalEvent{Type: ActionApprovalEventPending, Pending: a})
 	return a
 }
 
@@ -238,11 +344,21 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string) er
 	}
 	delete(q.pending, id)
 	q.mu.Unlock()
+	decidedAt := q.now()
 	a.decision <- ActionDecision{
 		Approved:  approved,
 		Reason:    reason,
-		DecidedAt: q.now(),
+		DecidedAt: decidedAt,
 	}
+	q.broadcast(ActionApprovalEvent{
+		Type: ActionApprovalEventResolved,
+		Resolved: &ResolvedActionApproval{
+			ID:        id,
+			Approved:  approved,
+			Reason:    reason,
+			DecidedAt: decidedAt,
+		},
+	})
 	return nil
 }
 

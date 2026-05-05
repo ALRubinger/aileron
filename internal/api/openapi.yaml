@@ -695,6 +695,52 @@ paths:
               schema:
                 $ref: "#/components/schemas/ActionApprovalListResponse"
 
+  /v1/action-approvals/watch:
+    get:
+      tags: [Approvals]
+      summary: Stream action-level approval queue events (Server-Sent Events)
+      description: |
+        Server-Sent Events stream of action-approval queue state. The
+        webapp's `/approvals` page subscribes here so the pending list
+        updates live without polling.
+
+        On connect the server emits a single `snapshot` event with the
+        current pending queue, then one event per state change:
+
+        - `event: snapshot` — `{ items: [PendingActionApproval, ...] }`
+          (the same shape `GET /v1/action-approvals` returns).
+        - `event: pending` — one `PendingActionApproval` payload, fired
+          when the runtime registers a new approval.
+        - `event: resolved` — one `ResolvedActionApproval` payload,
+          fired when `POST /v1/action-approvals/{id}/decide` resolves
+          an entry. The webapp uses this to drop the matching card.
+
+        A SSE comment line (`: heartbeat\n\n`) is sent every 30 seconds
+        to keep the connection alive across idle proxies. The stream
+        ends when the client disconnects or the server shuts down.
+
+        Per-subscriber buffer is finite (32 events); a slow consumer
+        drops events past the buffer. Clients should resync via
+        `GET /v1/action-approvals` on reconnect to recover from any
+        gap.
+      operationId: watchActionApprovals
+      responses:
+        "200":
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Sequence of SSE events. Each event is `event: <type>\ndata: <json>\n\n`.
+                  See description for the per-type payload shapes.
+        "503":
+          description: The action-approval queue is not configured on this server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/action-approvals/{approval_id}/decide:
     post:
       tags: [Approvals]
@@ -3613,6 +3659,26 @@ components:
             Optional commentary from the user. Surfaced to the agent in
             the deny path so it can recover gracefully (e.g. "wrong
             recipient — I'll redraft").
+
+    ResolvedActionApproval:
+      type: object
+      required: [id, approved, decided_at]
+      description: |
+        Payload of the `resolved` event on `GET /v1/action-approvals/watch`.
+        Carries the user's verdict so the webapp can drop the matching
+        pending card without re-fetching the list.
+      properties:
+        id:
+          type: string
+          description: ID of the pending approval the decision resolved.
+        approved:
+          type: boolean
+        reason:
+          type: string
+          description: Empty for the approve path; user-supplied commentary on deny.
+        decided_at:
+          type: string
+          format: date-time
 
     ActionRequires:
       type: object

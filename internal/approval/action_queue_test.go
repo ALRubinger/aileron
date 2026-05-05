@@ -261,6 +261,123 @@ func TestActionApprovalQueue_SetOnRegisterClearsCallback(t *testing.T) {
 	}
 }
 
+// TestActionApprovalQueue_SubscribeReceivesPendingAndResolved is the
+// primary regression for the streaming surface (#418): a subscriber
+// receives one `pending` event per Register and one `resolved` event
+// per Decide, in order, with the right payload. The webapp's SSE
+// handler is built on this contract.
+func TestActionApprovalQueue_SubscribeReceivesPendingAndResolved(t *testing.T) {
+	q := NewActionApprovalQueue(nil, nil)
+	events, cancel := q.Subscribe()
+	defer cancel()
+
+	a := q.Register("send-email", "github://x/y", "sess-1", map[string]any{"to": "alice"})
+
+	select {
+	case e := <-events:
+		if e.Type != ActionApprovalEventPending {
+			t.Errorf("event[0].Type = %q, want pending", e.Type)
+		}
+		if e.Pending == nil || e.Pending.ID != a.ID {
+			t.Errorf("event[0].Pending = %+v, want id %s", e.Pending, a.ID)
+		}
+		if e.Resolved != nil {
+			t.Errorf("event[0].Resolved should be nil for pending event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for pending event")
+	}
+
+	if err := q.Decide(a.ID, false, "wrong recipient"); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	select {
+	case e := <-events:
+		if e.Type != ActionApprovalEventResolved {
+			t.Errorf("event[1].Type = %q, want resolved", e.Type)
+		}
+		if e.Resolved == nil || e.Resolved.ID != a.ID {
+			t.Errorf("event[1].Resolved = %+v, want id %s", e.Resolved, a.ID)
+		}
+		if e.Resolved.Approved {
+			t.Errorf("event[1].Resolved.Approved = true, want false")
+		}
+		if e.Resolved.Reason != "wrong recipient" {
+			t.Errorf("event[1].Resolved.Reason = %q", e.Resolved.Reason)
+		}
+		if e.Pending != nil {
+			t.Errorf("event[1].Pending should be nil for resolved event")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for resolved event")
+	}
+}
+
+// TestActionApprovalQueue_SubscribeFanOut asserts that two
+// independent subscribers each receive every event. This is the
+// shape that holds when multiple webapp tabs are open at once: each
+// tab opens its own SSE connection and must see the same updates.
+func TestActionApprovalQueue_SubscribeFanOut(t *testing.T) {
+	q := NewActionApprovalQueue(nil, nil)
+	a, cancelA := q.Subscribe()
+	defer cancelA()
+	b, cancelB := q.Subscribe()
+	defer cancelB()
+
+	q.Register("send-email", "x", "", nil)
+	for i, ch := range []<-chan ActionApprovalEvent{a, b} {
+		select {
+		case e := <-ch:
+			if e.Type != ActionApprovalEventPending {
+				t.Errorf("subscriber %d: Type = %q, want pending", i, e.Type)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("subscriber %d: timed out on pending", i)
+		}
+	}
+}
+
+// TestActionApprovalQueue_SubscribeCancelStopsDelivery asserts that
+// the cancel returned by Subscribe removes the subscriber and closes
+// the channel. The SSE handler relies on this for cleanup on client
+// disconnect — a leaked subscriber would buffer forever and
+// (eventually, after broadcast's drop semantics) be silently dropped
+// from but never garbage collected.
+func TestActionApprovalQueue_SubscribeCancelStopsDelivery(t *testing.T) {
+	q := NewActionApprovalQueue(nil, nil)
+	events, cancel := q.Subscribe()
+	cancel()
+	// Channel should be closed.
+	if _, ok := <-events; ok {
+		t.Errorf("channel still open after cancel; want closed")
+	}
+	// Calling cancel a second time must not panic — defensive against
+	// the SSE handler's `defer cancel()` racing with an explicit
+	// cancel inside the loop.
+	cancel()
+	// New events after cancel are silently dropped; Register must
+	// still succeed.
+	q.Register("a", "x", "", nil)
+}
+
+// TestActionApprovalQueue_SubscribeDropsWhenSlow asserts the
+// broadcast contract: if a subscriber stops draining its channel,
+// further events are dropped for that subscriber rather than
+// blocking Register / Decide. The buffer is finite; flooding past
+// it must not stall the runtime.
+func TestActionApprovalQueue_SubscribeDropsWhenSlow(t *testing.T) {
+	q := NewActionApprovalQueue(nil, nil)
+	_, cancel := q.Subscribe()
+	defer cancel()
+
+	// Send more events than the buffer (32) without draining; broadcast
+	// must not block. If it does, this test will hang — the test
+	// timeout is the assertion.
+	for i := 0; i < actionApprovalSubscriberBuffer*2; i++ {
+		q.Register("a", "x", "", nil)
+	}
+}
+
 // TestActionApprovalQueue_ConcurrentDecides verifies that Register +
 // Decide is safe under concurrent access. The queue lives in the
 // apiServer and is shared by every action-run handler; locking has
