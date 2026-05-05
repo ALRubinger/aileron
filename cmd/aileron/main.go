@@ -112,7 +112,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
 	case "sync":
-		return runSync(args[1:], stdout, stderr)
+		return runSync(args[1:], os.Stdin, stdout, stderr)
 	case "log":
 		return runLog(args[1:], stdout, stderr)
 	case "audit":
@@ -1501,19 +1501,19 @@ func postSyncRequest(autoInstall bool) (*syncResult, error) {
 // `/v1/sync`, prints a per-section report, and surfaces unbound
 // capabilities so the operator knows what to bind next.
 //
-// `--bind-all` is parsed but not yet honored: pre-binding requires
-// credential values that have to come from somewhere (interactive
-// prompt for api_key, OAuth dance for oauth2). For v1 this CLI flag
-// is documented as a TODO, the unbound list serves as the operator's
-// next-step guide. Filed as a follow-up — see issue #364.
+// `--bind-all` walks the unbound list and prompts interactively to
+// create a binding per entry — api_key kinds prompt for the value
+// inline, oauth2 kinds drive the server-side OAuth dance through the
+// same code path as `aileron binding setup`. Failures don't abort
+// the loop; a final summary reports bound vs failed.
 //
-// `--yes` is also accepted but has no effect today: the install
-// pipeline is unconditional in v1 (no consent prompt). The flag is
-// honored on the wire so adding consent later doesn't break callers.
-func runSync(args []string, stdout, stderr io.Writer) int {
+// `--yes` is accepted but has no effect today: the install pipeline
+// is unconditional in v1 (no consent prompt). The flag is honored on
+// the wire so adding consent later doesn't break callers.
+func runSync(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	bindAll := flags.Bool("bind-all", false, "(not yet implemented) pre-bind every required capability before exiting")
+	bindAll := flags.Bool("bind-all", false, "after sync, prompt to create a binding for each unbound capability")
 	yes := flags.Bool("yes", false, "auto-approve install consent for new connectors (no-op in v1; install is unconditional)")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -1570,9 +1570,19 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "  Bind each with: aileron binding setup <FQN>")
 	}
 
-	if *bindAll {
+	if *bindAll && len(resp.Unbound) > 0 {
 		fmt.Fprintln(stdout)
-		fmt.Fprintln(stderr, "warning: --bind-all is not yet implemented in v1; run 'aileron binding setup <FQN>' for each unbound capability listed above.")
+		fmt.Fprintf(stdout, "Binding %d capability(s)...\n", len(resp.Unbound))
+		bound, failed := bindAllUnbound(resp.Unbound, stdin, stdout, stderr)
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "Bound %d of %d capability(s)", bound, len(resp.Unbound))
+		if failed > 0 {
+			fmt.Fprintf(stdout, " (%d failed)", failed)
+		}
+		fmt.Fprintln(stdout, ".")
+		if failed > 0 {
+			return 1
+		}
 	}
 
 	// Exit non-zero on install failures so operators wiring sync
@@ -1581,6 +1591,71 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// bindAllUnbound walks the unbound list returned by /v1/sync and
+// dispatches by credential kind. It returns (bound, failed) counts.
+// Failures don't abort the loop — partial binding is more useful
+// than nothing.
+func bindAllUnbound(unbound []unboundCapabilityWire, stdin io.Reader, stdout, stderr io.Writer) (bound, failed int) {
+	br := bufio.NewReader(stdin)
+	for _, u := range unbound {
+		fmt.Fprintln(stdout)
+		scope := ""
+		if u.Scope != nil && *u.Scope != "" {
+			scope = " — " + *u.Scope
+		}
+		fmt.Fprintf(stdout, "→ %s [%s]%s\n", u.ConnectorFqn, u.Kind, scope)
+
+		identity := promptLine(br, stdout, "  Identity (e.g. work, personal): ")
+		if identity == "" {
+			fmt.Fprintln(stderr, "  identity is required; skipping")
+			failed++
+			continue
+		}
+
+		var rc int
+		switch u.Kind {
+		case "oauth2":
+			rc = bindOneOAuth2(u.ConnectorFqn, identity, stdout, stderr)
+		case "api_key":
+			rc = runBindingSetupAPIKey(u.ConnectorFqn, identity, br, stdout, stderr)
+		default:
+			fmt.Fprintf(stderr, "  unsupported credential kind %q for %s; skipping\n", u.Kind, u.ConnectorFqn)
+			failed++
+			continue
+		}
+		if rc == 0 {
+			bound++
+		} else {
+			failed++
+		}
+	}
+	return bound, failed
+}
+
+// bindOneOAuth2 drives the server-side OAuth dance for a single
+// (connector, identity). It is the bind-all counterpart to the OAuth
+// branch of `runBindingSetup`: the kind is known up front (from the
+// sync response), so we POST init unconditionally and treat anything
+// other than 200 as a hard error rather than falling through to
+// api_key. The post-init flow shares `runBindingSetupOAuth2Finish`.
+func bindOneOAuth2(connectorFQN, identity string, stdout, stderr io.Writer) int {
+	initBody, _ := json.Marshal(map[string]any{
+		"connector_fqn": connectorFQN,
+		"identity":      identity,
+	})
+	initStatus, initRespBody, err := bindingDoRequest(http.MethodPost,
+		"/bindings/setup/oauth2/init", strings.NewReader(string(initBody)))
+	if err != nil {
+		fmt.Fprintf(stderr, "  error: %v\n", err)
+		return 1
+	}
+	if initStatus != http.StatusOK {
+		fmt.Fprintf(stderr, "  server returned %d: %s\n", initStatus, string(initRespBody))
+		return 1
+	}
+	return runBindingSetupOAuth2Finish(initRespBody, stdout, stderr)
 }
 
 // connectorPreviewWire mirrors the JSON shape of api.ConnectorPreview
