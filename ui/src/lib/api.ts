@@ -72,6 +72,53 @@ export async function denyRequest(approvalId: string, reason: string, comment?: 
 	});
 }
 
+// --- Action-level approvals (#418) ---
+//
+// Distinct from the rich governance flow above (`/v1/approvals` with
+// intents and multi-approver workflows). The action-approval queue is
+// the runtime-blocking shape: one entry per held-open
+// `POST /v1/actions/{name}/run` waiting for a single yes/no decision.
+// Per the launch path, the agent surfaces the approval URL to the
+// user via templated MCP tool descriptions; the user decides here.
+
+export type PendingActionApproval = {
+	id: string;
+	action_name: string;
+	connector_fqn?: string;
+	args?: Record<string, unknown>;
+	session_id?: string;
+	requested_at: string;
+};
+
+export type ActionApprovalListResponse = {
+	items: PendingActionApproval[];
+};
+
+/** Returns the queue of pending action-level approvals. The webapp polls
+ *  this every few seconds while open; the backend is in-memory per-process,
+ *  so an empty list after the daemon restarts is normal (#412 will give
+ *  this persistence later). */
+export async function listActionApprovals(): Promise<ActionApprovalListResponse> {
+	return apiFetch('/v1/action-approvals');
+}
+
+/** Resolves a pending action-approval. The runtime's blocked
+ *  `RunAction` unblocks on the next tick; on `approved=true` the action
+ *  proceeds normally, on `approved=false` it returns an
+ *  `approval_denied` failure envelope to the agent with `reason` in the
+ *  message body. Returns null on success (server replies 200 with empty
+ *  body); throws on 404 (already resolved) or other non-2xx. */
+export async function decideActionApproval(
+	approvalId: string,
+	approved: boolean,
+	reason?: string
+): Promise<null> {
+	return apiFetch(`/v1/action-approvals/${approvalId}/decide`, {
+		method: 'POST',
+		body: JSON.stringify({ approved, reason: reason ?? '' })
+	});
+}
+
 export async function getIntent(intentId: string) {
 	return apiFetch(`/v1/intents/${intentId}`);
 }
