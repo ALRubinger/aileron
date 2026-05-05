@@ -138,3 +138,84 @@ func plural(word string, n int) string {
 	}
 	return word + "s"
 }
+
+// vaultPromptMode names the surface that collects the user's vault
+// passphrase under `aileron launch`.
+type vaultPromptMode int
+
+const (
+	// vaultPromptModeStderr prompts on stderr via [EnsureVault]
+	// before the agent runs. The legacy path; selected automatically
+	// when no vault file exists yet (the webapp modal does not yet
+	// handle first-launch creation), or via AILERON_VAULT_PROMPT=stderr.
+	vaultPromptModeStderr vaultPromptMode = iota
+
+	// vaultPromptModeWebapp starts the daemon vault-locked and lets
+	// the webapp's passphrase modal POST /v1/vault/unlock. Default
+	// under launch (#429), provided a vault file already exists.
+	vaultPromptModeWebapp
+)
+
+// resolveVaultPromptMode picks the prompt surface based on the env
+// override, the vault file's state on disk, and whether stdin is a
+// terminal.
+//
+// Returns the chosen mode and a pre-unlocked vault when the mode is
+// stderr (the gateway needs the unlocked vault at construction time
+// in that branch). Webapp mode returns a nil vault — the daemon
+// constructs an empty [vault.LockableVault] internally and unlocks
+// it via /v1/vault/unlock.
+//
+// Selection rules:
+//   - AILERON_VAULT_PROMPT=stderr (or not a TTY): stderr mode.
+//   - Vault file missing: stderr mode (forces creation flow).
+//   - Otherwise: webapp mode.
+func resolveVaultPromptMode(vaultPath, envOverride string, stdinIsTerminal bool) (vaultPromptMode, vault.Vault, error) {
+	state, err := vault.CheckState(vaultPath)
+	if err != nil {
+		return vaultPromptModeStderr, nil, fmt.Errorf("checking vault state: %w", err)
+	}
+
+	switch envOverride {
+	case "stderr":
+		// Explicit opt-out from the webapp modal. Falls through to
+		// the legacy stderr-prompt path below; non-TTY contexts
+		// further fall through to the lazy on-demand path.
+	case "webapp":
+		if state == vault.StateMissing {
+			return vaultPromptModeStderr, nil, fmt.Errorf("AILERON_VAULT_PROMPT=webapp but no vault file exists at %s; remove the override or run once with AILERON_VAULT_PROMPT=stderr to create one", vaultPath)
+		}
+		return vaultPromptModeWebapp, nil, nil
+	case "":
+		// Default: webapp when a vault file exists, stderr for
+		// first-launch creation.
+		if state != vault.StateMissing && stdinIsTerminal {
+			return vaultPromptModeWebapp, nil, nil
+		}
+	default:
+		return vaultPromptModeStderr, nil, fmt.Errorf("AILERON_VAULT_PROMPT=%q is not a recognised value (want stderr|webapp)", envOverride)
+	}
+
+	// Stderr mode: prompt up-front when stdin is a terminal, else
+	// fall through to the lazy on-demand path (OpenVaultFunc is
+	// invoked only when comms or the gateway needs the vault).
+	if !stdinIsTerminal {
+		return vaultPromptModeStderr, nil, nil
+	}
+	v, err := EnsureVault(vaultPath, nil, os.Stderr, 3)
+	if err != nil {
+		return vaultPromptModeStderr, nil, err
+	}
+	return vaultPromptModeStderr, v, nil
+}
+
+// vaultPathForGateway returns the local vault path the gateway should
+// pass to [app.Config.LocalVaultPath] for the supplied mode. Returns
+// the canonical path for webapp mode and "" for stderr mode (where
+// the daemon receives a pre-unlocked vault and never reads the path).
+func vaultPathForGateway(mode vaultPromptMode) string {
+	if mode == vaultPromptModeWebapp {
+		return DefaultVaultPath()
+	}
+	return ""
+}

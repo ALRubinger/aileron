@@ -94,6 +94,22 @@ type Config struct {
 	// the default — when set, no log / desktop notifications fire from
 	// this handler, only the supplied notifier.
 	Notifier notify.Notifier
+
+	// LocalVaultPath, when set, runs the daemon with a deferred-unlock
+	// local file vault (#429): NewHandlerWithConfig wraps the supplied
+	// Vault in a [vault.LockableVault] and marks vaultLocked = true.
+	// Vault-needing endpoints return 423 Locked until the user POSTs
+	// their passphrase to /v1/vault/unlock — typically via the webapp
+	// passphrase modal.
+	//
+	// Distinct from Vault: when LocalVaultPath is set, Vault is the
+	// initial (locked) inner — usually nil, so the LockableVault
+	// returns ErrCredentialUnavailable on credential reads until
+	// unlock. Setting Vault to a pre-unlocked vault while also
+	// setting LocalVaultPath is supported (`vaultLocked` stays false)
+	// for tests that want to drive the UnlockLocalVault handler
+	// without provisioning a real vault file.
+	LocalVaultPath string
 }
 
 // NewHandler creates a fully-wired Aileron control plane HTTP handler
@@ -163,15 +179,30 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// auto-generated KEK so the standalone server binary still works
 	// without any setup. Either way, the on-the-wire path is encrypted
 	// — there is no plaintext bypass.
+	//
+	// When cfg.LocalVaultPath is set, wrap the supplied (possibly nil)
+	// vault in a LockableVault — the daemon starts vault-locked, every
+	// component that holds a reference to v gets the wrapper, and
+	// /v1/vault/unlock swaps the unlocked inner vault in (#429).
 	v := cfg.Vault
-	if v == nil {
+	var lockableVault *vault.LockableVault
+	startVaultLocked := false
+	if cfg.LocalVaultPath != "" {
+		lockableVault = vault.NewLockableVault()
+		if v != nil {
+			lockableVault.Set(v)
+		} else {
+			startVaultLocked = true
+		}
+		v = lockableVault
+	} else if v == nil {
 		var err error
 		v, err = newLocalEncryptedVault()
 		if err != nil {
 			return nil, err
 		}
 	}
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
+	if token := os.Getenv("GITHUB_TOKEN"); token != "" && !startVaultLocked {
 		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{
 			Type: "api_key",
 			Labels: map[string]string{
@@ -247,6 +278,9 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		policyEngine:       policyEngine,
 		orchestrator:       orchestrator,
 		vault:              v,
+		lockableVault:      lockableVault,
+		localVaultPath:     cfg.LocalVaultPath,
+		vaultLocked:        startVaultLocked,
 		notifier:           notifier,
 		intents:            intentStore,
 		approvals:          approvalStore,

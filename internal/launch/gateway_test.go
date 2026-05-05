@@ -95,9 +95,9 @@ func TestGatewayClose_NilReceiverNoop(t *testing.T) {
 }
 
 func TestStartGateway_RequiresVault(t *testing.T) {
-	_, err := StartGateway(context.Background(), nil, nil)
+	_, err := StartGateway(context.Background(), gatewayConfig{})
 	if err == nil {
-		t.Fatal("expected error when vault is nil")
+		t.Fatal("expected error when neither Vault nor LocalVaultPath is supplied")
 	}
 }
 
@@ -115,7 +115,7 @@ func TestStartGateway_BindsAndServes(t *testing.T) {
 		t.Fatalf("NewEncryptedVault: %v", err)
 	}
 
-	g, err := StartGateway(context.Background(), v, nil)
+	g, err := StartGateway(context.Background(), gatewayConfig{Vault: v})
 	if err != nil {
 		t.Fatalf("StartGateway: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestGatewayClose_RunningServerShutsDown(t *testing.T) {
 		t.Fatalf("NewEncryptedVault: %v", err)
 	}
 
-	g, err := StartGateway(context.Background(), v, nil)
+	g, err := StartGateway(context.Background(), gatewayConfig{Vault: v})
 	if err != nil {
 		t.Fatalf("StartGateway: %v", err)
 	}

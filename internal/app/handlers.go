@@ -102,6 +102,9 @@ type apiServer struct {
 	auditStore         *audit.MemStore             // ADR-0010 audit store; in-memory for v1, Postgres post-MVP
 	auditRecorder      audit.Recorder              // ADR-0010 recorder; mints audit IDs and emits binding-lifecycle events
 	vaultLocked        bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked
+	lockableVault      *vault.LockableVault        // wraps s.vault when the daemon runs with a deferred-unlock local vault (#429); nil otherwise
+	localVaultPath     string                      // path to the local file vault for /v1/vault/unlock (#429); empty when no local vault is managed
+	localVaultMu       sync.Mutex                  // serializes /v1/vault/unlock so concurrent submits don't both call vault.Unlock
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
 	executor           action.Executor   // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub

@@ -33,18 +33,42 @@ type Gateway struct {
 	log    *slog.Logger
 }
 
-// StartGateway constructs an Aileron app handler bound to the supplied
-// passphrase-unlocked vault, binds it to an ephemeral localhost port,
-// and starts serving in a background goroutine. The returned Gateway
-// must be shut down via Close at session end.
+// gatewayConfig holds the inputs StartGateway needs. Replaces the
+// previous (vault, log) positional signature so the caller can run
+// the gateway in either of two modes:
 //
-// The vault must already be unlocked; the gateway refuses chat
-// completion requests when it isn't (per ADR-0011, surfaced as a 412
-// FailureEnvelope with class binding_required).
-func StartGateway(ctx context.Context, v vault.Vault, log *slog.Logger) (*Gateway, error) {
-	if v == nil {
-		return nil, fmt.Errorf("gateway: vault is required")
+//   - "vault unlocked at startup" — supply Vault, leave LocalVaultPath
+//     empty. The legacy stderr-prompt path (`AILERON_VAULT_PROMPT=stderr`).
+//
+//   - "vault locked, awaiting webapp unlock" — leave Vault nil, supply
+//     LocalVaultPath. The default under #429: the daemon starts
+//     vault-locked, the user submits their passphrase via the webapp
+//     modal, and the daemon transitions to unlocked.
+//
+// Setting both is supported for tests that pre-unlock a vault but
+// still want the /v1/vault/unlock handler wired (e.g. to assert
+// "already unlocked → 409").
+type gatewayConfig struct {
+	Vault          vault.Vault
+	LocalVaultPath string
+	Log            *slog.Logger
+}
+
+// StartGateway constructs an Aileron app handler, binds it to an
+// ephemeral localhost port, and starts serving in a background
+// goroutine. The returned Gateway must be shut down via Close at
+// session end.
+//
+// When cfg.Vault is supplied the daemon is unlocked from the start.
+// When cfg.LocalVaultPath is supplied without cfg.Vault, the daemon
+// starts vault-locked and exposes /v1/vault/unlock; vault-needing
+// endpoints return 423 Locked until the user submits their
+// passphrase via the webapp modal (#429).
+func StartGateway(ctx context.Context, cfg gatewayConfig) (*Gateway, error) {
+	if cfg.Vault == nil && cfg.LocalVaultPath == "" {
+		return nil, fmt.Errorf("gateway: either Vault or LocalVaultPath is required")
 	}
+	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
 	}
@@ -71,7 +95,8 @@ func StartGateway(ctx context.Context, v vault.Vault, log *slog.Logger) (*Gatewa
 	// gateway remains in the path as a pass-through proxy and as the
 	// substrate for Phase 2 request mediation.
 	handler, err := app.NewHandlerWithConfig(log, app.Config{
-		Vault:               v,
+		Vault:               cfg.Vault,
+		LocalVaultPath:      cfg.LocalVaultPath,
 		DisableAugmentation: true,
 		WebappURL:           url,
 	})

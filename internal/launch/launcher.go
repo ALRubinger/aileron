@@ -87,35 +87,42 @@ func ResolveShim(selfPath string) (string, error) {
 // When stdin is a terminal, the agent runs inside a pty with a status bar
 // rendered in the bottom 2 rows. Otherwise, it falls back to direct I/O.
 func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
-	// Per ADR-0011, ensure the local credential vault is unlocked
-	// before any agent runs. On first launch (no vault file) we
-	// prompt to create one; on subsequent launches we prompt for
-	// the passphrase with retry. The KEK lives in this process for
-	// the lifetime of the launch.
+	// Per ADR-0011, the daemon needs the local credential vault for
+	// credential resolution at action-execution time. Two prompt
+	// surfaces are supported:
 	//
-	// We only do this when stdin is a terminal — non-TTY contexts
-	// (tests, CI, headless integrations) fall through to the lazy
-	// on-demand path via OpenVaultFunc, preserving backward
-	// compatibility with the existing test surface.
-	var unlockedVault vault.Vault
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		v, err := EnsureVault(DefaultVaultPath(), nil, os.Stderr, 3)
-		if err != nil {
-			return LaunchResult{}, fmt.Errorf("vault: %w", err)
-		}
-		unlockedVault = v
+	//   - "webapp" (default under launch, #429): the daemon starts
+	//     vault-locked; the user opens the webapp URL printed in the
+	//     startup banner and submits the passphrase via the modal.
+	//     Vault-needing endpoints return 423 until the webapp POSTs
+	//     /v1/vault/unlock.
+	//
+	//   - "stderr" (legacy / fallback): EnsureVault prompts on stderr
+	//     before the agent runs. Selected automatically when the
+	//     vault file is missing (the webapp modal does not yet handle
+	//     first-launch creation), or when AILERON_VAULT_PROMPT=stderr.
+	//
+	// The mode selection happens before StartGateway so the gateway
+	// is built with the correct (locked or pre-unlocked) vault state.
+	mode, unlockedVault, err := resolveVaultPromptMode(DefaultVaultPath(), os.Getenv("AILERON_VAULT_PROMPT"), term.IsTerminal(int(os.Stdin.Fd())))
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("vault: %w", err)
 	}
 
-	// Start the embedded Aileron gateway when the vault is unlocked
-	// and the agent supports LLM-endpoint override via env var. The
-	// gateway shares the user's just-unlocked vault, so credential
-	// resolution at action-execution time uses the same KEK without a
-	// second prompt. Agents whose endpoint is configured via a settings
-	// file (see [Pi.LLMEndpointEnv]) bypass this — adding gateway
+	// Start the embedded Aileron gateway when the agent supports
+	// LLM-endpoint override via env var. The gateway either shares
+	// the user's just-unlocked vault (stderr mode) or runs in the
+	// vault-locked-pending-webapp-unlock mode (webapp mode).
+	// Agents whose endpoint is configured via a settings file
+	// (see [Pi.LLMEndpointEnv]) bypass this — adding gateway
 	// support for those agents requires extending [Agent.ConfigureShell].
 	var gateway *Gateway
-	if unlockedVault != nil && config.Agent.LLMEndpointEnv() != "" {
-		gw, err := StartGateway(ctx, unlockedVault, slog.Default())
+	if config.Agent.LLMEndpointEnv() != "" {
+		gw, err := StartGateway(ctx, gatewayConfig{
+			Vault:          unlockedVault,
+			LocalVaultPath: vaultPathForGateway(mode),
+			Log:            slog.Default(),
+		})
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("starting gateway: %w", err)
 		}
@@ -222,7 +229,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// agent. The agent inherits this terminal — Claude Code, Pi,
 	// and others own the terminal completely under the new launch
 	// path. The banner is the only thing Aileron ever writes here.
-	printStartupBanner(os.Stderr, gateway, sessionID, sessionLogPath(config.Dir))
+	printStartupBanner(os.Stderr, gateway, sessionID, sessionLogPath(config.Dir), unlockedVault == nil && mode == vaultPromptModeWebapp)
 
 	result, err := launchDirect(cmd, config)
 
@@ -238,7 +245,12 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 // pty StatusBar from the pre-#419 launch path. Output is fenced so
 // agents that don't render ANSI gracefully (or terminals that wrap
 // long lines) still parse the URL cleanly.
-func printStartupBanner(w io.Writer, gateway *Gateway, sessionID, logPath string) {
+//
+// When the daemon starts vault-locked (webapp mode, #429) and the
+// gateway is up, a follow-up line points the user at the unlock
+// surface — vault-needing tool calls fail with 423 until the user
+// types their passphrase into the modal.
+func printStartupBanner(w io.Writer, gateway *Gateway, sessionID, logPath string, vaultLocked bool) {
 	url := ""
 	if gateway != nil {
 		url = gateway.URL
@@ -248,6 +260,9 @@ func printStartupBanner(w io.Writer, gateway *Gateway, sessionID, logPath string
 		return
 	}
 	fmt.Fprintf(w, "✈️  Aileron — webapp %s — session %s — log %s\n", url, sessionID, logPath)
+	if vaultLocked {
+		fmt.Fprintf(w, "✈️  Vault locked — open %s and enter your passphrase to unlock.\n", url)
+	}
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.
