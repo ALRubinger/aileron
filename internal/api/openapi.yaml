@@ -4420,7 +4420,7 @@ components:
           description: Opaque server-minted identifier for this request.
         kind:
           type: string
-          enum: [action, comms_send, comms_draft, http_request]
+          enum: [action, comms_send, comms_draft, http_request, shell]
           description: |
             Discriminates the user-facing card layout the webapp
             should render.
@@ -4438,6 +4438,15 @@ components:
                 args carry `method`, `url`, `body`, `secret_name`
                 (the matched binding name; the value is never
                 surfaced to the webapp).
+              - `shell` — aileron-sh shell-shim per-command approval
+                (#427); args carry `command`, `reason`, optional
+                `cwd`. The card offers four buttons; the chosen
+                "save" mode rides back as
+                `ActionApprovalDecision.edited_payload.save_policy`
+                (`""` | `"project"` | `"user"`), which the launch-
+                side approval socket translates into the
+                `allow_once` / `allow_project` / `allow_user` wire
+                string aileron-sh writes the new rule under.
         action_name:
           type: string
           description: |
@@ -4494,12 +4503,19 @@ components:
           type: object
           additionalProperties: true
           description: |
-            Kind-specific fields the user changed before approving — most
-            prominently the edited reply body for `kind=comms_draft`
-            (`{ "body": "...new..." }`). Omitted when the user approved
-            without edits, or when the kind doesn't support editing. The
-            dispatcher (e.g. CommsServer) reads this to send the
-            user-edited bytes rather than the agent's original draft.
+            Kind-specific fields the user changed (or chose) before
+            approving. Omitted when the user approved without edits or
+            the kind doesn't support them. Consumers read kind-specific
+            keys:
+
+              - `kind=comms_draft` — `body` carries the edited reply
+                bytes; the CommsServer dispatcher sends those rather
+                than the agent's original draft.
+              - `kind=shell` — `save_policy` carries `""` | `"project"`
+                | `"user"`; the launch-side approval socket translates
+                this into the `allow_once` / `allow_project` /
+                `allow_user` wire string aileron-sh writes the new
+                allow rule under.
 
     ResolvedActionApproval:
       type: object

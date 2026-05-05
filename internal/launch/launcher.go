@@ -232,7 +232,25 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 	defer commsSrv.Close()
 	go commsSrv.Serve()
-	_ = approvalSocket // socket env var is set for forward-compat with aileron-sh; no listener under v0.x
+
+	// Approval socket: aileron-sh dials this when a shell command
+	// matches an `ask:` policy rule (issue #427). The server registers
+	// a shell-kind entry on the same approval queue the gateway
+	// exposes to the webapp, blocks on the user's verdict, and
+	// replies with the four-option decision string aileron-sh
+	// expects. When the listener can't be created (e.g. tmpdir is
+	// read-only in a hostile environment), aileron-sh's dial fails
+	// and the policy-enforced shell falls back to its built-in
+	// deny — agents stay blocked from running gated commands without
+	// explicit approval.
+	approvalSrv, err := NewApprovalSocketServer(approvalSocket, approvalQueue, sessionID, config.Dir, sessionLog.With("component", "approval-socket"))
+	if err != nil {
+		sessionLog.Warn("approval socket disabled", "error", err)
+		fmt.Fprintf(os.Stderr, "aileron: approval socket unavailable: %v\n", err)
+	} else {
+		defer func() { _ = approvalSrv.Close() }()
+		go approvalSrv.Serve(ctx)
+	}
 
 	// Print the startup banner once on stderr before exec'ing the
 	// agent. The agent inherits this terminal — Claude Code, Pi,
