@@ -30,6 +30,27 @@ type Store interface {
 	GetTrace(ctx context.Context, traceID string) (Trace, error)
 }
 
+// EventStore is the audit-store surface the daemon and the
+// `/v1/audit` handlers depend on. It is the union of the trace-aware
+// [Store] SPI and the flat-event API the read endpoint uses, so the
+// in-memory and file-backed implementations are interchangeable at
+// the wiring site in `internal/app/app.go`.
+type EventStore interface {
+	Store
+
+	// AppendToTrace records an event scoped to a trace correlation
+	// (intent/workspace).
+	AppendToTrace(ctx context.Context, traceID, intentID, workspaceID string, event Event) error
+
+	// GetByEventID returns the recorded event with this id and
+	// reports whether one was found. Used by GET /v1/audit/{audit_id}.
+	GetByEventID(eventID string) (Event, bool)
+
+	// ListEvents returns flat events matching the filter, newest-first.
+	// Used by GET /v1/audit.
+	ListEvents(ctx context.Context, f EventFilter) ([]Event, error)
+}
+
 // Event is a single immutable audit record.
 type Event struct {
 	EventID   string

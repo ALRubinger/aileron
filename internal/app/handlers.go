@@ -99,7 +99,7 @@ type apiServer struct {
 	openAIProxy        http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
 	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
 	interceptEngine    interceptEngineHandle       // tool-call intercept engine; nil disables interception (proxy passthrough only)
-	auditStore         *audit.MemStore             // ADR-0010 audit store; in-memory for v1, Postgres post-MVP
+	auditStore         audit.EventStore            // ADR-0010 audit store; file-backed by default, MemStore in tests, Postgres post-MVP
 	auditRecorder      audit.Recorder              // ADR-0010 recorder; mints audit IDs and emits binding-lifecycle events
 	vaultLocked        bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked
 	lockableVault      *vault.LockableVault        // wraps s.vault when the daemon runs with a deferred-unlock local vault (#429); nil otherwise
