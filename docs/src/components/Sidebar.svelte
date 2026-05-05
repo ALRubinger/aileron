@@ -11,6 +11,7 @@
   import Cloud from '@lucide/svelte/icons/cloud';
   import Compass from '@lucide/svelte/icons/compass';
   import Layers from '@lucide/svelte/icons/layers';
+  import BookOpen from '@lucide/svelte/icons/book-open';
   import Terminal from '@lucide/svelte/icons/terminal';
 
   let { currentPath = '', navigation = [] as NavItem[] }: { currentPath?: string; navigation?: NavItem[] } = $props();
@@ -61,6 +62,7 @@
     'Development': Wrench,
     'Architecture Decisions': GitFork,
     'Concepts': Layers,
+    'Guides': BookOpen,
     'CLI Reference': Terminal,
     'API Reference': Braces
   };
