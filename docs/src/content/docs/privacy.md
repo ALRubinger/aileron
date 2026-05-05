@@ -19,7 +19,7 @@ Aileron is an open-source project, stewarded by its creator. No company or organ
 
 ## What this policy covers
 
-This policy covers the Aileron runtime (the server daemon, the `aileron` CLI, and the local webapp, all running on your machine) and the `aileron.sh` website. It does **not** cover services you connect *through* Aileron, like Gmail, Google Drive, Google Calendar, Slack, or GitHub. Those services have their own privacy policies; the data you exchange with them is governed by their terms.
+This policy covers the Aileron runtime (the server daemon, the `aileron` CLI, and the local webapp, all running on your machine) and the `withaileron.ai` website. It does **not** cover services you connect *through* Aileron, like Gmail, Google Drive, Google Calendar, Slack, or GitHub. Those services have their own privacy policies; the data you exchange with them is governed by their terms.
 
 ## The Aileron runtime
 
