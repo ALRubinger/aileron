@@ -3,32 +3,40 @@ title: "Publishing a Connector"
 description: "How to author, sign, and release a connector + action templates that Aileron users can install via aileron connector install / aileron action add."
 ---
 
-This guide walks through publishing a connector and its action templates so Aileron users can install them via `aileron connector install <FQN>` and `aileron action add <FQN>`. It documents the conventions Aileron's install pipeline expects: where the binary lives, how it's signed, how the user trusts your publisher key.
+This guide walks through publishing a connector and its action templates so Aileron users can install them via `aileron connector install <FQN>` and `aileron action add <FQN>`. It documents the conventions Aileron's install pipeline expects: where the binary lives, how it's signed, how the user trusts your publisher key, and how a single tag push produces every artifact in a release cohort.
 
-The reference implementation is `github.com/ALRubinger/aileron-connector-github` — a per-service connector exposing GitHub ops with action templates living alongside.
+The reference implementation is [`github.com/ALRubinger/aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) — a per-service connector exposing six Gmail and Calendar ops with action templates living alongside. Snippets here mirror its layout; clone the repo when you want to see the full working setup.
 
-## The two-repo model
+## The one-repo-per-service model
 
-Per [ADR-0002](/adr/0002-connector-model), connectors are sandboxed binaries with their own publication identity and lifecycle. **A connector lives in its own repository, separate from Aileron itself.** A security fix to the GitHub connector should not require an Aileron release; Aileron's tag space should not be polluted with connector tags.
+Per [ADR-0002](/adr/0002-connector-model), connectors are sandboxed binaries with their own publication identity and lifecycle. **A connector lives in its own repository, separate from Aileron itself.** A security fix to the Google connector should not require an Aileron release; Aileron's tag space should not be polluted with connector tags.
 
-Convention: one repo per external service, named `aileron-connector-<service>` (e.g. `aileron-connector-github`, `aileron-connector-slack`). One connector binary per repo, exposing all of that service's ops. Action templates that exercise the connector live in the same repo at `actions/<name>/`. This matches the Terraform-provider pattern: one provider per service, dozens of resources inside.
+Convention: one repo per external service, named `aileron-connector-<service>` (e.g. `aileron-connector-google`, `aileron-connector-slack`). One connector binary per repo, exposing all of that service's ops. Action templates that exercise the connector live in the same repo at `actions/<name>/`. This matches the Terraform-provider pattern: one provider per service, dozens of resources inside.
 
 ## Repository layout
 
 ```
-aileron-connector-github/
+aileron-connector-google/
 ├── connector/
-│   ├── main.go              # wasip1 Go source
-│   ├── manifest.toml        # capability declarations
-│   └── README.md
+│   ├── main.go              # //go:build wasip1 — WASM entry, host-import calls
+│   ├── helpers.go           # untagged — host-testable pure helpers
+│   ├── helpers_test.go
+│   ├── go.mod
+│   └── manifest.toml        # capability declarations + OAuth provider config
 ├── actions/
-│   ├── list-recent-prs/
-│   │   └── action.md
-│   └── file-bug/
-│       └── action.md
-├── Taskfile.yml             # build, sign, package
-├── keys/                    # public keys committed; private keys NEVER committed
-│   └── publisher.pub
+│   ├── list-recent-emails/action.md
+│   ├── get-email/action.md
+│   ├── list-upcoming-events/action.md
+│   ├── draft-email/action.md
+│   ├── send-email/action.md
+│   └── create-calendar-event/action.md
+├── keys/
+│   ├── publisher.pub        # committed (PEM)
+│   └── README.md            # how consumers extract the raw key for their keyring
+├── Taskfile.yml             # build, pack, hash, test
+├── .github/workflows/
+│   ├── ci.yml
+│   └── release.yml          # one tag push → connector + every action tarball
 └── README.md
 ```
 
@@ -36,20 +44,22 @@ aileron-connector-github/
 
 ```toml
 [connector]
-name = "github://<owner>/aileron-connector-github"
-version = "0.1.0"
+name = "github://<owner>/aileron-connector-<service>"
+version = "0.0.0-dev"     # CI substitutes the real version at release time
 publisher = "Your Name"
 
 [capabilities.network]
-hosts = ["api.github.com:443"]
+hosts = ["api.example.com:443"]
 
 [capabilities.credential]
-kind = "api_key"
-scope = "repo:read"
+kind = "oauth2"
+scope = "Read messages and create events"   # human-readable; surfaced in CLI prompts
 
 [capabilities.runtime]
 imports = ["log", "http_request", "http_response_size", "http_response_status", "http_response_read"]
 ```
+
+`version = "0.0.0-dev"` is a deliberate placeholder. The release workflow substitutes the real version (extracted from the pushed tag) into a build copy of the manifest before signing — see [Releasing](#releasing) below. The committed source stays a template, so the publisher pushes a tag and never edits version fields by hand.
 
 ### OAuth2 connectors
 
@@ -58,21 +68,28 @@ A connector that needs OAuth2 access declares the OAuth provider config inside `
 ```toml
 [capabilities.credential]
 kind = "oauth2"
-scope = "Read your email and send messages"   # human-readable; surfaced in CLI prompts
+scope = "Read your Gmail messages and Calendar events; create drafts and calendar events"
 
 [capabilities.credential.oauth2]
 authorize_url = "https://accounts.google.com/o/oauth2/v2/auth"
 token_url     = "https://oauth2.googleapis.com/token"
-client_id     = "1234567890-xxxxxxx.apps.googleusercontent.com"
+client_id     = "298373247853-i63n2n3ghapvbsjn3ocb2jr6u9vkcmih.apps.googleusercontent.com"
+client_secret = "bound-at-release"
 scopes = [
-  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.compose",
   "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/calendar.events",
 ]
 ```
 
 **Trust model: publishers register their own OAuth apps.** Each connector publisher creates an OAuth app on the target service (Google Cloud Console, Slack API dashboard, Notion integrations panel, etc.) and pastes the resulting `client_id` into the manifest. The user's consent screen names the publisher — *your* app name appears, not Aileron's. This is the load-bearing trust property of ADR-0002: the OAuth client is whoever wrote the code that will use the access.
 
-**No `client_secret` field.** v1 requires PKCE (S256) for installed-app flows. The "secret" most providers list for installed apps isn't actually secret per their own guidance — PKCE is the cryptographic protection. The manifest carries no secrets.
+**`client_secret` is sometimes required, and is bound at release time.** Aileron's OAuth dance uses PKCE (S256) per [ADR-0006](/adr/0006-capability-binding-ux/), but several providers — Google's "Desktop app" OAuth client type is the canonical example — still require `client_secret` on token-exchange and refresh requests. This is a provider quirk, not a spec requirement; PKCE is doing the cryptographic work, but the API rejects the call without the value present.
+
+For providers that demand it, the value ships in the connector binary the same way `gcloud` and `gh` ship their bundled secrets. **Never commit it to the repo** — GitHub's secret scanner forwards Google client secrets to Google, which auto-rotates them on detection. The committed source manifest carries `client_secret = "bound-at-release"` as a placeholder; the release workflow substitutes it from a repo secret (e.g. `GOOGLE_OAUTH_CLIENT_SECRET`) before signing and packing. The bound value lives only in the signed connector tarball.
+
+For providers that *don't* require `client_secret` (most non-Google OAuth servers), omit the field. The manifest validator allows omission.
 
 **Loopback redirect required.** When you register your OAuth app with the provider, register `http://localhost` (and/or `http://127.0.0.1`) as a valid redirect URI. The Aileron runtime allocates a free loopback port at bind time and serves the callback locally. Niche providers without loopback support are post-MVP.
 
@@ -98,91 +115,132 @@ Every field is enforced by the install pipeline:
 - `name` must match the FQN used at install time (no spoofing).
 - `version` is strict SemVer.
 - `[capabilities.network].hosts` is a closed list of `host:port` pairs (no wildcards). The runtime denies any outbound request not on the list.
-- `[capabilities.credential].kind` must equal the kind on the user's binding (`api_key` for v1; `oauth2` lands with [#388](https://github.com/ALRubinger/aileron/issues/388)).
+- `[capabilities.credential].kind` must equal the kind on the user's binding. v1 supports `api_key` and `oauth2`.
 
 ## WASM build
 
-The connector is a `wasip1` Go program that imports four host functions:
+The connector is a `wasip1` Go program — see [Authoring a Connector](/guides/authoring-a-connector/) for the full host-import ABI and source structure. Build via Taskfile from the repo root:
 
-```go
-//go:wasmimport aileron_host log
-func hostLog(...)
-
-//go:wasmimport aileron_host http_request
-func hostHTTPRequest(...) int32
-
-//go:wasmimport aileron_host http_response_size
-func hostHTTPResponseSize() int32
-
-//go:wasmimport aileron_host http_response_status
-func hostHTTPResponseStatus() int32
-
-//go:wasmimport aileron_host http_response_read
-func hostHTTPResponseRead(...) int32
+```sh
+task build
 ```
 
-The `internal/sandbox/testdata/echo/main.go` fixture in the Aileron repo is the canonical reference for the I/O envelope shape (JSON in on stdin, JSON out on stdout).
-
-Build with:
+…or directly:
 
 ```sh
 cd connector
-GOOS=wasip1 GOARCH=wasm go build -o ../build/connector.wasm .
+GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags='-s -w' -o ../connector.wasm .
 ```
+
+`-trimpath` and `-ldflags='-s -w'` keep the binary reproducible and small (the resulting `.wasm` ends up content-addressed in the user's store, so smaller is faster to fetch).
 
 ## Signing
 
 Aileron verifies every install with an ed25519 signature over `binary || manifest`. Publishers generate one keypair per repo (or per publisher identity), keep the private key out of the repo, and commit only the public key.
 
-Generate the keypair once:
+### Generate the keypair (one-time)
 
 ```sh
-go run github.com/ALRubinger/aileron/connectors/sign/keygen \
-  > keys/publisher.priv  # KEEP THIS OUT OF THE REPO
+# 1. Generate. Private key in /tmp briefly; public goes in the repo.
+openssl genpkey -algorithm ed25519 -out /tmp/publisher.key
+openssl pkey -in /tmp/publisher.key -pubout -out keys/publisher.pub
+
+# 2. Encode the private key for the GitHub Actions secret.
+#    macOS:
+base64 -i /tmp/publisher.key | pbcopy
+#    Linux:
+# base64 < /tmp/publisher.key | xclip -selection clipboard
+
+# 3. In GitHub: repo Settings → Secrets and variables → Actions →
+#    New repository secret. Name: AILERON_SIGNING_KEY. Value: paste.
+
+# 4. Save the PRIVATE key to a password manager, then delete the local copy:
+rm /tmp/publisher.key
+
+# 5. Commit the public key:
 git add keys/publisher.pub
+git commit -m "feat(keys): commit publisher signing public key"
+git push
 ```
 
-Sign the tarball at release time:
+### Sign at release time
+
+The CI release workflow does this for you (see [Releasing](#releasing)). For reference, the signing step is:
 
 ```sh
-go run github.com/ALRubinger/aileron/connectors/sign \
-  --priv keys/publisher.priv \
-  --binary build/connector.wasm \
-  --manifest connector/manifest.toml \
-  --out build/signature.sig
+# Hash input is the canonical concatenation: binary || manifest.
+cat connector.wasm connector/manifest.toml > /tmp/payload.bin
+
+# Sign with the ed25519 private key (rawin = sign the bytes, not a hash of them).
+openssl pkeyutl -sign -rawin -inkey /tmp/publisher.key \
+  -in /tmp/payload.bin -out signature.sig
+
+# Pack the flat archive Aileron's install pipeline expects.
+mkdir -p /tmp/pack
+cp connector.wasm           /tmp/pack/
+cp connector/manifest.toml  /tmp/pack/
+cp signature.sig            /tmp/pack/
+tar czf aileron.tar.gz -C /tmp/pack \
+  connector.wasm manifest.toml signature.sig
 ```
 
-Build the tarball:
+The tarball must be flat: exactly three files at the root (`connector.wasm`, `manifest.toml`, `signature.sig`), no `connector/` directory prefix. The Aileron install pipeline (`internal/cstore/tarball.go`) requires that exact shape.
+
+## Releasing
+
+**One tag, one workflow run, all artifacts.** The publisher pushes a `vX.Y.Z` tag; CI does the rest. There are no manifest edits before tagging — the source manifests are templates with placeholder versions and a placeholder connector hash, and CI substitutes the real values into build copies before signing and packing.
 
 ```sh
-tar czf build/aileron.tar.gz \
-  -C build connector.wasm signature.sig \
-  -C ../connector manifest.toml
+git tag vX.Y.Z
+git push origin vX.Y.Z
+# Wait ~2 minutes. Done — connector + every action tarball is published
+# at the per-FQN tag the install pipeline expects.
 ```
 
-## Release tag conventions
+The source manifests carry placeholders that CI binds at release time:
+
+- `version = "0.0.0-dev"` in `connector/manifest.toml` and every `actions/*/action.md` (also in each action's `source` URL and `[[requires.connectors]]` block). CI replaces `0.0.0-dev` with the version from the pushed tag.
+- `hash = "sha256:bound-at-release"` in every action manifest's `[[requires.connectors]]` block. CI replaces this with the connector tarball's real content hash, computed after the connector is built in the same workflow run.
+- `client_secret = "bound-at-release"` in the connector manifest, for OAuth providers that require it. CI replaces this from a repository secret.
+
+What CI does on each `vX.Y.Z` push (see [`release.yml`](https://github.com/ALRubinger/aileron-connector-google/blob/main/.github/workflows/release.yml) in the reference repo):
+
+1. Substitutes `0.0.0-dev` with the tag's version across every manifest in the working tree.
+2. Substitutes `client_secret = "bound-at-release"` with the repo secret value (OAuth providers that need it).
+3. Builds `connector.wasm` (wasip1).
+4. Computes `sha256(connector.wasm || manifest.toml)` — the canonical-hash input from ADR-0004.
+5. Signs the connector payload, packs `aileron.tar.gz`, publishes at tag `vX.Y.Z`.
+6. For each `actions/*/action.md`: substitutes `sha256:bound-at-release` with the real connector hash, signs the substituted manifest, packs `aileron.tar.gz`, publishes at tag `actions/<name>/vX.Y.Z`.
+
+All artifacts in a version cohort share provenance — every per-action release is created at the same commit the connector tag points at, with all action tarballs pinned to the same connector content hash.
+
+### Release tag conventions
 
 Aileron's resolver per [ADR-0004](/adr/0004-dependency-resolution) maps FQNs to GitHub release URLs:
 
-- **Single-artifact repo** (one connector at the root): tag `v<version>`.
-  - `github://acme/aileron-connector-foo@0.1.0` → tag `v0.1.0`.
-- **Monorepo subpath** (action templates living under the connector repo): tag `<subpath>/v<version>`.
-  - `github://acme/aileron-connector-foo/actions/list-prs@0.1.0` → tag `actions/list-prs/v0.1.0`.
+- **Connector** (one connector at the root of the repo): tag `v<version>`.
+  - `github://ALRubinger/aileron-connector-google@0.0.1` → tag `v0.0.1`.
+- **Action** (action templates under the connector repo): tag `actions/<name>/v<version>`.
+  - `github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.1` → tag `actions/list-recent-emails/v0.0.1`.
 
 The release asset must be named `aileron.tar.gz` for both connectors and actions.
 
-Action tarballs contain `action.md` and an optional `signature.sig` (signed over the action.md bytes alone). v1 keeps action signing optional; mandatory signing lands with the install consent flow ([#363](https://github.com/ALRubinger/aileron/issues/363)).
+Action tarballs contain `action.md` and `signature.sig` (signed over the substituted action.md bytes alone — the version and hash placeholders are replaced *before* signing).
+
+### What you see on the releases page
+
+Each `vX.Y.Z` push produces one connector release plus one per-action release, all from the same commit. The connector release (tagged `vX.Y.Z`) carries the **Latest** badge; the per-action releases (tagged `actions/<name>/vX.Y.Z`) are marked **Pre-release** so the page anchors visually on the connector. Per-action tags are how Aileron's resolver locates artifacts — they aren't subordinate releases despite their tag prefix; they're sibling artifacts in the same cohort, all pinned to the same connector content hash.
 
 ## How users trust your publisher
 
-Aileron ships with **no trusted publishers by default** — the keyring is fail-closed. Users opt in to your publisher by adding the public key to `~/.aileron/keyring.json`:
+Aileron ships with **no trusted publishers by default** — the keyring is fail-closed (`internal/cstore/keyring_config.go`). Users opt in to your publisher by adding the public key to `~/.aileron/keyring.json`:
 
 ```json
 {
   "version": 1,
   "publishers": {
-    "github://acme/aileron-connector-foo": [
-      "BASE64_ENCODED_ED25519_PUBLIC_KEY"
+    "github://ALRubinger/aileron-connector-google": [
+      "BASE64_ENCODED_RAW_ED25519_PUBLIC_KEY"
     ]
   }
 }
@@ -190,74 +248,80 @@ Aileron ships with **no trusted publishers by default** — the keyring is fail-
 
 The authority key is the FQN base (`<scheme>://<owner>/<repo>`); the value is a list of public keys (a list to support key rotation — register the new key alongside the old, switch signing, drop the old).
 
-Document the registration step in your connector's README so users know what to copy into their keyring.
+The keyring stores the **raw 32-byte ed25519 public key**, base64-encoded. `keys/publisher.pub` in your repo is the PEM form (a 44-byte SubjectPublicKeyInfo wrapping the same 32 raw bytes); consumers extract the raw form once with:
+
+```sh
+PUB_KEY_RAW=$(openssl pkey -in keys/publisher.pub -pubin -outform DER | tail -c 32 | base64)
+```
+
+…then paste `$PUB_KEY_RAW` into the keyring entry above.
+
+Document the extraction + registration steps in your connector's README so users know exactly what to copy into their keyring. Without an entry in the keyring for your authority, `aileron connector install` fails closed with `signature_failure` — unsigned or unverified binaries never reach disk.
 
 ## Action templates
 
-An action template is a Markdown file with TOML frontmatter that references your connector by FQN+version+hash:
+An action template is a Markdown file with TOML frontmatter that references your connector by FQN+version+hash. The full guide is [Authoring an Action](/guides/authoring-an-action/); from a publishing perspective the key point is the **placeholder convention**:
 
 ```markdown
 +++
-name = "list-recent-prs"
-version = "0.1.0"
-source = "github://acme/aileron-connector-foo/actions/list-recent-prs@0.1.0"
+name = "list-recent-emails"
+version = "0.0.0-dev"
+source = "github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.0-dev"
 
 [[requires.connectors]]
-name = "github://acme/aileron-connector-foo"
-version = "0.1.0"
-hash = "sha256:abc123..."          # paste the connector's canonical hash
-capabilities = ["list_prs"]        # subset the action exercises
+name = "github://ALRubinger/aileron-connector-google"
+version = "0.0.0-dev"
+hash = "sha256:bound-at-release"
+capabilities = ["list_recent_emails"]
 
 [match]
-intent = "list recent merged PRs"
-
-[[inputs]]
-name = "owner"
-type = "string"
-description = "Repository owner."
-
-[[inputs]]
-name = "repo"
-type = "string"
-description = "Repository name."
+intent = "list my recent Gmail messages"
 
 [[execute]]
 id = "list"
-connector = "github://acme/aileron-connector-foo"
-op = "list_prs"
+connector = "github://ALRubinger/aileron-connector-google"
+op = "list_recent_emails"
+idempotent = true
 
-[execute.inputs]
-owner = "${args.owner}"
-repo = "${args.repo}"
+[[inputs]]
+name = "query"
+type = "string"
+description = "Optional Gmail search query, e.g. \"is:unread\"."
+required = false
 +++
 
-# List recent PRs
+# List Recent Gmail Messages
 
-Lists recent merged PRs in a GitHub repository.
+Fetches a list of recent Gmail messages for the authenticated user.
 ```
 
-The Markdown body is the LLM-facing function description. Write tight prose — the LLM reads it to decide when to invoke the action.
+`0.0.0-dev` and `sha256:bound-at-release` stay in the committed source. The release workflow substitutes both into a build copy before signing, so every action in a cohort automatically pins to the same connector hash with no per-release commits. The Markdown body is the LLM-facing function description — write tight prose, the LLM reads it to decide when to invoke.
 
 ## End-to-end install flow
 
 Once published, a user runs:
 
 ```sh
-# Trust the publisher (one-time)
-echo '{"version":1,"publishers":{"github://acme/aileron-connector-foo":["BASE64..."]}}' \
+# Trust the publisher (one-time per user)
+PUB_KEY_RAW=$(curl -fsSL https://raw.githubusercontent.com/ALRubinger/aileron-connector-google/main/keys/publisher.pub \
+  | openssl pkey -pubin -outform DER | tail -c 32 | base64)
+
+mkdir -p ~/.aileron
+jq -n --arg key "$PUB_KEY_RAW" \
+  '{version:1, publishers:{"github://ALRubinger/aileron-connector-google":[$key]}}' \
   > ~/.aileron/keyring.json
 
-# Install the connector
-aileron connector install github://acme/aileron-connector-foo@0.1.0
+# Install the connector at a specific tag
+aileron connector install github://ALRubinger/aileron-connector-google@0.0.1
 
-# Install the action template
-aileron action add github://acme/aileron-connector-foo/actions/list-recent-prs@0.1.0
+# Install one of its action templates
+aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.1
 
-# Bind the credential
-aileron binding setup github://acme/aileron-connector-foo
-# (CLI prompts for the api_key value)
+# Bind the credential — for OAuth2, drives the consent dance in the browser
+aileron binding setup github://ALRubinger/aileron-connector-google
 
 # Action is now available to the agent.
+aileron launch claude
 ```
 
 ## Versioning

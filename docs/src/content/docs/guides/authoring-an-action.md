@@ -7,6 +7,8 @@ This guide walks you from an empty file to a working, installable action. By the
 
 If you have not read it yet, start with [Actions](/concepts/actions/) for the model. This guide is the *how*; that page is the *what* and *why*. The companion guide is [Authoring a Connector](/guides/authoring-a-connector/) — actions exist to call connectors, so the two surfaces are designed in parallel.
 
+The reference templates throughout this guide are the [`actions/*/action.md`](https://github.com/ALRubinger/aileron-connector-google/tree/main/actions) files in `aileron-connector-google` — six real action templates spanning idempotent reads, non-idempotent writes, and per-call user approval.
+
 ## What you are building
 
 An action is a single Markdown file. There is no compiled artifact, no separate manifest, no bundled binary. The whole contract — what the action does, which connectors it touches, which capabilities it exercises, what arguments it accepts — lives in TOML frontmatter at the top of the file. The Markdown body is documentation that doubles as the description the LLM reads when deciding whether to invoke.
@@ -17,70 +19,72 @@ This shapes how you author. The file is the artifact. There is nothing else.
 
 ## Project skeleton
 
-For an action template you are publishing, the file lives inside a connector repo per the layout in [Publishing a connector](/guides/publishing-a-connector/):
+For an action template you are publishing, the file lives inside a connector repo per the layout in [Publishing a Connector](/guides/publishing-a-connector/):
 
 ```
-aileron-connector-slack/
+aileron-connector-google/
 └── actions/
-    └── ship-update/
+    └── list-recent-emails/
         └── action.md
 ```
 
-The file is named `action.md`; the directory name becomes the action handle (`ship-update` here). When a user runs `aileron action add github://acme/aileron-connector-slack/actions/ship-update@1.0.0`, the runtime fetches the tarball, verifies it, and writes the body to `~/.aileron/actions/ship-update.md`.
+The file is named `action.md`; the directory name becomes the action handle (`list-recent-emails` here). When a user runs `aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@<version>`, the runtime fetches the tarball, verifies it, and writes the body to `~/.aileron/actions/list-recent-emails.md`.
 
 For an action you are writing for yourself — no template, no publishing — just create the file directly under `~/.aileron/actions/`. Same shape, same rules.
 
 ## The skeleton
 
-A complete, valid minimum:
+A complete, valid minimum, modeled on `list-recent-emails/action.md` from the reference repo:
 
 ```markdown
 +++
-name = "ship-update"
-version = "1.0.0"
-source = "hub://aileron/ship-update@1.0.0"
+name = "list-recent-emails"
+version = "0.0.0-dev"
+source = "github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.0-dev"
 
 [[requires.connectors]]
-name = "github://aileron/slack"
-version = "1.2.0"
-hash = "sha256:abc123..."
-capabilities = ["chat:write"]
+name = "github://ALRubinger/aileron-connector-google"
+version = "0.0.0-dev"
+hash = "sha256:bound-at-release"
+capabilities = ["list_recent_emails"]
 
 [match]
-intent = "tell team I shipped"
-
-[[inputs]]
-name = "channel"
-type = "string"
-description = "Slack channel to post to (e.g. '#engineering')."
-
-[[inputs]]
-name = "summary"
-type = "string"
-description = "What you shipped, in one or two sentences."
+intent = "list my recent Gmail messages"
 
 [[execute]]
-id = "post"
-connector = "github://aileron/slack"
-op = "post_message"
+id = "list"
+connector = "github://ALRubinger/aileron-connector-google"
+op = "list_recent_emails"
+idempotent = true
 
-[execute.inputs]
-channel = "${args.channel}"
-text = "${args.summary}"
+[[inputs]]
+name = "query"
+type = "string"
+description = "Optional Gmail search query, e.g. \"is:unread\" or \"from:alice@example.com\"."
+required = false
+
+[[inputs]]
+name = "max_results"
+type = "integer"
+description = "Maximum number of messages to return. Defaults to 10; capped at 100."
+required = false
 +++
 
-# Ship Update
+# List Recent Gmail Messages
 
-Posts a brief "shipped" announcement to a Slack channel.
+Fetches a list of recent Gmail messages for the authenticated user. Returns
+the raw `users.messages.list` response (a paginated list of `{id, threadId}`
+pairs); the agent or a downstream action resolves message bodies as needed.
 
-## When it fires
-
-- "tell the team I shipped the migration"
-- "post a ship update to #engineering"
-- "let everyone know I merged the PR"
+When it fires:
+- "summarize my unread emails from this week"
+- "show me messages from alice@example.com"
+- "what's in my inbox right now"
 ```
 
 That is everything. Open one of those `+++` blocks at the top; close it; write the body underneath.
+
+The `0.0.0-dev` and `sha256:bound-at-release` placeholders are *intentional* in source. The release workflow substitutes the real values at tag-push time. That pattern is covered in the [Identity](#identity) and [Connector dependencies](#connector-dependencies) sections below, and in detail in [Publishing a Connector](/guides/publishing-a-connector/).
 
 ## Frontmatter, field by field
 
@@ -89,9 +93,9 @@ Every field in the frontmatter is enforced. There is no "ignored if empty" — u
 ### Identity
 
 ```toml
-name    = "ship-update"
-version = "1.0.0"
-source  = "hub://aileron/ship-update@1.0.0"
+name    = "list-recent-emails"
+version = "0.0.0-dev"
+source  = "github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.0-dev"
 ```
 
 - `name` is the bare local handle. Lowercase, starts with a letter or digit, dashes/dots/underscores allowed (`^[a-z0-9][a-z0-9._-]*$`). It becomes the filename and the tool name the LLM sees.
@@ -100,29 +104,38 @@ source  = "hub://aileron/ship-update@1.0.0"
 
 The recognized FQN schemes are `github://`, `gitlab://`, and `hub://`. Anything else is a validation error.
 
+**Source-template convention:** in a published action template, both `version` and the version suffix in `source` are typically `0.0.0-dev`. The release workflow substitutes the real version (extracted from the pushed tag) into a build copy of the file before signing. The committed source intentionally stays a template, so the publisher pushes a tag and never edits version fields by hand. The shipped tarball — the file the user actually installs — carries the real values.
+
 ### Connector dependencies
 
 ```toml
 [[requires.connectors]]
-name         = "github://aileron/slack"
-version      = "1.2.0"
-hash         = "sha256:abc123..."
-capabilities = ["chat:write", "channels:read"]
+name         = "github://ALRubinger/aileron-connector-google"
+version      = "0.0.0-dev"
+hash         = "sha256:bound-at-release"
+capabilities = ["list_recent_emails"]
 ```
 
 This block does several jobs at once:
 
 - **Pins the connector.** `name` + `version` + `hash` together identify exactly one binary. The runtime refuses to execute an action whose pinned hash does not match what is in the content-addressed store. A connector publisher cannot ship a malicious update to your installed action — the action references a specific content hash, period.
-- **Declares the capability subset.** `capabilities` is what the action actually uses, not what the connector is capable of. The Slack connector might support `chat:write`, `chat:read`, `users:read`, `files:upload`; if your action only posts messages, you declare `chat:write` and that is the entire surface area.
+- **Declares the capability subset.** `capabilities` is what the action actually uses, not what the connector is capable of. The Google connector exposes `list_recent_emails`, `get_email`, `send_email`, `create_calendar_event`, etc.; an action that only lists messages declares `["list_recent_emails"]` and that is the entire surface area. The capability strings are typically the connector's op names, since each op corresponds to one external operation.
 - **Drives the audit story.** A reader of the file can tell at a glance what surface the action touches. If a future template update adds a new capability, it shows up as a TOML diff against the user's local copy and they can accept or reject it.
 
-You can declare multiple connectors. Compose them in your execute chain — one step pulls the recent merge from `git`, the next posts the announcement to `slack`.
+You can declare multiple connectors. Compose them in your execute chain — one step pulls a list of messages from `gmail`, the next creates a calendar event in `calendar`.
+
+**Placeholder convention:** as with `version`, the `0.0.0-dev` and `sha256:bound-at-release` placeholders are how a published template stays template-shaped. The release workflow substitutes both at tag-push time:
+
+- `0.0.0-dev` → the real version (taken from the pushed tag).
+- `sha256:bound-at-release` → the real connector content hash (computed after the connector tarball is built in the same workflow run).
+
+The committed source carries the placeholders; the published tarball carries the real values. This means every action in a connector repo automatically pins to the same connector hash, in the same release cohort, with no per-action commits per release.
 
 ### Intent matching
 
 ```toml
 [match]
-intent = "tell team I shipped"
+intent = "list my recent Gmail messages"
 ```
 
 `intent` is a canonical natural-language phrase the runtime uses to surface this action to the agent. The shape will grow as [ADR-0008](/adr/0008-intent-matching/) matures; in v1 it is one required string.
@@ -133,15 +146,16 @@ The intent string is *not* the only signal the LLM sees. The Markdown body's "Wh
 
 ```toml
 [[inputs]]
-name        = "channel"
+name        = "query"
 type        = "string"
-description = "Slack channel to post to (e.g. '#engineering')."
+description = "Optional Gmail search query, e.g. \"is:unread\" or \"from:alice@example.com\"."
+required    = false  # default is true; set false to mark optional
 
 [[inputs]]
-name        = "summary"
-type        = "string"
-description = "What you shipped, in one or two sentences."
-required    = false  # default is true; set false to mark optional
+name        = "max_results"
+type        = "integer"
+description = "Maximum number of messages to return. Defaults to 10; capped at 100."
+required    = false
 ```
 
 Inputs become the JSON Schema `parameters` object the LLM sees when Aileron exposes the action as a tool. The LLM uses `description` to decide what to pass. Write descriptions for the LLM — terse, concrete, with one example if format matters.
@@ -155,28 +169,27 @@ Inputs become the JSON Schema `parameters` object the LLM sees when Aileron expo
 
 ```toml
 [[execute]]
-id        = "recent_merge"
-connector = "github://aileron/git"
-op        = "read_recent_merge"
-
-[[execute]]
-id        = "post"
-connector = "github://aileron/slack"
-op        = "post_message"
+id         = "send"
+connector  = "github://ALRubinger/aileron-connector-google"
+op         = "send_email"
+idempotent = false
 
 [execute.inputs]
-channel = "${args.channel}"
-text    = "${args.summary}"
+to      = "${args.to}"
+subject = "${args.subject}"
+body    = "${args.body}"
 ```
 
 Steps run in declared order. Each step calls one connector op with one set of inputs. The runtime's contract:
 
 - **First failure terminates.** If step 2 fails, step 3 does not run. Per [ADR-0010](/adr/0010-failure-handling/), the action returns a Result whose `Failure` is the failing step's structured error.
-- **No auto-rollback.** Successful prior steps are not undone. If `recent_merge` succeeded and `post` failed, the merge fact is unchanged in the world (it was a read anyway, but the rule holds for writes too). If you need compensating actions, the agent composes them in conversation, not the action file.
+- **No auto-rollback.** Successful prior steps are not undone. If you need compensating actions, the agent composes them in conversation, not the action file.
 - **Each step ID is unique.** Step IDs are how prior outputs will be referenced once interpolation lands (see below).
 - **Each `connector` must appear in `[[requires.connectors]]`.** You cannot reference a connector you did not declare — validation fails before the action is installable.
 
 `[execute.inputs]` is a keyed map of arguments the runtime passes into the connector's op. Values can be literals or `${args.<name>}` interpolations referencing the call-time inputs you declared in `[[inputs]]`. The validator confirms every `${args.X}` reference matches a declared input.
+
+**`idempotent`** declares whether the gateway's retry layer ([ADR-0010](/adr/0010-failure-handling/)) is allowed to re-invoke this step on transient failure. Read ops (GETs) are typically `true`. Write ops that mutate the world (sending an email, creating a calendar event) MUST be `false` — repeating them produces duplicates. The connector's documentation tells you which ops are repeatable; the action manifest is where you record that decision.
 
 **v1 caveat on interpolation:** `${args.X}` works. `${step_id.field}` (referencing a prior step's output) is post-MVP. If your action genuinely needs to feed step 1's output into step 2's input, factor it into the connector for now — write a connector op that does both halves — rather than trying to chain steps in the action file.
 
@@ -189,7 +202,13 @@ required = true
 
 When `required = true`, the action does not run until the user explicitly approves the invocation in the Aileron webapp. The HTTP response from `POST /v1/actions/<name>/run` holds open while the approval is queued; on approve, the action runs and returns its normal result; on deny, the runtime returns a structured error with class `approval_denied`.
 
-Use approval for actions that touch the world in ways the user wants to confirm — sending an email, charging a card, deleting something. Skip it for read-only actions and low-stakes writes.
+Use approval for actions that touch the world in ways the user wants to confirm. The reference repo's three write actions illustrate the gating axis:
+
+- **`draft-email` — un-gated.** Drafts land in Gmail's Drafts folder and are fully reversible. The user already has a built-in human-in-the-loop step (clicking Send in Gmail), so a runtime prompt would duplicate that review without adding safety.
+- **`send-email` — gated.** Dispatched mail is not reversible. The approval step moves from Gmail's UI to Aileron's prompt; it does not disappear.
+- **`create-calendar-event` — gated.** Calendar's `events.insert` dispatches invitation emails to attendees as a side effect, and those notifications don't retract cleanly when the event is later deleted.
+
+Reversibility is the test. If the action's effect is recoverable by a normal user action (delete a draft, edit a doc), skip approval. If it isn't (mail dispatched, money moved, irreversible API call), gate it.
 
 The block is optional. Absent block ⇒ no approval needed.
 
@@ -225,8 +244,8 @@ Brief prose explanation of the steps. Mention any non-obvious behavior
 
 ## Inputs
 
-- `channel` — Slack channel to post to.
-- `summary` — One or two sentences about what shipped.
+- `query` — Optional Gmail search query.
+- `max_results` — Page size cap (default 10).
 ```
 
 Write the body for the LLM first. Trigger phrases and a tight one-paragraph description matter more than ASCII art. Avoid hedging language ("might", "sometimes", "depending on") — the LLM uses prose to predict the function's behavior, and uncertain prose makes it less likely to invoke when it should.
@@ -236,7 +255,7 @@ Write the body for the LLM first. Trigger phrases and a tight one-paragraph desc
 A few non-obvious behaviors worth knowing:
 
 - **Inputs from `[[inputs]]` are merged with `[execute.inputs]`.** v1 passes both through to the connector op. The connector receives the call-time args plus whatever the step declared.
-- **Connector ops get the JSON envelope shape from [Authoring a Connector](/guides/authoring-a-connector/)** — `{op: "post_message", args: {channel: "#engineering", text: "..."}}`. The action's job is to produce that shape; the connector's job is to dispatch on it.
+- **Connector ops get the JSON envelope shape from [Authoring a Connector](/guides/authoring-a-connector/)** — `{op: "list_recent_emails", args: {query: "is:unread", max_results: 10}}`. The action's job is to produce that shape; the connector's job is to dispatch on it.
 - **Step output becomes the action result.** When all steps succeed, the runtime aggregates them into the final result. v1 returns the last successful step's output as the primary content.
 - **Capability denial is sticky.** If a step tries a network call to a host outside the connector's manifest, or outside the action's declared capability subset, the call is denied at the sandbox boundary and the step fails. The runtime does not silently retry or substitute.
 
@@ -246,8 +265,8 @@ This is worth understanding because it shapes what `capabilities` should contain
 
 When a step runs:
 
-1. **Connector boundary.** The runtime checks the call against the connector's manifest. If the connector declared `chat:write` and the call is `chat:write`, fine. If the connector did not declare it, the call is denied.
-2. **Action boundary.** The runtime *also* checks the call against the action's declared capability subset. If the action declared `["chat:write"]` and the connector tries something else, the call is denied — even though the connector itself permits it.
+1. **Connector boundary.** The runtime checks the call against the connector's manifest. If the connector declared `gmail.googleapis.com:443` in `[capabilities.network].hosts` and the call dials that host, fine. If the connector tries to dial anywhere else, the call is denied.
+2. **Action boundary.** The runtime *also* checks the call against the action's declared capability subset. If the action declared `["list_recent_emails"]` and the step tries to invoke `send_email` instead, the call is denied — even though the connector itself permits it.
 
 Both gates fire on every call. Either denies and the step fails. The action's `capabilities` list is the second gate; declare the minimum subset you need so adding a new capability later is a visible TOML diff for the user, not a silent change in behavior.
 
@@ -256,25 +275,25 @@ Both gates fire on every call. Either denies and the step fails. The action's `c
 The fastest loop is to install a real template, edit the local file, and run it through the agent.
 
 ```sh
-# Install a template you'll modify
-$ aileron action add hub://aileron/ship-update@1.0.0
-✓ Action file written to ~/.aileron/actions/ship-update.md
+# Install a template you'll modify (replace <version> with a real tag)
+$ aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@<version>
+✓ Action file written to ~/.aileron/actions/list-recent-emails.md
 
 # Edit the file
-$ $EDITOR ~/.aileron/actions/ship-update.md
+$ $EDITOR ~/.aileron/actions/list-recent-emails.md
 
 # Validation runs on every load — invalid frontmatter surfaces immediately
 $ aileron action list
-ship-update  1.0.0  hub://aileron/ship-update@1.0.0
+list-recent-emails  0.0.1  github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.1
 ```
 
-When you have written something the runtime does not like — missing field, malformed FQN, unknown frontmatter key — `aileron action list` and `aileron action show ship-update` surface the error with the file and (when known) the line. Fix it in place and try again.
+When you have written something the runtime does not like — missing field, malformed FQN, unknown frontmatter key — `aileron action list` and `aileron action show list-recent-emails` surface the error with the file and (when known) the line. Fix it in place and try again.
 
 To exercise the action end-to-end, drive it through `aileron launch` — the agent picks it up automatically once it is in the actions directory.
 
 ## Common authoring mistakes
 
-- **Forgetting `hash`.** The validator requires `sha256:<hex>` on every `[[requires.connectors]]` entry. Get it from the connector's release tarball or from `aileron connector show <FQN>` after install.
+- **Forgetting `hash`.** The validator requires `sha256:<hex>` on every `[[requires.connectors]]` entry. In a published template, the placeholder `sha256:bound-at-release` is what the source carries; CI substitutes the real hash at release time. If you are hand-writing an action against a connector you've already installed, get the hash from `aileron connector show <FQN>`.
 - **Listing more capabilities than you use.** The action boundary enforces the subset you declare; declaring more weakens the audit story. Strip capabilities aggressively.
 - **A `${args.X}` reference that does not match an input.** Validation catches this — the error names the offending step, key, and missing input.
 - **Multi-paragraph descriptions on inputs.** The LLM reads `description` as a single line. Keep it tight.
