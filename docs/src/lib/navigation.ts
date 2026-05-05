@@ -41,7 +41,8 @@ export const navigation: NavItem[] = [
   {
     label: 'Meet Aileron',
     children: [
-      { label: 'Overview', href: '/' }
+      { label: 'Overview', href: '/' },
+      { label: 'Getting Started', href: '/getting-started/' }
     ]
   },
   {
