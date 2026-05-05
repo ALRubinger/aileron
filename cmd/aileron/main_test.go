@@ -1932,6 +1932,173 @@ func TestRunConnector_InstallExpectedHashPropagated(t *testing.T) {
 	}
 }
 
+// TestRunConnectorCheck_Empty asserts that with nothing installed the
+// CLI prints a useful "no connectors installed" line and exits 0 —
+// the bare-server path operators see when they run check before any
+// install.
+func TestRunConnectorCheck_Empty(t *testing.T) {
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		return &connectorsCheckResponse{Results: []connectorCheckResult{}}, nil
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "check"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "No connectors installed") {
+		t.Errorf("expected 'No connectors installed' in output; got: %s", stdout.String())
+	}
+}
+
+// TestRunConnectorCheck_UpdateAvailable asserts the primary signal:
+// when the daemon reports update_available=true, the CLI renders the
+// row with the latest version and a summary line counting updates.
+func TestRunConnectorCheck_UpdateAvailable(t *testing.T) {
+	latest := "0.0.6"
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		return &connectorsCheckResponse{Results: []connectorCheckResult{
+			{
+				Fqn:               "github://ALRubinger/aileron-connector-google",
+				CurrentVersion:    "0.0.5",
+				UpdateAvailable:   true,
+				LatestVersion:     &latest,
+				AvailableVersions: []string{"0.0.6"},
+			},
+		}}, nil
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "check"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"github://ALRubinger/aileron-connector-google", "0.0.5", "0.0.6", "update available", "1 update(s) available"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output; got: %s", want, out)
+		}
+	}
+}
+
+// TestRunConnectorCheck_UpToDate asserts the "all good" path: every
+// connector is on its latest version, summary says all up to date.
+func TestRunConnectorCheck_UpToDate(t *testing.T) {
+	latest := "1.0.0"
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		return &connectorsCheckResponse{Results: []connectorCheckResult{
+			{Fqn: "github://acme/x", CurrentVersion: "1.0.0", UpdateAvailable: false, LatestVersion: &latest},
+		}}, nil
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"connector", "check"}, newTestRegistry(), &stdout, &stderr)
+	out := stdout.String()
+	if !strings.Contains(out, "up to date") {
+		t.Errorf("expected 'up to date' in output; got: %s", out)
+	}
+	if !strings.Contains(out, "All 1 connector(s) are up to date") {
+		t.Errorf("expected summary line; got: %s", out)
+	}
+}
+
+// TestRunConnectorCheck_PerConnectorError asserts the "offline-failing
+// per connector" surface: a row with an error renders a "check failed"
+// line, but other rows still render and the command exits 0.
+func TestRunConnectorCheck_PerConnectorError(t *testing.T) {
+	errMsg := "dial tcp: connection refused"
+	latest := "1.1.0"
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		return &connectorsCheckResponse{Results: []connectorCheckResult{
+			{Fqn: "github://acme/down", CurrentVersion: "1.0.0", Error: &errMsg},
+			{Fqn: "github://acme/up", CurrentVersion: "1.0.0", UpdateAvailable: true, LatestVersion: &latest},
+		}}, nil
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "check"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (per-connector errors don't fail the command)", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "check failed") {
+		t.Errorf("expected 'check failed' for the down connector; got: %s", out)
+	}
+	if !strings.Contains(out, "github://acme/up") {
+		t.Errorf("expected the working connector to still render; got: %s", out)
+	}
+}
+
+// TestRunConnectorCheck_IncludePrereleaseFlag asserts the
+// --include-prerelease flag flows through to the fetcher (and thence
+// to the daemon's query parameter). Without this propagation the flag
+// would be silently dropped.
+func TestRunConnectorCheck_IncludePrereleaseFlag(t *testing.T) {
+	var sawInclude bool
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		sawInclude = includePrerelease
+		return &connectorsCheckResponse{}, nil
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"connector", "check", "--include-prerelease"}, newTestRegistry(), &stdout, &stderr)
+	if !sawInclude {
+		t.Error("expected fetcher to be called with includePrerelease=true")
+	}
+}
+
+// TestRunConnectorCheck_FetcherError asserts that a daemon error
+// (network, 500, etc.) exits with a non-zero status and prints to
+// stderr. Operators can wire the exit code into shell scripts.
+func TestRunConnectorCheck_FetcherError(t *testing.T) {
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "check"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when fetcher fails")
+	}
+	if !strings.Contains(stderr.String(), "connection refused") {
+		t.Errorf("expected error message in stderr; got: %s", stderr.String())
+	}
+}
+
+// TestRunConnectorCheck_FetcherSendsQueryParam asserts the production
+// fetcher (not the stub) builds the right URL when include-prerelease
+// is requested. This is the only test that touches the actual HTTP
+// call path.
+func TestRunConnectorCheck_FetcherSendsQueryParam(t *testing.T) {
+	var sawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"results":[]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	if _, err := fetchConnectorCheck(true); err != nil {
+		t.Fatalf("fetchConnectorCheck: %v", err)
+	}
+	if sawQuery != "include_prerelease=true" {
+		t.Errorf("query = %q, want include_prerelease=true", sawQuery)
+	}
+}
+
 func TestRunAction_AddHappyPath(t *testing.T) {
 	var seenBody []byte
 	var seenPath string

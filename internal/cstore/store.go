@@ -112,6 +112,35 @@ func (s *Store) Count() int {
 	return len(s.index)
 }
 
+// ListInstalled returns every installed (FQN, version) pair in the
+// index. Order is sorted ascending by canonical key for deterministic
+// output. Used by `GET /v1/connectors/check` to enumerate what to
+// query for newer versions.
+//
+// Returns refs whose canonical key parsed cleanly. Index entries that
+// can't be parsed (corrupted or written by an older version with a
+// different canonical form) are silently skipped — the index is a
+// cache, not a source of truth, and a single bad entry must not abort
+// the whole sweep.
+func (s *Store) ListInstalled() []Ref {
+	s.mu.RLock()
+	keys := make([]string, 0, len(s.index))
+	for k := range s.index {
+		keys = append(keys, k)
+	}
+	s.mu.RUnlock()
+	sort.Strings(keys)
+	out := make([]Ref, 0, len(keys))
+	for _, k := range keys {
+		ref, err := ParseRef(k)
+		if err != nil {
+			continue
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
 // LookupAnyVersion returns one installed (Ref, hash) pair for the
 // given FQN, or `false` when no version of the connector is installed.
 // Multiple installed versions return an unspecified one — callers that

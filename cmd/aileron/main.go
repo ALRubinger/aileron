@@ -134,6 +134,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
 	fmt.Fprintln(w, "  aileron binding list               List credential bindings (metadata only — no unlock)")
 	fmt.Fprintln(w, "  aileron connector install <FQN>    Install a connector binary from its FQN")
+	fmt.Fprintln(w, "  aileron connector check            Check installed connectors for newer versions")
 	fmt.Fprintln(w, "  aileron action add <FQN>           Install an action template from its FQN")
 	fmt.Fprintln(w, "  aileron keyring trust <auth> <key> Authorize a publisher's signing key for installs")
 	fmt.Fprintln(w, "  aileron keyring list               List trusted publishers and key fingerprints")
@@ -1280,7 +1281,8 @@ func resolveShim() (string, error) {
 // --- Connector / action install (ADR-0004 / ADR-0003 + #366) ---
 
 const connectorUsage = `usage:
-  aileron connector install <FQN> [--version=<v>] [--hash=<sha256:...>] [--force]`
+  aileron connector install <FQN> [--version=<v>] [--hash=<sha256:...>] [--force]
+  aileron connector check [--include-prerelease]`
 
 const actionUsage = `usage:
   aileron action add <FQN> [--version=<v>] [--force]`
@@ -1294,11 +1296,114 @@ func runConnector(args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "install":
 		return runConnectorInstall(args[1:], stdout, stderr)
+	case "check":
+		return runConnectorCheck(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown connector command: %q\n", args[0])
 		fmt.Fprintln(stderr, connectorUsage)
 		return 1
 	}
+}
+
+// connectorCheckResult mirrors api.ConnectorCheckResult on the wire.
+// Defined locally so the CLI binary doesn't pull the full generated
+// types graph just to render this surface.
+type connectorCheckResult struct {
+	Fqn               string   `json:"fqn"`
+	CurrentVersion    string   `json:"current_version"`
+	UpdateAvailable   bool     `json:"update_available"`
+	LatestVersion     *string  `json:"latest_version,omitempty"`
+	AvailableVersions []string `json:"available_versions,omitempty"`
+	Error             *string  `json:"error,omitempty"`
+}
+
+type connectorsCheckResponse struct {
+	Results []connectorCheckResult `json:"results"`
+}
+
+// connectorCheckFetcher fetches the daemon's GET /v1/connectors/check
+// snapshot. Replaceable in tests so they don't depend on a running
+// server. Same pattern as runtimeStatusFetcher.
+var connectorCheckFetcher = fetchConnectorCheck
+
+func fetchConnectorCheck(includePrerelease bool) (*connectorsCheckResponse, error) {
+	path := "/connectors/check"
+	if includePrerelease {
+		path += "?include_prerelease=true"
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, bindingAPIBaseURL()+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, string(body))
+	}
+	var out connectorsCheckResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &out, nil
+}
+
+// runConnectorCheck implements `aileron connector check`. Walks the
+// daemon's installed connectors and renders one row per connector with
+// the current version, the latest available version (per ADR-0004 §
+// "connector check"), and a per-row error when the source couldn't be
+// reached.
+func runConnectorCheck(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("connector check", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	includePrerelease := flags.Bool("include-prerelease", false, "include pre-release versions when computing the latest version")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+
+	resp, err := connectorCheckFetcher(*includePrerelease)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	if len(resp.Results) == 0 {
+		fmt.Fprintln(stdout, "No connectors installed.")
+		return 0
+	}
+
+	updates := 0
+	errored := 0
+	for _, r := range resp.Results {
+		switch {
+		case r.Error != nil:
+			fmt.Fprintf(stdout, "  %s@%s\n", r.Fqn, r.CurrentVersion)
+			fmt.Fprintf(stdout, "    \033[31mcheck failed:\033[0m %s\n", *r.Error)
+			errored++
+		case r.UpdateAvailable && r.LatestVersion != nil:
+			fmt.Fprintf(stdout, "  %s@%s → \033[32m%s\033[0m (update available)\n",
+				r.Fqn, r.CurrentVersion, *r.LatestVersion)
+			updates++
+		case r.LatestVersion != nil:
+			fmt.Fprintf(stdout, "  %s@%s (up to date)\n", r.Fqn, r.CurrentVersion)
+		default:
+			fmt.Fprintf(stdout, "  %s@%s (no released versions found)\n", r.Fqn, r.CurrentVersion)
+		}
+	}
+	fmt.Fprintln(stdout)
+	switch {
+	case updates > 0:
+		fmt.Fprintf(stdout, "%d update(s) available; %d connector(s) checked.\n", updates, len(resp.Results))
+	case errored > 0:
+		fmt.Fprintf(stdout, "%d connector(s) up to date; %d check failure(s).\n", len(resp.Results)-errored, errored)
+	default:
+		fmt.Fprintf(stdout, "All %d connector(s) are up to date.\n", len(resp.Results))
+	}
+	return 0
 }
 
 // runAction dispatches `aileron action <subcommand>`.

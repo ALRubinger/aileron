@@ -1158,6 +1158,50 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/connectors/check:
+    get:
+      tags: [Connectors]
+      summary: Check installed connectors for newer versions
+      description: |
+        Walks every (FQN, version) pair in the cstore index and queries
+        each connector's source for newer versions. Read-only — does
+        not mutate the store.
+
+        Per the ADR-0004 acceptance test "offline-failing per
+        connector", a single source that's unreachable does not abort
+        the sweep: that result carries an `error` and the response
+        still lists results for every other connector.
+
+        By default pre-release versions (SemVer 2.0
+        `<major>.<minor>.<patch>-<suffix>`) are excluded from
+        `available_versions` and the `latest_version` selection. Set
+        `include_prerelease=true` to include them.
+
+        Today only the `github://` scheme has a wired version lister.
+        Connectors using `gitlab://` or `hub://` schemes will surface
+        a per-connector "not yet implemented" error until those
+        listers ship — they don't break the rest of the check.
+      operationId: checkConnectors
+      parameters:
+        - name: include_prerelease
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Include pre-release versions when computing the latest version.
+      responses:
+        "200":
+          description: Check completed (per-connector errors are inside `results[].error`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorsCheckResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/connectors/install:
     post:
       tags: [Connectors]
@@ -3454,6 +3498,59 @@ components:
             $ref: "#/components/schemas/Connector"
         pagination:
           $ref: "#/components/schemas/Pagination"
+
+    ConnectorsCheckResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectorCheckResult"
+          description: |
+            One entry per installed (FQN, version) pair. Order matches
+            the cstore index's deterministic sort (ascending canonical
+            key); operators rendering this should not assume a
+            different order.
+
+    ConnectorCheckResult:
+      type: object
+      required: [fqn, current_version, update_available]
+      properties:
+        fqn:
+          type: string
+          description: Canonical FQN of the installed connector (per ADR-0002).
+        current_version:
+          type: string
+          description: Currently installed SemVer.
+        update_available:
+          type: boolean
+          description: |
+            True when `latest_version` is strictly newer than `current_version`
+            under SemVer 2.0 ordering. False when this connector is up to date,
+            and false when `error` is present (we couldn't tell).
+        latest_version:
+          type: string
+          description: |
+            Latest available version after applying the prerelease filter.
+            Omitted when `error` is present or when no released versions
+            were found at the source.
+        available_versions:
+          type: array
+          items:
+            type: string
+          description: |
+            Versions strictly newer than `current_version`, sorted descending.
+            Omitted when `error` is present. Excludes pre-releases unless
+            the request set `include_prerelease=true`.
+        error:
+          type: string
+          description: |
+            Per-connector check error (network failure, source removed,
+            unknown scheme, scheme not yet implemented). When present,
+            `latest_version` and `available_versions` may be omitted —
+            the check failed for this connector but did not abort the
+            sweep.
 
     InstallConnectorRequest:
       type: object
