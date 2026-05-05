@@ -2099,6 +2099,315 @@ func TestRunConnectorCheck_FetcherSendsQueryParam(t *testing.T) {
 	}
 }
 
+// TestRunSync_Empty asserts the empty-state path: no actions, no
+// requireds, no installs. The CLI prints a "no dependencies" line
+// and exits 0 — what an operator running sync on a fresh project
+// sees before installing anything.
+func TestRunSync_Empty(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No connector dependencies") {
+		t.Errorf("expected empty-state message; got: %s", stdout.String())
+	}
+}
+
+// TestRunSync_InstallsAndUnbound asserts the canonical happy path:
+// one action declares a connector, sync installs it, and reports an
+// unbound capability so the operator knows to run `aileron binding
+// setup <FQN>` next.
+func TestRunSync_InstallsAndUnbound(t *testing.T) {
+	scope := "test scope"
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			ActionsSeen: 1,
+			Required:    []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+			Installed: []installedConnectorWire{
+				{Fqn: "github://acme/widget", Version: "1.0.0", Hash: "sha256:abc"},
+			},
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/widget", Kind: "api_key", Scope: &scope},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Walked 1 action", "github://acme/widget", "Installed 1", "1 unbound", "api_key", "test scope", "aileron binding setup"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output; got: %s", want, out)
+		}
+	}
+}
+
+// TestRunSync_AlreadyInstalledIdempotent asserts the second-run path:
+// every connector already present, no failures, no unbound. A clean
+// idempotent re-run should print "already installed" and exit 0.
+func TestRunSync_AlreadyInstalledIdempotent(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			ActionsSeen:      1,
+			Required:         []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+			AlreadyInstalled: []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "already installed") {
+		t.Errorf("expected 'already installed'; got: %s", out)
+	}
+	if strings.Contains(out, "Installed 1") {
+		t.Errorf("did not expect 'Installed 1' line on idempotent re-run; got: %s", out)
+	}
+}
+
+// TestRunSync_InstallFailureExits1 asserts the script-friendly path:
+// any install failure exits 1 so operators wiring sync into CI / Make
+// targets can branch on the exit code.
+func TestRunSync_InstallFailureExits1(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			ActionsSeen: 1,
+			Required:    []connectorRefWire{{Fqn: "github://acme/widget", Version: "1.0.0"}},
+			InstallFailures: []connectorFailureWire{
+				{Fqn: "github://acme/widget", Version: "1.0.0", Error: "connection refused"},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 on install failure", code)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "1 install failure") {
+		t.Errorf("expected '1 install failure'; got: %s", out)
+	}
+	if !strings.Contains(out, "connection refused") {
+		t.Errorf("expected error message in output; got: %s", out)
+	}
+}
+
+// TestRunSync_BindAllWarns asserts that --bind-all prints a clear
+// "not yet implemented" warning so operators learn the limitation
+// without filing a "broken" bug. When --bind-all lands as a real
+// feature, this test will be replaced.
+func TestRunSync_BindAllWarns(t *testing.T) {
+	scope := "test"
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/widget", Kind: "api_key", Scope: &scope},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"sync", "--bind-all"}, newTestRegistry(), &stdout, &stderr)
+	if !strings.Contains(stderr.String(), "not yet implemented") {
+		t.Errorf("expected '--bind-all not yet implemented' warning; got stderr: %s", stderr.String())
+	}
+}
+
+// TestRunSync_YesFlagPropagated asserts the --yes flag flows through
+// to the fetcher (and thence to the daemon's auto_install body
+// field). Without this propagation the flag would be silently dropped.
+func TestRunSync_YesFlagPropagated(t *testing.T) {
+	var sawAutoInstall bool
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		sawAutoInstall = autoInstall
+		return &syncResult{}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"sync", "--yes"}, newTestRegistry(), &stdout, &stderr)
+	if !sawAutoInstall {
+		t.Error("expected fetcher to be called with autoInstall=true")
+	}
+}
+
+// TestRunSync_FetcherError asserts the daemon-down path: a network
+// or 5xx error from the daemon exits 1 and prints the error to stderr.
+func TestRunSync_FetcherError(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	defer func() { syncFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sync"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on fetcher error")
+	}
+	if !strings.Contains(stderr.String(), "connection refused") {
+		t.Errorf("expected error in stderr; got: %s", stderr.String())
+	}
+}
+
+// TestPostSyncRequest_HappyPath asserts the actual HTTP fetcher (not
+// the stub) hits the right URL, sends the right method + headers, and
+// decodes the daemon's response into syncResult correctly. The other
+// runSync tests stub the fetcher; this is the only path that
+// exercises the real network code.
+func TestPostSyncRequest_HappyPath(t *testing.T) {
+	var sawMethod, sawPath, sawContentType string
+	var sawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawMethod = r.Method
+		sawPath = r.URL.Path
+		sawContentType = r.Header.Get("Content-Type")
+		sawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"actions_seen": 2,
+			"required": [{"fqn":"github://acme/x","version":"1.0.0"}],
+			"installed": [],
+			"already_installed": [{"fqn":"github://acme/x","version":"1.0.0"}],
+			"install_failures": [],
+			"unbound": []
+		}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	got, err := postSyncRequest(false)
+	if err != nil {
+		t.Fatalf("postSyncRequest: %v", err)
+	}
+	if sawMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", sawMethod)
+	}
+	if sawPath != "/v1/sync" {
+		t.Errorf("path = %q, want /v1/sync", sawPath)
+	}
+	if sawContentType != "application/json" {
+		t.Errorf("content-type = %q, want application/json", sawContentType)
+	}
+	if !strings.Contains(string(sawBody), `"auto_install":false`) {
+		t.Errorf("body should contain auto_install=false; got: %s", sawBody)
+	}
+	if got.ActionsSeen != 2 {
+		t.Errorf("ActionsSeen = %d, want 2", got.ActionsSeen)
+	}
+	if len(got.Required) != 1 || got.Required[0].Fqn != "github://acme/x" {
+		t.Errorf("Required = %v, want [github://acme/x]", got.Required)
+	}
+	if len(got.AlreadyInstalled) != 1 {
+		t.Errorf("AlreadyInstalled = %v, want 1", got.AlreadyInstalled)
+	}
+}
+
+// TestPostSyncRequest_AutoInstallTrueInBody asserts the autoInstall
+// argument flows into the JSON body. Mirrors --yes propagation
+// from the runSync test, but checks the wire shape directly.
+func TestPostSyncRequest_AutoInstallTrueInBody(t *testing.T) {
+	var sawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"actions_seen":0,"required":[],"installed":[],"already_installed":[],"install_failures":[],"unbound":[]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	if _, err := postSyncRequest(true); err != nil {
+		t.Fatalf("postSyncRequest: %v", err)
+	}
+	if !strings.Contains(string(sawBody), `"auto_install":true`) {
+		t.Errorf("body should contain auto_install=true; got: %s", sawBody)
+	}
+}
+
+// TestPostSyncRequest_Non200ReturnsError asserts daemon-side errors
+// (e.g. 401 unauthorized, 500 internal) surface as a Go error with
+// the status code embedded in the message. Operators wiring sync
+// into shell scripts can grep for the code if needed.
+func TestPostSyncRequest_Non200ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"code":"internal_error","message":"oops"}}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	_, err := postSyncRequest(false)
+	if err == nil {
+		t.Fatal("expected error on 500")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention 500; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "oops") {
+		t.Errorf("error should include response body; got: %v", err)
+	}
+}
+
+// TestPostSyncRequest_MalformedJSONReturnsError asserts that a
+// truncated or otherwise unparseable response surfaces as a wrapped
+// "decoding response" error. Without this, a daemon bug producing
+// bad JSON would crash the CLI rather than reporting cleanly.
+func TestPostSyncRequest_MalformedJSONReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"actions_seen": not_a_number}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	_, err := postSyncRequest(false)
+	if err == nil {
+		t.Fatal("expected error on malformed JSON")
+	}
+	if !strings.Contains(err.Error(), "decoding response") {
+		t.Errorf("error should mention 'decoding response'; got: %v", err)
+	}
+}
+
+// TestPostSyncRequest_NetworkErrorReturnsError asserts a closed
+// listener (server already shut down) surfaces as a Go error rather
+// than a panic. Same robustness contract as fetchRuntimeStatus and
+// fetchConnectorCheck.
+func TestPostSyncRequest_NetworkErrorReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	addr := srv.URL
+	srv.Close() // shut down listener immediately
+	t.Setenv("AILERON_API_URL", addr+"/v1")
+
+	_, err := postSyncRequest(false)
+	if err == nil {
+		t.Fatal("expected error on closed listener")
+	}
+}
+
 func TestRunAction_AddHappyPath(t *testing.T) {
 	var seenBody []byte
 	var seenPath string

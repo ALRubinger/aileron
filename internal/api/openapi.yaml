@@ -1158,6 +1158,50 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/sync:
+    post:
+      tags: [Sync]
+      summary: Reconcile installed actions with their declared connector dependencies
+      description: |
+        Per ADR-0004 §"sync, check, status": walks every action in
+        `~/.aileron/actions/`, collects the unique connector references
+        each one declares in `[[requires.connectors]]`, and runs the
+        install pipeline for any connector that isn't already in the
+        cstore.
+
+        Also enumerates the `[capabilities.credential]` block of every
+        installed connector and cross-references it against existing
+        bindings — capabilities with no matching binding are surfaced
+        as "unbound" so the operator knows what they still need to set
+        up with `aileron binding setup <FQN>`.
+
+        Idempotent: re-running with no source changes is a no-op
+        (every connector already installed → empty `installed`; every
+        capability already bound → empty `unbound`).
+
+        Per-connector install failures (resolver/fetcher/verifier
+        errors) are surfaced inside `install_failures` and do not
+        abort the sweep — the same "offline-failing per connector"
+        contract that `GET /v1/connectors/check` honors.
+      operationId: sync
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncRequest"
+      responses:
+        "200":
+          description: Sync completed (per-connector install failures inside `install_failures`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /v1/connectors/check:
     get:
       tags: [Connectors]
@@ -3498,6 +3542,88 @@ components:
             $ref: "#/components/schemas/Connector"
         pagination:
           $ref: "#/components/schemas/Pagination"
+
+    SyncRequest:
+      type: object
+      properties:
+        auto_install:
+          type: boolean
+          default: true
+          description: |
+            Auto-approve install consent for missing connectors. v1
+            has no consent prompt — install is unconditional — so this
+            flag is accepted as a no-op for forward compatibility with
+            the planned consent flow. Maps to the CLI's `--yes` flag.
+
+    SyncResponse:
+      type: object
+      required: [actions_seen, required, installed, already_installed, install_failures, unbound]
+      properties:
+        actions_seen:
+          type: integer
+          description: Count of action manifests in `~/.aileron/actions/` walked this run.
+        required:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectorRef"
+          description: |
+            Deduplicated set of (FQN, version) connector references
+            collected across every action's `[[requires.connectors]]`.
+        installed:
+          type: array
+          items:
+            $ref: "#/components/schemas/InstalledConnector"
+          description: |
+            Connectors actually installed by this sweep — i.e. those
+            absent from the cstore at the start of the run.
+        already_installed:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectorRef"
+          description: |
+            Connectors that were already present in the cstore (no
+            install necessary). The idempotent path.
+        install_failures:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectorInstallFailure"
+          description: |
+            Connectors whose install pipeline failed (resolver,
+            fetcher, verifier, hash mismatch, etc.). Sweep continues
+            past per-connector failures.
+        unbound:
+          type: array
+          items:
+            $ref: "#/components/schemas/UnboundCapability"
+          description: |
+            Capabilities (`[capabilities.credential]` blocks) declared
+            by installed connectors for which no binding exists.
+            Sorted by `connector_fqn` then `kind` for deterministic
+            output. Operators bind these manually with
+            `aileron binding setup <FQN>`.
+
+    ConnectorRef:
+      type: object
+      required: [fqn, version]
+      properties:
+        fqn:
+          type: string
+          description: Fully-qualified URI per ADR-0002.
+        version:
+          type: string
+          description: Strict SemVer.
+
+    ConnectorInstallFailure:
+      type: object
+      required: [fqn, version, error]
+      properties:
+        fqn:
+          type: string
+        version:
+          type: string
+        error:
+          type: string
+          description: Human-readable error from the install pipeline.
 
     ConnectorsCheckResponse:
       type: object

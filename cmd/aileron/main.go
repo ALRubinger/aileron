@@ -110,6 +110,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runApproval(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
+	case "sync":
+		return runSync(args[1:], stdout, stderr)
 	case "log":
 		return runLog(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
@@ -143,6 +145,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron approval approve <id>      Approve a pending action — agent's tool call unblocks")
 	fmt.Fprintln(w, "  aileron approval deny <id>         Deny a pending action — agent receives approval_denied")
 	fmt.Fprintln(w, "  aileron status [section]           Show daemon runtime + merged config (runtime, policy, env, notifications, vault)")
+	fmt.Fprintln(w, "  aileron sync [--bind-all] [--yes]  Reconcile installed actions: install missing connectors; report unbound capabilities")
 	fmt.Fprintln(w, "  aileron log [flags]                View the audit trail")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
@@ -1421,6 +1424,159 @@ func runAction(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, actionUsage)
 		return 1
 	}
+}
+
+// syncResult mirrors the wire shape of api.SyncResponse. Defined
+// locally so the CLI binary doesn't pull the full generated types
+// graph just to render this surface.
+type syncResult struct {
+	ActionsSeen      int                       `json:"actions_seen"`
+	Required         []connectorRefWire        `json:"required"`
+	Installed        []installedConnectorWire  `json:"installed"`
+	AlreadyInstalled []connectorRefWire        `json:"already_installed"`
+	InstallFailures  []connectorFailureWire    `json:"install_failures"`
+	Unbound          []unboundCapabilityWire   `json:"unbound"`
+}
+
+type connectorRefWire struct {
+	Fqn     string `json:"fqn"`
+	Version string `json:"version"`
+}
+
+type installedConnectorWire struct {
+	Fqn              string  `json:"fqn"`
+	Version          string  `json:"version"`
+	Hash             string  `json:"hash"`
+	EntryDir         string  `json:"entry_dir"`
+	AlreadyInstalled *bool   `json:"already_installed,omitempty"`
+}
+
+type connectorFailureWire struct {
+	Fqn     string `json:"fqn"`
+	Version string `json:"version"`
+	Error   string `json:"error"`
+}
+
+type unboundCapabilityWire struct {
+	ConnectorFqn string  `json:"connector_fqn"`
+	Kind         string  `json:"kind"`
+	Scope        *string `json:"scope,omitempty"`
+}
+
+// syncFetcher posts to /v1/sync and decodes the response. Replaceable
+// in tests so they don't depend on a running daemon. Same pattern as
+// runtimeStatusFetcher and connectorCheckFetcher.
+var syncFetcher = postSyncRequest
+
+func postSyncRequest(autoInstall bool) (*syncResult, error) {
+	body, _ := json.Marshal(map[string]any{"auto_install": autoInstall})
+	client := &http.Client{Timeout: 5 * time.Minute}
+	req, err := http.NewRequest(http.MethodPost, bindingAPIBaseURL()+"/sync",
+		strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, string(raw))
+	}
+	var out syncResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &out, nil
+}
+
+// runSync implements `aileron sync [--bind-all] [--yes]`. Posts to
+// `/v1/sync`, prints a per-section report, and surfaces unbound
+// capabilities so the operator knows what to bind next.
+//
+// `--bind-all` is parsed but not yet honored: pre-binding requires
+// credential values that have to come from somewhere (interactive
+// prompt for api_key, OAuth dance for oauth2). For v1 this CLI flag
+// is documented as a TODO, the unbound list serves as the operator's
+// next-step guide. Filed as a follow-up — see issue #364.
+//
+// `--yes` is also accepted but has no effect today: the install
+// pipeline is unconditional in v1 (no consent prompt). The flag is
+// honored on the wire so adding consent later doesn't break callers.
+func runSync(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("sync", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	bindAll := flags.Bool("bind-all", false, "(not yet implemented) pre-bind every required capability before exiting")
+	yes := flags.Bool("yes", false, "auto-approve install consent for new connectors (no-op in v1; install is unconditional)")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+
+	resp, err := syncFetcher(*yes)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Walked %d action(s).\n", resp.ActionsSeen)
+
+	if len(resp.Required) == 0 {
+		fmt.Fprintln(stdout, "No connector dependencies declared by any installed action.")
+	} else {
+		fmt.Fprintf(stdout, "%d connector dependency(s) collected:\n", len(resp.Required))
+		for _, r := range resp.Required {
+			fmt.Fprintf(stdout, "  - %s@%s\n", r.Fqn, r.Version)
+		}
+	}
+
+	if len(resp.Installed) > 0 {
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "Installed %d connector(s):\n", len(resp.Installed))
+		for _, c := range resp.Installed {
+			fmt.Fprintf(stdout, "  \033[32m✓\033[0m %s@%s (%s)\n", c.Fqn, c.Version, c.Hash)
+		}
+	}
+	if len(resp.AlreadyInstalled) > 0 {
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "%d connector(s) already installed:\n", len(resp.AlreadyInstalled))
+		for _, r := range resp.AlreadyInstalled {
+			fmt.Fprintf(stdout, "  - %s@%s\n", r.Fqn, r.Version)
+		}
+	}
+	if len(resp.InstallFailures) > 0 {
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "\033[31m%d install failure(s):\033[0m\n", len(resp.InstallFailures))
+		for _, f := range resp.InstallFailures {
+			fmt.Fprintf(stdout, "  ✗ %s@%s — %s\n", f.Fqn, f.Version, f.Error)
+		}
+	}
+	if len(resp.Unbound) > 0 {
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "%d unbound capability(s):\n", len(resp.Unbound))
+		for _, u := range resp.Unbound {
+			scope := ""
+			if u.Scope != nil && *u.Scope != "" {
+				scope = " — " + *u.Scope
+			}
+			fmt.Fprintf(stdout, "  - %s [%s]%s\n", u.ConnectorFqn, u.Kind, scope)
+		}
+		fmt.Fprintln(stdout, "  Bind each with: aileron binding setup <FQN>")
+	}
+
+	if *bindAll {
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stderr, "warning: --bind-all is not yet implemented in v1; run 'aileron binding setup <FQN>' for each unbound capability listed above.")
+	}
+
+	// Exit non-zero on install failures so operators wiring sync
+	// into shell scripts can branch on it.
+	if len(resp.InstallFailures) > 0 {
+		return 1
+	}
+	return 0
 }
 
 // runConnectorInstall posts to /v1/connectors/install and renders the
