@@ -62,7 +62,12 @@ func TestInjectCredential_DeniedOnKindMismatchAgainstManifest(t *testing.T) {
 
 func TestInjectCredential_BindingRequiredWhenNoResolver(t *testing.T) {
 	// Manifest declared the kind, the connector emitted a credential
-	// reference, but the action declared no [[bindings]] entry — binding_required.
+	// reference, but no binding has been created for this connector —
+	// binding_required. The message must name the connector FQN, the
+	// credential kind, and point operators at `aileron binding setup`
+	// (regression test for #414: the old wording falsely blamed a
+	// "[[bindings]]" block in the action manifest, sending operators
+	// chasing a non-existent file edit).
 	st := &hostState{connectorFQN: "github://x/y", expectedCredentialKind: "oauth2"}
 	req, _ := http.NewRequest("GET", "https://example.com", nil)
 	err := injectCredential(context.Background(), st, req, "oauth2")
@@ -74,6 +79,14 @@ func TestInjectCredential_BindingRequiredWhenNoResolver(t *testing.T) {
 	}
 	if got, _ := err.Details["boundary_detail"].(string); got != "action" {
 		t.Errorf("boundary_detail = %q, want action", got)
+	}
+	if strings.Contains(err.Message, "[[bindings]]") {
+		t.Errorf("message still references [[bindings]] (the misleading wording from #414): %q", err.Message)
+	}
+	for _, want := range []string{"github://x/y", "oauth2", "aileron binding setup"} {
+		if !strings.Contains(err.Message, want) {
+			t.Errorf("message = %q, want substring %q", err.Message, want)
+		}
 	}
 }
 

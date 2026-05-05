@@ -97,9 +97,9 @@ func run(log *slog.Logger) error {
 //
 // Without this branch, the standalone server always took the in-memory
 // path, which silently dropped every credential binding the moment the
-// process exited — surfacing later as "action declares no [[bindings]]
-// entry for this connector" when the launch gateway tried to resolve
-// the same binding against the persistent file vault.
+// process exited — surfacing later as a `binding_required` error from
+// the credential mediation path when the launch gateway tried to
+// resolve the same binding against the persistent file vault.
 //
 // Extracted from `run` so unit tests can exercise the branching
 // without bringing up an HTTP server. `prompter` is forwarded to

@@ -52,7 +52,7 @@ func TestSelectVault_NonTTYFallsBackToMemoryEvenWithFile(t *testing.T) {
 // server always took the in-memory path, even when a persistent vault
 // file existed. That silently dropped every binding created via
 // `aileron binding setup` the moment the server process exited,
-// surfacing later as a "no [[bindings]] entry" error from the launch
+// surfacing later as a `binding_required` error from the launch
 // gateway. After this change the server unlocks the persistent vault
 // when conditions allow.
 func TestSelectVault_PresentFileAndTTYUnlocks(t *testing.T) {

@@ -385,7 +385,9 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 	}
 	if s.credentialResolver == nil {
 		return newBindingRequired(
-			"http_request: action declares no [[bindings]] entry for this connector",
+			fmt.Sprintf(
+				"http_request: no credential binding found for connector %s (kind: %s); run `aileron binding setup %s` to create one or `aileron binding list` to inspect existing bindings",
+				s.connectorFQN, s.expectedCredentialKind, s.connectorFQN),
 			map[string]any{
 				"connector":       s.connectorFQN,
 				"capability_kind": s.expectedCredentialKind,
