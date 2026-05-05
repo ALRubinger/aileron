@@ -3,8 +3,6 @@ title: "Privacy Policy"
 description: "Aileron is open source and runs locally on your computer. We don't capture or store your data — and you can read the code to verify it."
 ---
 
-*Effective: May 5, 2026*
-
 ## The short version
 
 Aileron is an open-source project, stewarded by its creator. No company or organization runs it. The purpose of Aileron is to give you security and confidence that no agent, no LLM, and not Aileron itself has direct access to your protected information beyond what you explicitly provide.
@@ -58,10 +56,6 @@ Because Aileron runs on your computer, Google user data goes directly between Go
 ## Children's privacy
 
 Aileron is not intended for children under 13, and we do not knowingly collect data from them.
-
-## Changes to this policy
-
-If this policy changes in a material way, we'll update the Effective date at the top and post a note on the homepage. Smaller corrections (typos, clarifications) we may make without notice.
 
 ## Contact
 
