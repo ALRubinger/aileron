@@ -29,12 +29,13 @@ func TestCommsServer_ReadMessages_Empty(t *testing.T) {
 	}
 }
 
-// TestCommsServer_SendMessage_FailsClosed asserts the post-#419
-// regression contract: send-shaped requests fail-closed because the
-// in-pty approval surface is gone. The error message names the
-// reason so agents can recover (e.g. suggest the user run the
-// action via a connector with `[approval] required = true` instead).
-func TestCommsServer_SendMessage_FailsClosed(t *testing.T) {
+// TestCommsServer_SendMessage_NoQueueFailsClosed asserts the legacy
+// fallback: when a CommsServer is constructed without an
+// [approval.ActionApprovalQueue], send-shaped requests fail-closed
+// rather than block indefinitely. Production launch always wires
+// the queue (#428); this branch protects callers that haven't
+// updated yet (e.g. tests that don't care about the approval flow).
+func TestCommsServer_SendMessage_NoQueueFailsClosed(t *testing.T) {
 	srv, sock := newCommsServer(t)
 	defer srv.Close()
 
@@ -42,17 +43,17 @@ func TestCommsServer_SendMessage_FailsClosed(t *testing.T) {
 		Method: "send_message", Service: "slack", Channel: "#x", Body: "hi",
 	})
 	if resp.OK {
-		t.Errorf("OK = true; want fail-closed under post-#419 launch path")
+		t.Errorf("OK = true; want fail-closed when no queue wired")
 	}
 	if resp.Error == "" {
-		t.Error("Error is empty; want a clear regression message")
+		t.Error("Error is empty; want a clear fallback message")
 	}
 }
 
-// TestCommsServer_DraftReply_FailsClosed: same regression as
-// sendMessage. Tracked separately so a future wire-through doesn't
-// have to retire two tests at once.
-func TestCommsServer_DraftReply_FailsClosed(t *testing.T) {
+// TestCommsServer_DraftReply_NoQueueFailsClosed: same fallback as
+// sendMessage. Kept separate so a future change to either method's
+// fallback shape doesn't have to retire two tests at once.
+func TestCommsServer_DraftReply_NoQueueFailsClosed(t *testing.T) {
 	srv, sock := newCommsServer(t)
 	defer srv.Close()
 
@@ -60,14 +61,16 @@ func TestCommsServer_DraftReply_FailsClosed(t *testing.T) {
 		Method: "draft_reply", ReplyTo: "m1", Body: "ok",
 	})
 	if resp.OK {
-		t.Errorf("OK = true; want fail-closed")
+		t.Errorf("OK = true; want fail-closed when no queue wired")
 	}
 }
 
-// TestCommsServer_HTTPRequest_FailsClosed: the generic `http_request`
-// MCP tool (api_key-binding-injecting fetch) had its own pty approval
-// prompt. Same regression.
-func TestCommsServer_HTTPRequest_FailsClosed(t *testing.T) {
+// TestCommsServer_HTTPRequest_NoQueueFailsClosed: the generic
+// `http_request` MCP tool (api_key-binding-injecting fetch) had its
+// own pty approval prompt pre-#419 and now routes through the same
+// queue (#428). Same fallback as the other two when no queue is
+// supplied.
+func TestCommsServer_HTTPRequest_NoQueueFailsClosed(t *testing.T) {
 	srv, sock := newCommsServer(t)
 	defer srv.Close()
 
@@ -75,7 +78,7 @@ func TestCommsServer_HTTPRequest_FailsClosed(t *testing.T) {
 		Method: "http_request", Service: "GET", Channel: "https://example.com",
 	})
 	if resp.OK {
-		t.Errorf("OK = true; want fail-closed")
+		t.Errorf("OK = true; want fail-closed when no queue wired")
 	}
 }
 
@@ -151,7 +154,7 @@ func newCommsServer(t *testing.T) (*launch.CommsServer, string) {
 	t.Cleanup(func() { os.Remove(sock) })
 
 	q := launch.NewNotifyQueue(100, nil)
-	srv, err := launch.NewCommsServer(sock, q, []comms.Listener{}, "", "test-session")
+	srv, err := launch.NewCommsServer(sock, q, []comms.Listener{}, "", "test-session", nil)
 	if err != nil {
 		t.Fatalf("NewCommsServer: %v", err)
 	}

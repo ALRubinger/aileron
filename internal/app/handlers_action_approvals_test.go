@@ -386,7 +386,7 @@ func TestWatchActionApprovals_StreamsPendingAndResolved(t *testing.T) {
 		t.Errorf("pending.action_name = %q", pending.ActionName)
 	}
 
-	if err := q.Decide(a.ID, false, "wrong recipient"); err != nil {
+	if err := q.Decide(a.ID, false, "wrong recipient", nil); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	ev, err = readSSEEvent(r)

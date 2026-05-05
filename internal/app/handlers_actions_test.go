@@ -446,7 +446,7 @@ func TestRunAction_ApprovalRequired_ApprovedReturnsResult(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			pending := srv.actionApprovals.List()
 			if len(pending) == 1 {
-				if err := srv.actionApprovals.Decide(pending[0].ID, true, ""); err != nil {
+				if err := srv.actionApprovals.Decide(pending[0].ID, true, "", nil); err != nil {
 					t.Errorf("Decide: %v", err)
 				}
 				return
@@ -492,7 +492,7 @@ func TestRunAction_ApprovalRequired_DeniedReturnsForbidden(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			pending := srv.actionApprovals.List()
 			if len(pending) == 1 {
-				_ = srv.actionApprovals.Decide(pending[0].ID, false, "wrong recipient")
+				_ = srv.actionApprovals.Decide(pending[0].ID, false, "wrong recipient", nil)
 				return
 			}
 			time.Sleep(10 * time.Millisecond)

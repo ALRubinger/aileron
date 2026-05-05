@@ -110,6 +110,16 @@ type Config struct {
 	// for tests that want to drive the UnlockLocalVault handler
 	// without provisioning a real vault file.
 	LocalVaultPath string
+
+	// ActionApprovals overrides the default in-process action-
+	// approval queue. Production wiring under `aileron launch`
+	// passes a shared queue here so the embedded gateway *and* the
+	// CommsServer (which fields `aileron-mcp`'s send-shaped tool
+	// calls per #428) register their pending entries on the same
+	// queue — one webapp surface, one SSE stream, one decision path.
+	// Nil falls back to a fresh queue, preserving the historic
+	// behaviour for callers that don't need cross-component sharing.
+	ActionApprovals *approval.ActionApprovalQueue
 }
 
 // NewHandler creates a fully-wired Aileron control plane HTTP handler
@@ -355,7 +365,11 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// /v1/action-approvals; consumed by RunAction when an action's
 	// manifest declares [approval] required = true. Distinct from the
 	// rich governance orchestrator above; converges with it post-MVP.
-	server.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	if cfg.ActionApprovals != nil {
+		server.actionApprovals = cfg.ActionApprovals
+	} else {
+		server.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	}
 	server.actionApprovalTTL = 5 * time.Minute
 
 	// On Register, fire a notification so the user knows the agent is

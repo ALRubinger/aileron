@@ -28,7 +28,7 @@ func TestActionApprovalQueue_RegisterAndDecideUnblocksWaiter(t *testing.T) {
 		close(done)
 	}()
 
-	if err := q.Decide(a.ID, true, ""); err != nil {
+	if err := q.Decide(a.ID, true, "", nil); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	<-done
@@ -57,7 +57,7 @@ func TestActionApprovalQueue_DenyCarriesReason(t *testing.T) {
 		resultCh <- result{d, err}
 	}()
 
-	if err := q.Decide(a.ID, false, "wrong recipient"); err != nil {
+	if err := q.Decide(a.ID, false, "wrong recipient", nil); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	r := <-resultCh
@@ -80,10 +80,10 @@ func TestActionApprovalQueue_DecideTwiceReturnsNotFound(t *testing.T) {
 	q := NewActionApprovalQueue(nil, nil)
 	a := q.Register("send-email", "github://x/y", "", nil)
 
-	if err := q.Decide(a.ID, true, ""); err != nil {
+	if err := q.Decide(a.ID, true, "", nil); err != nil {
 		t.Fatalf("first Decide: %v", err)
 	}
-	err := q.Decide(a.ID, true, "")
+	err := q.Decide(a.ID, true, "", nil)
 	if !errors.Is(err, ErrActionApprovalNotFound) {
 		t.Errorf("second Decide err = %v, want ErrActionApprovalNotFound", err)
 	}
@@ -94,7 +94,7 @@ func TestActionApprovalQueue_DecideTwiceReturnsNotFound(t *testing.T) {
 // channel, or never existed) should produce a clear error.
 func TestActionApprovalQueue_DecideUnknownIDReturnsNotFound(t *testing.T) {
 	q := NewActionApprovalQueue(nil, nil)
-	err := q.Decide("act-does-not-exist", true, "")
+	err := q.Decide("act-does-not-exist", true, "", nil)
 	if !errors.Is(err, ErrActionApprovalNotFound) {
 		t.Errorf("err = %v, want ErrActionApprovalNotFound", err)
 	}
@@ -118,7 +118,7 @@ func TestActionApprovalQueue_WaitTimesOutWhenNoDecision(t *testing.T) {
 	// resolved or the queue process exits). This matters for the
 	// race where a user finally clicks just as the runtime gives up
 	// — we don't want a spurious "not found" in the webapp.
-	if err := q.Decide(a.ID, true, ""); err != nil {
+	if err := q.Decide(a.ID, true, "", nil); err != nil {
 		t.Errorf("Decide after timeout = %v, want nil", err)
 	}
 }
@@ -288,7 +288,7 @@ func TestActionApprovalQueue_SubscribeReceivesPendingAndResolved(t *testing.T) {
 		t.Fatal("timed out waiting for pending event")
 	}
 
-	if err := q.Decide(a.ID, false, "wrong recipient"); err != nil {
+	if err := q.Decide(a.ID, false, "wrong recipient", nil); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	select {
@@ -396,7 +396,7 @@ func TestActionApprovalQueue_ConcurrentDecides(t *testing.T) {
 		wg.Add(1)
 		go func(a *ActionApproval) {
 			defer wg.Done()
-			if err := q.Decide(a.ID, true, ""); err != nil {
+			if err := q.Decide(a.ID, true, "", nil); err != nil {
 				t.Errorf("Decide(%s): %v", a.ID, err)
 			}
 		}(approvals[i])

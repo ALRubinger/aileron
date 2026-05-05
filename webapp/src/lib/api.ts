@@ -89,8 +89,18 @@ export async function unlockLocalVault(passphrase: string): Promise<LocalVaultSt
 // yes/no decision. The agent surfaces the approval URL to the user via
 // templated MCP tool descriptions; the user decides here.
 
+/** Discriminates the user-facing card layout the webapp renders for a
+ *  pending approval. Mirrors `PendingActionApprovalKind` in the Go
+ *  codegen — keep the union in sync if the spec adds a new kind. */
+export type PendingActionApprovalKind =
+	| 'action'
+	| 'comms_send'
+	| 'comms_draft'
+	| 'http_request';
+
 export type PendingActionApproval = {
 	id: string;
+	kind: PendingActionApprovalKind;
 	action_name: string;
 	connector_fqn?: string;
 	args?: Record<string, unknown>;
@@ -181,14 +191,25 @@ export function watchActionApprovals(sub: ActionApprovalSubscriber): () => void 
  *  proceeds normally, on `approved=false` it returns an
  *  `approval_denied` failure envelope to the agent with `reason` in the
  *  message body. Returns null on success (server replies 200 with empty
- *  body); throws on 404 (already resolved) or other non-2xx. */
+ *  body); throws on 404 (already resolved) or other non-2xx.
+ *
+ *  `editedPayload` carries kind-specific fields the user changed
+ *  before approving — most prominently `{ body: "...new..." }` for
+ *  `comms_draft` approvals (#428). The CommsServer's dispatcher
+ *  reads this and sends the user-edited bytes rather than the
+ *  agent's original draft. */
 export async function decideActionApproval(
 	approvalId: string,
 	approved: boolean,
-	reason?: string
+	reason?: string,
+	editedPayload?: Record<string, unknown>
 ): Promise<null> {
+	const body: Record<string, unknown> = { approved, reason: reason ?? '' };
+	if (editedPayload && Object.keys(editedPayload).length > 0) {
+		body.edited_payload = editedPayload;
+	}
 	return apiFetch(`/v1/action-approvals/${approvalId}/decide`, {
 		method: 'POST',
-		body: JSON.stringify({ approved, reason: reason ?? '' })
+		body: JSON.stringify(body)
 	});
 }

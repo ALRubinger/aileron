@@ -72,7 +72,11 @@ func (s *apiServer) DecideActionApproval(w http.ResponseWriter, r *http.Request,
 	if req.Reason != nil {
 		reason = *req.Reason
 	}
-	err := s.actionApprovals.Decide(approvalID, req.Approved, reason)
+	var editedPayload map[string]any
+	if req.EditedPayload != nil {
+		editedPayload = *req.EditedPayload
+	}
+	err := s.actionApprovals.Decide(approvalID, req.Approved, reason, editedPayload)
 	if errors.Is(err, approval.ErrActionApprovalNotFound) {
 		writeError(w, http.StatusNotFound, "not_found",
 			"approval id is unknown or already resolved")
@@ -205,15 +209,21 @@ func (s *apiServer) WatchActionApprovals(w http.ResponseWriter, r *http.Request)
 // only emits Go types for schemas referenced from a JSON-content
 // operation, and SSE event payloads have no such anchor.
 type resolvedActionApprovalDTO struct {
-	ID        string    `json:"id"`
-	Approved  bool      `json:"approved"`
-	Reason    string    `json:"reason,omitempty"`
-	DecidedAt time.Time `json:"decided_at"`
+	ID        string                `json:"id"`
+	Kind      approval.ApprovalKind `json:"kind"`
+	Approved  bool                  `json:"approved"`
+	Reason    string                `json:"reason,omitempty"`
+	DecidedAt time.Time             `json:"decided_at"`
 }
 
 func toResolvedActionApproval(r *approval.ResolvedActionApproval) resolvedActionApprovalDTO {
+	kind := r.Kind
+	if kind == "" {
+		kind = approval.ApprovalKindAction
+	}
 	return resolvedActionApprovalDTO{
 		ID:        r.ID,
+		Kind:      kind,
 		Approved:  r.Approved,
 		Reason:    r.Reason,
 		DecidedAt: r.DecidedAt,
@@ -243,8 +253,13 @@ func toPendingActionApproval(a *approval.ActionApproval) api.PendingActionApprov
 	if args == nil {
 		args = map[string]any{}
 	}
+	kind := a.Kind
+	if kind == "" {
+		kind = approval.ApprovalKindAction
+	}
 	out := api.PendingActionApproval{
 		Id:          a.ID,
+		Kind:        api.PendingActionApprovalKind(kind),
 		ActionName:  a.ActionName,
 		RequestedAt: a.RequestedAt,
 	}

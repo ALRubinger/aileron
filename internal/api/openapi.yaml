@@ -4408,7 +4408,7 @@ components:
 
     PendingActionApproval:
       type: object
-      required: [id, action_name, requested_at]
+      required: [id, kind, action_name, requested_at]
       description: |
         One pending action-level approval request. Surfaced to the
         webapp / CLI for user decision. The runtime is blocked on the
@@ -4418,20 +4418,46 @@ components:
         id:
           type: string
           description: Opaque server-minted identifier for this request.
+        kind:
+          type: string
+          enum: [action, comms_send, comms_draft, http_request]
+          description: |
+            Discriminates the user-facing card layout the webapp
+            should render.
+
+              - `action` — historic action-manifest gate (default).
+              - `comms_send` — `aileron-mcp`'s `send_message` tool;
+                args carry `service`, `channel`, `body`.
+              - `comms_draft` — `aileron-mcp`'s `draft_reply` tool;
+                args carry `service`, `channel`, `original_author`,
+                `original_body`, `draft_body`, `reply_to`. The
+                webapp surfaces `draft_body` as an editable field
+                and ships the edited bytes back via
+                `ActionApprovalDecision.edited_payload.body`.
+              - `http_request` — `aileron-mcp`'s `http_request` tool;
+                args carry `method`, `url`, `body`, `secret_name`
+                (the matched binding name; the value is never
+                surfaced to the webapp).
         action_name:
           type: string
-          description: Manifest name of the gated action (e.g. "send-email").
+          description: |
+            For `kind=action`, the manifest name of the gated action
+            (e.g. "send-email"). For non-action kinds, a short label
+            describing what's being approved ("send_message",
+            "draft_reply", "http_request").
         connector_fqn:
           type: string
           description: |
             Connector FQN the action's first execute step targets, surfaced
             so the user can see which integration would actually run.
+            Empty for non-action kinds.
         args:
           type: object
           additionalProperties: true
           description: |
-            Call-time arguments the agent passed in. Surfaced verbatim so
-            the user reviews exactly what would be sent.
+            Kind-specific arguments. For `action`, the call-time
+            arguments the agent passed in. For comms / HTTP kinds,
+            see the `kind` enum description above.
         session_id:
           type: string
           description: |
@@ -4464,6 +4490,16 @@ components:
             Optional commentary from the user. Surfaced to the agent in
             the deny path so it can recover gracefully (e.g. "wrong
             recipient — I'll redraft").
+        edited_payload:
+          type: object
+          additionalProperties: true
+          description: |
+            Kind-specific fields the user changed before approving — most
+            prominently the edited reply body for `kind=comms_draft`
+            (`{ "body": "...new..." }`). Omitted when the user approved
+            without edits, or when the kind doesn't support editing. The
+            dispatcher (e.g. CommsServer) reads this to send the
+            user-edited bytes rather than the agent's original draft.
 
     ResolvedActionApproval:
       type: object

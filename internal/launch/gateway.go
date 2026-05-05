@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/app"
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -49,9 +50,10 @@ type Gateway struct {
 // still want the /v1/vault/unlock handler wired (e.g. to assert
 // "already unlocked → 409").
 type gatewayConfig struct {
-	Vault          vault.Vault
-	LocalVaultPath string
-	Log            *slog.Logger
+	Vault           vault.Vault
+	LocalVaultPath  string
+	ActionApprovals *approval.ActionApprovalQueue
+	Log             *slog.Logger
 }
 
 // StartGateway constructs an Aileron app handler, binds it to an
@@ -97,6 +99,7 @@ func StartGateway(ctx context.Context, cfg gatewayConfig) (*Gateway, error) {
 	handler, err := app.NewHandlerWithConfig(log, app.Config{
 		Vault:               cfg.Vault,
 		LocalVaultPath:      cfg.LocalVaultPath,
+		ActionApprovals:     cfg.ActionApprovals,
 		DisableAugmentation: true,
 		WebappURL:           url,
 	})

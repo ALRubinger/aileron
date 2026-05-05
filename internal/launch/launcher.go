@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/comms"
 	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
@@ -109,6 +110,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("vault: %w", err)
 	}
 
+	// Construct the action-approval queue once and share it across
+	// the embedded gateway and the CommsServer. Both register
+	// pending entries here; the webapp's `/approvals` page renders a
+	// single SSE stream for all kinds (action / comms-send /
+	// comms-draft / http-request) — see #428.
+	approvalQueue := approval.NewActionApprovalQueue(nil, nil)
+
 	// Start the embedded Aileron gateway when the agent supports
 	// LLM-endpoint override via env var. The gateway either shares
 	// the user's just-unlocked vault (stderr mode) or runs in the
@@ -119,9 +127,10 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	var gateway *Gateway
 	if config.Agent.LLMEndpointEnv() != "" {
 		gw, err := StartGateway(ctx, gatewayConfig{
-			Vault:          unlockedVault,
-			LocalVaultPath: vaultPathForGateway(mode),
-			Log:            slog.Default(),
+			Vault:           unlockedVault,
+			LocalVaultPath:  vaultPathForGateway(mode),
+			ActionApprovals: approvalQueue,
+			Log:             slog.Default(),
 		})
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("starting gateway: %w", err)
@@ -217,7 +226,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// paths fail-closed under the new launch (no in-pty approval
 	// surface; webapp wire-through pending) — see commsserver.go for
 	// the regression detail.
-	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, auditLog, sessionID)
+	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, auditLog, sessionID, approvalQueue)
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("starting comms server: %w", err)
 	}
