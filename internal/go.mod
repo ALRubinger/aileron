@@ -13,6 +13,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.4
 	github.com/oapi-codegen/oapi-codegen/v2 v2.6.0
 	github.com/oapi-codegen/runtime v1.3.1
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/slack-go/slack v0.21.1
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/tetratelabs/wazero v1.11.0
@@ -81,7 +82,6 @@ require (
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/oasdiff/yaml v0.0.0-20250309154309-f31be36b4037 // indirect
 	github.com/oasdiff/yaml3 v0.0.0-20250309153720-d2182401db90 // indirect
-	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
