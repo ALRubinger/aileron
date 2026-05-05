@@ -46,6 +46,12 @@ tags:
   - name: Connected Accounts
   - name: TEE
   - name: Health
+  - name: Vault
+    description: |
+      Local file vault management for `aileron launch`. Single-user, no
+      auth: the daemon is bound to loopback and the operator running it.
+      Distinct from the cloud-tier `/v1/users/me/passphrase/*` endpoints,
+      which manage per-user KEK sessions for the multi-tenant SaaS path.
   - name: Gateway
     description: |
       Dual-protocol LLM gateway. Aileron speaks both OpenAI Chat Completions
@@ -515,6 +521,88 @@ paths:
                 $ref: "#/components/schemas/VaultStatusResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /v1/vault/status:
+    get:
+      tags: [Vault]
+      summary: Get local vault lock status
+      description: |
+        Returns the state of the local file vault that backs `aileron launch`.
+        Distinct from `/v1/users/me/vault/status`, which reports the cloud-tier
+        per-user KEK session. Single-user, no auth — the local vault belongs
+        to the operator running the daemon.
+
+        States:
+          - `missing`  — no vault file at the canonical path
+          - `locked`   — vault file present but no passphrase has been entered
+          - `unlocked` — passphrase accepted; vault operations succeed
+
+        Vault-needing endpoints (action execution, binding setup, gateway
+        chat completions) return `423 Locked` while the vault is locked.
+        The webapp polls this endpoint to drive the passphrase modal —
+        when the daemon reports locked, the modal opens; on unlock, the
+        webapp resumes any pending requests.
+      operationId: getLocalVaultStatus
+      security: []
+      responses:
+        "200":
+          description: Local vault status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalVaultStatusResponse"
+
+  /v1/vault/unlock:
+    post:
+      tags: [Vault]
+      summary: Unlock the local vault with a passphrase
+      description: |
+        Unlocks the local file vault by deriving the KEK from the supplied
+        passphrase via Argon2id and verifying it against the stored
+        verification blob. On success the daemon caches the unlocked vault
+        for the lifetime of the process — vault-needing endpoints stop
+        returning `423 Locked`.
+
+        Distinct from `/v1/users/me/passphrase/unlock`, which takes a
+        client-derived KEK over HTTPS for the cloud-tier per-user vault.
+        The local endpoint accepts the passphrase directly because the
+        daemon and the webapp share a single trust boundary (loopback,
+        single user).
+      operationId: unlockLocalVault
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocalVaultUnlockRequest"
+      responses:
+        "200":
+          description: Vault unlocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalVaultStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Wrong passphrase
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No local vault file at the canonical path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Vault already unlocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LocalVaultStatusResponse"
 
   /v1/intents:
     post:
@@ -4920,6 +5008,36 @@ components:
           type: string
           format: date-time
           description: When the current KEK session expires (omitted when locked)
+
+    LocalVaultStatusResponse:
+      type: object
+      required: [locked, state]
+      properties:
+        locked:
+          type: boolean
+          description: |
+            Convenience boolean — true when state is `missing` or `locked`,
+            false when `unlocked`. The webapp uses this to drive the modal.
+        state:
+          type: string
+          enum: [missing, locked, unlocked]
+          description: |
+            Lifecycle state of the local vault file.
+              - `missing`  — no vault file at the canonical path
+              - `locked`   — vault file present, awaiting passphrase
+              - `unlocked` — passphrase accepted; the daemon holds the KEK
+
+    LocalVaultUnlockRequest:
+      type: object
+      required: [passphrase]
+      properties:
+        passphrase:
+          type: string
+          description: |
+            The vault passphrase. Sent in plaintext over the loopback
+            connection — the daemon derives the KEK locally via Argon2id.
+            Distinct from `UnlockVaultRequest`, which carries a
+            client-derived KEK for the cloud-tier multi-tenant flow.
 
     TeeStatus:
       type: object

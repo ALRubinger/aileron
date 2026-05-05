@@ -1,14 +1,18 @@
 // Local-webapp API client.
 //
 // The daemon serves this webapp at the same origin it serves the
-// `/v1/*` API. No JWT, no token refresh, no vault-locked retry — the
-// vault is unlocked at launch and stays unlocked for the session's
-// lifetime, and there's no multi-user auth boundary on the local
-// surface. If a request fails, the caller surfaces the error.
+// `/v1/*` API. No JWT, no token refresh — there's no multi-user auth
+// boundary on the local surface. The one cross-cutting concern is
+// vault-locked handling: under `aileron launch` the daemon may start
+// vault-locked and refuse vault-needing endpoints with 423; the
+// passphrase modal (#429) opens, the user unlocks, and the original
+// request is retried.
 //
 // See ../../../ui/src/lib/api.ts for the cloud-tier reference client
 // (frozen). The shape is deliberately pared-down here — only what
-// the action-approval flow needs.
+// the local launch UX needs.
+
+import { onVaultLocked } from './vault.svelte';
 
 const API_BASE = '';
 
@@ -20,8 +24,56 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 			...(init?.headers ?? {})
 		}
 	});
+	if (res.status === 423) {
+		// Vault locked. Open the passphrase modal; on unlock, retry
+		// the original request once. The modal is responsible for
+		// resolving the promise we hand it via onVaultLocked.
+		return onVaultLocked(() => apiFetch<T>(path, init));
+	}
 	if (res.status === 204) return null as T;
 	if (!res.ok) {
+		const body = await res
+			.json()
+			.catch(() => ({ error: { message: res.statusText } }));
+		throw new Error(body?.error?.message || res.statusText);
+	}
+	return res.json();
+}
+
+// --- Vault unlock (#429) ---
+
+export type LocalVaultStatus = {
+	locked: boolean;
+	state: 'missing' | 'locked' | 'unlocked';
+};
+
+/** Snapshot of the local vault's lock state. The webapp polls this on
+ *  load so it can open the modal even if the user hasn't yet
+ *  triggered a vault-needing call. */
+export async function getLocalVaultStatus(): Promise<LocalVaultStatus> {
+	const res = await fetch(`${API_BASE}/v1/vault/status`);
+	if (!res.ok) {
+		throw new Error(`vault status: ${res.statusText}`);
+	}
+	return res.json();
+}
+
+/** Submits the passphrase. Returns the new status on success. Throws
+ *  with a recognisable message on 401 (wrong passphrase) so the modal
+ *  can keep the field open and let the user retry. */
+export async function unlockLocalVault(passphrase: string): Promise<LocalVaultStatus> {
+	const res = await fetch(`${API_BASE}/v1/vault/unlock`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ passphrase })
+	});
+	if (res.status === 401) {
+		throw new Error('wrong passphrase');
+	}
+	if (res.status === 404) {
+		throw new Error('no vault file at the expected path');
+	}
+	if (!res.ok && res.status !== 409) {
 		const body = await res
 			.json()
 			.catch(() => ({ error: { message: res.statusText } }));
