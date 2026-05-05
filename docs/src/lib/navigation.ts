@@ -57,7 +57,8 @@ export const navigation: NavItem[] = [
   {
     label: 'Guides',
     children: [
-      { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' }
+      { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' },
+      { label: 'Authoring an Action', href: '/guides/authoring-an-action/' }
     ]
   },
   {
