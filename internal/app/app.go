@@ -149,7 +149,16 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	}
 
 	// --- Notifier ---
-	notifier := notify.NewLogNotifier(log)
+	// Multi-notifier: log first (always works), desktop second (best-
+	// effort native OS notifications via osascript / notify-send). The
+	// desktop notifier is what nudges the user toward the webapp when
+	// an action-approval lands; the log notifier is the durable
+	// backstop. Slack / email notifiers (the existing rich-governance
+	// channels) compose into the same Multi when configured.
+	notifier := notify.NewMulti(
+		notify.NewLogNotifier(log),
+		notify.NewDesktopNotifier(log),
+	)
 
 	// --- LLM gateway (dual-protocol: OpenAI + Anthropic) ---
 	gatewayCfg, err := config.LoadGatewayConfig()
@@ -258,6 +267,25 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// rich governance orchestrator above; converges with it post-MVP.
 	server.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
 	server.actionApprovalTTL = 5 * time.Minute
+
+	// On Register, fire a notification so the user knows the agent is
+	// blocked. AILERON_WEBAPP_URL points at the webapp's /approvals
+	// page when set (typical: launch sets it after starting the
+	// gateway). When unset, the notification still fires but uses a
+	// fallback "Open the Aileron webapp" prompt — the operator at
+	// least sees that something is pending.
+	webappURL := os.Getenv("AILERON_WEBAPP_URL")
+	server.actionApprovals.SetOnRegister(func(a *approval.ActionApproval) {
+		summary := a.ActionName
+		if a.ConnectorFQN != "" {
+			summary = a.ActionName + " on " + a.ConnectorFQN
+		}
+		_ = notifier.Notify(context.Background(), notify.Notification{
+			ApprovalID: a.ID,
+			Summary:    summary,
+			ReviewURL:  webappURL,
+		})
+	})
 
 	// --- Intercept engine (stage 4) ---
 	// When augmentation is disabled (e.g. `aileron launch` with MCP as
