@@ -117,6 +117,19 @@ type ActionApprovalQueue struct {
 	// now returns "now" for RequestedAt and DecidedAt. Tests inject a
 	// fake clock.
 	now func() time.Time
+
+	// onRegister is invoked synchronously by Register after a new
+	// pending entry has been added. Production wiring fires a desktop
+	// notification + log line so the user knows to look at the webapp;
+	// tests inject a recorder. Nil = no-op.
+	//
+	// The callback runs on the Register caller's goroutine, so the
+	// runtime's RunAction is blocked behind it — it should be fast.
+	// Side-effects that may block (network, slow shell-out) should
+	// dispatch their own goroutine. Errors returned (or panics) are
+	// not propagated to Register's caller; this is a notification path,
+	// not a gating one.
+	onRegister func(*ActionApproval)
 }
 
 // NewActionApprovalQueue returns an empty queue using the supplied
@@ -136,11 +149,26 @@ func NewActionApprovalQueue(idGen func() string, now func() time.Time) *ActionAp
 	}
 }
 
-// Register creates and tracks a new pending approval. The returned
-// pointer is the caller's handle for [ActionApproval.Wait].
-func (q *ActionApprovalQueue) Register(actionName, connectorFQN, sessionID string, args map[string]any) *ActionApproval {
+// SetOnRegister installs a callback fired synchronously after each
+// successful Register. Pass nil to clear. Safe to call concurrently
+// with Register/List/Decide/Get; the swap is mutex-protected.
+//
+// Production wiring uses this to fire a desktop notification + log
+// line on each new pending approval so the user knows to look at the
+// webapp. Test code uses it to record call sequences.
+func (q *ActionApprovalQueue) SetOnRegister(fn func(*ActionApproval)) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.onRegister = fn
+}
+
+// Register creates and tracks a new pending approval. The returned
+// pointer is the caller's handle for [ActionApproval.Wait]. When an
+// onRegister callback has been installed via SetOnRegister, it is
+// invoked synchronously after the entry is in the map and before
+// Register returns. Callback errors / panics are not propagated.
+func (q *ActionApprovalQueue) Register(actionName, connectorFQN, sessionID string, args map[string]any) *ActionApproval {
+	q.mu.Lock()
 	a := &ActionApproval{
 		ID:           q.idGen(),
 		ActionName:   actionName,
@@ -151,6 +179,17 @@ func (q *ActionApprovalQueue) Register(actionName, connectorFQN, sessionID strin
 		decision:     make(chan ActionDecision, 1),
 	}
 	q.pending[a.ID] = a
+	cb := q.onRegister
+	q.mu.Unlock()
+	if cb != nil {
+		// Defer the panic recover so a misbehaving notifier never
+		// takes down RunAction. Notifications are nice-to-have; the
+		// queue's invariants must hold regardless.
+		func() {
+			defer func() { _ = recover() }()
+			cb(a)
+		}()
+	}
 	return a
 }
 

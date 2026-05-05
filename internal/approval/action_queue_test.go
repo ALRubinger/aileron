@@ -188,6 +188,79 @@ func TestActionApprovalQueue_GetReturnsRegisteredEntry(t *testing.T) {
 	}
 }
 
+// TestActionApprovalQueue_OnRegisterCallbackFires asserts that the
+// hook installed via SetOnRegister is invoked for every Register, with
+// the exact pending entry as its argument. Production wiring uses this
+// to fire a desktop notification so the user knows the agent is
+// blocked; tests inject a recorder to drive the same path.
+func TestActionApprovalQueue_OnRegisterCallbackFires(t *testing.T) {
+	q := NewActionApprovalQueue(nil, nil)
+	var received []*ActionApproval
+	q.SetOnRegister(func(a *ActionApproval) {
+		received = append(received, a)
+	})
+
+	first := q.Register("send-email", "github://x/y", "sess-1", map[string]any{"to": "alice"})
+	second := q.Register("send-email", "github://x/y", "sess-2", nil)
+
+	if len(received) != 2 {
+		t.Fatalf("received len = %d, want 2", len(received))
+	}
+	if received[0].ID != first.ID || received[1].ID != second.ID {
+		t.Errorf("callback ids = [%s, %s], want [%s, %s]",
+			received[0].ID, received[1].ID, first.ID, second.ID)
+	}
+	// The callback gets the same pointer the caller does — the queue
+	// shouldn't be defensively copying. The webapp's notification
+	// payload reads ActionName / ConnectorFQN / Args directly off it.
+	if received[0].ActionName != "send-email" {
+		t.Errorf("callback received[0].ActionName = %q", received[0].ActionName)
+	}
+}
+
+// TestActionApprovalQueue_OnRegisterPanicDoesNotPropagate asserts the
+// fail-soft contract: a misbehaving callback (panic, slow, whatever)
+// does not break Register. The queue's invariants must hold regardless
+// of what the notifier does. Without this guarantee, a buggy notifier
+// would prevent the agent's tool call from registering — much worse
+// than no notification.
+func TestActionApprovalQueue_OnRegisterPanicDoesNotPropagate(t *testing.T) {
+	q := NewActionApprovalQueue(nil, nil)
+	q.SetOnRegister(func(_ *ActionApproval) {
+		panic("notifier blew up")
+	})
+
+	// If panic propagates, this Register call panics out of the test;
+	// the recover'd path returns normally.
+	a := q.Register("send-email", "github://x/y", "", nil)
+	if a == nil || a.ID == "" {
+		t.Fatal("Register returned nil despite recovered panic")
+	}
+	// Entry is still in the queue.
+	if got, ok := q.Get(a.ID); !ok || got.ID != a.ID {
+		t.Errorf("Get(%s) ok=%v, expected entry to be registered despite callback panic", a.ID, ok)
+	}
+}
+
+// TestActionApprovalQueue_SetOnRegisterClearsCallback covers the
+// SetOnRegister(nil) path: clearing the callback returns Register to
+// its no-op-on-side-effects behavior.
+func TestActionApprovalQueue_SetOnRegisterClearsCallback(t *testing.T) {
+	q := NewActionApprovalQueue(nil, nil)
+	called := 0
+	q.SetOnRegister(func(_ *ActionApproval) { called++ })
+	q.Register("a", "x", "", nil)
+	if called != 1 {
+		t.Fatalf("after first Register: called = %d, want 1", called)
+	}
+
+	q.SetOnRegister(nil)
+	q.Register("b", "x", "", nil)
+	if called != 1 {
+		t.Errorf("after SetOnRegister(nil) + Register: called = %d, want still 1", called)
+	}
+}
+
 // TestActionApprovalQueue_ConcurrentDecides verifies that Register +
 // Decide is safe under concurrent access. The queue lives in the
 // apiServer and is shared by every action-run handler; locking has
