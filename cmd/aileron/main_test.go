@@ -2413,12 +2413,38 @@ func TestRunSync_InstallFailureExits1(t *testing.T) {
 	}
 }
 
-// TestRunSync_BindAllWarns asserts that --bind-all prints a clear
-// "not yet implemented" warning so operators learn the limitation
-// without filing a "broken" bug. When --bind-all lands as a real
-// feature, this test will be replaced.
-func TestRunSync_BindAllWarns(t *testing.T) {
-	scope := "test"
+// TestRunSync_BindAllNoUnboundIsNoop asserts that --bind-all with no
+// unbound capabilities is a clean no-op: no prompts, no summary line,
+// no stderr noise. The earlier "not yet implemented" stderr warning
+// is gone.
+func TestRunSync_BindAllNoUnboundIsNoop(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{ActionsSeen: 1}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	stdin := strings.NewReader("")
+	var stdout, stderr bytes.Buffer
+	code := runSync([]string{"--bind-all"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "not yet implemented") {
+		t.Errorf("legacy 'not yet implemented' warning leaked into stderr: %s", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Binding ") {
+		t.Errorf("did not expect binding loop output with no unbound; got: %s", stdout.String())
+	}
+}
+
+// TestRunSync_BindAllAPIKeyHappyPath asserts the canonical flow: one
+// unbound api_key capability → operator types identity + key → CLI
+// POSTs /v1/bindings/setup with the right body → CLI prints
+// "Created" and a summary, exits 0. Mocks the daemon at the HTTP
+// boundary via httptest so the test runs without a real server.
+func TestRunSync_BindAllAPIKeyHappyPath(t *testing.T) {
+	scope := "secret_key"
 	prev := syncFetcher
 	syncFetcher = func(autoInstall bool) (*syncResult, error) {
 		return &syncResult{
@@ -2429,10 +2455,208 @@ func TestRunSync_BindAllWarns(t *testing.T) {
 	}
 	defer func() { syncFetcher = prev }()
 
+	var seenBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/bindings/setup" || r.Method != http.MethodPost {
+			t.Errorf("unexpected daemon call: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"created":[{"name":"github://acme/widget/work"}],"skipped":[]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	stdin := strings.NewReader("work\nsk-live-1234\n")
 	var stdout, stderr bytes.Buffer
-	run([]string{"sync", "--bind-all"}, newTestRegistry(), &stdout, &stderr)
-	if !strings.Contains(stderr.String(), "not yet implemented") {
-		t.Errorf("expected '--bind-all not yet implemented' warning; got stderr: %s", stderr.String())
+	code := runSync([]string{"--bind-all"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	out := stdout.String()
+	for _, want := range []string{
+		"github://acme/widget [api_key]",
+		"secret_key",
+		"Created: github://acme/widget/work",
+		"Bound 1 of 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in stdout; got: %s", want, out)
+		}
+	}
+
+	// Wire body must carry FQN + the identity + value the user typed.
+	body := string(seenBody)
+	for _, want := range []string{
+		`"connector_fqn":"github://acme/widget"`,
+		`"identity":"work"`,
+		`"kind":"api_key"`,
+		`"value":"sk-live-1234"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in POST body; got: %s", want, body)
+		}
+	}
+}
+
+// TestRunSync_BindAllOAuth2InitPosted asserts that an oauth2 unbound
+// entry triggers POST /v1/bindings/setup/oauth2/init with the right
+// body. The full dance (browser open, callback listener, finish POST)
+// is out of scope for a unit test; this pins the boundary the issue
+// asks for ("OAuth path mocked at the binding-setup-oauth2 boundary").
+// The test makes the init endpoint return an error so the loop
+// terminates without trying to bind a real loopback listener.
+func TestRunSync_BindAllOAuth2InitPosted(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/oauth-widget", Kind: "oauth2"},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var seenPath string
+	var seenBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenBody, _ = io.ReadAll(r.Body)
+		// Surface as a 500 so the loop counts a failure and exits
+		// cleanly without trying to listen for a callback.
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"upstream provider down"}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	stdin := strings.NewReader("personal\n")
+	var stdout, stderr bytes.Buffer
+	code := runSync([]string{"--bind-all"}, stdin, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 on bind failure", code)
+	}
+
+	if seenPath != "/v1/bindings/setup/oauth2/init" {
+		t.Errorf("path = %q, want /v1/bindings/setup/oauth2/init", seenPath)
+	}
+	body := string(seenBody)
+	for _, want := range []string{
+		`"connector_fqn":"github://acme/oauth-widget"`,
+		`"identity":"personal"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in init body; got: %s", want, body)
+		}
+	}
+
+	if !strings.Contains(stdout.String(), "Bound 0 of 1 capability(s) (1 failed)") {
+		t.Errorf("expected '0 of 1 (1 failed)' summary; got: %s", stdout.String())
+	}
+}
+
+// TestRunSync_BindAllPartialFailureContinues asserts that a single
+// failing binding doesn't abort the loop: the next unbound entry is
+// still attempted, and the summary line tallies correctly.
+func TestRunSync_BindAllPartialFailureContinues(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/first", Kind: "api_key"},
+				{ConnectorFqn: "github://acme/second", Kind: "api_key"},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			// First binding fails on the daemon side.
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":"vault locked"}`)
+			return
+		}
+		// Second binding succeeds.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"created":[{"name":"github://acme/second/work"}]}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	stdin := strings.NewReader("work\nbad-key\nwork\ngood-key\n")
+	var stdout, stderr bytes.Buffer
+	code := runSync([]string{"--bind-all"}, stdin, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 (partial failure)", code)
+	}
+	if calls != 2 {
+		t.Errorf("daemon calls = %d, want 2 (loop must continue past the first failure)", calls)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Bound 1 of 2 capability(s) (1 failed)") {
+		t.Errorf("expected '1 of 2 (1 failed)' summary; got: %s", out)
+	}
+}
+
+// TestRunSync_BindAllUnsupportedKindContinues asserts that an
+// unrecognized credential kind logs to stderr and is counted as a
+// failure, but doesn't crash or short-circuit the loop.
+func TestRunSync_BindAllUnsupportedKindContinues(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/weird", Kind: "future_kind"},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	stdin := strings.NewReader("work\n")
+	var stdout, stderr bytes.Buffer
+	code := runSync([]string{"--bind-all"}, stdin, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 on unsupported kind", code)
+	}
+	if !strings.Contains(stderr.String(), `unsupported credential kind "future_kind"`) {
+		t.Errorf("expected unsupported-kind message in stderr; got: %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Bound 0 of 1 capability(s) (1 failed)") {
+		t.Errorf("expected '0 of 1 (1 failed)' summary; got: %s", stdout.String())
+	}
+}
+
+// TestRunSync_BindAllEmptyIdentitySkips asserts that pressing return
+// at the identity prompt skips that entry (counted as failed) and
+// the loop continues to the next.
+func TestRunSync_BindAllEmptyIdentitySkips(t *testing.T) {
+	prev := syncFetcher
+	syncFetcher = func(autoInstall bool) (*syncResult, error) {
+		return &syncResult{
+			Unbound: []unboundCapabilityWire{
+				{ConnectorFqn: "github://acme/widget", Kind: "api_key"},
+			},
+		}, nil
+	}
+	defer func() { syncFetcher = prev }()
+
+	// Empty identity (just a newline).
+	stdin := strings.NewReader("\n")
+	var stdout, stderr bytes.Buffer
+	code := runSync([]string{"--bind-all"}, stdin, &stdout, &stderr)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 when binding skipped", code)
+	}
+	if !strings.Contains(stderr.String(), "identity is required") {
+		t.Errorf("expected 'identity is required' in stderr; got: %s", stderr.String())
 	}
 }
 
