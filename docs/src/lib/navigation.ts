@@ -55,6 +55,12 @@ export const navigation: NavItem[] = [
     ]
   },
   {
+    label: 'Guides',
+    children: [
+      { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' }
+    ]
+  },
+  {
     label: 'Architecture Decisions',
     children: [
       { label: 'Overview', href: '/adr/' },
