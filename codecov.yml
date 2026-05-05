@@ -44,9 +44,10 @@ flags:
     carryforward: true
 
 ignore:
-  - "internal/api/gen/**"    # generated code (oapi-codegen) — DO NOT EDIT
-  - "ui/**"                  # tracked separately via ui flag
-  - "docs/**"                # documentation and ADRs
+  - "internal/api/gen/**"             # generated code (oapi-codegen) — DO NOT EDIT
+  - "internal/sessions/sessionstest/**" # test-helper package; err-check branches only fire when SUT misbehaves
+  - "ui/**"                           # tracked separately via ui flag
+  - "docs/**"                         # documentation and ADRs
 
 comment:
   layout: "condensed_header, diff, flags, components"
