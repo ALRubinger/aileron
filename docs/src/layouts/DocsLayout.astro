@@ -2,6 +2,7 @@
 import BaseLayout from './BaseLayout.astro';
 import TableOfContents from '../components/TableOfContents.svelte';
 import MarkdownForAI from '../components/MarkdownForAI.svelte';
+import Footer from '../components/Footer.svelte';
 
 interface Props {
   title: string;
@@ -15,10 +16,14 @@ const { title, headings = [], slug = '', rawMarkdown = '' } = Astro.props;
 
 <BaseLayout title={title}>
   <main class="px-6 pt-8 pb-8 lg:px-10 flex gap-8">
-    <article class="prose flex-1 min-w-0">
-      <h1>{title}</h1>
-      <slot />
-    </article>
+    <div class="flex-1 min-w-0 flex flex-col">
+      <article class="prose">
+        <h1>{title}</h1>
+        <slot />
+      </article>
+
+      <Footer />
+    </div>
 
     <aside class="w-0 2xl:w-56 shrink-0 opacity-0 invisible translate-x-12 2xl:opacity-100 2xl:visible 2xl:translate-x-0 transition-[opacity,visibility,translate,width] duration-200 overflow-hidden 2xl:overflow-visible">
       <div class="sticky top-20 max-h-[calc(100vh-5rem)] overflow-y-auto pb-4">
