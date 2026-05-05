@@ -6,8 +6,5 @@ var OpenSessionLogger = openSessionLogger
 // SessionLogPath exposes sessionLogPath for testing.
 var SessionLogPath = sessionLogPath
 
-// WrapTextForTest exposes wrapText for testing.
-var WrapTextForTest = wrapText
-
-// VisibleWidthForTest exposes visibleWidth for testing.
-var VisibleWidthForTest = visibleWidth
+// `wrapText` and `visibleWidth` lived in the pty rendering files
+// (panel.go) deleted by #419; their tests die with them.

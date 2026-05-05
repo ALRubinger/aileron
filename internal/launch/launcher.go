@@ -18,7 +18,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/comms"
 	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/creack/pty/v2"
 	"golang.org/x/term"
 )
 
@@ -198,26 +197,57 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		"binary", agentPath,
 	)
 
-	commsConf := prepareCommsConfig(config.Dir, sessionLog)
-
-	// If stdin is a terminal, use the pty proxy with status bar.
-	// The pty path defers vault opening so it can show a Panel prompt.
-	var result LaunchResult
-	var listeners []comms.Listener
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		result, listeners, err = launchWithPty(ctx, cmd, config, queue, commsConf, approvalSocket, commsSocket, auditLog, sessionID)
-	} else {
-		// Non-pty path: use legacy tty-based vault prompt.
-		listeners = startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
-		result, err = launchDirect(cmd, config)
-	}
+	// Comms listeners (Slack, Discord) so incoming messages still
+	// land in the NotifyQueue and are readable via the
+	// `read_messages` MCP tool. The webapp surface for surfacing
+	// these messages is a future addition (#418's followups);
+	// today the agent reads them via `aileron-mcp`.
+	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
 	defer stopCommsListeners(listeners)
+
+	// Comms server: same socket the pre-#419 launch exposed to
+	// aileron-mcp for `read_messages` etc. The send / draft / http
+	// paths fail-closed under the new launch (no in-pty approval
+	// surface; webapp wire-through pending) — see commsserver.go for
+	// the regression detail.
+	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, auditLog, sessionID)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("starting comms server: %w", err)
+	}
+	defer commsSrv.Close()
+	go commsSrv.Serve()
+	_ = approvalSocket // socket env var is set for forward-compat with aileron-sh; no listener under v0.x
+
+	// Print the startup banner once on stderr before exec'ing the
+	// agent. The agent inherits this terminal — Claude Code, Pi,
+	// and others own the terminal completely under the new launch
+	// path. The banner is the only thing Aileron ever writes here.
+	printStartupBanner(os.Stderr, gateway, sessionID, sessionLogPath(config.Dir))
+
+	result, err := launchDirect(cmd, config)
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	if auditLog != "" {
 		PrintSessionSummary(os.Stderr, auditLog, sessionID)
 	}
 	return result, err
+}
+
+// printStartupBanner writes a single line on stderr before exec'ing
+// the agent, naming the webapp URL and session id. Replaces the in-
+// pty StatusBar from the pre-#419 launch path. Output is fenced so
+// agents that don't render ANSI gracefully (or terminals that wrap
+// long lines) still parse the URL cleanly.
+func printStartupBanner(w io.Writer, gateway *Gateway, sessionID, logPath string) {
+	url := ""
+	if gateway != nil {
+		url = gateway.URL
+	}
+	if url == "" {
+		fmt.Fprintf(w, "✈️  Aileron — session %s — log %s\n", sessionID, logPath)
+		return
+	}
+	fmt.Fprintf(w, "✈️  Aileron — webapp %s — session %s — log %s\n", url, sessionID, logPath)
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.
@@ -246,190 +276,6 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 	return exitResult(err)
 }
 
-// launchWithPty runs the agent inside a pty with a status bar at the bottom.
-func launchWithPty(ctx context.Context, cmd *exec.Cmd, config LaunchConfig, queue *NotifyQueue, commsConf *commsSetup, approvalSocket, commsSocket, auditLog, sessionID string) (LaunchResult, []comms.Listener, error) {
-	stdinFd := int(os.Stdin.Fd())
-
-	cols, rows, err := term.GetSize(stdinFd)
-	if err != nil {
-		return LaunchResult{}, nil, fmt.Errorf("getting terminal size: %w", err)
-	}
-
-	bar := NewStatusBar(rows, cols, "Flying ✈️ withaileron.ai ")
-	agentRows := ComputeAgentRows(rows, bar.BarHeight())
-
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
-		Rows: uint16(agentRows),
-		Cols: uint16(cols),
-	})
-	if err != nil {
-		return LaunchResult{}, nil, fmt.Errorf("failed to start %s in pty: %w", config.Agent.Name(), err)
-	}
-	defer ptmx.Close()
-
-	oldState, err := term.MakeRaw(stdinFd)
-	if err != nil {
-		return LaunchResult{}, nil, fmt.Errorf("setting raw mode: %w", err)
-	}
-	defer term.Restore(stdinFd, oldState)
-
-	SetupTerminalScreen(os.Stdout, agentRows, bar)
-
-	// Set up the overlay and intelligent I/O routing.
-	bar.SetQueue(queue)
-
-	outputCopier := NewOutputCopier(ptmx, os.Stdout, nil)
-	outputCopier.SetOnIdle(func() { bar.Render(os.Stdout) })
-	overlay := NewOverlay(queue, outputCopier, os.Stdout, rows, cols, nil)
-	outputCopier.SetOverlay(overlay)
-	router := NewKeyRouter(os.Stdin, ptmx, overlay)
-	overlay.onDismiss = router.DeactivateOverlay
-
-	WireDraftInjection(ptmx, overlay, queue)
-
-	// Start the router early so vault prompt can steal input.
-	go router.Run()
-	go outputCopier.Run()
-
-	// Now that the PTY, router, and copier are up, open the vault
-	// (with Panel-based retry prompt) and start comms listeners.
-	var listeners []comms.Listener
-	if commsConf != nil {
-		var v vault.Vault
-		if commsConf.needsVault {
-			v = PromptVaultWithPanel(outputCopier, router, bar, ptmx)
-		}
-		listeners = startCommsWithVault(ctx, commsConf, v, queue, auditLog, sessionID)
-	}
-
-	// Start the approval server so aileron-sh can request user approvals
-	// on the real terminal (not the pty).
-	approvalSrv, err := NewApprovalServer(approvalSocket, bar, outputCopier, router, ptmx)
-	if err != nil {
-		return LaunchResult{}, listeners, fmt.Errorf("starting approval server: %w", err)
-	}
-	defer approvalSrv.Close()
-	go approvalSrv.Serve()
-
-	// Start the comms server so aileron-mcp can read/send messages.
-	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, bar, outputCopier, router, auditLog, sessionID)
-	if err != nil {
-		return LaunchResult{}, listeners, fmt.Errorf("starting comms server: %w", err)
-	}
-	defer commsSrv.Close()
-	go commsSrv.Serve()
-
-	WireReply(overlay, commsSrv)
-	WireDraftSend(overlay, commsSrv)
-
-	// Wire onChange to re-render the status bar when notifications arrive.
-	queue.onChange = func() { bar.Render(os.Stdout) }
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGWINCH)
-	go func() {
-		for sig := range sigCh {
-			switch sig {
-			case syscall.SIGWINCH:
-				HandleResize(os.Stdout, stdinFd, ptmx, bar)
-				newCols, newRows, _ := term.GetSize(stdinFd)
-				overlay.Resize(newRows, newCols)
-			default:
-				if cmd.Process != nil {
-					_ = cmd.Process.Signal(sig)
-				}
-			}
-		}
-	}()
-
-	err = cmd.Wait()
-	signal.Stop(sigCh)
-	close(sigCh)
-
-	// Print learned rules before the deferred Close clears the server.
-	if learned := approvalSrv.LearnedRules(); len(learned) > 0 {
-		PrintLearnedRulesSummary(os.Stderr, learned)
-	}
-
-	CleanupTerminalScreen(os.Stdout, rows)
-
-	r, exitErr := exitResult(err)
-	return r, listeners, exitErr
-}
-
-// WireDraftInjection connects the overlay's draft-request and converse
-// actions to a DraftInjector that writes prompts into the agent's pty
-// stdin. Auto-draft messages are NOT injected automatically — the user
-// must explicitly request a draft from the overlay. Exported for testing.
-func WireDraftInjection(ptmx io.Writer, overlay *Overlay, queue *NotifyQueue) {
-	injector := NewDraftInjector(ptmx)
-	overlay.OnDraftRequest = func(msg Message) {
-		injector.Inject(msg)
-	}
-	overlay.OnDraftConverse = func(msg Message, feedback string) {
-		injector.InjectRevision(msg, feedback)
-	}
-	// No queue.SetOnAutoDraft — user must open the overlay and press 'a'.
-}
-
-// WireReply connects the overlay's reply callback to the CommsServer's
-// DirectSend method. No approval prompt is shown since the user authored
-// the reply text themselves. Exported for testing.
-func WireReply(overlay *Overlay, commsSrv *CommsServer) {
-	overlay.OnReply = func(msg Message, reply string) {
-		commsSrv.DirectSend(msg.Source, msg.Channel, reply)
-	}
-}
-
-// WireDraftSend connects the overlay's draft-approve and draft-edit
-// callbacks to send directly via the CommsServer. The agent drafts the
-// text; Aileron sends it after user approval. Exported for testing.
-func WireDraftSend(overlay *Overlay, commsSrv *CommsServer) {
-	overlay.OnDraftApprove = func(msg Message) {
-		commsSrv.DirectSend(msg.Source, msg.Channel, msg.Draft)
-	}
-	overlay.OnDraftEdit = func(msg Message, edited string) {
-		commsSrv.DirectSend(msg.Source, msg.Channel, edited)
-	}
-}
-
-// ComputeAgentRows returns the number of rows available for the agent,
-// reserving space for the status bar.
-func ComputeAgentRows(totalRows, barHeight int) int {
-	rows := totalRows - barHeight
-	if rows < 1 {
-		return 1
-	}
-	return rows
-}
-
-// SetupTerminalScreen clears the screen and renders the status bar.
-func SetupTerminalScreen(w io.Writer, agentRows int, bar *StatusBar) {
-	fmt.Fprintf(w, "\033[2J\033[1;1H")
-	bar.Render(w)
-	fmt.Fprintf(w, "\033[1;1H")
-}
-
-// CleanupTerminalScreen clears the status bar area (3 rows).
-func CleanupTerminalScreen(w io.Writer, totalRows int) {
-	fmt.Fprintf(w, "\033[%d;1H\033[J", totalRows-2)
-}
-
-// HandleResize updates the pty size and re-renders the status bar after a
-// terminal resize. The fd parameter is the file descriptor to query for the
-// new terminal size.
-func HandleResize(w io.Writer, fd int, ptmx *os.File, bar *StatusBar) {
-	newCols, newRows, err := term.GetSize(fd)
-	if err != nil {
-		return
-	}
-	newAgentRows := ComputeAgentRows(newRows, bar.BarHeight())
-	_ = pty.Setsize(ptmx, &pty.Winsize{
-		Rows: uint16(newAgentRows),
-		Cols: uint16(newCols),
-	})
-	bar.Resize(w, newRows, newCols)
-}
 
 // exitResult extracts an exit code from a cmd.Wait error.
 func exitResult(err error) (LaunchResult, error) {
@@ -601,15 +447,6 @@ func wireQuietHours(dir string, queue *NotifyQueue) {
 	pf := loadPolicyFileFrom(policyPath)
 	if pf.Notifications != nil && pf.Notifications.QuietHours != nil {
 		queue.SetQuietHours(pf.Notifications.QuietHours)
-	}
-}
-
-// PrintLearnedRulesSummary prints the rules the user chose to persist
-// during the session (via "allow for project" or "allow for me").
-func PrintLearnedRulesSummary(w io.Writer, rules []LearnedRule) {
-	fmt.Fprintf(w, "  %d rule(s) learned this session:\n", len(rules))
-	for _, r := range rules {
-		fmt.Fprintf(w, "    %s  -> %s (%s)\n", r.Pattern, r.File, r.Scope)
 	}
 }
 
