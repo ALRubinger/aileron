@@ -186,6 +186,8 @@ aileron audit list           # action-execution audit log: every call, with inpu
 
 The audit log is the receipt for everything the agent did on your behalf. Each entry names the action, the connector version, the binding identity, the duration, and the disposition. Combined with the install consent log, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
 
+For end-to-end timing or correlation with the rest of your agent stack, Aileron also emits OpenTelemetry traces — opt-in via `AILERON_OTEL_ENABLED=true AILERON_OTEL_EXPORTER=stdout`. See [Observability](/concepts/observability/) for what gets emitted, the span attribute schema, and the env vars that control both the audit and tracing surfaces.
+
 ## What you've built
 
 You ran a real LLM through a local proxy that augmented its tool catalog with installed actions, executed those actions inside a WASM sandbox, mediated OAuth tokens at the network boundary so the LLM never held a credential, and recorded every decision and execution in an audit log.
