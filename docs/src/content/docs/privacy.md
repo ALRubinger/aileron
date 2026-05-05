@@ -10,10 +10,11 @@ description: "Aileron is open source and runs locally on your computer. We don't
 Aileron is an open-source project, maintained by a project lead — no company runs it. The purpose of Aileron is to give you security and confidence that no agent, no LLM, and not Aileron itself has direct access to your protected information beyond what you explicitly provide.
 
 - Aileron runs entirely on your computer.
-- Your credentials, prompts, and the data your agent touches never leave your machine.
-- We have no interest in your personal information and no way to collect it.
+- Your credentials live in a local, encrypted vault. They never reach Aileron, your LLM, or anyone else.
+- The data your agent works with — emails, files, calendar events — flows between you, the services you've connected, and the LLM provider you've configured. Aileron has no servers in that data path.
+- We don't want or collect your personal information.
 - You are not the product.
-- The `aileron.sh` website uses standard, anonymous web analytics. That's it.
+- The Aileron website and runtime use standard, anonymous web analytics. That's it.
 
 ## What this policy covers
 
@@ -21,17 +22,19 @@ This policy covers the Aileron desktop application, the `aileron` CLI, and the `
 
 ## The desktop app and CLI
 
-When you install and run Aileron on your computer, everything stays there:
+When you install and run Aileron on your computer:
 
 - Your credential vault is stored locally and encrypted.
 - OAuth tokens for connected services are held in that vault.
-- The prompts you give your agent, the actions Aileron runs, and the results those actions produce never leave your machine.
+- Actions run on your machine. The data they read or write flows directly between you and the third-party service (Gmail, Slack, etc.) — Aileron has no servers in that data path.
 
-There are no Aileron-operated servers in the loop. The desktop app does not run telemetry today. If that changes, we'll update this policy.
+Your agent itself runs through whichever LLM provider you've configured (Anthropic, OpenAI, etc.). The provider sees the prompts you write and the action results your agent processes — that's how agentic LLMs work, with or without Aileron. Their privacy policies govern what happens to your data once it reaches them.
 
-## The aileron.sh website
+## Anonymous analytics
 
-The website uses [PostHog](https://posthog.com) for standard, anonymous web analytics — page views, click events, and basic session metadata. It captures no personally identifying information beyond what's already present in any web request (IP address, user agent, requested page). This is the same kind of analytics most software project websites use, applied here to understand which pages are read and where readers come from.
+The Aileron website and the local runtime use standard, anonymous analytics — page views or event names, plus aggregate usage metrics like which actions are run and how often. The website's analytics use [PostHog](https://posthog.com). No personally identifying information is captured beyond what's already present in any web request (IP address, user agent, the page or event name).
+
+No content of your work is captured. No prompts, no action arguments, no action results, no Google data, no vault contents.
 
 ## How we handle Google user data
 

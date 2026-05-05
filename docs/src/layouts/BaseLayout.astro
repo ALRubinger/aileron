@@ -43,18 +43,8 @@ const nav = navigation;
     <div class="flex min-h-screen pt-16">
       <Sidebar currentPath={currentPath} navigation={nav} client:load />
 
-      <div class="flex-1 flex flex-col">
-        <div class="flex-1">
-          <slot />
-        </div>
-        <footer class="border-t border-border px-6 lg:px-10 py-6 text-sm text-muted-foreground">
-          <div class="flex flex-wrap items-center justify-between gap-4">
-            <div>Aileron — open source</div>
-            <nav class="flex gap-4">
-              <a href="/privacy" class="hover:text-foreground">Privacy</a>
-            </nav>
-          </div>
-        </footer>
+      <div class="flex-1">
+        <slot />
       </div>
     </div>
   </body>
