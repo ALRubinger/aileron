@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/account"
@@ -67,6 +68,32 @@ type Config struct {
 	// substrate for Phase 2 request mediation, without exposing
 	// duplicate action tools to the LLM in-band.
 	DisableAugmentation bool
+
+	// WebappURL is the base URL of the Aileron webapp the user opens to
+	// approve / deny gated actions (#418). When set, the action-approval
+	// notification's ReviewURL is built as `<WebappURL>/approvals` so
+	// the desktop notification carries a clickable target.
+	//
+	// Empty falls back to the AILERON_WEBAPP_URL environment variable.
+	// Both empty means notifications fire with a generic "Open the
+	// Aileron webapp to approve or deny" prompt instead of a URL —
+	// the operator at least learns something needs attention.
+	//
+	// Launch sets this to the embedded gateway's own URL so the
+	// notification points at the same daemon the agent is talking to.
+	// Once the daemon serves `ui/build` directly (post-MVP cleanup),
+	// that URL becomes the working webapp entry point automatically.
+	// Until then, users running the webapp dev server elsewhere can
+	// override via AILERON_WEBAPP_URL.
+	WebappURL string
+
+	// Notifier overrides the default notification dispatcher (log +
+	// desktop multi). Production wiring leaves this nil; tests inject
+	// a recorder to observe the action-approval notification payload
+	// without firing OS notifications. The injected notifier replaces
+	// the default — when set, no log / desktop notifications fire from
+	// this handler, only the supplied notifier.
+	Notifier notify.Notifier
 }
 
 // NewHandler creates a fully-wired Aileron control plane HTTP handler
@@ -74,6 +101,28 @@ type Config struct {
 // Equivalent to NewHandlerWithConfig(log, Config{}).
 func NewHandler(log *slog.Logger) (http.Handler, error) {
 	return NewHandlerWithConfig(log, Config{})
+}
+
+// buildApprovalsReviewURL composes the approval-notification ReviewURL
+// from the two-tier configuration: cfg.WebappURL (set by launch to the
+// embedded gateway's URL — production path) takes precedence over the
+// AILERON_WEBAPP_URL environment variable (the standalone-server case
+// where users may run the webapp dev server elsewhere). Both empty
+// returns "", which the desktop notifier handles by falling back to a
+// generic "Open the Aileron webapp" prompt — the user at least learns
+// something needs attention even without a clickable target.
+//
+// Trailing slashes on the base URL are tolerated and stripped so the
+// resulting URL never has a doubled slash before /approvals.
+func buildApprovalsReviewURL(cfgURL, envURL string) string {
+	base := cfgURL
+	if base == "" {
+		base = envURL
+	}
+	if base == "" {
+		return ""
+	}
+	return strings.TrimRight(base, "/") + "/approvals"
 }
 
 // NewHandlerWithConfig is the configurable entry point. The launcher
@@ -155,10 +204,16 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// an action-approval lands; the log notifier is the durable
 	// backstop. Slack / email notifiers (the existing rich-governance
 	// channels) compose into the same Multi when configured.
-	notifier := notify.NewMulti(
+	//
+	// Tests inject a recorder via cfg.Notifier; that replaces the
+	// default — no OS notifications fire from a test process.
+	var notifier notify.Notifier = notify.NewMulti(
 		notify.NewLogNotifier(log),
 		notify.NewDesktopNotifier(log),
 	)
+	if cfg.Notifier != nil {
+		notifier = cfg.Notifier
+	}
 
 	// --- LLM gateway (dual-protocol: OpenAI + Anthropic) ---
 	gatewayCfg, err := config.LoadGatewayConfig()
@@ -269,12 +324,14 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	server.actionApprovalTTL = 5 * time.Minute
 
 	// On Register, fire a notification so the user knows the agent is
-	// blocked. AILERON_WEBAPP_URL points at the webapp's /approvals
-	// page when set (typical: launch sets it after starting the
-	// gateway). When unset, the notification still fires but uses a
-	// fallback "Open the Aileron webapp" prompt — the operator at
-	// least sees that something is pending.
-	webappURL := os.Getenv("AILERON_WEBAPP_URL")
+	// blocked. The notification's ReviewURL points at the webapp's
+	// /approvals page; precedence is cfg.WebappURL (set by launch to
+	// the embedded gateway's URL) → AILERON_WEBAPP_URL env var (for
+	// the standalone-server case where users may run the webapp dev
+	// server elsewhere) → empty, which falls back to a generic prompt
+	// inside the desktop notifier so the user at least learns
+	// something needs attention.
+	reviewURL := buildApprovalsReviewURL(cfg.WebappURL, os.Getenv("AILERON_WEBAPP_URL"))
 	server.actionApprovals.SetOnRegister(func(a *approval.ActionApproval) {
 		summary := a.ActionName
 		if a.ConnectorFQN != "" {
@@ -283,7 +340,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		_ = notifier.Notify(context.Background(), notify.Notification{
 			ApprovalID: a.ID,
 			Summary:    summary,
-			ReviewURL:  webappURL,
+			ReviewURL:  reviewURL,
 		})
 	})
 
