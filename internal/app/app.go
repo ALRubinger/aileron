@@ -718,20 +718,21 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 }
 
 // spanNameForRequest shapes server-root span names for the tracing
-// middleware. Default-style "METHOD /path" is fine for static paths
-// (`POST /v1/chat/completions`), but path-templated routes carrying
-// IDs (`POST /v1/actions/{name}/run`) blow up cardinality if the
-// raw URL is used as the span name. We collapse the two known
-// templated routes back to their template form so trace tooling
-// groups them correctly.
+// middleware. Static paths get "METHOD /path"; path-templated routes
+// carrying IDs (`POST /v1/actions/{name}/run`) collapse back to the
+// template form so trace tooling groups them correctly. The two
+// gateway endpoints get domain-shaped names (`aileron.gateway.openai.chat`,
+// `aileron.gateway.anthropic.messages`) so consumers can filter for
+// "all LLM round-trips" without grepping URL paths — they're the
+// secondary trace surface from issue #390 Phase 7.
 func spanNameForRequest(r *http.Request) string {
 	switch {
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/actions/") && strings.HasSuffix(r.URL.Path, "/run"):
 		return "POST /v1/actions/{name}/run"
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
-		return "POST /v1/chat/completions"
+		return "aileron.gateway.openai.chat"
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/messages":
-		return "POST /v1/messages"
+		return "aileron.gateway.anthropic.messages"
 	}
 	return r.Method + " " + r.URL.Path
 }

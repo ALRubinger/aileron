@@ -69,17 +69,18 @@ Tracing is independent of the audit log. The audit log answers *what was done*; 
 
 ### What gets emitted
 
-Today (as the Phase 7 emission integrations land slice by slice in [issue #390](https://github.com/ALRubinger/aileron/issues/390)):
+The Phase 7 emission integrations from [issue #390](https://github.com/ALRubinger/aileron/issues/390) are now complete:
 
-| Span name | Where it's emitted | Status |
-|---|---|---|
-| `aileron.mcp.tool.call` | `aileron-mcp` outbound to `/v1/actions/{name}/run` — typically the trace root under `aileron launch` | ✅ shipped |
-| `aileron.action.execute` | `SandboxExecutor.Execute` — root for an action invocation | ✅ shipped |
-| `aileron.connector.call` | per-step `conn.Invoke` inside the executor | ✅ shipped |
-| `aileron.capability.check` | per-step action-boundary capability enforcement (defense-in-depth, [ADR-0003](/adr/0003-action-model)) — first observability point on "how often does the sandbox say no?" | ✅ shipped |
-| `aileron.approval.wait` | the approval-queue blocking wait — covers the entire user-decision interval; `aileron.approval.decision` is `approved` / `denied` / `timeout` / `cancelled` | ✅ shipped |
-| HTTP server-root span | gateway and `/v1/actions/{name}/run` entry points | ✅ shipped |
-| `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway | ⏳ pending |
+| Span name | Where it's emitted |
+|---|---|
+| `aileron.mcp.tool.call` | `aileron-mcp` outbound to `/v1/actions/{name}/run` — typically the trace root under `aileron launch` |
+| `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway endpoints |
+| `aileron.intercept.round` | per round of the augmentation/interception loop when actions are installed; carries `aileron.intercept.{round_index,protocol,tool_calls_count,terminal}` |
+| `aileron.action.execute` | `SandboxExecutor.Execute` — root for an action invocation |
+| `aileron.capability.check` | per-step action-boundary capability enforcement (defense-in-depth, [ADR-0003](/adr/0003-action-model)) |
+| `aileron.connector.call` | per-step `conn.Invoke` inside the executor |
+| `aileron.approval.wait` | the approval-queue blocking wait — covers the entire user-decision interval; `aileron.approval.decision` is `approved` / `denied` / `timeout` / `cancelled` |
+| HTTP server-root span | other API entry points (`/v1/audit`, `/v1/bindings`, etc.) — generic "METHOD /path" naming |
 
 The file exporter is shipped — spans land in `~/.aileron/traces/spans-YYYY-MM-DD.jsonl`, sibling to the audit log's `~/.aileron/audit/audit-YYYY-MM-DD.jsonl`. Both surfaces share the path-naming convention via the `internal/dailypath` package, so retention and rotation are consistent across the two on-disk surfaces.
 
