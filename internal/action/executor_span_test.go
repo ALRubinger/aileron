@@ -235,6 +235,149 @@ func TestSandboxExecutor_Execute_ActionNotFoundMarksActionSpanError(t *testing.T
 	}
 }
 
+func TestSandboxExecutor_Execute_EmitsCapabilityCheckSpanPerStep(t *testing.T) {
+	// Defense-in-depth: every step's action-boundary check emits an
+	// aileron.capability.check span — child of action.execute,
+	// sibling of (and ordered before) the connector.call span when
+	// the check passes. Attributes follow the audit-log schema:
+	// aileron.connector.fqn, aileron.capability.kind,
+	// aileron.action.name.
+	exp := withInMemoryExporter(t)
+
+	cstoreDir := t.TempDir()
+	store := cstore.NewStore(cstoreDir)
+	hash := installFakeConnector(t, store, "github://test/echo", "1.0.0")
+	actions := installFakeAction(t, "github://test/echo", "1.0.0", hash, []string{"echo"}, []string{"echo"})
+
+	rt := &fakeRuntime{}
+	rt.connectors = map[string]*fakeConnector{"github://test/echo": {resp: map[string]any{"v": 1}}}
+
+	exec := NewSandboxExecutor(actions, store, rt, nil)
+	t.Cleanup(func() { _ = exec.Close(context.Background()) })
+
+	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	spans := exp.GetSpans().Snapshots()
+	capSpan, ok := findSpan(spans, "aileron.capability.check")
+	if !ok {
+		t.Fatalf("aileron.capability.check span not emitted; got %d spans", len(spans))
+	}
+	if v, _ := attr(capSpan, "aileron.connector.fqn"); v != "github://test/echo" {
+		t.Errorf("aileron.connector.fqn = %v", v)
+	}
+	if v, _ := attr(capSpan, "aileron.capability.kind"); v != "echo" {
+		t.Errorf("aileron.capability.kind = %v, want echo", v)
+	}
+	if v, _ := attr(capSpan, "aileron.action.name"); v != "test-action" {
+		t.Errorf("aileron.action.name = %v, want test-action", v)
+	}
+
+	actSpan, _ := findSpan(spans, "aileron.action.execute")
+	if capSpan.Parent().SpanID() != actSpan.SpanContext().SpanID() {
+		t.Errorf("capability.check parent = %v, want action.execute span %v",
+			capSpan.Parent().SpanID(), actSpan.SpanContext().SpanID())
+	}
+}
+
+func TestSandboxExecutor_Execute_CapabilityCheckSpanMarksDeniedError(t *testing.T) {
+	// On denial: the capability.check span itself carries Error
+	// status with the denial message, distinct from the parent
+	// action.execute span (which also gets Error via the failure
+	// envelope on the result). Two spans showing Error means trace
+	// readers can pinpoint that *the capability check* was the
+	// failure point, not e.g. a downstream connector error.
+	exp := withInMemoryExporter(t)
+
+	cstoreDir := t.TempDir()
+	store := cstore.NewStore(cstoreDir)
+	hash := installFakeConnector(t, store, "github://test/echo", "1.0.0")
+	// Capabilities omit "echo" — the only execute step's op.
+	actions := installFakeAction(t, "github://test/echo", "1.0.0", hash, []string{"other_op"}, []string{"echo"})
+
+	rt := &fakeRuntime{}
+	rt.connectors = map[string]*fakeConnector{"github://test/echo": {resp: map[string]any{}}}
+
+	exec := NewSandboxExecutor(actions, store, rt, nil)
+	t.Cleanup(func() { _ = exec.Close(context.Background()) })
+
+	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	spans := exp.GetSpans().Snapshots()
+	capSpan, ok := findSpan(spans, "aileron.capability.check")
+	if !ok {
+		t.Fatal("aileron.capability.check span not emitted")
+	}
+	if capSpan.Status().Code != 1 /* codes.Error */ {
+		t.Errorf("capability.check status = %v, want Error", capSpan.Status())
+	}
+	if !strings.Contains(capSpan.Status().Description, "capability_denied") &&
+		!strings.Contains(capSpan.Status().Description, "not in declared subset") {
+		t.Errorf("capability.check status description = %q, want denial message",
+			capSpan.Status().Description)
+	}
+}
+
+func TestSandboxExecutor_Execute_CapabilityCheckSpanPerStepUntilFirstDenial(t *testing.T) {
+	// Multi-step action where the second step is denied: the first
+	// step's capability.check passes (Ok), the second's fails (Error).
+	// First-failure-terminates per ADR-0010; no third span ever opens.
+	exp := withInMemoryExporter(t)
+
+	cstoreDir := t.TempDir()
+	store := cstore.NewStore(cstoreDir)
+	hash := installFakeConnector(t, store, "github://test/echo", "1.0.0")
+	// First step's op (echo) is in the capability list; second step's
+	// op (denied_op) is not.
+	actions := installFakeAction(t, "github://test/echo", "1.0.0", hash, []string{"echo"}, []string{"echo", "denied_op"})
+
+	rt := &fakeRuntime{}
+	rt.connectors = map[string]*fakeConnector{"github://test/echo": {resp: map[string]any{"v": 1}}}
+
+	exec := NewSandboxExecutor(actions, store, rt, nil)
+	t.Cleanup(func() { _ = exec.Close(context.Background()) })
+
+	if _, err := exec.Execute(context.Background(), "test-action", nil); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	spans := exp.GetSpans().Snapshots()
+	var capSpans []sdktrace.ReadOnlySpan
+	for _, s := range spans {
+		if s.Name() == "aileron.capability.check" {
+			capSpans = append(capSpans, s)
+		}
+	}
+	if len(capSpans) != 2 {
+		t.Fatalf("got %d capability.check spans, want 2 (one per step until first denial)",
+			len(capSpans))
+	}
+	// Find the spans by their capability.kind attribute.
+	var firstStep, secondStep sdktrace.ReadOnlySpan
+	for _, s := range capSpans {
+		v, _ := attr(s, "aileron.capability.kind")
+		switch v {
+		case "echo":
+			firstStep = s
+		case "denied_op":
+			secondStep = s
+		}
+	}
+	if firstStep == nil || secondStep == nil {
+		t.Fatalf("expected both echo and denied_op spans; firstStep=%v secondStep=%v",
+			firstStep, secondStep)
+	}
+	if firstStep.Status().Code == 1 /* codes.Error */ {
+		t.Errorf("first-step capability.check status = Error, want Unset (op was allowed)")
+	}
+	if secondStep.Status().Code != 1 /* codes.Error */ {
+		t.Errorf("second-step capability.check status = %v, want Error", secondStep.Status())
+	}
+}
+
 func TestSandboxExecutor_Execute_NoOpProviderDoesNotCrash(t *testing.T) {
 	// With the OTel global at the no-op provider (the daemon startup
 	// default until AILERON_OTEL_ENABLED=true), Execute must still

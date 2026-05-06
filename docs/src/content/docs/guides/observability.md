@@ -66,8 +66,8 @@ Today (as the Phase 7 emission integrations land slice by slice in [issue #390](
 | `aileron.mcp.tool.call` | `aileron-mcp` outbound to `/v1/actions/{name}/run` — typically the trace root under `aileron launch` | ✅ shipped |
 | `aileron.action.execute` | `SandboxExecutor.Execute` — root for an action invocation | ✅ shipped |
 | `aileron.connector.call` | per-step `conn.Invoke` inside the executor | ✅ shipped |
+| `aileron.capability.check` | per-step action-boundary capability enforcement (defense-in-depth, [ADR-0003](/adr/0003-action-model)) — first observability point on "how often does the sandbox say no?" | ✅ shipped |
 | HTTP server-root span | gateway and `/v1/actions/{name}/run` entry points | ✅ shipped |
-| `aileron.capability.check` | the action-boundary capability enforcement | ⏳ pending |
 | `aileron.approval.wait` | the approval-queue blocking wait | ⏳ pending |
 | `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway | ⏳ pending |
 

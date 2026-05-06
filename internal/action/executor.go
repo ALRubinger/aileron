@@ -210,7 +210,7 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 		// op name is treated as the capability string for v1 — the
 		// action's `capabilities = [...]` list must include the op
 		// the step invokes.
-		if capErr := EnforceCapability(manifest, step.Connector, step.Op); capErr != nil {
+		if capErr := enforceCapabilityWithSpan(ctx, manifest, step.Connector, step.Op); capErr != nil {
 			return errorResult(capErr), nil
 		}
 
@@ -267,6 +267,35 @@ func (e *SandboxExecutor) Execute(ctx context.Context, name string, args map[str
 	// Unreachable: every loop iteration either errors or, on the last
 	// iteration, returns the success result.
 	return Result{}, nil
+}
+
+// enforceCapabilityWithSpan wraps the action-boundary capability
+// check (ADR-0003 §"defense in depth") in an
+// `aileron.capability.check` span. Net-new emission point — until
+// this lands, "how often does the sandbox say no?" had no
+// observability surface. Attributes use the OTel-namespaced shape
+// shared with the audit log: aileron.connector.fqn,
+// aileron.capability.kind, aileron.action.name. Denial sets span
+// status Error with the *Error's message; success leaves status
+// Unset.
+func enforceCapabilityWithSpan(ctx context.Context, m *Manifest, connectorFQN, capability string) error {
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
+	_, span := tracer.Start(ctx, "aileron.capability.check",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("aileron.connector.fqn", connectorFQN),
+			attribute.String("aileron.capability.kind", capability),
+		),
+	)
+	defer span.End()
+	if m != nil && m.Name != "" {
+		span.SetAttributes(attribute.String("aileron.action.name", m.Name))
+	}
+	if err := EnforceCapability(m, connectorFQN, capability); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	return nil
 }
 
 // invokeWithSpan wraps a single connector.Invoke call in an
