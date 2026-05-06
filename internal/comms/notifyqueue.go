@@ -1,10 +1,10 @@
-package launch
+package comms
 
 import (
 	"sync"
 	"time"
 
-	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
+	"github.com/ALRubinger/aileron/internal/config"
 )
 
 // Message represents an incoming notification from a comms channel.
@@ -39,7 +39,7 @@ type NotifyQueue struct {
 	maxSize     int
 	onChange    func()
 	onAutoDraft func(Message)
-	quietHours  *launchpolicy.QuietHoursConfig
+	quietHours  *config.QuietHoursConfig
 	nowFunc     func() time.Time // injectable clock for testing; defaults to time.Now
 }
 
@@ -202,7 +202,7 @@ func (q *NotifyQueue) SetDraft(targetID, draftText string) bool {
 }
 
 // ApproveDraft sets the draft to the approved sentinel so the
-// commsserver knows to send the message as-is.
+// dispatcher knows to send the message as-is.
 func (q *NotifyQueue) ApproveDraft(targetID string) {
 	q.mu.Lock()
 	for i := range q.messages {
@@ -267,7 +267,7 @@ func (q *NotifyQueue) MarkAllRead() {
 }
 
 // SetQuietHours configures the quiet hours window. Pass nil to disable.
-func (q *NotifyQueue) SetQuietHours(cfg *launchpolicy.QuietHoursConfig) {
+func (q *NotifyQueue) SetQuietHours(cfg *config.QuietHoursConfig) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.quietHours = cfg
@@ -302,7 +302,7 @@ func (q *NotifyQueue) isQuiet() bool {
 // IsQuietHours determines whether the given time (from nowFunc, or
 // time.Now if nil) falls within the quiet hours window defined by cfg.
 // Returns false if cfg is nil or the start/end times are unparseable.
-func IsQuietHours(cfg *launchpolicy.QuietHoursConfig, nowFunc func() time.Time) bool {
+func IsQuietHours(cfg *config.QuietHoursConfig, nowFunc func() time.Time) bool {
 	if cfg == nil {
 		return false
 	}

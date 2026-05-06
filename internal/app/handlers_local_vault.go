@@ -87,6 +87,25 @@ func (s *apiServer) UnlockLocalVault(w http.ResponseWriter, r *http.Request) {
 	s.vaultLocked = false
 	s.log.Info("local vault unlocked via webapp")
 
+	// Fire the vault-unlock callback so daemon-wide subsystems that
+	// were waiting on credentials (Slack/Discord listener startup,
+	// per ADR-0012 step 9B-2) can resolve tokens and come online.
+	// The callback runs synchronously here; listener startup itself
+	// is fire-and-forget inside the callback so this handler never
+	// blocks on Slack's websocket handshake. A panicking callback
+	// must not poison the unlock — caller might still want the
+	// vault open.
+	if s.onVaultUnlock != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Warn("vault-unlock callback panicked", "panic", r)
+				}
+			}()
+			s.onVaultUnlock(v)
+		}()
+	}
+
 	writeJSON(w, http.StatusOK, s.localVaultStatusResponseLocked())
 }
 

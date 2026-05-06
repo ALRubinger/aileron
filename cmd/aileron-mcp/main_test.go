@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -86,7 +84,7 @@ func TestDispatchTool_UnknownTool(t *testing.T) {
 // --- Tool listing ---
 
 func TestAvailableTools_CommsOnly(t *testing.T) {
-	s := &server{commsSocket: "/tmp/test.sock", httpClient: &http.Client{}}
+	s := &server{commsURL:    "http://x", sessionID: "sess-x", httpClient: &http.Client{}}
 	tools := s.availableTools()
 	if len(tools) != 4 {
 		t.Fatalf("expected 4 comms tools, got %d", len(tools))
@@ -120,7 +118,7 @@ func TestAvailableTools_ActionsOnly(t *testing.T) {
 
 func TestAvailableTools_CommsAndActions(t *testing.T) {
 	s := &server{
-		commsSocket: "/tmp/test.sock",
+		commsURL:    "http://x", sessionID: "sess-x",
 		httpClient:  &http.Client{},
 		actionTools: []toolDef{
 			{Name: "ship_update", Description: "x", InputSchema: schema{Type: "object"}},
@@ -494,65 +492,56 @@ func TestSendMessage_NoSocket(t *testing.T) {
 }
 
 func TestSendMessage_MissingFields(t *testing.T) {
-	s := &server{commsSocket: "/tmp/x.sock", httpClient: &http.Client{}}
+	s := commsServerWithFakeDaemon(t, nil)
 	if !s.sendMessage(map[string]any{}).IsError {
 		t.Fatal("expected error for missing fields")
 	}
 }
 
-func TestDraftReply_NoSocket(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
+func TestDraftReply_NoCommsURL(t *testing.T) {
+	s := &server{httpClient: &http.Client{}, commsHTTPClient: &http.Client{}}
 	if !s.draftReply(map[string]any{"message_id": "1", "body": "hi"}).IsError {
-		t.Fatal("expected error without comms socket")
+		t.Fatal("expected error without comms URL + session ID")
 	}
 }
 
 func TestDraftReply_MissingFields(t *testing.T) {
-	s := &server{commsSocket: "/tmp/x.sock", httpClient: &http.Client{}}
+	s := commsServerWithFakeDaemon(t, nil)
 	if !s.draftReply(map[string]any{}).IsError {
 		t.Fatal("expected error for missing fields")
 	}
 }
 
-func TestHttpRequest_NoSocket(t *testing.T) {
-	s := &server{httpClient: &http.Client{}}
+func TestHttpRequest_NoCommsURL(t *testing.T) {
+	s := &server{httpClient: &http.Client{}, commsHTTPClient: &http.Client{}}
 	if !s.httpRequest(map[string]any{"method": "GET", "url": "https://x"}).IsError {
-		t.Fatal("expected error without comms socket")
+		t.Fatal("expected error without comms URL + session ID")
 	}
 }
 
 func TestHttpRequest_MissingFields(t *testing.T) {
-	s := &server{commsSocket: "/tmp/x.sock", httpClient: &http.Client{}}
+	s := commsServerWithFakeDaemon(t, nil)
 	if !s.httpRequest(map[string]any{}).IsError {
 		t.Fatal("expected error for missing fields")
 	}
 }
 
-func TestRequestComms_NoSocket(t *testing.T) {
-	resp := requestComms("/tmp/no-such.sock", commsRequest{Method: "read_messages"})
-	if resp.Error == "" {
-		t.Fatal("expected error for missing socket")
-	}
-}
+// --- Comms tools — integration against a fake daemon HTTP server ---
 
-// --- Comms tools — integration with a Unix socket ---
-
-func TestReadMessages_WithServer(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		if req.Method != "read_messages" {
-			t.Errorf("method = %q", req.Method)
+func TestReadMessages_WithDaemon(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %q, want GET", r.Method)
 		}
-		return commsResponse{
-			OK: true,
+		if !strings.HasSuffix(r.URL.Path, "/comms/messages") {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(readMessagesResponse{
 			Messages: []commsMessage{
 				{ID: "1", Service: "slack", Channel: "#dev", Author: "alice", Body: "hello"},
 			},
-		}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+		})
+	}))
 	got := s.readMessages(map[string]any{})
 	if got.IsError {
 		t.Fatalf("unexpected error: %s", got.Content[0].Text)
@@ -562,84 +551,85 @@ func TestReadMessages_WithServer(t *testing.T) {
 	}
 }
 
-func TestSendMessage_WithServer(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		if req.Method != "send_message" {
-			t.Errorf("method = %q", req.Method)
-		}
-		return commsResponse{OK: true}
-	})
-	defer stop()
+func TestReadMessages_PassesQueryFilters(t *testing.T) {
+	got := make(chan string, 1)
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(readMessagesResponse{Messages: []commsMessage{}})
+	}))
+	_ = s.readMessages(map[string]any{"service": "slack", "channel": "#dev"})
+	q := <-got
+	if !strings.Contains(q, "service=slack") || !strings.Contains(q, "channel=") {
+		t.Errorf("query = %q, want service=slack and channel filter", q)
+	}
+}
 
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+func TestSendMessage_WithDaemon(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/comms/send") {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body["service"] != "slack" || body["channel"] != "#x" || body["body"] != "hi" {
+			t.Errorf("body = %v", body)
+		}
+		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: true})
+	}))
 	got := s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"})
 	if got.IsError {
 		t.Fatalf("unexpected error: %s", got.Content[0].Text)
 	}
 }
 
-func TestSendMessage_ServerError(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		return commsResponse{Error: "policy denied"}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+func TestSendMessage_DaemonDenies(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: false, Error: "user denied"})
+	}))
 	got := s.sendMessage(map[string]any{"service": "slack", "channel": "#x", "body": "hi"})
 	if !got.IsError {
-		t.Fatal("expected error when comms server returns error")
+		t.Fatal("expected error when daemon denies send")
+	}
+	if !strings.Contains(got.Content[0].Text, "user denied") {
+		t.Errorf("expected daemon's error text in result, got %q", got.Content[0].Text)
 	}
 }
 
-func TestDraftReply_WithServer(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		if req.Method != "draft_reply" {
-			t.Errorf("method = %q", req.Method)
+func TestDraftReply_WithDaemon(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/comms/draft") {
+			t.Errorf("path = %q", r.URL.Path)
 		}
-		return commsResponse{OK: true}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: true})
+	}))
 	got := s.draftReply(map[string]any{"message_id": "1", "body": "hi"})
 	if got.IsError {
 		t.Fatalf("unexpected error: %s", got.Content[0].Text)
 	}
 }
 
-func TestDraftReply_ServerError(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		return commsResponse{Error: "draft denied"}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+func TestDraftReply_DaemonDenies(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: false, Error: "discarded"})
+	}))
 	got := s.draftReply(map[string]any{"message_id": "1", "body": "hi"})
 	if !got.IsError {
-		t.Fatal("expected error when server denies draft")
+		t.Fatal("expected error when daemon discards draft")
 	}
 }
 
-func TestHttpRequest_WithServer(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		if req.Method != "http_request" {
-			t.Errorf("method = %q", req.Method)
+func TestHttpRequest_WithDaemon(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/comms/http") {
+			t.Errorf("path = %q", r.URL.Path)
 		}
-		return commsResponse{
+		_ = json.NewEncoder(w).Encode(commsToolResponse{
 			OK: true,
 			Messages: []commsMessage{
-				{ID: "r", Body: "200 OK\n{\"ok\":true}"},
+				{ID: "200", Body: "{\"ok\":true}"},
 			},
-		}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+		})
+	}))
 	got := s.httpRequest(map[string]any{"method": "GET", "url": "https://example.com"})
 	if got.IsError {
 		t.Fatalf("unexpected error: %s", got.Content[0].Text)
@@ -649,28 +639,28 @@ func TestHttpRequest_WithServer(t *testing.T) {
 	}
 }
 
-func TestHttpRequest_ServerError(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		return commsResponse{Error: "url not in allowlist"}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+func TestHttpRequest_DaemonDenies(t *testing.T) {
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(commsToolResponse{OK: false, Error: "url not in allowlist"})
+	}))
 	got := s.httpRequest(map[string]any{"method": "GET", "url": "https://blocked"})
 	if !got.IsError {
-		t.Fatal("expected error when comms server denies")
+		t.Fatal("expected error when daemon denies")
 	}
 }
 
 func TestDispatchTool_RoutesAllCommsTools(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		return commsResponse{OK: true, Messages: []commsMessage{{ID: "x", Body: "ok"}}}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /comms/messages is GET; the rest are POST.
+		if strings.HasSuffix(r.URL.Path, "/comms/messages") {
+			_ = json.NewEncoder(w).Encode(readMessagesResponse{Messages: []commsMessage{}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(commsToolResponse{
+			OK:       true,
+			Messages: []commsMessage{{ID: "x", Body: "ok"}},
+		})
+	}))
 	cases := []struct {
 		name string
 		args map[string]any
@@ -690,8 +680,10 @@ func TestDispatchTool_RoutesAllCommsTools(t *testing.T) {
 
 func TestHandle_ToolsList_ReturnsTools(t *testing.T) {
 	s := &server{
-		commsSocket: "/tmp/x.sock",
-		httpClient:  &http.Client{},
+		commsURL:        "http://127.0.0.1:1",
+		sessionID:       "sess-x",
+		httpClient:      &http.Client{},
+		commsHTTPClient: &http.Client{},
 	}
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -709,13 +701,9 @@ func TestHandle_ToolsList_ReturnsTools(t *testing.T) {
 }
 
 func TestHandle_ToolsCall_RoutesToTool(t *testing.T) {
-	socket := tempSocket(t)
-	stop := serveComms(t, socket, func(req commsRequest) commsResponse {
-		return commsResponse{OK: true, Messages: []commsMessage{}}
-	})
-	defer stop()
-
-	s := &server{commsSocket: socket, httpClient: &http.Client{}}
+	s := commsServerWithFakeDaemon(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(readMessagesResponse{Messages: []commsMessage{}})
+	}))
 	resp := s.handle(jsonrpcRequest{
 		JSONRPC: "2.0",
 		ID:      json.RawMessage(`1`),
@@ -724,6 +712,24 @@ func TestHandle_ToolsCall_RoutesToTool(t *testing.T) {
 	})
 	if resp == nil || resp.Error != nil {
 		t.Fatalf("unexpected error: %+v", resp)
+	}
+}
+
+func TestCommsAvailable_RequiresBothEnvVars(t *testing.T) {
+	cases := []struct {
+		name string
+		s    *server
+		want bool
+	}{
+		{"both set", &server{commsURL: "http://x", sessionID: "s"}, true},
+		{"missing url", &server{sessionID: "s"}, false},
+		{"missing session", &server{commsURL: "http://x"}, false},
+		{"both missing", &server{}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.s.commsAvailable(); got != tc.want {
+			t.Errorf("%s: commsAvailable() = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -752,50 +758,22 @@ func TestJsonResult(t *testing.T) {
 
 // --- Test infra ---
 
-func tempSocket(t *testing.T) string {
+// commsServerWithFakeDaemon returns a *server pointed at an httptest
+// server that runs the supplied handler. nil handler yields a server
+// configured with comms env but no upstream — useful for missing-field
+// tests where the request never reaches the wire.
+func commsServerWithFakeDaemon(t *testing.T, handler http.Handler) *server {
 	t.Helper()
-	// macOS limits Unix socket paths to ~104 bytes; t.TempDir() with
-	// long test names can exceed that. Use a short random name in
-	// /tmp instead.
-	f, err := os.CreateTemp("/tmp", "ai-mcp-*.sock")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
+	url := "http://127.0.0.1:1" // unreachable; sentinel for "env set, no daemon"
+	if handler != nil {
+		ts := httptest.NewServer(handler)
+		t.Cleanup(ts.Close)
+		url = ts.URL
 	}
-	path := f.Name()
-	f.Close()
-	_ = os.Remove(path) // socket can't exist before listen()
-	t.Cleanup(func() { _ = os.Remove(path) })
-	return path
-}
-
-func serveComms(t *testing.T, socket string, handler func(commsRequest) commsResponse) func() {
-	t.Helper()
-	l, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				var req commsRequest
-				if err := json.NewDecoder(conn).Decode(&req); err != nil {
-					return
-				}
-				resp := handler(req)
-				_ = json.NewEncoder(conn).Encode(resp)
-			}()
-		}
-	}()
-	return func() {
-		_ = l.Close()
-		<-done
-		_ = os.Remove(socket)
+	return &server{
+		commsURL:        url,
+		sessionID:       "sess-x",
+		httpClient:      &http.Client{},
+		commsHTTPClient: &http.Client{},
 	}
 }

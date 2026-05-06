@@ -30,7 +30,9 @@ aileron secret set slack_user_token   # optional, for sending as yourself
 aileron secret list                   # shows stored names
 ```
 
-## 3. Reference them in aileron.yaml
+## 3. Reference them in `~/.aileron/config.yaml`
+
+The notifications block lives in the user-scoped `~/.aileron/config.yaml` — the daemon owns Slack/Discord listeners across launches per [ADR-0012](/adr/0012-local-daemon-architecture). It is not a per-project setting.
 
 ```yaml
 notifications:
@@ -51,13 +53,14 @@ notifications:
 
 Token fields **must** use `vault:` references. Aileron rejects plaintext tokens to prevent secrets from being committed to version control.
 
-## 4. Launch as usual
+## 4. Unlock the vault, launch as usual
 
 ```sh
+aileron daemon start         # if not already running
 aileron launch claude
 ```
 
-Aileron prompts for the vault passphrase, then starts the Slack listener.
+Listener startup is deferred until the vault is unlocked — open the daemon URL printed in the launch banner and enter your passphrase, or unlock from a separate `aileron` CLI flow. The daemon resolves the `vault:` references and connects to Slack only after that point. While listeners are not yet up, the agent's `read_messages` MCP tool returns an empty list rather than failing.
 
 ## Using the notification overlay
 

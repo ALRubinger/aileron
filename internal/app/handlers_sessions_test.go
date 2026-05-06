@@ -305,4 +305,3 @@ func mustJSON(t *testing.T, v any) []byte {
 	return b
 }
 
-func ptr[T any](v T) *T { return &v }

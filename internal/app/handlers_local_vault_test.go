@@ -225,6 +225,70 @@ func TestUnlockLocalVault_NoLocalVaultConfigured(t *testing.T) {
 	assertErrorCode(t, w, "no_local_vault")
 }
 
+func TestUnlockLocalVault_FiresOnVaultUnlockCallback(t *testing.T) {
+	// ADR-0012 step 9B-2: when the local vault is unlocked via the
+	// webapp, the daemon must call OnVaultUnlock so listener startup
+	// can resolve Slack/Discord tokens against the freshly-unlocked
+	// inner vault. The callback receives the unlocked vault handle —
+	// without it the listener-startup helper has no way to resolve
+	// `vault:slack-app-token` references.
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	if _, err := vault.Init(path, "open sesame"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	s := newLocalVaultServer(t, path)
+	got := make(chan vault.Vault, 1)
+	s.onVaultUnlock = func(v vault.Vault) { got <- v }
+
+	w := httptest.NewRecorder()
+	r := unlockRequest(`{"passphrase":"open sesame"}`)
+	s.UnlockLocalVault(w, r)
+	assertStatus(t, w, http.StatusOK)
+
+	select {
+	case v := <-got:
+		if v == nil {
+			t.Fatal("callback fired with nil vault")
+		}
+	default:
+		t.Fatal("OnVaultUnlock callback did not fire after successful unlock")
+	}
+}
+
+func TestUnlockLocalVault_CallbackPanicDoesNotPoisonUnlock(t *testing.T) {
+	// A misbehaving callback must not break the unlock — the user's
+	// passphrase was right, the vault is open, the rest of the system
+	// should keep working.
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	if _, err := vault.Init(path, "open sesame"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	s := newLocalVaultServer(t, path)
+	s.onVaultUnlock = func(vault.Vault) { panic("boom") }
+
+	w := httptest.NewRecorder()
+	r := unlockRequest(`{"passphrase":"open sesame"}`)
+	s.UnlockLocalVault(w, r)
+	assertStatus(t, w, http.StatusOK)
+	if s.vaultLocked {
+		t.Error("vaultLocked still true after panic in callback")
+	}
+}
+
+func TestUnlockLocalVault_NilCallbackIsFine(t *testing.T) {
+	// Callback is optional; nil must not panic.
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	if _, err := vault.Init(path, "open sesame"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	s := newLocalVaultServer(t, path)
+	// onVaultUnlock left nil.
+	w := httptest.NewRecorder()
+	r := unlockRequest(`{"passphrase":"open sesame"}`)
+	s.UnlockLocalVault(w, r)
+	assertStatus(t, w, http.StatusOK)
+}
+
 // --- helpers ---
 
 func unlockRequest(body string) *http.Request {

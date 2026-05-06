@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/comms"
+	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
@@ -1298,32 +1300,38 @@ func showStatusEnv(dir string, w io.Writer) {
 	}
 }
 
-func showStatusNotifications(dir string, w io.Writer) {
+// showStatusNotifications surfaces the user-scoped notification config
+// (Slack / Discord / quiet hours) the daemon reads at startup. Lives in
+// `~/.aileron/config.yaml` per ADR-0012 step 9B-2 — moved out of the
+// per-project `aileron.yaml` along with listener ownership.
+//
+// The `dir` argument is unused now (kept for the call-site signature
+// alignment with the other showStatus* helpers); future enhancements
+// might re-introduce per-project overrides.
+func showStatusNotifications(_ string, w io.Writer) {
 	fmt.Fprintln(w, "\033[1mNotifications\033[0m")
 
-	policyPath := launch.FindPolicyFile(dir)
-	var merged *launchpolicy.PolicyFile
-	if policyPath != "" {
-		var err error
-		merged, err = launchpolicy.LoadWithProfiles(policyPath)
-		if err != nil {
-			fmt.Fprintf(w, "  error: %v\n", err)
-			return
-		}
-	} else {
-		merged = launchpolicy.DefaultPolicy()
+	configPath := config.DefaultAileronConfigPath()
+	cfg, err := config.LoadAileronConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(w, "  error: %v\n", err)
+		return
 	}
 
-	if merged.Notifications == nil {
+	fmt.Fprintf(w, "  config file: %s\n", configPath)
+	if cfg.Notifications == nil {
 		fmt.Fprintln(w, "  No notifications configured.")
 		return
 	}
 
-	if cfg := merged.Notifications.Slack; cfg != nil {
+	if slack := cfg.Notifications.Slack; slack != nil {
 		fmt.Fprintln(w, "  Slack:")
-		fmt.Fprintf(w, "    app_token: %s\n", tokenStatus(cfg.AppToken))
-		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(cfg.BotToken))
-		for _, ch := range cfg.Channels {
+		fmt.Fprintf(w, "    app_token: %s\n", tokenStatus(slack.AppToken))
+		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(slack.BotToken))
+		if slack.UserToken != "" {
+			fmt.Fprintf(w, "    user_token: %s\n", tokenStatus(slack.UserToken))
+		}
+		for _, ch := range slack.Channels {
 			draft := ""
 			if ch.AutoDraft {
 				draft = " (auto-draft)"
@@ -1332,12 +1340,20 @@ func showStatusNotifications(dir string, w io.Writer) {
 		}
 	}
 
-	if cfg := merged.Notifications.Discord; cfg != nil {
+	if discord := cfg.Notifications.Discord; discord != nil {
 		fmt.Fprintln(w, "  Discord:")
-		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(cfg.BotToken))
-		for _, ch := range cfg.Channels {
+		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(discord.BotToken))
+		for _, ch := range discord.Channels {
 			fmt.Fprintf(w, "    channel: %s [show=%s]\n", ch.Name, ch.Show)
 		}
+	}
+
+	if qh := cfg.Notifications.QuietHours; qh != nil {
+		tz := qh.Timezone
+		if tz == "" {
+			tz = "(local)"
+		}
+		fmt.Fprintf(w, "  Quiet hours: %s–%s %s\n", qh.Start, qh.End, tz)
 	}
 }
 
@@ -1369,7 +1385,7 @@ func tokenStatus(value string) string {
 	if value == "" {
 		return "(not set)"
 	}
-	if launch.IsVaultRef(value) {
+	if comms.IsVaultRef(value) {
 		return value
 	}
 	return "(plaintext — use vault: reference)"
