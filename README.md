@@ -16,7 +16,7 @@ Everything lives at **[docs.withaileron.ai](https://docs.withaileron.ai)**:
 
 - [Overview](https://docs.withaileron.ai/) — what Aileron is and the pitch
 - [Concepts](https://docs.withaileron.ai/concepts/deterministic-agentic-execution/) — the architecture, layered: deterministic execution, the LLM gateway, actions, connectors, the vault, proof of control
-- [Architecture Decisions](https://docs.withaileron.ai/adr/) — the eleven ADRs that ratify the post-Pivot architecture
+- [Architecture Decisions](https://docs.withaileron.ai/adr/) — the ADRs that ratify the post-Pivot architecture, including [ADR-0012: Local Daemon Architecture](https://docs.withaileron.ai/adr/0012-local-daemon-architecture/) which collapsed the previous CLI/server split into a single user-scoped daemon auto-spawned on demand
 - [API Reference](https://docs.withaileron.ai/api) — full OpenAPI specification
 
 ## Repository layout
