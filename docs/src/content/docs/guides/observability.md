@@ -122,27 +122,72 @@ The full set is in the [OTel exporter spec](https://opentelemetry.io/docs/specs/
 |---|---|
 | `aileron.mcp.tool.call` | `aileron-mcp` outbound to `/v1/actions/{name}/run` — typically the trace root under `aileron launch` |
 | `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway endpoints |
-| `aileron.intercept.round` | per round of the augmentation/interception loop when actions are installed; carries `aileron.intercept.{round_index,protocol,tool_calls_count,terminal}` |
+| `aileron.intercept.round` | per round of the augmentation/interception loop when actions are installed |
 | `aileron.action.execute` | `SandboxExecutor.Execute` — root for an action invocation |
 | `aileron.capability.check` | per-step action-boundary capability enforcement (defense-in-depth, [ADR-0003](/adr/0003-action-model)) |
 | `aileron.connector.call` | per-step `conn.Invoke` inside the executor |
-| `aileron.approval.wait` | the approval-queue blocking wait — covers the entire user-decision interval; `aileron.approval.decision` is `approved` / `denied` / `timeout` / `cancelled` |
+| `aileron.approval.wait` | the approval-queue blocking wait — covers the entire user-decision interval |
 | HTTP server-root span | other API entry points (`/v1/audit`, `/v1/bindings`, etc.) — generic "METHOD /path" naming |
 
 ### Span attribute schema
 
-Every span carries the OTel-namespaced shape locked-in for the audit payload. When you query traces by attribute, you query the same names you'd query the audit log by:
+Every span carries the OTel-namespaced shape locked-in for the audit payload. When you query traces by attribute, you query the same names you'd query the audit log by — this table is the source of truth for what's available.
 
-| Attribute | On | Description |
-|---|---|---|
-| `aileron.action.name` | `aileron.action.execute` | The action manifest name being invoked |
-| `aileron.action.steps_count` | `aileron.action.execute` | Number of `[[execute]]` steps in the action |
-| `aileron.connector.fqn` | `aileron.connector.call` | Fully-qualified connector identifier (e.g. `github://ALRubinger/aileron-connector-google`) |
-| `aileron.connector.op` | `aileron.connector.call` | The connector operation name (e.g. `list_recent_emails`) |
-| `aileron.connector.hash` | `aileron.connector.call` | The content-addressed hash of the connector binary |
-| `aileron.failure.class` | error spans | Failure taxonomy class (`capability_denied`, `binding_required`, etc.) per [ADR-0010](/adr/0010-failure-handling) |
-| `aileron.failure.boundary` | error spans | Where the failure was detected (`action`, `sandbox`, `runtime`) |
-| `aileron.failure.retriable` | error spans | Whether the agent should retry |
+**Action execution** (`aileron.action.execute`):
+
+| Attribute | Description |
+|---|---|
+| `aileron.action.name` | The action manifest name being invoked |
+| `aileron.action.steps_count` | Number of `[[execute]]` steps in the action |
+
+**Capability check** (`aileron.capability.check`):
+
+| Attribute | Description |
+|---|---|
+| `aileron.action.name` | The action whose subset is being enforced |
+| `aileron.connector.fqn` | The connector the step targets |
+| `aileron.capability.kind` | The op the action is attempting (treated as the capability string per [ADR-0003](/adr/0003-action-model)) |
+
+**Connector call** (`aileron.connector.call`):
+
+| Attribute | Description |
+|---|---|
+| `aileron.connector.fqn` | Fully-qualified connector identifier (e.g. `github://ALRubinger/aileron-connector-google`) |
+| `aileron.connector.op` | The connector operation name (e.g. `list_recent_emails`) |
+| `aileron.connector.hash` | The content-addressed hash of the connector binary |
+
+**Intercept round** (`aileron.intercept.round`):
+
+| Attribute | Description |
+|---|---|
+| `aileron.intercept.round_index` | 0-based, monotonic per request |
+| `aileron.intercept.protocol` | `openai` or `anthropic` |
+| `aileron.intercept.tool_calls_count` | Number of Aileron tool calls in this round (set when present) |
+| `aileron.intercept.terminal` | `true` when the round produced the final assistant message |
+| `aileron.intercept.upstream_status` | HTTP status from the upstream LLM when non-200 |
+
+**Approval wait** (`aileron.approval.wait`):
+
+| Attribute | Description |
+|---|---|
+| `aileron.approval.id` | Correlation key — same id as the `approval.requested` / `.approved` / `.denied` audit events |
+| `aileron.approval.kind` | `action` / `comms_send` / `comms_draft` / `http_request` / `shell` |
+| `aileron.approval.action` | The action-or-tool name the gate covers |
+| `aileron.approval.decision` | `approved` / `denied` / `timeout` / `cancelled` |
+| `aileron.approval.wait_ms` | Time from `RequestedAt` to `DecidedAt`, in milliseconds (set on resolved outcomes) |
+| `aileron.approval.edited` | `true` when the user edited the payload before approving |
+| `aileron.approval.reason` | Free-text reason (set on denials, when supplied) |
+| `aileron.connector.fqn` | Set when the gated action targets a specific connector |
+| `aileron.session.id` | Set when the request came in under a launch session |
+
+**Failure (any error span)** — the closed taxonomy from [ADR-0010](/adr/0010-failure-handling):
+
+| Attribute | Description |
+|---|---|
+| `aileron.failure.class` | Failure taxonomy class (`capability_denied`, `binding_required`, etc.) |
+| `aileron.failure.boundary` | Where the failure was detected (`action`, `sandbox`, `runtime`) |
+| `aileron.failure.retriable` | Whether the agent should retry |
+| `aileron.audit.id` | The audit event id stamped onto the failure envelope, so a span and an audit record can be cross-referenced |
 
 When a span fails, the OTel span status is also set to `Error` with the failure message — your tracing UI's red flags work without parsing attributes.
 
