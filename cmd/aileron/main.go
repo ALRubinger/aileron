@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -117,6 +120,11 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runLog(args[1:], stdout, stderr)
 	case "audit":
 		return runAudit(args[1:], stdout, stderr)
+	case "daemon":
+		return runDaemon(args[1:], stdout, stderr)
+	case "stop":
+		// Alias for `aileron daemon stop` per ADR-0012.
+		return runDaemonStop(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout, registry)
 		return 0
@@ -151,6 +159,8 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron sync [--bind-all] [--yes]  Reconcile installed actions: install missing connectors; report unbound capabilities")
 	fmt.Fprintln(w, "  aileron log [flags]                View the shell-policy log")
 	fmt.Fprintln(w, "  aileron audit [list|show]          View the action-execution audit log (ADR-0010)")
+	fmt.Fprintln(w, "  aileron daemon start|stop|status   Manage the local Aileron daemon (auto-spawned on demand)")
+	fmt.Fprintln(w, "  aileron stop                       Alias for 'aileron daemon stop'")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
 	fmt.Fprintln(w)
@@ -563,13 +573,106 @@ const bindingUsage = `usage:
   aileron binding rebind <name>
   aileron binding revoke <name>`
 
-// bindingAPIBaseURL returns the server's binding API base URL,
-// overridable via AILERON_API_URL for tests and non-default ports.
+// bindingAPIBaseURL returns the daemon's API base URL with the /v1
+// suffix.
+//
+// AILERON_API_URL overrides everything (test/dev escape hatch); when
+// set, it is returned as-is with the trailing slash trimmed. Read on
+// every call so tests that set the env mid-process see the new value.
+//
+// Otherwise, [spawn.Resolve] auto-spawns the daemon if needed; the
+// resulting URL is cached for the lifetime of the CLI process so
+// repeat callers don't reprobe.
+//
+// On spawn failure (binary missing, daemon refuses to start) the
+// historical default `http://localhost:8721/v1` is returned so the
+// caller fails with the familiar "connection refused" rather than a
+// malformed URL. The error is logged to stderr so the operator sees
+// the real cause.
 func bindingAPIBaseURL() string {
 	if u := os.Getenv("AILERON_API_URL"); u != "" {
 		return strings.TrimRight(u, "/")
 	}
-	return "http://localhost:8721/v1"
+	url, err := spawnResolveCached()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aileron: could not resolve daemon URL: %v\n", err)
+		return "http://localhost:8721/v1"
+	}
+	return url
+}
+
+var (
+	spawnURLOnce  sync.Once
+	spawnURLValue string
+	spawnURLErr   error
+)
+
+// spawnResolveFn is the seam that lets tests substitute spawn.Resolve
+// without fork-execing a real daemon binary.
+var spawnResolveFn = spawn.Resolve
+
+// spawnResolveCached calls spawnResolveOnce at most once per CLI
+// process and caches the result. The cache is intentionally
+// process-local — bindingAPIBaseURL re-reads AILERON_API_URL on every
+// call, so tests can flip behavior without resetting any state here.
+func spawnResolveCached() (string, error) {
+	spawnURLOnce.Do(func() { spawnURLValue, spawnURLErr = spawnResolveOnce() })
+	if spawnURLErr != nil {
+		return "", spawnURLErr
+	}
+	return spawnURLValue, nil
+}
+
+// spawnResolveOnce performs the actual spawn.Resolve call. Split out
+// from spawnResolveCached so tests can exercise the body without
+// fighting the sync.Once's process-scoped state.
+func spawnResolveOnce() (string, error) {
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve state dir: %w", err)
+	}
+	binary, err := daemonBinaryPath()
+	if err != nil {
+		return "", fmt.Errorf("locate daemon binary: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := spawnResolveFn(ctx, spawn.Options{
+		StateDir: stateDir,
+		Binary:   binary,
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(raw, "/") + "/v1", nil
+}
+
+// defaultStateDir returns ~/.aileron, the canonical user state
+// directory under which discovery files, the vault, sessions, and
+// the audit log all live.
+func defaultStateDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".aileron"), nil
+}
+
+// daemonBinaryPath resolves the daemon binary's path: a sibling of
+// the running aileron binary named "server" (current build artifact
+// per task build:server). Falls back to PATH lookup so users running
+// `aileron` from PATH can still spawn the daemon if `server` is also
+// on PATH.
+func daemonBinaryPath() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Join(filepath.Dir(self), "server")
+	if _, err := os.Stat(candidate); err == nil {
+		return filepath.Abs(candidate)
+	}
+	return exec.LookPath("server")
 }
 
 // bindingDoRequest issues an HTTP request to the server and returns
