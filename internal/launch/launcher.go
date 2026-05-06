@@ -2,7 +2,6 @@ package launch
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,13 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/comms"
+	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"golang.org/x/term"
 )
 
 // LaunchConfig holds the configuration for launching an agent.
@@ -85,59 +85,57 @@ func ResolveShim(selfPath string) (string, error) {
 }
 
 // Launch starts the agent as a child process with the modified environment.
-// When stdin is a terminal, the agent runs inside a pty with a status bar
-// rendered in the bottom 2 rows. Otherwise, it falls back to direct I/O.
+//
+// Under ADR-0012 launch is a thin client of the user-scoped local
+// daemon: it resolves (and auto-spawns if needed) the daemon URL,
+// registers the session, sets the agent's LLM-endpoint env to point
+// at the daemon, runs the agent, and ends the session on exit. The
+// daemon owns the gateway, the vault, and the action-approval surface.
 func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
-	// Per ADR-0011, the daemon needs the local credential vault for
-	// credential resolution at action-execution time. Two prompt
-	// surfaces are supported:
-	//
-	//   - "webapp" (default under launch, #429): the daemon starts
-	//     vault-locked; the user opens the webapp URL printed in the
-	//     startup banner and submits the passphrase via the modal.
-	//     Vault-needing endpoints return 423 until the webapp POSTs
-	//     /v1/vault/unlock.
-	//
-	//   - "stderr" (legacy / fallback): EnsureVault prompts on stderr
-	//     before the agent runs. Selected automatically when the
-	//     vault file is missing (the webapp modal does not yet handle
-	//     first-launch creation), or when AILERON_VAULT_PROMPT=stderr.
-	//
-	// The mode selection happens before StartGateway so the gateway
-	// is built with the correct (locked or pre-unlocked) vault state.
-	mode, unlockedVault, err := resolveVaultPromptMode(DefaultVaultPath(), os.Getenv("AILERON_VAULT_PROMPT"), term.IsTerminal(int(os.Stdin.Fd())))
+	// Resolve (or auto-spawn) the daemon. spawn.Resolve honors
+	// AILERON_API_URL for tests/dev and falls back to fork-execing the
+	// daemon binary; the URL is stable across launches in a daemon's
+	// lifetime, so the agent's ANTHROPIC_BASE_URL doesn't churn.
+	stateDir, err := resolveStateDir()
 	if err != nil {
-		return LaunchResult{}, fmt.Errorf("vault: %w", err)
+		return LaunchResult{}, fmt.Errorf("state dir: %w", err)
 	}
-
-	// Construct the action-approval queue once and share it across
-	// the embedded gateway and the CommsServer. Both register
-	// pending entries here; the webapp's `/approvals` page renders a
-	// single SSE stream for all kinds (action / comms-send /
-	// comms-draft / http-request) — see #428.
-	approvalQueue := approval.NewActionApprovalQueue(nil, nil)
-
-	// Start the embedded Aileron gateway when the agent supports
-	// LLM-endpoint override via env var. The gateway either shares
-	// the user's just-unlocked vault (stderr mode) or runs in the
-	// vault-locked-pending-webapp-unlock mode (webapp mode).
-	// Agents whose endpoint is configured via a settings file
-	// (see [Pi.LLMEndpointEnv]) bypass this — adding gateway
-	// support for those agents requires extending [Agent.ConfigureShell].
-	var gateway *Gateway
-	if config.Agent.LLMEndpointEnv() != "" {
-		gw, err := StartGateway(ctx, gatewayConfig{
-			Vault:           unlockedVault,
-			LocalVaultPath:  vaultPathForGateway(mode),
-			ActionApprovals: approvalQueue,
-			Log:             slog.Default(),
-		})
+	opts := spawn.Options{StateDir: stateDir}
+	// Binary lookup is only needed when spawn would actually have to
+	// fork-exec the daemon. AILERON_API_URL bypasses spawn entirely
+	// (test/dev), so skip the binary check there — otherwise tests
+	// without a `server` binary on PATH would fail to even start.
+	if os.Getenv("AILERON_API_URL") == "" {
+		binary, err := resolveDaemonBinary()
 		if err != nil {
-			return LaunchResult{}, fmt.Errorf("starting gateway: %w", err)
+			return LaunchResult{}, fmt.Errorf("locate daemon binary: %w", err)
 		}
-		gateway = gw
-		defer func() { _ = gateway.Close(context.Background()) }()
+		opts.Binary = binary
 	}
+	resolveCtx, cancelResolve := context.WithTimeout(ctx, 10*time.Second)
+	daemonURL, err := spawn.Resolve(resolveCtx, opts)
+	cancelResolve()
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("daemon: %w", err)
+	}
+	daemonURL = trimTrailingSlash(daemonURL)
+	client := newDaemonClient(daemonURL)
+
+	// Register the session: the daemon mints the ULID and stamps
+	// StartedAt. Pass the working directory so `aileron sessions list`
+	// can render it.
+	regCtx, cancelReg := context.WithTimeout(ctx, daemonHTTPTimeout)
+	sessionID, err := client.RegisterSession(regCtx, config.Agent.Name(), config.Dir)
+	cancelReg()
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("register session: %w", err)
+	}
+
+	// Action-approval queue: under Step 8, the per-launch queue still
+	// powers the local approval-socket and the comms server.
+	// Step 9 (#454) moves the queue to daemon ownership and routes
+	// per-session via HTTP. For now the queue is process-local.
+	approvalQueue := approval.NewActionApprovalQueue(nil, nil)
 
 	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
 	if err != nil {
@@ -150,13 +148,16 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("configuring shell for %s: %w", config.Agent.Name(), err)
 	}
 
-	sessionID := generateSessionID()
 	auditStateDir := resolveAuditStateDir()
 	envConfig := loadEnvConfig(config.Dir)
 	approvalSocket := filepath.Join(os.TempDir(), "ai-"+sessionID+".sock")
 	commsSocket := filepath.Join(os.TempDir(), "ai-comms-"+sessionID+".sock")
 
-	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), gatewayURL(gateway))
+	// LLM-endpoint env (e.g. ANTHROPIC_BASE_URL for Claude Code) now
+	// points at the daemon. Agents that don't override their LLM
+	// endpoint via env (Pi reads a settings file) bypass this; the
+	// daemon-owned MCP path still reaches them via AILERON_URL.
+	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), daemonURL)
 	env := buildEnv(config.ShellShim, config.Agent.Name(), sessionID, auditStateDir, envConfig, agentEnv)
 	env = append(env, "AILERON_APPROVAL_SOCKET="+approvalSocket)
 	env = append(env, "AILERON_COMMS_SOCKET="+commsSocket)
@@ -165,25 +166,19 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	allArgs := append(config.Agent.Args(), config.Args...)
 
 	// Register aileron-mcp as an MCP server so the agent has access to
-	// read_messages, draft_reply, etc. — and, when the embedded gateway
-	// is up, AILERON_URL so aileron-mcp can route action discovery
-	// (`tools/list`) and execution (`tools/call`) to the same daemon
-	// the agent's LLM calls flow through.
+	// read_messages, draft_reply, etc. AILERON_URL points at the daemon
+	// (was the embedded gateway pre-ADR-0012); aileron-mcp routes action
+	// discovery (`tools/list`) and execution (`tools/call`) there.
 	//
-	// AILERON_APPROVAL_URL is the user-facing approval surface. Until the
-	// webapp ships (#418), this points at the standalone server's API; the
-	// agent uses it in templated tool descriptions to tell the user
-	// exactly where to approve gated actions. Without launch setting it,
-	// aileron-mcp falls back to a generic "check the Aileron webapp"
-	// phrasing, which still works but is less actionable.
+	// AILERON_APPROVAL_URL is the user-facing approval surface — the
+	// daemon's `/approvals` page. The agent embeds this in templated
+	// tool descriptions so the user knows where to approve gated actions.
 	selfPath, _ := os.Executable()
 	if mcpBin, err := resolveSibling(selfPath, "aileron-mcp"); err == nil {
 		mcpEnv := map[string]string{
 			"AILERON_COMMS_SOCKET": commsSocket,
-		}
-		if gateway != nil {
-			mcpEnv["AILERON_URL"] = gateway.URL
-			mcpEnv["AILERON_APPROVAL_URL"] = gateway.URL + "/approvals"
+			"AILERON_URL":          daemonURL,
+			"AILERON_APPROVAL_URL": daemonURL + "/approvals",
 		}
 		envJSON, _ := json.Marshal(mcpEnv)
 		mcpConfig := fmt.Sprintf(
@@ -211,13 +206,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		"session_id", sessionID,
 		"dir", config.Dir,
 		"binary", agentPath,
+		"daemon_url", daemonURL,
 	)
 
 	// Comms listeners (Slack, Discord) so incoming messages still
 	// land in the NotifyQueue and are readable via the
-	// `read_messages` MCP tool. The webapp surface for surfacing
-	// these messages is a future addition (#418's followups);
-	// today the agent reads them via `aileron-mcp`.
+	// `read_messages` MCP tool. Step 9 (#454) moves these to daemon
+	// ownership; until then they stay per-launch.
 	listeners := startCommsListeners(ctx, config.Dir, queue, auditStateDir, sessionID, sessionLog)
 	defer stopCommsListeners(listeners)
 
@@ -234,15 +229,8 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	go commsSrv.Serve()
 
 	// Approval socket: aileron-sh dials this when a shell command
-	// matches an `ask:` policy rule (issue #427). The server registers
-	// a shell-kind entry on the same approval queue the gateway
-	// exposes to the webapp, blocks on the user's verdict, and
-	// replies with the four-option decision string aileron-sh
-	// expects. When the listener can't be created (e.g. tmpdir is
-	// read-only in a hostile environment), aileron-sh's dial fails
-	// and the policy-enforced shell falls back to its built-in
-	// deny — agents stay blocked from running gated commands without
-	// explicit approval.
+	// matches an `ask:` policy rule (issue #427). Independent of the
+	// daemon — Step 9 routes this through daemon HTTP per session ID.
 	approvalSrv, err := NewApprovalSocketServer(approvalSocket, approvalQueue, sessionID, config.Dir, sessionLog.With("component", "approval-socket"))
 	if err != nil {
 		sessionLog.Warn("approval socket disabled", "error", err)
@@ -252,43 +240,94 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		go approvalSrv.Serve(ctx)
 	}
 
-	// Print the startup banner once on stderr before exec'ing the
-	// agent. The agent inherits this terminal — Claude Code, Pi,
-	// and others own the terminal completely under the new launch
-	// path. The banner is the only thing Aileron ever writes here.
-	printStartupBanner(os.Stderr, gateway, sessionID, sessionLogPath(config.Dir), unlockedVault == nil && mode == vaultPromptModeWebapp)
+	// Banner: probe the daemon's vault state so we can include the
+	// "open the URL to unlock" hint when needed. Failure is silent —
+	// the banner just omits the hint.
+	probeCtx, cancelProbe := context.WithTimeout(ctx, daemonHTTPTimeout)
+	locked, ok := client.LocalVaultLocked(probeCtx)
+	cancelProbe()
+	printStartupBanner(os.Stderr, daemonURL, sessionID, sessionLogPath(config.Dir), ok && locked)
 
-	result, err := launchDirect(cmd, config)
+	result, runErr := launchDirect(cmd, config)
+
+	// End the session: stamp EndedAt + ExitCode on the daemon's record.
+	// Best-effort — failure here logs but doesn't override the agent's
+	// exit code. The orphan-reaper handles the worst case (daemon dies
+	// while we're mid-launch).
+	endCtx, cancelEnd := context.WithTimeout(context.Background(), daemonHTTPTimeout)
+	exit := result.ExitCode
+	if endErr := client.EndSession(endCtx, sessionID, &exit); endErr != nil {
+		sessionLog.Warn("end session", "error", endErr)
+	}
+	cancelEnd()
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	if auditStateDir != "" {
 		PrintSessionSummary(os.Stderr, auditStateDir, sessionID)
 	}
-	return result, err
+	return result, runErr
+}
+
+// composeAgentEnv merges the agent's env map with the LLM-endpoint
+// override (e.g. ANTHROPIC_BASE_URL → daemonURL). Empty endpointEnv
+// or empty url skips the override entirely.
+func composeAgentEnv(agentEnv map[string]string, endpointEnv, url string) map[string]string {
+	merged := make(map[string]string, len(agentEnv)+1)
+	for k, v := range agentEnv {
+		merged[k] = v
+	}
+	if endpointEnv != "" && url != "" {
+		merged[endpointEnv] = url
+	}
+	return merged
+}
+
+// resolveStateDir returns ~/.aileron, the state directory the daemon
+// publishes its discovery files into. Launch passes this to
+// spawn.Resolve and to the audit log writers.
+func resolveStateDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".aileron"), nil
+}
+
+// resolveDaemonBinary locates the daemon binary — a sibling of the
+// running aileron binary named "server" — and falls back to PATH.
+// Mirrors the helper in cmd/aileron; duplicated to keep launch
+// self-contained without a circular import on the cmd module.
+func resolveDaemonBinary() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Join(filepath.Dir(self), "server")
+	if _, err := os.Stat(candidate); err == nil {
+		return filepath.Abs(candidate)
+	}
+	return exec.LookPath("server")
 }
 
 // printStartupBanner writes a single line on stderr before exec'ing
-// the agent, naming the webapp URL and session id. Replaces the in-
+// the agent, naming the daemon URL and session id. Replaces the in-
 // pty StatusBar from the pre-#419 launch path. Output is fenced so
 // agents that don't render ANSI gracefully (or terminals that wrap
 // long lines) still parse the URL cleanly.
 //
-// When the daemon starts vault-locked (webapp mode, #429) and the
-// gateway is up, a follow-up line points the user at the unlock
-// surface — vault-needing tool calls fail with 423 until the user
-// types their passphrase into the modal.
-func printStartupBanner(w io.Writer, gateway *Gateway, sessionID, logPath string, vaultLocked bool) {
-	url := ""
-	if gateway != nil {
-		url = gateway.URL
-	}
-	if url == "" {
+// daemonURL is the URL spawn.Resolve handed back — stable across
+// every launch in the daemon's lifetime, so users can bookmark it.
+// When vaultLocked is true, a follow-up line points the user at the
+// unlock surface — vault-needing tool calls fail with 423 until the
+// user types their passphrase into the webapp modal.
+func printStartupBanner(w io.Writer, daemonURL, sessionID, logPath string, vaultLocked bool) {
+	if daemonURL == "" {
 		fmt.Fprintf(w, "✈️  Aileron — session %s — log %s\n", sessionID, logPath)
 		return
 	}
-	fmt.Fprintf(w, "✈️  Aileron — webapp %s — session %s — log %s\n", url, sessionID, logPath)
+	fmt.Fprintf(w, "✈️  Aileron — webapp %s — session %s — log %s\n", daemonURL, sessionID, logPath)
 	if vaultLocked {
-		fmt.Fprintf(w, "✈️  Vault locked — open %s and enter your passphrase to unlock.\n", url)
+		fmt.Fprintf(w, "✈️  Vault locked — open %s and enter your passphrase to unlock.\n", daemonURL)
 	}
 }
 
@@ -394,14 +433,6 @@ func buildEnv(shimPath, agentName, sessionID, auditStateDir string, envConfig *l
 	}
 
 	return filtered
-}
-
-// generateSessionID returns a short random hex string for correlating
-// audit entries within a single aileron launch session.
-func generateSessionID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
 }
 
 // ResolveAuditLogFromCwd returns the audit subdirectory the
