@@ -119,6 +119,13 @@ type apiServer struct {
 	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
 	oauth2Sessions     *oauth2Sessions   // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
 	oauth2HTTPClient   *http.Client      // for OAuth token exchanges; nil → http.DefaultClient
+
+	// --- Comms (ADR-0012 step 9B-2) ---
+	notifyQueue   *comms.NotifyQueue        // daemon-wide inbound messages; nil disables /comms/* endpoints
+	listeners     *comms.ListenerRegistry   // registered Slack/Discord listeners; populated by the vault-unlock callback
+	onVaultUnlock func(vault.Vault)         // fires after POST /v1/vault/unlock so listener startup can resolve tokens
+	auditStateDir string                    // scopes message-event audit log writes; "" disables audit emission for /comms/*
+	commsHTTPClient *http.Client            // outbound client for /comms/http; nil falls back to http.DefaultClient
 }
 
 // --- JSON helpers ---

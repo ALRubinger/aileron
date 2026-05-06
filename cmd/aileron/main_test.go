@@ -473,8 +473,9 @@ env:
 func TestRunStatus_Notifications(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
+	configDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(configDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
 notifications:
   slack:
     app_token: vault:slack_app
@@ -568,8 +569,9 @@ func TestRunStatus_InHelp(t *testing.T) {
 func TestRunStatus_NotificationsWithDiscord(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
+	configDir := filepath.Join(dir, ".aileron")
+	os.MkdirAll(configDir, 0o755)
+	os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
 notifications:
   discord:
     bot_token: vault:discord_bot

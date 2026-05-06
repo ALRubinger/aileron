@@ -1,21 +1,21 @@
-package launch_test
+package comms_test
 
 import (
 	"testing"
 	"time"
 
-	"github.com/ALRubinger/aileron/internal/launch"
-	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
+	"github.com/ALRubinger/aileron/internal/comms"
+	"github.com/ALRubinger/aileron/internal/config"
 )
 
 func TestIsQuietHours_NilConfig(t *testing.T) {
-	if launch.IsQuietHours(nil, nil) {
+	if comms.IsQuietHours(nil, nil) {
 		t.Error("expected false for nil config")
 	}
 }
 
 func TestIsQuietHours_OvernightWindow(t *testing.T) {
-	cfg := &launchpolicy.QuietHoursConfig{
+	cfg := &config.QuietHoursConfig{
 		Start: "22:00",
 		End:   "06:00",
 	}
@@ -40,7 +40,7 @@ func TestIsQuietHours_OvernightWindow(t *testing.T) {
 			now := func() time.Time {
 				return time.Date(2026, 1, 15, tt.hour, tt.min, 0, 0, time.Local)
 			}
-			if got := launch.IsQuietHours(cfg, now); got != tt.want {
+			if got := comms.IsQuietHours(cfg, now); got != tt.want {
 				t.Errorf("IsQuietHours at %02d:%02d = %v, want %v", tt.hour, tt.min, got, tt.want)
 			}
 		})
@@ -48,7 +48,7 @@ func TestIsQuietHours_OvernightWindow(t *testing.T) {
 }
 
 func TestIsQuietHours_SameDayWindow(t *testing.T) {
-	cfg := &launchpolicy.QuietHoursConfig{
+	cfg := &config.QuietHoursConfig{
 		Start: "09:00",
 		End:   "17:00",
 	}
@@ -72,7 +72,7 @@ func TestIsQuietHours_SameDayWindow(t *testing.T) {
 			now := func() time.Time {
 				return time.Date(2026, 1, 15, tt.hour, tt.min, 0, 0, time.Local)
 			}
-			if got := launch.IsQuietHours(cfg, now); got != tt.want {
+			if got := comms.IsQuietHours(cfg, now); got != tt.want {
 				t.Errorf("IsQuietHours at %02d:%02d = %v, want %v", tt.hour, tt.min, got, tt.want)
 			}
 		})
@@ -80,7 +80,7 @@ func TestIsQuietHours_SameDayWindow(t *testing.T) {
 }
 
 func TestIsQuietHours_WithTimezone(t *testing.T) {
-	cfg := &launchpolicy.QuietHoursConfig{
+	cfg := &config.QuietHoursConfig{
 		Start:    "22:00",
 		End:      "06:00",
 		Timezone: "America/New_York",
@@ -91,7 +91,7 @@ func TestIsQuietHours_WithTimezone(t *testing.T) {
 	now := func() time.Time {
 		return time.Date(2026, 1, 15, 23, 0, 0, 0, ny)
 	}
-	if !launch.IsQuietHours(cfg, now) {
+	if !comms.IsQuietHours(cfg, now) {
 		t.Error("expected quiet at 23:00 America/New_York")
 	}
 
@@ -99,13 +99,13 @@ func TestIsQuietHours_WithTimezone(t *testing.T) {
 	now = func() time.Time {
 		return time.Date(2026, 1, 15, 12, 0, 0, 0, ny)
 	}
-	if launch.IsQuietHours(cfg, now) {
+	if comms.IsQuietHours(cfg, now) {
 		t.Error("expected not quiet at 12:00 America/New_York")
 	}
 }
 
 func TestIsQuietHours_InvalidTimezone(t *testing.T) {
-	cfg := &launchpolicy.QuietHoursConfig{
+	cfg := &config.QuietHoursConfig{
 		Start:    "22:00",
 		End:      "06:00",
 		Timezone: "Invalid/Zone",
@@ -113,7 +113,7 @@ func TestIsQuietHours_InvalidTimezone(t *testing.T) {
 	now := func() time.Time {
 		return time.Date(2026, 1, 15, 23, 0, 0, 0, time.UTC)
 	}
-	if launch.IsQuietHours(cfg, now) {
+	if comms.IsQuietHours(cfg, now) {
 		t.Error("expected false for invalid timezone")
 	}
 }
@@ -122,11 +122,11 @@ func TestIsQuietHours_NilNowFunc(t *testing.T) {
 	// When nowFunc is nil, IsQuietHours should use time.Now and not panic.
 	// We use a wide window (00:00–23:59) to guarantee the result is true
 	// regardless of when the test runs.
-	cfg := &launchpolicy.QuietHoursConfig{
+	cfg := &config.QuietHoursConfig{
 		Start: "00:00",
 		End:   "23:59",
 	}
-	if !launch.IsQuietHours(cfg, nil) {
+	if !comms.IsQuietHours(cfg, nil) {
 		t.Error("expected true for all-day window with nil nowFunc")
 	}
 }
@@ -144,14 +144,14 @@ func TestIsQuietHours_InvalidTimeFormat(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &launchpolicy.QuietHoursConfig{
+			cfg := &config.QuietHoursConfig{
 				Start: tt.start,
 				End:   tt.end,
 			}
 			now := func() time.Time {
 				return time.Date(2026, 1, 15, 23, 0, 0, 0, time.Local)
 			}
-			if launch.IsQuietHours(cfg, now) {
+			if comms.IsQuietHours(cfg, now) {
 				t.Error("expected false for invalid time format")
 			}
 		})

@@ -829,6 +829,175 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/sessions/{session_id}/comms/messages:
+    get:
+      tags: [Sessions]
+      summary: Read pending messages from communication channels
+      description: |
+        Called by `aileron-mcp`'s `read_messages` tool. Returns the
+        messages currently in the daemon's notify queue (Slack, Discord),
+        optionally filtered by `service` and `channel`. Marks every
+        surfaced message as read, so consecutive calls don't return the
+        same message twice.
+      operationId: readCommsMessages
+      security: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: service
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by service ("slack", "discord", or empty for all).
+        - name: channel
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter by channel name, or empty for all channels.
+      responses:
+        "200":
+          description: Messages snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadCommsMessagesResponse"
+        "503":
+          description: Comms surface is not configured on this daemon.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/sessions/{session_id}/comms/send:
+    post:
+      tags: [Sessions]
+      summary: Request user approval to send a message (long-poll)
+      description: |
+        Called by `aileron-mcp`'s `send_message` tool. The daemon
+        registers a [comms_send] entry on the action-approval queue,
+        long-polls until the user decides via the webapp, and on
+        approve dispatches the message via the matching listener.
+        Returns 200 + `{ok:true}` on approve, `{ok:false,error:...}`
+        on deny / timeout / dispatch failure.
+      operationId: sendCommsMessage
+      security: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendCommsMessageRequest"
+      responses:
+        "200":
+          description: User decided (approved → dispatched, denied / timeout / dispatch error → ok=false).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommsToolResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: Comms surface is not configured on this daemon.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/sessions/{session_id}/comms/draft:
+    post:
+      tags: [Sessions]
+      summary: Submit a draft reply for user review (long-poll)
+      description: |
+        Called by `aileron-mcp`'s `draft_reply` tool. Looks up the
+        original incoming message in the notify queue by `reply_to`,
+        registers a [comms_draft] entry on the action-approval queue
+        with the editable draft body, long-polls, and on approve
+        dispatches the (possibly user-edited) reply through the
+        matching listener.
+      operationId: draftCommsReply
+      security: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DraftCommsReplyRequest"
+      responses:
+        "200":
+          description: User decided (approved → dispatched, discarded / timeout → ok=false).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommsToolResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: Comms surface is not configured on this daemon.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/sessions/{session_id}/comms/http:
+    post:
+      tags: [Sessions]
+      summary: Issue an authenticated HTTP request (long-poll approval)
+      description: |
+        Called by `aileron-mcp`'s `http_request` tool. The daemon
+        matches the URL against api_key vault entries (where
+        `metadata.type=api_key` and `metadata.labels[url-pattern]`
+        matches), registers a [http_request] approval entry, long-polls,
+        and on approve issues the HTTP call with the matched secret
+        injected as a Bearer token. The response body is returned in
+        `messages[0].body` with the upstream status code in
+        `messages[0].id`.
+      operationId: requestCommsHTTP
+      security: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RequestCommsHTTPRequest"
+      responses:
+        "200":
+          description: User decided (approved → dispatched, denied / timeout / dispatch error → ok=false).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommsToolResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: Comms surface is not configured on this daemon.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/intents:
     post:
       tags: [Intents]
@@ -6157,3 +6326,129 @@ components:
         decision:
           type: string
           enum: [allow_once, deny, allow_project, allow_user]
+
+    CommsMessage:
+      type: object
+      required: [id, service, channel, author, body, timestamp]
+      description: |
+        A single message read from the daemon's notify queue. Mirrors
+        the wire shape `aileron-mcp`'s `read_messages` tool surfaces
+        to the agent so the agent can decide whether to draft a reply.
+      properties:
+        id:
+          type: string
+          description: Stable per-message identifier (set by the inbound listener).
+        service:
+          type: string
+          description: Source service ("slack", "discord", ...).
+        channel:
+          type: string
+          description: Channel name or ID the message arrived on.
+        author:
+          type: string
+          description: Sender's display name.
+        body:
+          type: string
+          description: Full message text.
+        timestamp:
+          type: string
+          format: date-time
+          description: When the listener received the message (RFC3339).
+        draft_request:
+          type: boolean
+          description: |
+            True when the message arrived on a channel configured for
+            auto-draft and no reply has been drafted yet — the agent
+            should call `draft_reply` with this message's id.
+
+    ReadCommsMessagesResponse:
+      type: object
+      required: [messages]
+      description: |
+        Snapshot of unread messages from the daemon's notify queue.
+        Calling this endpoint marks the surfaced messages as read.
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/CommsMessage"
+
+    SendCommsMessageRequest:
+      type: object
+      required: [service, channel, body]
+      description: |
+        Request body for `POST /v1/sessions/{id}/comms/send`. session_id
+        rides in the URL path; the daemon stamps it on the
+        action-approval entry.
+      properties:
+        service:
+          type: string
+          description: Target service ("slack", "discord").
+        channel:
+          type: string
+          description: Channel name or ID to send to.
+        body:
+          type: string
+          description: Message text to send.
+
+    DraftCommsReplyRequest:
+      type: object
+      required: [reply_to, body]
+      description: |
+        Request body for `POST /v1/sessions/{id}/comms/draft`. The
+        daemon looks up the original message in the notify queue by
+        `reply_to` and surfaces it alongside the draft body for the
+        user to approve / edit / discard.
+      properties:
+        reply_to:
+          type: string
+          description: ID of the original incoming message (from `read_messages`).
+        body:
+          type: string
+          description: Suggested reply text the agent drafted.
+
+    RequestCommsHTTPRequest:
+      type: object
+      required: [method, url]
+      description: |
+        Request body for `POST /v1/sessions/{id}/comms/http`. The
+        daemon matches `url` against api_key vault entries and injects
+        the matched secret as a Bearer token after the user approves.
+      properties:
+        method:
+          type: string
+          description: HTTP method (GET, POST, PUT, DELETE, PATCH).
+        url:
+          type: string
+          description: Target URL.
+        body:
+          type: string
+          description: Request body string. Optional.
+        headers:
+          type: string
+          description: |
+            Additional request headers as a JSON object string, e.g.
+            `{"X-Foo":"bar"}`. Optional.
+
+    CommsToolResponse:
+      type: object
+      required: [ok]
+      description: |
+        Generic wire shape for the send-shaped comms endpoints
+        (`/comms/send`, `/comms/draft`, `/comms/http`). `ok=true` means
+        the request was approved and dispatched successfully; `ok=false`
+        means denied / timed out / dispatch failed, with `error`
+        carrying the agent-facing reason.
+      properties:
+        ok:
+          type: boolean
+        error:
+          type: string
+          description: Agent-facing failure detail when ok=false.
+        messages:
+          type: array
+          description: |
+            Optional response payload — used by `/comms/http` to carry
+            the upstream HTTP response (status code in id, body in body).
+          items:
+            $ref: "#/components/schemas/CommsMessage"

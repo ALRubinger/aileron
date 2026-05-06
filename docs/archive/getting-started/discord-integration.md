@@ -19,12 +19,20 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
 
 In Discord, enable Developer Mode (User Settings > Advanced > Developer Mode). Right-click a channel and **Copy Channel ID**.
 
-## 3. Add the config to aileron.yaml
+## 3. Add the config to `~/.aileron/config.yaml`
+
+The notifications block lives in the user-scoped `~/.aileron/config.yaml` per [ADR-0012](/adr/0012-local-daemon-architecture) — the daemon owns the Discord listener across launches.
+
+Store the bot token in the vault and reference it; plaintext tokens are rejected.
+
+```sh
+aileron secret set discord_bot_token
+```
 
 ```yaml
 notifications:
   discord:
-    bot_token: "your-bot-token"
+    bot_token: vault:discord_bot_token
     channels:
       - name: "1234567890123456789"   # channel ID
         show: all
@@ -36,10 +44,11 @@ notifications:
       - "1111111111111111111"          # channel ID to ignore
 ```
 
-## 4. Launch as usual
+## 4. Unlock the vault, launch as usual
 
 ```sh
+aileron daemon start         # if not already running
 aileron launch claude
 ```
 
-Discord messages appear alongside Slack messages in the same notification bar and overlay.
+Listener startup is deferred until the vault is unlocked. Discord messages then appear alongside Slack messages in the same notification surface.

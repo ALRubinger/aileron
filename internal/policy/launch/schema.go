@@ -9,16 +9,20 @@ import (
 )
 
 // PolicyFile is the top-level schema for aileron.yaml.
+//
+// The historic `notifications:` block has moved to the user-scoped
+// `~/.aileron/config.yaml` (see [config.AileronConfig]) per ADR-0012:
+// the daemon owns Slack/Discord listener lifecycle, not the per-project
+// policy.
 type PolicyFile struct {
-	Version       int              `yaml:"version"`
-	Default       string           `yaml:"default,omitempty"` // "allow", "deny", "ask"
-	Settings      *Settings        `yaml:"settings,omitempty"`
-	Env           *EnvConfig       `yaml:"env,omitempty"`
-	Notifications *NotifyConfig    `yaml:"notifications,omitempty"`
-	Secrets       SecretsConfig    `yaml:"secrets,omitempty"`
-	Allow         []Rule           `yaml:"allow,omitempty"`
-	Deny          []Rule           `yaml:"deny,omitempty"`
-	Ask           []Rule           `yaml:"ask,omitempty"`
+	Version  int           `yaml:"version"`
+	Default  string        `yaml:"default,omitempty"` // "allow", "deny", "ask"
+	Settings *Settings     `yaml:"settings,omitempty"`
+	Env      *EnvConfig    `yaml:"env,omitempty"`
+	Secrets  SecretsConfig `yaml:"secrets,omitempty"`
+	Allow    []Rule        `yaml:"allow,omitempty"`
+	Deny     []Rule        `yaml:"deny,omitempty"`
+	Ask      []Rule        `yaml:"ask,omitempty"`
 }
 
 // SecretsConfig maps secret names to their target URL patterns. When an
@@ -35,46 +39,6 @@ type SecretDef struct {
 type Settings struct {
 	AskMode string `yaml:"ask_mode,omitempty"` // "terminal" or "ui"
 	Timeout int    `yaml:"timeout,omitempty"`  // seconds to wait for human response
-}
-
-// NotifyConfig holds notification channel configuration for Slack and Discord.
-type NotifyConfig struct {
-	Slack      *SlackNotifyConfig   `yaml:"slack,omitempty"`
-	Discord    *DiscordNotifyConfig `yaml:"discord,omitempty"`
-	QuietHours *QuietHoursConfig    `yaml:"quiet_hours,omitempty"`
-}
-
-// QuietHoursConfig defines a daily window during which non-high-priority
-// notifications are suppressed. Messages are still queued but the status
-// bar and onChange callback are not triggered.
-type QuietHoursConfig struct {
-	Start    string `yaml:"start"`              // "HH:MM" in 24-hour format, e.g. "22:00"
-	End      string `yaml:"end"`                // "HH:MM" in 24-hour format, e.g. "08:00"
-	Timezone string `yaml:"timezone,omitempty"` // IANA timezone, e.g. "America/New_York"; defaults to local
-}
-
-// SlackNotifyConfig configures Slack integration.
-type SlackNotifyConfig struct {
-	AppToken  string          `yaml:"app_token,omitempty"`  // xapp-... Socket Mode token
-	BotToken  string          `yaml:"bot_token,omitempty"`  // xoxb-... Bot token (receiving)
-	UserToken string          `yaml:"user_token,omitempty"` // xoxp-... User OAuth token (sending as you)
-	Channels  []ChannelConfig `yaml:"channels,omitempty"`
-	Ignore    []string        `yaml:"ignore,omitempty"`
-}
-
-// DiscordNotifyConfig configures Discord integration.
-type DiscordNotifyConfig struct {
-	BotToken string         `yaml:"bot_token,omitempty"`
-	Channels []ChannelConfig `yaml:"channels,omitempty"`
-	Ignore   []string       `yaml:"ignore,omitempty"`
-}
-
-// ChannelConfig defines how a single channel is handled.
-type ChannelConfig struct {
-	Name      string `yaml:"name"`
-	Show      string `yaml:"show,omitempty"`       // "all", "mentions", "none"
-	AutoDraft bool   `yaml:"auto_draft,omitempty"` // route to agent for draft reply
-	Priority  string `yaml:"priority,omitempty"`   // "normal", "high"
 }
 
 // EnvConfig controls environment variable scrubbing.

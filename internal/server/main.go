@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/app"
+	"github.com/ALRubinger/aileron/internal/comms"
+	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/sessions/jsonl"
@@ -140,6 +142,71 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		}
 	}()
 	cfg.Sessions = sessionStore
+
+	// Comms wiring (ADR-0012 step 9B-2). The daemon owns Slack/Discord
+	// listeners now; the launch product no longer binds a per-session
+	// unix socket. Lazy startup: listener tokens come from the user's
+	// vault, which is locked at this point. The OnVaultUnlock callback
+	// fires from POST /v1/vault/unlock and is where listener startup
+	// actually runs — until the user unlocks, /comms/messages returns
+	// an empty queue and /comms/send returns "no listener for service".
+	aileronCfg, err := config.LoadAileronConfig(config.DefaultAileronConfigPath())
+	if err != nil {
+		// Surface but don't abort — a malformed config.yaml shouldn't
+		// stop the daemon serving the rest of its endpoints. Vault,
+		// actions, and approvals all still work without notifications.
+		log.Warn("loading aileron config", "error", err)
+		aileronCfg = &config.AileronConfig{}
+	}
+	if err := comms.ValidateNotificationTokens(aileronCfg.Notifications); err != nil {
+		log.Warn("notifications config rejected", "error", err)
+		aileronCfg.Notifications = nil
+	}
+
+	notifyQueue := comms.NewNotifyQueue(100, nil)
+	if aileronCfg.Notifications != nil && aileronCfg.Notifications.QuietHours != nil {
+		notifyQueue.SetQuietHours(aileronCfg.Notifications.QuietHours)
+	}
+	listenerRegistry := comms.NewListenerRegistry()
+	cfg.NotifyQueue = notifyQueue
+	cfg.Listeners = listenerRegistry
+	cfg.AuditStateDir = opts.StateDir
+
+	// Vault-unlock callback: when the user unlocks the local vault via
+	// the webapp passphrase modal, resolve Slack/Discord tokens and
+	// start listeners. No-op when the user hasn't configured
+	// notifications, when listeners are already running (Set replaces
+	// rather than duplicates per-service), or when the unlocked vault
+	// is the same one we already saw — relock teardown is deliberately
+	// out of scope (#454 acceptance criteria).
+	cfg.OnVaultUnlock = func(v vault.Vault) {
+		if listenerRegistry.Len() > 0 {
+			log.Debug("listeners already running; skipping startup")
+			return
+		}
+		started, err := comms.StartListeners(ctx, comms.StartOptions{
+			Notifications: aileronCfg.Notifications,
+			Vault:         v,
+			Queue:         notifyQueue,
+			AuditStateDir: opts.StateDir,
+			Log:           log,
+		}, listenerRegistry)
+		if err != nil {
+			log.Warn("listener startup failed", "error", err)
+			return
+		}
+		log.Info("comms listeners started after vault unlock", "started", started)
+	}
+	defer listenerRegistry.CloseAll(log)
+
+	// If the daemon launched with a pre-unlocked vault (the
+	// `selectVault` interactive path on a TTY), fire the callback
+	// immediately so listeners come up before the first /comms/*
+	// request lands. The webapp-driven unlock path drives the same
+	// callback later via UnlockLocalVault.
+	if cfg.Vault != nil {
+		cfg.OnVaultUnlock(cfg.Vault)
+	}
 
 	bindAddr := opts.BindAddr
 	if bindAddr == "" {

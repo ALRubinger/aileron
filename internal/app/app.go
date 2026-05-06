@@ -29,6 +29,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/binding"
+	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/intercept"
@@ -130,6 +131,41 @@ type Config struct {
 	// is the right behavior for cloud-shaped deployments and tests
 	// that don't exercise the launch session surface.
 	Sessions sessions.Store
+
+	// NotifyQueue is the daemon-wide queue of incoming Slack/Discord
+	// messages (ADR-0012, step 9B-2). Populated by listener goroutines
+	// after [OnVaultUnlock] resolves credentials; consumed by the
+	// `/v1/sessions/{id}/comms/messages` endpoint that powers
+	// `aileron-mcp`'s `read_messages` tool. Nil disables every comms
+	// endpoint — the right behavior for cloud-shaped daemons that
+	// don't bridge personal messaging.
+	NotifyQueue *comms.NotifyQueue
+
+	// Listeners is the registry of active Slack/Discord listeners
+	// keyed by service name. Populated by the vault-unlock callback;
+	// consumed by `/comms/send` and `/comms/draft` to dispatch
+	// outbound messages after the user approves. Pair with
+	// [NotifyQueue] — both nil or both set.
+	Listeners *comms.ListenerRegistry
+
+	// OnVaultUnlock fires after a successful POST /v1/vault/unlock,
+	// stamped with the freshly-unlocked vault. The daemon registers
+	// a callback here that resolves Slack/Discord tokens and starts
+	// the matching listeners — the canonical signal that "user just
+	// authorized us to read their personal messaging." Nil is fine
+	// for tests / cloud daemons that have nothing to do on unlock.
+	//
+	// Synchronous from the perspective of the unlock handler — the
+	// HTTP response holds open until the callback returns. Listener
+	// startup itself is fire-and-forget inside the callback so the
+	// handler never blocks on Slack's WebSocket handshake.
+	OnVaultUnlock func(vault.Vault)
+
+	// AuditStateDir scopes the daily-rotated `audit-YYYY-MM-DD.jsonl`
+	// files that `message_received` events land in. Empty disables
+	// audit emission for inbound messages. Production passes
+	// ~/.aileron; tests pass t.TempDir().
+	AuditStateDir string
 }
 
 // NewHandler creates a fully-wired Aileron control plane HTTP handler
@@ -405,6 +441,15 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// in-memory implementation or omit entirely.
 	server.sessions = cfg.Sessions
 	server.actionApprovalTTL = 5 * time.Minute
+
+	// Comms wiring (ADR-0012 step 9B-2). All four fields are
+	// optional and travel together: nil queue or nil registry
+	// makes every /comms/* endpoint return 503. The daemon
+	// (cmd/server) constructs them; tests opt in selectively.
+	server.notifyQueue = cfg.NotifyQueue
+	server.listeners = cfg.Listeners
+	server.onVaultUnlock = cfg.OnVaultUnlock
+	server.auditStateDir = cfg.AuditStateDir
 	// Wire the audit recorder so approval.requested / approval.approved
 	// / approval.denied land in the audit log. Before this, the
 	// approval flow left no audit trail — the user could grant or
