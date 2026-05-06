@@ -158,9 +158,6 @@ func Merge(base, overlay *PolicyFile) *PolicyFile {
 		if overlay.Settings.AskMode != "" {
 			merged.AskMode = overlay.Settings.AskMode
 		}
-		if overlay.Settings.AuditLog != "" {
-			merged.AuditLog = overlay.Settings.AuditLog
-		}
 		if overlay.Settings.Timeout != 0 {
 			merged.Timeout = overlay.Settings.Timeout
 		}

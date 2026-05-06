@@ -71,7 +71,7 @@ type CommsServer struct {
 	listener    net.Listener
 	queue       *NotifyQueue
 	senders     map[string]comms.Listener
-	auditLog    string
+	auditStateDir    string
 	sessionID   string
 	secrets     launchpolicy.SecretsConfig
 	vault       vault.Vault
@@ -91,7 +91,7 @@ type CommsServer struct {
 // specific entries here and wait for the user to decide via the
 // webapp. Pass nil for the legacy fail-closed behaviour preserved
 // for callers that don't yet route through the queue.
-func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, auditLog, sessionID string, approvals *approval.ActionApprovalQueue) (*CommsServer, error) {
+func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Listener, auditStateDir, sessionID string, approvals *approval.ActionApprovalQueue) (*CommsServer, error) {
 	os.Remove(socketPath)
 
 	ln, err := net.Listen("unix", socketPath)
@@ -109,7 +109,7 @@ func NewCommsServer(socketPath string, queue *NotifyQueue, senders []comms.Liste
 		listener:    ln,
 		queue:       queue,
 		senders:     senderMap,
-		auditLog:    auditLog,
+		auditStateDir:    auditStateDir,
 		sessionID:   sessionID,
 		approvals:   approvals,
 		approvalTTL: defaultCommsApprovalTimeout,
@@ -516,10 +516,10 @@ func RequestComms(socketPath string, req CommsRequest) CommsResponse {
 }
 
 func (cs *CommsServer) logMessage(event, service, channel, author, body, inReplyTo string) {
-	if cs.auditLog == "" {
+	if cs.auditStateDir == "" {
 		return
 	}
-	audit.AppendMessageEntry(cs.auditLog, audit.MessageEntry{
+	audit.AppendMessageEntry(audit.DailyPath(cs.auditStateDir), audit.MessageEntry{
 		Timestamp: time.Now(),
 		SessionID: cs.sessionID,
 		Event:     event,

@@ -418,48 +418,12 @@ env:
 
 func TestResolveAuditLogFromCwd(t *testing.T) {
 	dir := t.TempDir()
-	// No aileron.yaml → falls back to cwd/.aileron/audit.jsonl.
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	path := launch.ResolveAuditLogFromCwd()
-	if !strings.HasSuffix(path, filepath.Join(".aileron", "audit.jsonl")) {
-		t.Errorf("expected .aileron/audit.jsonl suffix, got %q", path)
-	}
-}
-
-func TestResolveAuditLogFromCwd_WithPolicy(t *testing.T) {
-	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
-settings:
-  audit_log: custom/audit.log
-`), 0o644)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	path := launch.ResolveAuditLogFromCwd()
-	if !strings.HasSuffix(path, filepath.Join("custom", "audit.log")) {
-		t.Errorf("expected custom/audit.log, got %q", path)
-	}
-}
-
-func TestResolveAuditLogFromCwd_DefaultWithPolicy(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	path := launch.ResolveAuditLogFromCwd()
-	if !strings.HasSuffix(path, filepath.Join(".aileron", "audit.jsonl")) {
-		t.Errorf("expected .aileron/audit.jsonl, got %q", path)
+	got := launch.ResolveAuditLogFromCwd()
+	want := filepath.Join(dir, ".aileron", "audit")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -844,18 +808,19 @@ notifications:
 }
 
 func TestBridgeMessages_AuditLog(t *testing.T) {
-	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	stateDir := t.TempDir()
 	queue := launch.NewNotifyQueue(10, nil)
 	msgs := make(chan comms.IncomingMessage, 2)
 
-	go launch.BridgeMessages(msgs, queue, nil, nil, auditPath, "test-session", nopLogger())
+	go launch.BridgeMessages(msgs, queue, nil, nil, stateDir, "test-session", nopLogger())
 
 	msgs <- comms.IncomingMessage{ID: "1", Service: "slack", Channel: "#backend", Author: "Alice", Body: "hello", Timestamp: time.Now()}
 	msgs <- comms.IncomingMessage{ID: "2", Service: "discord", Channel: "dev-chat", Author: "Bob", Body: "hi", Timestamp: time.Now()}
 	close(msgs)
 	time.Sleep(50 * time.Millisecond)
 
-	entries, err := audit.ReadMessageEntries(auditPath)
+	// Reader sees the daily-rotated layout: scan <stateDir>/audit/.
+	entries, err := audit.ReadMessageEntries(audit.DailyDir(stateDir))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -119,39 +119,42 @@ func defaultVaultPath() string {
 	return filepath.Join(home, ".aileron", "secrets.json")
 }
 
-// resolveAuditPath returns the JSONL path the action-execution audit
-// store should write to, honoring AILERON_AUDIT_PATH.
+// resolveAuditStateDir returns the state directory the daily-rotated
+// audit log lives under, honoring AILERON_AUDIT_DIR.
 //
-//   - env unset → default `<home>/.aileron/audit.jsonl`
+//   - env unset → default `<home>/.aileron`
 //   - env explicitly empty → "" (caller falls back to in-memory store)
 //   - env set → that exact path
-func resolveAuditPath() string {
-	if p, ok := os.LookupEnv("AILERON_AUDIT_PATH"); ok {
+//
+// The audit JSONL files themselves live at
+// `<stateDir>/audit/audit-YYYY-MM-DD.jsonl` per ADR-0012.
+func resolveAuditStateDir() string {
+	if p, ok := os.LookupEnv("AILERON_AUDIT_DIR"); ok {
 		return p
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(".aileron", "audit.jsonl")
+		return ".aileron"
 	}
-	return filepath.Join(home, ".aileron", "audit.jsonl")
+	return filepath.Join(home, ".aileron")
 }
 
 // newAuditStore picks the audit-store implementation per
-// resolveAuditPath. A file-open failure logs a warning and falls back
-// to in-memory so the daemon still starts (degraded durability beats
-// no daemon).
+// resolveAuditStateDir. A directory-open failure logs a warning and
+// falls back to in-memory so the daemon still starts (degraded
+// durability beats no daemon).
 func newAuditStore(log *slog.Logger) audit.EventStore {
-	path := resolveAuditPath()
-	if path == "" {
-		log.Info("audit store: in-memory; events will not survive daemon restart (set AILERON_AUDIT_PATH to enable persistence)")
+	stateDir := resolveAuditStateDir()
+	if stateDir == "" {
+		log.Info("audit store: in-memory; events will not survive daemon restart (set AILERON_AUDIT_DIR to enable persistence)")
 		return audit.NewMemStore()
 	}
-	fs, err := audit.NewFileStore(path, log)
+	fs, err := audit.NewFileStore(stateDir, log)
 	if err != nil {
-		log.Warn("audit store: could not open file, falling back to in-memory",
-			"path", path, "error", err.Error())
+		log.Warn("audit store: could not open daily-rotated dir, falling back to in-memory",
+			"state_dir", stateDir, "error", err.Error())
 		return audit.NewMemStore()
 	}
-	log.Info("audit store: file-backed", "path", path)
+	log.Info("audit store: file-backed", "dir", audit.DailyDir(stateDir))
 	return fs
 }

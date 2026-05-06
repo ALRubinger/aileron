@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,15 +26,17 @@ import (
 //     entries are loaded and the bad line is logged.
 //   - Filter/limit semantics match MemStore (delegation, but pinned).
 
+// newTestFileStore returns a FileStore rooted at a fresh tempdir.
+// The second return is the state dir (so callers wanting to verify
+// today's daily file path can compute audit.DailyPath(dir)).
 func newTestFileStore(t *testing.T) (*audit.FileStore, string) {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	store, err := audit.NewFileStore(path, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	store, err := audit.NewFileStore(dir, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	if err != nil {
 		t.Fatalf("NewFileStore: %v", err)
 	}
-	return store, path
+	return store, dir
 }
 
 func TestFileStore_AppendThenReopen_RoundTrip(t *testing.T) {
@@ -190,9 +193,11 @@ func TestFileStore_ConcurrentAppends_AllLand(t *testing.T) {
 
 func TestFileStore_MalformedLineSkippedWithWarning(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-
-	// Pre-seed the file: one good entry, one corrupt line, one good entry.
+	// Pre-seed today's daily file: one good entry, one corrupt line, one good entry.
+	path := audit.DailyPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 	good1 := `{"event":{"EventID":"good-1","EventType":"action.installed","Actor":{"ID":"user","Type":"human"},"Payload":{"name":"ship-update"},"Timestamp":"2026-05-01T00:00:00Z"}}`
 	good2 := `{"event":{"EventID":"good-2","EventType":"action.installed","Actor":{"ID":"user","Type":"human"},"Payload":{"name":"send-email"},"Timestamp":"2026-05-01T00:01:00Z"}}`
 	corrupt := `{this is not json`
@@ -203,7 +208,7 @@ func TestFileStore_MalformedLineSkippedWithWarning(t *testing.T) {
 
 	var logBuf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	store, err := audit.NewFileStore(path, log)
+	store, err := audit.NewFileStore(dir, log)
 	if err != nil {
 		t.Fatalf("NewFileStore: %v", err)
 	}
@@ -280,9 +285,60 @@ func TestFileStore_FilterAndLimitDelegateToMem(t *testing.T) {
 	}
 }
 
-func TestFileStore_PathReturnsConfiguredPath(t *testing.T) {
-	store, path := newTestFileStore(t)
-	if store.Path() != path {
-		t.Errorf("Path() = %q, want %q", store.Path(), path)
+func TestFileStore_StateDirReturnsConfiguredDir(t *testing.T) {
+	store, dir := newTestFileStore(t)
+	if store.StateDir() != dir {
+		t.Errorf("StateDir() = %q, want %q", store.StateDir(), dir)
+	}
+}
+
+// TestFileStore_ReplaysAcrossDailyFiles seeds two distinct audit-*.jsonl
+// files (older + newer) in <stateDir>/audit/ and asserts that opening
+// a fresh FileStore replays both, in chronological order.
+func TestFileStore_ReplaysAcrossDailyFiles(t *testing.T) {
+	dir := t.TempDir()
+	auditDir := audit.DailyDir(dir)
+	if err := os.MkdirAll(auditDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	yesterday := `{"event":{"EventID":"yday","EventType":"action.installed","Actor":{"ID":"u","Type":"human"},"Payload":{},"Timestamp":"2026-05-04T10:00:00Z"}}` + "\n"
+	today := `{"event":{"EventID":"today","EventType":"action.installed","Actor":{"ID":"u","Type":"human"},"Payload":{},"Timestamp":"2026-05-05T10:00:00Z"}}` + "\n"
+
+	if err := os.WriteFile(filepath.Join(auditDir, "audit-2026-05-04.jsonl"), []byte(yesterday), 0o600); err != nil {
+		t.Fatalf("seed yesterday: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(auditDir, "audit-2026-05-05.jsonl"), []byte(today), 0o600); err != nil {
+		t.Fatalf("seed today: %v", err)
+	}
+	// A non-audit file in the same dir is ignored, not parsed.
+	if err := os.WriteFile(filepath.Join(auditDir, "README.txt"), []byte("ignore me"), 0o600); err != nil {
+		t.Fatalf("seed noise: %v", err)
+	}
+
+	store, err := audit.NewFileStore(dir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	if _, ok := store.GetByEventID("yday"); !ok {
+		t.Error("yesterday's event missing after replay")
+	}
+	if _, ok := store.GetByEventID("today"); !ok {
+		t.Error("today's event missing after replay")
+	}
+}
+
+// TestFileStore_AppendCreatesDailyFile asserts that an Append after a
+// fresh open creates today's audit-YYYY-MM-DD.jsonl file in
+// <stateDir>/audit/, not a flat file at the root.
+func TestFileStore_AppendCreatesDailyFile(t *testing.T) {
+	store, dir := newTestFileStore(t)
+	ev := audit.Event{EventID: "ping", Timestamp: time.Now().UTC()}
+	if err := store.Append(context.Background(), ev); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	wantPath := audit.DailyPath(dir)
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("expected daily file at %s, got: %v", wantPath, err)
 	}
 }

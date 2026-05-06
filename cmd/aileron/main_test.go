@@ -1657,7 +1657,9 @@ func TestRunPolicySave_InvalidFlag(t *testing.T) {
 }
 
 func TestRunPolicySave_DefaultAuditLogPath(t *testing.T) {
-	// When --path is not given, runPolicySave uses ResolveAuditLogFromCwd.
+	// When --path is not given, runPolicySave uses ResolveAuditLogFromCwd
+	// which (post-ADR-0012) returns the user-scope audit state dir.
+	// Audit files live at <HOME>/.aileron/audit/audit-YYYY-MM-DD.jsonl.
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
@@ -1665,10 +1667,11 @@ func TestRunPolicySave_DefaultAuditLogPath(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(oldWd)
 
-	// Create an audit file at the default location.
-	auditDir := filepath.Join(dir, ".aileron")
-	os.MkdirAll(auditDir, 0o755)
-	auditPath := filepath.Join(auditDir, "audit.jsonl")
+	// Create an audit file at today's daily-rotated location.
+	auditPath := audit.DailyPath(filepath.Join(dir, ".aileron"))
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 	audit.AppendShellEntry(auditPath, audit.ShellEntry{
 		SessionID: "s1", Command: "docker push myimage", Disposition: "ask_approved",
 	})

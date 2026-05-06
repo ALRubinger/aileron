@@ -33,9 +33,8 @@ type SecretDef struct {
 
 // Settings holds launch session configuration.
 type Settings struct {
-	AskMode  string `yaml:"ask_mode,omitempty"`  // "terminal" or "ui"
-	AuditLog string `yaml:"audit_log,omitempty"` // path to audit log file
-	Timeout  int    `yaml:"timeout,omitempty"`   // seconds to wait for human response
+	AskMode string `yaml:"ask_mode,omitempty"` // "terminal" or "ui"
+	Timeout int    `yaml:"timeout,omitempty"`  // seconds to wait for human response
 }
 
 // NotifyConfig holds notification channel configuration for Slack and Discord.

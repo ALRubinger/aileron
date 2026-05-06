@@ -263,40 +263,40 @@ func TestDefaultVaultPath_FromHome(t *testing.T) {
 	}
 }
 
-// TestResolveAuditPath_DefaultsToHome asserts the env-unset path
-// lands at `<home>/.aileron/audit.jsonl`.
-func TestResolveAuditPath_DefaultsToHome(t *testing.T) {
+// TestResolveAuditStateDir_DefaultsToHome asserts the env-unset path
+// lands at `<home>/.aileron`.
+func TestResolveAuditStateDir_DefaultsToHome(t *testing.T) {
 	t.Setenv("HOME", "/test/home")
-	os.Unsetenv("AILERON_AUDIT_PATH")
-	got := resolveAuditPath()
-	want := filepath.Join("/test/home", ".aileron", "audit.jsonl")
+	os.Unsetenv("AILERON_AUDIT_DIR")
+	got := resolveAuditStateDir()
+	want := filepath.Join("/test/home", ".aileron")
 	if got != want {
-		t.Errorf("resolveAuditPath = %q, want %q", got, want)
+		t.Errorf("resolveAuditStateDir = %q, want %q", got, want)
 	}
 }
 
-// TestResolveAuditPath_RespectsEnvVar asserts that an explicit env
+// TestResolveAuditStateDir_RespectsEnvVar asserts that an explicit env
 // value (including an empty string for the in-memory opt-out)
 // supersedes the home-based default.
-func TestResolveAuditPath_RespectsEnvVar(t *testing.T) {
-	t.Setenv("AILERON_AUDIT_PATH", "/tmp/x/y/audit.jsonl")
-	if got := resolveAuditPath(); got != "/tmp/x/y/audit.jsonl" {
-		t.Errorf("resolveAuditPath = %q, want explicit", got)
+func TestResolveAuditStateDir_RespectsEnvVar(t *testing.T) {
+	t.Setenv("AILERON_AUDIT_DIR", "/tmp/x/y")
+	if got := resolveAuditStateDir(); got != "/tmp/x/y" {
+		t.Errorf("resolveAuditStateDir = %q, want explicit", got)
 	}
-	t.Setenv("AILERON_AUDIT_PATH", "")
-	if got := resolveAuditPath(); got != "" {
-		t.Errorf("resolveAuditPath with empty env = %q, want empty (memory opt-out)", got)
+	t.Setenv("AILERON_AUDIT_DIR", "")
+	if got := resolveAuditStateDir(); got != "" {
+		t.Errorf("resolveAuditStateDir with empty env = %q, want empty (memory opt-out)", got)
 	}
 }
 
 // TestNewAuditStore_FileBackedByDefault asserts that the wiring
-// chooses FileStore when AILERON_AUDIT_PATH points at a writable
-// path. Regression guard for the bug behind issue #412: events
-// recorded under aileron launch did not survive process exit.
+// chooses FileStore when AILERON_AUDIT_DIR points at a writable
+// directory, and that events round-trip through today's daily file.
+// Regression guard for the bug behind issue #412: events recorded
+// under aileron launch did not survive process exit.
 func TestNewAuditStore_FileBackedByDefault(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	t.Setenv("AILERON_AUDIT_PATH", path)
+	t.Setenv("AILERON_AUDIT_DIR", dir)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := newAuditStore(log)
@@ -304,14 +304,14 @@ func TestNewAuditStore_FileBackedByDefault(t *testing.T) {
 		t.Fatalf("got %T, want *audit.FileStore", store)
 	}
 
-	// Round-trip through the file: append, then a fresh FileStore
+	// Round-trip through the daily file: append, then a fresh FileStore
 	// must surface the same event after replay.
 	if err := store.Append(context.Background(), audit.Event{
 		EventID: "wired", Timestamp: time.Now(),
 	}); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	reopened, err := audit.NewFileStore(path, log)
+	reopened, err := audit.NewFileStore(dir, log)
 	if err != nil {
 		t.Fatalf("NewFileStore: %v", err)
 	}
@@ -322,12 +322,12 @@ func TestNewAuditStore_FileBackedByDefault(t *testing.T) {
 
 // TestNewAuditStore_FallsBackToMemoryWhenEnvEmpty asserts the explicit
 // in-memory opt-out path: tests and ephemeral contexts that set
-// `AILERON_AUDIT_PATH=` (empty) get a MemStore back.
+// `AILERON_AUDIT_DIR=` (empty) get a MemStore back.
 func TestNewAuditStore_FallsBackToMemoryWhenEnvEmpty(t *testing.T) {
-	t.Setenv("AILERON_AUDIT_PATH", "")
+	t.Setenv("AILERON_AUDIT_DIR", "")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := newAuditStore(log)
 	if _, ok := store.(*audit.MemStore); !ok {
-		t.Errorf("got %T, want *audit.MemStore for empty AILERON_AUDIT_PATH", store)
+		t.Errorf("got %T, want *audit.MemStore for empty AILERON_AUDIT_DIR", store)
 	}
 }
