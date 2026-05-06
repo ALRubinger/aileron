@@ -25,6 +25,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/app"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
+	"github.com/ALRubinger/aileron/internal/sessions/jsonl"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
@@ -124,6 +125,21 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	if err != nil {
 		return err
 	}
+
+	// Persistent launch-session records (ADR-0012). One JSONL file per
+	// daemon, lives in stateDir alongside the discovery files. Reaped
+	// of any sessions left running (EndedAt nil) on Open — see the
+	// jsonl package for the orphan-reaping contract.
+	sessionStore, err := jsonl.New(filepath.Join(opts.StateDir, "sessions.jsonl"))
+	if err != nil {
+		return fmt.Errorf("open sessions store: %w", err)
+	}
+	defer func() {
+		if err := sessionStore.Close(); err != nil {
+			log.Warn("closing sessions store", "error", err)
+		}
+	}()
+	cfg.Sessions = sessionStore
 
 	bindAddr := opts.BindAddr
 	if bindAddr == "" {

@@ -60,6 +60,15 @@ tags:
       executing them deterministically, and injecting the synthesized
       result back into the response stream. Behavior is ratified by
       ADR-0008 (intent matching).
+  - name: Sessions
+    description: |
+      Persistent records of `aileron launch` agent invocations, owned by
+      the daemon under ADR-0012. Launch POSTs `/v1/sessions` to register
+      a session at startup, and POSTs `/v1/sessions/{id}/end` on agent
+      exit. The webapp and `aileron sessions list` read these via GET.
+      Sessions survive daemon restarts; sessions left running when the
+      daemon is killed are reaped to a known-orphaned state on next
+      start (EndedAt set, ExitCode left null).
 
 paths:
   /v1/health:
@@ -603,6 +612,174 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LocalVaultStatusResponse"
+
+  /v1/sessions:
+    post:
+      tags: [Sessions]
+      summary: Register a new launch session
+      description: |
+        Called by `aileron launch` at agent startup. The daemon mints a
+        ULID-based session ID and stamps StartedAt; the response carries
+        the full Session record. The agent's working directory and the
+        agent name (e.g. "claude") are caller-supplied; the daemon does
+        not infer them.
+
+        Returns 503 when the daemon is not configured with a sessions
+        store (cloud-shaped deployments may run without one).
+      operationId: createSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+      responses:
+        "200":
+          description: Session registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: Sessions store is not configured on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    get:
+      tags: [Sessions]
+      summary: List launch sessions
+      description: |
+        Returns sessions ordered newest-first by StartedAt. Filter by
+        active state (EndedAt is null), agent name, and an inclusive
+        Since lower bound on StartedAt. Limit caps the result count;
+        zero or unset returns all matching sessions.
+
+        A session whose EndedAt is set but ExitCode is null is the
+        honest "ended via daemon restart" signal — the daemon was
+        killed while this session was running and on next start the
+        record was reaped without a fabricated exit code.
+      operationId: listSessions
+      security: []
+      parameters:
+        - name: active_only
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: agent
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: RFC3339 timestamp; only sessions with StartedAt >= since are returned.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: Session list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionListResponse"
+        "503":
+          description: Sessions store is not configured on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/sessions/{session_id}:
+    get:
+      tags: [Sessions]
+      summary: Get a launch session by id
+      operationId: getSession
+      security: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "404":
+          description: No session with that id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Sessions store is not configured on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/sessions/{session_id}/end:
+    post:
+      tags: [Sessions]
+      summary: Mark a launch session ended
+      description: |
+        Called by `aileron launch` when the agent process exits. The
+        daemon stamps EndedAt with the current UTC timestamp and stores
+        the supplied ExitCode. Omitting ExitCode (or sending null) marks
+        the session as ended-with-unknown-status — the same shape the
+        orphan-reaper produces on daemon restart.
+      operationId: endSession
+      security: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EndSessionRequest"
+      responses:
+        "200":
+          description: Session ended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No session with that id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Sessions store is not configured on this daemon
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/intents:
     post:
@@ -5838,3 +6015,65 @@ components:
         usage:
           type: object
           additionalProperties: true
+
+    Session:
+      type: object
+      required: [id, started_at, agent, working_dir]
+      description: |
+        One record of an `aileron launch` agent invocation, owned by the
+        daemon under ADR-0012. (started_at, ended_at, exit_code) encode
+        three states:
+          - running:        ended_at == null
+          - ended cleanly:  ended_at != null && exit_code != null
+          - orphaned:       ended_at != null && exit_code == null
+            (daemon restart while session was running)
+      properties:
+        id:
+          type: string
+          description: ULID-based session identifier; time-sortable lexicographically.
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          nullable: true
+        agent:
+          type: string
+          description: Agent name (e.g. "claude", "pi").
+        working_dir:
+          type: string
+          description: The directory aileron launch was invoked from.
+        exit_code:
+          type: integer
+          nullable: true
+          description: Agent process exit code, or null when ended_at is set but the daemon never observed a clean exit (orphaned).
+
+    SessionListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Session"
+
+    CreateSessionRequest:
+      type: object
+      required: [agent]
+      properties:
+        agent:
+          type: string
+        working_dir:
+          type: string
+
+    EndSessionRequest:
+      type: object
+      properties:
+        exit_code:
+          type: integer
+          nullable: true
+          description: |
+            Agent process exit code. Omit or send null to mark the
+            session as ended-with-unknown-status (same shape the
+            orphan-reaper produces on daemon restart).
