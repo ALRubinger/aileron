@@ -245,6 +245,33 @@ func TestSendCommsMessage_NoListenerForService(t *testing.T) {
 	}
 }
 
+func TestSendCommsMessage_GarbageBody400(t *testing.T) {
+	s := newCommsServer(t, 5*time.Second)
+	s.listeners.Set("slack", &fakeListener{service: "slack"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/x/comms/send", strings.NewReader("not json"))
+	w := httptest.NewRecorder()
+	s.SendCommsMessage(w, req, "x")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestSendCommsMessage_NoApprovalQueue503(t *testing.T) {
+	// Queue + listeners wired but action-approval queue nil → 503.
+	s := &apiServer{
+		log:         slog.Default(),
+		notifyQueue: comms.NewNotifyQueue(10, nil),
+		listeners:   comms.NewListenerRegistry(),
+	}
+	body, _ := json.Marshal(api.SendCommsMessageRequest{Service: "slack", Channel: "#x", Body: "hi"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/x/comms/send", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.SendCommsMessage(w, req, "x")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
 func TestSendCommsMessage_NoQueue503(t *testing.T) {
 	// Comms queue + listener registry both nil → 503.
 	s := &apiServer{log: slog.Default(), actionApprovals: approval.NewActionApprovalQueue(nil, nil)}
@@ -414,6 +441,16 @@ func TestRequestCommsHTTP_DeniedReturnsError(t *testing.T) {
 	}
 }
 
+func TestRequestCommsHTTP_GarbageBody400(t *testing.T) {
+	s := newCommsServer(t, 5*time.Second)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/x/comms/http", strings.NewReader("not json"))
+	w := httptest.NewRecorder()
+	s.RequestCommsHTTP(w, req, "x")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
 func TestRequestCommsHTTP_MissingFields400(t *testing.T) {
 	s := newCommsServer(t, 5*time.Second)
 	body, _ := json.Marshal(api.RequestCommsHTTPRequest{Method: "GET"}) // missing url
@@ -522,6 +559,65 @@ func TestDraftCommsReply_NoListenerForService(t *testing.T) {
 	mustDecode(t, w.Body, &resp)
 	if resp.Ok || !strings.Contains(deref(resp.Error), "no listener for service") {
 		t.Errorf("expected 'no listener for service' error, got %+v", resp)
+	}
+}
+
+func TestDraftCommsReply_NoQueue503(t *testing.T) {
+	// Comms surface unconfigured → 503, matching SendCommsMessage.
+	s := &apiServer{log: slog.Default(), actionApprovals: approval.NewActionApprovalQueue(nil, nil)}
+	body, _ := json.Marshal(api.DraftCommsReplyRequest{ReplyTo: "x", Body: "hi"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/x/comms/draft", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.DraftCommsReply(w, req, "x")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestDraftCommsReply_NoApprovalQueue503(t *testing.T) {
+	// Listener registry + queue wired but action-approval queue nil →
+	// 503 (separate failure mode from no comms at all).
+	s := &apiServer{
+		log:         slog.Default(),
+		notifyQueue: comms.NewNotifyQueue(10, nil),
+		listeners:   comms.NewListenerRegistry(),
+	}
+	body, _ := json.Marshal(api.DraftCommsReplyRequest{ReplyTo: "x", Body: "hi"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/x/comms/draft", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.DraftCommsReply(w, req, "x")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestDraftCommsReply_GarbageBody400(t *testing.T) {
+	s := newCommsServer(t, 5*time.Second)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/x/comms/draft", strings.NewReader("not json"))
+	w := httptest.NewRecorder()
+	s.DraftCommsReply(w, req, "x")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestDraftCommsReply_ContextCancelledCollapsesToError(t *testing.T) {
+	// ctx.Done before the user decides → waitErr is ctx.Err(), the
+	// non-timeout error branch.
+	s := newCommsServer(t, 5*time.Second)
+	s.notifyQueue.Push(comms.Message{ID: "msg-1", Source: "slack", Channel: "#dev"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the request runs
+	body, _ := json.Marshal(api.DraftCommsReplyRequest{ReplyTo: "msg-1", Body: "hi"})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/x/comms/draft", bytes.NewReader(body)).WithContext(ctx)
+	w := httptest.NewRecorder()
+	s.DraftCommsReply(w, req, "x")
+
+	var resp api.CommsToolResponse
+	mustDecode(t, w.Body, &resp)
+	if resp.Ok {
+		t.Fatal("expected ok=false on ctx cancellation")
 	}
 }
 

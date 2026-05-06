@@ -178,6 +178,132 @@ func TestBuildListeners_BuildsDiscordListener(t *testing.T) {
 	}
 }
 
+// startBuiltListeners contract:
+//   - Connect-error: listener is logged + skipped, not added to registry.
+//   - Listen-error: same.
+//   - Happy path: listener registered, bridge goroutine routes messages
+//     into the queue with autoDraft + priority maps applied.
+//   - Mixed: one bad + one good → only the good one starts.
+
+type startTestListener struct {
+	service    string
+	connectErr error
+	listenErr  error
+	msgs       chan IncomingMessage
+	closed     bool
+}
+
+func (l *startTestListener) Service() string                                { return l.service }
+func (l *startTestListener) Connect(context.Context) error                  { return l.connectErr }
+func (l *startTestListener) Listen(context.Context) (<-chan IncomingMessage, error) {
+	if l.listenErr != nil {
+		return nil, l.listenErr
+	}
+	return l.msgs, nil
+}
+func (l *startTestListener) Send(_ context.Context, _ OutgoingMessage) error { return nil }
+func (l *startTestListener) Close() error                                    { l.closed = true; return nil }
+
+func TestStartBuiltListeners_HappyPath_RegistersAndBridges(t *testing.T) {
+	q := NewNotifyQueue(10, nil)
+	reg := NewListenerRegistry()
+	msgs := make(chan IncomingMessage, 2)
+	l := &startTestListener{service: "slack", msgs: msgs}
+
+	auto := map[string]bool{"#dev": true}
+	pri := map[string]string{"#alerts": "high"}
+	started := startBuiltListeners(context.Background(),
+		[]Listener{l}, auto, pri,
+		StartOptions{Queue: q, Log: nopLogger()},
+		reg)
+
+	if started != 1 {
+		t.Fatalf("started = %d, want 1", started)
+	}
+	if _, ok := reg.Get("slack"); !ok {
+		t.Error("listener not added to registry")
+	}
+
+	// Push a message — bridge goroutine should land it in the queue.
+	msgs <- IncomingMessage{ID: "1", Service: "slack", Channel: "#dev", Body: "hi", Timestamp: time.Now()}
+	close(msgs)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && q.Len() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if q.Len() != 1 {
+		t.Errorf("queue size = %d, want 1 (bridge goroutine should have pushed)", q.Len())
+	}
+	if all := q.Messages(); !all[0].AutoDraft {
+		t.Error("expected AutoDraft=true on #dev message")
+	}
+}
+
+func TestStartBuiltListeners_ConnectError_Skips(t *testing.T) {
+	q := NewNotifyQueue(10, nil)
+	reg := NewListenerRegistry()
+	bad := &startTestListener{service: "slack", connectErr: errBoom}
+
+	started := startBuiltListeners(context.Background(),
+		[]Listener{bad}, nil, nil,
+		StartOptions{Queue: q, Log: nopLogger()},
+		reg)
+
+	if started != 0 {
+		t.Errorf("started = %d, want 0 (Connect failed)", started)
+	}
+	if reg.Len() != 0 {
+		t.Errorf("registry size = %d, want 0", reg.Len())
+	}
+}
+
+func TestStartBuiltListeners_ListenError_Skips(t *testing.T) {
+	q := NewNotifyQueue(10, nil)
+	reg := NewListenerRegistry()
+	bad := &startTestListener{service: "slack", listenErr: errBoom}
+
+	started := startBuiltListeners(context.Background(),
+		[]Listener{bad}, nil, nil,
+		StartOptions{Queue: q, Log: nopLogger()},
+		reg)
+
+	if started != 0 {
+		t.Errorf("started = %d, want 0 (Listen failed)", started)
+	}
+	if reg.Len() != 0 {
+		t.Errorf("registry size = %d, want 0", reg.Len())
+	}
+}
+
+func TestStartBuiltListeners_MixedGoodAndBad(t *testing.T) {
+	q := NewNotifyQueue(10, nil)
+	reg := NewListenerRegistry()
+	good := &startTestListener{service: "slack", msgs: make(chan IncomingMessage)}
+	bad := &startTestListener{service: "discord", connectErr: errBoom}
+
+	started := startBuiltListeners(context.Background(),
+		[]Listener{bad, good}, nil, nil,
+		StartOptions{Queue: q, Log: nopLogger()},
+		reg)
+
+	if started != 1 {
+		t.Errorf("started = %d, want 1 (only good)", started)
+	}
+	if _, ok := reg.Get("slack"); !ok {
+		t.Error("good listener missing from registry")
+	}
+	if _, ok := reg.Get("discord"); ok {
+		t.Error("bad listener should not be in registry")
+	}
+}
+
+// errBoom is the sentinel used by the connect / listen error tests.
+var errBoom = simpleError("boom")
+
+type simpleError string
+
+func (e simpleError) Error() string { return string(e) }
+
 // Services contract: returns every registered service name.
 
 func TestListenerRegistry_Services(t *testing.T) {

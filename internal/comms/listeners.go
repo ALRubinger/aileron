@@ -164,9 +164,22 @@ func StartListeners(ctx context.Context, opts StartOptions, registry *ListenerRe
 	if err != nil {
 		return 0, err
 	}
+	return startBuiltListeners(ctx, created, autoDraft, priority, opts, registry), nil
+}
 
+// startBuiltListeners runs the connect / listen / bridge phase against
+// an already-constructed slice of listeners. Split out from
+// [StartListeners] so tests can drive it with fake [Listener]s
+// without going through the Slack / Discord constructors —
+// `buildListeners` returns concrete types that can't be swapped at
+// the call site.
+//
+// Best-effort: a single listener that fails Connect or Listen is
+// logged and skipped; the others still start. Returns the count of
+// successfully-started listeners.
+func startBuiltListeners(ctx context.Context, listeners []Listener, autoDraft map[string]bool, priority map[string]string, opts StartOptions, registry *ListenerRegistry) int {
 	started := 0
-	for _, l := range created {
+	for _, l := range listeners {
 		if err := l.Connect(ctx); err != nil {
 			opts.Log.Warn("listener connect failed", "service", l.Service(), "error", err)
 			continue
@@ -181,7 +194,7 @@ func StartListeners(ctx context.Context, opts StartOptions, registry *ListenerRe
 		started++
 		go bridgeMessages(msgs, opts.Queue, autoDraft, priority, opts.AuditStateDir, opts.Log)
 	}
-	return started, nil
+	return started
 }
 
 // buildListeners constructs the concrete Slack/Discord listeners from
