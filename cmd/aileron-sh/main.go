@@ -8,10 +8,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -180,17 +184,59 @@ func extractCommand(args []string) (string, bool) {
 }
 
 
-// promptApproval requests user approval via the launcher's approval
-// server. The launcher owns the real terminal and handles the prompt.
+// promptApproval requests user approval via the daemon's
+// /v1/sessions/{id}/approvals/shell endpoint, which long-polls until
+// the user clicks Approve/Deny on the webapp /approvals page (or the
+// 5-minute server-side timeout fires).
+//
+// AILERON_APPROVAL_URL is the daemon's base URL, set by `aileron
+// launch` for the agent's child processes. AILERON_SESSION_ID
+// identifies which launch session this approval belongs to so the
+// daemon can attribute it on the webapp + audit log.
+//
+// Any failure path — env unset, daemon unreachable, malformed
+// response, timeout — collapses to deny so the policy-enforced shell
+// fails closed.
 func promptApproval(command, reason string) approvalResponse {
-	socketPath := os.Getenv("AILERON_APPROVAL_SOCKET")
-	if socketPath == "" {
+	baseURL := os.Getenv("AILERON_APPROVAL_URL")
+	sessionID := os.Getenv("AILERON_SESSION_ID")
+	if baseURL == "" || sessionID == "" {
 		return responseDeny
 	}
 
-	decision := launch.RequestApproval(socketPath, command, reason)
+	cwd, _ := os.Getwd()
+	body, err := json.Marshal(map[string]string{
+		"command": command,
+		"reason":  reason,
+		"cwd":     cwd,
+	})
+	if err != nil {
+		return responseDeny
+	}
 
-	switch decision {
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1/sessions/" + sessionID + "/approvals/shell"
+	// The daemon caps the wait at its action-approval TTL (5min by
+	// default); cap our client-side dial+read at slightly longer so
+	// the daemon's bounded response always wins over a transport
+	// timeout. We can't tell the difference from here either way —
+	// both surface as "deny" by design.
+	client := &http.Client{Timeout: 6 * time.Minute}
+	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return responseDeny
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return responseDeny
+	}
+	var decoded struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return responseDeny
+	}
+
+	switch decoded.Decision {
 	case "allow_once":
 		return responseAllowOnce
 	case "allow_project":

@@ -150,7 +150,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	auditStateDir := resolveAuditStateDir()
 	envConfig := loadEnvConfig(config.Dir)
-	approvalSocket := filepath.Join(os.TempDir(), "ai-"+sessionID+".sock")
 	commsSocket := filepath.Join(os.TempDir(), "ai-comms-"+sessionID+".sock")
 
 	// LLM-endpoint env (e.g. ANTHROPIC_BASE_URL for Claude Code) now
@@ -159,7 +158,10 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// daemon-owned MCP path still reaches them via AILERON_URL.
 	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), daemonURL)
 	env := buildEnv(config.ShellShim, config.Agent.Name(), sessionID, auditStateDir, envConfig, agentEnv)
-	env = append(env, "AILERON_APPROVAL_SOCKET="+approvalSocket)
+	// AILERON_APPROVAL_URL + AILERON_SESSION_ID are what aileron-sh
+	// uses to POST shell-approval requests to the daemon (Step 9A of
+	// #454, replacing the pre-9A unix socket).
+	env = append(env, "AILERON_APPROVAL_URL="+daemonURL)
 	env = append(env, "AILERON_COMMS_SOCKET="+commsSocket)
 
 	// Agent-required args come first, then user-supplied args.
@@ -227,18 +229,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 	defer commsSrv.Close()
 	go commsSrv.Serve()
-
-	// Approval socket: aileron-sh dials this when a shell command
-	// matches an `ask:` policy rule (issue #427). Independent of the
-	// daemon — Step 9 routes this through daemon HTTP per session ID.
-	approvalSrv, err := NewApprovalSocketServer(approvalSocket, approvalQueue, sessionID, config.Dir, sessionLog.With("component", "approval-socket"))
-	if err != nil {
-		sessionLog.Warn("approval socket disabled", "error", err)
-		fmt.Fprintf(os.Stderr, "aileron: approval socket unavailable: %v\n", err)
-	} else {
-		defer func() { _ = approvalSrv.Close() }()
-		go approvalSrv.Serve(ctx)
-	}
 
 	// Banner: probe the daemon's vault state so we can include the
 	// "open the URL to unlock" hint when needed. Failure is silent —
