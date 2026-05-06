@@ -257,6 +257,17 @@ The recorder in [`internal/audit/record.go`](https://github.com/ALRubinger/ailer
 
 Phase 7 (post-MVP) wires the actual OTLP exporter and `traceparent` propagation per [#390](https://github.com/ALRubinger/aileron/issues/390); the names are pre-aligned so that emission becomes a wiring change, not a schema break.
 
+#### Reserved keys (declared, not yet emitted)
+
+Two attribute keys are declared in the audit payload schema but not populated by any recorder today. They are reserved so future features can adopt them without forcing a downstream-visible rename once consumers depend on the format. Constants live in `internal/audit/keys.go`.
+
+| Key | Reserved for | Issue |
+|---|---|---|
+| `aileron.signing.key_id` | The public-key fingerprint that signed an audit event under the Stage-1.5 hash-chained audit log. | [#398](https://github.com/ALRubinger/aileron/issues/398) |
+| `aileron.policy.decision` | The verdict a pre-execution policy hook returned for the action that produced this event: `allow`, `deny`, `require_approval`, or an opaque decision-source reference. | [#396](https://github.com/ALRubinger/aileron/issues/396), [#399](https://github.com/ALRubinger/aileron/issues/399) |
+
+Consumers reading the audit log MUST tolerate these keys appearing as empty / absent today and as populated values once the corresponding features ship. Reading code that names them by string literal should switch to the `audit.AttrSigningKeyID` and `audit.AttrPolicyDecision` constants so a future spelling refinement (which would itself require migration coordination) has a single point of change.
+
 ### For users
 
 - Failures are surfaced. The user sees the agent's chat say "I tried to post the update but Slack returned an error — would you like me to try again with a different channel?" rather than the agent claiming success and the message never arriving.
