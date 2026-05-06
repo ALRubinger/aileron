@@ -84,7 +84,7 @@ func TestInit_StdoutExporterEmitsSpan(t *testing.T) {
 	// this test asserts the exporter contract — given a span, write a
 	// JSON line — which is the part that matters for downstream tooling.
 	var buf bytes.Buffer
-	exp, err := newExporter(cfg.Exporter, &buf)
+	exp, err := newExporter(cfg, &buf)
 	if err != nil {
 		t.Fatalf("newExporter: %v", err)
 	}
