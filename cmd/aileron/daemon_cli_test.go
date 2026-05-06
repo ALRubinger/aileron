@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
+	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 )
 
 // runDaemon dispatches "start", "stop", "status", and a usage path
@@ -243,6 +246,267 @@ func TestRunDaemon_DispatchToStop(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "not running") {
 		t.Errorf("dispatch should reach runDaemonStop; got %q", stdout.String())
+	}
+}
+
+// --- runDaemonStart ---
+
+// withSpawnResolve substitutes the spawnResolveFn seam for the
+// duration of a test, restoring it on cleanup. Lets us exercise the
+// daemon-start path without fork-execing a real binary.
+func withSpawnResolve(t *testing.T, fn func(context.Context, spawn.Options) (string, error)) {
+	t.Helper()
+	orig := spawnResolveFn
+	spawnResolveFn = fn
+	t.Cleanup(func() { spawnResolveFn = orig })
+}
+
+func TestRunDaemonStart_HappyPath_PrintsURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	withSpawnResolve(t, func(_ context.Context, opts spawn.Options) (string, error) {
+		// Sanity: opts.StateDir resolves to ~/.aileron under the test HOME.
+		if !strings.HasSuffix(opts.StateDir, ".aileron") {
+			t.Errorf("StateDir %q should end with .aileron", opts.StateDir)
+		}
+		return "http://127.0.0.1:54321", nil
+	})
+
+	// daemonBinaryPath looks for a sibling 'server' binary; when not
+	// found it falls back to PATH lookup, which will fail in test.
+	// Place a no-op binary on PATH so the resolution succeeds.
+	binDir := t.TempDir()
+	server := filepath.Join(binDir, "server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var stdout, stderr bytes.Buffer
+	code := runDaemonStart(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "http://127.0.0.1:54321") {
+		t.Errorf("stdout missing URL; got %q", stdout.String())
+	}
+}
+
+func TestRunDaemonStart_SpawnError_NonZeroExit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	binDir := t.TempDir()
+	server := filepath.Join(binDir, "server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	withSpawnResolve(t, func(context.Context, spawn.Options) (string, error) {
+		return "", errors.New("spawn-failed-on-purpose")
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runDaemonStart(nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "spawn-failed-on-purpose") {
+		t.Errorf("stderr should propagate spawn error; got %q", stderr.String())
+	}
+}
+
+func TestRunDaemonStart_BinaryNotFound_NonZeroExit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// Empty PATH and no sibling 'server' next to the test binary →
+	// daemonBinaryPath fails before spawn is even called.
+	t.Setenv("PATH", "")
+
+	var stdout, stderr bytes.Buffer
+	code := runDaemonStart(nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit when daemon binary is missing; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "locate daemon binary") {
+		t.Errorf("stderr should mention binary lookup; got %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "task build:server") {
+		t.Errorf("stderr should suggest building; got %q", stderr.String())
+	}
+}
+
+// --- spawnResolveOnce (the body that spawnResolveCached wraps) ---
+
+func TestSpawnResolveOnce_HappyPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	binDir := t.TempDir()
+	server := filepath.Join(binDir, "server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	withSpawnResolve(t, func(_ context.Context, opts spawn.Options) (string, error) {
+		return "http://127.0.0.1:54321", nil
+	})
+
+	got, err := spawnResolveOnce()
+	if err != nil {
+		t.Fatalf("spawnResolveOnce: %v", err)
+	}
+	// /v1 suffix appended; trailing slash on input would be trimmed.
+	if got != "http://127.0.0.1:54321/v1" {
+		t.Errorf("got %q, want trailing /v1", got)
+	}
+}
+
+func TestSpawnResolveOnce_TrimsTrailingSlash(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	binDir := t.TempDir()
+	server := filepath.Join(binDir, "server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	withSpawnResolve(t, func(context.Context, spawn.Options) (string, error) {
+		return "http://127.0.0.1:54321/", nil
+	})
+
+	got, err := spawnResolveOnce()
+	if err != nil {
+		t.Fatalf("spawnResolveOnce: %v", err)
+	}
+	if got != "http://127.0.0.1:54321/v1" {
+		t.Errorf("got %q, want trailing slash trimmed before /v1 append", got)
+	}
+}
+
+func TestSpawnResolveOnce_BinaryMissing_Errors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+
+	_, err := spawnResolveOnce()
+	if err == nil {
+		t.Fatal("expected error when daemon binary cannot be located")
+	}
+	if !strings.Contains(err.Error(), "locate daemon binary") {
+		t.Errorf("error should mention binary lookup; got %v", err)
+	}
+}
+
+func TestSpawnResolveOnce_PropagatesSpawnError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	binDir := t.TempDir()
+	server := filepath.Join(binDir, "server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	wantErr := errors.New("kaboom")
+	withSpawnResolve(t, func(context.Context, spawn.Options) (string, error) {
+		return "", wantErr
+	})
+
+	_, err := spawnResolveOnce()
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("got %v, want %v", err, wantErr)
+	}
+}
+
+// --- runDaemonStop happy path with a real subprocess ---
+
+// runDaemonStop's happy path (SIGTERM a real daemon and poll for its
+// cleanup) is covered end-to-end by Test 8 of the umbrella issue
+// against the real daemon binary. Trying to mimic that here with a
+// fake subprocess is fragile across shells/platforms — coverage
+// gain isn't worth the test-flakiness risk.
+
+// --- defaultStateDir / daemonBinaryPath ---
+
+func TestDefaultStateDir_UnderHome(t *testing.T) {
+	t.Setenv("HOME", "/test/home")
+	got, err := defaultStateDir()
+	if err != nil {
+		t.Fatalf("defaultStateDir: %v", err)
+	}
+	want := "/test/home/.aileron"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestDaemonBinaryPath_FindsSibling(t *testing.T) {
+	// Drop a "server" binary next to the running test binary's dir.
+	// daemonBinaryPath uses os.Executable() to find the "self" path
+	// and looks for a sibling — this test verifies that branch.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(self), "server")
+	if _, err := os.Stat(sibling); err == nil {
+		// Already exists from a previous test run; fine, just verify.
+		got, err := daemonBinaryPath()
+		if err != nil {
+			t.Fatalf("daemonBinaryPath: %v", err)
+		}
+		if got != sibling {
+			t.Errorf("got %q, want sibling %q", got, sibling)
+		}
+		return
+	}
+	if err := os.WriteFile(sibling, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		// On some CI sandboxes the test binary's directory isn't
+		// writable; in that case fall back to the PATH branch and
+		// skip the sibling assertion.
+		t.Skipf("cannot write sibling for test (sandboxed?): %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sibling) })
+
+	got, err := daemonBinaryPath()
+	if err != nil {
+		t.Fatalf("daemonBinaryPath: %v", err)
+	}
+	if got != sibling {
+		t.Errorf("got %q, want sibling %q", got, sibling)
+	}
+}
+
+func TestDaemonBinaryPath_FallsBackToPATH(t *testing.T) {
+	// No sibling 'server' near the test binary (we don't write one),
+	// so resolution should fall back to PATH lookup. Place one on PATH.
+	binDir := t.TempDir()
+	server := filepath.Join(binDir, "server")
+	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	// The sibling check happens first; if a sibling exists from a
+	// prior test, this test silently exercises the sibling branch
+	// instead. That's fine — both branches are valid resolutions.
+	got, err := daemonBinaryPath()
+	if err != nil {
+		t.Fatalf("daemonBinaryPath: %v", err)
+	}
+	if got == "" {
+		t.Fatal("got empty path")
+	}
+}
+
+func TestDaemonBinaryPath_NotFound(t *testing.T) {
+	// Empty PATH and no sibling next to the test binary → not found.
+	t.Setenv("PATH", "")
+	// Best-effort: remove any sibling 'server' a previous test left
+	// behind. If we can't, the assertion below is a no-op (still safe).
+	if self, err := os.Executable(); err == nil {
+		_ = os.Remove(filepath.Join(filepath.Dir(self), "server"))
+	}
+	_, err := daemonBinaryPath()
+	if err == nil {
+		t.Fatal("expected error when no daemon binary is reachable")
 	}
 }
 

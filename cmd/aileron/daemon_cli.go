@@ -58,7 +58,7 @@ func runDaemonStart(_ []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	url, err := spawn.Resolve(ctx, spawn.Options{
+	url, err := spawnResolveFn(ctx, spawn.Options{
 		StateDir: stateDir,
 		Binary:   binary,
 	})

@@ -607,38 +607,44 @@ var (
 	spawnURLErr   error
 )
 
-// spawnResolveCached calls spawn.Resolve once per CLI process and
-// caches the result. The cache is intentionally process-local —
-// bindingAPIBaseURL re-reads AILERON_API_URL on every call, so tests
-// can flip behavior without resetting any state in this package.
+// spawnResolveFn is the seam that lets tests substitute spawn.Resolve
+// without fork-execing a real daemon binary.
+var spawnResolveFn = spawn.Resolve
+
+// spawnResolveCached calls spawnResolveOnce at most once per CLI
+// process and caches the result. The cache is intentionally
+// process-local — bindingAPIBaseURL re-reads AILERON_API_URL on every
+// call, so tests can flip behavior without resetting any state here.
 func spawnResolveCached() (string, error) {
-	spawnURLOnce.Do(func() {
-		stateDir, err := defaultStateDir()
-		if err != nil {
-			spawnURLErr = fmt.Errorf("resolve state dir: %w", err)
-			return
-		}
-		binary, err := daemonBinaryPath()
-		if err != nil {
-			spawnURLErr = fmt.Errorf("locate daemon binary: %w", err)
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		raw, err := spawn.Resolve(ctx, spawn.Options{
-			StateDir: stateDir,
-			Binary:   binary,
-		})
-		if err != nil {
-			spawnURLErr = err
-			return
-		}
-		spawnURLValue = strings.TrimRight(raw, "/") + "/v1"
-	})
+	spawnURLOnce.Do(func() { spawnURLValue, spawnURLErr = spawnResolveOnce() })
 	if spawnURLErr != nil {
 		return "", spawnURLErr
 	}
 	return spawnURLValue, nil
+}
+
+// spawnResolveOnce performs the actual spawn.Resolve call. Split out
+// from spawnResolveCached so tests can exercise the body without
+// fighting the sync.Once's process-scoped state.
+func spawnResolveOnce() (string, error) {
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve state dir: %w", err)
+	}
+	binary, err := daemonBinaryPath()
+	if err != nil {
+		return "", fmt.Errorf("locate daemon binary: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	raw, err := spawnResolveFn(ctx, spawn.Options{
+		StateDir: stateDir,
+		Binary:   binary,
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(raw, "/") + "/v1", nil
 }
 
 // defaultStateDir returns ~/.aileron, the canonical user state
