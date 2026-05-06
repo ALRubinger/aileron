@@ -29,6 +29,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
+	"github.com/ALRubinger/aileron/internal/sessions"
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
@@ -112,6 +113,7 @@ type apiServer struct {
 	versionLister      cstore.VersionLister // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
 	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
 	actionApprovals    *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
+	sessions           sessions.Store                // ADR-0012: persistent launch-session records; nil → /v1/sessions endpoints return 503
 	webappURL          string                        // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
 	actionApprovalTTL  time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
 	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired

@@ -36,6 +36,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/observability"
 	"github.com/ALRubinger/aileron/internal/policy"
+	"github.com/ALRubinger/aileron/internal/sessions"
 	"github.com/ALRubinger/aileron/internal/source"
 	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
 	githubsource "github.com/ALRubinger/aileron/internal/source/github"
@@ -121,6 +122,14 @@ type Config struct {
 	// Nil falls back to a fresh queue, preserving the historic
 	// behaviour for callers that don't need cross-component sharing.
 	ActionApprovals *approval.ActionApprovalQueue
+
+	// Sessions is the persistent store for `aileron launch` session
+	// records (ADR-0012). The daemon constructs a JSONL-backed store
+	// pointed at ~/.aileron/sessions.jsonl and passes it here. Nil
+	// disables the /v1/sessions endpoints — they return 503 — which
+	// is the right behavior for cloud-shaped deployments and tests
+	// that don't exercise the launch session surface.
+	Sessions sessions.Store
 }
 
 // NewHandler creates a fully-wired Aileron control plane HTTP handler
@@ -389,6 +398,12 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	} else {
 		server.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
 	}
+
+	// Sessions store (ADR-0012). Optional — nil leaves the
+	// /v1/sessions endpoints to return 503. The daemon constructs a
+	// JSONL-backed store and passes it via cfg; tests may pass an
+	// in-memory implementation or omit entirely.
+	server.sessions = cfg.Sessions
 	server.actionApprovalTTL = 5 * time.Minute
 	// Wire the audit recorder so approval.requested / approval.approved
 	// / approval.denied land in the audit log. Before this, the
