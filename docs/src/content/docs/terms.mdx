@@ -1,0 +1,76 @@
+---
+title: "Terms of Use"
+description: "Aileron is free, open-source software, offered as-is. These Terms cover what that means for both of us, in plain English."
+---
+
+import * as Card from '$lib/components/ui/card/index.js';
+
+<Card.Root class="my-8 border-l-4 border-l-primary text-base">
+<Card.Header>
+<Card.Title class="text-lg">The short version</Card.Title>
+</Card.Header>
+<Card.Content>
+
+Aileron is free, open-source software, offered as-is by its maintainer. These Terms cover what that means for both of us. You may use Aileron, and what you and your agent do with it is your responsibility.
+
+- Aileron is free and open source. There's no account, no fee, no hosted service.
+- The software is provided as-is, with no warranty and no obligation of support.
+- What you and your agent do with Aileron is your responsibility, including the actions your agent takes against the services you've connected.
+- Your use of those services (Gmail, Slack, the LLM provider you've chosen, and so on) is governed by their terms, not these.
+- Don't use Aileron for things that are illegal or that harm other people.
+
+</Card.Content>
+</Card.Root>
+
+## What these Terms cover
+
+These Terms cover your use of the `withaileron.ai` website and the Aileron runtime (the server daemon, the `aileron` CLI, and the local webapp) when you connect them to third-party APIs you've configured.
+
+Aileron's source code is licensed separately under the [Apache License 2.0](https://github.com/ALRubinger/aileron/blob/main/LICENSE). That license governs your rights to copy, modify, and redistribute the source. These Terms govern the relationship between you, the running software, and the maintainer.
+
+## No accounts, no hosted service
+
+Aileron is local-first software. There is no hosted Aileron service today, no user account, and no fee. The runtime's LLM Gateway proxies traffic between your machine and the providers you've configured (Anthropic, OpenAI, etc.); Aileron does not capture or store that traffic.
+
+If a hosted service is offered in the future, these Terms will be updated to cover it.
+
+## Third-party services
+
+When you connect a third-party service (Google, Slack, GitHub, an LLM provider, anything else), you do so under that service's terms. Aileron sits between you and the service as a tool; it does not change or replace your obligations to those services. Your account, tokens, and data with those services remain governed by their policies.
+
+## Acceptable use
+
+Don't use Aileron to do things that are illegal, that violate the terms of services you've connected, or that harm other people. In particular, don't use it to:
+
+- send spam, phishing, or other unsolicited communications;
+- impersonate someone else;
+- circumvent security controls of services you've connected;
+- access data you don't have permission to access.
+
+## Disclaimer of warranties
+
+Aileron, the website, and any related materials are provided "as is" and "as available" without warranty of any kind, express or implied — including merchantability, fitness for a particular purpose, and non-infringement. The maintainer does not warrant that the software will be uninterrupted, error-free, secure, or free of harmful components, or that any defects will be corrected. Use is at your sole risk.
+
+## Limitation of liability
+
+To the maximum extent permitted by law, the maintainer is not liable for any indirect, incidental, special, consequential, or punitive damages arising out of or related to your use of Aileron — including loss of data, loss of profit, business interruption, or damages caused by your agent's actions or by third-party services. The maintainer's aggregate liability for any direct damages is limited to one hundred U.S. dollars (USD 100).
+
+## Release and indemnification
+
+You release the maintainer from claims arising out of your use of Aileron, your agent's actions, your use of connected third-party services, or your violation of these Terms. You agree to defend and indemnify the maintainer against any third-party claims arising from any of the foregoing.
+
+## Trademarks
+
+"Aileron" and the Aileron logo are not licensed for use under Apache-2.0. Don't use them in a way that implies endorsement, affiliation, or sponsorship by the maintainer without permission. Other trademarks belong to their owners.
+
+## Severability and waiver
+
+If any provision of these Terms is found unenforceable, the rest remain in effect. Failure to enforce any provision is not a waiver of the right to enforce it later.
+
+## Maintainer
+
+These Terms are offered by Andrew Lee Rubinger, an individual project maintainer. There is no associated legal entity. Contact: [fly@withaileron.ai](mailto:fly@withaileron.ai).
+
+---
+
+*Structure adapted from [GitHub's Terms of Service](https://github.com/github/site-policy), released under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).*
