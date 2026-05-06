@@ -99,7 +99,7 @@ func TestHTTPMiddleware_MalformedTraceparentStartsFreshTrace(t *testing.T) {
 
 func TestHTTPMiddleware_ExportsSpanWithStatus5xxAsError(t *testing.T) {
 	var buf bytes.Buffer
-	exp, err := newExporter(config.ExporterStdout, &buf)
+	exp, err := newExporter(&config.ObservabilityConfig{Exporter: config.ExporterStdout}, &buf)
 	if err != nil {
 		t.Fatalf("newExporter: %v", err)
 	}

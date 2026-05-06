@@ -90,7 +90,7 @@ func Init(cfg *config.ObservabilityConfig, log *slog.Logger) *Provider {
 		return &Provider{TracerProvider: p}
 	}
 
-	exporter, err := newExporter(cfg.Exporter, os.Stderr)
+	exporter, err := newExporter(cfg, os.Stderr)
 	if err != nil {
 		log.Warn("observability: exporter construction failed; tracing disabled",
 			"exporter", cfg.Exporter, "error", err.Error())
@@ -135,18 +135,21 @@ func Init(cfg *config.ObservabilityConfig, log *slog.Logger) *Provider {
 // Returns (nil, nil) for the no-op case so the caller can short-
 // circuit to a no-op provider without constructing the SDK.
 //
-// w is the writer the stdout exporter targets — taken as a parameter
-// so tests can capture span output without race conditions on
-// os.Stderr.
-func newExporter(name string, w io.Writer) (sdktrace.SpanExporter, error) {
-	switch name {
+// stdoutW is the writer the stdout exporter targets — taken as a
+// parameter so tests can capture span output without race
+// conditions on os.Stderr. The file exporter uses cfg.TracesDir
+// directly; the writer parameter does not apply.
+func newExporter(cfg *config.ObservabilityConfig, stdoutW io.Writer) (sdktrace.SpanExporter, error) {
+	switch cfg.Exporter {
 	case config.ExporterNoop, "":
 		return nil, nil
 	case config.ExporterStdout:
 		// PrettyPrint is intentionally off: jq-friendly JSON-per-line
 		// is what humans want when piping through standard tooling.
-		return stdouttrace.New(stdouttrace.WithWriter(w))
+		return stdouttrace.New(stdouttrace.WithWriter(stdoutW))
+	case config.ExporterFile:
+		return newFileExporter(cfg.TracesDir)
 	default:
-		return nil, fmt.Errorf("unknown exporter %q", name)
+		return nil, fmt.Errorf("unknown exporter %q", cfg.Exporter)
 	}
 }

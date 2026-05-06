@@ -37,7 +37,7 @@ Aileron's role here is thin and consistent: when the agent calls Aileron, Ailero
 
 A few terms you'll see:
 
-- **Exporter** — the component that ships spans out of the process. Aileron currently supports `noop` (the default — drops spans, zero overhead) and `stdout` (writes JSON-per-line to stderr). A file exporter and an OTLP exporter are pending.
+- **Exporter** — the component that ships spans out of the process. Aileron supports `noop` (the default — drops spans, zero overhead), `stdout` (writes JSON-per-line to stderr for local development), and `file` (writes JSON-per-line to a daily-rotated file under `~/.aileron/traces/`, sibling to the audit log). An OTLP exporter is pending.
 - **OTLP** — the OpenTelemetry Protocol, the wire format collectors expect. When Aileron's OTLP exporter ships, you'll point it at an **OTel endpoint** — typically the URL of an [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) deployed alongside your other services, which fans the spans out to whichever backend (Grafana, Datadog, etc.) you've configured.
 - **Span status** — `Ok` (default), `Error`, or `Unset`. Aileron sets `Error` on any span whose underlying operation failed, with the failure message as the status description.
 
@@ -55,6 +55,16 @@ aileron launch claude
 
 Spans land on stderr as JSON-per-line. Pipe to `jq` to navigate them. With tracing off (the default), there's zero SDK overhead — the call sites resolve to no-op tracers.
 
+For durable retention across sessions, use the **file** exporter — spans land in a daily-rotated file under `~/.aileron/traces/`, mirroring the audit log's `~/.aileron/audit/` layout:
+
+```sh
+AILERON_OTEL_ENABLED=true \
+AILERON_OTEL_EXPORTER=file \
+aileron launch claude
+```
+
+A new file is created per local-clock day (`spans-YYYY-MM-DD.jsonl`); a session that crosses midnight rolls naturally to the next day's file. `AILERON_TRACES_DIR` overrides the state directory; the default (`~/.aileron`) keeps audit and traces side-by-side.
+
 Tracing is independent of the audit log. The audit log answers *what was done*; the traces answer *how it ran*. Both are useful; neither replaces the other.
 
 ### What gets emitted
@@ -71,7 +81,7 @@ Today (as the Phase 7 emission integrations land slice by slice in [issue #390](
 | HTTP server-root span | gateway and `/v1/actions/{name}/run` entry points | ✅ shipped |
 | `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway | ⏳ pending |
 
-The file exporter (writing spans to `~/.aileron/traces/spans.jsonl` with date-based rotation) is also pending — it's gated on the parallel audit-log file rotation work so spans and audit events share a rotating writer with the same retention story.
+The file exporter is shipped — spans land in `~/.aileron/traces/spans-YYYY-MM-DD.jsonl`, sibling to the audit log's `~/.aileron/audit/audit-YYYY-MM-DD.jsonl`. Both surfaces share the path-naming convention via the `internal/dailypath` package, so retention and rotation are consistent across the two on-disk surfaces.
 
 ### Span attribute schema
 
@@ -98,8 +108,9 @@ All knobs are environment variables read at daemon startup. Defaults reproduce t
 |---|---|---|
 | `AILERON_OTEL_ENABLED` | `false` | Master switch for trace emission. When `false`, the SDK is never constructed; the call sites resolve to no-op. The W3C TraceContext propagator is registered regardless, so an inbound `traceparent` is parsed and propagated even without local emission. |
 | `AILERON_OTEL_SERVICE_NAME` | `aileron` | The OTel resource attribute `service.name` reported on every span. Set it to disambiguate Aileron from other services in your trace tooling. |
-| `AILERON_OTEL_EXPORTER` | `noop` | Exporter selection. `noop` drops spans (the default — same as `AILERON_OTEL_ENABLED=false`). `stdout` writes JSON-per-line to stderr for local development. The file exporter is pending. |
-| `AILERON_AUDIT_PATH` | `~/.aileron/audit.jsonl` | Override the audit log location. The default suits the personal-use case; environments with stricter filesystem layouts can point this elsewhere. |
+| `AILERON_OTEL_EXPORTER` | `noop` | Exporter selection. `noop` drops spans (the default — same as `AILERON_OTEL_ENABLED=false`). `stdout` writes JSON-per-line to stderr for local development. `file` writes JSON-per-line to a daily-rotated file under `AILERON_TRACES_DIR`. |
+| `AILERON_TRACES_DIR` | `~/.aileron` | State directory for the `file` exporter. Spans land at `<dir>/traces/spans-YYYY-MM-DD.jsonl`. The default keeps traces and the audit log side-by-side under `~/.aileron/`. Setting this to an explicit empty string disables the file exporter (degrades to no-op). |
+| `AILERON_AUDIT_DIR` | `~/.aileron` | State directory for the audit log. Audit events land at `<dir>/audit/audit-YYYY-MM-DD.jsonl`. The default keeps the audit log alongside traces. Setting this to an explicit empty string falls back to the in-memory store (events lost on daemon restart). |
 
 A misconfigured exporter — unknown name, or a known exporter whose construction fails — degrades gracefully to no-op rather than failing daemon startup. The Aileron HTTP server keeps serving when its telemetry sidecar is misconfigured; the failure is logged at warn level so you find it without it taking the daemon down.
 
