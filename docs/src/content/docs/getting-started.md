@@ -47,7 +47,7 @@ Verify:
 aileron version
 ```
 
-## 2. (No separate server to start)
+## 2. The Local Daemon
 
 Per [ADR-0012](/adr/0012-local-daemon-architecture), the first `aileron <anything>` you run auto-spawns the local daemon — there is no `aileron serve` step. The daemon binds an ephemeral port on `127.0.0.1` and advertises itself in `~/.aileron/daemon.json` so every subsequent CLI command and every `aileron launch` finds it without you typing a port number.
 
@@ -183,20 +183,22 @@ Routes to `list_upcoming_events`.
 
 Routes to `get_email` (to read context) then `draft_email` — which lands a draft in your Gmail Drafts folder. Drafts are reversible, so this action is not gated; the existing manual "click Send in Gmail" step is the human review.
 
-`send-email` and `create-calendar-event` are gated for per-call approval because their effects are not reversible (see [the connector's README](https://github.com/ALRubinger/aileron-connector-google#what-it-ships) for why). When Claude proposes one of those, the approval prompt fires through the launch comms channel and Claude's tool call blocks until you decide.
+`send-email` and `create-calendar-event` are gated for per-call approval because their effects are not reversible (see [the connector's README](https://github.com/ALRubinger/aileron-connector-google#what-it-ships) for why). When Claude proposes one of those, the approval lands on the daemon's `/approvals` page (the same URL printed in the launch banner above), and Claude's tool call blocks until you click Approve or Deny.
 
 ## 8. Inspect what happened
 
 In a separate terminal — the daemon is still running, so any CLI call connects to the same process — see what the runtime knows:
 
 ```sh
-aileron status               # version, listen addr, action/connector/binding counts, vault state
-aileron daemon status        # daemon URL, PID, version, started_at, locked/unlocked vault
+aileron status               # what's configured: action/connector/binding counts, policy, env, vault state
+aileron daemon status        # what's running: daemon URL, PID, version, started_at, locked/unlocked vault
 aileron sessions list        # every aileron launch, with status (running / ended / orphaned) and exit code
 aileron action audit         # every installed action and the capabilities it can exercise
 aileron binding list         # bound credentials with their last-used timestamp
 aileron audit list           # action-execution audit log: every call, with inputs and outcome
 ```
+
+`aileron status` is configuration-shaped: what you've installed, what your policy says, where credentials live. `aileron daemon status` is process-shaped: which daemon process the CLI is talking to and whether its vault is unlocked. They overlap on vault state because both surface it for different reasons; the rest is disjoint.
 
 The audit log is the receipt for everything the agent did on your behalf. Each entry names the action, the connector version, the binding identity, the duration, and the disposition — recorded under `~/.aileron/audit/audit-YYYY-MM-DD.jsonl` (daily-rotated, user-scope per [ADR-0012](/adr/0012-local-daemon-architecture)). Combined with the install consent log, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
 
