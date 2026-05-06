@@ -7,6 +7,8 @@ When an agent sends an email, files a ticket, or posts to a channel on your beha
 
 Aileron records two complementary surfaces of structured data so those questions have answers. The **audit log** is the durable record of *what was done*: every install consent, every action invocation, every approval decision, every failure — append-only on local disk, queryable through the CLI, intended to outlive the daemon. **Traces** are the per-request timing tree showing *how each invocation ran*: which steps took how long, how nested calls fit together, where errors originated, and how Aileron's spans connect to the rest of an instrumented stack.
 
+For actions that touch money, send messages that can't be unsent, or grant access, the audit log isn't just operational telemetry — it's the receipt that demonstrates what the agent actually did. That's [Proof of Control](/concepts/proof-of-control/): self-verifiable to you today, with a forward path to independently and cryptographically verifiable as Aileron's deployment story evolves. The durability properties below — append-only, daily-rotated, surviving daemon restart — exist because the receipt has to outlast the runtime that wrote it.
+
 The audit log is always on; traces are off by default and opt-in via [OpenTelemetry](https://opentelemetry.io/), the open standard for distributed tracing. Both surfaces share attribute keys exactly, so a span and an audit event for the same operation read the same names — your trace tooling and your audit reader speak the same vocabulary.
 
 If you only want a quick reference for env vars, jump to [Configuration](#configuration). If you already have an OTel collector running and just want to point Aileron at it, jump to [Hooking up to a collector](#hooking-up-to-a-collector).
