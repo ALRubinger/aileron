@@ -14,6 +14,10 @@ import (
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/retry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // HandleAnthropic mirrors HandleOpenAI for the Anthropic Messages
@@ -56,19 +60,33 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 
 	gatewayActor := model.ActorRef{ID: "aileron-gateway", Type: model.ActorTypeService}
 
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
 	for round := 0; round < maxRounds; round++ {
-		respStatus, respHeaders, respBody, sendFailure := e.sendAnthropicWithRetry(r, currentBody)
+		roundCtx, roundSpan := tracer.Start(r.Context(), "aileron.intercept.round",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				attribute.Int("aileron.intercept.round_index", round),
+				attribute.String("aileron.intercept.protocol", "anthropic"),
+			),
+		)
+		respStatus, respHeaders, respBody, sendFailure := e.sendAnthropicWithRetry(r.WithContext(roundCtx), currentBody)
 		if sendFailure != nil {
+			roundSpan.SetStatus(codes.Error, sendFailure.Message())
+			roundSpan.End()
 			writeFailure(r.Context(), w, e.recorder, sendFailure, gatewayActor)
 			return
 		}
 		if respStatus != http.StatusOK {
+			roundSpan.SetAttributes(attribute.Int("aileron.intercept.upstream_status", respStatus))
+			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
 			return
 		}
 
 		assistantContent, toolUses, err := parseAnthropicResponse(respBody)
 		if err != nil {
+			roundSpan.SetStatus(codes.Error, "parse upstream response: "+err.Error())
+			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
 			return
 		}
@@ -76,17 +94,24 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 		ours, theirs := classifyAnthropicToolUses(toolUses, ourNames)
 
 		if len(ours) == 0 {
+			roundSpan.SetAttributes(attribute.Bool("aileron.intercept.terminal", true))
+			roundSpan.End()
 			emitAnthropicTerminal(w, respBody, wantStream)
 			return
 		}
 		if len(theirs) > 0 {
+			roundSpan.SetStatus(codes.Error, "mixed_tool_calls_unsupported")
+			roundSpan.End()
 			writeError(w, http.StatusBadGateway, "mixed_tool_calls_unsupported",
 				"the gateway does not yet support a single response that mixes Aileron tool calls with agent-declared tool calls")
 			return
 		}
+		roundSpan.SetAttributes(attribute.Int("aileron.intercept.tool_calls_count", len(ours)))
 
-		toolResultBlocks, execErr := e.executeAnthropicToolUses(r.Context(), ours)
+		toolResultBlocks, execErr := e.executeAnthropicToolUses(roundCtx, ours)
 		if execErr != nil {
+			roundSpan.SetStatus(codes.Error, "executor fatal: "+execErr.Error())
+			roundSpan.End()
 			writeFailure(r.Context(), w, e.recorder,
 				failure.ConnectorRuntime("action executor fatal error: "+execErr.Error(), false,
 					failure.WithBoundary(failure.Runtime),
@@ -97,11 +122,14 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 
 		nextBody, err := appendAnthropicContinuation(currentBody, assistantContent, toolResultBlocks)
 		if err != nil {
+			roundSpan.SetStatus(codes.Error, "continuation: "+err.Error())
+			roundSpan.End()
 			writeError(w, http.StatusInternalServerError, "continuation_error",
 				"failed to build continuation request: "+err.Error())
 			return
 		}
 		currentBody = nextBody
+		roundSpan.End()
 	}
 
 	writeError(w, http.StatusBadGateway, "max_intercept_rounds",

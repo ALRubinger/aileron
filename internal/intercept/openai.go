@@ -15,7 +15,16 @@ import (
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/retry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName names the OTel instrumentation library reported on
+// spans this package emits. Mirrors the convention used in
+// internal/action and internal/observability.
+const tracerName = "github.com/ALRubinger/aileron/internal/intercept"
 
 // HandleOpenAI runs the augmentation + interception loop for an
 // OpenAI Chat Completions request. The request body is read once,
@@ -74,19 +83,33 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 	gatewayActor := model.ActorRef{ID: "aileron-gateway", Type: model.ActorTypeService}
 
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
 	for round := 0; round < maxRounds; round++ {
-		respStatus, respHeaders, respBody, sendFailure := e.sendOpenAIWithRetry(r, currentBody)
+		roundCtx, roundSpan := tracer.Start(r.Context(), "aileron.intercept.round",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(
+				attribute.Int("aileron.intercept.round_index", round),
+				attribute.String("aileron.intercept.protocol", "openai"),
+			),
+		)
+		respStatus, respHeaders, respBody, sendFailure := e.sendOpenAIWithRetry(r.WithContext(roundCtx), currentBody)
 		if sendFailure != nil {
+			roundSpan.SetStatus(codes.Error, sendFailure.Message())
+			roundSpan.End()
 			writeFailure(r.Context(), w, e.recorder, sendFailure, gatewayActor)
 			return
 		}
 		if respStatus != http.StatusOK {
+			roundSpan.SetAttributes(attribute.Int("aileron.intercept.upstream_status", respStatus))
+			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
 			return
 		}
 
 		assistantMsg, toolCalls, err := parseOpenAIChoice(respBody)
 		if err != nil {
+			roundSpan.SetStatus(codes.Error, "parse upstream response: "+err.Error())
+			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
 			return
 		}
@@ -96,17 +119,24 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 		if len(ours) == 0 {
 			// No Aileron tool calls — terminal for this round.
 			// Either pure-text response or agent's tools to handle.
+			roundSpan.SetAttributes(attribute.Bool("aileron.intercept.terminal", true))
+			roundSpan.End()
 			emitOpenAITerminal(w, respBody, wantStream)
 			return
 		}
 		if len(theirs) > 0 {
+			roundSpan.SetStatus(codes.Error, "mixed_tool_calls_unsupported")
+			roundSpan.End()
 			writeError(w, http.StatusBadGateway, "mixed_tool_calls_unsupported",
 				"the gateway does not yet support a single response that mixes Aileron tool calls with agent-declared tool calls")
 			return
 		}
+		roundSpan.SetAttributes(attribute.Int("aileron.intercept.tool_calls_count", len(ours)))
 
-		toolMessages, execErr := e.executeOpenAIToolCalls(r.Context(), ours)
+		toolMessages, execErr := e.executeOpenAIToolCalls(roundCtx, ours)
 		if execErr != nil {
+			roundSpan.SetStatus(codes.Error, "executor fatal: "+execErr.Error())
+			roundSpan.End()
 			writeFailure(r.Context(), w, e.recorder,
 				failure.ConnectorRuntime("action executor fatal error: "+execErr.Error(), false,
 					failure.WithBoundary(failure.Runtime),
@@ -117,11 +147,14 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 		nextBody, err := appendOpenAIContinuation(currentBody, assistantMsg, toolMessages)
 		if err != nil {
+			roundSpan.SetStatus(codes.Error, "continuation: "+err.Error())
+			roundSpan.End()
 			writeError(w, http.StatusInternalServerError, "continuation_error",
 				"failed to build continuation request: "+err.Error())
 			return
 		}
 		currentBody = nextBody
+		roundSpan.End()
 	}
 
 	writeError(w, http.StatusBadGateway, "max_intercept_rounds",
