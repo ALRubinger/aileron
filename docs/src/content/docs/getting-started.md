@@ -12,7 +12,7 @@ By the end you will have asked Claude Code "summarize my five most recent emails
 
 - **Go 1.25 or newer.** Aileron's modules require it. `go version` should report at least `go1.25.0`.
 - **[Task](https://taskfile.dev/installation/).** All build commands go through `task`. `brew install go-task` on macOS.
-- **[Claude Code](https://docs.claude.com/en/docs/claude-code/setup) installed and configured** with an Anthropic API key in `ANTHROPIC_API_KEY`. Aileron's launcher routes Claude Code's LLM calls through an embedded gateway, but it does not supply or replace your API key.
+- **[Claude Code](https://docs.claude.com/en/docs/claude-code/setup) installed and configured** with an Anthropic API key in `ANTHROPIC_API_KEY`. Aileron's launcher routes Claude Code's LLM calls through the local Aileron daemon, but it does not supply or replace your API key.
 - **A Google account.** Gmail and Calendar must be enabled. The OAuth dance opens in your default browser.
 - **`jq` and `openssl`** for the one-liner that trusts the connector's signing key.
 
@@ -30,8 +30,8 @@ This produces four binaries in `build/`:
 
 | Binary | Purpose |
 |---|---|
-| `aileron` | The CLI you use for install, binding, status, audit, and launch. |
-| `server` | The standalone Aileron HTTP server. The CLI talks to it. |
+| `aileron` | The CLI you use for install, binding, status, audit, launch, and `aileron daemon start/stop/status`. |
+| `server` | The user-scoped local daemon (per [ADR-0012](/adr/0012-local-daemon-architecture)). Auto-spawned by the CLI on first need; you don't run it directly during normal use. |
 | `aileron-mcp` | The MCP server that exposes installed actions to the agent. `aileron launch` resolves it as a sibling of the `aileron` binary. |
 | `aileron-sh` | The policy-enforced shell shim used by `aileron launch`. |
 
@@ -47,15 +47,20 @@ Verify:
 aileron version
 ```
 
-## 2. Start the standalone server
+## 2. (No separate server to start)
 
-The CLI is a thin HTTP client over [the OpenAPI-spec'd server](/cli/#architecture-cli-is-an-http-client). Install, binding, status, and audit commands all go to `http://localhost:8721/v1`. Start the server on that port and leave it running in its own terminal:
+Per [ADR-0012](/adr/0012-local-daemon-architecture), the first `aileron <anything>` you run auto-spawns the local daemon — there is no `aileron serve` step. The daemon binds an ephemeral port on `127.0.0.1` and advertises itself in `~/.aileron/daemon.json` so every subsequent CLI command and every `aileron launch` finds it without you typing a port number.
+
+You can manage the daemon explicitly when you want to:
 
 ```sh
-AILERON_ADDR=:8721 ./build/server
+aileron daemon start    # idempotent — prints the URL whether or not it was already running
+aileron daemon status   # URL + PID + locked/unlocked vault state
+aileron daemon stop     # SIGTERM, drops the unlocked vault key from memory
+aileron stop            # alias for `aileron daemon stop`
 ```
 
-On first launch you will be prompted to create a vault and choose a passphrase. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106); see [The Vault](/concepts/the-vault/) for what it protects you from. The vault file lives at `~/.aileron/secrets.json` and is shared by the standalone server and `aileron launch` — bind a credential here once and the launched agent picks it up automatically.
+On first launch you will be prompted to create a vault and choose a passphrase. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106); see [The Vault](/concepts/the-vault/) for what it protects you from. The vault file lives at `~/.aileron/secrets.json`. **You unlock the vault once per daemon lifetime** — every subsequent CLI command and every `aileron launch` reuses the unlocked state until you `aileron stop` or reboot.
 
 ## 3. Trust the connector's publisher key
 
@@ -141,17 +146,24 @@ aileron launch claude
 You'll see a banner like:
 
 ```
-✈️  Aileron — webapp http://127.0.0.1:54321 — session 01J... — log ~/.aileron/logs/...
+✈️  Aileron — webapp http://127.0.0.1:54321 — session 01HK6... — log ~/.aileron/logs/...
+```
+
+If the vault happens to be locked at this moment, a follow-up line points you at the unlock surface:
+
+```
+✈️  Vault locked — open http://127.0.0.1:54321 and enter your passphrase to unlock.
 ```
 
 What happened under the hood:
 
-- Aileron started a per-session embedded gateway on an ephemeral localhost port.
-- It set `ANTHROPIC_BASE_URL` to that gateway URL for the Claude Code child process, so Claude's LLM calls now flow through Aileron.
-- It registered `aileron-mcp` as an MCP server for the session. On startup, `aileron-mcp` queries `/v1/actions` and generates one MCP tool per installed action — `list_recent_emails`, `get_email`, `list_upcoming_events`, `draft_email`.
-- The vault is shared with the standalone server's persistent vault at `~/.aileron/secrets.json`, so the binding you set up in step 5 is in scope.
+- The CLI resolved the daemon URL via `~/.aileron/daemon.json` (auto-spawning the daemon on first need).
+- It registered the launch session by `POST /v1/sessions`; the daemon minted a [ULID](https://github.com/ulid/spec) session ID and stamped its start time.
+- It set `ANTHROPIC_BASE_URL` to the daemon URL so Claude Code's LLM calls flow through Aileron.
+- It registered `aileron-mcp` as an MCP server for the session. On startup, `aileron-mcp` queries the daemon's `/v1/actions` and generates one MCP tool per installed action — `list_recent_emails`, `get_email`, `list_upcoming_events`, `draft_email`.
+- The vault binding you set up in step 5 is in scope because the daemon is the same process the CLI used to register the binding.
 
-Claude Code is now a normal Claude Code session, with a tool catalog that includes the actions Aileron published.
+The daemon URL is **stable across launches** — bookmark it once and it stays reachable until you `aileron stop`. Claude Code is now a normal Claude Code session, with a tool catalog that includes the actions Aileron published.
 
 ## 7. Drive the actions from the agent
 
@@ -175,16 +187,18 @@ Routes to `get_email` (to read context) then `draft_email` — which lands a dra
 
 ## 8. Inspect what happened
 
-In a separate terminal (with the standalone server still running), see what the runtime knows:
+In a separate terminal — the daemon is still running, so any CLI call connects to the same process — see what the runtime knows:
 
 ```sh
 aileron status               # version, listen addr, action/connector/binding counts, vault state
+aileron daemon status        # daemon URL, PID, version, started_at, locked/unlocked vault
+aileron sessions list        # every aileron launch, with status (running / ended / orphaned) and exit code
 aileron action audit         # every installed action and the capabilities it can exercise
 aileron binding list         # bound credentials with their last-used timestamp
 aileron audit list           # action-execution audit log: every call, with inputs and outcome
 ```
 
-The audit log is the receipt for everything the agent did on your behalf. Each entry names the action, the connector version, the binding identity, the duration, and the disposition. Combined with the install consent log, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
+The audit log is the receipt for everything the agent did on your behalf. Each entry names the action, the connector version, the binding identity, the duration, and the disposition — recorded under `~/.aileron/audit/audit-YYYY-MM-DD.jsonl` (daily-rotated, user-scope per [ADR-0012](/adr/0012-local-daemon-architecture)). Combined with the install consent log, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
 
 For end-to-end timing or correlation with the rest of your agent stack, Aileron also emits OpenTelemetry traces — opt-in via `AILERON_OTEL_ENABLED=true AILERON_OTEL_EXPORTER=stdout`. See [Observability](/guides/observability/) for what gets emitted, the span attribute schema, and the env vars that control both the audit and tracing surfaces.
 

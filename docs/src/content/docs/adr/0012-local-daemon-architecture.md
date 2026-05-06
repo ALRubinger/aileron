@@ -7,8 +7,8 @@ order: 12
 
 <div class="meta">
 <table>
-  <tr><th>Status</th><td>Proposed</td></tr>
-  <tr><th>Date</th><td>2026-05-05</td></tr>
+  <tr><th>Status</th><td>Accepted</td></tr>
+  <tr><th>Date</th><td>2026-05-06</td></tr>
   <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/454">#454</a></td></tr>
 </table>
 </div>
