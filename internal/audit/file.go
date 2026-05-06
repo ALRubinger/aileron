@@ -8,24 +8,26 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/ALRubinger/aileron/internal/model"
 )
 
 // FileStore is a JSONL-backed audit store: one event per line,
-// append-only, durable across daemon restarts. Reads are served
-// from an in-memory index rebuilt at startup, so the on-disk file is
-// authoritative and the in-memory copy is a cache.
+// daily-rotated under <stateDir>/audit/audit-YYYY-MM-DD.jsonl per
+// ADR-0012. Append computes today's path on every write; replay scans
+// every daily file in the directory at startup. Reads are served from
+// an in-memory index, so the on-disk files are authoritative and the
+// in-memory copy is a cache.
 //
 // Per ADR-0010 this is the v0.x persistence target — Postgres /
-// signed log are post-MVP and operate over the same SPI. Rotation,
-// retention, and dedup are deliberately not implemented.
+// signed log are post-MVP and operate over the same SPI.
 type FileStore struct {
-	path string
-	log  *slog.Logger
-	mu   sync.Mutex // serializes appends so file order matches mem order
-	mem  *MemStore  // hydrated from the file at New, then write-through
+	stateDir string
+	log      *slog.Logger
+	mu       sync.Mutex // serializes appends so file order matches mem order
+	mem      *MemStore  // hydrated from the daily files at New, then write-through
 }
 
 // fileLine is the on-disk JSONL shape: the SPI Event plus the
@@ -38,24 +40,24 @@ type fileLine struct {
 	Event       Event  `json:"event"`
 }
 
-// NewFileStore opens (or creates) a JSONL audit log at path and
-// returns a FileStore whose in-memory index is replayed from the
-// file. Malformed lines are skipped with a warning so a single
-// corrupt entry can't make the daemon refuse to start; the rest of
-// the file is still loaded.
+// NewFileStore opens (or creates) the daily-rotated audit log under
+// stateDir and returns a FileStore whose in-memory index is replayed
+// from every audit-*.jsonl file in <stateDir>/audit/. Malformed lines
+// are skipped with a warning so a single corrupt entry can't make the
+// daemon refuse to start; the rest of the file is still loaded.
 //
 // log may be nil; in that case warnings are routed to slog.Default.
-func NewFileStore(path string, log *slog.Logger) (*FileStore, error) {
+func NewFileStore(stateDir string, log *slog.Logger) (*FileStore, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("creating audit log directory: %w", err)
+	if err := os.MkdirAll(DailyDir(stateDir), 0o755); err != nil {
+		return nil, fmt.Errorf("creating audit directory: %w", err)
 	}
 	fs := &FileStore{
-		path: path,
-		log:  log,
-		mem:  NewMemStore(),
+		stateDir: stateDir,
+		log:      log,
+		mem:      NewMemStore(),
 	}
 	if err := fs.replay(); err != nil {
 		return nil, err
@@ -63,22 +65,50 @@ func NewFileStore(path string, log *slog.Logger) (*FileStore, error) {
 	return fs, nil
 }
 
-// Path returns the JSONL file path the store is backed by. Useful
-// for status surfaces (e.g. `aileron status`) and tests.
-func (fs *FileStore) Path() string { return fs.path }
+// StateDir returns the state directory the daily files live under.
+// Useful for status surfaces (e.g. `aileron status`) and tests.
+func (fs *FileStore) StateDir() string { return fs.stateDir }
 
+// replay reads every audit-*.jsonl file in DailyDir(stateDir), sorted
+// by name (which is chronological since filenames embed YYYY-MM-DD),
+// and replays each into the in-memory index.
 func (fs *FileStore) replay() error {
-	f, err := os.Open(fs.path)
+	dir := DailyDir(fs.stateDir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("opening audit log: %w", err)
+		return fmt.Errorf("listing audit directory: %w", err)
+	}
+	files := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			continue
+		}
+		// Match `audit-*.jsonl` only — ignore stray files.
+		if !isAuditFileName(name) {
+			continue
+		}
+		files = append(files, name)
+	}
+	sort.Strings(files)
+	for _, name := range files {
+		if err := fs.replayFile(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (fs *FileStore) replayFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("opening audit log %s: %w", path, err)
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
-	// Default Scanner buffer is 64KiB; raise to handle large
-	// payloads (failure events with deep details). 1 MiB cap.
 	const maxLine = 1 << 20
 	scanner.Buffer(make([]byte, 0, 64<<10), maxLine)
 	lineNo := 0
@@ -93,7 +123,7 @@ func (fs *FileStore) replay() error {
 		if err := json.Unmarshal(raw, &line); err != nil {
 			bad++
 			fs.log.Warn("audit: skipped malformed line during replay",
-				"path", fs.path, "line", lineNo, "error", err.Error())
+				"path", path, "line", lineNo, "error", err.Error())
 			continue
 		}
 		if line.TraceID == "" && line.IntentID == "" && line.WorkspaceID == "" {
@@ -104,18 +134,18 @@ func (fs *FileStore) replay() error {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scanning audit log: %w", err)
+		return fmt.Errorf("scanning audit log %s: %w", path, err)
 	}
 	if bad > 0 {
 		fs.log.Warn("audit: replay completed with skipped lines",
-			"path", fs.path, "skipped", bad, "loaded", lineNo-bad)
+			"path", path, "skipped", bad, "loaded", lineNo-bad)
 	}
 	return nil
 }
 
-// Append persists the event to the file and the in-memory index.
-// Both must succeed for Append to return nil; a write to disk that
-// fails surfaces to the recorder, which logs and continues per
+// Append persists the event to today's daily file and the in-memory
+// index. Both must succeed for Append to return nil; a write to disk
+// that fails surfaces to the recorder, which logs and continues per
 // ADR-0010's best-effort recording.
 func (fs *FileStore) Append(ctx context.Context, event Event) error {
 	fs.mu.Lock()
@@ -126,8 +156,8 @@ func (fs *FileStore) Append(ctx context.Context, event Event) error {
 	return fs.mem.Append(ctx, event)
 }
 
-// AppendToTrace persists the trace-correlated event to the file and
-// the in-memory index.
+// AppendToTrace persists the trace-correlated event to today's daily
+// file and the in-memory index.
 func (fs *FileStore) AppendToTrace(ctx context.Context, traceID, intentID, workspaceID string, event Event) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
@@ -143,9 +173,10 @@ func (fs *FileStore) AppendToTrace(ctx context.Context, traceID, intentID, works
 }
 
 func (fs *FileStore) writeLine(line fileLine) error {
-	f, err := os.OpenFile(fs.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	path := DailyPath(fs.stateDir)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("opening audit log: %w", err)
+		return fmt.Errorf("opening audit log %s: %w", path, err)
 	}
 	defer f.Close()
 	data, err := json.Marshal(line)
@@ -177,6 +208,17 @@ func (fs *FileStore) ListTraces(ctx context.Context, filter Filter) ([]Trace, er
 // GetTrace delegates to the in-memory index.
 func (fs *FileStore) GetTrace(ctx context.Context, traceID string) (Trace, error) {
 	return fs.mem.GetTrace(ctx, traceID)
+}
+
+// isAuditFileName matches "audit-YYYY-MM-DD.jsonl" loosely — we
+// accept anything starting with "audit-" and ending in ".jsonl" so
+// future date formats don't break replay.
+func isAuditFileName(name string) bool {
+	const prefix = "audit-"
+	const suffix = ".jsonl"
+	return len(name) > len(prefix)+len(suffix) &&
+		name[:len(prefix)] == prefix &&
+		name[len(name)-len(suffix):] == suffix
 }
 
 // Compile-time check that FileStore satisfies the audit-store

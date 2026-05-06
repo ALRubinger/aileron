@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -47,7 +48,28 @@ func AppendShellEntry(path string, entry ShellEntry) error {
 
 // ReadShellEntries reads all JSONL entries from the audit log.
 // Malformed lines are silently skipped.
+//
+// path may be either a single JSONL file (legacy / test use) or the
+// daily-rotated directory `<stateDir>/audit/`. When it's a directory,
+// every `audit-*.jsonl` file inside is read, sorted by name (which is
+// chronological since filenames embed the date).
 func ReadShellEntries(path string) ([]ShellEntry, error) {
+	files, err := resolveAuditFiles(path)
+	if err != nil {
+		return nil, err
+	}
+	var entries []ShellEntry
+	for _, p := range files {
+		got, err := readShellEntriesFromFile(p)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, got...)
+	}
+	return entries, nil
+}
+
+func readShellEntriesFromFile(path string) ([]ShellEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -68,6 +90,42 @@ func ReadShellEntries(path string) ([]ShellEntry, error) {
 		entries = append(entries, entry)
 	}
 	return entries, scanner.Err()
+}
+
+// resolveAuditFiles returns the list of files to read for `path`.
+// If path is a directory, lists every `audit-*.jsonl` file inside,
+// sorted by name. If path is a file (or does not exist), returns
+// just that path.
+func resolveAuditFiles(path string) ([]string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		// Caller-friendly: a missing file is an error from the
+		// stat below in readShellEntriesFromFile, not here.
+		if os.IsNotExist(err) {
+			return []string{path}, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []string{path}, nil
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			continue
+		}
+		if !isAuditFileName(name) {
+			continue
+		}
+		files = append(files, filepath.Join(path, name))
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 // ShellFilter specifies criteria for filtering audit entries.
@@ -113,7 +171,25 @@ func AppendMessageEntry(path string, entry MessageEntry) error {
 
 // ReadMessageEntries reads all message JSONL entries from the audit log.
 // Only entries with an "event" field are returned (shell entries are skipped).
+//
+// path follows the same dir-or-file rule as [ReadShellEntries].
 func ReadMessageEntries(path string) ([]MessageEntry, error) {
+	files, err := resolveAuditFiles(path)
+	if err != nil {
+		return nil, err
+	}
+	var entries []MessageEntry
+	for _, p := range files {
+		got, err := readMessageEntriesFromFile(p)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, got...)
+	}
+	return entries, nil
+}
+
+func readMessageEntriesFromFile(path string) ([]MessageEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

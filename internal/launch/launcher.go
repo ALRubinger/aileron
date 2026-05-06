@@ -151,13 +151,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 
 	sessionID := generateSessionID()
-	auditLog := resolveAuditLog(config.Dir)
+	auditStateDir := resolveAuditStateDir()
 	envConfig := loadEnvConfig(config.Dir)
 	approvalSocket := filepath.Join(os.TempDir(), "ai-"+sessionID+".sock")
 	commsSocket := filepath.Join(os.TempDir(), "ai-comms-"+sessionID+".sock")
 
 	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), gatewayURL(gateway))
-	env := buildEnv(config.ShellShim, config.Agent.Name(), sessionID, auditLog, envConfig, agentEnv)
+	env := buildEnv(config.ShellShim, config.Agent.Name(), sessionID, auditStateDir, envConfig, agentEnv)
 	env = append(env, "AILERON_APPROVAL_SOCKET="+approvalSocket)
 	env = append(env, "AILERON_COMMS_SOCKET="+commsSocket)
 
@@ -218,7 +218,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// `read_messages` MCP tool. The webapp surface for surfacing
 	// these messages is a future addition (#418's followups);
 	// today the agent reads them via `aileron-mcp`.
-	listeners := startCommsListeners(ctx, config.Dir, queue, auditLog, sessionID, sessionLog)
+	listeners := startCommsListeners(ctx, config.Dir, queue, auditStateDir, sessionID, sessionLog)
 	defer stopCommsListeners(listeners)
 
 	// Comms server: same socket the pre-#419 launch exposed to
@@ -226,7 +226,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// paths fail-closed under the new launch (no in-pty approval
 	// surface; webapp wire-through pending) — see commsserver.go for
 	// the regression detail.
-	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, auditLog, sessionID, approvalQueue)
+	commsSrv, err := NewCommsServer(commsSocket, queue, listeners, auditStateDir, sessionID, approvalQueue)
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("starting comms server: %w", err)
 	}
@@ -261,8 +261,8 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	result, err := launchDirect(cmd, config)
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
-	if auditLog != "" {
-		PrintSessionSummary(os.Stderr, auditLog, sessionID)
+	if auditStateDir != "" {
+		PrintSessionSummary(os.Stderr, auditStateDir, sessionID)
 	}
 	return result, err
 }
@@ -335,7 +335,7 @@ func exitResult(err error) (LaunchResult, error) {
 //   - Replaces SHELL with the shim path
 //   - Sets AILERON_REAL_SHELL to the original SHELL value
 //   - Merges any agent-specific env vars (including agent-specific vars like CLAUDE_CODE_SHELL)
-func buildEnv(shimPath, agentName, sessionID, auditLog string, envConfig *launchpolicy.EnvConfig, agentEnv map[string]string) []string {
+func buildEnv(shimPath, agentName, sessionID, auditStateDir string, envConfig *launchpolicy.EnvConfig, agentEnv map[string]string) []string {
 	origShell := os.Getenv("SHELL")
 	if origShell == "" {
 		origShell = "/bin/sh"
@@ -355,7 +355,7 @@ func buildEnv(shimPath, agentName, sessionID, auditLog string, envConfig *launch
 		"AILERON_REAL_SHELL": true,
 		"AILERON_AGENT":      true,
 		"AILERON_SESSION_ID": true,
-		"AILERON_AUDIT_LOG":  true,
+		"AILERON_AUDIT_DIR":  true,
 	}
 	for k := range agentEnv {
 		managed[k] = true
@@ -383,8 +383,8 @@ func buildEnv(shimPath, agentName, sessionID, auditLog string, envConfig *launch
 	filtered = append(filtered, "AILERON_REAL_SHELL="+realShell)
 	filtered = append(filtered, "AILERON_AGENT="+agentName)
 	filtered = append(filtered, "AILERON_SESSION_ID="+sessionID)
-	if auditLog != "" {
-		filtered = append(filtered, "AILERON_AUDIT_LOG="+auditLog)
+	if auditStateDir != "" {
+		filtered = append(filtered, "AILERON_AUDIT_DIR="+auditStateDir)
 	}
 	for k, v := range agentEnv {
 		if k == "AILERON_REAL_SHELL" {
@@ -404,37 +404,29 @@ func generateSessionID() string {
 	return fmt.Sprintf("%x", b)
 }
 
-// ResolveAuditLogFromCwd resolves the audit log path from the current
-// working directory.
+// ResolveAuditLogFromCwd returns the audit subdirectory the
+// daily-rotated JSONL files live in (`~/.aileron/audit`). Pre-ADR-0012
+// this resolved per-project under the working directory and honored an
+// `aileron.yaml` `Settings.AuditLog` override; ADR-0012 centralizes
+// audit at user scope so all callers get the same path.
+//
+// The function name is kept for callers (`aileron policy save` etc.)
+// that read the audit log via the file system; under ADR-0012 it is
+// effectively a constant. Read helpers like
+// [audit.ReadShellEntriesFiltered] accept a directory and scan every
+// `audit-*.jsonl` file inside.
 func ResolveAuditLogFromCwd() string {
-	return resolveAuditLog("")
+	return audit.DailyDir(resolveAuditStateDir())
 }
 
-// resolveAuditLog determines the audit log path. It looks for
-// aileron.yaml in the given directory (or cwd) and reads its
-// Settings.AuditLog field. Falls back to .aileron/audit.jsonl
-// relative to the policy file's directory.
-func resolveAuditLog(dir string) string {
-	if dir == "" {
-		dir, _ = os.Getwd()
+// resolveAuditStateDir returns `~/.aileron`. The audit JSONL files
+// themselves live under `audit/audit-YYYY-MM-DD.jsonl` inside.
+func resolveAuditStateDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".aileron"
 	}
-	policyPath := FindPolicyFile(dir)
-	if policyPath == "" {
-		// No policy file — use cwd/.aileron/audit.jsonl.
-		return filepath.Join(dir, ".aileron", "audit.jsonl")
-	}
-
-	policyDir := filepath.Dir(policyPath)
-
-	pf := loadPolicyFileFrom(policyPath)
-	if pf.Settings != nil && pf.Settings.AuditLog != "" {
-		p := pf.Settings.AuditLog
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(policyDir, p)
-		}
-		return p
-	}
-	return filepath.Join(policyDir, ".aileron", "audit.jsonl")
+	return filepath.Join(home, ".aileron")
 }
 
 // PrintSessionSummary reads the audit log for the given session and
@@ -630,7 +622,7 @@ func prepareCommsConfig(dir string, sessionLog *slog.Logger) *commsSetup {
 
 // startCommsWithVault resolves tokens (using the provided vault, which
 // may be nil), creates listeners, and starts them.
-func startCommsWithVault(ctx context.Context, setup *commsSetup, v vault.Vault, queue *NotifyQueue, auditLog, sessionID string) []comms.Listener {
+func startCommsWithVault(ctx context.Context, setup *commsSetup, v vault.Vault, queue *NotifyQueue, auditStateDir, sessionID string) []comms.Listener {
 	if setup == nil {
 		return nil
 	}
@@ -696,13 +688,13 @@ func startCommsWithVault(ctx context.Context, setup *commsSetup, v vault.Vault, 
 		created = append(created, dl)
 	}
 
-	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, priority, auditLog, sessionID, sessionLog)
+	return StartListeners(ctx, created, queue, os.Stderr, autoDraft, priority, auditStateDir, sessionID, sessionLog)
 }
 
 // startCommsListeners is the legacy convenience wrapper that prepares
 // config, opens the vault via the old tty prompt, and starts listeners.
 // Used by the non-pty (direct) launch path.
-func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditLog, sessionID string, sessionLog *slog.Logger) []comms.Listener {
+func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, auditStateDir, sessionID string, sessionLog *slog.Logger) []comms.Listener {
 	setup := prepareCommsConfig(dir, sessionLog)
 	if setup == nil {
 		return nil
@@ -719,7 +711,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 		}
 	}
 
-	return startCommsWithVault(ctx, setup, v, queue, auditLog, sessionID)
+	return startCommsWithVault(ctx, setup, v, queue, auditStateDir, sessionID)
 }
 
 // StartListeners connects and starts each listener, bridging incoming
@@ -727,7 +719,7 @@ func startCommsListeners(ctx context.Context, dir string, queue *NotifyQueue, au
 // trigger automatic draft replies. The priority map controls the
 // priority level ("normal", "high") per channel. Returns the
 // successfully started listeners. Errors are written to w.
-func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string, log *slog.Logger) []comms.Listener {
+func StartListeners(ctx context.Context, listeners []comms.Listener, queue *NotifyQueue, w io.Writer, autoDraft map[string]bool, priority map[string]string, auditStateDir, sessionID string, log *slog.Logger) []comms.Listener {
 	var started []comms.Listener
 	for _, l := range listeners {
 		if err := l.Connect(ctx); err != nil {
@@ -743,7 +735,7 @@ func StartListeners(ctx context.Context, listeners []comms.Listener, queue *Noti
 		}
 		log.Info("listener started", "service", l.Service())
 		started = append(started, l)
-		go BridgeMessages(msgs, queue, autoDraft, priority, auditLog, sessionID, log)
+		go BridgeMessages(msgs, queue, autoDraft, priority, auditStateDir, sessionID, log)
 	}
 	return started
 }
@@ -752,7 +744,7 @@ func StartListeners(ctx context.Context, listeners []comms.Listener, queue *Noti
 // into the NotifyQueue. The autoDraft map controls which channels trigger
 // automatic draft replies. The priority map sets the priority level per
 // channel. Exported for testing.
-func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool, priority map[string]string, auditLog, sessionID string, log *slog.Logger) {
+func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoDraft map[string]bool, priority map[string]string, auditStateDir, sessionID string, log *slog.Logger) {
 	for msg := range msgs {
 		preview := msg.Body
 		if len(preview) > 80 {
@@ -780,8 +772,8 @@ func BridgeMessages(msgs <-chan comms.IncomingMessage, queue *NotifyQueue, autoD
 			AutoDraft: autoDraft[msg.Channel],
 			Priority:  pri,
 		})
-		if auditLog != "" {
-			audit.AppendMessageEntry(auditLog, audit.MessageEntry{
+		if auditStateDir != "" {
+			audit.AppendMessageEntry(audit.DailyPath(auditStateDir), audit.MessageEntry{
 				Timestamp: msg.Timestamp,
 				SessionID: sessionID,
 				Event:     "message_received",

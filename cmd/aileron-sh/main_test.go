@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ALRubinger/aileron/internal/audit"
 )
 
 // TestShimPassthrough verifies commands pass through without policy.
@@ -459,12 +461,13 @@ deny:
     description: "no recursive delete"
 `)
 
-	auditPath := filepath.Join(dir, "audit.jsonl")
+	stateDir := dir
+	auditPath := audit.DailyPath(stateDir)
 	cmd := exec.Command(binary, "-c", "rm -rf /something")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"AILERON_REAL_SHELL=/bin/sh",
-		"AILERON_AUDIT_LOG="+auditPath,
+		"AILERON_AUDIT_DIR="+stateDir,
 		"AILERON_SESSION_ID=test-session",
 		"AILERON_AGENT=test",
 	)
@@ -493,12 +496,13 @@ version: 1
 default: ask
 `)
 
-	auditPath := filepath.Join(dir, "audit.jsonl")
+	stateDir := dir
+	auditPath := audit.DailyPath(stateDir)
 	cmd := exec.Command(binary, "-c", "docker run myimage")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"AILERON_REAL_SHELL=/bin/sh",
-		"AILERON_AUDIT_LOG="+auditPath,
+		"AILERON_AUDIT_DIR="+stateDir,
 		"AILERON_SESSION_ID=test-session",
 	)
 	cmd.Run()
@@ -522,12 +526,13 @@ allow:
   - "echo *"
 `)
 
-	auditPath := filepath.Join(dir, "audit.jsonl")
+	stateDir := dir
+	auditPath := audit.DailyPath(stateDir)
 	cmd := exec.Command(binary, "-c", "echo audit-test")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"AILERON_REAL_SHELL=/bin/sh",
-		"AILERON_AUDIT_LOG="+auditPath,
+		"AILERON_AUDIT_DIR="+stateDir,
 		"AILERON_SESSION_ID=test-session",
 		"AILERON_AGENT=test",
 	)

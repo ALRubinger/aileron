@@ -110,13 +110,17 @@ func writeDenyByUserMessage(command string) {
 	launch.WriteDenyByUser(os.Stderr, command)
 }
 
-// writeAuditEntry appends an entry to the audit log if configured.
+// writeAuditEntry appends an entry to today's daily-rotated audit log
+// under the state dir advertised via AILERON_AUDIT_DIR (set by
+// `aileron launch`). The file path is recomputed on every call so a
+// shell invocation that happens after midnight lands in the new day's
+// file. ADR-0012 specifies the user-scope, daily-rotated layout.
 func writeAuditEntry(command, disposition, ruleID string) {
-	path := os.Getenv("AILERON_AUDIT_LOG")
-	if path == "" {
+	stateDir := os.Getenv("AILERON_AUDIT_DIR")
+	if stateDir == "" {
 		return
 	}
-	audit.AppendShellEntry(path, audit.ShellEntry{
+	audit.AppendShellEntry(audit.DailyPath(stateDir), audit.ShellEntry{
 		Timestamp:   time.Now(),
 		SessionID:   os.Getenv("AILERON_SESSION_ID"),
 		Command:     command,
