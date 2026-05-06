@@ -10,7 +10,16 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/model"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracerName names the OTel instrumentation library reported on
+// spans this package emits. Mirrors the convention used in
+// internal/action and internal/observability.
+const tracerName = "github.com/ALRubinger/aileron/internal/approval"
 
 // ApprovalKind discriminates the user-facing card layout the webapp
 // renders for a queue entry. Defaults to [ApprovalKindAction] for
@@ -142,15 +151,51 @@ type ActionDecision struct {
 // held-open response. When this returns, the handler proceeds to
 // either execute the action (Approved) or write an `approval_denied`
 // failure envelope to the response.
+//
+// Emits an `aileron.approval.wait` span covering the blocked-on-user
+// interval. Span attribute keys mirror the audit-event keys emitted
+// by Register / Decide so consumers can correlate the queue's three
+// audit events with this span by `aileron.approval.id`. The span's
+// `aileron.approval.wait_ms` is computed identically to the
+// approved/denied audit event.
 func (a *ActionApproval) Wait(ctx context.Context, timeout time.Duration) (ActionDecision, error) {
+	tracer := otel.GetTracerProvider().Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "aileron.approval.wait",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("aileron.approval.id", a.ID),
+			attribute.String("aileron.approval.kind", string(a.Kind)),
+			attribute.String("aileron.approval.action", a.ActionName),
+		),
+	)
+	defer span.End()
+	if a.ConnectorFQN != "" {
+		span.SetAttributes(attribute.String("aileron.connector.fqn", a.ConnectorFQN))
+	}
+	if a.SessionID != "" {
+		span.SetAttributes(attribute.String("aileron.session.id", a.SessionID))
+	}
+
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case d := <-a.decision:
+		decision := "denied"
+		if d.Approved {
+			decision = "approved"
+		}
+		span.SetAttributes(
+			attribute.String("aileron.approval.decision", decision),
+			attribute.Int64("aileron.approval.wait_ms", d.DecidedAt.Sub(a.RequestedAt).Milliseconds()),
+		)
 		return d, nil
 	case <-timer.C:
+		span.SetAttributes(attribute.String("aileron.approval.decision", "timeout"))
+		span.SetStatus(codes.Error, ErrActionApprovalTimeout.Error())
 		return ActionDecision{}, ErrActionApprovalTimeout
 	case <-ctx.Done():
+		span.SetAttributes(attribute.String("aileron.approval.decision", "cancelled"))
+		span.SetStatus(codes.Error, ctx.Err().Error())
 		return ActionDecision{}, ctx.Err()
 	}
 }

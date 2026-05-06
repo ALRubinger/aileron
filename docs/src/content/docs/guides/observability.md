@@ -67,8 +67,8 @@ Today (as the Phase 7 emission integrations land slice by slice in [issue #390](
 | `aileron.action.execute` | `SandboxExecutor.Execute` — root for an action invocation | ✅ shipped |
 | `aileron.connector.call` | per-step `conn.Invoke` inside the executor | ✅ shipped |
 | `aileron.capability.check` | per-step action-boundary capability enforcement (defense-in-depth, [ADR-0003](/adr/0003-action-model)) — first observability point on "how often does the sandbox say no?" | ✅ shipped |
+| `aileron.approval.wait` | the approval-queue blocking wait — covers the entire user-decision interval; `aileron.approval.decision` is `approved` / `denied` / `timeout` / `cancelled` | ✅ shipped |
 | HTTP server-root span | gateway and `/v1/actions/{name}/run` entry points | ✅ shipped |
-| `aileron.approval.wait` | the approval-queue blocking wait | ⏳ pending |
 | `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway | ⏳ pending |
 
 The file exporter (writing spans to `~/.aileron/traces/spans.jsonl` with date-based rotation) is also pending — it's gated on the parallel audit-log file rotation work so spans and audit events share a rotating writer with the same retention story.
