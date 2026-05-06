@@ -87,6 +87,18 @@ func TestLoadObservabilityConfig_AcceptsFileExporter(t *testing.T) {
 	}
 }
 
+func TestLoadObservabilityConfig_AcceptsOTLPExporter(t *testing.T) {
+	t.Setenv("AILERON_OTEL_ENABLED", "true")
+	t.Setenv("AILERON_OTEL_EXPORTER", "otlp")
+	cfg, err := LoadObservabilityConfig()
+	if err != nil {
+		t.Fatalf("LoadObservabilityConfig: %v", err)
+	}
+	if got, want := cfg.Exporter, ExporterOTLP; got != want {
+		t.Errorf("Exporter = %q, want %q", got, want)
+	}
+}
+
 func TestLoadObservabilityConfig_TracesDirHonorsEnv(t *testing.T) {
 	t.Setenv("AILERON_TRACES_DIR", "/var/lib/aileron/x")
 	cfg, err := LoadObservabilityConfig()

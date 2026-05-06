@@ -25,11 +25,18 @@ type ObservabilityConfig struct {
 	// Env: AILERON_OTEL_SERVICE_NAME (default: "aileron")
 	ServiceName string
 
-	// Exporter selects how spans leave the process. "noop" drops
-	// every span (the default; matches OTelEnabled=false). "stdout"
-	// writes JSON-per-line to stderr for local development. "file"
-	// writes JSON-per-line to a daily-rotated file under TracesDir
-	// (path: <TracesDir>/traces/spans-YYYY-MM-DD.jsonl).
+	// Exporter selects how spans leave the process.
+	//
+	//   - "noop" (default; matches OTelEnabled=false): drops every span.
+	//   - "stdout": writes JSON-per-line to stderr for local development.
+	//   - "file": writes JSON-per-line to a daily-rotated file under
+	//     TracesDir (path: <TracesDir>/traces/spans-YYYY-MM-DD.jsonl).
+	//   - "otlp": ships spans to an OpenTelemetry Collector via
+	//     OTLP/HTTP. Honors the standard OTEL_EXPORTER_OTLP_*
+	//     environment variables (ENDPOINT, HEADERS, INSECURE, etc.)
+	//     so the configuration matches every other OTel-instrumented
+	//     service in the user's stack.
+	//
 	// Env: AILERON_OTEL_EXPORTER (default: "noop")
 	Exporter string
 
@@ -49,6 +56,7 @@ const (
 	ExporterNoop   = "noop"
 	ExporterStdout = "stdout"
 	ExporterFile   = "file"
+	ExporterOTLP   = "otlp"
 )
 
 const (
@@ -73,10 +81,10 @@ func LoadObservabilityConfig() (*ObservabilityConfig, error) {
 
 	exporter := envOrDefault("AILERON_OTEL_EXPORTER", defaultOTelExporter)
 	switch exporter {
-	case ExporterNoop, ExporterStdout, ExporterFile:
+	case ExporterNoop, ExporterStdout, ExporterFile, ExporterOTLP:
 	default:
-		return nil, fmt.Errorf("AILERON_OTEL_EXPORTER: unknown exporter %q (want %q, %q, or %q)",
-			exporter, ExporterNoop, ExporterStdout, ExporterFile)
+		return nil, fmt.Errorf("AILERON_OTEL_EXPORTER: unknown exporter %q (want %q, %q, %q, or %q)",
+			exporter, ExporterNoop, ExporterStdout, ExporterFile, ExporterOTLP)
 	}
 
 	return &ObservabilityConfig{

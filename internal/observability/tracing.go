@@ -23,6 +23,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/config"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -149,6 +150,17 @@ func newExporter(cfg *config.ObservabilityConfig, stdoutW io.Writer) (sdktrace.S
 		return stdouttrace.New(stdouttrace.WithWriter(stdoutW))
 	case config.ExporterFile:
 		return newFileExporter(cfg.TracesDir)
+	case config.ExporterOTLP:
+		// otlptracehttp.New honors the standard OTel env vars by
+		// default — OTEL_EXPORTER_OTLP_ENDPOINT,
+		// OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_INSECURE,
+		// etc. We deliberately don't add Aileron-prefixed
+		// alternatives: anyone running an OTel collector already
+		// has these vars in their environment, and forking the
+		// names would force them to maintain two parallel sets.
+		// HTTP/protobuf rather than gRPC keeps the dep tree light
+		// and works through standard proxies.
+		return otlptracehttp.New(context.Background())
 	default:
 		return nil, fmt.Errorf("unknown exporter %q", cfg.Exporter)
 	}
