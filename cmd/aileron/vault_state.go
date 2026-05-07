@@ -123,7 +123,7 @@ func promptCreateAndUnlock(vaultPath, passphraseFile string, stderr io.Writer) e
 	if _, err := vaultInitFn(vaultPath, passphrase); err != nil {
 		return fmt.Errorf("creating vault: %w", err)
 	}
-	url, err := spawnResolveCached()
+	url, err := spawnResolveCachedFn()
 	if err != nil {
 		return fmt.Errorf("spawning daemon: %w", err)
 	}
@@ -142,7 +142,7 @@ func promptAndSpawnUnlock(passphraseFile string, stderr io.Writer) error {
 		if passphrase == "" {
 			return errors.New("vault passphrase cannot be empty")
 		}
-		url, err := spawnResolveCached()
+		url, err := spawnResolveCachedFn()
 		if err != nil {
 			return fmt.Errorf("spawning daemon: %w", err)
 		}
@@ -252,9 +252,14 @@ func bypassesVault(args []string) bool {
 // Test seams. ensureVaultUnlocked is exercised end-to-end with these
 // swapped to fakes so tests don't fork-exec a daemon, hit a real HTTP
 // endpoint, or write to ~/.aileron/secrets.json.
+//
+// spawnResolveCachedFn wraps the production memo so tests can mock the
+// daemon URL without contending with spawnResolveCached's process-
+// scoped sync.Once.
 var (
-	discoveryReadFn   = discovery.Read
-	vaultCheckStateFn = vault.CheckState
-	vaultInitFn       = vault.Init
-	postVaultUnlockFn = postVaultUnlock
+	discoveryReadFn      = discovery.Read
+	vaultCheckStateFn    = vault.CheckState
+	vaultInitFn          = vault.Init
+	postVaultUnlockFn    = postVaultUnlock
+	spawnResolveCachedFn = spawnResolveCached
 )
