@@ -80,7 +80,7 @@ Connector names are not bare strings. They are fully-qualified URIs that encode 
 <scheme>://<owner>/<repo-or-namespace>/<...subpath>/<connector>
 ```
 
-For git-host schemes (`github://`, `gitlab://`), the first two segments after the scheme are the repo (`<owner>/<repo>`) and any further segments locate the connector within the repo's tree. For `hub://`, the path after the owner is the publisher's organizational choice within their Hub namespace.
+For git-host schemes (`github://`, `gitlab://`), the first two segments after the scheme are the repo (`<owner>/<repo>`) and any further segments locate the connector within the repo's tree.
 
 Examples:
 
@@ -90,8 +90,6 @@ Examples:
 | `github://aileron/integrations/connectors/slack` | Repo `aileron/integrations` on GitHub; connector lives at `connectors/slack/` (monorepo) |
 | `github://aileron/integrations/connectors/discord` | Same repo as above; sibling connector |
 | `gitlab://team/linear` | Repo `team/linear` on GitLab; one connector at the repo root |
-| `hub://aileron/slack` | Aileron Hub, owner `aileron`, connector `slack` |
-| `hub://aileron/integrations/slack` | Aileron Hub, owner `aileron`, organized under `integrations/` |
 
 This is decentralized. The scheme plus full path uniquely identifies a publication source; there is no central naming authority. Two organizations both publishing a connector named `slack` cannot collide — `github://acme/slack` and `github://other/slack` are distinct identities and produce distinct content hashes.
 
@@ -101,7 +99,8 @@ This is decentralized. The scheme plus full path uniquely identifies a publicati
 
 - `github://` — published as a GitHub release artifact under the named owner/repo, optionally at a subpath within the repo.
 - `gitlab://` — published as a GitLab release artifact under the named owner/repo, optionally at a subpath within the repo.
-- `hub://` — published to the Aileron Hub. The Hub is one source among many, not a privileged namespace. `hub://` connectors are subject to the same identity, hash, and signing checks as any other source.
+
+There is no `hub://` scheme. The Aileron Hub is a discovery and metadata layer over canonical `github://` / `gitlab://` FQNs, not a publication channel of its own. See [ADR-0013](/adr/0013-connector-hub-and-trust-distribution).
 
 Forward-compatible: additional schemes (custom forges, OCI registries, signed HTTPS URLs) can be added as the ecosystem matures. Schemes are added by code in Aileron's resolver, not by user configuration; an unknown scheme is a hard error at install.
 
@@ -139,7 +138,7 @@ Tags are mutable on git hosts (a publisher can re-tag, force-push, delete and re
 
 This drops out of the content-addressed model directly, but is worth stating explicitly because it makes monorepos and gradual migrations work without ceremony. Action A can pin an old, stable version while Action B adopts a new major; both run side by side.
 
-**Compact reference form.** In commands and provenance fields, `@<version>` is the canonical compact form: `aileron connector install github://aileron/slack@1.2.0`, `source = "hub://aileron/ship-update@1.0.0"`. In TOML manifests, the canonical form is `name` and `version` as separate fields so each is queryable, diffable, and updatable independently. Both forms are equivalent; the FQN identity does not include the version.
+**Compact reference form.** In commands and provenance fields, `@<version>` is the canonical compact form: `aileron connector install github://aileron/slack@1.2.0`, `source = "github://aileron/ship-update@1.0.0"`. In TOML manifests, the canonical form is `name` and `version` as separate fields so each is queryable, diffable, and updatable independently. Both forms are equivalent; the FQN identity does not include the version.
 
 The mechanics of *how* a version maps to a concrete fetch (tag conventions, release-asset layout, update discovery, prerelease handling) are resolver concerns and are deferred to [ADR-0004](/adr/0004-dependency-resolution).
 
@@ -290,10 +289,11 @@ Rejected as deliberate scope reduction. Capability abstraction would require: a 
 
 ### For the Hub and distribution
 
-- The Hub indexes connectors by `(FQN, version, hash)` and serves their binaries plus manifests. Hub-published connectors carry `hub://` FQNs.
-- The Hub does not own a privileged namespace. A developer browsing the Hub may install a `hub://` connector or a `github://` / `gitlab://` connector through the same flow; the Hub surfaces what it serves and the FQN tells the user where everything else came from.
-- Discovery surfaces (browse, search) use the `provides.intents` field and the connector's documentation.
-- The Hub validates manifests at publish time. Manifests with malformed or contradictory capability declarations, or whose `name` does not match the FQN they're being published under, do not enter the catalog.
+The Hub model, trust granularity, and publisher identity are ratified separately in [ADR-0013](/adr/0013-connector-hub-and-trust-distribution). Summary of how this ADR's commitments interact with that one:
+
+- The Hub is a discovery and metadata layer, not a registry. It points to connectors at their canonical `github://` / `gitlab://` FQNs and does not host artifacts.
+- Aileron does not vet publishers or audit connector binaries. The Hub repo's CI validates entry schema only; trust decisions live with consumers (keyring trust ahead of time, or the install-time prompt).
+- Discovery surfaces (browse, search) use the Hub entry's description and the connector's documentation. The `provides.intents` field remains the structured discovery signal at the connector level.
 
 ### For security and audit
 
