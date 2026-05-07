@@ -902,6 +902,61 @@ func TestRunSecret_ListWithSecrets(t *testing.T) {
 	}
 }
 
+// TestRunSecret_ListJSON_Empty: --json on an empty vault emits `[]`,
+// not the human-targeted prose. Lets scripts detect "nothing here yet"
+// without grepping for "No secrets stored".
+func TestRunSecret_ListJSON_Empty(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"secret", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+		t.Errorf("stdout = %q, want %q", got, "[]")
+	}
+}
+
+// TestRunSecret_ListJSON_NDJSON: --json with secrets emits one
+// JSON-encoded name per line.
+func TestRunSecret_ListJSON_NDJSON(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	vaultPath := filepath.Join(dir, ".aileron", "secrets.json")
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultPath, []byte(`{"salt":"AAAA","secrets":{"a":{"value":"ZW5j","metadata":{}},"b":{"value":"ZW5j","metadata":{}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"secret", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %q", len(lines), stdout.String())
+	}
+	got := map[string]bool{}
+	for _, line := range lines {
+		var name string
+		if err := json.Unmarshal([]byte(line), &name); err != nil {
+			t.Errorf("line %q is not JSON: %v", line, err)
+		}
+		got[name] = true
+	}
+	for _, want := range []string{"a", "b"} {
+		if !got[want] {
+			t.Errorf("missing name %q in: %v", want, got)
+		}
+	}
+}
+
 // `aileron binding list` reads vault metadata without unlocking, per
 // ADR-0011 acceptance: metadata is plaintext on disk, so the user
 // can inspect what's bound before paying the passphrase prompt.
@@ -935,6 +990,66 @@ func TestRunBinding_ListEmpty(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "aileron binding setup") {
 		t.Errorf("expected next-step hint mentioning `aileron binding setup`, got: %s", stdout.String())
+	}
+}
+
+// TestRunBinding_ListJSON_Empty: --json on the empty case emits `[]`,
+// not the human "No bindings configured." text. Scripts can detect the
+// empty set with a JSON parser instead of grepping prose.
+func TestRunBinding_ListJSON_Empty(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+		t.Errorf("stdout = %q, want %q", got, "[]")
+	}
+}
+
+// TestRunBinding_ListJSON_NDJSON: --json with rows emits one
+// JSON-encoded binding per line, round-trippable through json.Decode.
+func TestRunBinding_ListJSON_NDJSON(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[
+			{"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team","connector_fqn":"github://aileron/linear","status":"active","created_at":"2024-01-01T00:00:00Z"},
+			{"name":"oauth2/slack/work","kind":"oauth2","service":"slack","identity":"work","connector_fqn":"github://aileron/slack","status":"active","created_at":"2024-01-01T00:00:00Z"}
+		]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %q", len(lines), stdout.String())
+	}
+	for _, line := range lines {
+		var b bindingRow
+		if err := json.Unmarshal([]byte(line), &b); err != nil {
+			t.Errorf("line %q is not JSON: %v", line, err)
+		}
+	}
+}
+
+// TestRunBinding_UsageAdvertisesJSON: bindingUsage gained `[--json]`
+// in #492 item 2; the user-discovery path is `aileron binding` with no
+// subcommand, which prints the usage to stderr. Pins the contract that
+// the flag is documented in that surface.
+func TestRunBinding_UsageAdvertisesJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for no subcommand")
+	}
+	if !strings.Contains(stderr.String(), "--json") {
+		t.Errorf("usage missing `--json`:\n%s", stderr.String())
 	}
 }
 
@@ -2306,6 +2421,70 @@ func TestRunConnectorCheck_Empty(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "aileron connector install") {
 		t.Errorf("expected next-step hint mentioning `aileron connector install`, got: %s", stdout.String())
+	}
+}
+
+// TestRunConnectorCheck_JSON_Empty: --json on an empty install set emits
+// `[]`, so scripts can detect the bare-server case without grepping.
+func TestRunConnectorCheck_JSON_Empty(t *testing.T) {
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		return &connectorsCheckResponse{Results: []connectorCheckResult{}}, nil
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "check", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+		t.Errorf("stdout = %q, want %q", got, "[]")
+	}
+}
+
+// TestRunConnectorCheck_JSON_NDJSON: --json with results emits one
+// JSON-encoded connectorCheckResult per line.
+func TestRunConnectorCheck_JSON_NDJSON(t *testing.T) {
+	latest := "0.0.6"
+	prev := connectorCheckFetcher
+	connectorCheckFetcher = func(includePrerelease bool) (*connectorsCheckResponse, error) {
+		return &connectorsCheckResponse{Results: []connectorCheckResult{
+			{Fqn: "github://x/a", CurrentVersion: "0.0.5", LatestVersion: &latest, UpdateAvailable: true},
+			{Fqn: "github://x/b", CurrentVersion: "0.1.0", LatestVersion: &latest, UpdateAvailable: false},
+		}}, nil
+	}
+	defer func() { connectorCheckFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector", "check", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2: %q", len(lines), stdout.String())
+	}
+	for _, line := range lines {
+		var r connectorCheckResult
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Errorf("line %q is not JSON: %v", line, err)
+		}
+	}
+}
+
+// TestRunConnector_UsageAdvertisesJSON: connectorUsage gained `[--json]`
+// for `connector check` in #492 item 2. Pins that the flag is
+// documented in the surface a user reaches via `aileron connector`
+// with no subcommand.
+func TestRunConnector_UsageAdvertisesJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for no subcommand")
+	}
+	if !strings.Contains(stderr.String(), "--json") {
+		t.Errorf("usage missing `--json`:\n%s", stderr.String())
 	}
 }
 
@@ -3706,6 +3885,27 @@ func TestRunAudit_EmptyPrintsNoEntries(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "No audit events") {
 		t.Errorf("expected 'No audit events'; got: %s", stdout.String())
+	}
+}
+
+// TestRunAudit_EmptyJSONEmitsArray: regression for #492 item 2 — `--json`
+// on the empty case must emit `[]`, not the human "No audit events." line.
+// Before the fix, the empty branch ignored the flag and broke any script
+// that relied on parsing JSON from `aileron audit list --json`.
+func TestRunAudit_EmptyJSONEmitsArray(t *testing.T) {
+	prev := auditListFetcher
+	auditListFetcher = func(_ auditListQuery) (*auditListWire, error) {
+		return &auditListWire{Events: []auditEventWire{}}, nil
+	}
+	defer func() { auditListFetcher = prev }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"audit", "list", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+		t.Errorf("stdout = %q, want %q", got, "[]")
 	}
 }
 

@@ -438,7 +438,7 @@ func runSecret(args []string, stdout, stderr io.Writer) int {
 	case "set":
 		return runSecretSet(args[1:], stdout, stderr)
 	case "list":
-		return runSecretList(stdout, stderr)
+		return runSecretList(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown secret command: %q\n", args[0])
 		fmt.Fprintln(stderr, "usage: aileron secret <set|list>")
@@ -520,7 +520,14 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 }
 
 // runSecretList lists secret names in the vault.
-func runSecretList(stdout, stderr io.Writer) int {
+func runSecretList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("secret list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	asJSON := flags.Bool("json", false, "Render names as NDJSON, one name per line")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+
 	vaultPath := launch.DefaultVaultPath()
 	fv, err := vault.NewFileVault(vaultPath)
 	if err != nil {
@@ -530,8 +537,23 @@ func runSecretList(stdout, stderr io.Writer) int {
 
 	names := fv.Names()
 	if len(names) == 0 {
+		if *asJSON {
+			fmt.Fprintln(stdout, "[]")
+			return 0
+		}
 		fmt.Fprintln(stdout, "No secrets stored.")
 		fmt.Fprintln(stdout, "Run `aileron secret set <name>` to store one.")
+		return 0
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		for _, name := range names {
+			if err := enc.Encode(name); err != nil {
+				fmt.Fprintf(stderr, "encode: %v\n", err)
+				return 1
+			}
+		}
 		return 0
 	}
 
@@ -580,7 +602,7 @@ func runBinding(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 var bindingBrowser oauth.Opener = oauth.SystemBrowser{}
 
 const bindingUsage = `usage:
-  aileron binding list   [--connector FQN] [--kind KIND]
+  aileron binding list   [--connector FQN] [--kind KIND] [--json]
   aileron binding inspect <name>
   aileron binding setup  <connector-FQN>
   aileron binding rebind <name>
@@ -731,6 +753,7 @@ func runBindingList(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	connector := flags.String("connector", "", "filter by connector FQN")
 	kind := flags.String("kind", "", "filter by credential kind")
+	asJSON := flags.Bool("json", false, "Render rows as NDJSON, one binding per line")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
@@ -762,8 +785,22 @@ func runBindingList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(resp.Items) == 0 {
+		if *asJSON {
+			fmt.Fprintln(stdout, "[]")
+			return 0
+		}
 		fmt.Fprintln(stdout, "No bindings configured.")
 		fmt.Fprintln(stdout, "Run `aileron binding setup <connector-FQN>` to add one.")
+		return 0
+	}
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		for _, b := range resp.Items {
+			if err := enc.Encode(b); err != nil {
+				fmt.Fprintf(stderr, "encode: %v\n", err)
+				return 1
+			}
+		}
 		return 0
 	}
 	fmt.Fprintf(stdout, "%-40s  %-10s  %-30s  %s\n", "NAME", "KIND", "CONNECTOR", "STATUS")
@@ -1437,7 +1474,7 @@ func resolveShim() (string, error) {
 
 const connectorUsage = `usage:
   aileron connector install <FQN> [--version=<v>] [--hash=<sha256:...>] [--yes]
-  aileron connector check [--include-prerelease]`
+  aileron connector check [--include-prerelease] [--json]`
 
 const actionUsage = `usage:
   aileron action add <FQN> [--version=<v>] [--force] [--yes] [--no-bind]`
@@ -1520,6 +1557,7 @@ func runConnectorCheck(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("connector check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	includePrerelease := flags.Bool("include-prerelease", false, "include pre-release versions when computing the latest version")
+	asJSON := flags.Bool("json", false, "Render results as NDJSON, one connector per line")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
@@ -1531,8 +1569,23 @@ func runConnectorCheck(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if len(resp.Results) == 0 {
+		if *asJSON {
+			fmt.Fprintln(stdout, "[]")
+			return 0
+		}
 		fmt.Fprintln(stdout, "No connectors installed.")
 		fmt.Fprintln(stdout, "Run `aileron connector install <FQN>` to add one.")
+		return 0
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(stdout)
+		for _, r := range resp.Results {
+			if err := enc.Encode(r); err != nil {
+				fmt.Fprintf(stderr, "encode: %v\n", err)
+				return 1
+			}
+		}
 		return 0
 	}
 
@@ -2439,6 +2492,10 @@ func runAuditList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(resp.Events) == 0 {
+		if *asJSON {
+			fmt.Fprintln(stdout, "[]")
+			return 0
+		}
 		fmt.Fprintln(stdout, "No audit events.")
 		return 0
 	}
