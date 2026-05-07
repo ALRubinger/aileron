@@ -229,6 +229,55 @@ func TestRunVaultInit_PassphraseFileTrimsTrailingNewline(t *testing.T) {
 	}
 }
 
+// TestRunVaultInit_BannerPrintsBeforeFirstPrompt regression-pins
+// #528 finding 1 (the `vault init` flow shares the same first-run
+// banner with the daemon-auto-spawn path; both must print the
+// irretrievable-passphrase warning BEFORE the user types a passphrase,
+// not between the two prompts).
+//
+// The scripted prompt writes its prompt string to the supplied writer
+// (mirroring defaultPromptPassphrase) so the captured stderr buffer
+// reflects natural ordering.
+func TestRunVaultInit_BannerPrintsBeforeFirstPrompt(t *testing.T) {
+	vaultPath := vaultInitTempHome(t)
+	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	answers := []string{"correct horse", "correct horse"}
+	idx := 0
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		if w != nil && prompt != "" {
+			_, _ = w.Write([]byte(prompt))
+		}
+		a := answers[idx]
+		idx++
+		return a, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"vault", "init"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	out := stderr.String()
+	bannerAt := strings.Index(out, "Creating a new Aileron vault")
+	promptAt := strings.Index(out, "Vault passphrase:")
+	if bannerAt < 0 {
+		t.Fatalf("banner missing from stderr: %q", out)
+	}
+	if promptAt < 0 {
+		t.Fatalf("first prompt missing from stderr: %q", out)
+	}
+	if bannerAt > promptAt {
+		t.Errorf("banner must appear BEFORE first 'Vault passphrase:' prompt; banner@%d, prompt@%d\nstderr=%q",
+			bannerAt, promptAt, out)
+	}
+}
+
 func TestRunVaultInit_AppearsInHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	usage(&stdout, newTestRegistry())
