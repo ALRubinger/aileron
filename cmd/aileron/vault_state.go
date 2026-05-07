@@ -103,6 +103,13 @@ func promptAndUnlockRunning(daemonURL, passphraseFile string, stderr io.Writer) 
 // but folded into one prompt so a fresh user doesn't have to learn
 // three commands before their first action.
 func promptCreateAndUnlock(vaultPath, passphraseFile string, stderr io.Writer) error {
+	// Print the new-vault banner BEFORE the first prompt so the user
+	// reads the irretrievable-passphrase warning before choosing one.
+	// File/env sources skip the banner (non-interactive callers don't
+	// need the warning).
+	if willPromptInteractively(passphraseFile) {
+		printNewVaultBanner(stderr, vaultPath)
+	}
 	passphrase, source, err := readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
 	if err != nil {
 		return err
@@ -111,7 +118,6 @@ func promptCreateAndUnlock(vaultPath, passphraseFile string, stderr io.Writer) e
 		return errors.New("vault passphrase cannot be empty")
 	}
 	if source == passphraseSourceInteractive {
-		printNewVaultBanner(stderr, vaultPath)
 		confirm, _, err := readVaultPassphrase("", "Confirm passphrase: ", stderr)
 		if err != nil {
 			return err

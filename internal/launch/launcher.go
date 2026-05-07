@@ -516,8 +516,12 @@ func EnvGlobMatch(pattern, name string) bool {
 	return pattern == name
 }
 
-// sessionLogPath returns the path to the session log file,
-// located alongside the audit log in .aileron/.
+// sessionLogPath returns the per-project session log path: the
+// .aileron/session.log next to the policy file (walking up from dir if
+// necessary) or, if no policy file exists, .aileron/session.log under
+// dir itself. The session log captures the launched agent's stdio and
+// is intentionally project-scoped — distinct from the audit log, which
+// is user-scoped at ~/.aileron/audit/.
 func sessionLogPath(dir string) string {
 	if dir == "" {
 		dir, _ = os.Getwd()

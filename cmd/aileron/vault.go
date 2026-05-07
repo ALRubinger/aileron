@@ -67,6 +67,15 @@ func runVaultInit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Print the new-vault banner BEFORE the first prompt so the user
+	// reads the irretrievable-passphrase warning before choosing one.
+	// File/env sources are non-interactive (CI, scripts) and don't need
+	// the warning — gate on willPromptInteractively, not on the source
+	// returned by readVaultPassphrase (which only resolves after the
+	// prompt fires).
+	if willPromptInteractively(*passphraseFile) {
+		printNewVaultBanner(stderr, vaultPath)
+	}
 	passphrase, source, err := readVaultPassphrase(*passphraseFile, "Vault passphrase: ", stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -81,7 +90,6 @@ func runVaultInit(args []string, stdout, stderr io.Writer) int {
 	// passphrase comes from a file or env, re-reading the same source
 	// would just confirm itself, so we skip the second prompt.
 	if source == passphraseSourceInteractive {
-		printNewVaultBanner(stderr, vaultPath)
 		confirm, _, err := readVaultPassphrase("", "Confirm passphrase: ", stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
@@ -140,6 +148,16 @@ func readVaultPassphrase(passphraseFile, prompt string, w io.Writer) (string, pa
 		return "", passphraseSourceInteractive, err
 	}
 	return pass, passphraseSourceInteractive, nil
+}
+
+// willPromptInteractively reports whether the next readVaultPassphrase
+// call would fall through to /dev/tty. Mirrors readVaultPassphrase's
+// dispatch order — file > env > interactive — so callers can decide
+// whether to print user-facing context (e.g. the new-vault banner)
+// BEFORE the prompt fires, instead of inferring interactivity from
+// the post-hoc passphraseSource return value.
+func willPromptInteractively(passphraseFile string) bool {
+	return passphraseFile == "" && os.Getenv(envVaultPassphrase) == ""
 }
 
 // printNewVaultBanner prints the irretrievable-passphrase warning. Same

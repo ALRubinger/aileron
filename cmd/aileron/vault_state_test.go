@@ -623,6 +623,54 @@ func TestEnsureVaultUnlocked_StoppedMissing_InteractiveDriveSpawnAndUnlock(t *te
 	}
 }
 
+// TestEnsureVaultUnlocked_StoppedMissing_BannerPrintsBeforeFirstPrompt
+// regression-pins #528 finding 1: on interactive first-run, the user
+// must see the irretrievable-passphrase warning BEFORE choosing a
+// passphrase, not after they've already typed one.
+//
+// The fake prompt writes its prompt string to the supplied writer,
+// mirroring defaultPromptPassphrase, so the test buffer captures the
+// natural ordering between banner output and prompt strings.
+func TestEnsureVaultUnlocked_StoppedMissing_BannerPrintsBeforeFirstPrompt(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	answers := []string{"new-pass", "new-pass"}
+	idx := 0
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead:   func(string) (discovery.Info, error) { return discovery.Info{}, discovery.ErrNotRunning },
+		vaultCheckState: func(string) (vault.State, error) { return vault.StateMissing, nil },
+		prompt: func(prompt string, w io.Writer) (string, error) {
+			if w != nil && prompt != "" {
+				_, _ = w.Write([]byte(prompt))
+			}
+			a := answers[idx]
+			idx++
+			return a, nil
+		},
+		vaultInit:    func(string, string) (vault.Vault, error) { return vault.NewMemVault(), nil },
+		spawnResolve: func() (string, error) { return "http://x/v1", nil },
+		postUnlock:   func(string, string) error { return nil },
+	})
+
+	var stderr bytes.Buffer
+	if err := ensureVaultUnlocked("", &stderr); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+
+	out := stderr.String()
+	bannerAt := strings.Index(out, "Creating a new Aileron vault")
+	promptAt := strings.Index(out, "Vault passphrase:")
+	if bannerAt < 0 {
+		t.Fatalf("banner missing from stderr: %q", out)
+	}
+	if promptAt < 0 {
+		t.Fatalf("first prompt missing from stderr: %q", out)
+	}
+	if bannerAt > promptAt {
+		t.Errorf("banner must appear BEFORE first 'Vault passphrase:' prompt; banner@%d, prompt@%d\nstderr=%q",
+			bannerAt, promptAt, out)
+	}
+}
+
 // TestEnsureVaultUnlocked_StoppedMissing_TolerateErrVaultExists pins
 // the concurrent first-run contract from #454 Test 6: multiple CLI
 // processes sharing AILERON_VAULT_PASSPHRASE may race on vault.Init,
