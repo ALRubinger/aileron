@@ -166,12 +166,15 @@ func runApprovalDecide(args []string, approved bool, stdout, stderr io.Writer) i
 // (`bindingAPIBaseURL` in main.go) so AILERON_API_URL overrides apply
 // uniformly across all subcommands.
 func approvalDoRequest(method, path string, body []byte) (*http.Response, error) {
-	url := bindingAPIBaseURL() + path
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		return nil, err
+	}
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
 	}
-	req, err := http.NewRequest(method, url, reader)
+	req, err := http.NewRequest(method, base+path, reader)
 	if err != nil {
 		return nil, err
 	}

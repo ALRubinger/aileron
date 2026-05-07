@@ -677,14 +677,20 @@ func TestRunStatus_NotificationsNoPolicy(t *testing.T) {
 
 // TestRunStatus_RuntimeUnreachable covers the offline path: with no
 // daemon listening, `aileron status runtime` must exit cleanly and
-// surface a "(not reachable)" line. The CLI is a thin client; users
-// run it from arbitrary shells where the daemon may or may not be up.
+// surface a "(not reachable)" line that names the underlying error.
+// The CLI is a thin client; users run it from arbitrary shells where
+// the daemon may or may not be up.
+//
+// Locks in the post-#489 behavior: the unreachable line carries the
+// fetcher's error verbatim, not a hardcoded URL like the legacy
+// `http://localhost:8721/v1` fallback that `bindingAPIBaseURL` used
+// to return. The legacy port has no meaning under ADR-0012.
 func TestRunStatus_RuntimeUnreachable(t *testing.T) {
 	// Force the fetcher to fail so the test doesn't depend on the host
 	// having an actual server listening on the default port.
 	prev := runtimeStatusFetcher
 	runtimeStatusFetcher = func() (*runtimeStatus, error) {
-		return nil, fmt.Errorf("connection refused")
+		return nil, fmt.Errorf("daemon binary missing")
 	}
 	defer func() { runtimeStatusFetcher = prev }()
 
@@ -699,6 +705,15 @@ func TestRunStatus_RuntimeUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(out, "not reachable") {
 		t.Errorf("expected 'not reachable' hint when daemon is down; got: %s", out)
+	}
+	if !strings.Contains(out, "daemon binary missing") {
+		t.Errorf("expected fetcher error to surface in output; got: %s", out)
+	}
+	if strings.Contains(out, "8721") {
+		t.Errorf("output should not name the legacy port 8721; got: %s", out)
+	}
+	if strings.Contains(out, "aileron serve") {
+		t.Errorf("output should not suggest 'aileron serve' (deprecated under ADR-0012); got: %s", out)
 	}
 }
 
@@ -1261,14 +1276,14 @@ func TestRunBinding_SetupParsesPartialResponse(t *testing.T) {
 	}
 }
 
-func TestBindingAPIBaseURL_DefaultAndOverride(t *testing.T) {
-	t.Setenv("AILERON_API_URL", "")
-	if got := bindingAPIBaseURL(); got != "http://localhost:8721/v1" {
-		t.Errorf("default = %q", got)
-	}
+func TestBindingAPIBaseURL_OverrideTrimsTrailingSlash(t *testing.T) {
 	t.Setenv("AILERON_API_URL", "https://example.com/v1/")
-	if got := bindingAPIBaseURL(); got != "https://example.com/v1" {
-		t.Errorf("override = %q", got)
+	got, err := bindingAPIBaseURL()
+	if err != nil {
+		t.Fatalf("override should not error: %v", err)
+	}
+	if got != "https://example.com/v1" {
+		t.Errorf("override = %q, want trimmed", got)
 	}
 }
 

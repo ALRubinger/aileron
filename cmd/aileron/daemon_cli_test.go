@@ -229,7 +229,10 @@ func TestRunDaemonStatus_WithVaultProbe(t *testing.T) {
 
 func TestBindingAPIBaseURL_RespectsAILERON_API_URL(t *testing.T) {
 	t.Setenv("AILERON_API_URL", "http://override.test:9999/v1/")
-	got := bindingAPIBaseURL()
+	got, err := bindingAPIBaseURL()
+	if err != nil {
+		t.Fatalf("override should not error: %v", err)
+	}
 	if got != "http://override.test:9999/v1" {
 		t.Errorf("got %q, want trimmed override URL", got)
 	}
