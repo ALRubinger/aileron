@@ -20,9 +20,6 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/connector"
-	googlecalendar "github.com/ALRubinger/aileron/internal/connector/calendar/google"
-	"github.com/ALRubinger/aileron/internal/connector/git/github"
-	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/internal/source"
 	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
 	githubsource "github.com/ALRubinger/aileron/internal/source/github"
@@ -53,12 +50,11 @@ func main() {
 		}
 	}
 
-	// Build execution connector registry (write actions).
-	ctx := context.Background()
+	// Build execution connector registry (write actions). Per ADR-0002 the
+	// runtime ships only the registry; service-specific connectors live in
+	// sandboxed binaries installed at FQNs and join the registry as they
+	// are loaded.
 	registry := connector.NewRegistry()
-	registry.Register(ctx, stripe.New())
-	registry.Register(ctx, googlecalendar.New("", ""))
-	registry.Register(ctx, github.New())
 
 	// Build source connector registry (read-only tools).
 	// Source connectors execute inside the enclave so credentials never
