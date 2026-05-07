@@ -11,14 +11,18 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/config"
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	handler, err := NewHandler(log)
+	// Per #492 item 6a, NewHandler no longer falls back to an
+	// implicit dev vault. Tests that don't care about credential
+	// behavior pass an explicit MemVault to satisfy the new contract.
+	handler, err := NewHandlerWithConfig(log, Config{Vault: vault.NewMemVault()})
 	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
+		t.Fatalf("NewHandlerWithConfig: %v", err)
 	}
 	return handler
 }

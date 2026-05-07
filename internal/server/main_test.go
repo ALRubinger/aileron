@@ -17,27 +17,52 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
-// TestSelectVault_NoFileFallsBackToMemory verifies that the standalone
-// server uses the in-memory dev vault when no vault file exists at
-// the path. Other modes are gated on this state — if the file is
-// missing, the server should not attempt to prompt the user.
-func TestSelectVault_NoFileFallsBackToMemory(t *testing.T) {
+// TestSelectVault_CloudShapedBypassesLocalCheck is the regression test
+// for the integration-suite failure on PR #503: cloud daemons (set
+// AILERON_DATABASE_URL) never have a local vault file, so the
+// "vault file required" hard error from #492 item 6a must skip them.
+// The postgres-backed vault wires up later inside
+// [app.NewHandlerWithConfig]; this branch just ensures selectVault
+// doesn't refuse to start the daemon before we get there.
+func TestSelectVault_CloudShapedBypassesLocalCheck(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "postgres://test")
 	dir := t.TempDir()
-	cfg, err := selectVault(slog.Default(), filepath.Join(dir, "secrets.json"), true, refusePrompter(t), io.Discard)
+	cfg, err := selectVault(slog.Default(), filepath.Join(dir, "secrets.json"), false, refusePrompter(t), io.Discard)
 	if err != nil {
 		t.Fatalf("selectVault: %v", err)
 	}
 	if cfg.Vault != nil {
-		t.Errorf("cfg.Vault = %v, want nil (in-memory fallback)", cfg.Vault)
+		t.Errorf("cfg.Vault = %v, want nil for cloud path", cfg.Vault)
+	}
+	if cfg.LocalVaultPath != "" {
+		t.Errorf("cfg.LocalVaultPath = %q, want empty for cloud path", cfg.LocalVaultPath)
 	}
 }
 
-// TestSelectVault_NonTTYFallsBackToMemoryEvenWithFile asserts that the
-// server does not attempt to unlock a persistent vault in headless
-// contexts (Docker, CI, systemd) — there is nowhere to prompt the
-// passphrase. Without this guard the server would block on read from
-// /dev/tty during startup.
-func TestSelectVault_NonTTYFallsBackToMemoryEvenWithFile(t *testing.T) {
+// TestSelectVault_NoFileIsHardError covers #492 item 6a: with the dev
+// fallback removed, a missing vault file is no longer silently OK.
+// selectVault must return an error pointing the operator at
+// `aileron vault init` so we never silently lose data.
+func TestSelectVault_NoFileIsHardError(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
+	dir := t.TempDir()
+	_, err := selectVault(slog.Default(), filepath.Join(dir, "secrets.json"), true, refusePrompter(t), io.Discard)
+	if err == nil {
+		t.Fatal("selectVault: expected error for missing vault, got nil")
+	}
+	if !strings.Contains(err.Error(), "aileron vault init") {
+		t.Errorf("error = %q; want a hint pointing at `aileron vault init`", err)
+	}
+}
+
+// TestSelectVault_NonTTYStartsLocked covers #492 item 6b: the auto-spawn
+// case (no controlling tty, vault file present) returns a Config with
+// LocalVaultPath set so the daemon wraps its (empty) inner vault in a
+// LockableVault. /v1/vault/unlock then has somewhere to swap the
+// unlocked vault into. Pre-#492 this returned an empty Config, daemons
+// fell through to a memory dev vault, and /v1/vault/unlock was dead
+// code in production.
+func TestSelectVault_NonTTYStartsLocked(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "secrets.json")
 	if _, err := vault.Init(path, "passphrase"); err != nil {
@@ -49,18 +74,17 @@ func TestSelectVault_NonTTYFallsBackToMemoryEvenWithFile(t *testing.T) {
 		t.Fatalf("selectVault: %v", err)
 	}
 	if cfg.Vault != nil {
-		t.Errorf("cfg.Vault = %v, want nil (non-TTY should never unlock)", cfg.Vault)
+		t.Errorf("cfg.Vault = %v, want nil (no-TTY path should not pre-unlock)", cfg.Vault)
+	}
+	if cfg.LocalVaultPath != path {
+		t.Errorf("cfg.LocalVaultPath = %q, want %q (so app.NewHandlerWithConfig wires LockableVault)", cfg.LocalVaultPath, path)
 	}
 }
 
-// TestSelectVault_PresentFileAndTTYUnlocks is the regression test for
-// the bug this commit fixes: prior to this change the standalone
-// server always took the in-memory path, even when a persistent vault
-// file existed. That silently dropped every binding created via
-// `aileron binding setup` the moment the server process exited,
-// surfacing later as a `binding_required` error from the launch
-// gateway. After this change the server unlocks the persistent vault
-// when conditions allow.
+// TestSelectVault_PresentFileAndTTYUnlocks covers the interactive
+// startup path (operator-typed `aileron daemon start`): vault file
+// present + isTTY true → unlock interactively, set both Vault and
+// LocalVaultPath so the LockableVault wraps the pre-unlocked inner.
 func TestSelectVault_PresentFileAndTTYUnlocks(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "secrets.json")
@@ -75,6 +99,9 @@ func TestSelectVault_PresentFileAndTTYUnlocks(t *testing.T) {
 	}
 	if cfg.Vault == nil {
 		t.Fatal("cfg.Vault is nil; expected the persistent vault to be unlocked and used")
+	}
+	if cfg.LocalVaultPath != path {
+		t.Errorf("cfg.LocalVaultPath = %q, want %q (LockableVault wires regardless of when unlock happens)", cfg.LocalVaultPath, path)
 	}
 }
 
@@ -98,6 +125,131 @@ func TestSelectVault_CorruptFileFailsStartup(t *testing.T) {
 	}
 }
 
+// seedVault creates a passphrase-protected vault file at path, so the
+// daemon's selectVault has something to start with. After #492 item 6a
+// the dev fallback is gone — every test that boots the daemon must
+// supply a real vault file. The passphrase is irrelevant when isTTY
+// is false (the daemon starts vault-locked); when isTTY is true the
+// caller is responsible for the prompter handshake.
+func seedVault(t *testing.T, path string) {
+	t.Helper()
+	if _, err := vault.Init(path, "test-passphrase"); err != nil {
+		t.Fatalf("seed vault at %s: %v", path, err)
+	}
+}
+
+// TestRun_NoTTYDaemonHonorsVaultUnlock is the integration test for
+// #492 item 6c: a daemon spawned production-shape (no controlling TTY,
+// vault file at the canonical path) starts vault-locked, and an HTTP
+// POST to /v1/vault/unlock with the right passphrase actually unlocks
+// it. Pre-#492 this path was dead code in production: selectVault
+// never set LocalVaultPath, so the LockableVault wrapper was never
+// installed, and /v1/vault/unlock had no inner vault to swap into.
+//
+// Asserts the full chain: selectVault → app.NewHandlerWithConfig
+// (LockableVault wrap) → HTTP request → vault.Unlock → /v1/vault/status
+// flips from locked to unlocked.
+func TestRun_NoTTYDaemonHonorsVaultUnlock(t *testing.T) {
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	const passphrase = "the-passphrase"
+	if _, err := vault.Init(vaultPath, passphrase); err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := options{
+		BindAddr:  "127.0.0.1:0",
+		StateDir:  stateDir,
+		VaultPath: vaultPath,
+		IsTTY:     false, // production-shape: no controlling TTY
+		Stderr:    io.Discard,
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, log, opts) }()
+	info := waitForDaemon(t, stateDir, 3*time.Second)
+
+	// Pre-unlock the vault should report locked. (Empty cfg.Vault +
+	// LocalVaultPath set → LockableVault wrap → vaultLocked = true.)
+	statusResp, err := http.Get(info.URL + "/v1/vault/status")
+	if err != nil {
+		t.Fatalf("GET /v1/vault/status: %v", err)
+	}
+	defer statusResp.Body.Close()
+	statusBody, _ := io.ReadAll(statusResp.Body)
+	if !strings.Contains(string(statusBody), `"locked":true`) {
+		t.Errorf("status before unlock = %s, want locked:true", string(statusBody))
+	}
+
+	// Drive the unlock with the right passphrase.
+	unlockBody := strings.NewReader(`{"passphrase":"` + passphrase + `"}`)
+	unlockResp, err := http.Post(info.URL+"/v1/vault/unlock", "application/json", unlockBody)
+	if err != nil {
+		t.Fatalf("POST /v1/vault/unlock: %v", err)
+	}
+	defer unlockResp.Body.Close()
+	if unlockResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(unlockResp.Body)
+		t.Fatalf("unlock status = %d, want 200; body = %s", unlockResp.StatusCode, string(body))
+	}
+
+	// Status after unlock: locked:false.
+	statusResp2, err := http.Get(info.URL + "/v1/vault/status")
+	if err != nil {
+		t.Fatalf("GET /v1/vault/status (post-unlock): %v", err)
+	}
+	defer statusResp2.Body.Close()
+	statusBody2, _ := io.ReadAll(statusResp2.Body)
+	if !strings.Contains(string(statusBody2), `"locked":false`) {
+		t.Errorf("status after unlock = %s, want locked:false", string(statusBody2))
+	}
+
+	cancel()
+	<-runErr
+}
+
+// TestRun_NoTTYDaemonRejectsWrongPassphrase: the same production-shape
+// path with a wrong passphrase returns 401 and leaves the vault locked.
+func TestRun_NoTTYDaemonRejectsWrongPassphrase(t *testing.T) {
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	if _, err := vault.Init(vaultPath, "right"); err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := options{
+		BindAddr:  "127.0.0.1:0",
+		StateDir:  stateDir,
+		VaultPath: vaultPath,
+		IsTTY:     false,
+		Stderr:    io.Discard,
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, log, opts) }()
+	info := waitForDaemon(t, stateDir, 3*time.Second)
+
+	resp, err := http.Post(info.URL+"/v1/vault/unlock", "application/json",
+		strings.NewReader(`{"passphrase":"wrong"}`))
+	if err != nil {
+		t.Fatalf("POST /v1/vault/unlock: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 for wrong passphrase", resp.StatusCode)
+	}
+
+	cancel()
+	<-runErr
+}
+
 // TestRun_PublishesDiscoveryAndCleansUp covers the daemon happy path:
 // run binds an ephemeral port, writes daemon.json with the URL/PID,
 // the URL is reachable for HTTP, and on context cancellation the
@@ -105,6 +257,7 @@ func TestSelectVault_CorruptFileFailsStartup(t *testing.T) {
 func TestRun_PublishesDiscoveryAndCleansUp(t *testing.T) {
 	stateDir := t.TempDir()
 	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,7 +287,7 @@ func TestRun_PublishesDiscoveryAndCleansUp(t *testing.T) {
 	}
 
 	// URL is reachable: GET an endpoint that exists without auth setup.
-	resp, err := http.Get(info.URL + "/v1/vault/local/status")
+	resp, err := http.Get(info.URL + "/v1/vault/status")
 	if err != nil {
 		t.Fatalf("GET %s: %v", info.URL, err)
 	}
@@ -167,6 +320,8 @@ func TestRun_PublishesDiscoveryAndCleansUp(t *testing.T) {
 // the latest, while the other process keeps running invisibly.
 func TestRun_RefusesWhenAnotherDaemonHoldsLock(t *testing.T) {
 	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
 
 	release, err := discovery.Lock(context.Background(), stateDir)
 	if err != nil {
@@ -178,7 +333,7 @@ func TestRun_RefusesWhenAnotherDaemonHoldsLock(t *testing.T) {
 	opts := options{
 		BindAddr:  "127.0.0.1:0",
 		StateDir:  stateDir,
-		VaultPath: filepath.Join(t.TempDir(), "secrets.json"),
+		VaultPath: vaultPath,
 		IsTTY:     false,
 		Stderr:    io.Discard,
 	}
@@ -194,12 +349,14 @@ func TestRun_RefusesWhenAnotherDaemonHoldsLock(t *testing.T) {
 // daemon either succeeds and publishes, or fails and publishes nothing.
 func TestRun_ListenFailureCleansUp(t *testing.T) {
 	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	opts := options{
 		BindAddr:  "not-a-valid-address",
 		StateDir:  stateDir,
-		VaultPath: filepath.Join(t.TempDir(), "secrets.json"),
+		VaultPath: vaultPath,
 		IsTTY:     false,
 		Stderr:    io.Discard,
 	}
@@ -220,6 +377,8 @@ func TestRun_ListenFailureCleansUp(t *testing.T) {
 // loopback only). Cloud overrides via --bind explicitly.
 func TestRun_BindAddrEmptyMeansEphemeral(t *testing.T) {
 	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -228,7 +387,7 @@ func TestRun_BindAddrEmptyMeansEphemeral(t *testing.T) {
 	opts := options{
 		BindAddr:  "",
 		StateDir:  stateDir,
-		VaultPath: filepath.Join(t.TempDir(), "secrets.json"),
+		VaultPath: vaultPath,
 		IsTTY:     false,
 		Stderr:    io.Discard,
 	}
@@ -255,6 +414,7 @@ func TestRun_RemoveWarnDoesNotFailShutdown(t *testing.T) {
 	}
 	stateDir := t.TempDir()
 	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -347,6 +507,15 @@ func TestStartDaemonHappyPath(t *testing.T) {
 	// dir so the test does not write to the user's actual home.
 	t.Setenv("HOME", t.TempDir())
 
+	// Per #492 item 6a, the daemon refuses to start without a vault file.
+	// Seed one at the canonical path so startDaemon's selectVault
+	// proceeds past the StateMissing check.
+	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	seedVault(t, launch.DefaultVaultPath())
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -354,7 +523,6 @@ func TestStartDaemonHappyPath(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- startDaemon(ctx, "127.0.0.1:0", log) }()
 
-	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
 	waitForDaemon(t, stateDir, 3*time.Second)
 
 	cancel()
@@ -370,6 +538,11 @@ func TestStartDaemonHappyPath(t *testing.T) {
 
 func TestStartDaemonReturnsErrorFromRun(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), ".aileron"), 0o700); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	seedVault(t, launch.DefaultVaultPath())
+
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	err := startDaemon(context.Background(), "not-a-valid-address", log)
 	if err == nil {

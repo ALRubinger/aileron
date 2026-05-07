@@ -140,8 +140,8 @@ func TestRunDaemonStatus_RunningDaemon_RendersInfo(t *testing.T) {
 
 func TestProbeLocalVaultLocked_LockedTrue(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/vault/local/status" {
-			t.Errorf("got path %q, want /v1/vault/local/status", r.URL.Path)
+		if r.URL.Path != "/v1/vault/status" {
+			t.Errorf("got path %q, want /v1/vault/status", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"locked": true, "state": "locked"})
@@ -198,7 +198,7 @@ func TestRunDaemonStatus_WithVaultProbe(t *testing.T) {
 
 	// Real httptest server that serves the local vault status endpoint.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/vault/local/status" {
+		if r.URL.Path == "/v1/vault/status" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"locked": true})
 			return
 		}

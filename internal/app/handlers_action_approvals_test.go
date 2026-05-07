@@ -14,6 +14,7 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 // newActionApprovalsTestServer returns an apiServer wired with an
@@ -347,7 +348,7 @@ func TestNewHandlerWithConfig_ReusesSuppliedActionApprovals(t *testing.T) {
 	q := approval.NewActionApprovalQueue(nil, nil)
 	q.RegisterCommsSend("slack", "#general", "hi", "")
 
-	h, err := NewHandlerWithConfig(slog.Default(), Config{ActionApprovals: q})
+	h, err := NewHandlerWithConfig(slog.Default(), Config{ActionApprovals: q, Vault: vault.NewMemVault()})
 	if err != nil {
 		t.Fatalf("NewHandlerWithConfig: %v", err)
 	}

@@ -23,6 +23,16 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
 
+// init bypasses the CLI vault state machine for the bulk of tests.
+// The state machine prompts for a passphrase and tries to spawn a
+// daemon — neither is available in the test process, and almost no
+// existing test exercises that flow. Tests for vault_state.go itself
+// call ensureVaultUnlocked directly (not through the seam) so this
+// override doesn't suppress them.
+func init() {
+	ensureVaultUnlockedFn = func(string, io.Writer) error { return nil }
+}
+
 func newTestRegistry() *launch.Registry {
 	r := launch.NewRegistry()
 	r.Register(agents.Claude{})

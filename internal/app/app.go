@@ -164,13 +164,6 @@ type Config struct {
 	AuditStateDir string
 }
 
-// NewHandler creates a fully-wired Aileron control plane HTTP handler
-// with in-memory stores, seeded policies, and registered connectors.
-// Equivalent to NewHandlerWithConfig(log, Config{}).
-func NewHandler(log *slog.Logger) (http.Handler, error) {
-	return NewHandlerWithConfig(log, Config{})
-}
-
 // buildApprovalsReviewURL composes the approval-notification ReviewURL
 // from the two-tier configuration: cfg.WebappURL (set by launch to the
 // embedded gateway's URL — production path) takes precedence over the
@@ -241,17 +234,21 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	registry := connector.NewRegistry()
 
 	// --- Vault ---
-	// When the caller (typically `aileron launch`) supplied a
-	// passphrase-unlocked vault via Config, use it directly. Otherwise
-	// fall back to the dev-mode in-memory vault with an
-	// auto-generated KEK so the standalone server binary still works
-	// without any setup. Either way, the on-the-wire path is encrypted
-	// — there is no plaintext bypass.
+	// Local daemons MUST supply either Vault (pre-unlocked) or
+	// LocalVaultPath (deferred unlock via /v1/vault/unlock) — see
+	// [Config.Vault] and [Config.LocalVaultPath]. Per #492 item 6a the
+	// implicit dev-mode in-memory vault was removed: it silently dropped
+	// credentials at every restart, and made /v1/vault/unlock dead code
+	// in production (no inner vault to swap in via [vault.LockableVault]).
 	//
-	// When cfg.LocalVaultPath is set, wrap the supplied (possibly nil)
-	// vault in a LockableVault — the daemon starts vault-locked, every
-	// component that holds a reference to v gets the wrapper, and
-	// /v1/vault/unlock swaps the unlocked inner vault in (#429).
+	// Cloud-shaped daemons (AILERON_DATABASE_URL set) leave both fields
+	// empty; the postgres vault wires up further down (search for
+	// vault.NewPostgresVault). The check here just refuses to start a
+	// local daemon without a vault — cloud is unaffected.
+	//
+	// Tests that previously got the dev fallback by passing Config{}
+	// should construct an explicit [vault.NewMemVault] (wrap in
+	// [vault.NewEncryptedVault] if encryption-at-rest is desired).
 	v := cfg.Vault
 	var lockableVault *vault.LockableVault
 	startVaultLocked := false
@@ -264,11 +261,17 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		}
 		v = lockableVault
 	} else if v == nil {
-		var err error
-		v, err = newLocalEncryptedVault()
-		if err != nil {
-			return nil, err
+		if os.Getenv("AILERON_DATABASE_URL") == "" {
+			return nil, fmt.Errorf("app: no vault configured: set Config.Vault or Config.LocalVaultPath")
 		}
+		// Cloud-shaped daemon: the postgres-backed vault is wired
+		// further down (search vault.NewPostgresVault). The
+		// placeholder MemVault here keeps early consumers (bindingStore
+		// construction, GITHUB_TOKEN seed) from deref'ing nil. Matches
+		// pre-#492 cloud behavior, where the dev-fallback memory vault
+		// was likewise transiently held by those consumers before the
+		// postgres reassignment overwrote `v`.
+		v = vault.NewMemVault()
 	}
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" && !startVaultLocked {
 		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{

@@ -45,6 +45,18 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	// CLI vault state machine (#492 item 5). Runs before any vault-
+	// relevant command so the dispatched handler sees a daemon with
+	// an unlocked vault. The bypass allowlist short-circuits this for
+	// commands that don't talk to the daemon (version/help) or don't
+	// need the vault to do their job (daemon status/stop, vault init).
+	if !bypassesVault(args) {
+		if err := ensureVaultUnlockedFn("", stderr); err != nil {
+			fmt.Fprintf(stderr, "aileron: %v\n", err)
+			return 1
+		}
+	}
+
 	switch args[0] {
 	case "version", "--version", "-v":
 		fmt.Fprintf(stdout, "aileron %s (%s)\n", version.Version, version.Commit)
@@ -661,6 +673,11 @@ var (
 	launchFn      = launch.Launch
 	resolveShimFn = resolveShim
 )
+
+// ensureVaultUnlockedFn is the seam for the run() vault state-machine
+// hook. Tests for the dispatched commands swap this to a no-op so they
+// don't have to mock out the entire daemon-discovery + unlock chain.
+var ensureVaultUnlockedFn = ensureVaultUnlocked
 
 // spawnResolveCached calls spawnResolveOnce at most once per CLI
 // process and caches the result. The cache is intentionally
