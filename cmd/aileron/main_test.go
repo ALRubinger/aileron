@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -1284,6 +1285,95 @@ func TestBindingAPIBaseURL_OverrideTrimsTrailingSlash(t *testing.T) {
 	}
 	if got != "https://example.com/v1" {
 		t.Errorf("override = %q, want trimmed", got)
+	}
+}
+
+// TestBindingAPIBaseURL_PropagatesSpawnErrorThroughCallers locks in
+// the post-#490 contract: every helper that previously dialed the
+// hardcoded `localhost:8721` fallback now propagates the spawn
+// error from bindingAPIBaseURL instead. Stubs bindingAPIBaseURL to
+// return a sentinel error, then calls each helper and asserts the
+// sentinel reaches the caller.
+//
+// One test covers seven helpers because the error-propagation code
+// added at each call site is mechanical (early-return on
+// bindingAPIBaseURL error). Testing the contract once per helper
+// catches a future regression where someone forgets to plumb the
+// error through a new call site.
+func TestBindingAPIBaseURL_PropagatesSpawnErrorThroughCallers(t *testing.T) {
+	sentinel := errors.New("spawn unavailable for test")
+
+	// Stub the URL helper for the duration of the test. Restore on
+	// cleanup so other parallel-package tests aren't affected.
+	orig := bindingAPIBaseURL
+	bindingAPIBaseURL = func() (string, error) { return "", sentinel }
+	t.Cleanup(func() { bindingAPIBaseURL = orig })
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "bindingDoRequest",
+			call: func() error {
+				_, _, err := bindingDoRequest(http.MethodGet, "/bindings", nil)
+				return err
+			},
+		},
+		{
+			name: "fetchRuntimeStatus",
+			call: func() error {
+				_, err := fetchRuntimeStatus()
+				return err
+			},
+		},
+		{
+			name: "fetchConnectorCheck",
+			call: func() error {
+				_, err := fetchConnectorCheck(false)
+				return err
+			},
+		},
+		{
+			name: "postSyncRequest",
+			call: func() error {
+				_, err := postSyncRequest(false)
+				return err
+			},
+		},
+		{
+			name: "fetchAuditList",
+			call: func() error {
+				_, err := fetchAuditList(auditListQuery{})
+				return err
+			},
+		},
+		{
+			name: "fetchAuditGet",
+			call: func() error {
+				_, _, err := fetchAuditGet("audit-id")
+				return err
+			},
+		},
+		{
+			name: "approvalDoRequest",
+			call: func() error {
+				_, err := approvalDoRequest(http.MethodGet, "/approvals", nil)
+				return err
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil {
+				t.Fatal("expected error from spawn failure to propagate")
+			}
+			if !errors.Is(err, sentinel) {
+				t.Errorf("got %v, want sentinel %v wrapped or returned", err, sentinel)
+			}
+		})
 	}
 }
 

@@ -593,7 +593,11 @@ const bindingUsage = `usage:
 // advertised in `~/.aileron/daemon.json`), and the doomed dial
 // produced a misleading second error line that obscured the real
 // spawn failure. Callers now surface the spawn error directly.
-func bindingAPIBaseURL() (string, error) {
+//
+// Declared as a `var` rather than `func` so tests can drive the
+// error-propagation path through every caller without going through
+// the spawn cache + daemon binary lookup.
+var bindingAPIBaseURL = func() (string, error) {
 	if u := os.Getenv("AILERON_API_URL"); u != "" {
 		return strings.TrimRight(u, "/"), nil
 	}
