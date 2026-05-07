@@ -118,7 +118,7 @@ func runDaemonStop(_ []string, stdout, stderr io.Writer) int {
 }
 
 // runDaemonStatus prints a short summary of the running daemon and
-// its vault state. Probes /v1/vault/local/status when daemon.json is
+// its vault state. Probes /v1/vault/status when daemon.json is
 // present; "not running" when it isn't.
 func runDaemonStatus(_ []string, stdout, stderr io.Writer) int {
 	stateDir, err := defaultStateDir()
@@ -160,7 +160,7 @@ func runDaemonStatus(_ []string, stdout, stderr io.Writer) int {
 // (e.g. cloud-shaped deployment without a local vault).
 func probeLocalVaultLocked(baseURL string) (bool, bool) {
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Get(baseURL + "/v1/vault/local/status")
+	resp, err := client.Get(baseURL + "/v1/vault/status")
 	if err != nil {
 		return false, false
 	}

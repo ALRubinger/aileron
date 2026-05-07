@@ -14,6 +14,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/action"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/notify"
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 // recordingNotifier captures every Notification dispatched to it, so
@@ -183,6 +184,7 @@ func TestNewHandlerWithConfig_NotifierOverrideReplacesDefault(t *testing.T) {
 	h, err := NewHandlerWithConfig(log, Config{
 		WebappURL: "http://127.0.0.1:54321",
 		Notifier:  rec,
+		Vault:     vault.NewMemVault(),
 	})
 	if err != nil {
 		t.Fatalf("NewHandlerWithConfig: %v", err)

@@ -282,52 +282,56 @@ func defaultStateDir() (string, error) {
 	return filepath.Join(home, ".aileron"), nil
 }
 
-// selectVault returns an [app.Config] with `Vault` set to a persistent
-// file vault unlocked from `vaultPath` when both conditions hold:
+// selectVault decides how the daemon should access the local file vault
+// at startup. The decision is governed by the four-state matrix from
+// #492 items 5+6:
 //
-//  1. A vault file already exists at `vaultPath` (i.e. the user ran
-//     `aileron launch` or `aileron binding setup` previously and
-//     created one), and
-//  2. `isTTY` is true — needed so the passphrase prompt has somewhere
-//     to read from.
+//	StateMissing             → hard error (run `aileron vault init` first)
+//	StateReady, !isTTY        → start vault-locked; CLI/webapp drives /v1/vault/unlock
+//	StateReady, isTTY         → unlock interactively at startup
+//	parse error / corruption  → hard error (security signal — refuse to start)
 //
-// Otherwise the returned config has `Vault: nil`, and
-// [app.NewHandlerWithConfig] falls back to its in-memory dev vault per
-// the comment in `internal/app/app.go`.
+// In every non-error case the returned [app.Config] sets
+// `LocalVaultPath`, which is what wires the daemon's [vault.LockableVault]
+// in [app.NewHandlerWithConfig] — without it, /v1/vault/unlock has no
+// inner vault to swap into. Pre-#492 the auto-spawn path returned an
+// empty Config, daemons silently fell through to an in-memory dev vault,
+// and bindings disappeared on every restart while /v1/vault/unlock was
+// effectively dead code in production.
 //
-// Without this branch, the standalone server always took the in-memory
-// path, which silently dropped every credential binding the moment the
-// process exited — surfacing later as a `binding_required` error from
-// the credential mediation path when the launch gateway tried to
-// resolve the same binding against the persistent file vault.
-//
-// Extracted from `run` so unit tests can exercise the branching
-// without bringing up an HTTP server. `prompter` is forwarded to
-// [launch.EnsureVault]; nil means use the package default which reads
-// from `/dev/tty`.
+// `prompter` is forwarded to [launch.EnsureVault] for the interactive
+// path; nil means use the package default which reads from `/dev/tty`.
 func selectVault(log *slog.Logger, vaultPath string, isTTY bool, prompter launch.PassphrasePrompter, w io.Writer) (app.Config, error) {
 	state, err := vault.CheckState(vaultPath)
 	if err != nil {
-		// A vault file exists but is unreadable. This is a security
-		// signal (tamper or corruption) — fail-loud rather than
-		// silently dropping back to the in-memory dev vault, which
-		// would mask the issue and hide whatever bindings the user
-		// thought they had. Operators who want a clean memory-mode
-		// start can `rm` the file themselves.
+		// Tamper / corruption: fail-loud. Continuing with a memory vault
+		// would mask the security signal and hide whatever bindings the
+		// user thought they had.
 		return app.Config{}, fmt.Errorf("checking vault %q: %w", vaultPath, err)
 	}
 	if state == vault.StateMissing {
-		log.Info("no persistent vault found; using in-memory dev vault", "path", vaultPath)
-		return app.Config{}, nil
+		// Per #492 item 6a, the dev-vault fallback is gone. The CLI
+		// state machine creates the file before spawning, and operators
+		// running `aileron daemon start` directly are expected to
+		// `aileron vault init` first. Refuse to start so we never
+		// silently lose data.
+		return app.Config{}, fmt.Errorf("no vault file at %q; run `aileron vault init` first", vaultPath)
 	}
 	if !isTTY {
-		log.Info("no controlling tty; using in-memory dev vault", "path", vaultPath)
-		return app.Config{}, nil
+		// Auto-spawn case: daemon starts vault-locked. The CLI POSTs
+		// to /v1/vault/unlock with the passphrase right after spawn,
+		// or the webapp drives the same endpoint via its passphrase
+		// modal.
+		log.Info("starting daemon with locked local vault", "path", vaultPath)
+		return app.Config{LocalVaultPath: vaultPath}, nil
 	}
 	log.Info("unlocking persistent vault", "path", vaultPath)
 	v, vErr := launch.EnsureVault(vaultPath, prompter, w, 3)
 	if vErr != nil {
 		return app.Config{}, vErr
 	}
-	return app.Config{Vault: v}, nil
+	// Set both Vault and LocalVaultPath: the LockableVault wraps the
+	// pre-unlocked inner so the daemon's vault surface stays uniform
+	// regardless of whether the unlock happened before or after spawn.
+	return app.Config{Vault: v, LocalVaultPath: vaultPath}, nil
 }
