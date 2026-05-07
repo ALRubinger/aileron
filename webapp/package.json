@@ -37,12 +37,5 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^5.0.0",
     "vitest": "^4.1.4"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "core-js",
-      "esbuild",
-      "protobufjs"
-    ]
   }
 }

@@ -48,11 +48,6 @@
     "vitest": "^4.1.4"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "core-js",
-      "esbuild",
-      "protobufjs"
-    ],
     "overrides": {
       "protobufjs": "^7.5.5"
     }
