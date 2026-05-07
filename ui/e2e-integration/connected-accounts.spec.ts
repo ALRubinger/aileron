@@ -28,10 +28,14 @@ test.describe('Connected Accounts — Real API', () => {
 	test('available integrations shown or redirects to vault setup', async ({ authedPage: page }) => {
 		await page.goto('/settings/connected-accounts');
 
-		// Wait for the page to settle — either vault setup or connected accounts content
+		// Wait for a state signal that lands AFTER the GET /v1/connected-accounts
+		// fetch resolves — either the vault-setup redirect copy or the
+		// landed empty-state copy. The Connected Accounts card title
+		// renders before the fetch resolves, so gating on the title
+		// raced against the empty state and the providers list (#501).
 		const settled = page
 			.getByText('Secure your vault')
-			.or(page.locator('[data-slot="card-title"]', { hasText: 'Connected Accounts' }));
+			.or(page.getByText('No accounts connected yet.'));
 		await expect(settled).toBeVisible({ timeout: 15000 });
 
 		if (page.url().includes('/vault')) {
@@ -39,10 +43,10 @@ test.describe('Connected Accounts — Real API', () => {
 			return;
 		}
 
-		// Verify empty state
-		await expect(page.getByText('No accounts connected yet.')).toBeVisible();
-
-		// All four providers should be listed
+		// Empty state already verified by the `settled` matcher above —
+		// reaching this point means the fetch resolved and the page has
+		// rendered its post-fetch content. The provider list shares the
+		// same fetch, so the next assertions land deterministically.
 		await expect(page.getByText('Slack', { exact: true })).toBeVisible();
 		await expect(page.getByText('GitHub')).toBeVisible();
 		await expect(page.getByText('Gmail', { exact: true })).toBeVisible();
