@@ -12,6 +12,7 @@ By the end you will have asked Claude Code "summarize my five most recent emails
 
 - **Go 1.25 or newer.** Aileron's modules require it. `go version` should report at least `go1.25.0`.
 - **[Task](https://taskfile.dev/installation/).** All build commands go through `task`. `brew install go-task` on macOS.
+- **Node.js 24 or newer** and **pnpm 11.0.8 (within the 11.x line)**. The webapp and docs targets build through `pnpm`, so `task build` will fail without them. The simplest setup is `corepack enable` after installing Node, then `corepack prepare pnpm@11.0.8 --activate`.
 - **[Claude Code](https://docs.claude.com/en/docs/claude-code/setup) installed and configured** with an Anthropic API key in `ANTHROPIC_API_KEY`. Aileron's launcher routes Claude Code's LLM calls through the local Aileron daemon, but it does not supply or replace your API key.
 - **A Google account.** Gmail and Calendar must be enabled. The OAuth dance opens in your default browser.
 - **`jq` and `openssl`** for the one-liner that trusts the connector's signing key.
