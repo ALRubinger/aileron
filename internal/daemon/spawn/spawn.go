@@ -110,22 +110,31 @@ func Resolve(ctx context.Context, opts Options) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("spawn: acquire lock: %w", err)
 	}
-	// Release the lock as soon as SpawnFn returns and (in the default
-	// fork-exec case) the daemon's own startup lock takes over. We
-	// hold the lock through the polling loop too — clients that race
-	// past us will block on this lock and re-check daemon.json on
-	// acquire, avoiding redundant fork-execs.
-	defer func() { _ = release() }()
 
 	// Re-check after lock — another client may have spawned during
 	// our lock-acquire window.
 	if url, ok := readAlive(opts.StateDir, opts.LivenessTimeout); ok {
+		_ = release()
 		return url, nil
 	}
 
 	if err := opts.SpawnFn(ctx, opts.StateDir); err != nil {
+		_ = release()
 		return "", fmt.Errorf("spawn: %w", err)
 	}
+
+	// Release before waitForDaemon. The daemon's own startup-lock
+	// acquisition (`internal/server.run`) takes over as the singleton
+	// check; holding the lock through the polling loop would deadlock
+	// against it — the daemon would time out, exit, and never write
+	// daemon.json, leaving the helper to time out at SpawnTimeout.
+	//
+	// Concurrent clients that race past us during waitForDaemon either
+	// observe the daemon's daemon.json once it lands (fast-path return)
+	// or fork a redundant daemon — the daemon's own lock then
+	// guarantees only one survives, so the worst case is a few wasted
+	// process starts, not duplicated daemons.
+	_ = release()
 
 	return waitForDaemon(ctx, opts)
 }

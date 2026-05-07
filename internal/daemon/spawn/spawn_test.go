@@ -296,4 +296,83 @@ func TestResolve_DefaultSpawnFnForkExecsBinary(t *testing.T) {
 	}
 }
 
+// TestResolve_ReleasesLockBeforeWaitForDaemon is the regression test
+// for the spawn/daemon deadlock that surfaced while running the
+// ADR-0012 manual acceptance tests on a fresh machine.
+//
+// The bug: the helper held [discovery.Lock] through both SpawnFn and
+// the subsequent waitForDaemon polling loop. The daemon child (in
+// `internal/server.run`) tries to acquire the same lock for its own
+// singleton check with a 250ms timeout. Holding the lock through
+// waitForDaemon caused the daemon to time out, exit, and never
+// publish daemon.json — the helper then timed out at SpawnTimeout
+// with the misleading "daemon did not become ready within Ns".
+//
+// The contract the daemon depends on: by the time waitForDaemon is
+// polling, the spawn helper has released the lock so the daemon can
+// take it for itself. This test asserts that contract by attempting
+// to acquire the same lock from a goroutine started during SpawnFn
+// — which mirrors what the real daemon does at startup.
+func TestResolve_ReleasesLockBeforeWaitForDaemon(t *testing.T) {
+	dir := t.TempDir()
+
+	// Synthetic "daemon" goroutine: tries to grab the lock (the way
+	// the real daemon does), then writes daemon.json so Resolve's
+	// polling completes.
+	daemonStarted := make(chan struct{})
+	daemonLockErr := make(chan error, 1)
+
+	spawnFn := func(_ context.Context, stateDir string) error {
+		go func() {
+			// Wait for the helper to enter waitForDaemon. A small
+			// delay is enough — the helper releases the lock between
+			// SpawnFn returning and the first poll iteration.
+			time.Sleep(50 * time.Millisecond)
+			lockCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+			defer cancel()
+			release, err := discovery.Lock(lockCtx, stateDir)
+			daemonLockErr <- err
+			if err != nil {
+				return
+			}
+			defer func() { _ = release() }()
+			// Stand in for the daemon's listen + discovery.Write.
+			_, _ = fakeDaemon(t, stateDir)
+			close(daemonStarted)
+		}()
+		return nil
+	}
+
+	got, err := spawn.Resolve(context.Background(), spawn.Options{
+		StateDir:     dir,
+		EnvLookup:    emptyEnv,
+		SpawnTimeout: 3 * time.Second,
+		PollInterval: 25 * time.Millisecond,
+		SpawnFn:      spawnFn,
+	})
+
+	// Whether Resolve returns success or not, the daemon's lock attempt
+	// must succeed — that's the contract under test.
+	select {
+	case lockErr := <-daemonLockErr:
+		if lockErr != nil {
+			t.Fatalf("daemon-side Lock acquisition failed (spawn helper still holding it?): %v", lockErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon goroutine never reported its lock attempt — Resolve probably blocked forever")
+	}
+
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got == "" {
+		t.Fatal("got empty URL")
+	}
+	select {
+	case <-daemonStarted:
+	default:
+		t.Error("daemon goroutine never wrote daemon.json — Resolve returned but the synthetic daemon didn't run")
+	}
+}
+
 func emptyEnv(string) string { return "" }
