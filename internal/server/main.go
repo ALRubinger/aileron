@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,6 +33,12 @@ import (
 	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
 )
+
+// lockInodeWatchInterval is how often the daemon stats <stateDir>/daemon.lock
+// to detect inode changes. Picked at 5s as a tradeoff: long enough to cost
+// nothing under steady-state, short enough that a duplicate-daemon situation
+// resolves quickly. Variable rather than const so tests can shorten it.
+var lockInodeWatchInterval = 5 * time.Second
 
 func main() {
 	var bind string
@@ -122,6 +129,18 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 			opts.StateDir, discovery.LockFile, err)
 	}
 	defer func() { _ = releaseLock() }()
+
+	// Capture the inode of daemon.lock at the moment we acquired its
+	// flock. The watcher goroutine below polls the same path and shuts
+	// us down if the inode changes — i.e. an external `rm -rf
+	// <stateDir>` (or any unlink-and-recreate) has orphaned our flock'd
+	// inode and a fresh daemon now owns the path. Without this watch a
+	// stranded daemon survives invisibly, breaking the singleton
+	// invariant (#528 finding 3b).
+	originalLockInode, err := discovery.LockFileInode(opts.StateDir)
+	if err != nil {
+		return fmt.Errorf("capture lock-file inode: %w", err)
+	}
 
 	cfg, err := selectVault(log, opts.VaultPath, opts.IsTTY, nil, opts.Stderr)
 	if err != nil {
@@ -228,7 +247,17 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		_ = listener.Close()
 		return fmt.Errorf("publish discovery: %w", err)
 	}
+	// skipDiscoveryRemove gates the deferred discovery.Remove. The
+	// inode-watcher sets it on shutdown caused by lock-inode mismatch:
+	// at that point daemon.json/pid belong to the daemon that took
+	// over, and removing them would erase the surviving daemon's
+	// advertisement.
+	var skipDiscoveryRemove atomic.Bool
 	defer func() {
+		if skipDiscoveryRemove.Load() {
+			log.Info("inode-mismatch shutdown: leaving discovery files for the daemon that owns them")
+			return
+		}
 		if err := discovery.Remove(opts.StateDir); err != nil {
 			log.Warn("removing discovery files", "error", err)
 		}
@@ -257,9 +286,20 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		serveErr <- nil
 	}()
 
+	// Lock-inode watcher. Closes inodeMismatch when the daemon.lock
+	// path's inode changes from originalLockInode (or the file is
+	// gone). See the originalLockInode capture above for the why.
+	inodeMismatch := make(chan struct{})
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	go watchLockInode(watchCtx, log, opts.StateDir, originalLockInode, inodeMismatch)
+
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down daemon", "url", url)
+	case <-inodeMismatch:
+		log.Warn("daemon.lock inode changed; another daemon owns this path now — shutting down", "url", url)
+		skipDiscoveryRemove.Store(true)
 	case err := <-serveErr:
 		if err != nil {
 			return fmt.Errorf("serve: %w", err)
@@ -270,6 +310,43 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelShutdown()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// watchLockInode polls daemon.lock at lockInodeWatchInterval and closes
+// trigger when the inode no longer matches original. Stops on ctx
+// cancellation. See run()'s originalLockInode capture for the why.
+//
+// "Inode changed" includes "file is gone": LockFileInode returns an
+// error wrapping os.ErrNotExist when daemon.lock has been unlinked,
+// which we treat the same as a mismatch. Other stat errors are logged
+// at warn but otherwise ignored — they're transient (e.g. fs hiccup)
+// and triggering shutdown on them would cause spurious daemon exits.
+func watchLockInode(ctx context.Context, log *slog.Logger, stateDir string, original uint64, trigger chan<- struct{}) {
+	ticker := time.NewTicker(lockInodeWatchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			current, err := discovery.LockFileInode(stateDir)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					log.Warn("daemon.lock disappeared", "stateDir", stateDir)
+					close(trigger)
+					return
+				}
+				log.Warn("statting daemon.lock", "error", err)
+				continue
+			}
+			if current != original {
+				log.Warn("daemon.lock inode changed",
+					"original", original, "current", current, "stateDir", stateDir)
+				close(trigger)
+				return
+			}
+		}
+	}
 }
 
 // defaultStateDir returns the canonical user state directory
