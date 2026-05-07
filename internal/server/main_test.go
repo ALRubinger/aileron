@@ -344,6 +344,165 @@ func TestRun_RefusesWhenAnotherDaemonHoldsLock(t *testing.T) {
 	}
 }
 
+// TestRun_LockInodeMismatchTriggersShutdown regression-pins #528
+// finding 3b: when daemon.lock is unlinked-and-recreated while a daemon
+// is running (e.g. external `rm -rf ~/.aileron` followed by another
+// daemon spawning at the same path), the running daemon's flock is
+// orphaned on a now-unreferenced inode. Without the inode-watcher the
+// daemon would survive indefinitely alongside the new owner of the
+// path, breaking the singleton invariant.
+//
+// The watcher must:
+//   - detect the inode change,
+//   - exit run() cleanly (no error), and
+//   - leave daemon.json/daemon.pid intact (those belong to the daemon
+//     that took over; removing them would erase its advertisement).
+func TestRun_LockInodeMismatchTriggersShutdown(t *testing.T) {
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
+
+	// Shorten the watch interval so the test doesn't wait the
+	// production 5s. Restored on cleanup.
+	prev := lockInodeWatchInterval
+	lockInodeWatchInterval = 50 * time.Millisecond
+	t.Cleanup(func() { lockInodeWatchInterval = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := options{
+		BindAddr:  "127.0.0.1:0",
+		StateDir:  stateDir,
+		VaultPath: vaultPath,
+		IsTTY:     false,
+		Stderr:    io.Discard,
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, log, opts) }()
+
+	info := waitForDaemon(t, stateDir, 3*time.Second)
+	if info.URL == "" {
+		t.Fatal("daemon never published its URL")
+	}
+
+	// Simulate external "rm -rf <stateDir>/daemon.lock + new daemon
+	// recreates it." The daemon's flock-fd retains the original inode;
+	// our recreated file gets a fresh one.
+	lockPath := filepath.Join(stateDir, discovery.LockFile)
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("recreate lock: %v", err)
+	}
+	_ = f.Close()
+
+	// Wait for the watcher to detect the mismatch and run() to return.
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned error: %v (want nil — inode-mismatch is a clean shutdown)", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not return after lock-file inode change; the watcher is not detecting the mismatch")
+	}
+
+	// daemon.json + daemon.pid must still exist: removing them would
+	// erase the surviving daemon's advertisement.
+	for _, name := range []string{discovery.InfoFile, discovery.PIDFile} {
+		if _, err := os.Stat(filepath.Join(stateDir, name)); err != nil {
+			t.Errorf("%s missing after inode-mismatch shutdown (err: %v); discovery files should be left for the daemon that took over", name, err)
+		}
+	}
+}
+
+// TestWatchLockInode_FileDisappeared covers the ENOENT branch: an
+// unlinked-but-not-recreated daemon.lock is the same shutdown signal
+// as a recreated one. Exercised as a unit test against watchLockInode
+// directly so we don't need to drive a full daemon.
+func TestWatchLockInode_FileDisappeared(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, discovery.LockFile)
+	if err := os.WriteFile(lockPath, nil, 0o600); err != nil {
+		t.Fatalf("create lock: %v", err)
+	}
+	original, err := discovery.LockFileInode(dir)
+	if err != nil {
+		t.Fatalf("LockFileInode: %v", err)
+	}
+
+	prev := lockInodeWatchInterval
+	lockInodeWatchInterval = 25 * time.Millisecond
+	t.Cleanup(func() { lockInodeWatchInterval = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	trigger := make(chan struct{})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	go watchLockInode(ctx, log, dir, original, trigger)
+
+	// Unlink the lock file; do NOT recreate. The watcher should treat
+	// disappearance as a mismatch signal.
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("remove lock: %v", err)
+	}
+
+	select {
+	case <-trigger:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not signal on file-disappeared (ENOENT)")
+	}
+}
+
+// TestWatchLockInode_StopsOnContextCancel pins the watcher's clean-stop
+// behavior — the goroutine must exit when its context is canceled,
+// otherwise it leaks for the daemon's lifetime.
+func TestWatchLockInode_StopsOnContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, discovery.LockFile), nil, 0o600); err != nil {
+		t.Fatalf("create lock: %v", err)
+	}
+	original, err := discovery.LockFileInode(dir)
+	if err != nil {
+		t.Fatalf("LockFileInode: %v", err)
+	}
+
+	prev := lockInodeWatchInterval
+	lockInodeWatchInterval = 25 * time.Millisecond
+	t.Cleanup(func() { lockInodeWatchInterval = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	trigger := make(chan struct{})
+	done := make(chan struct{})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	go func() {
+		watchLockInode(ctx, log, dir, original, trigger)
+		close(done)
+	}()
+
+	// Let the watcher run a couple of ticks, then cancel.
+	time.Sleep(75 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not return after context cancel")
+	}
+
+	// Trigger must not have fired — context cancel is a clean stop, not
+	// a mismatch signal.
+	select {
+	case <-trigger:
+		t.Fatal("trigger fired on context cancel; should only fire on inode change")
+	default:
+	}
+}
+
 // TestRun_ListenFailureCleansUp verifies that when listen fails (e.g.
 // invalid bind address), no stale discovery files are left behind. The
 // daemon either succeeds and publishes, or fails and publishes nothing.

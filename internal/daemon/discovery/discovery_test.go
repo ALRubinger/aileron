@@ -337,3 +337,67 @@ func TestWriteFailsWhenStateDirIsFile(t *testing.T) {
 	}
 }
 
+// TestLockFileInode_StableThenChangesAfterUnlinkRecreate pins the
+// contract LockFileInode exposes to the daemon's inode-watch loop
+// (#528 finding 3b): repeated calls return the same inode while the
+// file is undisturbed; an unlink + recreate at the same path returns
+// a different inode (the failure mode the watcher detects).
+func TestLockFileInode_StableThenChangesAfterUnlinkRecreate(t *testing.T) {
+	dir := t.TempDir()
+
+	// Acquire a lock so daemon.lock exists with a stable inode.
+	release, err := discovery.Lock(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Lock: %v", err)
+	}
+
+	first, err := discovery.LockFileInode(dir)
+	if err != nil {
+		t.Fatalf("LockFileInode: %v", err)
+	}
+	if first == 0 {
+		t.Fatal("inode = 0; want a real inode")
+	}
+
+	// Repeated calls return the same inode.
+	second, err := discovery.LockFileInode(dir)
+	if err != nil {
+		t.Fatalf("LockFileInode (second call): %v", err)
+	}
+	if second != first {
+		t.Errorf("inode changed between calls: %d → %d", first, second)
+	}
+
+	// Release our flock and remove the lock file. (The release closes
+	// the fd; the held inode is freed once removed.)
+	if err := release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, discovery.LockFile)); err != nil {
+		t.Fatalf("remove lock file: %v", err)
+	}
+
+	// File missing → error wrapping os.ErrNotExist.
+	if _, err := discovery.LockFileInode(dir); err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LockFileInode after remove: err = %v, want wrapped os.ErrNotExist", err)
+	}
+
+	// Acquire a fresh lock (creates daemon.lock anew) and verify the
+	// inode has changed. This is the empirical underpinning of finding
+	// 3b: a fresh inode at the same path is the signal a parallel
+	// daemon now owns the lock.
+	release2, err := discovery.Lock(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Lock (re-acquire): %v", err)
+	}
+	defer release2()
+
+	third, err := discovery.LockFileInode(dir)
+	if err != nil {
+		t.Fatalf("LockFileInode (post-recreate): %v", err)
+	}
+	if third == first {
+		t.Errorf("inode unchanged after unlink+recreate (got %d both times); the watcher cannot detect 3b", third)
+	}
+}
+
