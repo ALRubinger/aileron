@@ -92,15 +92,9 @@ func TestListenerRegistry_ConcurrentSetGet(t *testing.T) {
 	wg.Wait()
 }
 
-// StartListeners contract:
-//
-//   - Empty / nil notification config: returns 0, no error.
-//   - Plaintext token (caught earlier by ValidateNotificationTokens):
-//     not exercised here.
-//   - ValidateNotificationTokens rejects plaintext, accepts vault refs
-//     and empty values.
-
-func TestStartListeners_NoConfig(t *testing.T) {
+// StartListeners contract: with no channel implementations in tree
+// (#525 removed Slack and Discord), it is a no-op that returns 0.
+func TestStartListeners_NoOp(t *testing.T) {
 	r := comms.NewListenerRegistry()
 	q := comms.NewNotifyQueue(10, nil)
 	started, err := comms.StartListeners(context.Background(), comms.StartOptions{
@@ -116,57 +110,12 @@ func TestStartListeners_NoConfig(t *testing.T) {
 	}
 }
 
-func TestStartListeners_RequiresQueue(t *testing.T) {
-	_, err := comms.StartListeners(context.Background(), comms.StartOptions{
-		Notifications: &config.NotifyConfig{Slack: &config.SlackNotifyConfig{AppToken: "vault:a", BotToken: "vault:b"}},
-		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}, comms.NewListenerRegistry())
-	if err == nil {
-		t.Fatal("expected error for nil queue")
+func TestValidateNotificationTokens_NoOp(t *testing.T) {
+	if err := comms.ValidateNotificationTokens(nil); err != nil {
+		t.Errorf("nil config: %v", err)
 	}
-}
-
-func TestStartListeners_VaultMissingForRef(t *testing.T) {
-	// Notifications reference vault:foo but no vault is supplied →
-	// ResolveVaultRef errors and StartListeners surfaces it.
-	_, err := comms.StartListeners(context.Background(), comms.StartOptions{
-		Notifications: &config.NotifyConfig{
-			Slack: &config.SlackNotifyConfig{AppToken: "vault:a", BotToken: "vault:b"},
-		},
-		Vault: nil,
-		Queue: comms.NewNotifyQueue(10, nil),
-		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}, comms.NewListenerRegistry())
-	if err == nil {
-		t.Fatal("expected error when vault refs but no vault")
-	}
-}
-
-func TestValidateNotificationTokens(t *testing.T) {
-	cases := []struct {
-		name    string
-		cfg     *config.NotifyConfig
-		wantErr bool
-	}{
-		{"nil config", nil, false},
-		{"empty tokens", &config.NotifyConfig{Slack: &config.SlackNotifyConfig{}}, false},
-		{"vault refs OK", &config.NotifyConfig{
-			Slack: &config.SlackNotifyConfig{AppToken: "vault:a", BotToken: "vault:b", UserToken: "vault:c"},
-		}, false},
-		{"plaintext slack app rejected", &config.NotifyConfig{
-			Slack: &config.SlackNotifyConfig{AppToken: "xapp-plain", BotToken: "vault:b"},
-		}, true},
-		{"plaintext discord bot rejected", &config.NotifyConfig{
-			Discord: &config.DiscordNotifyConfig{BotToken: "plain"},
-		}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := comms.ValidateNotificationTokens(tc.cfg)
-			if (err != nil) != tc.wantErr {
-				t.Errorf("err = %v, wantErr = %v", err, tc.wantErr)
-			}
-		})
+	if err := comms.ValidateNotificationTokens(&config.NotifyConfig{}); err != nil {
+		t.Errorf("empty config: %v", err)
 	}
 }
 
@@ -194,8 +143,8 @@ func TestResolveVaultRef_Passthrough(t *testing.T) {
 
 func TestResolveVaultRef_LooksUpInVault(t *testing.T) {
 	v := vault.NewMemVault()
-	_ = v.Put(context.Background(), "slack-app-token", []byte("xapp-resolved"), vault.Metadata{})
-	got, err := comms.ResolveVaultRef(context.Background(), "vault:slack-app-token", v)
+	_ = v.Put(context.Background(), "app-token", []byte("xapp-resolved"), vault.Metadata{})
+	got, err := comms.ResolveVaultRef(context.Background(), "vault:app-token", v)
 	if err != nil {
 		t.Fatalf("ResolveVaultRef: %v", err)
 	}

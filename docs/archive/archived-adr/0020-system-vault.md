@@ -5,11 +5,19 @@ title: "ADR-0020: System Vault for Infrastructure Secrets"
 
 <div class="meta">
 <table>
-  <tr><th>Status</th><td>Proposed</td></tr>
-  <tr><th>Date</th><td>2026-04-21</td></tr>
+  <tr><th>Status</th><td>Superseded — system vault removed in #525 with no validated consumer post-pivot; the concept is parked until a future cloud product surfaces a real need.</td></tr>
+  <tr><th>Date</th><td>2026-04-21 (superseded 2026-05-07)</td></tr>
   <tr><th>References</th><td><a href="/archived-adr/0010-zero-knowledge-vault-trust-model">ADR-0010</a></td></tr>
 </table>
 </div>
+
+> **Update (2026-05-07, #525):** The system vault implementation was removed
+> in this issue along with the Slack and Discord daemon code. The bot-token
+> driver described below was the only consumer; with no validated cloud
+> product depending on it, keeping the implementation around as
+> speculation costs more than the git history is worth. This ADR remains
+> in the archive as the recorded rationale; revisit the design here if
+> and when a future cloud product validates the underlying need.
 
 ## Context
 

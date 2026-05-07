@@ -524,13 +524,10 @@ func TestRunStatus_Notifications(t *testing.T) {
 	os.MkdirAll(configDir, 0o755)
 	os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
 notifications:
-  slack:
-    app_token: vault:slack_app
-    bot_token: vault:slack_bot
-    channels:
-      - name: "#backend"
-        show: all
-        auto_draft: true
+  quiet_hours:
+    start: "22:00"
+    end: "06:00"
+    timezone: America/New_York
 `), 0o644)
 
 	oldWd, _ := os.Getwd()
@@ -543,17 +540,11 @@ notifications:
 		t.Errorf("expected exit code 0, got %d", code)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "Slack") {
-		t.Error("expected Slack section")
+	if !strings.Contains(out, "Quiet hours") {
+		t.Error("expected Quiet hours section")
 	}
-	if !strings.Contains(out, "vault:slack_bot") {
-		t.Error("expected vault reference for bot token")
-	}
-	if !strings.Contains(out, "#backend") {
-		t.Error("expected channel name")
-	}
-	if !strings.Contains(out, "auto-draft") {
-		t.Error("expected auto-draft indicator")
+	if !strings.Contains(out, "22:00") {
+		t.Error("expected quiet hours start time")
 	}
 }
 
@@ -610,41 +601,6 @@ func TestRunStatus_InHelp(t *testing.T) {
 	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
 	if !strings.Contains(stdout.String(), "aileron status") {
 		t.Error("expected 'aileron status' in help output")
-	}
-}
-
-func TestRunStatus_NotificationsWithDiscord(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	configDir := filepath.Join(dir, ".aileron")
-	os.MkdirAll(configDir, 0o755)
-	os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(`
-notifications:
-  discord:
-    bot_token: vault:discord_bot
-    channels:
-      - name: "123456789"
-        show: all
-`), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"status", "notifications"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "Discord") {
-		t.Error("expected Discord section")
-	}
-	if !strings.Contains(out, "vault:discord_bot") {
-		t.Error("expected vault reference for discord token")
-	}
-	if !strings.Contains(out, "123456789") {
-		t.Error("expected channel ID")
 	}
 }
 
@@ -1957,23 +1913,6 @@ func TestRunPolicySave_DefaultAuditLogPath(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "docker push myimage") {
 		t.Errorf("expected command in dry-run output, got: %s", stdout.String())
-	}
-}
-
-func TestTokenStatus(t *testing.T) {
-	tests := []struct {
-		value string
-		want  string
-	}{
-		{"", "(not set)"},
-		{"vault:my_secret", "vault:my_secret"},
-		{"xoxb-plaintext-token", "(plaintext"},
-	}
-	for _, tt := range tests {
-		got := tokenStatus(tt.value)
-		if !strings.Contains(got, tt.want) {
-			t.Errorf("tokenStatus(%q) = %q, want substring %q", tt.value, got, tt.want)
-		}
 	}
 }
 

@@ -17,6 +17,23 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
+// fakeDraftListener is a comms.Listener stub used by draft-send tests.
+// Send records the call; if sendErr is non-nil, Send returns it.
+type fakeDraftListener struct {
+	service string
+	sendErr error
+	last    comms.OutgoingMessage
+}
+
+func (f *fakeDraftListener) Service() string                                                      { return f.service }
+func (f *fakeDraftListener) Connect(context.Context) error                                        { return nil }
+func (f *fakeDraftListener) Listen(context.Context) (<-chan comms.IncomingMessage, error)         { return nil, nil }
+func (f *fakeDraftListener) Send(_ context.Context, msg comms.OutgoingMessage) error {
+	f.last = msg
+	return f.sendErr
+}
+func (f *fakeDraftListener) Close() error { return nil }
+
 func newDraftsTestServer() *apiServer {
 	return &apiServer{
 		log:               slog.Default(),
@@ -211,27 +228,15 @@ func TestDraftAction_Routing(t *testing.T) {
 
 func newDraftsTestServerWithSend() *apiServer {
 	srv := newDraftsTestServer()
-	enableVaultEncryption(srv, "usr_a")
-	// Set up a connected Slack account + encrypted user token so send works.
-	ctx := context.Background()
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID:             "conn_s1",
-		UserID:         "usr_a",
-		Provider:       model.ConnectedAccountProviderSlack,
-		Status:         model.ConnectedAccountStatusActive,
-		ExternalUserID: "U123ABC",
-		ExternalTeamID: "T001TEST",
-	})
-	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"access_token":"xoxp-test"}`))
-	// Store workspace-level bot token in the system vault (installed by admin).
-	srv.systemVault = vault.NewMemVault()
-	srv.systemVault.Put(ctx, "slack-workspaces/T001TEST/bot-token", []byte("xoxb-test"), vault.Metadata{
-		Type: "slack_bot_token",
-	})
-	// Mock sender so we don't call real Slack.
-	srv.slackSender = func(_ context.Context, token, channel, body, threadTS string) error {
-		return nil
-	}
+	srv.listeners = comms.NewListenerRegistry()
+	srv.listeners.Set("slack", &fakeDraftListener{service: "slack"})
+	return srv
+}
+
+func newDraftsTestServerWithFailingSend() *apiServer {
+	srv := newDraftsTestServer()
+	srv.listeners = comms.NewListenerRegistry()
+	srv.listeners.Set("slack", &fakeDraftListener{service: "slack", sendErr: fmt.Errorf("backend unavailable")})
 	return srv
 }
 
@@ -254,52 +259,6 @@ func TestApproveDraft_Success(t *testing.T) {
 	}
 	if d.SentBody != "No, the claims stay the same." {
 		t.Errorf("expected SentBody to match DraftBody, got %q", d.SentBody)
-	}
-}
-
-func TestApproveDraft_PassesThreadTS(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	ctx := context.Background()
-	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
-
-	var capturedThreadTS string
-	srv.slackSender = func(_ context.Context, _, _, _, threadTS string) error {
-		capturedThreadTS = threadTS
-		return nil
-	}
-
-	w := httptest.NewRecorder()
-	r := mcpRequest("POST", "/v1/drafts/dft_1/approve", "", userAClaims)
-	srv.handleApproveDraft(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	if capturedThreadTS != "1234567890.123456" {
-		t.Errorf("expected threadTS = %q, got %q", "1234567890.123456", capturedThreadTS)
-	}
-}
-
-func TestEditDraft_PassesThreadTS(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	ctx := context.Background()
-	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
-
-	var capturedThreadTS string
-	srv.slackSender = func(_ context.Context, _, _, _, threadTS string) error {
-		capturedThreadTS = threadTS
-		return nil
-	}
-
-	w := httptest.NewRecorder()
-	r := mcpRequest("POST", "/v1/drafts/dft_1/edit", `{"body":"edited reply"}`, userAClaims)
-	srv.handleEditDraft(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	if capturedThreadTS != "1234567890.123456" {
-		t.Errorf("expected threadTS = %q, got %q", "1234567890.123456", capturedThreadTS)
 	}
 }
 
@@ -344,10 +303,7 @@ func TestApproveDraft_NotFound(t *testing.T) {
 }
 
 func TestApproveDraft_SendFails(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.slackSender = func(_ context.Context, _, _, _, _ string) error {
-		return fmt.Errorf("slack API unavailable")
-	}
+	srv := newDraftsTestServerWithFailingSend()
 	ctx := context.Background()
 	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
 
@@ -360,9 +316,8 @@ func TestApproveDraft_SendFails(t *testing.T) {
 	}
 }
 
-func TestApproveDraft_NoSlackAccount(t *testing.T) {
-	srv := newDraftsTestServer() // no connected account seeded
-	srv.slackSender = func(_ context.Context, _, _, _, _ string) error { return nil }
+func TestApproveDraft_NoListener(t *testing.T) {
+	srv := newDraftsTestServer() // no listener configured
 	ctx := context.Background()
 	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
 
@@ -402,10 +357,7 @@ func TestEditDraft_Success(t *testing.T) {
 }
 
 func TestEditDraft_SendFails(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	srv.slackSender = func(_ context.Context, _, _, _, _ string) error {
-		return fmt.Errorf("slack error")
-	}
+	srv := newDraftsTestServerWithFailingSend()
 	ctx := context.Background()
 	seedDraft(ctx, srv.drafts, "dft_1", "usr_a", model.DraftStatusPending)
 
@@ -500,42 +452,18 @@ func TestCreateDraftFromMessage(t *testing.T) {
 	}
 }
 
-func TestSendDraftMessage_BadTokenJSON(t *testing.T) {
+func TestSendDraftMessage_NoListenerConfigured(t *testing.T) {
 	srv := newDraftsTestServer()
-	enableVaultEncryption(srv, "usr_a")
-	ctx := context.Background()
-
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID:       "conn_s1",
-		UserID:   "usr_a",
-		Provider: model.ConnectedAccountProviderSlack,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-	// Store invalid JSON as token.
-	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte("not-json"))
-
-	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello", "")
-	if err == nil {
-		t.Fatal("expected error for bad token JSON")
+	if err := srv.sendDraftMessage(context.Background(), "slack", "C123", "hello"); err == nil {
+		t.Fatal("expected error when no listener registry is configured")
 	}
 }
 
-func TestSendDraftMessage_EmptyAccessToken(t *testing.T) {
+func TestSendDraftMessage_NoListenerForService(t *testing.T) {
 	srv := newDraftsTestServer()
-	enableVaultEncryption(srv, "usr_a")
-	ctx := context.Background()
-
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID:       "conn_s1",
-		UserID:   "usr_a",
-		Provider: model.ConnectedAccountProviderSlack,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-	storeEncryptedToken(srv, "connected-accounts/usr_a/slack", []byte(`{"token_type":"user"}`))
-
-	err := srv.sendDraftMessage(ctx, "usr_a", "C123", "hello", "")
-	if err == nil {
-		t.Fatal("expected error for missing access_token")
+	srv.listeners = comms.NewListenerRegistry()
+	if err := srv.sendDraftMessage(context.Background(), "slack", "C123", "hello"); err == nil {
+		t.Fatal("expected error when service has no listener registered")
 	}
 }
 
@@ -761,116 +689,6 @@ func TestListFeedback_Empty(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&resp)
 	if len(resp.Items) != 0 {
 		t.Fatalf("expected empty, got %d", len(resp.Items))
-	}
-}
-
-func TestResolveSlackCredentials_Success(t *testing.T) {
-	srv := newDraftsTestServerWithSend()
-	creds, err := srv.resolveSlackCredentials(context.Background(), "usr_a")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if creds.BotToken != "xoxb-test" {
-		t.Errorf("expected xoxb-test, got %s", creds.BotToken)
-	}
-	if creds.SlackUserID != "U123ABC" {
-		t.Errorf("expected U123ABC, got %s", creds.SlackUserID)
-	}
-}
-
-func TestResolveSlackCredentials_NoAccount(t *testing.T) {
-	srv := newDraftsTestServer()
-	_, err := srv.resolveSlackCredentials(context.Background(), "usr_a")
-	if err == nil {
-		t.Fatal("expected error when no slack account")
-	}
-}
-
-func TestResolveSlackCredentials_NoBotToken(t *testing.T) {
-	srv := newDraftsTestServer()
-	ctx := context.Background()
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001",
-	})
-	// No workspace bot token stored — admin hasn't installed the app yet.
-
-	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
-	if err == nil {
-		t.Fatal("expected error when workspace bot token missing")
-	}
-}
-
-func TestResolveSlackCredentials_NoExternalUserID(t *testing.T) {
-	srv := newDraftsTestServer()
-	ctx := context.Background()
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalTeamID: "T001",
-		// No ExternalUserID
-	})
-
-	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
-	if err == nil {
-		t.Fatal("expected error when external user ID missing")
-	}
-}
-
-func TestResolveSlackCredentials_NoTeamID(t *testing.T) {
-	srv := newDraftsTestServer()
-	ctx := context.Background()
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123",
-		// No ExternalTeamID
-	})
-
-	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
-	if err == nil {
-		t.Fatal("expected error when team ID missing")
-	}
-}
-
-func TestResolveSlackCredentials_UsesSystemVault(t *testing.T) {
-	// Regression: bot token must come from systemVault, not vault (user vault).
-	// The install handler writes to systemVault; resolveSlackCredentials must read from there.
-	srv := newDraftsTestServer()
-	ctx := context.Background()
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001",
-	})
-
-	// Store bot token ONLY in systemVault, not in vault.
-	srv.systemVault = vault.NewMemVault()
-	srv.systemVault.Put(ctx, "slack-workspaces/T001/bot-token", []byte("xoxb-from-system"), vault.Metadata{
-		Type: "slack_bot_token",
-	})
-	// Ensure user vault does NOT have the bot token.
-	// (vault is already empty for this path)
-
-	creds, err := srv.resolveSlackCredentials(ctx, "usr_a")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if creds.BotToken != "xoxb-from-system" {
-		t.Errorf("expected bot token from systemVault, got %q", creds.BotToken)
-	}
-}
-
-func TestResolveSlackCredentials_NilSystemVault(t *testing.T) {
-	srv := newDraftsTestServer()
-	ctx := context.Background()
-	srv.connectedAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_a", Provider: model.ConnectedAccountProviderSlack,
-		Status: model.ConnectedAccountStatusActive, ExternalUserID: "U123", ExternalTeamID: "T001",
-	})
-	// systemVault is nil — should return an error, not panic.
-	srv.systemVault = nil
-
-	_, err := srv.resolveSlackCredentials(ctx, "usr_a")
-	if err == nil {
-		t.Fatal("expected error when systemVault is nil")
 	}
 }
 

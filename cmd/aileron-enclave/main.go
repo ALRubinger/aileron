@@ -24,7 +24,6 @@ import (
 	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
 	githubsource "github.com/ALRubinger/aileron/internal/source/github"
 	gmailsource "github.com/ALRubinger/aileron/internal/source/gmail"
-	slacksource "github.com/ALRubinger/aileron/internal/source/slack"
 )
 
 func main() {
@@ -65,7 +64,6 @@ func main() {
 	sourceReg := source.NewRegistry()
 	sourceReg.Register(gmailsource.New(googleClientID, googleClientSecret))
 	sourceReg.Register(calendarsource.New(googleClientID, googleClientSecret))
-	sourceReg.Register(slacksource.New())
 	sourceReg.Register(githubsource.New())
 
 	escrowKeyCfg, err := escrowKeyConfigFromEnv(provider)

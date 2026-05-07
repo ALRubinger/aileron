@@ -40,10 +40,9 @@ func ResolveVaultRef(ctx context.Context, v string, vlt vault.Vault) (string, er
 }
 
 // ListenerRegistry is a thread-safe map of active listeners keyed by
-// their service name (e.g. "slack", "discord"). The daemon's HTTP comms
-// handlers (`send_message`, `draft_reply`) consult it to dispatch to
-// the right backend after the user approves; `StartListeners` populates
-// it once the vault is unlocked.
+// their service name. The daemon's HTTP comms handlers (`send_message`,
+// `draft_reply`) consult it to dispatch to the right backend after
+// the user approves.
 //
 // Empty registry is a valid steady state — when the user has not
 // configured any listeners, send-shaped tools fail with 503 rather
@@ -95,7 +94,7 @@ func (r *ListenerRegistry) Services() []string {
 
 // CloseAll shuts down every registered listener and clears the
 // registry. Best-effort; per-listener errors are logged but do not
-// abort the loop so a hung Slack websocket can't block Discord teardown.
+// abort the loop so a hung listener can't block teardown.
 func (r *ListenerRegistry) CloseAll(log *slog.Logger) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -107,25 +106,19 @@ func (r *ListenerRegistry) CloseAll(log *slog.Logger) {
 	r.listeners = make(map[string]Listener)
 }
 
-// StartOptions bundles the inputs StartListeners needs. Extracted so
-// callers don't grow a long positional argument list as the
-// daemon-owned listener layer accretes responsibilities.
+// StartOptions bundles the inputs StartListeners needs. With no
+// channel implementations currently shipped (#525 removed the Slack
+// and Discord listeners), this is a placeholder for future channel
+// listeners; StartListeners is a no-op until one is wired in.
 type StartOptions struct {
-	// Notifications is the user-scoped Slack/Discord configuration.
-	// Nil or with no Slack/Discord block means "no listeners to
-	// start"; StartListeners returns immediately with an empty
-	// registry contribution.
+	// Notifications is the user-scoped channel configuration.
 	Notifications *config.NotifyConfig
 
-	// Vault holds the resolved tokens. Required when Notifications
-	// references vault paths (the production case); the constructor
-	// resolves each `vault:<name>` ref at startup.
+	// Vault holds resolved tokens for any future listener that needs them.
 	Vault vault.Vault
 
-	// Queue is where every incoming message lands. A bridge goroutine
-	// is spawned per started listener that funnels [IncomingMessage]
-	// into [Queue.Push] with the channel's auto-draft + priority
-	// flags applied.
+	// Queue is where any incoming message would land. Required when
+	// listeners are present.
 	Queue *NotifyQueue
 
 	// AuditStateDir is the directory under which `audit-YYYY-MM-DD.jsonl`
@@ -133,46 +126,25 @@ type StartOptions struct {
 	// message. Empty disables audit emission.
 	AuditStateDir string
 
-	// Log scopes per-listener structured log entries. Required.
+	// Log scopes per-listener structured log entries. Required when
+	// listeners are present.
 	Log *slog.Logger
 }
 
-// StartListeners resolves vault tokens, constructs the Slack and
-// Discord listeners that the user configured, connects them, and
-// spawns a bridge goroutine per listener that pushes inbound messages
-// into the [NotifyQueue]. Successful starts are written to the
-// supplied registry — the daemon's comms handlers consult the
-// registry to dispatch outbound `send_message` / `draft_reply` calls
-// after the user approves.
+// StartListeners constructs and starts the channel listeners the user
+// configured, registering each on the supplied registry. With no
+// channel implementations currently in tree this is a no-op.
 //
-// Best-effort: a single listener that fails to connect is logged and
-// skipped; the others still start. Return value is the count of
-// successfully-started listeners so the caller can log "0 of 2
-// listeners up" when the vault has stale tokens.
+// Returns the count of successfully-started listeners.
 func StartListeners(ctx context.Context, opts StartOptions, registry *ListenerRegistry) (int, error) {
-	if opts.Notifications == nil {
-		return 0, nil
-	}
-	if opts.Queue == nil {
-		return 0, fmt.Errorf("StartListeners requires a NotifyQueue")
-	}
-	if opts.Log == nil {
-		return 0, fmt.Errorf("StartListeners requires a logger")
-	}
-
-	created, autoDraft, priority, err := buildListeners(ctx, opts)
-	if err != nil {
-		return 0, err
-	}
-	return startBuiltListeners(ctx, created, autoDraft, priority, opts, registry), nil
+	_ = ctx
+	_ = opts
+	_ = registry
+	return 0, nil
 }
 
 // startBuiltListeners runs the connect / listen / bridge phase against
-// an already-constructed slice of listeners. Split out from
-// [StartListeners] so tests can drive it with fake [Listener]s
-// without going through the Slack / Discord constructors —
-// `buildListeners` returns concrete types that can't be swapped at
-// the call site.
+// a slice of listeners. Tests use this to drive fake [Listener]s.
 //
 // Best-effort: a single listener that fails Connect or Listen is
 // logged and skipped; the others still start. Returns the count of
@@ -195,70 +167,6 @@ func startBuiltListeners(ctx context.Context, listeners []Listener, autoDraft ma
 		go bridgeMessages(msgs, opts.Queue, autoDraft, priority, opts.AuditStateDir, opts.Log)
 	}
 	return started
-}
-
-// buildListeners constructs the concrete Slack/Discord listeners from
-// the user's notification config and returns the autoDraft + priority
-// channel maps the bridge goroutine reads.
-func buildListeners(ctx context.Context, opts StartOptions) ([]Listener, map[string]bool, map[string]string, error) {
-	autoDraft := make(map[string]bool)
-	priority := make(map[string]string)
-	var listeners []Listener
-
-	if cfg := opts.Notifications.Slack; cfg != nil && cfg.AppToken != "" && cfg.BotToken != "" {
-		appToken, err := ResolveVaultRef(ctx, cfg.AppToken, opts.Vault)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		botToken, err := ResolveVaultRef(ctx, cfg.BotToken, opts.Vault)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		var userToken string
-		if cfg.UserToken != "" {
-			userToken, err = ResolveVaultRef(ctx, cfg.UserToken, opts.Vault)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-		}
-		channels := make([]string, 0, len(cfg.Channels))
-		for _, ch := range cfg.Channels {
-			channels = append(channels, ch.Name)
-			if ch.AutoDraft {
-				autoDraft[ch.Name] = true
-			}
-			if ch.Priority != "" {
-				priority[ch.Name] = ch.Priority
-			}
-		}
-		opts.Log.Info("slack listener configured",
-			"channels", channels,
-			"ignore", cfg.Ignore,
-			"user_token", userToken != "",
-		)
-		listeners = append(listeners, NewSlackListener(appToken, botToken, userToken, channels, cfg.Ignore, opts.Log.With("component", "slack")))
-	}
-
-	if cfg := opts.Notifications.Discord; cfg != nil && cfg.BotToken != "" {
-		botToken, err := ResolveVaultRef(ctx, cfg.BotToken, opts.Vault)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		channels := make([]string, 0, len(cfg.Channels))
-		for _, ch := range cfg.Channels {
-			channels = append(channels, ch.Name)
-			if ch.Priority != "" {
-				priority[ch.Name] = ch.Priority
-			}
-		}
-		opts.Log.Info("discord listener configured",
-			"channels", channels,
-			"ignore", cfg.Ignore,
-		)
-		listeners = append(listeners, NewDiscordListener(botToken, channels, cfg.Ignore, opts.Log.With("component", "discord")))
-	}
-
-	return listeners, autoDraft, priority, nil
 }
 
 // bridgeMessages reads from a listener's IncomingMessage channel and
@@ -307,39 +215,10 @@ func bridgeMessages(msgs <-chan IncomingMessage, queue *NotifyQueue, autoDraft m
 }
 
 // ValidateNotificationTokens checks that every token in the
-// notifications block is either empty or a vault reference. Plaintext
-// tokens trip a fail-loud error so users don't accidentally commit
-// secrets in `~/.aileron/config.yaml`.
-//
-// Called at daemon startup so the failure surfaces in the daemon log
-// rather than mid-listener, and so `aileron status notifications` can
-// surface the problem alongside the rest of the config snapshot.
+// notifications block is either empty or a vault reference. With no
+// channel implementations in tree there are no token fields to
+// validate; the function is a no-op kept for call-site stability.
 func ValidateNotificationTokens(n *config.NotifyConfig) error {
-	if n == nil {
-		return nil
-	}
-	if cfg := n.Slack; cfg != nil {
-		if err := validateTokenRef("slack.app_token", cfg.AppToken); err != nil {
-			return err
-		}
-		if err := validateTokenRef("slack.bot_token", cfg.BotToken); err != nil {
-			return err
-		}
-		if err := validateTokenRef("slack.user_token", cfg.UserToken); err != nil {
-			return err
-		}
-	}
-	if cfg := n.Discord; cfg != nil {
-		if err := validateTokenRef("discord.bot_token", cfg.BotToken); err != nil {
-			return err
-		}
-	}
+	_ = n
 	return nil
-}
-
-func validateTokenRef(field, value string) error {
-	if value == "" || IsVaultRef(value) {
-		return nil
-	}
-	return fmt.Errorf("%s contains a plaintext token — use 'aileron secret set <name>' and reference it as 'vault:<name>' instead", field)
 }

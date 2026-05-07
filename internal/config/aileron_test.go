@@ -26,24 +26,6 @@ func TestLoadAileronConfig_FullRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	body := `notifications:
-  slack:
-    app_token: vault:slack-app
-    bot_token: vault:slack-bot
-    user_token: vault:slack-user
-    channels:
-      - name: "#engineering"
-        show: mentions
-        auto_draft: true
-        priority: high
-      - name: "#random"
-        show: none
-    ignore:
-      - bot-noise
-  discord:
-    bot_token: vault:discord-bot
-    channels:
-      - name: "12345"
-        auto_draft: false
   quiet_hours:
     start: "22:00"
     end: "06:00"
@@ -59,31 +41,6 @@ func TestLoadAileronConfig_FullRoundtrip(t *testing.T) {
 	}
 	if cfg.Notifications == nil {
 		t.Fatal("Notifications should be set")
-	}
-
-	slack := cfg.Notifications.Slack
-	if slack == nil {
-		t.Fatal("Slack should be set")
-	}
-	if slack.AppToken != "vault:slack-app" || slack.BotToken != "vault:slack-bot" || slack.UserToken != "vault:slack-user" {
-		t.Errorf("slack tokens: %+v", slack)
-	}
-	if len(slack.Channels) != 2 {
-		t.Fatalf("got %d slack channels, want 2", len(slack.Channels))
-	}
-	if slack.Channels[0].Name != "#engineering" || slack.Channels[0].Show != "mentions" || !slack.Channels[0].AutoDraft || slack.Channels[0].Priority != "high" {
-		t.Errorf("slack channel[0]: %+v", slack.Channels[0])
-	}
-	if len(slack.Ignore) != 1 || slack.Ignore[0] != "bot-noise" {
-		t.Errorf("slack ignore: %+v", slack.Ignore)
-	}
-
-	discord := cfg.Notifications.Discord
-	if discord == nil || discord.BotToken != "vault:discord-bot" {
-		t.Errorf("discord: %+v", discord)
-	}
-	if len(discord.Channels) != 1 || discord.Channels[0].Name != "12345" {
-		t.Errorf("discord channels: %+v", discord.Channels)
 	}
 
 	qh := cfg.Notifications.QuietHours

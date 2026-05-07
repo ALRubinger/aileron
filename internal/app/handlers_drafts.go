@@ -3,12 +3,10 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/ALRubinger/aileron/internal/account"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store"
@@ -133,7 +131,7 @@ func (s *apiServer) handleApproveDraft(w http.ResponseWriter, r *http.Request) {
 		return // error already written
 	}
 
-	if err := s.sendDraftMessage(r.Context(), draft.UserID, draft.Channel, draft.DraftBody, draft.MessageTS); err != nil {
+	if err := s.sendDraftMessage(r.Context(), draft.Service, draft.Channel, draft.DraftBody); err != nil {
 		s.log.Error("failed to send draft", "draft_id", draftID, "error", err)
 		writeError(w, http.StatusInternalServerError, "send_error", "failed to send message: "+err.Error())
 		return
@@ -170,7 +168,7 @@ func (s *apiServer) handleEditDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.sendDraftMessage(r.Context(), draft.UserID, draft.Channel, req.Body, draft.MessageTS); err != nil {
+	if err := s.sendDraftMessage(r.Context(), draft.Service, draft.Channel, req.Body); err != nil {
 		s.log.Error("failed to send edited draft", "draft_id", draftID, "error", err)
 		writeError(w, http.StatusInternalServerError, "send_error", "failed to send message: "+err.Error())
 		return
@@ -238,46 +236,19 @@ func (s *apiServer) getDraftForAction(w http.ResponseWriter, r *http.Request, dr
 	return draft, nil
 }
 
-// SlackSender is the function used to send messages to Slack.
-// Defaults to comms.SendSlackMessage. Override in tests.
-type SlackSender func(ctx context.Context, token, channel, body, threadTS string) error
-
-// sendDraftMessage sends a message to Slack using the user's connected account token.
-// When threadTS is non-empty the message is posted as a threaded reply.
-func (s *apiServer) sendDraftMessage(ctx context.Context, userID, channel, body, threadTS string) error {
-	slackProvider := model.ConnectedAccountProviderSlack
-	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
-		UserID:   userID,
-		Provider: &slackProvider,
-	})
-	if err != nil {
-		return err
+// sendDraftMessage dispatches an approved draft through the registered
+// listener for the draft's source service. With no listener registered
+// the call returns errNoListener — the right behavior when the daemon
+// has no channel implementation wired up.
+func (s *apiServer) sendDraftMessage(ctx context.Context, service, channel, body string) error {
+	if s.listeners == nil {
+		return errNoListener
 	}
-	if len(accounts) == 0 {
-		return errNoSlackAccount
+	listener, ok := s.listeners.Get(service)
+	if !ok {
+		return errNoListener
 	}
-
-	vlt := s.userVault(userID)
-	secret, err := vlt.Get(ctx, accounts[0].VaultPath())
-	if err != nil {
-		return err
-	}
-
-	var tokenData map[string]string
-	if err := json.Unmarshal(secret.Value, &tokenData); err != nil {
-		return err
-	}
-
-	token := tokenData["access_token"]
-	if token == "" {
-		return errNoSlackToken
-	}
-
-	sender := s.slackSender
-	if sender == nil {
-		sender = comms.SendSlackMessage
-	}
-	return sender(ctx, token, channel, body, threadTS)
+	return listener.Send(ctx, comms.OutgoingMessage{Channel: channel, Body: body})
 }
 
 // extractDraftID extracts the draft ID from /v1/drafts/{draft_id}
@@ -422,86 +393,7 @@ func (s *apiServer) handleListFeedback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": feedback})
 }
 
-// slackCredentials holds resolved Slack bot token and user ID for a user.
-type slackCredentials struct {
-	BotToken    string
-	SlackUserID string
-}
-
-// resolveWorkspaceBotToken looks up the workspace-level bot token from the
-// system vault for the given Slack team ID. This is installed once by a
-// workspace admin and shared across all users.
-func (s *apiServer) resolveWorkspaceBotToken(ctx context.Context, teamID string) (string, error) {
-	if s.systemVault == nil {
-		return "", fmt.Errorf("system vault not configured — cannot resolve bot token for workspace %s", teamID)
-	}
-	botSecret, err := s.systemVault.Get(ctx, account.SlackBotTokenVaultPath(teamID))
-	if err != nil {
-		return "", fmt.Errorf("no bot token for workspace %s — an admin must install the Slack app first", teamID)
-	}
-	botToken := string(botSecret.Value)
-	if botToken == "" {
-		return "", fmt.Errorf("empty bot token for workspace %s", teamID)
-	}
-	return botToken, nil
-}
-
-// resolveAileronUserBySlack looks up the Aileron user ID from a Slack user ID
-// and team ID. Returns the user ID and connected account, or an error if not found.
-func (s *apiServer) resolveAileronUserBySlack(ctx context.Context, slackUserID, teamID string) (string, error) {
-	slackProvider := model.ConnectedAccountProviderSlack
-	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
-		Provider:       &slackProvider,
-		ExternalTeamID: teamID,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to look up connected accounts: %w", err)
-	}
-	for _, acct := range accounts {
-		if acct.ExternalUserID == slackUserID {
-			return acct.UserID, nil
-		}
-	}
-	return "", fmt.Errorf("no Aileron user found for Slack user %s in team %s", slackUserID, teamID)
-}
-
-// resolveSlackCredentials looks up the user's connected Slack account and
-// retrieves the workspace bot token and the user's Slack user ID.
-// The bot token is stored at the workspace level (keyed by team_id),
-// not per-user — it is installed once by a workspace admin.
-func (s *apiServer) resolveSlackCredentials(ctx context.Context, userID string) (*slackCredentials, error) {
-	slackProvider := model.ConnectedAccountProviderSlack
-	accounts, err := s.connectedAccounts.List(ctx, store.ConnectedAccountFilter{
-		UserID:   userID,
-		Provider: &slackProvider,
-	})
-	if err != nil || len(accounts) == 0 {
-		return nil, fmt.Errorf("no slack account for user %s", userID)
-	}
-
-	acct := accounts[0]
-
-	slackUserID := acct.ExternalUserID
-	if slackUserID == "" {
-		return nil, fmt.Errorf("no slack user ID on connected account")
-	}
-
-	teamID := acct.ExternalTeamID
-	if teamID == "" {
-		return nil, fmt.Errorf("no team ID on connected account for user %s", userID)
-	}
-
-	botToken, err := s.resolveWorkspaceBotToken(ctx, teamID)
-	if err != nil {
-		return nil, err
-	}
-
-	return &slackCredentials{BotToken: botToken, SlackUserID: slackUserID}, nil
-}
-
-
 // createDraftFromMessage stores a generated draft as pending in the draft store.
-// Extracted from the onSlackMessage closure so it can be unit tested.
 func (s *apiServer) createDraftFromMessage(ctx context.Context, userID string, msg comms.IncomingMessage, draftText string) (model.Draft, error) {
 	now := time.Now().UTC()
 	d := model.Draft{
@@ -525,9 +417,8 @@ func (s *apiServer) createDraftFromMessage(ctx context.Context, userID string, m
 
 // Sentinel errors for draft handlers.
 var (
-	errBadRequest      = &store.ErrNotFound{Entity: "request", ID: "bad"}
-	errNotFound        = &store.ErrNotFound{Entity: "draft", ID: "not_found"}
-	errConflict        = &store.ErrNotFound{Entity: "draft", ID: "conflict"}
-	errNoSlackAccount  = &store.ErrNotFound{Entity: "slack_account", ID: "missing"}
-	errNoSlackToken    = &store.ErrNotFound{Entity: "slack_token", ID: "missing"}
+	errBadRequest = &store.ErrNotFound{Entity: "request", ID: "bad"}
+	errNotFound   = &store.ErrNotFound{Entity: "draft", ID: "not_found"}
+	errConflict   = &store.ErrNotFound{Entity: "draft", ID: "conflict"}
+	errNoListener = &store.ErrNotFound{Entity: "listener", ID: "missing"}
 )
