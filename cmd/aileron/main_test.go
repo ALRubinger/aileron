@@ -838,6 +838,9 @@ func TestRunSecret_ListEmpty(t *testing.T) {
 	if !strings.Contains(stdout.String(), "No secrets stored") {
 		t.Errorf("expected 'No secrets stored', got: %s", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "aileron secret set") {
+		t.Errorf("expected next-step hint mentioning `aileron secret set`, got: %s", stdout.String())
+	}
 }
 
 func TestRunSecret_ListWithSecrets(t *testing.T) {
@@ -891,8 +894,11 @@ func TestRunBinding_ListEmpty(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit code = %d; stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "No bindings.") {
+	if !strings.Contains(stdout.String(), "No bindings configured.") {
 		t.Errorf("output = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "aileron binding setup") {
+		t.Errorf("expected next-step hint mentioning `aileron binding setup`, got: %s", stdout.String())
 	}
 }
 
@@ -2261,6 +2267,9 @@ func TestRunConnectorCheck_Empty(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "No connectors installed") {
 		t.Errorf("expected 'No connectors installed' in output; got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "aileron connector install") {
+		t.Errorf("expected next-step hint mentioning `aileron connector install`, got: %s", stdout.String())
 	}
 }
 
