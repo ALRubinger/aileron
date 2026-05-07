@@ -124,6 +124,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runAudit(args[1:], stdout, stderr)
 	case "sessions":
 		return runSessions(args[1:], stdout, stderr)
+	case "vault":
+		return runVault(args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr)
 	case "stop":
@@ -147,6 +149,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron launch [--verbose] <agent>  Launch an agent with policy-enforced shell")
 	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
 	fmt.Fprintln(w, "  aileron policy save [flags]        Save user-approved commands as policy rules")
+	fmt.Fprintln(w, "  aileron vault init                 Create the local encrypted vault with a passphrase")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
 	fmt.Fprintln(w, "  aileron binding list               List credential bindings (metadata only — no unlock)")
@@ -441,11 +444,19 @@ func runSecret(args []string, stdout, stderr io.Writer) int {
 
 // runSecretSet stores a secret in the local vault.
 func runSecretSet(args []string, stdout, stderr io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintln(stderr, "usage: aileron secret set <name>")
+	flags := flag.NewFlagSet("secret set", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	passphraseFile := flags.String("passphrase-file", "",
+		"Read the vault passphrase from the named file instead of prompting (no trailing newline)")
+	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	name := args[0]
+	rest := flags.Args()
+	if len(rest) < 1 {
+		fmt.Fprintln(stderr, "usage: aileron secret set [--passphrase-file <path>] <name>")
+		return 1
+	}
+	name := rest[0]
 
 	// Check if this is a brand-new vault (no existing secrets).
 	vaultPath := launch.DefaultVaultPath()
@@ -455,29 +466,25 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if isNewVault {
-		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "  Creating a new Aileron vault.")
-		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "  The passphrase you choose protects all secrets in this vault.")
-		fmt.Fprintln(stderr, "  It is never stored, transmitted, or recoverable. No one can")
-		fmt.Fprintln(stderr, "  read it, tell you what it is, or help you retrieve it.")
-		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "  If you lose this passphrase, you must delete the vault file")
-		fmt.Fprintf(stderr, "  (%s) and re-add all secrets.\n", vaultPath)
-		fmt.Fprintln(stderr, "")
-		fmt.Fprintln(stderr, "  Store this passphrase securely. Do not share it.")
-		fmt.Fprintln(stderr, "")
+		printNewVaultBanner(stderr, vaultPath)
 	}
 
-	passphrase, err := promptPassphrase("Vault passphrase: ", stderr)
+	passphrase, source, err := readVaultPassphrase(*passphraseFile, "Vault passphrase: ", stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	if passphrase == "" {
+		fmt.Fprintln(stderr, "error: passphrase cannot be empty")
+		return 1
+	}
 
-	// For a new vault, require confirmation.
-	if isNewVault {
-		confirm, err := promptPassphrase("Confirm passphrase: ", stderr)
+	// For a new vault, require confirmation. Confirmation only fires
+	// for interactive entry — file/env sources are taken at face
+	// value (re-reading the same file/env var would just confirm
+	// itself).
+	if isNewVault && source == passphraseSourceInteractive {
+		confirm, _, err := readVaultPassphrase("", "Confirm passphrase: ", stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
