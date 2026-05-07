@@ -30,6 +30,8 @@ Everything lives at **[docs.withaileron.ai](https://docs.withaileron.ai)**:
 
 ## Development
 
+Build prerequisites: Go 1.25+, [Task](https://taskfile.dev/installation/), Node.js 24+, and pnpm 11.0.8 (within the 11.x line). See the [Getting Started guide](https://docs.withaileron.ai/getting-started/) for the full toolchain walkthrough.
+
 ```sh
 task build              # build everything (binaries + webapp + docs)
 task build:webapp       # just the local webapp; refreshes internal/app/webapp_dist
