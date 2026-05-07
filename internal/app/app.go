@@ -23,10 +23,6 @@ import (
 	googleauth "github.com/ALRubinger/aileron/internal/auth/google"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/connector"
-	googlecalendar "github.com/ALRubinger/aileron/internal/connector/calendar/google"
-	gmailconnector "github.com/ALRubinger/aileron/internal/connector/email/gmail"
-	"github.com/ALRubinger/aileron/internal/connector/git/github"
-	"github.com/ALRubinger/aileron/internal/connector/payments/stripe"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/comms"
@@ -236,13 +232,13 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	llmConfigStore := mem.NewLLMConfigStore()
 
 	// --- Connector registry ---
+	// Per ADR-0002, the runtime ships only the registry — service-specific
+	// connectors (Gmail, Slack, Stripe, GitHub, ...) live in sandboxed
+	// binaries installed at FQNs like `github://aileron/slack` and reach
+	// the registry via `aileron action add`. The registry stays empty at
+	// process start; entries are registered as connectors are installed
+	// and loaded by the cstore install pipeline.
 	registry := connector.NewRegistry()
-	registry.Register(ctx, stripe.New())
-	// Google Calendar connector — OAuth client credentials are loaded later
-	// from auth config. Empty strings here mean token refresh won't work
-	// until registerProviders re-registers with real credentials.
-	registry.Register(ctx, googlecalendar.New("", ""))
-	registry.Register(ctx, github.New())
 
 	// --- Vault ---
 	// When the caller (typically `aileron launch`) supplied a
@@ -662,7 +658,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		authRegistry := auth.NewRegistry()
 		accountRegistry := account.NewRegistry()
 
-		registerProviders(authCfg, authRegistry, accountRegistry, sourceReg, registry, pgConnectedAccountStore, v, log)
+		registerProviders(authCfg, authRegistry, accountRegistry, sourceReg, pgConnectedAccountStore, v, log)
 
 		if len(accountRegistry.Providers()) > 0 {
 			server.accountService = accountRegistry
@@ -804,7 +800,6 @@ func registerProviders(
 	authReg *auth.Registry,
 	accountReg *account.Registry,
 	sourceReg *source.Registry,
-	connectorRegistry *connector.Registry,
 	accounts store.ConnectedAccountStore,
 	v vault.Vault,
 	log *slog.Logger,
@@ -826,10 +821,7 @@ func registerProviders(
 		))
 		sourceReg.Register(gmailsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
 		sourceReg.Register(calendarsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
-		// Re-register execution connectors with OAuth credentials for token refresh.
-		connectorRegistry.Register(context.Background(), googlecalendar.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
-		connectorRegistry.Register(context.Background(), gmailconnector.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
-		log.Info("enabled Google connected accounts, source connectors, and execution connectors (Gmail, Calendar)")
+		log.Info("enabled Google connected accounts and source connectors (Gmail, Calendar)")
 	}
 
 	if cfg.SlackEnabled() {
