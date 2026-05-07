@@ -299,9 +299,18 @@ func defaultStateDir() (string, error) {
 // and bindings disappeared on every restart while /v1/vault/unlock was
 // effectively dead code in production.
 //
+// Cloud-shaped daemons (AILERON_DATABASE_URL set) bypass this entire
+// branch — they store credentials in PostgreSQL via vault.PostgresVault,
+// which [app.NewHandlerWithConfig] wires later. The local file vault
+// is local-daemon-only, so a missing file there is benign.
+//
 // `prompter` is forwarded to [launch.EnsureVault] for the interactive
 // path; nil means use the package default which reads from `/dev/tty`.
 func selectVault(log *slog.Logger, vaultPath string, isTTY bool, prompter launch.PassphrasePrompter, w io.Writer) (app.Config, error) {
+	if os.Getenv("AILERON_DATABASE_URL") != "" {
+		log.Info("cloud-shaped daemon: skipping local vault (postgres-backed)")
+		return app.Config{}, nil
+	}
 	state, err := vault.CheckState(vaultPath)
 	if err != nil {
 		// Tamper / corruption: fail-loud. Continuing with a memory vault

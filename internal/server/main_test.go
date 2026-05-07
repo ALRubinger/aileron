@@ -17,11 +17,34 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
+// TestSelectVault_CloudShapedBypassesLocalCheck is the regression test
+// for the integration-suite failure on PR #503: cloud daemons (set
+// AILERON_DATABASE_URL) never have a local vault file, so the
+// "vault file required" hard error from #492 item 6a must skip them.
+// The postgres-backed vault wires up later inside
+// [app.NewHandlerWithConfig]; this branch just ensures selectVault
+// doesn't refuse to start the daemon before we get there.
+func TestSelectVault_CloudShapedBypassesLocalCheck(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "postgres://test")
+	dir := t.TempDir()
+	cfg, err := selectVault(slog.Default(), filepath.Join(dir, "secrets.json"), false, refusePrompter(t), io.Discard)
+	if err != nil {
+		t.Fatalf("selectVault: %v", err)
+	}
+	if cfg.Vault != nil {
+		t.Errorf("cfg.Vault = %v, want nil for cloud path", cfg.Vault)
+	}
+	if cfg.LocalVaultPath != "" {
+		t.Errorf("cfg.LocalVaultPath = %q, want empty for cloud path", cfg.LocalVaultPath)
+	}
+}
+
 // TestSelectVault_NoFileIsHardError covers #492 item 6a: with the dev
 // fallback removed, a missing vault file is no longer silently OK.
 // selectVault must return an error pointing the operator at
 // `aileron vault init` so we never silently lose data.
 func TestSelectVault_NoFileIsHardError(t *testing.T) {
+	t.Setenv("AILERON_DATABASE_URL", "")
 	dir := t.TempDir()
 	_, err := selectVault(slog.Default(), filepath.Join(dir, "secrets.json"), true, refusePrompter(t), io.Discard)
 	if err == nil {

@@ -234,12 +234,17 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	registry := connector.NewRegistry()
 
 	// --- Vault ---
-	// Callers MUST supply either Vault (pre-unlocked) or LocalVaultPath
-	// (deferred unlock via /v1/vault/unlock) — see [Config.Vault] and
-	// [Config.LocalVaultPath]. Per #492 item 6a the implicit dev-mode
-	// in-memory vault was removed: it silently dropped credentials at
-	// every restart, and made /v1/vault/unlock dead code in production
-	// (no inner vault to swap in via [vault.LockableVault]).
+	// Local daemons MUST supply either Vault (pre-unlocked) or
+	// LocalVaultPath (deferred unlock via /v1/vault/unlock) — see
+	// [Config.Vault] and [Config.LocalVaultPath]. Per #492 item 6a the
+	// implicit dev-mode in-memory vault was removed: it silently dropped
+	// credentials at every restart, and made /v1/vault/unlock dead code
+	// in production (no inner vault to swap in via [vault.LockableVault]).
+	//
+	// Cloud-shaped daemons (AILERON_DATABASE_URL set) leave both fields
+	// empty; the postgres vault wires up further down (search for
+	// vault.NewPostgresVault). The check here just refuses to start a
+	// local daemon without a vault — cloud is unaffected.
 	//
 	// Tests that previously got the dev fallback by passing Config{}
 	// should construct an explicit [vault.NewMemVault] (wrap in
@@ -256,7 +261,17 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		}
 		v = lockableVault
 	} else if v == nil {
-		return nil, fmt.Errorf("app: no vault configured: set Config.Vault or Config.LocalVaultPath")
+		if os.Getenv("AILERON_DATABASE_URL") == "" {
+			return nil, fmt.Errorf("app: no vault configured: set Config.Vault or Config.LocalVaultPath")
+		}
+		// Cloud-shaped daemon: the postgres-backed vault is wired
+		// further down (search vault.NewPostgresVault). The
+		// placeholder MemVault here keeps early consumers (bindingStore
+		// construction, GITHUB_TOKEN seed) from deref'ing nil. Matches
+		// pre-#492 cloud behavior, where the dev-fallback memory vault
+		// was likewise transiently held by those consumers before the
+		// postgres reassignment overwrote `v`.
+		v = vault.NewMemVault()
 	}
 	if token := os.Getenv("GITHUB_TOKEN"); token != "" && !startVaultLocked {
 		v.Put(ctx, "connectors/github/default", []byte(token), vault.Metadata{
