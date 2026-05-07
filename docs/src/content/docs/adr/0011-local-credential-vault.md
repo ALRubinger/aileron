@@ -110,39 +110,59 @@ Notable:
 - **Metadata is unencrypted.** The kind, scope, and identity of a binding are plaintext (so Aileron can list them via `aileron binding list` without a passphrase). The credential value is the only encrypted field.
 - **JSON for the file format.** Per [ADR-0001](/adr/0001-manifest-format), JSON is the right choice for runtime-internal state (machine-authored, machine-read, never edited by hand).
 
-### Passphrase prompt at runtime startup
+### Passphrase prompt — CLI-driven four-state machine
 
-When the Aileron runtime starts and detects an existing vault file (a passphrase is already set), it prompts the user via the CLI for their passphrase before serving any chat completion requests:
+Under [ADR-0012](/adr/0012-local-daemon-architecture)'s local daemon model, the daemon is fork-exec'd by the CLI without a controlling TTY (`stdin = nil`, stdout/stderr redirected to a log file). The daemon cannot prompt the user. The CLI does, before issuing any request that would land against a locked vault.
+
+The CLI evaluates a four-state state machine before dispatching any vault-relevant command. The states cover the cross-product of *daemon running?* and *vault file present? unlocked?*:
+
+| Daemon | Vault file | Vault unlocked? | CLI behavior |
+| --- | --- | --- | --- |
+| running | exists | yes | pass-through, no prompt |
+| running | exists | no | prompt for passphrase, POST `/v1/vault/unlock` |
+| stopped | exists | n/a | prompt for passphrase, auto-spawn daemon, POST `/v1/vault/unlock` |
+| stopped | missing | n/a | prompt for new passphrase + confirmation, write vault file, auto-spawn daemon, POST `/v1/vault/unlock` |
+
+User mental model: "if you have a vault, you'll be asked for the passphrase once per daemon lifetime; if you don't, you'll be asked to create one when you first need it." Matches `gpg-agent`, `ssh-agent`, and password-manager unlock flows.
+
+The first-run case prints a banner before the prompt:
 
 ```
-$ aileron launch
-Vault is encrypted. Enter passphrase to unlock:
-> ********
+$ aileron binding setup github://aileron/slack
 
-✓ Vault unlocked. Listening on http://localhost:8721/v1
+  Creating a new Aileron vault.
+
+  The passphrase you choose protects all secrets in this vault.
+  It is never stored, transmitted, or recoverable. No one can
+  read it, tell you what it is, or help you retrieve it.
+
+  If you lose this passphrase, you must delete the vault file
+  (/home/alice/.aileron/secrets.json) and re-add all secrets.
+
+  Store this passphrase securely. Do not share it.
+
+Vault passphrase: ********
+Confirm passphrase: ********
 ```
 
-The prompt uses the v1 user-channel surface (CLI per [ADR-0009](/adr/0009-user-channel)). After unlock:
+After the file is written, the CLI fork-execs the daemon (which starts vault-locked under `selectVault`'s no-TTY path), then drives `/v1/vault/unlock` so the daemon's `vault.LockableVault` swaps the unlocked inner vault into place. Subsequent CLI commands hit the running-and-unlocked branch and pass through with no prompt.
 
-- The KEK is held in memory by the runtime process.
-- Subsequent chat completions and action invocations resolve credential bindings against the unlocked vault transparently.
+After unlock:
+
+- The KEK is held in memory by the daemon process for its lifetime.
+- Subsequent action invocations resolve credential bindings against the unlocked vault transparently.
 - The KEK is **never written to disk**, never logged, never sent over the network, never visible in audit records (audit records contain binding identities, not credential bytes).
+- `aileron daemon stop` exits the daemon process; the next CLI command hits the daemon-stopped branch and re-prompts.
 
-If the user's first interaction with Aileron creates the vault (no existing file), a one-time setup flow runs:
+A bypass allowlist short-circuits the state machine for commands that don't talk to the daemon (or don't need an unlocked vault to do their job): `version`, `help`, `init`, `log`, `vault init`, `secret set`, `secret list`, `daemon status/stop/start`, `policy test/save`, and `stop`. Those run without prompting.
 
-```
-$ aileron launch
-No vault detected. Create one now? [Y/n] Y
-Choose a passphrase to protect your credentials:
-> ********
-Confirm passphrase:
-> ********
+The daemon refuses to start if no vault file exists at the canonical path; there is no in-memory dev fallback. The state machine creates the file on first run, so the only way to hit this error is to run `aileron daemon start` directly without first running `aileron vault init`. (For ephemeral CI / smoke-test scenarios that genuinely don't need a vault, a future `--no-vault` flag with explicit "actions cannot bind credentials" semantics may exist; not in MVP.)
 
-✓ Vault created at ~/.aileron/secrets.json
-✓ Listening on http://localhost:8721/v1
-```
+#### Non-interactive sources
 
-The runtime refuses to start if the user declines to create a vault; there is no plaintext fallback. (For ephemeral CI / smoke-test scenarios that genuinely don't need a vault, a future `--no-vault` flag with explicit "actions cannot bind credentials" semantics may exist; not in MVP.)
+The state machine reads from `AILERON_VAULT_PASSPHRASE` and `--passphrase-file <path>` before falling back to the interactive `/dev/tty` prompt. CI pipelines and scripts pass the passphrase through one of these so they never block on input. Non-interactive sources also skip the confirmation step on first run — re-reading the same source would just confirm itself.
+
+A wrong passphrase from interactive entry triggers a single retry; non-interactive sources fail immediately on `401`, since the source isn't going to change between attempts.
 
 ### KEK session lifetime: while the runtime is running
 
@@ -179,8 +199,12 @@ The cryptographic primitives and all three stages of the broader design are alre
 - `internal/crypto/envelope.go` — AES-256-GCM envelope encryption
 - `internal/vault/encrypted.go` — `EncryptedVault` decorator that wraps any vault implementation
 - `internal/vault/file.go` — JSON file-backed vault at `~/.aileron/secrets.json`
+- `internal/vault/lockable.go` — `LockableVault` wrapper. The daemon starts with an empty `LockableVault`; `/v1/vault/unlock` swaps the unlocked inner vault into it once the CLI drives the unlock.
+- `internal/server/main.go::selectVault` — chooses between interactive-unlock-at-startup (operator-typed `aileron daemon start`) and start-vault-locked (CLI auto-spawn case). Refuses to start when the vault file is missing.
+- `cmd/aileron/vault.go` — `aileron vault init` and the `readVaultPassphrase` helper that resolves passphrases from `AILERON_VAULT_PASSPHRASE` / `--passphrase-file` / interactive in that order.
+- `cmd/aileron/vault_state.go` — the four-state CLI flow (`ensureVaultUnlocked`, `bypassesVault`, `postVaultUnlock`).
 - `internal/auth/kek_session.go` — KEK session cache (used in cloud mode; v1 uses runtime-lifetime memory holding directly)
-- Test coverage: `kek_test.go`, `envelope_test.go`, `encrypted_test.go`, `file_test.go`, `kek_session_test.go`
+- Test coverage: `kek_test.go`, `envelope_test.go`, `encrypted_test.go`, `file_test.go`, `lockable_test.go`, `kek_session_test.go`, `vault_state_test.go`, plus the production-shape integration test in `internal/server/main_test.go::TestRun_NoTTYDaemonHonorsVaultUnlock`.
 
 **Stage 2 — TEE-backed vault (post-MVP, security review in progress):**
 

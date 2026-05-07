@@ -61,7 +61,31 @@ aileron daemon stop     # SIGTERM, drops the unlocked vault key from memory
 aileron stop            # alias for `aileron daemon stop`
 ```
 
-On first launch you will be prompted to create a vault and choose a passphrase. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106); see [The Vault](/concepts/the-vault/) for what it protects you from. The vault file lives at `~/.aileron/secrets.json`. **You unlock the vault once per daemon lifetime** — every subsequent CLI command and every `aileron launch` reuses the unlocked state until you `aileron stop` or reboot.
+### Vault first-run
+
+On the first CLI command that needs the vault (e.g. `aileron binding setup` or any of the daemon-talking subcommands below), Aileron walks you through creating one:
+
+```
+$ aileron binding setup github://aileron/slack
+
+  Creating a new Aileron vault.
+
+  The passphrase you choose protects all secrets in this vault.
+  It is never stored, transmitted, or recoverable. No one can
+  read it, tell you what it is, or help you retrieve it.
+
+  If you lose this passphrase, you must delete the vault file
+  (~/.aileron/secrets.json) and re-add all secrets.
+
+  Store this passphrase securely. Do not share it.
+
+Vault passphrase: ********
+Confirm passphrase: ********
+```
+
+The CLI then writes the vault file, auto-spawns the daemon, and unlocks it for you in one step. **You unlock the vault once per daemon lifetime** — every subsequent CLI command and every `aileron launch` reuses the unlocked state until you `aileron stop` or reboot. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106); see [The Vault](/concepts/the-vault/) for what it protects you from. The file lives at `~/.aileron/secrets.json`.
+
+If you'd rather create the vault deliberately before doing anything else (e.g. while writing a setup script), `aileron vault init` runs the same flow as a standalone command. For non-interactive contexts, set `AILERON_VAULT_PASSPHRASE` or pass `--passphrase-file <path>`; both are honored at every prompt point so CI pipelines never block on input. See [ADR-0011](/adr/0011-local-credential-vault) for the full state machine and prompt rules.
 
 ## 3. Trust the connector's publisher key
 
