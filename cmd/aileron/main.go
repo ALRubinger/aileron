@@ -586,21 +586,22 @@ const bindingUsage = `usage:
 // resulting URL is cached for the lifetime of the CLI process so
 // repeat callers don't reprobe.
 //
-// On spawn failure (binary missing, daemon refuses to start) the
-// historical default `http://localhost:8721/v1` is returned so the
-// caller fails with the familiar "connection refused" rather than a
-// malformed URL. The error is logged to stderr so the operator sees
-// the real cause.
-func bindingAPIBaseURL() string {
+// Returns the spawn error verbatim on failure. Earlier versions
+// returned a hardcoded `http://localhost:8721/v1` fallback so the
+// caller would fail with "connection refused" — but the legacy port
+// has no meaning under ADR-0012 (the daemon binds an ephemeral port
+// advertised in `~/.aileron/daemon.json`), and the doomed dial
+// produced a misleading second error line that obscured the real
+// spawn failure. Callers now surface the spawn error directly.
+//
+// Declared as a `var` rather than `func` so tests can drive the
+// error-propagation path through every caller without going through
+// the spawn cache + daemon binary lookup.
+var bindingAPIBaseURL = func() (string, error) {
 	if u := os.Getenv("AILERON_API_URL"); u != "" {
-		return strings.TrimRight(u, "/")
+		return strings.TrimRight(u, "/"), nil
 	}
-	url, err := spawnResolveCached()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "aileron: could not resolve daemon URL: %v\n", err)
-		return "http://localhost:8721/v1"
-	}
-	return url
+	return spawnResolveCached()
 }
 
 var (
@@ -680,7 +681,11 @@ func daemonBinaryPath() (string, error) {
 // bindingDoRequest issues an HTTP request to the server and returns
 // the parsed body. Status codes are surfaced to callers.
 func bindingDoRequest(method, path string, body io.Reader) (int, []byte, error) {
-	req, err := http.NewRequest(method, bindingAPIBaseURL()+path, body)
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequest(method, base+path, body)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1175,8 +1180,12 @@ type runtimeStatus struct {
 // running — the CLI prints a "(daemon not reachable)" hint and moves
 // on rather than blocking the operator.
 func fetchRuntimeStatus() (*runtimeStatus, error) {
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, bindingAPIBaseURL()+"/status", nil)
+	req, err := http.NewRequest(http.MethodGet, base+"/status", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1200,8 +1209,8 @@ func showStatusRuntime(w io.Writer) {
 
 	rs, err := runtimeStatusFetcher()
 	if err != nil {
-		fmt.Fprintf(w, "  Daemon:            (not reachable at %s)\n", bindingAPIBaseURL())
-		fmt.Fprintln(w, "  Hint:              start the daemon with 'aileron launch <agent>' or 'aileron serve'.")
+		fmt.Fprintf(w, "  Daemon:            (not reachable: %v)\n", err)
+		fmt.Fprintln(w, "  Hint:              start the daemon with 'aileron daemon start' or run any 'aileron' command (auto-spawns).")
 		return
 	}
 
@@ -1457,8 +1466,12 @@ func fetchConnectorCheck(includePrerelease bool) (*connectorsCheckResponse, erro
 	if includePrerelease {
 		path += "?include_prerelease=true"
 	}
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, bindingAPIBaseURL()+path, nil)
+	req, err := http.NewRequest(http.MethodGet, base+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1592,9 +1605,13 @@ type unboundCapabilityWire struct {
 var syncFetcher = postSyncRequest
 
 func postSyncRequest(autoInstall bool) (*syncResult, error) {
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		return nil, err
+	}
 	body, _ := json.Marshal(map[string]any{"auto_install": autoInstall})
 	client := &http.Client{Timeout: 5 * time.Minute}
-	req, err := http.NewRequest(http.MethodPost, bindingAPIBaseURL()+"/sync",
+	req, err := http.NewRequest(http.MethodPost, base+"/sync",
 		strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
@@ -2291,7 +2308,11 @@ type auditListQuery struct {
 }
 
 func fetchAuditList(q auditListQuery) (*auditListWire, error) {
-	u, err := url.Parse(bindingAPIBaseURL() + "/audit")
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(base + "/audit")
 	if err != nil {
 		return nil, err
 	}
@@ -2330,8 +2351,12 @@ func fetchAuditList(q auditListQuery) (*auditListWire, error) {
 }
 
 func fetchAuditGet(auditID string) (*auditEventWire, int, error) {
+	base, err := bindingAPIBaseURL()
+	if err != nil {
+		return nil, 0, err
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(bindingAPIBaseURL() + "/audit/" + url.PathEscape(auditID))
+	resp, err := client.Get(base + "/audit/" + url.PathEscape(auditID))
 	if err != nil {
 		return nil, 0, err
 	}
