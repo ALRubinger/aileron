@@ -1038,6 +1038,21 @@ func TestRunBinding_ListJSON_NDJSON(t *testing.T) {
 	}
 }
 
+// TestRunBinding_UsageAdvertisesJSON: bindingUsage gained `[--json]`
+// in #492 item 2; the user-discovery path is `aileron binding` with no
+// subcommand, which prints the usage to stderr. Pins the contract that
+// the flag is documented in that surface.
+func TestRunBinding_UsageAdvertisesJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for no subcommand")
+	}
+	if !strings.Contains(stderr.String(), "--json") {
+		t.Errorf("usage missing `--json`:\n%s", stderr.String())
+	}
+}
+
 func TestRunBinding_ListShowsTable(t *testing.T) {
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -2455,6 +2470,21 @@ func TestRunConnectorCheck_JSON_NDJSON(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &r); err != nil {
 			t.Errorf("line %q is not JSON: %v", line, err)
 		}
+	}
+}
+
+// TestRunConnector_UsageAdvertisesJSON: connectorUsage gained `[--json]`
+// for `connector check` in #492 item 2. Pins that the flag is
+// documented in the surface a user reaches via `aileron connector`
+// with no subcommand.
+func TestRunConnector_UsageAdvertisesJSON(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"connector"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for no subcommand")
+	}
+	if !strings.Contains(stderr.String(), "--json") {
+		t.Errorf("usage missing `--json`:\n%s", stderr.String())
 	}
 }
 

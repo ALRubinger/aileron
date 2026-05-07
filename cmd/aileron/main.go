@@ -523,7 +523,7 @@ func runSecretSet(args []string, stdout, stderr io.Writer) int {
 func runSecretList(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("secret list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	asJSON := flags.Bool("json", false, "Render names as a JSON array")
+	asJSON := flags.Bool("json", false, "Render names as NDJSON, one name per line")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
