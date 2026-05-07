@@ -623,6 +623,40 @@ func TestEnsureVaultUnlocked_StoppedMissing_InteractiveDriveSpawnAndUnlock(t *te
 	}
 }
 
+// TestEnsureVaultUnlocked_StoppedMissing_TolerateErrVaultExists pins
+// the concurrent first-run contract from #454 Test 6: multiple CLI
+// processes sharing AILERON_VAULT_PASSPHRASE may race on vault.Init,
+// and only one wins. The losers see the file already created and must
+// fall through to the spawn + unlock steps rather than aborting with
+// "creating vault: vault: already exists". The unlock POST is what
+// validates the passphrase end-to-end — a wrong passphrase still
+// surfaces as a 401, but a correct passphrase succeeds even though
+// vault.Init failed.
+func TestEnsureVaultUnlocked_StoppedMissing_TolerateErrVaultExists(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	t.Setenv(envVaultPassphrase, "shared-pass")
+
+	spawnFired, unlockFired := false, false
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead:   func(string) (discovery.Info, error) { return discovery.Info{}, discovery.ErrNotRunning },
+		vaultCheckState: func(string) (vault.State, error) { return vault.StateMissing, nil },
+		vaultInit: func(string, string) (vault.Vault, error) {
+			// Simulate a racing CLI having already created the vault
+			// between our CheckState and our Init call.
+			return nil, vault.ErrVaultExists
+		},
+		spawnResolve: func() (string, error) { spawnFired = true; return "http://x/v1", nil },
+		postUnlock:   func(string, string) error { unlockFired = true; return nil },
+	})
+
+	if err := ensureVaultUnlocked("", io.Discard); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v (ErrVaultExists must be tolerated)", err)
+	}
+	if !spawnFired || !unlockFired {
+		t.Errorf("spawn and unlock must still fire after ErrVaultExists; spawn=%v, unlock=%v", spawnFired, unlockFired)
+	}
+}
+
 // First-run + vault.Init failure: error wrapped, no spawn.
 func TestEnsureVaultUnlocked_StoppedMissing_VaultInitFailurePropagates(t *testing.T) {
 	scopeHomeAndAPIURL(t)
