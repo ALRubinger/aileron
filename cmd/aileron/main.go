@@ -53,7 +53,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		// Parse aileron-level flags before the agent name.
 		launchFlags := flag.NewFlagSet("launch", flag.ContinueOnError)
 		launchFlags.SetOutput(stderr)
-		logLevel := launchFlags.String("log-level", "warn", "Log level: trace, debug, info, warn, error")
+		logLevel := launchFlags.String("log-level", "info", "Log level: trace, debug, info, warn, error")
 		if err := launchFlags.Parse(args[1:]); err != nil {
 			return 1
 		}
