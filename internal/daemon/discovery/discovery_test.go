@@ -340,16 +340,28 @@ func TestWriteFailsWhenStateDirIsFile(t *testing.T) {
 // TestLockFileInode_StableThenChangesAfterUnlinkRecreate pins the
 // contract LockFileInode exposes to the daemon's inode-watch loop
 // (#528 finding 3b): repeated calls return the same inode while the
-// file is undisturbed; an unlink + recreate at the same path returns
-// a different inode (the failure mode the watcher detects).
+// file is undisturbed; an unlink + recreate at the same path while the
+// original lock fd is still held returns a different inode (the
+// failure mode the watcher detects).
+//
+// The fd-still-held detail matters: if the original fd is closed
+// before re-acquiring, Linux ext4 may reuse the now-free inode for
+// the new file, producing a false-negative inode comparison. The
+// real-world bug scenario keeps the original daemon's fd open
+// throughout (the daemon is still running), pinning the inode's
+// refcount > 0 so the kernel must allocate a fresh inode for the
+// fresh file. This test mirrors that — release1 fires only at
+// cleanup, after the second Lock has captured a comparison inode.
 func TestLockFileInode_StableThenChangesAfterUnlinkRecreate(t *testing.T) {
 	dir := t.TempDir()
 
-	// Acquire a lock so daemon.lock exists with a stable inode.
-	release, err := discovery.Lock(context.Background(), dir)
+	// Acquire a lock so daemon.lock exists. The fd is held until test
+	// cleanup — mimicking the original (still-running) daemon.
+	release1, err := discovery.Lock(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
+	t.Cleanup(func() { _ = release1() })
 
 	first, err := discovery.LockFileInode(dir)
 	if err != nil {
@@ -368,36 +380,34 @@ func TestLockFileInode_StableThenChangesAfterUnlinkRecreate(t *testing.T) {
 		t.Errorf("inode changed between calls: %d → %d", first, second)
 	}
 
-	// Release our flock and remove the lock file. (The release closes
-	// the fd; the held inode is freed once removed.)
-	if err := release(); err != nil {
-		t.Fatalf("release: %v", err)
-	}
+	// External `rm -rf ~/.aileron`: unlink the lock file. Original
+	// fd still holds flock on the orphaned inode (refcount > 0), so
+	// the kernel cannot reuse that inode for whatever lands here next.
 	if err := os.Remove(filepath.Join(dir, discovery.LockFile)); err != nil {
 		t.Fatalf("remove lock file: %v", err)
 	}
 
-	// File missing → error wrapping os.ErrNotExist.
+	// Path missing → LockFileInode wraps os.ErrNotExist.
 	if _, err := discovery.LockFileInode(dir); err == nil || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("LockFileInode after remove: err = %v, want wrapped os.ErrNotExist", err)
 	}
 
-	// Acquire a fresh lock (creates daemon.lock anew) and verify the
-	// inode has changed. This is the empirical underpinning of finding
-	// 3b: a fresh inode at the same path is the signal a parallel
-	// daemon now owns the lock.
+	// A "fresh daemon" comes up at the same path. discovery.Lock
+	// creates daemon.lock anew and flock's its fd — the original fd
+	// is on a different inode, so flock(LOCK_EX|LOCK_NB) succeeds
+	// without contention.
 	release2, err := discovery.Lock(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("Lock (re-acquire): %v", err)
+		t.Fatalf("Lock (re-acquire while original fd still held): %v", err)
 	}
-	defer release2()
+	t.Cleanup(func() { _ = release2() })
 
 	third, err := discovery.LockFileInode(dir)
 	if err != nil {
 		t.Fatalf("LockFileInode (post-recreate): %v", err)
 	}
 	if third == first {
-		t.Errorf("inode unchanged after unlink+recreate (got %d both times); the watcher cannot detect 3b", third)
+		t.Errorf("inode unchanged after held-unlink-recreate (got %d both times); the watcher cannot detect 3b on this filesystem", third)
 	}
 }
 
