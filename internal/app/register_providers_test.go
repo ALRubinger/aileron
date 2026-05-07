@@ -176,33 +176,6 @@ func TestRegisterProviders_NoneConfigured(t *testing.T) {
 	}
 }
 
-func TestRegisterProviders_SlackConnector(t *testing.T) {
-	cfg := &config.AuthConfig{
-		SlackClientID:      "slack-id",
-		SlackClientSecret:  "slack-secret",
-		SlackSigningSecret: "slack-signing",
-	}
-	authReg := auth.NewRegistry()
-	accountReg := account.NewRegistry()
-	sourceReg := source.NewRegistry()
-
-	registerProviders(cfg, authReg, accountReg, sourceReg, mem.NewConnectedAccountStore(), vault.NewMemVault(), slog.Default())
-
-	providers := accountReg.Providers()
-	found := false
-	for _, p := range providers {
-		if p == "slack" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected slack in account providers, got %v", providers)
-	}
-	if _, ok := sourceReg.Get("slack"); !ok {
-		t.Error("expected slack source connector")
-	}
-}
-
 func TestRegisterProviders_AllProviders(t *testing.T) {
 	cfg := &config.AuthConfig{
 		GoogleSigninClientID:        "gs-id",
@@ -213,9 +186,6 @@ func TestRegisterProviders_AllProviders(t *testing.T) {
 		GitHubSigninClientSecret:    "ghs-secret",
 		GitHubConnectorClientID:     "ghc-id",
 		GitHubConnectorClientSecret: "ghc-secret",
-		SlackClientID:               "slack-id",
-		SlackClientSecret:           "slack-secret",
-		SlackSigningSecret:          "slack-signing",
 	}
 	authReg := auth.NewRegistry()
 	accountReg := account.NewRegistry()
@@ -231,14 +201,14 @@ func TestRegisterProviders_AllProviders(t *testing.T) {
 		t.Error("expected GitHub auth provider")
 	}
 
-	// Account providers: gmail, google_calendar, slack, github_repos
+	// Account providers: gmail, google_calendar, github_repos
 	providers := accountReg.Providers()
-	if len(providers) < 3 {
-		t.Errorf("expected at least 3 account providers, got %v", providers)
+	if len(providers) < 2 {
+		t.Errorf("expected at least 2 account providers, got %v", providers)
 	}
 
-	// Source connectors: gmail, calendar, slack, github
-	for _, name := range []string{"gmail", "google_calendar", "slack", "github_repos"} {
+	// Source connectors: gmail, calendar, github
+	for _, name := range []string{"gmail", "google_calendar", "github_repos"} {
 		if _, ok := sourceReg.Get(name); !ok {
 			t.Errorf("expected %s source connector", name)
 		}

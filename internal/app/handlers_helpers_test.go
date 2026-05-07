@@ -573,26 +573,6 @@ func TestRequireEnclave_EnclaveDown(t *testing.T) {
 	}
 }
 
-// --- formatRecipientList tests ---
-
-func TestFormatRecipientList_Empty(t *testing.T) {
-	got := formatRecipientList(nil)
-	if got != "(no recipients)" {
-		t.Errorf("got %q, want (no recipients)", got)
-	}
-}
-
-func TestFormatRecipientList_WithNames(t *testing.T) {
-	recipients := []model.Recipient{
-		{Name: "Alice", Email: "alice@example.com"},
-		{Email: "bob@example.com"},
-	}
-	got := formatRecipientList(recipients)
-	if got != "Alice <alice@example.com>, bob@example.com" {
-		t.Errorf("got %q", got)
-	}
-}
-
 // --- executeGrant tests ---
 
 func TestExecuteGrant_GrantNotFound(t *testing.T) {

@@ -303,54 +303,6 @@ func TestEscrowTTL_Invalid(t *testing.T) {
 	}
 }
 
-func TestLoadAuthConfig_SlackEnabled(t *testing.T) {
-	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("SLACK_CLIENT_ID", "slack-client-id")
-	t.Setenv("SLACK_CLIENT_SECRET", "slack-secret")
-	t.Setenv("SLACK_SIGNING_SECRET", "slack-signing")
-
-	cfg, err := LoadAuthConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.SlackEnabled() {
-		t.Error("expected Slack enabled")
-	}
-	if cfg.SlackClientID != "slack-client-id" {
-		t.Errorf("SlackClientID = %q", cfg.SlackClientID)
-	}
-}
-
-func TestLoadAuthConfig_SlackDisabled(t *testing.T) {
-	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("SLACK_CLIENT_ID", "")
-	t.Setenv("SLACK_CLIENT_SECRET", "")
-	t.Setenv("SLACK_SIGNING_SECRET", "")
-
-	cfg, err := LoadAuthConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.SlackEnabled() {
-		t.Error("expected Slack disabled when credentials missing")
-	}
-}
-
-func TestLoadAuthConfig_SlackPartial(t *testing.T) {
-	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("SLACK_CLIENT_ID", "slack-client-id")
-	t.Setenv("SLACK_CLIENT_SECRET", "slack-secret")
-	t.Setenv("SLACK_SIGNING_SECRET", "") // missing signing secret
-
-	cfg, err := LoadAuthConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.SlackEnabled() {
-		t.Error("expected Slack disabled when signing secret missing")
-	}
-}
-
 func TestLoadAuthConfig_LLMEnabled(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
@@ -403,9 +355,6 @@ func TestLoadAuthConfig_LLMModelDefaults(t *testing.T) {
 
 func TestLoadAuthConfig_TrimsWhitespace(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("SLACK_CLIENT_ID", "  slack-id  ")
-	t.Setenv("SLACK_CLIENT_SECRET", "slack-secret\n")
-	t.Setenv("SLACK_SIGNING_SECRET", "\tsigning-secret ")
 	t.Setenv("ANTHROPIC_API_KEY", " sk-ant-key ")
 	t.Setenv("GOOGLE_SIGNIN_CLIENT_ID", "google-id\t")
 	t.Setenv("GITHUB_SIGNIN_CLIENT_ID", " github-id")
@@ -413,15 +362,6 @@ func TestLoadAuthConfig_TrimsWhitespace(t *testing.T) {
 	cfg, err := LoadAuthConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.SlackClientID != "slack-id" {
-		t.Errorf("SlackClientID not trimmed: %q", cfg.SlackClientID)
-	}
-	if cfg.SlackClientSecret != "slack-secret" {
-		t.Errorf("SlackClientSecret not trimmed: %q", cfg.SlackClientSecret)
-	}
-	if cfg.SlackSigningSecret != "signing-secret" {
-		t.Errorf("SlackSigningSecret not trimmed: %q", cfg.SlackSigningSecret)
 	}
 	if cfg.AnthropicAPIKey != "sk-ant-key" {
 		t.Errorf("AnthropicAPIKey not trimmed: %q", cfg.AnthropicAPIKey)
@@ -467,40 +407,6 @@ func TestLoadAuthConfig_TrimsWhitespace_DatabaseURL(t *testing.T) {
 	}
 }
 
-func TestSystemVaultEnabled(t *testing.T) {
-	// Valid 32-byte hex key (64 hex chars).
-	cfg := &AuthConfig{SystemVaultKey: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
-	if !cfg.SystemVaultEnabled() {
-		t.Error("expected system vault enabled with valid 64-char hex key")
-	}
-}
-
-func TestSystemVaultDisabled_Empty(t *testing.T) {
-	cfg := &AuthConfig{SystemVaultKey: ""}
-	if cfg.SystemVaultEnabled() {
-		t.Error("expected system vault disabled when key empty")
-	}
-}
-
-func TestSystemVaultDisabled_WrongLength(t *testing.T) {
-	cfg := &AuthConfig{SystemVaultKey: "too-short"}
-	if cfg.SystemVaultEnabled() {
-		t.Error("expected system vault disabled when key wrong length")
-	}
-}
-
-func TestLoadAuthConfig_SystemVaultKey(t *testing.T) {
-	t.Setenv("AILERON_DATABASE_URL", "")
-	t.Setenv("AILERON_SYSTEM_VAULT_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-
-	cfg, err := LoadAuthConfig()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cfg.SystemVaultEnabled() {
-		t.Error("expected system vault enabled")
-	}
-}
 
 func TestLoadAuthConfig_MailFromDefault(t *testing.T) {
 	t.Setenv("AILERON_DATABASE_URL", "")

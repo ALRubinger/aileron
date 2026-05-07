@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/account"
@@ -110,10 +111,10 @@ func TestGitHubService_AuthorizationURL(t *testing.T) {
 	if result.URL == "" {
 		t.Fatal("expected non-empty URL")
 	}
-	if !containsSubstr(result.URL, "github.com") {
+	if !strings.Contains(result.URL, "github.com") {
 		t.Errorf("expected github.com in URL, got %s", result.URL)
 	}
-	if !containsSubstr(result.URL, "gh-client-id") {
+	if !strings.Contains(result.URL, "gh-client-id") {
 		t.Errorf("expected client_id in URL, got %s", result.URL)
 	}
 }

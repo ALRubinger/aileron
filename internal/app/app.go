@@ -5,7 +5,6 @@ package app
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -38,7 +37,6 @@ import (
 	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
 	githubsource "github.com/ALRubinger/aileron/internal/source/github"
 	gmailsource "github.com/ALRubinger/aileron/internal/source/gmail"
-	slacksource "github.com/ALRubinger/aileron/internal/source/slack"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/store/postgres"
@@ -128,17 +126,16 @@ type Config struct {
 	// that don't exercise the launch session surface.
 	Sessions sessions.Store
 
-	// NotifyQueue is the daemon-wide queue of incoming Slack/Discord
+	// NotifyQueue is the daemon-wide queue of incoming channel
 	// messages (ADR-0012, step 9B-2). Populated by listener goroutines
 	// after [OnVaultUnlock] resolves credentials; consumed by the
 	// `/v1/sessions/{id}/comms/messages` endpoint that powers
 	// `aileron-mcp`'s `read_messages` tool. Nil disables every comms
-	// endpoint — the right behavior for cloud-shaped daemons that
-	// don't bridge personal messaging.
+	// endpoint.
 	NotifyQueue *comms.NotifyQueue
 
-	// Listeners is the registry of active Slack/Discord listeners
-	// keyed by service name. Populated by the vault-unlock callback;
+	// Listeners is the registry of active channel listeners keyed
+	// by service name. Populated by the vault-unlock callback;
 	// consumed by `/comms/send` and `/comms/draft` to dispatch
 	// outbound messages after the user approves. Pair with
 	// [NotifyQueue] — both nil or both set.
@@ -146,15 +143,14 @@ type Config struct {
 
 	// OnVaultUnlock fires after a successful POST /v1/vault/unlock,
 	// stamped with the freshly-unlocked vault. The daemon registers
-	// a callback here that resolves Slack/Discord tokens and starts
-	// the matching listeners — the canonical signal that "user just
-	// authorized us to read their personal messaging." Nil is fine
-	// for tests / cloud daemons that have nothing to do on unlock.
+	// a callback here when channel listeners need credentials
+	// resolved at unlock time. Nil is fine for tests / cloud
+	// daemons that have nothing to do on unlock.
 	//
 	// Synchronous from the perspective of the unlock handler — the
 	// HTTP response holds open until the callback returns. Listener
 	// startup itself is fire-and-forget inside the callback so the
-	// handler never blocks on Slack's WebSocket handshake.
+	// handler never blocks on remote handshakes.
 	OnVaultUnlock func(vault.Vault)
 
 	// AuditStateDir scopes the daily-rotated `audit-YYYY-MM-DD.jsonl`
@@ -226,9 +222,9 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 
 	// --- Connector registry ---
 	// Per ADR-0002, the runtime ships only the registry — service-specific
-	// connectors (Gmail, Slack, Stripe, GitHub, ...) live in sandboxed
-	// binaries installed at FQNs like `github://aileron/slack` and reach
-	// the registry via `aileron action add`. The registry stays empty at
+	// connectors (Gmail, Stripe, GitHub, ...) live in sandboxed binaries
+	// installed at FQNs like `github://aileron/gmail` and reach the
+	// registry via `aileron action add`. The registry stays empty at
 	// process start; entries are registered as connectors are installed
 	// and loaded by the cstore install pipeline.
 	registry := connector.NewRegistry()
@@ -304,8 +300,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// effort native OS notifications via osascript / notify-send). The
 	// desktop notifier is what nudges the user toward the webapp when
 	// an action-approval lands; the log notifier is the durable
-	// backstop. Slack / email notifiers (the existing rich-governance
-	// channels) compose into the same Multi when configured.
+	// backstop.
 	//
 	// Tests inject a recorder via cfg.Notifier; that replaces the
 	// default — no OS notifications fire from a test process.
@@ -619,7 +614,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 			}
 		}()
 
-		// Load persisted escrow index so async flows (Slack) work after restart.
+		// Load persisted escrow index so async flows work after restart.
 		if idx, err := escrowIndexStore.LoadAll(ctx); err == nil {
 			for path, id := range idx {
 				server.escrowIndex.Store(path, id)
@@ -634,23 +629,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 			}
 		}
 		log.Info("using Postgres-backed stores and vault")
-
-		// System vault for infrastructure secrets (ADR-0020).
-		if authCfg.SystemVaultEnabled() {
-			sysKey, err := hex.DecodeString(authCfg.SystemVaultKey)
-			if err != nil {
-				return nil, fmt.Errorf("AILERON_SYSTEM_VAULT_KEY: invalid hex: %w", err)
-			}
-			sysVault, err := vault.NewEncryptedVault(
-				vault.NewPostgresSystemVault(db.Pool),
-				sysKey,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("system vault: %w", err)
-			}
-			server.systemVault = sysVault
-			log.Info("enabled system vault for infrastructure secrets")
-		}
 
 		tokenIssuer := auth.NewTokenIssuer(
 			[]byte(authCfg.JWTSigningKey),
@@ -695,19 +673,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 				"prompt_source", draft.PromptSource())
 		}
 
-		if authCfg.SlackEnabled() {
-			server.slackClientID = authCfg.SlackClientID
-			server.slackClientSecret = authCfg.SlackClientSecret
-			server.slackSigningSecret = authCfg.SlackSigningSecret
-			server.slackDedup = newSlackEventDedup()
-			server.slackAgentClient = defaultSlackAgentClient{}
-			mux.HandleFunc("POST /v1/webhooks/slack/events", server.handleSlackEvent)
-			mux.HandleFunc("POST /v1/webhooks/slack/interactions", server.handleSlackInteraction)
-			mux.HandleFunc("POST /v1/webhooks/slack/commands", server.handleSlackCommand)
-			mux.HandleFunc("GET /v1/slack/install/callback", server.handleSlackInstall)
-			log.Info("enabled Slack Events API webhook, interaction, command, and install endpoints")
-		}
-
 		enforcer := auth.NewStoreEnforcer(enterpriseStore)
 
 		mailer := newMailer(log, authCfg)
@@ -731,18 +696,14 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		authHandler.RegisterRoutes(mux)
 
 		skipPaths := map[string]bool{
-			"/v1/health":                      true,
-			"/v1/tee/status":                  true,
-			"/v1/tee/jwks":                    true,
-			"/v1/webhooks/slack/events":       true,
-			"/v1/webhooks/slack/interactions": true,
-			"/v1/webhooks/slack/commands":     true,
-			"/v1/slack/install/callback":      true,
+			"/v1/health":     true,
+			"/v1/tee/status": true,
+			"/v1/tee/jwks":   true,
 		}
 		handler = auth.MiddlewareWithConfig(tokenIssuer, auth.MiddlewareConfig{
 			SkipPaths: skipPaths,
 			OptionalAuthPrefixes: []string{
-				"/v1/connect/", // OAuth callbacks may be unauthenticated (e.g. Slack Marketplace installs)
+				"/v1/connect/", // OAuth callbacks may be unauthenticated.
 			},
 		})(handler)
 		log.Info("auth middleware enabled")
@@ -825,17 +786,6 @@ func registerProviders(
 		sourceReg.Register(gmailsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
 		sourceReg.Register(calendarsource.New(cfg.GoogleConnectorClientID, cfg.GoogleConnectorClientSecret))
 		log.Info("enabled Google connected accounts and source connectors (Gmail, Calendar)")
-	}
-
-	if cfg.SlackEnabled() {
-		accountReg.Register(account.NewSlackService(
-			cfg.SlackClientID,
-			cfg.SlackClientSecret,
-			accounts,
-			v,
-		))
-		sourceReg.Register(slacksource.New())
-		log.Info("enabled Slack connected accounts and source connector")
 	}
 
 	if cfg.GitHubSigninEnabled() {

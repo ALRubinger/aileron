@@ -10,54 +10,20 @@ import (
 
 // AileronConfig is the user-level configuration the daemon reads at
 // startup from `~/.aileron/config.yaml`. Per ADR-0012 (#454 step 9B),
-// configuration that used to live in per-project `aileron.yaml` —
-// notably the `notifications` section that drives Slack/Discord
-// listeners — moves here. The daemon is user-scoped and long-lived;
-// per-project notification config doesn't fit that ownership model.
+// configuration that used to live in per-project `aileron.yaml`
+// moves here — the daemon is user-scoped and long-lived.
 //
-// Missing or empty file is fine: the daemon runs with no listeners
-// and the `read_messages` MCP tool returns empty.
+// Missing or empty file is fine.
 type AileronConfig struct {
 	Notifications *NotifyConfig `yaml:"notifications,omitempty"`
 }
 
-// NotifyConfig holds the Slack/Discord listener configuration plus
-// the daemon-wide quiet-hours window. Type names mirror the
-// pre-9B types in `internal/policy/launch/schema.go` so callers that
-// migrated find a near-drop-in replacement under a different
-// package.
+// NotifyConfig holds the daemon-wide quiet-hours window. Type names
+// mirror the pre-9B types in `internal/policy/launch/schema.go` so
+// callers that migrated find a near-drop-in replacement under a
+// different package.
 type NotifyConfig struct {
-	Slack      *SlackNotifyConfig   `yaml:"slack,omitempty"`
-	Discord    *DiscordNotifyConfig `yaml:"discord,omitempty"`
-	QuietHours *QuietHoursConfig    `yaml:"quiet_hours,omitempty"`
-}
-
-// SlackNotifyConfig configures Slack integration. Tokens are vault
-// references (`vault:<name>`) — the daemon resolves them after the
-// user unlocks the vault, then starts the listener.
-type SlackNotifyConfig struct {
-	AppToken  string          `yaml:"app_token,omitempty"`
-	BotToken  string          `yaml:"bot_token,omitempty"`
-	UserToken string          `yaml:"user_token,omitempty"`
-	Channels  []ChannelConfig `yaml:"channels,omitempty"`
-	Ignore    []string        `yaml:"ignore,omitempty"`
-}
-
-// DiscordNotifyConfig configures Discord integration.
-type DiscordNotifyConfig struct {
-	BotToken string          `yaml:"bot_token,omitempty"`
-	Channels []ChannelConfig `yaml:"channels,omitempty"`
-	Ignore   []string        `yaml:"ignore,omitempty"`
-}
-
-// ChannelConfig defines how a single channel is handled by an
-// agent — what to surface, whether to auto-draft replies, and the
-// priority shape for quiet-hours filtering.
-type ChannelConfig struct {
-	Name      string `yaml:"name"`
-	Show      string `yaml:"show,omitempty"`       // "all", "mentions", "none"
-	AutoDraft bool   `yaml:"auto_draft,omitempty"` // route to agent for draft reply
-	Priority  string `yaml:"priority,omitempty"`   // "normal", "high"
+	QuietHours *QuietHoursConfig `yaml:"quiet_hours,omitempty"`
 }
 
 // QuietHoursConfig defines a daily window during which non-high-priority
@@ -82,9 +48,7 @@ func DefaultAileronConfigPath() string {
 
 // LoadAileronConfig reads `path` (typically [DefaultAileronConfigPath])
 // and returns the parsed config. A missing file returns an empty
-// config and no error — the daemon treats "no config" as "no
-// listeners," which is the most common case for users who haven't
-// wired Slack/Discord yet.
+// config and no error.
 func LoadAileronConfig(path string) (*AileronConfig, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

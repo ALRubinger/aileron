@@ -38,17 +38,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/version"
 )
 
-// SlackAgentClient abstracts Slack's Agent/AI Apps API for testability.
-type SlackAgentClient interface {
-	SetStatus(ctx context.Context, botToken, channelID, threadTS, status string) error
-	SetSuggestedPrompts(ctx context.Context, botToken, channelID, threadTS string, prompts []comms.SlackAgentPrompt) error
-	SetTitle(ctx context.Context, botToken, channelID, threadTS, title string) error
-	StartStream(ctx context.Context, botToken, channelID, threadTS string) (ts string, err error)
-	AppendStream(ctx context.Context, botToken, channelID, ts, text string) error
-	StopStream(ctx context.Context, botToken, channelID, ts string) error
-	PostMessage(ctx context.Context, botToken, channelID, threadTS, text string) error
-}
-
 // apiServer implements the generated api.ServerInterface.
 type apiServer struct {
 	log                *slog.Logger
@@ -56,7 +45,6 @@ type apiServer struct {
 	policyEngine       *policy.RuleEngine
 	orchestrator       *approval.InMemoryOrchestrator
 	vault              vault.Vault
-	systemVault        vault.Vault // infrastructure secrets (ADR-0020); nil when not configured
 	notifier           notify.Notifier
 	intents            *mem.IntentStore
 	approvals          *mem.ApprovalStore
@@ -74,14 +62,6 @@ type apiServer struct {
 	drafts             store.DraftStore            // draft lifecycle store
 	instructions       store.UserInstructionStore  // user instructions for context store
 	feedback           store.DraftFeedbackStore    // draft feedback signals for behavioral model
-	slackSender        SlackSender                 // injectable for testing; defaults to comms.SendSlackMessage
-	slackAgentClient   SlackAgentClient            // injectable for testing; defaults to defaultSlackAgentClient
-	slackClientID      string                      // Slack app client ID (for bot install OAuth exchange)
-	slackClientSecret  string                      // Slack app client secret (for bot install OAuth exchange)
-	slackSigningSecret string                      // Slack Events API signing secret for webhook verification
-	slackBotExchanger  slackBotTokenExchanger      // injectable for testing; defaults to defaultSlackBotTokenExchange
-	slackTokenURL      string                      // overrides slackTokenURL const for testing
-	slackDedup         *slackEventDedup            // deduplication cache for Slack events
 	llmConfigs         store.LLMConfigStore        // per-user/per-org LLM provider config
 	enterprises        store.EnterpriseStore       // nil when auth is disabled
 	users              store.UserStore             // nil when auth is disabled
@@ -122,7 +102,7 @@ type apiServer struct {
 
 	// --- Comms (ADR-0012 step 9B-2) ---
 	notifyQueue   *comms.NotifyQueue        // daemon-wide inbound messages; nil disables /comms/* endpoints
-	listeners     *comms.ListenerRegistry   // registered Slack/Discord listeners; populated by the vault-unlock callback
+	listeners     *comms.ListenerRegistry   // registered channel listeners; populated by the vault-unlock callback
 	onVaultUnlock func(vault.Vault)         // fires after POST /v1/vault/unlock so listener startup can resolve tokens
 	auditStateDir string                    // scopes message-event audit log writes; "" disables audit emission for /comms/*
 	commsHTTPClient *http.Client            // outbound client for /comms/http; nil falls back to http.DefaultClient

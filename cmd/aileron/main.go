@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/audit"
-	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	"github.com/ALRubinger/aileron/internal/launch"
@@ -1414,30 +1413,6 @@ func showStatusNotifications(_ string, w io.Writer) {
 		return
 	}
 
-	if slack := cfg.Notifications.Slack; slack != nil {
-		fmt.Fprintln(w, "  Slack:")
-		fmt.Fprintf(w, "    app_token: %s\n", tokenStatus(slack.AppToken))
-		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(slack.BotToken))
-		if slack.UserToken != "" {
-			fmt.Fprintf(w, "    user_token: %s\n", tokenStatus(slack.UserToken))
-		}
-		for _, ch := range slack.Channels {
-			draft := ""
-			if ch.AutoDraft {
-				draft = " (auto-draft)"
-			}
-			fmt.Fprintf(w, "    channel: %s [show=%s]%s\n", ch.Name, ch.Show, draft)
-		}
-	}
-
-	if discord := cfg.Notifications.Discord; discord != nil {
-		fmt.Fprintln(w, "  Discord:")
-		fmt.Fprintf(w, "    bot_token: %s\n", tokenStatus(discord.BotToken))
-		for _, ch := range discord.Channels {
-			fmt.Fprintf(w, "    channel: %s [show=%s]\n", ch.Name, ch.Show)
-		}
-	}
-
 	if qh := cfg.Notifications.QuietHours; qh != nil {
 		tz := qh.Timezone
 		if tz == "" {
@@ -1469,16 +1444,6 @@ func showStatusVault(dir string, w io.Writer) {
 	for _, name := range names {
 		fmt.Fprintf(w, "    - %s\n", name)
 	}
-}
-
-func tokenStatus(value string) string {
-	if value == "" {
-		return "(not set)"
-	}
-	if comms.IsVaultRef(value) {
-		return value
-	}
-	return "(plaintext — use vault: reference)"
 }
 
 // resolveShim finds the aileron-sh binary next to this executable, or on PATH.

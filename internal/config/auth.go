@@ -58,11 +58,6 @@ type AuthConfig struct {
 	GitHubConnectorClientID     string // Env: GITHUB_CONNECTOR_CLIENT_ID
 	GitHubConnectorClientSecret string // Env: GITHUB_CONNECTOR_CLIENT_SECRET
 
-	// Slack OAuth and Events API configuration.
-	SlackClientID      string // Env: SLACK_CLIENT_ID
-	SlackClientSecret  string // Env: SLACK_CLIENT_SECRET
-	SlackSigningSecret string // Env: SLACK_SIGNING_SECRET (for webhook signature verification)
-
 	// Resend email configuration.
 	// ResendAPIKey enables real email sending via Resend. When set, ResendMailer
 	// is used; otherwise LogMailer is used (prints to log, safe for dev/CI).
@@ -71,12 +66,6 @@ type AuthConfig struct {
 	// MailFrom is the sender address for outgoing emails.
 	// Env: MAIL_FROM (default: "noreply@withaileron.ai")
 	MailFrom string
-
-	// SystemVaultKey is the AES-256 encryption key for the system vault
-	// (ADR-0020). Infrastructure secrets (Slack bot tokens, webhook keys)
-	// are encrypted at rest with this key. 32 bytes, hex-encoded (64 chars).
-	// Env: AILERON_SYSTEM_VAULT_KEY
-	SystemVaultKey string
 
 	// LLM configuration for cloud-hosted draft generation.
 	// Two models: research (fast, cheap — tool-call decisions) and synthesis
@@ -104,10 +93,6 @@ func LoadAuthConfig() (*AuthConfig, error) {
 		GitHubSigninClientSecret:    envTrimmed("GITHUB_SIGNIN_CLIENT_SECRET"),
 		GitHubConnectorClientID:     envTrimmed("GITHUB_CONNECTOR_CLIENT_ID"),
 		GitHubConnectorClientSecret: envTrimmed("GITHUB_CONNECTOR_CLIENT_SECRET"),
-		SlackClientID:      envTrimmed("SLACK_CLIENT_ID"),
-		SlackClientSecret:  envTrimmed("SLACK_CLIENT_SECRET"),
-		SlackSigningSecret: envTrimmed("SLACK_SIGNING_SECRET"),
-		SystemVaultKey:     envTrimmed("AILERON_SYSTEM_VAULT_KEY"),
 		ResendAPIKey:       envTrimmed("RESEND_API_KEY"),
 		MailFrom:           envOrDefault("MAIL_FROM", "noreply@withaileron.ai"),
 		AnthropicAPIKey:    envTrimmed("ANTHROPIC_API_KEY"),
@@ -164,13 +149,6 @@ func (c *AuthConfig) GitHubConnectorEnabled() bool {
 	return c.GitHubConnectorClientID != "" && c.GitHubConnectorClientSecret != ""
 }
 
-// SlackEnabled reports whether Slack OAuth and Events API are configured.
-// Requires client credentials for the OAuth flow and a signing secret for
-// webhook signature verification.
-func (c *AuthConfig) SlackEnabled() bool {
-	return c.SlackClientID != "" && c.SlackClientSecret != "" && c.SlackSigningSecret != ""
-}
-
 // LLMEnabled reports whether cloud-hosted draft generation is configured.
 func (c *AuthConfig) LLMEnabled() bool {
 	return c.AnthropicAPIKey != ""
@@ -179,12 +157,6 @@ func (c *AuthConfig) LLMEnabled() bool {
 // ResendEnabled reports whether Resend email delivery is configured.
 func (c *AuthConfig) ResendEnabled() bool {
 	return c.ResendAPIKey != ""
-}
-
-// SystemVaultEnabled reports whether the system vault is configured.
-// Requires a 32-byte hex-encoded key (64 hex characters).
-func (c *AuthConfig) SystemVaultEnabled() bool {
-	return len(c.SystemVaultKey) == 64 // 32 bytes hex-encoded
 }
 
 // KEKSessionTTL returns the TTL for in-memory KEK sessions.

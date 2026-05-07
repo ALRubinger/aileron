@@ -1,6 +1,7 @@
 // Package comms defines the SPI for bidirectional communication channels
-// (Slack, Discord, etc.) and provides implementations that integrate with
-// the terminal notification system.
+// (a future channel listener implements [Listener]) and provides shared
+// helpers — the notify queue, listener registry, and vault-reference
+// resolution — that any channel implementation can build on.
 package comms
 
 import (

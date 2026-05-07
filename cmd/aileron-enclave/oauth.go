@@ -19,8 +19,8 @@ type oauthExchangeResult struct {
 	tokenJSON      []byte
 	accessToken    string
 	tokenType      string
-	externalUserID string // provider-specific user ID (e.g. Slack authed_user.id)
-	externalTeamID string // provider-specific team ID (e.g. Slack team.id)
+	externalUserID string // provider-specific user ID
+	externalTeamID string // provider-specific team ID
 }
 
 func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (*oauthExchangeResult, error) {
@@ -59,17 +59,6 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (*oa
 		AccessToken  string `json:"access_token"`
 		TokenType    string `json:"token_type"`
 		RefreshToken string `json:"refresh_token"`
-		// Slack-specific: user token is nested under authed_user.
-		AuthedUser struct {
-			ID          string `json:"id"`
-			AccessToken string `json:"access_token"`
-			Scope       string `json:"scope"`
-			TokenType   string `json:"token_type"`
-		} `json:"authed_user"`
-		Team struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"team"`
 	}
 	if err := json.Unmarshal(body, &tokenData); err != nil {
 		return nil, fmt.Errorf("parsing token response: %w", err)
@@ -79,28 +68,6 @@ func doOAuthExchange(ctx context.Context, req enclave.OAuthExchangeRequest) (*oa
 		accessToken: tokenData.AccessToken,
 		tokenType:   tokenData.TokenType,
 		tokenJSON:   body,
-	}
-
-	// Slack's oauth.v2.access nests the user token under authed_user.
-	// Normalize to store only the user token fields, matching the direct
-	// (non-TEE) code path in SlackService.HandleCallback.
-	if req.Provider == "slack" && tokenData.AuthedUser.AccessToken != "" {
-		result.accessToken = tokenData.AuthedUser.AccessToken
-		result.tokenType = tokenData.AuthedUser.TokenType
-		result.externalUserID = tokenData.AuthedUser.ID
-		result.externalTeamID = tokenData.Team.ID
-		normalized, err := json.Marshal(map[string]string{
-			"access_token": tokenData.AuthedUser.AccessToken,
-			"token_type":   tokenData.AuthedUser.TokenType,
-			"scope":        tokenData.AuthedUser.Scope,
-			"team_id":      tokenData.Team.ID,
-			"team_name":    tokenData.Team.Name,
-			"user_id":      tokenData.AuthedUser.ID,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("marshalling normalized token: %w", err)
-		}
-		result.tokenJSON = normalized
 	}
 
 	if result.accessToken == "" {
