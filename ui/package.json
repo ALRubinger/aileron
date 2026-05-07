@@ -52,6 +52,9 @@
       "core-js",
       "esbuild",
       "protobufjs"
-    ]
+    ],
+    "overrides": {
+      "protobufjs": "^7.5.5"
+    }
   }
 }
