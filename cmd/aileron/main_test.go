@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -111,6 +112,41 @@ func TestRun_LaunchUnknownAgent(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "claude") {
 		t.Error("expected available agents list in stderr")
+	}
+}
+
+// Regression test for issue #492 item 9: the CLI must populate
+// LaunchConfig.Dir from os.Getwd() so the daemon's session record carries
+// working_dir. Before the fix, Dir was the empty string at the call site,
+// and every `aileron sessions list` row showed cwd="".
+func TestRun_LaunchPopulatesWorkingDir(t *testing.T) {
+	origShim := resolveShimFn
+	origLaunch := launchFn
+	t.Cleanup(func() {
+		resolveShimFn = origShim
+		launchFn = origLaunch
+	})
+
+	resolveShimFn = func() (string, error) { return "/fake/aileron-sh", nil }
+
+	var captured launch.LaunchConfig
+	launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
+		captured = cfg
+		return launch.LaunchResult{ExitCode: 0}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"launch", "claude"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, stderr.String())
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	if captured.Dir != cwd {
+		t.Errorf("LaunchConfig.Dir = %q, want %q (cwd)", captured.Dir, cwd)
 	}
 }
 
@@ -3205,12 +3241,12 @@ func TestRunBinding_SetupOAuth2_InitErrorIsExit1(t *testing.T) {
 
 func TestPortFromRedirectURI(t *testing.T) {
 	cases := map[string]int{
-		"http://127.0.0.1:54321/callback":   54321,
-		"http://localhost:8080/x":           8080,
-		"http://127.0.0.1/callback":         0, // no port
-		"https://accounts.google.com/auth":  0, // standard port omitted
-		"":                                  0,
-		"not a url":                         0,
+		"http://127.0.0.1:54321/callback":  54321,
+		"http://localhost:8080/x":          8080,
+		"http://127.0.0.1/callback":        0, // no port
+		"https://accounts.google.com/auth": 0, // standard port omitted
+		"":                                 0,
+		"not a url":                        0,
 	}
 	for in, want := range cases {
 		if got := portFromRedirectURI(in); got != want {
