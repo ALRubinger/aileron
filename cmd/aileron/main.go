@@ -72,16 +72,23 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 			return 1
 		}
 
-		shimPath, err := resolveShim()
+		shimPath, err := resolveShimFn()
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
 
-		result, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		// Capture cwd so the daemon's session record carries working_dir
+		// (rendered by `aileron sessions list`). os.Getwd basically never
+		// errors in practice; on the rare case it does, fall through with
+		// Dir="" — the launcher and daemon already tolerate that.
+		cwd, _ := os.Getwd()
+
+		result, err := launchFn(context.Background(), launch.LaunchConfig{
 			Agent:     agent,
 			ShellShim: shimPath,
 			Args:      launchArgs[1:],
+			Dir:       cwd,
 			LogLevel:  launch.ParseLogLevel(*logLevel),
 		})
 		if err != nil {
@@ -616,6 +623,14 @@ var (
 // spawnResolveFn is the seam that lets tests substitute spawn.Resolve
 // without fork-execing a real daemon binary.
 var spawnResolveFn = spawn.Resolve
+
+// launchFn / resolveShimFn are package-level seams so tests can assert on
+// the LaunchConfig the CLI builds without depending on a real shim or a
+// running daemon.
+var (
+	launchFn      = launch.Launch
+	resolveShimFn = resolveShim
+)
 
 // spawnResolveCached calls spawnResolveOnce at most once per CLI
 // process and caches the result. The cache is intentionally
