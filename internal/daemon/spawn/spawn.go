@@ -108,6 +108,17 @@ func Resolve(ctx context.Context, opts Options) (string, error) {
 	release, err := discovery.Lock(lockCtx, opts.StateDir)
 	cancelLock()
 	if err != nil {
+		// Lock-acquire timed out. The most common cause is that a
+		// surviving daemon already grabbed the lock and is holding
+		// it for its lifetime (`internal/server.run`'s `defer
+		// releaseLock`), so no client can ever acquire it again.
+		// In that case the daemon is up — retry readAlive once
+		// before surfacing the error. (#528 finding 3a)
+		if errors.Is(err, context.DeadlineExceeded) {
+			if url, ok := readAlive(opts.StateDir, opts.LivenessTimeout); ok {
+				return url, nil
+			}
+		}
 		return "", fmt.Errorf("spawn: acquire lock: %w", err)
 	}
 

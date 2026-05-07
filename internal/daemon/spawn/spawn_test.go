@@ -376,3 +376,130 @@ func TestResolve_ReleasesLockBeforeWaitForDaemon(t *testing.T) {
 }
 
 func emptyEnv(string) string { return "" }
+
+// TestResolve_RetriesReadAliveOnLockTimeout regression-pins #528
+// finding 3a: when the spawn lock is held forever (the surviving
+// daemon owns it for its lifetime), a client that arrives during the
+// daemon's bind window must not return "spawn: acquire lock: context
+// deadline exceeded". Instead, it should retry readAlive once after
+// the lock-acquire timeout and pick up the now-bound daemon.
+//
+// Scenario: external goroutine takes daemon.lock and holds it. After
+// a short delay, it stands up a fake daemon (TCP listener + daemon.json).
+// Resolve is called with a short ctx so the lock acquire fails quickly.
+// The fix's post-timeout readAlive retry is what lets Resolve return
+// the URL successfully despite the lock being held.
+func TestResolve_RetriesReadAliveOnLockTimeout(t *testing.T) {
+	dir := t.TempDir()
+
+	// Hold daemon.lock for the duration of the test, mimicking the
+	// surviving daemon's lifetime-long flock.
+	lockHeld := make(chan struct{})
+	releaseLockOnExit := make(chan struct{})
+	go func() {
+		lockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		release, err := discovery.Lock(lockCtx, dir)
+		if err != nil {
+			t.Errorf("external lock acquire: %v", err)
+			close(lockHeld)
+			return
+		}
+		close(lockHeld)
+		<-releaseLockOnExit
+		_ = release()
+	}()
+	t.Cleanup(func() { close(releaseLockOnExit) })
+	<-lockHeld
+
+	// After Resolve enters its lock-acquire wait, write daemon.json +
+	// bind a listener. The 100ms delay is enough that Resolve has
+	// passed its fast-path readAlive (which would otherwise short-
+	// circuit before the lock attempt) and is blocked in discovery.Lock.
+	bindDone := make(chan string, 1)
+	var listenerCloser func()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		url, cleanup := fakeDaemon(t, dir)
+		listenerCloser = cleanup
+		bindDone <- url
+	}()
+	t.Cleanup(func() {
+		if listenerCloser != nil {
+			listenerCloser()
+		}
+	})
+
+	// 400ms ctx caps the lock-acquire timeout (it would otherwise be
+	// 2s). Bound by 100ms-bind + slack for the retry to fire.
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	got, err := spawn.Resolve(ctx, spawn.Options{
+		StateDir:        dir,
+		EnvLookup:       emptyEnv,
+		SpawnTimeout:    1 * time.Second,
+		PollInterval:    25 * time.Millisecond,
+		LivenessTimeout: 200 * time.Millisecond,
+		SpawnFn: func(context.Context, string) error {
+			t.Error("SpawnFn must not be called: lock-acquire-timeout retry should pick up the existing daemon")
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v (expected the post-timeout readAlive retry to return the daemon URL)", err)
+	}
+	want := <-bindDone
+	if got != want {
+		t.Errorf("got URL %q, want %q", got, want)
+	}
+}
+
+// TestResolve_LockTimeoutSurfacedWhenNoDaemon pins the negative case
+// for #528 finding 3a: if the lock truly cannot be acquired AND no
+// daemon is reachable, the lock-acquire error must still propagate.
+// Otherwise the fix would mask all lock-acquire errors as silent
+// successes against a nonexistent daemon.
+func TestResolve_LockTimeoutSurfacedWhenNoDaemon(t *testing.T) {
+	dir := t.TempDir()
+
+	// Hold the lock; never write daemon.json or bind a listener.
+	lockHeld := make(chan struct{})
+	releaseLockOnExit := make(chan struct{})
+	go func() {
+		lockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		release, err := discovery.Lock(lockCtx, dir)
+		if err != nil {
+			t.Errorf("external lock acquire: %v", err)
+			close(lockHeld)
+			return
+		}
+		close(lockHeld)
+		<-releaseLockOnExit
+		_ = release()
+	}()
+	t.Cleanup(func() { close(releaseLockOnExit) })
+	<-lockHeld
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	_, err := spawn.Resolve(ctx, spawn.Options{
+		StateDir:        dir,
+		EnvLookup:       emptyEnv,
+		SpawnTimeout:    1 * time.Second,
+		PollInterval:    25 * time.Millisecond,
+		LivenessTimeout: 50 * time.Millisecond,
+		SpawnFn: func(context.Context, string) error {
+			t.Error("SpawnFn must not be called when lock acquire times out")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("expected lock-acquire error when no daemon is reachable, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want wrapped context.DeadlineExceeded", err)
+	}
+}
