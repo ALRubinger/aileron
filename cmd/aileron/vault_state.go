@@ -120,7 +120,16 @@ func promptCreateAndUnlock(vaultPath, passphraseFile string, stderr io.Writer) e
 			return errors.New("passphrases do not match")
 		}
 	}
-	if _, err := vaultInitFn(vaultPath, passphrase); err != nil {
+	// Tolerate ErrVaultExists: under concurrent first-run (e.g. ten
+	// parallel `aileron <cmd>` invocations sharing AILERON_VAULT_PASSPHRASE,
+	// per #454 Test 6), only one CLI's vault.Init wins; the others see
+	// the file already created and would otherwise fail with a confusing
+	// "creating vault: vault: already exists". The post-spawn unlock
+	// below then validates the passphrase against whatever was written —
+	// if the racing CLIs disagree, the losers get a 401 from /v1/vault/
+	// unlock and surface that, which is the correct shape for "you and
+	// another process picked different passphrases."
+	if _, err := vaultInitFn(vaultPath, passphrase); err != nil && !errors.Is(err, vault.ErrVaultExists) {
 		return fmt.Errorf("creating vault: %w", err)
 	}
 	url, err := spawnResolveCachedFn()
