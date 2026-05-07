@@ -531,6 +531,7 @@ func runSecretList(stdout, stderr io.Writer) int {
 	names := fv.Names()
 	if len(names) == 0 {
 		fmt.Fprintln(stdout, "No secrets stored.")
+		fmt.Fprintln(stdout, "Run `aileron secret set <name>` to store one.")
 		return 0
 	}
 
@@ -761,7 +762,8 @@ func runBindingList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if len(resp.Items) == 0 {
-		fmt.Fprintln(stdout, "No bindings.")
+		fmt.Fprintln(stdout, "No bindings configured.")
+		fmt.Fprintln(stdout, "Run `aileron binding setup <connector-FQN>` to add one.")
 		return 0
 	}
 	fmt.Fprintf(stdout, "%-40s  %-10s  %-30s  %s\n", "NAME", "KIND", "CONNECTOR", "STATUS")
@@ -1530,6 +1532,7 @@ func runConnectorCheck(args []string, stdout, stderr io.Writer) int {
 
 	if len(resp.Results) == 0 {
 		fmt.Fprintln(stdout, "No connectors installed.")
+		fmt.Fprintln(stdout, "Run `aileron connector install <FQN>` to add one.")
 		return 0
 	}
 
