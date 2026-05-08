@@ -1,60 +1,15 @@
 ---
 title: "Prepare for Liftoff"
-description: "Build Aileron from source, install the Google connector, bind a Google account via OAuth, and launch Claude Code with Gmail and Calendar actions wired in."
+description: "Build Aileron from source, install Gmail and Calendar actions, and launch Claude Code with everything wired in."
 order: 2
 ---
 
 import HighlightCard from '$lib/components/ui/highlight-card.svelte';
-import { PlatformTabs } from '$lib/components/ui/tabs/index.js';
+import LiftoffPreflight from '$lib/components/ui/liftoff-preflight.svelte';
 
-export const goInstall = [
-  { value: 'macos', label: 'macOS', lang: 'sh', code: 'brew install go' },
-  {
-    value: 'linux',
-    label: 'Linux',
-    lang: 'sh',
-    note: "Use your distro's package manager, or download the official tarball from go.dev/dl.",
-    code: '# Debian / Ubuntu (may lag behind upstream; check version)\nsudo apt-get install golang-go',
-  },
-  { value: 'windows', label: 'Windows', lang: 'powershell', code: 'winget install GoLang.Go' },
-];
+<HighlightCard>
 
-export const taskInstall = [
-  { value: 'macos', label: 'macOS', lang: 'sh', code: 'brew install go-task' },
-  {
-    value: 'linux',
-    label: 'Linux',
-    lang: 'sh',
-    code: 'sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b ~/.local/bin',
-  },
-  { value: 'windows', label: 'Windows', lang: 'powershell', code: 'scoop install task' },
-];
-
-export const nodeInstall = [
-  {
-    value: 'macos',
-    label: 'macOS',
-    lang: 'sh',
-    code: 'brew install node\ncorepack enable\ncorepack prepare pnpm@11.0.8 --activate',
-  },
-  {
-    value: 'linux',
-    label: 'Linux',
-    lang: 'sh',
-    note: 'Install nvm (https://github.com/nvm-sh/nvm), then run:',
-    code: 'nvm install 24\ncorepack enable\ncorepack prepare pnpm@11.0.8 --activate',
-  },
-  {
-    value: 'windows',
-    label: 'Windows',
-    lang: 'powershell',
-    code: 'winget install OpenJS.NodeJS\ncorepack enable\ncorepack prepare pnpm@11.0.8 --activate',
-  },
-];
-
-<HighlightCard title="Your first flight">
-
-Let's take your first flight with Aileron. In under 5 minutes, you'll be securely equipping Claude Code to use your real Gmail and Calendar account. Along the way we'll introduce Connectors and Actions, a joyful way to add powerful features to your agent. Your agent never sees the keys to your private services, and you always retain approval before taking an irreversible action like sending an email. Let's take off.
+We're about to take your first flight with Aileron. In under 5 minutes, you'll be securely equipping Claude Code to use your real Gmail and Calendar account. Along the way we'll introduce Connectors and Actions, a joyful way to add powerful features to your agent. Your agent never sees the keys to your private services, and you always retain approval before taking an irreversible action like sending an email. Let's take off.
 
 </HighlightCard>
 
@@ -64,29 +19,11 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
 
 </HighlightCard>
 
-This guide walks the full end-to-end flow on a fresh machine: build the binaries, trust a publisher, install the [`aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) reference connector, bind a real Google account, and run [Claude Code](https://docs.claude.com/en/docs/claude-code) with Gmail and Calendar actions exposed via Aileron's MCP server.
-
-By the end you will have asked Claude Code "summarize my five most recent emails", watched it pick a Gmail tool Aileron published, and seen Aileron execute it inside the WASM sandbox against the real Google API — all without Claude ever holding your OAuth token.
-
 ## Preflight Checklist
 
-- **Go 1.25 or newer.** Aileron's modules require it. `go version` should report at least `go1.25.0`. Install instructions vary by platform.
+<LiftoffPreflight client:load />
 
-  <PlatformTabs items={goInstall} client:load />
-
-- **[Task](https://taskfile.dev/installation/).** All build commands go through `task`.
-
-  <PlatformTabs items={taskInstall} client:load />
-
-- **Node.js 24 or newer** and **pnpm 11.0.8 (within the 11.x line).** The webapp and docs targets build through `pnpm`, so `task build` will fail without them. The simplest setup is `corepack enable` after installing Node, then `corepack prepare pnpm@11.0.8 --activate`.
-
-  <PlatformTabs items={nodeInstall} client:load />
-
-- **[Claude Code](https://docs.claude.com/en/docs/claude-code/setup) installed and configured** with an Anthropic API key in `ANTHROPIC_API_KEY`. Aileron's launcher routes Claude Code's LLM calls through the local Aileron daemon. It does not supply or replace your API key.
-
-- **A Google account.** Gmail and Calendar must be enabled. The OAuth dance opens in your default browser.
-
-## 1. Build the binaries
+## 1. Build Aileron
 
 > **Note:** there is no `brew install aileron` yet. This guide builds from source; package distribution is coming shortly.
 
@@ -109,11 +46,9 @@ You should see something like:
 aileron dev (f66e51c)
 ```
 
-## 2. Trust the connector's publisher key
+## 2. Install Actions for Gmail and Calendar
 
-Every connector install verifies an ed25519 signature against keys you have explicitly trusted. Without a trusted key for the publisher's authority, install fails closed before fetching anything.
-
-Trust the `aileron-connector-google` publisher. The CLI fetches the key from `keys/publisher.pub` on the repo's default branch:
+Every connector install verifies an ed25519 signature against keys you have explicitly trusted. Without a trusted key for the publisher's authority, install fails closed before fetching anything. Trust the `aileron-connector-google` publisher; the CLI fetches the key from `keys/publisher.pub` on the repo's default branch:
 
 ```sh
 aileron keyring trust github://ALRubinger/aileron-connector-google
@@ -147,63 +82,20 @@ After the passphrase is set, the trust command finishes:
   Keyring: /Users/you/.aileron/keyring.json
 ```
 
-Confirm it landed:
+Now add the Gmail and Calendar actions. Pick the latest release tag from [the connector's releases page](https://github.com/ALRubinger/aileron-connector-google/releases) and substitute it for `0.0.6` below.
 
 ```sh
-aileron keyring list
+aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.6 && \
+  aileron action add github://ALRubinger/aileron-connector-google/actions/get-email@0.0.6 && \
+  aileron action add github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@0.0.6 && \
+  aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email@0.0.6
 ```
 
-## 3. Install an action
+The first `action add` resolves the action's connector dependency, fetches the connector tarball from the GitHub release, verifies the signature against your trusted key, computes the content hash, and walks you through Google's OAuth consent screen to bind a credential. Confirm each step. Subsequent action installs reuse the connector and the binding.
 
-Pick the latest release tag from [the connector's releases page](https://github.com/ALRubinger/aileron-connector-google/releases) and install one of its action templates. Versions in this guide use `0.0.6` — substitute the current tag.
+The connector's publisher already shipped a Desktop OAuth `client_id` and `client_secret` bound at release time, so there's no Google Cloud Console setup on your end. The token bytes are encrypted at rest; Aileron refreshes them transparently when they near expiry, and the connector never sees the credential.
 
-```sh
-aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.6
-```
-
-Aileron resolves the action's connector dependency, fetches the connector tarball from the GitHub release, verifies the signature against your trusted key, computes the content hash, and walks you through a consent prompt for each new connector and the action itself. Confirm each step.
-
-When the install completes, the action file is at `~/.aileron/actions/list-recent-emails.md` (you own it — edit it freely) and the connector is in the content-addressed store at `~/.aileron/store/`.
-
-Add a couple more so the agent has room to compose:
-
-```sh
-aileron action add github://ALRubinger/aileron-connector-google/actions/get-email@0.0.6
-aileron action add github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@0.0.6
-aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email@0.0.6
-```
-
-The connector is fetched once; subsequent action installs reuse it.
-
-## 4. Confirm your Google binding
-
-Action templates declare *what* credential they need; binding is how you tell Aileron *which* one of your accounts to use. The Google connector declares an OAuth2 capability with read+compose scopes for Gmail and read+events scopes for Calendar.
-
-By the time you reach this step, `aileron action add` should already have walked you through Google's OAuth consent screen and bound a credential — you can see it now:
-
-```sh
-aileron binding list
-```
-
-You should see something like:
-
-```
-oauth2/aileron-connector-google/personal  oauth2  google  ...
-```
-
-The connector's publisher already shipped a Desktop OAuth `client_id` and `client_secret` bound at release time, so there's no Google Cloud Console setup on your end. The token bytes are encrypted at rest; Aileron refreshes them transparently when they near expiry, and the connector never sees the credential. See [The Vault](/concepts/the-vault/) for how the credential travels at execution time.
-
-### If you skipped consent during install
-
-If you declined the consent prompt during `aileron action add`, or your terminal session ended before consent completed, run the binding step explicitly:
-
-```sh
-aileron binding setup github://ALRubinger/aileron-connector-google
-```
-
-You'll be asked for an identity (e.g. `personal`, `work`) — this is just a label that disambiguates multiple accounts you might bind under the same connector. Aileron then opens your browser to Google's OAuth consent screen. Approve, and Google redirects to a loopback URL Aileron is listening on. The CLI captures the code, exchanges it for a refresh token server-side, and stores the result in your vault. Re-run `aileron binding list` to confirm.
-
-## 5. Launch Claude Code through Aileron
+## 3. Launch Claude Code through Aileron
 
 ```sh
 aileron launch claude
@@ -212,32 +104,18 @@ aileron launch claude
 You'll see a banner like:
 
 ```
-✈️  Aileron — webapp http://127.0.0.1:54321 — session 01HK6... — log ~/.aileron/logs/...
+✈️  Aileron — webapp http://127.0.0.1:54321 — session 01HK6...
 ```
 
-If the vault happens to be locked at this moment, a follow-up line points you at the unlock surface:
+Claude Code is now a normal Claude Code session, with a tool catalog that includes the actions you just installed.
 
-```
-✈️  Vault locked — open http://127.0.0.1:54321 and enter your passphrase to unlock.
-```
-
-What happened under the hood:
-
-- The CLI resolved the daemon URL via `~/.aileron/daemon.json` (auto-spawning the daemon on first need).
-- It registered the launch session by `POST /v1/sessions`; the daemon minted a [ULID](https://github.com/ulid/spec) session ID and stamped its start time.
-- It set `ANTHROPIC_BASE_URL` to the daemon URL so Claude Code's LLM calls flow through Aileron.
-- It registered `aileron-mcp` as an MCP server for the session. On startup, `aileron-mcp` queries the daemon's `/v1/actions` and generates one MCP tool per installed action — `list_recent_emails`, `get_email`, `list_upcoming_events`, `draft_email`.
-- The vault binding you set up in step 4 is in scope because the daemon is the same process the CLI used to register the binding.
-
-The daemon URL is **stable across launches** — bookmark it once and it stays reachable until you `aileron stop`. Claude Code is now a normal Claude Code session, with a tool catalog that includes the actions Aileron published.
-
-## 6. Drive the actions from the agent
+## 4. Drive the actions from the agent
 
 In the Claude Code prompt, try:
 
 > Summarize my five most recent emails.
 
-Claude picks `list_recent_emails` (it sees one tool per installed action thanks to MCP discovery), Aileron executes it inside the WASM sandbox against `gmail.googleapis.com`, returns `{id, threadId}` pairs, Claude fans out parallel `get_email` calls for the metadata, and you get a summary.
+Claude picks `list_recent_emails`, Aileron executes it inside the WASM sandbox against `gmail.googleapis.com`, returns `{id, threadId}` pairs, Claude fans out parallel `get_email` calls for the metadata, and you get a summary.
 
 A few more prompts to exercise the rest of the surface:
 
@@ -247,17 +125,16 @@ Routes to `list_upcoming_events`.
 
 > Draft a reply to the last email from Andrew thanking him and confirming Tuesday.
 
-Routes to `get_email` (to read context) then `draft_email` — which lands a draft in your Gmail Drafts folder. Drafts are reversible, so this action is not gated; the existing manual "click Send in Gmail" step is the human review.
+Routes to `get_email` (to read context) then `draft_email`, which lands a draft in your Gmail Drafts folder. Drafts are reversible, so this action is not gated; the existing manual "click Send in Gmail" step is the human review.
 
-`send-email` and `create-calendar-event` are gated for per-call approval because their effects are not reversible (see [the connector's README](https://github.com/ALRubinger/aileron-connector-google#what-it-ships) for why). When Claude proposes one of those, the approval lands on the daemon's `/approvals` page (the same URL printed in the launch banner above), and Claude's tool call blocks until you click Approve or Deny.
+`send-email` and `create-calendar-event` are gated for per-call approval because their effects are not reversible (see [the connector's README](https://github.com/ALRubinger/aileron-connector-google#what-it-ships) for why). When Claude proposes one of those, the approval lands on the webapp URL printed in the launch banner above, and Claude's tool call blocks until you click Approve or Deny.
 
-## 7. Inspect what happened
+## 5. Inspect what happened
 
-In a separate terminal — the daemon is still running, so any CLI call connects to the same process — see what the runtime knows:
+In a separate terminal, see what the runtime knows:
 
 ```sh
 aileron status               # what's configured: action/connector/binding counts, policy, env, vault state
-aileron daemon status        # what's running: daemon URL, PID, version, started_at, locked/unlocked vault
 aileron sessions list        # every aileron launch, with status (running / ended / orphaned) and exit code
 aileron sessions watch <id>  # tail the per-session log live (Ctrl-C to stop; --no-follow for one-shot)
 aileron action audit         # every installed action and the capabilities it can exercise
@@ -265,11 +142,9 @@ aileron binding list         # bound credentials with their last-used timestamp
 aileron audit list           # action-execution audit log: every call, with inputs and outcome
 ```
 
-`aileron status` is configuration-shaped: what you've installed, what your policy says, where credentials live. `aileron daemon status` is process-shaped: which daemon process the CLI is talking to and whether its vault is unlocked. They overlap on vault state because both surface it for different reasons; the rest is disjoint.
+The audit log is the receipt for everything the agent did on your behalf. Each entry names the action, the connector version, the binding identity, the duration, and the disposition, recorded under `~/.aileron/audit/audit-YYYY-MM-DD.jsonl` (daily-rotated, user-scope). Combined with the install consent log, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
 
-The audit log is the receipt for everything the agent did on your behalf. Each entry names the action, the connector version, the binding identity, the duration, and the disposition — recorded under `~/.aileron/audit/audit-YYYY-MM-DD.jsonl` (daily-rotated, user-scope). Combined with the install consent log, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
-
-For end-to-end timing or correlation with the rest of your agent stack, Aileron also emits OpenTelemetry traces — opt-in via `AILERON_OTEL_ENABLED=true AILERON_OTEL_EXPORTER=stdout`. See [Observability](/guides/observability/) for what gets emitted, the span attribute schema, and the env vars that control both the audit and tracing surfaces.
+For end-to-end timing or correlation with the rest of your agent stack, Aileron also emits OpenTelemetry traces, opt-in via `AILERON_OTEL_ENABLED=true AILERON_OTEL_EXPORTER=stdout`. See [Observability](/guides/observability/) for what gets emitted, the span attribute schema, and the env vars that control both the audit and tracing surfaces.
 
 ## What you've built
 
@@ -281,4 +156,4 @@ This is the loop the rest of the docs builds on. From here:
 - [Concepts → Actions](/concepts/actions/) and [Connectors](/concepts/connectors/) — the model behind what you just installed.
 - [Guides → Authoring an Action](/guides/authoring-an-action/) — write your own action template against an existing connector.
 - [Guides → Authoring a Connector](/guides/authoring-a-connector/) — ship a connector for a service Aileron does not yet have.
-- [CLI Reference](/cli/) — every command grouped by concern, each linked to the ADR that ratifies its behavior.
+- [CLI Reference](/cli/) — every command grouped by concern.
