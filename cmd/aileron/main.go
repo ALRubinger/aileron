@@ -26,6 +26,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/oauth"
 	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
+	"github.com/ALRubinger/aileron/internal/suite"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
@@ -1467,12 +1468,22 @@ const connectorUsage = `usage:
   aileron connector check [--include-prerelease] [--json]`
 
 const actionUsage = `usage:
-  aileron action add <FQN> [--version=<v>] [--force] [--yes] [--no-bind]
+  aileron action add <FQN>     [--version=<v>] [--force] [--yes] [--no-bind]
+  aileron action add -f <path> [--force] [--yes] [--no-bind]
 
-Trust + connector install are absorbed into this command (issue #563):
-on a fresh machine, the CLI prompts to trust the publisher's signing
-key before preview, then prompts for the action install consent. Pass
---yes to auto-accept both prompts in non-interactive use.`
+Single-action form: install one action by FQN. Trust + connector
+install are absorbed into this command (issue #563): on a fresh
+machine the CLI prompts to trust the publisher's signing key before
+preview, then prompts for the install consent.
+
+Suite form (issue #564): -f points at a TOML manifest listing a set
+of actions. The CLI installs each in order, sharing trust + connector
+state across the set so a publisher's prompt fires at most once per
+run. Per-action failures are surfaced in a final summary; the
+remaining actions still install (failure-soft).
+
+Pass --yes to auto-accept all trust + consent prompts in
+non-interactive use.`
 
 // runConnector dispatches `aileron connector <subcommand>`.
 func runConnector(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -2138,18 +2149,34 @@ func shortHash(h string) string {
 	return h
 }
 
-// runActionAdd posts to /v1/actions/install, renders the envelope,
-// and (per ADR-0006 v1 UX) prompts the user to drop into the binding
-// setup flow for any unbound credential capabilities the action's
-// connectors declare. The user stays in the CLI surface throughout —
-// avoids the hit-binding_required-at-agent-invocation friction.
+// actionAddOptions carries the per-install knobs that drive
+// installOneAction. Both the single-action and suite paths build
+// one of these per action; the only difference is the source
+// (CLI argv vs. suite manifest entry).
+type actionAddOptions struct {
+	fqn     string // raw FQN; may include @<version>
+	version string // optional separate version flag
+	force   bool
+	yes     bool
+	noBind  bool
+}
+
+// runActionAdd dispatches `aileron action add` to one of two paths:
 //
-// When the server returns `connectors_missing` (issue #413), the CLI
-// shows the resolved FQN, version, and hash for each missing
-// connector and prompts the user; on confirmation it retries the
-// install with `auto_install_connectors=true` so the server runs the
-// connector pipeline transparently.
+//   - Suite form (`-f <path>`): parses the manifest at <path> and
+//     installs every action in it, sharing trust + connector state
+//     across the set (issue #564).
+//   - Single-action form (`<FQN>`): installs one action (issue #563
+//     auto-trust + connector install).
+//
+// Detection is pre-parse: scanning args for `-f` / `--file` so the
+// existing extractPositional path (which would otherwise treat the
+// suite path as a positional FQN) is bypassed cleanly.
 func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if hasFileFlag(args) {
+		return runActionAddSuite(args, stdin, stdout, stderr)
+	}
+
 	fqnArg, rest, ok := extractPositional(args)
 	if !ok {
 		fmt.Fprintln(stderr, actionUsage)
@@ -2164,7 +2191,49 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if err := flags.Parse(rest); err != nil {
 		return 1
 	}
-	resolvedFQN, resolvedVersion, perr := splitFQNVersion(fqnArg, *version)
+	opts := actionAddOptions{
+		fqn:     fqnArg,
+		version: *version,
+		force:   *force,
+		yes:     *yes,
+		noBind:  *noBind,
+	}
+	return installOneAction(opts, stdin, stdout, stderr, newTrustState())
+}
+
+// hasFileFlag reports whether args contain a `-f` / `--file`
+// invocation in any of the supported forms (`-f path`, `-f=path`,
+// `--file path`, `--file=path`). Used by runActionAdd to dispatch
+// to the suite-install path before the single-action path's
+// positional extractor (which doesn't know about value-taking
+// flags) gets confused by `-f path`.
+func hasFileFlag(args []string) bool {
+	for _, a := range args {
+		if a == "-f" || a == "--file" ||
+			strings.HasPrefix(a, "-f=") || strings.HasPrefix(a, "--file=") {
+			return true
+		}
+	}
+	return false
+}
+
+// installOneAction runs the full trust → preview → consent →
+// install → auto-bind flow for a single action. The trust state is
+// passed in so suite installs can share it across actions; a
+// single-action invocation passes a fresh state.
+//
+// Per ADR-0006 v1 UX, on success it prompts the user to drop into
+// the binding setup flow for any unbound credential capabilities
+// the action's connectors declare. The user stays in the CLI
+// surface throughout, which avoids the
+// hit-binding_required-at-agent-invocation friction.
+//
+// When the server returns `connectors_missing` (issue #413), the
+// CLI shows the resolved FQN, version, and hash for each missing
+// connector and retries the install with `auto_install_connectors=true`
+// so the server runs the connector pipeline transparently.
+func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.Writer, trust *trustState) int {
+	resolvedFQN, resolvedVersion, perr := splitFQNVersion(opts.fqn, opts.version)
 	if perr != nil {
 		fmt.Fprintf(stderr, "%v\n", perr)
 		return 1
@@ -2173,21 +2242,16 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	// Step 0 (issue #563): ensure the action's authority is trusted.
 	// Preview verifies the action signature against this authority's
 	// keys; without one, the daemon would fail with `signature_failure`
-	// before we ever rendered the consent prompt. Track which
-	// authorities we've already prompted for in this invocation so
-	// connector deps that share the action's authority don't double-
-	// prompt below.
+	// before we ever rendered the consent prompt.
 	actionFQN, perr := cstore.ParseFQN(resolvedFQN)
 	if perr != nil {
 		fmt.Fprintf(stderr, "error: %v\n", perr)
 		return 1
 	}
-	trustedThisRun := map[string]bool{}
-	if err := ensureAuthorityTrusted(actionFQN.Authority(), *yes, stdin, stdout, stderr); err != nil {
+	if err := trust.ensure(actionFQN.Authority(), opts.yes, stdin, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	trustedThisRun[actionFQN.Authority()] = true
 
 	// Step 1: preview. Fetches + parses the action manifest plus
 	// enumerates connector deps with their already-installed status.
@@ -2237,19 +2301,14 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 			// The daemon already validated this — defensive skip.
 			continue
 		}
-		auth := depFQN.Authority()
-		if trustedThisRun[auth] {
-			continue
-		}
-		if err := ensureAuthorityTrusted(auth, *yes, stdin, stdout, stderr); err != nil {
+		if err := trust.ensure(depFQN.Authority(), opts.yes, stdin, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
-		trustedThisRun[auth] = true
 	}
 
 	// Step 3: prompt unless --yes.
-	if !*yes {
+	if !opts.yes {
 		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/N]: ")))
 		if answer != "y" && answer != "yes" {
 			fmt.Fprintln(stdout, "Cancelled.")
@@ -2265,7 +2324,7 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		"version":                 resolvedVersion,
 		"auto_install_connectors": true,
 	}
-	if *force {
+	if opts.force {
 		body["force"] = true
 	}
 	bodyJSON, _ := json.Marshal(body)
@@ -2303,7 +2362,7 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "%s: %s\n  source: %s\n  path: %s\n",
 		verb, resp.Name, resp.Source, resp.Path)
 
-	if *noBind || len(resp.UnboundCapabilities) == 0 {
+	if opts.noBind || len(resp.UnboundCapabilities) == 0 {
 		if len(resp.UnboundCapabilities) > 0 {
 			fmt.Fprintln(stdout, "")
 			fmt.Fprintln(stdout, "Action has unbound credential capabilities:")
@@ -2335,6 +2394,110 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 			// one later.
 		}
 	}
+	return 0
+}
+
+// runActionAddSuite implements `aileron action add -f <path>`
+// (issue #564). Parses the suite manifest at <path>, then installs
+// each action in declaration order via installOneAction, sharing a
+// single trustState so a publisher's prompt fires once per run
+// regardless of how many actions in the suite reference it.
+//
+// Failure semantics are deliberately failure-soft: a per-action
+// install failure is captured in the final summary and the loop
+// continues with the next action. The CLI exits nonzero if any
+// action failed, so scripts can branch on the return code without
+// parsing the summary. Trust declines are treated like any other
+// per-action failure, but subsequent actions sharing the declined
+// authority skip silently (trustState.declined) so the user is not
+// re-prompted N-1 times for the same publisher.
+func runActionAddSuite(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("action add -f", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	suitePath := flags.String("f", "", "path to a suite manifest TOML file")
+	suitePathLong := flags.String("file", "", "path to a suite manifest TOML file (alias for -f)")
+	force := flags.Bool("force", false, "overwrite existing actions with the same name")
+	noBind := flags.Bool("no-bind", false, "skip the auto-prompt for unbound credentials (use in scripts)")
+	yes := flags.Bool("yes", false, "skip the consent prompts and proceed without confirmation")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if len(flags.Args()) > 0 {
+		fmt.Fprintln(stderr, "error: cannot combine -f with a positional FQN")
+		fmt.Fprintln(stderr, actionUsage)
+		return 1
+	}
+	path := *suitePath
+	if path == "" {
+		path = *suitePathLong
+	}
+	if path == "" {
+		fmt.Fprintln(stderr, "error: -f/--file requires a path to a suite manifest")
+		return 1
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: read suite manifest: %v\n", err)
+		return 1
+	}
+	manifest, err := suite.Parse(path, data)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "Suite: %s\n", manifest.Suite.Name)
+	if manifest.Suite.Description != "" {
+		fmt.Fprintf(stdout, "  %s\n", manifest.Suite.Description)
+	}
+	fmt.Fprintf(stdout, "  %d action(s) to install\n", len(manifest.Actions))
+
+	// Buffered stdin so each prompt picks up where the previous
+	// left off — same reason runAction wraps stdin for the single-
+	// action path. The trust + consent prompts within each
+	// installOneAction share this reader.
+	br, ok := stdin.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(stdin)
+	}
+
+	trust := newTrustState()
+	type result struct {
+		fqn  string
+		rc   int
+	}
+	results := make([]result, 0, len(manifest.Actions))
+	for i, action := range manifest.Actions {
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "── [%d/%d] %s\n", i+1, len(manifest.Actions), action.FQN)
+		opts := actionAddOptions{
+			fqn:    action.FQN,
+			force:  *force,
+			yes:    *yes,
+			noBind: *noBind,
+		}
+		rc := installOneAction(opts, br, stdout, stderr, trust)
+		results = append(results, result{fqn: action.FQN, rc: rc})
+	}
+
+	// Final summary: one line per action with its outcome.
+	fmt.Fprintln(stdout)
+	fmt.Fprintln(stdout, "Suite install summary:")
+	failures := 0
+	for _, r := range results {
+		if r.rc == 0 {
+			fmt.Fprintf(stdout, "  \033[32m✓\033[0m %s\n", r.fqn)
+		} else {
+			fmt.Fprintf(stdout, "  \033[31m✗\033[0m %s (exit %d)\n", r.fqn, r.rc)
+			failures++
+		}
+	}
+	if failures > 0 {
+		fmt.Fprintf(stdout, "\n%d of %d action(s) failed.\n", failures, len(results))
+		return 1
+	}
+	fmt.Fprintf(stdout, "\nAll %d action(s) installed.\n", len(results))
 	return 0
 }
 
