@@ -23,7 +23,7 @@
     class: className,
     children,
   }: {
-    title: string;
+    title?: string;
     variant?: Variant;
     class?: string;
     children: Snippet;
@@ -36,9 +36,11 @@
 </script>
 
 <Card.Root class={cn('my-8 text-base', variantClass[variant], className)}>
-  <Card.Header>
-    <Card.Title class="text-lg">{title}</Card.Title>
-  </Card.Header>
+  {#if title}
+    <Card.Header>
+      <Card.Title class="text-lg">{title}</Card.Title>
+    </Card.Header>
+  {/if}
   <Card.Content>
     {@render children()}
   </Card.Content>

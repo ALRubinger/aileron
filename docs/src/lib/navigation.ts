@@ -42,7 +42,7 @@ export const navigation: NavItem[] = [
     label: 'Meet Aileron',
     children: [
       { label: 'Overview', href: '/' },
-      { label: 'Getting Started', href: '/getting-started/' }
+      { label: 'Liftoff in 5 Minutes', href: '/getting-started/' }
     ]
   },
   {
