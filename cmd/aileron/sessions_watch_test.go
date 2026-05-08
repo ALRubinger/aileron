@@ -79,6 +79,46 @@ func TestRunSessionsWatch_NoFollowPrintsExistingAndExits(t *testing.T) {
 	}
 }
 
+func TestRunSessionsWatch_FetcherTransportErrorExitsOne(t *testing.T) {
+	// A transport / spawn failure surfaces as a non-nil error from the
+	// fetcher, distinct from a structured 404. The CLI must exit 1
+	// with the underlying error on stderr — this is the daemon-down
+	// path users hit when AILERON_API_URL is misconfigured or the
+	// daemon binary cannot be located.
+	withSessionsFetchers(t, nil,
+		func(string) (*api.Session, int, error) {
+			return nil, 0, errStub("daemon: no such host")
+		})
+
+	var stdout, stderr bytes.Buffer
+	code := runSessionsWatch([]string{"abc"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "daemon: no such host") {
+		t.Errorf("stderr = %q, want underlying transport error", stderr.String())
+	}
+}
+
+func TestRunSessionsWatch_EmptyWorkingDirExitsOne(t *testing.T) {
+	// A session record without a working_dir would let SessionLogPath
+	// fall back to cwd and silently tail the wrong project's log.
+	// Fail fast with a clear error instead.
+	withSessionsFetchers(t, nil,
+		func(id string) (*api.Session, int, error) {
+			return &api.Session{Id: id, Agent: "claude" /* WorkingDir intentionally empty */}, http.StatusOK, nil
+		})
+
+	var stdout, stderr bytes.Buffer
+	code := runSessionsWatch([]string{"abc"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "no working_dir recorded") {
+		t.Errorf("stderr = %q, want explanatory error", stderr.String())
+	}
+}
+
 // --- tailSessionLog ---
 
 func TestTailSessionLog_PrintsExistingThenAppends(t *testing.T) {
@@ -160,6 +200,83 @@ func TestTailSessionLog_PollsForFileCreation(t *testing.T) {
 	}
 }
 
+// TestTailSessionLog_LargeContentDrainsAcrossReads pins that the
+// follow loop drains content larger than its 4 KiB read buffer in
+// one logical "burst" — without this, a session that emits a big
+// startup banner or summary would print only the first 4 KiB and
+// then sleep until the next poll tick, fragmenting the output the
+// operator sees in real time.
+func TestTailSessionLog_LargeContentDrainsAcrossReads(t *testing.T) {
+	withFastTailInterval(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.log")
+
+	// Build a payload that crosses the read buffer (4096) plus some
+	// margin so we exercise multiple Read iterations.
+	const payloadSize = 12000
+	payload := make([]byte, payloadSize)
+	for i := range payload {
+		payload[i] = byte('a' + (i % 26))
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out lockingBuffer
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- tailSessionLog(ctx, &out, path, false) }()
+
+	// Wait for the full existing payload to land.
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if len(out.String()) >= payloadSize {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := out.String(); len(got) != payloadSize {
+		t.Fatalf("got %d bytes, want %d (multi-Read drain)", len(got), payloadSize)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("tailSessionLog returned err = %v after ctx cancel", err)
+	}
+}
+
+// TestTailSessionLog_CancelDuringFilePolling pins that ctx
+// cancellation breaks the open-file polling loop. Without this, a
+// `aileron sessions watch <id>` against a session that never writes
+// (immediate-exit launches) would block forever — the SIGINT path
+// in runSessionsWatch threads ctx through, so the polling loop is
+// the actual cancellation respondent.
+func TestTailSessionLog_CancelDuringFilePolling(t *testing.T) {
+	withFastTailInterval(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "never-appears.log")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var out lockingBuffer
+	done := make(chan error, 1)
+	go func() { done <- tailSessionLog(ctx, &out, path, false) }()
+
+	// Give the loop time to enter polling, then cancel.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "context canceled") {
+			t.Errorf("err = %v, want wrapped context.Canceled", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("tailSessionLog did not return after ctx cancel during file polling")
+	}
+}
+
 func TestTailSessionLog_OpenFailureSurfaced(t *testing.T) {
 	withFastTailInterval(t)
 	// A path under a non-readable parent yields a non-ErrNotExist
@@ -214,6 +331,12 @@ func (b *lockingBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// errStub is the smallest possible error type for fetcher stubs;
+// avoids dragging fmt.Errorf into the test surface.
+type errStub string
+
+func (e errStub) Error() string { return string(e) }
 
 // waitForOutput polls the buffer up to 1.5s for substr to appear,
 // failing the test if it doesn't. Replaces sleep+assert which would

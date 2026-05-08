@@ -68,11 +68,16 @@ func runSessionsWatch(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	logPath := launch.SessionLogPath(s.WorkingDir)
-	if logPath == "" {
-		fmt.Fprintln(stderr, "error: could not resolve session log path (no working_dir on session record)")
+	if s.WorkingDir == "" {
+		// SessionLogPath falls back to cwd for empty input, which
+		// would silently watch the wrong project's session.log.
+		// A session record without a working_dir is malformed (the
+		// daemon stamps it at registration); fail fast rather than
+		// guess.
+		fmt.Fprintf(stderr, "error: session %q has no working_dir recorded; cannot locate session log\n", sessionID)
 		return 1
 	}
+	logPath := launch.SessionLogPath(s.WorkingDir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), sessionsWatchSignals...)
 	defer stop()
