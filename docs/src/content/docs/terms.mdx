@@ -3,13 +3,9 @@ title: "Terms of Use"
 description: "Aileron is free, open-source software, offered as-is. These Terms cover what that means for both of us, in plain English."
 ---
 
-import * as Card from '$lib/components/ui/card/index.js';
+import HighlightCard from '$lib/components/ui/highlight-card.svelte';
 
-<Card.Root class="my-8 border-l-4 border-l-primary text-base">
-<Card.Header>
-<Card.Title class="text-lg">The short version</Card.Title>
-</Card.Header>
-<Card.Content>
+<HighlightCard title="The short version">
 
 Aileron is free, open-source software, offered as-is by its maintainer. These Terms cover what that means for both of us. You may use Aileron, and what you and your agent do with it is your responsibility.
 
@@ -19,8 +15,7 @@ Aileron is free, open-source software, offered as-is by its maintainer. These Te
 - Your use of those services (Gmail, Slack, the LLM provider you've chosen, and so on) is governed by their terms, not these.
 - Don't use Aileron for things that are illegal or that harm other people.
 
-</Card.Content>
-</Card.Root>
+</HighlightCard>
 
 ## What these Terms cover
 

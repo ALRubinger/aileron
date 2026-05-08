@@ -4,29 +4,19 @@ description: "Build Aileron from source, install the Google connector, bind a Go
 order: 2
 ---
 
-import * as Card from '$lib/components/ui/card/index.js';
+import HighlightCard from '$lib/components/ui/highlight-card.svelte';
 
-<Card.Root class="my-8 border-l-4 border-l-primary text-base">
-<Card.Header>
-<Card.Title class="text-lg">Your first flight</Card.Title>
-</Card.Header>
-<Card.Content>
+<HighlightCard title="Your first flight">
 
 Let's take your first flight with Aileron. In under 5 minutes, you'll be securely equipping Claude Code to use your real Gmail and Calendar account. Along the way we'll introduce Connectors and Actions, a joyful way to add powerful features to your agent. Your agent never sees the keys to your private services, and you always retain approval before taking an irreversible action like sending an email. Let's take off.
 
-</Card.Content>
-</Card.Root>
+</HighlightCard>
 
-<Card.Root class="my-8 bg-muted/50 text-base">
-<Card.Header>
-<Card.Title class="text-lg">What to expect</Card.Title>
-</Card.Header>
-<Card.Content>
+<HighlightCard title="What to expect" variant="muted">
 
 Estimated time: 5 minutes. What happens: Summarize five most recent emails, draft an email, execute secured actions in a sandboxed environment, get proof of the audit trail for what was done — all without giving your agent or LLM direct access to your Google Account.
 
-</Card.Content>
-</Card.Root>
+</HighlightCard>
 
 This guide walks the full end-to-end flow on a fresh machine: build the binaries, trust a publisher, install the [`aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) reference connector, bind a real Google account, and run [Claude Code](https://docs.claude.com/en/docs/claude-code) with Gmail and Calendar actions exposed via Aileron's MCP server.
 
