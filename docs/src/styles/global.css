@@ -98,6 +98,33 @@
 .prose code { font-size: 0.875em; background: var(--muted); padding: 0.2em 0.4em; border-radius: 0.25rem; }
 .prose pre { background: var(--muted); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-top: 0; margin-bottom: 1.25rem; }
 .prose pre code { background: none; padding: 0; font-size: 0.875em; }
+
+/* Code-block copy button injected by rehype-copy-button.mjs.
+ * The wrapper is positioned relative so the button can hover over the top-right
+ * corner of the <pre>. The <pre>'s own bottom margin moves to the wrapper so
+ * the layout stays identical to the un-wrapped version. */
+.prose .code-block-wrapper { position: relative; margin-bottom: 1.25rem; }
+.prose .code-block-wrapper > pre { margin-bottom: 0; }
+.prose .code-copy-button {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	padding: 0.25rem 0.5rem;
+	font-size: 0.75rem;
+	font-family: inherit;
+	color: var(--muted-foreground);
+	background: var(--background);
+	border: 1px solid var(--border);
+	border-radius: 0.25rem;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.15s ease, color 0.15s ease;
+}
+.prose .code-block-wrapper:hover .code-copy-button,
+.prose .code-block-wrapper:focus-within .code-copy-button,
+.prose .code-copy-button:focus-visible { opacity: 1; }
+.prose .code-copy-button:hover { color: var(--foreground); }
+.prose .code-copy-button.is-copied { color: var(--foreground); opacity: 1; }
 .prose blockquote { border-left: 4px solid var(--border); padding-left: 1rem; margin-left: 0; margin-right: 0; color: var(--muted-foreground); }
 .prose hr { border-color: var(--border); margin: 2rem 0; }
 .prose table { width: 100%; border-collapse: collapse; margin-bottom: 1.25rem; }

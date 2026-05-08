@@ -91,9 +91,9 @@ There is no `brew install aileron` yet — for now you build from source. That i
 ## 1. Build the binaries
 
 ```sh
-git clone https://github.com/ALRubinger/aileron.git
-cd aileron
-task build:cli build:server build:mcp build:sh
+git clone https://github.com/ALRubinger/aileron.git && \
+  cd aileron && \
+  task build:cli build:server build:mcp build:sh
 ```
 
 This produces four binaries in `build/`:

@@ -47,5 +47,37 @@ const nav = navigation;
         <slot />
       </div>
     </div>
+    <script>
+      // Wire up the "Copy" buttons injected by rehype-copy-button.
+      // Each button is a sibling of the <pre> inside .code-block-wrapper;
+      // we read textContent off the <pre> so we never copy the button's own
+      // label or any surrounding markup.
+      (function () {
+        const RESET_MS = 1500;
+        const buttons = document.querySelectorAll('button.code-copy-button');
+        buttons.forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            const wrapper = btn.closest('.code-block-wrapper');
+            if (!wrapper) return;
+            const pre = wrapper.querySelector('pre');
+            if (!pre) return;
+            const text = pre.innerText;
+            const labelDefault = btn.getAttribute('data-copy-label') || 'Copy';
+            const labelCopied = btn.getAttribute('data-copy-label-copied') || 'Copied';
+            try {
+              await navigator.clipboard.writeText(text);
+              btn.textContent = labelCopied;
+              btn.classList.add('is-copied');
+            } catch {
+              btn.textContent = 'Copy failed';
+            }
+            setTimeout(() => {
+              btn.textContent = labelDefault;
+              btn.classList.remove('is-copied');
+            }, RESET_MS);
+          });
+        });
+      })();
+    </script>
   </body>
 </html>
