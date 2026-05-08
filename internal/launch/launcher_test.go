@@ -478,6 +478,90 @@ func TestPrintSessionSummary_EmptySession(t *testing.T) {
 	}
 }
 
+// TestSummarizeSessionShell_ProducesAggregateCounts pins finding #7a
+// of #532: end-of-session shell-policy counts must be available as
+// structured data so the launcher can both print colorized stderr
+// AND emit a single slog event into the per-session log. The session
+// log is the operator's first stop when a launch goes wrong; the
+// counts let them tell at a glance whether the agent ran shell calls
+// and whether any were denied.
+func TestSummarizeSessionShell_ProducesAggregateCounts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	for _, e := range []struct{ disp string }{
+		{"allow"}, {"allow"}, {"allow"},
+		{"deny"},
+		{"ask_approved"}, {"ask_approved"},
+		{"ask_denied"},
+	} {
+		audit.AppendShellEntry(path, audit.ShellEntry{
+			SessionID:   "abc",
+			Command:     "x",
+			Disposition: e.disp,
+		})
+	}
+
+	got := launch.SummarizeSessionShell(path, "abc")
+	want := launch.SessionShellSummary{
+		Total:      7,
+		Allowed:    3,
+		Denied:     1,
+		Approved:   2,
+		UserDenied: 1,
+	}
+	if got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestSummarizeSessionShell_ZeroOnMissingFile(t *testing.T) {
+	got := launch.SummarizeSessionShell("/nonexistent/audit.jsonl", "any")
+	if (got != launch.SessionShellSummary{}) {
+		t.Errorf("expected zero summary for missing file, got %+v", got)
+	}
+}
+
+// TestLogSessionShellSummary_EmitsStructuredEvent pins the contract
+// that the per-session log gets a structured slog event with all
+// counters, even when totals are zero. "Zero activity" is itself a
+// signal — a launch that fired no shell commands tells the operator
+// the agent isn't using the shell, and silence in the log would not.
+func TestLogSessionShellSummary_EmitsStructuredEvent(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	launch.LogSessionShellSummary(logger, launch.SessionShellSummary{
+		Total: 4, Allowed: 2, Denied: 1, Approved: 1, UserDenied: 0,
+	})
+
+	out := buf.String()
+	for _, want := range []string{
+		`msg="session shell summary"`,
+		"total=4",
+		"allowed=2",
+		"denied=1",
+		"approved=1",
+		"user_denied=0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in slog output, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestLogSessionShellSummary_EmitsZeroSummary(t *testing.T) {
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	launch.LogSessionShellSummary(logger, launch.SessionShellSummary{})
+	out := buf.String()
+	if !strings.Contains(out, `msg="session shell summary"`) {
+		t.Errorf("expected zero-summary event to still be emitted, got:\n%s", out)
+	}
+	if !strings.Contains(out, "total=0") {
+		t.Errorf("expected total=0 in output, got:\n%s", out)
+	}
+}
+
 func TestEnvGlobMatch(t *testing.T) {
 	tests := []struct {
 		pattern string

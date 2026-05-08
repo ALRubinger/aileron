@@ -203,6 +203,8 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		"dir", config.Dir,
 		"binary", agentPath,
 		"daemon_url", daemonURL,
+		"audit_dir", auditStateDir,
+		"daemon_log", filepath.Join(stateDir, "daemon.log"),
 	)
 
 	// Banner: probe the daemon's vault state so we can include the
@@ -228,7 +230,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	if auditStateDir != "" {
-		PrintSessionSummary(os.Stderr, auditStateDir, sessionID)
+		// audit-*.jsonl files live in <auditStateDir>/audit/, not at
+		// the top level — pass the subdir so ReadShellEntriesFiltered
+		// finds the daily-rotated files.
+		auditDir := audit.DailyDir(auditStateDir)
+		shellSummary := summarizeSessionShell(auditDir, sessionID)
+		logSessionShellSummary(sessionLog, shellSummary)
+		PrintSessionSummary(os.Stderr, auditDir, sessionID)
 	}
 	return result, runErr
 }
@@ -425,43 +433,84 @@ func resolveAuditStateDir() string {
 	return filepath.Join(home, ".aileron")
 }
 
-// PrintSessionSummary reads the audit log for the given session and
-// prints a summary of what happened.
-func PrintSessionSummary(w io.Writer, auditPath, sessionID string) {
+// SessionShellSummary is the aggregate count of shell-policy
+// dispositions emitted by aileron-sh for one launch session. Empty
+// (zero counts, Total == 0) means either the session ran no shell
+// commands or its audit entries are unreadable — the difference does
+// not matter to the operator opening the session log.
+type SessionShellSummary struct {
+	Total      int
+	Allowed    int // policy: allow
+	Denied     int // policy: deny
+	Approved   int // ask, user approved
+	UserDenied int // ask, user denied
+}
+
+// summarizeSessionShell reads the audit log entries for sessionID and
+// returns aggregate counts. Errors and missing files are flattened to
+// a zero summary — this powers operator-visible output where partial
+// data (or no data) is the normal case for early-exit launches.
+func summarizeSessionShell(auditPath, sessionID string) SessionShellSummary {
 	entries, err := audit.ReadShellEntriesFiltered(auditPath, audit.ShellFilter{
 		SessionID: sessionID,
 	})
 	if err != nil || len(entries) == 0 {
-		return
+		return SessionShellSummary{}
 	}
-
-	var allowed, denied, approved, userDenied int
+	var s SessionShellSummary
 	for _, e := range entries {
+		s.Total++
 		switch e.Disposition {
 		case "allow":
-			allowed++
+			s.Allowed++
 		case "deny":
-			denied++
+			s.Denied++
 		case "ask_approved":
-			approved++
+			s.Approved++
 		case "ask_denied":
-			userDenied++
+			s.UserDenied++
 		}
 	}
+	return s
+}
 
+// PrintSessionSummary reads the audit log for the given session and
+// prints a colorized summary of what happened. Used at end-of-launch
+// to give the operator a one-glance receipt on stderr; the structured
+// equivalent lands in the session log via [logSessionShellSummary].
+func PrintSessionSummary(w io.Writer, auditPath, sessionID string) {
+	s := summarizeSessionShell(auditPath, sessionID)
+	if s.Total == 0 {
+		return
+	}
 	fmt.Fprintf(w, "\n\033[1maileron session summary:\033[0m\n")
-	if allowed > 0 {
-		fmt.Fprintf(w, "  %d command(s) allowed by policy\n", allowed)
+	if s.Allowed > 0 {
+		fmt.Fprintf(w, "  %d command(s) allowed by policy\n", s.Allowed)
 	}
-	if denied > 0 {
-		fmt.Fprintf(w, "  %d command(s) denied by policy\n", denied)
+	if s.Denied > 0 {
+		fmt.Fprintf(w, "  %d command(s) denied by policy\n", s.Denied)
 	}
-	if approved > 0 {
-		fmt.Fprintf(w, "  %d command(s) approved by user\n", approved)
+	if s.Approved > 0 {
+		fmt.Fprintf(w, "  %d command(s) approved by user\n", s.Approved)
 	}
-	if userDenied > 0 {
-		fmt.Fprintf(w, "  %d command(s) denied by user\n", userDenied)
+	if s.UserDenied > 0 {
+		fmt.Fprintf(w, "  %d command(s) denied by user\n", s.UserDenied)
 	}
+}
+
+// logSessionShellSummary writes the structured shell-summary as a
+// single slog event so it lands in the per-session log alongside
+// "session started" / "session ended" — the operator's first stop
+// when a launch goes wrong. Always emits an event (including when
+// Total == 0) so the absence of activity is itself recorded.
+func logSessionShellSummary(log *slog.Logger, s SessionShellSummary) {
+	log.Info("session shell summary",
+		"total", s.Total,
+		"allowed", s.Allowed,
+		"denied", s.Denied,
+		"approved", s.Approved,
+		"user_denied", s.UserDenied,
+	)
 }
 
 // loadEnvConfig loads the merged policy's EnvConfig for env scrubbing.
