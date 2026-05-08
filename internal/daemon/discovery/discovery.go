@@ -33,6 +33,7 @@ const (
 	InfoFile = "daemon.json"
 	PIDFile  = "daemon.pid"
 	LockFile = "daemon.lock"
+	LogFile  = "daemon.log"
 )
 
 // Info is the structured advertisement the daemon writes after binding.
