@@ -47,11 +47,17 @@ Verify:
 aileron version
 ```
 
-## 2. What happens on first use
+## 2. Trust the connector's publisher key
 
-Per [ADR-0012](/adr/0012-local-daemon-architecture) the local daemon auto-spawns on the first CLI command that needs it — there is no separate `aileron serve` (or `aileron daemon start`) step in the happy path. You don't run anything in this section; it tells you what to expect when the next steps trigger first-run flows.
+Every connector install verifies an ed25519 signature against keys you have explicitly trusted (per [ADR-0002](/adr/0002-connector-model)). Without a trusted key for the publisher's authority, install fails closed before fetching anything.
 
-The first command that touches the vault — typically `aileron action add` in §4 below — walks you through creating one:
+Trust the `aileron-connector-google` publisher. The CLI fetches the key from `keys/publisher.pub` on the repo's default branch:
+
+```sh
+aileron keyring trust github://ALRubinger/aileron-connector-google
+```
+
+This is the first command that touches your local secret store, so Aileron walks you through creating one before recording the trusted key. You'll see this prompt now:
 
 ```
   Creating a new Aileron vault.
@@ -69,23 +75,9 @@ Vault passphrase: ********
 Confirm passphrase: ********
 ```
 
-The CLI then writes the vault file, auto-spawns the daemon, and unlocks it for you in one step. **You unlock the vault once per daemon lifetime** — every subsequent CLI command and every `aileron launch` reuses the unlocked state until you `aileron stop` or reboot. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106); see [The Vault](/concepts/the-vault/) for what it protects you from. The file lives at `~/.aileron/secrets.json`.
+Pick a passphrase and confirm it. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106). You unlock it once per session and every later command reuses that unlocked state. See [The Vault](/concepts/the-vault/) for what it protects you from.
 
-If you'd rather create the vault deliberately before doing anything else (e.g. while writing a setup script), `aileron vault init` runs the same flow as a standalone command. For non-interactive contexts, set `AILERON_VAULT_PASSPHRASE` or pass `--passphrase-file <path>`; both are honored at every prompt point so CI pipelines never block on input. See [ADR-0011](/adr/0011-local-credential-vault) for the full state machine and prompt rules.
-
-You don't need to think about the daemon explicitly during this guide. If you want to inspect or stop it later, the [CLI reference for `aileron daemon`](/cli/) covers the lifecycle commands.
-
-## 3. Trust the connector's publisher key
-
-Every connector install verifies an ed25519 signature against keys you have explicitly trusted (per [ADR-0002](/adr/0002-connector-model)). Without a trusted key for the publisher's authority, install fails closed before fetching anything.
-
-Trust the `aileron-connector-google` publisher — the CLI fetches the key from `keys/publisher.pub` on the repo's default branch:
-
-```sh
-aileron keyring trust github://ALRubinger/aileron-connector-google
-```
-
-You should see:
+After the passphrase is set, the trust command finishes:
 
 ```
 ✓ Trusted publisher github://ALRubinger/aileron-connector-google
@@ -99,7 +91,7 @@ Confirm it landed:
 aileron keyring list
 ```
 
-## 4. Install an action
+## 3. Install an action
 
 Pick the latest release tag from [the connector's releases page](https://github.com/ALRubinger/aileron-connector-google/releases) and install one of its action templates. Versions in this guide use `0.0.6` — substitute the current tag.
 
@@ -121,7 +113,7 @@ aileron action add github://ALRubinger/aileron-connector-google/actions/draft-em
 
 The connector is fetched once; subsequent action installs reuse it.
 
-## 5. Confirm your Google binding
+## 4. Confirm your Google binding
 
 Action templates declare *what* credential they need; binding is how you tell Aileron *which* one of your accounts to use. The Google connector declares an OAuth2 capability with read+compose scopes for Gmail and read+events scopes for Calendar.
 
@@ -149,7 +141,7 @@ aileron binding setup github://ALRubinger/aileron-connector-google
 
 You'll be asked for an identity (e.g. `personal`, `work`) — this is just a label that disambiguates multiple accounts you might bind under the same connector. Aileron then opens your browser to Google's OAuth consent screen. Approve, and Google redirects to a loopback URL Aileron is listening on. The CLI captures the code, exchanges it for a refresh token server-side, and stores the result in your vault. Re-run `aileron binding list` to confirm.
 
-## 6. Launch Claude Code through Aileron
+## 5. Launch Claude Code through Aileron
 
 ```sh
 aileron launch claude
@@ -173,11 +165,11 @@ What happened under the hood:
 - It registered the launch session by `POST /v1/sessions`; the daemon minted a [ULID](https://github.com/ulid/spec) session ID and stamped its start time.
 - It set `ANTHROPIC_BASE_URL` to the daemon URL so Claude Code's LLM calls flow through Aileron.
 - It registered `aileron-mcp` as an MCP server for the session. On startup, `aileron-mcp` queries the daemon's `/v1/actions` and generates one MCP tool per installed action — `list_recent_emails`, `get_email`, `list_upcoming_events`, `draft_email`.
-- The vault binding you set up in step 5 is in scope because the daemon is the same process the CLI used to register the binding.
+- The vault binding you set up in step 4 is in scope because the daemon is the same process the CLI used to register the binding.
 
 The daemon URL is **stable across launches** — bookmark it once and it stays reachable until you `aileron stop`. Claude Code is now a normal Claude Code session, with a tool catalog that includes the actions Aileron published.
 
-## 7. Drive the actions from the agent
+## 6. Drive the actions from the agent
 
 In the Claude Code prompt, try:
 
@@ -197,7 +189,7 @@ Routes to `get_email` (to read context) then `draft_email` — which lands a dra
 
 `send-email` and `create-calendar-event` are gated for per-call approval because their effects are not reversible (see [the connector's README](https://github.com/ALRubinger/aileron-connector-google#what-it-ships) for why). When Claude proposes one of those, the approval lands on the daemon's `/approvals` page (the same URL printed in the launch banner above), and Claude's tool call blocks until you click Approve or Deny.
 
-## 8. Inspect what happened
+## 7. Inspect what happened
 
 In a separate terminal — the daemon is still running, so any CLI call connects to the same process — see what the runtime knows:
 
