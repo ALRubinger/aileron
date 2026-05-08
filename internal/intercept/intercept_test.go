@@ -2,6 +2,7 @@ package intercept
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -599,6 +600,59 @@ func TestHandleAnthropic_InterceptsAileronToolUse(t *testing.T) {
 	contentBlocks := user["content"].([]any)
 	if contentBlocks[0].(map[string]any)["type"] != "tool_result" {
 		t.Errorf("expected tool_result block; got %v", contentBlocks[0])
+	}
+}
+
+// --- Anthropic: gzipped upstream still intercepts tool_use ---
+
+// TestHandleAnthropic_GzippedUpstreamIntercepted regresses a real-
+// world stall: the Claude SDK forwards `Accept-Encoding: gzip`,
+// Anthropic returns gzipped bodies, and pre-fix the gateway
+// io.ReadAll'd the raw gzipped bytes and JSON-parse-failed every
+// round, breaking tool-call interception and forcing the agent
+// onto its much slower MCP fallback path. Drafting a single email
+// went from seconds to multi-minute stalls.
+func TestHandleAnthropic_GzippedUpstreamIntercepted(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := `{"id":"msg2","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"Sent."}],"stop_reason":"end_turn"}`
+		if calls == 0 {
+			body = `{"id":"msg1","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"tu_1","name":"ship_update","input":{"channel":"#eng"}}],"stop_reason":"tool_use"}`
+		}
+		calls++
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		gw.Write([]byte(body))
+		gw.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+		w.Write(buf.Bytes())
+	}))
+	t.Cleanup(srv.Close)
+
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	exec := &staticExecutor{result: action.Result{Content: `{"posted":true}`}}
+	e := engineFor(t, "", srv.URL, store, exec)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1024,"messages":[{"role":"user","content":"ship"}]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if len(exec.calls) != 1 {
+		t.Errorf("executor calls = %d; want 1 — gateway failed to parse the gzipped tool_use response", len(exec.calls))
+	}
+	if !strings.Contains(w.Body.String(), `"text":"Sent."`) {
+		t.Errorf("agent didn't see final text: %s", w.Body.String())
+	}
+	// passThrough must have stripped Content-Encoding, since the body
+	// we just emitted to the agent is the decompressed form.
+	if got := w.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding leaked to agent: %q", got)
 	}
 }
 

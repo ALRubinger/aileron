@@ -252,7 +252,11 @@ func (e *Engine) sendOpenAI(ctx context.Context, orig *http.Request, body []byte
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	return resp.StatusCode, resp.Header.Clone(), respBody, nil
+	respBody, headers, err := decompressUpstreamBody(resp.Header.Clone(), respBody)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return resp.StatusCode, headers, respBody, nil
 }
 
 // parseOpenAIChoice extracts the first choice's assistant message and

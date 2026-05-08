@@ -221,7 +221,11 @@ func (e *Engine) sendAnthropic(ctx context.Context, orig *http.Request, body []b
 	if err != nil {
 		return 0, nil, nil, err
 	}
-	return resp.StatusCode, resp.Header.Clone(), respBody, nil
+	respBody, headers, err := decompressUpstreamBody(resp.Header.Clone(), respBody)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	return resp.StatusCode, headers, respBody, nil
 }
 
 // parseAnthropicResponse extracts the assistant content blocks and

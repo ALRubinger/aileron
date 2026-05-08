@@ -2,6 +2,7 @@ package intercept
 
 import (
 	"bytes"
+	"compress/gzip"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,138 @@ import (
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/retry"
 )
+
+// gzipBytes returns the gzip-compressed encoding of s — used by tests
+// that simulate an upstream that honored `Accept-Encoding: gzip`.
+func gzipBytes(t *testing.T, s string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write([]byte(s)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// --- decompressUpstreamBody ---
+
+func TestDecompressUpstreamBody_GzipDecodesAndStripsHeader(t *testing.T) {
+	plain := `{"type":"message","content":[]}`
+	encoded := gzipBytes(t, plain)
+	in := http.Header{}
+	in.Set("Content-Encoding", "gzip")
+	in.Set("Content-Length", "999")
+	in.Set("X-Pass-Through", "keep")
+
+	body, headers, err := decompressUpstreamBody(in, encoded)
+	if err != nil {
+		t.Fatalf("decompressUpstreamBody: %v", err)
+	}
+	if string(body) != plain {
+		t.Errorf("body = %q, want %q", body, plain)
+	}
+	if got := headers.Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding still present: %q", got)
+	}
+	if got := headers.Get("Content-Length"); got != "31" {
+		t.Errorf("Content-Length = %q, want %d", got, len(plain))
+	}
+	if got := headers.Get("X-Pass-Through"); got != "keep" {
+		t.Errorf("unrelated header dropped; X-Pass-Through = %q", got)
+	}
+	// Helper must not mutate the caller's input headers.
+	if in.Get("Content-Encoding") != "gzip" {
+		t.Error("input headers mutated")
+	}
+}
+
+func TestDecompressUpstreamBody_IdentityPassThrough(t *testing.T) {
+	plain := []byte(`{"type":"message"}`)
+	in := http.Header{}
+	in.Set("Content-Encoding", "identity")
+
+	body, headers, err := decompressUpstreamBody(in, plain)
+	if err != nil {
+		t.Fatalf("decompressUpstreamBody: %v", err)
+	}
+	if !bytes.Equal(body, plain) {
+		t.Errorf("body changed; got %q", body)
+	}
+	if headers.Get("Content-Encoding") != "identity" {
+		t.Error("identity header should be preserved when unchanged")
+	}
+}
+
+func TestDecompressUpstreamBody_NoEncodingHeader(t *testing.T) {
+	plain := []byte(`{"type":"message"}`)
+	body, _, err := decompressUpstreamBody(http.Header{}, plain)
+	if err != nil {
+		t.Fatalf("decompressUpstreamBody: %v", err)
+	}
+	if !bytes.Equal(body, plain) {
+		t.Errorf("body changed; got %q", body)
+	}
+}
+
+func TestDecompressUpstreamBody_UnknownEncodingPassThrough(t *testing.T) {
+	// Brotli / zstd / deflate aren't supported. We pass through
+	// unchanged so the existing parse-failure path logs and the
+	// agent's SDK can still try to decode if it knows the encoding.
+	in := http.Header{}
+	in.Set("Content-Encoding", "br")
+	original := []byte("opaque-brotli-bytes")
+
+	body, headers, err := decompressUpstreamBody(in, original)
+	if err != nil {
+		t.Fatalf("decompressUpstreamBody: %v", err)
+	}
+	if !bytes.Equal(body, original) {
+		t.Error("body changed for unknown encoding")
+	}
+	if headers.Get("Content-Encoding") != "br" {
+		t.Error("Content-Encoding stripped for unknown encoding")
+	}
+}
+
+func TestDecompressUpstreamBody_GzipMixedCaseAndWhitespace(t *testing.T) {
+	plain := `{"ok":true}`
+	in := http.Header{}
+	in.Set("Content-Encoding", "  GZIP  ")
+
+	body, _, err := decompressUpstreamBody(in, gzipBytes(t, plain))
+	if err != nil {
+		t.Fatalf("decompressUpstreamBody: %v", err)
+	}
+	if string(body) != plain {
+		t.Errorf("body = %q, want %q", body, plain)
+	}
+}
+
+func TestDecompressUpstreamBody_GzipEmptyBodyIsNoOp(t *testing.T) {
+	in := http.Header{}
+	in.Set("Content-Encoding", "gzip")
+	body, headers, err := decompressUpstreamBody(in, nil)
+	if err != nil {
+		t.Fatalf("expected no error on empty gzip body; got %v", err)
+	}
+	if len(body) != 0 {
+		t.Errorf("body = %q, want empty", body)
+	}
+	if headers.Get("Content-Encoding") != "gzip" {
+		t.Error("empty-body short-circuit should not strip headers")
+	}
+}
+
+func TestDecompressUpstreamBody_GzipMalformedReturnsError(t *testing.T) {
+	in := http.Header{}
+	in.Set("Content-Encoding", "gzip")
+	if _, _, err := decompressUpstreamBody(in, []byte("not-actually-gzip")); err == nil {
+		t.Fatal("expected error on malformed gzip body")
+	}
+}
 
 // --- truncateForLog ---
 
