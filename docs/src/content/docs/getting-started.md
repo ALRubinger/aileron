@@ -48,26 +48,13 @@ Verify:
 aileron version
 ```
 
-## 2. The Local Daemon
+## 2. What happens on first use
 
-Per [ADR-0012](/adr/0012-local-daemon-architecture), the first `aileron <anything>` you run auto-spawns the local daemon — there is no `aileron serve` step. The daemon binds an ephemeral port on `127.0.0.1` and advertises itself in `~/.aileron/daemon.json` so every subsequent CLI command and every `aileron launch` finds it without you typing a port number.
+Per [ADR-0012](/adr/0012-local-daemon-architecture) the local daemon auto-spawns on the first CLI command that needs it — there is no separate `aileron serve` (or `aileron daemon start`) step in the happy path. You don't run anything in this section; it tells you what to expect when the next steps trigger first-run flows.
 
-You can manage the daemon explicitly when you want to:
-
-```sh
-aileron daemon start    # idempotent — prints the URL whether or not it was already running
-aileron daemon status   # URL + PID + locked/unlocked vault state
-aileron daemon stop     # SIGTERM, drops the unlocked vault key from memory
-aileron stop            # alias for `aileron daemon stop`
-```
-
-### Vault first-run
-
-On the first CLI command that needs the vault (e.g. `aileron binding setup` or any of the daemon-talking subcommands below), Aileron walks you through creating one:
+The first command that touches the vault — typically `aileron action add` in §4 below — walks you through creating one:
 
 ```
-$ aileron binding setup github://aileron/slack
-
   Creating a new Aileron vault.
 
   The passphrase you choose protects all secrets in this vault.
@@ -86,6 +73,8 @@ Confirm passphrase: ********
 The CLI then writes the vault file, auto-spawns the daemon, and unlocks it for you in one step. **You unlock the vault once per daemon lifetime** — every subsequent CLI command and every `aileron launch` reuses the unlocked state until you `aileron stop` or reboot. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106); see [The Vault](/concepts/the-vault/) for what it protects you from. The file lives at `~/.aileron/secrets.json`.
 
 If you'd rather create the vault deliberately before doing anything else (e.g. while writing a setup script), `aileron vault init` runs the same flow as a standalone command. For non-interactive contexts, set `AILERON_VAULT_PASSPHRASE` or pass `--passphrase-file <path>`; both are honored at every prompt point so CI pipelines never block on input. See [ADR-0011](/adr/0011-local-credential-vault) for the full state machine and prompt rules.
+
+You don't need to think about the daemon explicitly during this guide. If you want to inspect or stop it later, the [CLI reference for `aileron daemon`](/cli/) covers the lifecycle commands.
 
 ## 3. Trust the connector's publisher key
 
@@ -134,21 +123,11 @@ aileron action add github://ALRubinger/aileron-connector-google/actions/draft-em
 
 The connector is fetched once; subsequent action installs reuse it.
 
-## 5. Bind your Google account
+## 5. Confirm your Google binding
 
 Action templates declare *what* credential they need; binding is how you tell Aileron *which* one of your accounts to use. The Google connector declares an OAuth2 capability with read+compose scopes for Gmail and read+events scopes for Calendar.
 
-If `aileron action add` already prompted you to bind during install, skip ahead. Otherwise:
-
-```sh
-aileron binding setup github://ALRubinger/aileron-connector-google
-```
-
-You'll be asked for an identity (e.g. `personal`, `work`) — this is just a label that disambiguates multiple accounts you might bind under the same connector. Aileron then opens your browser to Google's OAuth consent screen. Approve, and Google redirects to a loopback URL Aileron is listening on. The CLI captures the code, exchanges it for a refresh token server-side, and stores the result in your vault.
-
-The connector's publisher already shipped a Desktop OAuth `client_id` and `client_secret` bound at release time, so there is no Google Cloud Console setup on your end.
-
-Confirm the binding landed:
+By the time you reach this step, `aileron action add` should already have walked you through Google's OAuth consent screen and bound a credential — you can see it now:
 
 ```sh
 aileron binding list
@@ -160,7 +139,17 @@ You should see something like:
 oauth2/aileron-connector-google/personal  oauth2  google  ...
 ```
 
-The token bytes are encrypted at rest. Aileron refreshes them transparently when they near expiry; the connector never sees the credential. See [The Vault](/concepts/the-vault/) for how the credential travels at execution time.
+The connector's publisher already shipped a Desktop OAuth `client_id` and `client_secret` bound at release time, so there's no Google Cloud Console setup on your end. The token bytes are encrypted at rest; Aileron refreshes them transparently when they near expiry, and the connector never sees the credential. See [The Vault](/concepts/the-vault/) for how the credential travels at execution time.
+
+### If you skipped consent during install
+
+If you declined the consent prompt during `aileron action add`, or your terminal session ended before consent completed, run the binding step explicitly:
+
+```sh
+aileron binding setup github://ALRubinger/aileron-connector-google
+```
+
+You'll be asked for an identity (e.g. `personal`, `work`) — this is just a label that disambiguates multiple accounts you might bind under the same connector. Aileron then opens your browser to Google's OAuth consent screen. Approve, and Google redirects to a loopback URL Aileron is listening on. The CLI captures the code, exchanges it for a refresh token server-side, and stores the result in your vault. Re-run `aileron binding list` to confirm.
 
 ## 6. Launch Claude Code through Aileron
 
