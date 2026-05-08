@@ -77,10 +77,37 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if respStatus != http.StatusOK {
+			e.log.Warn("upstream non-success",
+				"protocol", "anthropic",
+				"upstream_status", respStatus,
+				"request_id", respHeaders.Get("request-id"),
+				"round", round,
+			)
 			roundSpan.SetAttributes(attribute.Int("aileron.intercept.upstream_status", respStatus))
 			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
 			return
+		}
+
+		// Anthropic occasionally surfaces upstream errors
+		// (overloaded_error, rate_limit_error, ...) inside an HTTP 200
+		// envelope. Logging here gives the operator a visible signal
+		// in daemon.log; without this the response looks indistin-
+		// guishable from a successful round and the agent's SDK retry
+		// (or 13-minute hang on stuttering streams) is the first sign
+		// anything is wrong. The body still flows through to the
+		// agent verbatim via parseAnthropicResponse → passThrough.
+		if errType, errMsg, ok := peekAnthropicError(respBody); ok {
+			e.log.Warn("upstream error in HTTP 200 envelope",
+				"protocol", "anthropic",
+				"upstream_error_type", errType,
+				"upstream_error_message", truncateForLog(errMsg, 256),
+				"request_id", respHeaders.Get("request-id"),
+				"round", round,
+			)
+			roundSpan.SetAttributes(
+				attribute.String("aileron.intercept.upstream_error_type", errType),
+			)
 		}
 
 		assistantContent, toolUses, err := parseAnthropicResponse(respBody)

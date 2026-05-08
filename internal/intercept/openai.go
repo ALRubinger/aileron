@@ -100,10 +100,34 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if respStatus != http.StatusOK {
+			e.log.Warn("upstream non-success",
+				"protocol", "openai",
+				"upstream_status", respStatus,
+				"request_id", respHeaders.Get("x-request-id"),
+				"round", round,
+			)
 			roundSpan.SetAttributes(attribute.Int("aileron.intercept.upstream_status", respStatus))
 			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
 			return
+		}
+
+		// Mirror of the Anthropic path: log when an upstream error
+		// envelope arrives inside an HTTP 200 body. OpenAI usually
+		// returns errors as 4xx/5xx but streaming/edge cases can
+		// surface them in a 200 — same operator-visibility argument
+		// applies as for Anthropic.
+		if errType, errMsg, ok := peekOpenAIError(respBody); ok {
+			e.log.Warn("upstream error in HTTP 200 envelope",
+				"protocol", "openai",
+				"upstream_error_type", errType,
+				"upstream_error_message", truncateForLog(errMsg, 256),
+				"request_id", respHeaders.Get("x-request-id"),
+				"round", round,
+			)
+			roundSpan.SetAttributes(
+				attribute.String("aileron.intercept.upstream_error_type", errType),
+			)
 		}
 
 		assistantMsg, toolCalls, err := parseOpenAIChoice(respBody)
