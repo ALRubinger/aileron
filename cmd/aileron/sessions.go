@@ -23,8 +23,9 @@ var (
 )
 
 const sessionsUsage = `usage:
-  aileron sessions list [--active] [--agent NAME] [--since RFC3339] [--limit N] [--json]
-  aileron sessions get  <session-id> [--json]`
+  aileron sessions list  [--active] [--agent NAME] [--since RFC3339] [--limit N] [--json]
+  aileron sessions get   <session-id> [--json]
+  aileron sessions watch <session-id> [--no-follow]`
 
 // sessionsListQuery mirrors the four query parameters supported by
 // `GET /v1/sessions`. Empty / zero values are not sent.
@@ -48,6 +49,8 @@ func runSessions(args []string, stdout, stderr io.Writer) int {
 		return runSessionsList(args[1:], stdout, stderr)
 	case "get":
 		return runSessionsGet(args[1:], stdout, stderr)
+	case "watch":
+		return runSessionsWatch(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown sessions command: %q\n", args[0])
 		fmt.Fprintln(stderr, sessionsUsage)
