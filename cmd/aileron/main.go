@@ -1468,19 +1468,27 @@ const connectorUsage = `usage:
   aileron connector check [--include-prerelease] [--json]`
 
 const actionUsage = `usage:
-  aileron action add <FQN>     [--version=<v>] [--force] [--yes] [--no-bind]
-  aileron action add -f <path> [--force] [--yes] [--no-bind]
+  aileron action add <FQN>             [--version=<v>] [--force] [--yes] [--no-bind]
+  aileron action add-suite <SOURCE>    [--force] [--yes] [--no-bind]
 
 Single-action form: install one action by FQN. Trust + connector
 install are absorbed into this command (issue #563): on a fresh
 machine the CLI prompts to trust the publisher's signing key before
 preview, then prompts for the install consent.
 
-Suite form (issue #564): -f points at a TOML manifest listing a set
-of actions. The CLI installs each in order, sharing trust + connector
-state across the set so a publisher's prompt fires at most once per
-run. Per-action failures are surfaced in a final summary; the
-remaining actions still install (failure-soft).
+Suite form (issue #564): <SOURCE> is either:
+  - <scheme>://<owner>/<repo>/<file-path>@<ref>   (remote)
+  - <local-filesystem-path>                       (no scheme)
+
+Remote refs:
+  @latest     latest non-draft, non-prerelease release
+  @<tag>      a specific release tag (e.g. v0.0.6)
+  @<sha>      a specific commit SHA (40 hex chars)
+
+The CLI installs each action in declaration order, sharing trust +
+connector state across the set so a publisher's prompt fires at most
+once per run. Per-action failures are surfaced in a final summary;
+the remaining actions still install (failure-soft).
 
 Pass --yes to auto-accept all trust + consent prompts in
 non-interactive use.`
@@ -1635,6 +1643,8 @@ func runAction(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "add":
 		return runActionAdd(args[1:], br, stdout, stderr)
+	case "add-suite":
+		return runActionAddSuite(args[1:], br, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown action command: %q\n", args[0])
 		fmt.Fprintln(stderr, actionUsage)
@@ -2161,22 +2171,10 @@ type actionAddOptions struct {
 	noBind  bool
 }
 
-// runActionAdd dispatches `aileron action add` to one of two paths:
-//
-//   - Suite form (`-f <path>`): parses the manifest at <path> and
-//     installs every action in it, sharing trust + connector state
-//     across the set (issue #564).
-//   - Single-action form (`<FQN>`): installs one action (issue #563
-//     auto-trust + connector install).
-//
-// Detection is pre-parse: scanning args for `-f` / `--file` so the
-// existing extractPositional path (which would otherwise treat the
-// suite path as a positional FQN) is bypassed cleanly.
+// runActionAdd installs a single action by FQN (issue #563
+// auto-trust + connector install). Suite installs go through the
+// peer subcommand `aileron action add-suite` (issue #564).
 func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if hasFileFlag(args) {
-		return runActionAddSuite(args, stdin, stdout, stderr)
-	}
-
 	fqnArg, rest, ok := extractPositional(args)
 	if !ok {
 		fmt.Fprintln(stderr, actionUsage)
@@ -2199,22 +2197,6 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		noBind:  *noBind,
 	}
 	return installOneAction(opts, stdin, stdout, stderr, newTrustState())
-}
-
-// hasFileFlag reports whether args contain a `-f` / `--file`
-// invocation in any of the supported forms (`-f path`, `-f=path`,
-// `--file path`, `--file=path`). Used by runActionAdd to dispatch
-// to the suite-install path before the single-action path's
-// positional extractor (which doesn't know about value-taking
-// flags) gets confused by `-f path`.
-func hasFileFlag(args []string) bool {
-	for _, a := range args {
-		if a == "-f" || a == "--file" ||
-			strings.HasPrefix(a, "-f=") || strings.HasPrefix(a, "--file=") {
-			return true
-		}
-	}
-	return false
 }
 
 // installOneAction runs the full trust → preview → consent →
@@ -2397,45 +2379,59 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 	return 0
 }
 
-// runActionAddSuite implements `aileron action add -f <path>`
-// (issue #564). Parses the suite manifest at <path>, then installs
-// each action in declaration order via installOneAction, sharing a
-// single trustState so a publisher's prompt fires once per run
-// regardless of how many actions in the suite reference it.
+// runActionAddSuite implements `aileron action add-suite <SOURCE>`
+// (issue #564). Source is one of:
 //
-// Failure semantics are deliberately failure-soft: a per-action
-// install failure is captured in the final summary and the loop
-// continues with the next action. The CLI exits nonzero if any
-// action failed, so scripts can branch on the return code without
-// parsing the summary. Trust declines are treated like any other
-// per-action failure, but subsequent actions sharing the declined
-// authority skip silently (trustState.declined) so the user is not
-// re-prompted N-1 times for the same publisher.
+//   - Remote: `<scheme>://<owner>/<repo>/<file-path>@<ref>` — the
+//     CLI resolves the ref (latest / tag / sha), fetches the suite
+//     manifest from raw.githubusercontent.com, and uses the resolved
+//     ref to set the install version of path-form entries.
+//   - Local: any path without a `<scheme>://` prefix — the CLI
+//     reads the file from disk and installs entries that all carry
+//     explicit `<FQN>@<version>` (path-form requires a remote ref
+//     to inherit).
+//
+// Each action installs in declaration order via installOneAction,
+// sharing a single trustState so a publisher's prompt fires once
+// per run regardless of how many entries reference it. Failure
+// semantics are failure-soft (per-action failures captured in the
+// summary; loop continues; nonzero exit if any failed).
 func runActionAddSuite(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("action add -f", flag.ContinueOnError)
+	flags := flag.NewFlagSet("action add-suite", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	suitePath := flags.String("f", "", "path to a suite manifest TOML file")
-	suitePathLong := flags.String("file", "", "path to a suite manifest TOML file (alias for -f)")
 	force := flags.Bool("force", false, "overwrite existing actions with the same name")
 	noBind := flags.Bool("no-bind", false, "skip the auto-prompt for unbound credentials (use in scripts)")
 	yes := flags.Bool("yes", false, "skip the consent prompts and proceed without confirmation")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
-	if len(flags.Args()) > 0 {
-		fmt.Fprintln(stderr, "error: cannot combine -f with a positional FQN")
+	if len(flags.Args()) != 1 {
+		fmt.Fprintln(stderr, "error: add-suite takes exactly one source argument")
 		fmt.Fprintln(stderr, actionUsage)
 		return 1
 	}
-	path := *suitePath
-	if path == "" {
-		path = *suitePathLong
-	}
-	if path == "" {
-		fmt.Fprintln(stderr, "error: -f/--file requires a path to a suite manifest")
-		return 1
+	source := flags.Args()[0]
+
+	opts := actionAddOptions{force: *force, yes: *yes, noBind: *noBind}
+
+	// Buffered stdin so each prompt picks up where the previous
+	// left off — same reason runAction wraps stdin for the single-
+	// action path.
+	br, ok := stdin.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(stdin)
 	}
 
+	if strings.Contains(source, "://") {
+		return runActionAddSuiteRemote(source, opts, br, stdout, stderr)
+	}
+	return runActionAddSuiteLocal(source, opts, br, stdout, stderr)
+}
+
+// runActionAddSuiteLocal handles a filesystem-path source: read,
+// parse, resolve with no inheritance context (path-form entries
+// in a local manifest are an error), then drive the shared loop.
+func runActionAddSuiteLocal(path string, opts actionAddOptions, stdin *bufio.Reader, stdout, stderr io.Writer) int {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: read suite manifest: %v\n", err)
@@ -2446,50 +2442,101 @@ func runActionAddSuite(args []string, stdin io.Reader, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-
-	fmt.Fprintf(stdout, "Suite: %s\n", manifest.Suite.Name)
-	if manifest.Suite.Description != "" {
-		fmt.Fprintf(stdout, "  %s\n", manifest.Suite.Description)
+	refs, err := suite.Resolve(manifest, cstore.FQN{}, "")
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %s: %v\n", path, err)
+		return 1
 	}
-	fmt.Fprintf(stdout, "  %d action(s) to install\n", len(manifest.Actions))
+	return installSuiteEntries(manifest, refs, opts, stdin, stdout, stderr)
+}
 
-	// Buffered stdin so each prompt picks up where the previous
-	// left off — same reason runAction wraps stdin for the single-
-	// action path. The trust + consent prompts within each
-	// installOneAction share this reader.
-	br, ok := stdin.(*bufio.Reader)
-	if !ok {
-		br = bufio.NewReader(stdin)
+// runActionAddSuiteRemote handles an FQN-style source: parse the
+// `<URL>@<ref>` shape, resolve `latest` to a concrete tag if needed,
+// fetch the suite manifest from raw.githubusercontent.com, and
+// drive the shared loop with the resolved ref's bare SemVer (when
+// applicable) as the inheritance version for path-form entries.
+func runActionAddSuiteRemote(source string, opts actionAddOptions, stdin *bufio.Reader, stdout, stderr io.Writer) int {
+	suiteFQN, ref, err := parseSuiteSource(source)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
 	}
+	ctx := context.Background()
+	resolvedRef := ref
+	if ref == "latest" {
+		fmt.Fprintf(stdout, "Resolving @latest for %s/%s …\n", suiteFQN.Owner, suiteFQN.Repo)
+		tag, rerr := resolveLatestRef(ctx, suiteFQN)
+		if rerr != nil {
+			fmt.Fprintf(stderr, "error: %v\n", rerr)
+			return 1
+		}
+		resolvedRef = tag
+		fmt.Fprintf(stdout, "  → %s\n", tag)
+	}
+
+	data, err := fetchSuiteTOML(ctx, suiteFQN, resolvedRef)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	display := source
+	manifest, err := suite.Parse(display, data)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+
+	// Path-form entries inherit the suite's version. Strip the `v`
+	// prefix from a release tag to get bare SemVer; SHAs and other
+	// non-SemVer refs leave inheritVersion empty, which surfaces as
+	// a clear error from suite.Resolve when path-form entries are
+	// present.
+	inheritVersion, _ := suiteVersionFromRef(resolvedRef)
+
+	refs, err := suite.Resolve(manifest, suiteFQN, inheritVersion)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %s: %v\n", display, err)
+		return 1
+	}
+	return installSuiteEntries(manifest, refs, opts, stdin, stdout, stderr)
+}
+
+// installSuiteEntries is the shared per-entry loop + summary used
+// by both local and remote suite paths. Each entry installs via
+// installOneAction; one trustState threads through every call so
+// publisher prompts fire at most once per run. Per-entry failures
+// are captured for the final summary; the loop never aborts mid-
+// stream (failure-soft).
+func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actionAddOptions, stdin *bufio.Reader, stdout, stderr io.Writer) int {
+	fmt.Fprintf(stdout, "Suite: %s\n", manifest.Name)
+	if manifest.Description != "" {
+		fmt.Fprintf(stdout, "  %s\n", manifest.Description)
+	}
+	fmt.Fprintf(stdout, "  %d action(s) to install\n", len(refs))
 
 	trust := newTrustState()
 	type result struct {
-		fqn  string
-		rc   int
+		ref string
+		rc  int
 	}
-	results := make([]result, 0, len(manifest.Actions))
-	for i, action := range manifest.Actions {
+	results := make([]result, 0, len(refs))
+	for i, ref := range refs {
 		fmt.Fprintln(stdout)
-		fmt.Fprintf(stdout, "── [%d/%d] %s\n", i+1, len(manifest.Actions), action.FQN)
-		opts := actionAddOptions{
-			fqn:    action.FQN,
-			force:  *force,
-			yes:    *yes,
-			noBind: *noBind,
-		}
-		rc := installOneAction(opts, br, stdout, stderr, trust)
-		results = append(results, result{fqn: action.FQN, rc: rc})
+		fmt.Fprintf(stdout, "── [%d/%d] %s\n", i+1, len(refs), ref.String())
+		entryOpts := opts
+		entryOpts.fqn = ref.String()
+		rc := installOneAction(entryOpts, stdin, stdout, stderr, trust)
+		results = append(results, result{ref: ref.String(), rc: rc})
 	}
 
-	// Final summary: one line per action with its outcome.
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Suite install summary:")
 	failures := 0
 	for _, r := range results {
 		if r.rc == 0 {
-			fmt.Fprintf(stdout, "  \033[32m✓\033[0m %s\n", r.fqn)
+			fmt.Fprintf(stdout, "  \033[32m✓\033[0m %s\n", r.ref)
 		} else {
-			fmt.Fprintf(stdout, "  \033[31m✗\033[0m %s (exit %d)\n", r.fqn, r.rc)
+			fmt.Fprintf(stdout, "  \033[31m✗\033[0m %s (exit %d)\n", r.ref, r.rc)
 			failures++
 		}
 	}

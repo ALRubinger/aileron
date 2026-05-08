@@ -48,33 +48,13 @@ aileron dev (f66e51c)
 
 ## 2. Install Actions for Gmail and Calendar
 
-The `aileron-connector-google` connector ships several action templates: read Gmail, draft an email, read your calendar, create an event. Install them as a suite by pointing `aileron action add` at a TOML manifest.
-
-Save this as `gmail-and-calendar.toml`. Pick the latest release tag from [the connector's releases page](https://github.com/ALRubinger/aileron-connector-google/releases) and substitute it for `0.0.6`:
-
-```toml
-[suite]
-name = "gmail-and-calendar"
-description = "Read and draft Gmail; read and create calendar events"
-
-[[actions]]
-fqn = "github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.6"
-
-[[actions]]
-fqn = "github://ALRubinger/aileron-connector-google/actions/get-email@0.0.6"
-
-[[actions]]
-fqn = "github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@0.0.6"
-
-[[actions]]
-fqn = "github://ALRubinger/aileron-connector-google/actions/draft-email@0.0.6"
-```
-
-Then run:
+The `aileron-connector-google` connector publishes a curated suite of Gmail and Calendar actions. Install them all in one command:
 
 ```sh
-aileron action add -f gmail-and-calendar.toml
+aileron action add-suite github://ALRubinger/aileron-connector-google/suite.toml@latest
 ```
+
+`@latest` resolves to the connector's most recent release. Pin to a specific version with `@v0.0.6`, or to a git commit with `@<sha>`.
 
 This is the first command that touches your local secret store, so Aileron walks you through creating one before recording trust. You'll see this prompt now:
 
@@ -108,11 +88,11 @@ Trust publisher github://ALRubinger/aileron-connector-google? [y/N]: y
   Keyring: /Users/you/.aileron/keyring.json
 ```
 
-The trust prompt fires once for the publisher and applies to every action in the suite. Aileron then walks each action through preview and install in declaration order. The connector tarball is fetched once and reused. Google's OAuth consent screen pops up on the first action, and the credential binds for all four. The CLI prints a per-action summary at the end.
+The trust prompt fires once for the publisher and applies to every action in the suite. Aileron then walks each action through preview and install in declaration order. The connector tarball is fetched once and reused. Google's OAuth consent screen pops up on the first action, and the bound credential is reused for the rest. The CLI prints a per-action summary at the end.
 
 The connector's publisher already shipped a Desktop OAuth `client_id` and `client_secret` bound at release time, so there's no Google Cloud Console setup on your end. The token bytes are encrypted at rest; Aileron refreshes them transparently when they near expiry, and the connector never sees the credential.
 
-If you'd rather drive each step yourself, the single-action form `aileron action add <action-FQN>` still works, and `aileron keyring trust <authority>` runs the trust step on its own. The suite manifest is the default flow because it names the set as a single intent.
+If you'd rather drive each step yourself, the single-action form `aileron action add <action-FQN>` still works, and `aileron keyring trust <authority>` runs the trust step on its own. If you maintain a connector and want to publish your own suite, see [Authoring an Action Suite](/guides/authoring-an-action-suite/).
 
 ## 3. Launch Claude Code through Aileron
 
