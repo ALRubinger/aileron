@@ -204,7 +204,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)
 	defer closeSessionLog()
-	fmt.Fprintf(os.Stderr, "aileron: session log → %s\n", sessionLogPath(config.Dir))
+	fmt.Fprintf(os.Stderr, "aileron: session log → %s\n", SessionLogPath(config.Dir))
 
 	sessionLog.Info("session started",
 		"agent", config.Agent.Name(),
@@ -222,7 +222,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	probeCtx, cancelProbe := context.WithTimeout(ctx, daemonHTTPTimeout)
 	locked, ok := client.LocalVaultLocked(probeCtx)
 	cancelProbe()
-	printStartupBanner(os.Stderr, daemonURL, sessionID, sessionLogPath(config.Dir), ok && locked)
+	printStartupBanner(os.Stderr, daemonURL, sessionID, SessionLogPath(config.Dir), ok && locked)
 
 	result, runErr := launchDirect(cmd, config)
 
@@ -574,13 +574,17 @@ func EnvGlobMatch(pattern, name string) bool {
 	return pattern == name
 }
 
-// sessionLogPath returns the per-project session log path: the
+// SessionLogPath returns the per-project session log path: the
 // .aileron/session.log next to the policy file (walking up from dir if
 // necessary) or, if no policy file exists, .aileron/session.log under
 // dir itself. The session log captures the launched agent's stdio and
 // is intentionally project-scoped — distinct from the audit log, which
 // is user-scoped at ~/.aileron/audit/.
-func sessionLogPath(dir string) string {
+//
+// Exported so `aileron sessions watch <id>` can resolve the same path
+// the launcher writes to, without re-implementing the policy-file
+// walk.
+func SessionLogPath(dir string) string {
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
@@ -596,7 +600,7 @@ func sessionLogPath(dir string) string {
 // cleanup function to close the file. If the file cannot be created,
 // returns a discard logger so callers never receive nil.
 func openSessionLogger(dir string, level slog.Level) (*slog.Logger, func()) {
-	path := sessionLogPath(dir)
+	path := SessionLogPath(dir)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return slog.New(slog.NewTextHandler(io.Discard, nil)), func() {}
 	}

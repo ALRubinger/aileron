@@ -207,6 +207,7 @@ In a separate terminal — the daemon is still running, so any CLI call connects
 aileron status               # what's configured: action/connector/binding counts, policy, env, vault state
 aileron daemon status        # what's running: daemon URL, PID, version, started_at, locked/unlocked vault
 aileron sessions list        # every aileron launch, with status (running / ended / orphaned) and exit code
+aileron sessions watch <id>  # tail the per-session log live (Ctrl-C to stop; --no-follow for one-shot)
 aileron action audit         # every installed action and the capabilities it can exercise
 aileron binding list         # bound credentials with their last-used timestamp
 aileron audit list           # action-execution audit log: every call, with inputs and outcome
