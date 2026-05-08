@@ -15,78 +15,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/retry"
 )
 
-// --- peekAnthropicError contract (#532 finding 7b) ---
-
-func TestPeekAnthropicError_DetectsErrorEnvelope(t *testing.T) {
-	body := []byte(`{"type":"error","error":{"type":"overloaded_error","message":"API overloaded"}}`)
-	gotType, gotMsg, ok := peekAnthropicError(body)
-	if !ok {
-		t.Fatal("expected ok=true for valid Anthropic error envelope")
-	}
-	if gotType != "overloaded_error" {
-		t.Errorf("type = %q, want overloaded_error", gotType)
-	}
-	if gotMsg != "API overloaded" {
-		t.Errorf("message = %q, want %q", gotMsg, "API overloaded")
-	}
-}
-
-func TestPeekAnthropicError_RejectsValidMessage(t *testing.T) {
-	body := []byte(`{"id":"msg_1","type":"message","role":"assistant","content":[]}`)
-	if _, _, ok := peekAnthropicError(body); ok {
-		t.Error("peekAnthropicError accepted a valid message body — must only match type=error")
-	}
-}
-
-func TestPeekAnthropicError_RejectsUnparseable(t *testing.T) {
-	if _, _, ok := peekAnthropicError([]byte("not json")); ok {
-		t.Error("peekAnthropicError accepted unparseable body")
-	}
-}
-
-// --- peekOpenAIError contract ---
-
-func TestPeekOpenAIError_DetectsErrorEnvelope(t *testing.T) {
-	body := []byte(`{"error":{"type":"rate_limit_exceeded","code":"rate_limit","message":"Slow down"}}`)
-	gotType, gotMsg, ok := peekOpenAIError(body)
-	if !ok {
-		t.Fatal("expected ok=true for OpenAI error envelope")
-	}
-	if gotType != "rate_limit_exceeded" {
-		t.Errorf("type = %q, want rate_limit_exceeded", gotType)
-	}
-	if gotMsg != "Slow down" {
-		t.Errorf("message = %q", gotMsg)
-	}
-}
-
-func TestPeekOpenAIError_FallsBackToCode(t *testing.T) {
-	body := []byte(`{"error":{"code":"insufficient_quota","message":"out of credits"}}`)
-	gotType, _, ok := peekOpenAIError(body)
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if gotType != "insufficient_quota" {
-		t.Errorf("type = %q, want insufficient_quota (fell back to code)", gotType)
-	}
-}
-
-func TestPeekOpenAIError_RejectsValidChoices(t *testing.T) {
-	// A successful chat completion may legitimately mention "error" in
-	// content text or finish_reason metadata; the helper must not
-	// classify it as an error envelope.
-	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"no error here"}}]}`)
-	if _, _, ok := peekOpenAIError(body); ok {
-		t.Error("peekOpenAIError accepted a successful completion as an error")
-	}
-}
-
-func TestPeekOpenAIError_RejectsUnparseable(t *testing.T) {
-	if _, _, ok := peekOpenAIError([]byte("garbage")); ok {
-		t.Error("peekOpenAIError accepted unparseable body")
-	}
-}
-
 // --- truncateForLog ---
 
 func TestTruncateForLog_RespectsLimit(t *testing.T) {
@@ -102,12 +30,12 @@ func TestTruncateForLog_PassesThroughShort(t *testing.T) {
 	}
 }
 
-// --- HandleAnthropic logs upstream-error envelope inside HTTP 200 ---
+// --- Upstream-visibility logging (#532 finding 7b) ---
 
 // engineWithCapturedLogger builds an Engine wired to capture slog
 // output to buf, used for asserting on Warn-level events the
-// production handlers emit on upstream non-success and HTTP 200
-// error envelopes.
+// production handlers emit on upstream non-success and unparseable-
+// 200 bodies.
 func engineWithCapturedLogger(t *testing.T, openAIURL, anthropicURL string, store *action.Store, buf *bytes.Buffer) *Engine {
 	t.Helper()
 	var oa, an *url.URL
@@ -135,12 +63,21 @@ func engineWithCapturedLogger(t *testing.T, openAIURL, anthropicURL string, stor
 	return e
 }
 
-// TestHandleAnthropic_LogsUpstreamErrorEnvelopeOn200 pins finding #7b:
-// Anthropic's `{"type":"error","error":{...}}` body inside HTTP 200
-// must produce a WARN-level log event so the operator sees the
-// upstream cause in daemon.log instead of guessing from a 200-
-// looking request that took 72s.
-func TestHandleAnthropic_LogsUpstreamErrorEnvelopeOn200(t *testing.T) {
+// TestHandleAnthropic_LogsUnparseable200Body pins finding #7b: when
+// upstream returns an HTTP 200 carrying a body that isn't a usable
+// message response — Anthropic's `{"type":"error","error":{...}}`
+// envelope is the motivating case (overloaded_error /
+// rate_limit_error inside an otherwise-successful stream) — the
+// gateway must log a WARN with the parse error and a body preview so
+// the operator sees the upstream cause in daemon.log. Without this
+// signal a 200 that took 72s looks identical to a slow-but-success-
+// ful round.
+//
+// The contract is provider-agnostic: any unparseable success body
+// (error envelope or genuinely malformed JSON) triggers the log.
+// This test pins the motivating shape; the handler does not depend
+// on it.
+func TestHandleAnthropic_LogsUnparseable200Body(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("request-id", "req_test_42")
 		w.Header().Set("Content-Type", "application/json")
@@ -161,10 +98,12 @@ func TestHandleAnthropic_LogsUpstreamErrorEnvelopeOn200(t *testing.T) {
 
 	out := logs.String()
 	for _, want := range []string{
-		"upstream error in HTTP 200 envelope",
+		"upstream returned unparseable success body",
 		"protocol=anthropic",
-		"upstream_error_type=overloaded_error",
 		"request_id=req_test_42",
+		// body preview must surface the upstream error type for grep
+		// without requiring the gateway to know Anthropic's shape:
+		"overloaded_error",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in log, got:\n%s", want, out)

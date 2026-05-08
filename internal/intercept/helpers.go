@@ -117,78 +117,12 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Write(body)
 }
 
-// peekAnthropicError returns the upstream error type and message
-// when body parses as an Anthropic error envelope —
-// `{"type":"error","error":{"type":"...","message":"..."}}` — and
-// (false) for valid messages or unparseable bodies.
-//
-// Anthropic surfaces some failure modes (overloaded_error,
-// rate_limit_error, …) inside an HTTP 200 response body when the
-// failure arrives mid-stream and the upstream wraps the streamed
-// error event into a single JSON document. Without an explicit
-// detection step the gateway sees a "successful" 200, the agent's
-// SDK retries silently on the inner error, and the operator gets no
-// visible signal that anything went wrong. peekAnthropicError gives
-// the gateway a place to log the upstream cause before passing the
-// envelope through to the agent.
-func peekAnthropicError(body []byte) (errType, message string, ok bool) {
-	var env struct {
-		Type  string `json:"type"`
-		Error struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return "", "", false
-	}
-	if env.Type != "error" {
-		return "", "", false
-	}
-	return env.Error.Type, env.Error.Message, true
-}
-
-// peekOpenAIError returns the upstream error type/code/message when
-// body parses as an OpenAI error envelope —
-// `{"error":{"type":"...","code":"...","message":"..."}}` — and
-// (false) for valid completions or unparseable bodies.
-//
-// OpenAI primarily surfaces errors as HTTP 4xx/5xx, so this helper
-// exists mainly for symmetry with the Anthropic shape and for the
-// rare envelope-on-200 cases that arrive via streaming.
-func peekOpenAIError(body []byte) (errType, message string, ok bool) {
-	// Reject obvious successful completions before unmarshaling so
-	// we don't accidentally classify a `choices: [...]` body as an
-	// error just because its serialization happens to include an
-	// "error" key in some downstream content payload.
-	var env struct {
-		Choices []any `json:"choices"`
-		Error   struct {
-			Type    string `json:"type"`
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(body, &env); err != nil {
-		return "", "", false
-	}
-	if len(env.Choices) > 0 {
-		return "", "", false
-	}
-	if env.Error.Type == "" && env.Error.Code == "" && env.Error.Message == "" {
-		return "", "", false
-	}
-	t := env.Error.Type
-	if t == "" {
-		t = env.Error.Code
-	}
-	return t, env.Error.Message, true
-}
-
 // truncateForLog clips s to maxRunes runes, appending "…" when
-// truncation happened. Used to keep upstream-error messages short
-// enough that they don't blow up daemon.log when the upstream
-// returns a wall-of-text body (rare but observed).
+// truncation happened. Used to bound upstream body previews in the
+// daemon log when an upstream returns a non-success body inside an
+// HTTP 200 envelope (e.g. Anthropic's overloaded_error wrapper) —
+// the body itself carries the operator-actionable signal but can be
+// arbitrarily large.
 func truncateForLog(s string, maxRunes int) string {
 	r := []rune(s)
 	if len(r) <= maxRunes {

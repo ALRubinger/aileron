@@ -89,29 +89,30 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Anthropic occasionally surfaces upstream errors
-		// (overloaded_error, rate_limit_error, ...) inside an HTTP 200
-		// envelope. Logging here gives the operator a visible signal
-		// in daemon.log; without this the response looks indistin-
-		// guishable from a successful round and the agent's SDK retry
-		// (or 13-minute hang on stuttering streams) is the first sign
-		// anything is wrong. The body still flows through to the
-		// agent verbatim via parseAnthropicResponse → passThrough.
-		if errType, errMsg, ok := peekAnthropicError(respBody); ok {
-			e.log.Warn("upstream error in HTTP 200 envelope",
+		assistantContent, toolUses, err := parseAnthropicResponse(respBody)
+		if err != nil {
+			// Upstream returned HTTP 200 but the body isn't a usable
+			// message response. The two real-world cases:
+			//   1. An error envelope wrapped in a 200 (Anthropic's
+			//      `{"type":"error","error":{...}}` shape — overloaded
+			//      / rate-limit / etc. arriving inside an otherwise-
+			//      successful stream).
+			//   2. Genuinely malformed JSON.
+			// Either way the operator needs an in-band signal: without
+			// this, a 200 that took 72s looks identical to a slow-but-
+			// successful round in daemon.log, and the agent's SDK retry
+			// (or 13-minute hang on stuttering streams) is the first
+			// sign anything is wrong. The body preview carries the
+			// upstream error type for grep / `aileron sessions watch`
+			// without requiring provider-specific parsing here. The
+			// body still flows through to the agent verbatim.
+			e.log.Warn("upstream returned unparseable success body",
 				"protocol", "anthropic",
-				"upstream_error_type", errType,
-				"upstream_error_message", truncateForLog(errMsg, 256),
+				"parse_error", err.Error(),
+				"body_preview", truncateForLog(string(respBody), 512),
 				"request_id", respHeaders.Get("request-id"),
 				"round", round,
 			)
-			roundSpan.SetAttributes(
-				attribute.String("aileron.intercept.upstream_error_type", errType),
-			)
-		}
-
-		assistantContent, toolUses, err := parseAnthropicResponse(respBody)
-		if err != nil {
 			roundSpan.SetStatus(codes.Error, "parse upstream response: "+err.Error())
 			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
