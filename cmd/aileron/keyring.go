@@ -157,6 +157,50 @@ func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
 	return pub, nil
 }
 
+// trustState tracks per-run trust decisions across one CLI
+// invocation. Suite installs (#564) thread the same state through
+// every action so a publisher's prompt fires at most once per run.
+// Both maps key on FQN authority strings (`<scheme>://<owner>/<repo>`).
+//
+//   - trusted:  authorities that have been (or already were) trusted
+//               this run. A second prompt is suppressed.
+//   - declined: authorities the user said "no" to (or fetch failed
+//               for) this run. Subsequent actions whose authority is
+//               in declined skip silently with a one-line summary
+//               line. A re-run of the command clears the state.
+type trustState struct {
+	trusted  map[string]bool
+	declined map[string]bool
+}
+
+func newTrustState() *trustState {
+	return &trustState{
+		trusted:  map[string]bool{},
+		declined: map[string]bool{},
+	}
+}
+
+// ensure is the suite-aware wrapper around ensureAuthorityTrusted.
+// It short-circuits when the authority has already been resolved
+// (trusted or declined) earlier in the same run, otherwise it falls
+// through to the prompt. Any failure marks the authority declined
+// so subsequent same-authority actions in the suite skip without
+// re-prompting.
+func (s *trustState) ensure(authority string, autoYes bool, stdin io.Reader, stdout, stderr io.Writer) error {
+	if s.declined[authority] {
+		return fmt.Errorf("publisher %s trust previously declined this run; skipping", authority)
+	}
+	if s.trusted[authority] {
+		return nil
+	}
+	if err := ensureAuthorityTrusted(authority, autoYes, stdin, stdout, stderr); err != nil {
+		s.declined[authority] = true
+		return err
+	}
+	s.trusted[authority] = true
+	return nil
+}
+
 // ensureAuthorityTrusted is the install-time bridge to the keyring:
 // it checks whether the supplied authority has any keys registered
 // and, if not, prompts the operator (or proceeds when autoYes=true)
@@ -169,6 +213,10 @@ func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
 // install flow per issue #563. Same fetch + verify path as the
 // standalone trust subcommand — re-uses fetchPublisherKey and the
 // keyring helpers so the policy stays in one place.
+//
+// Single-action callers can use this directly. Suite callers should
+// thread a *trustState through trustState.ensure so the same
+// authority isn't prompted twice across the suite.
 func ensureAuthorityTrusted(authority string, autoYes bool, stdin io.Reader, stdout, stderr io.Writer) error {
 	path := cstore.DefaultKeyringPath()
 	if path == "" {

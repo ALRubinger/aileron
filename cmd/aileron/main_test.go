@@ -4208,6 +4208,377 @@ func TestRunActionAdd_PublisherKeyFetchFailureExits1(t *testing.T) {
 	}
 }
 
+// --- runActionAddSuite: -f manifest install (issue #564) ---
+
+// writeSuiteManifest writes a TOML suite manifest to a temp file
+// and returns the path. The caller can then point `aileron action
+// add -f` at it. Inline TOML keeps the test self-contained.
+func writeSuiteManifest(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "suite.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write suite manifest: %v", err)
+	}
+	return path
+}
+
+// suiteInstallServer is the suite-test analogue of
+// actionInstallServer. It seeds the keyring and stands up a fake
+// daemon that records (preview, install) hits per FQN so tests can
+// assert which actions made it through. Each handler may be nil to
+// fall through to a default success response.
+//
+// per-FQN handlers receive the action FQN extracted from the
+// request body (without @<version>) so the test can match on a
+// specific entry.
+func suiteInstallServer(
+	t *testing.T,
+	authorities []string,
+	onPreview func(fqn string, w http.ResponseWriter, r *http.Request),
+	onInstall func(fqn string, w http.ResponseWriter, r *http.Request),
+) *httptest.Server {
+	t.Helper()
+	withSeededKeyring(t, authorities...)
+	return fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		// Restore body so handlers can re-read if they want.
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/actions/preview":
+			if onPreview != nil {
+				onPreview(req.FQN, w, r)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			if onInstall != nil {
+				onInstall(req.FQN, w, r)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":%q,"path":"/p"}`,
+				lastSegment(req.FQN), req.FQN, req.FQN+"@0.1.0")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
+// lastSegment returns the slug after the last `/` in an FQN,
+// suitable as a synthetic action `name` in test responses.
+func lastSegment(fqn string) string {
+	if i := strings.LastIndex(fqn, "/"); i >= 0 {
+		return fqn[i+1:]
+	}
+	return fqn
+}
+
+// TestRunActionAddSuite_HappyPathInstallsEveryAction is the headline
+// #564 test: a manifest with three actions installs all three and
+// the final summary lists them as added.
+func TestRunActionAddSuite_HappyPathInstallsEveryAction(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+[suite]
+name = "test-suite"
+description = "A test suite"
+
+[[actions]]
+fqn = "github://acme/conn/actions/foo@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/bar@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/baz@0.1.0"
+`)
+	installed := map[string]int{}
+	suiteInstallServer(t, []string{"github://acme/conn"}, nil, func(fqn string, w http.ResponseWriter, r *http.Request) {
+		installed[fqn]++
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":"x","path":"/p"}`,
+			lastSegment(fqn), fqn)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"-f", manifestPath, "--yes"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"github://acme/conn/actions/foo",
+		"github://acme/conn/actions/bar",
+		"github://acme/conn/actions/baz",
+	} {
+		if installed[want] != 1 {
+			t.Errorf("install for %s: hits = %d, want 1", want, installed[want])
+		}
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Suite: test-suite",
+		"3 action(s) to install",
+		"Suite install summary:",
+		"All 3 action(s) installed.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAddSuite_SharesTrustPromptAcrossActions: when every
+// action in the suite shares an authority, the trust prompt fires
+// at most once per run. This is the "user doesn't see the same
+// trust prompt N times" guarantee from the acceptance criteria.
+func TestRunActionAddSuite_SharesTrustPromptAcrossActions(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	manifestPath := writeSuiteManifest(t, `
+[suite]
+name = "shared-trust"
+description = "Three actions, one publisher"
+
+[[actions]]
+fqn = "github://acme/conn/actions/foo@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/bar@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/baz@0.1.0"
+`)
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct{ FQN string `json:"fqn"` }
+		_ = json.Unmarshal(body, &req)
+		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"-f", manifestPath, "--yes"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	// Trust prompt block lives in stdout. Count occurrences — must be 1.
+	count := strings.Count(stdout.String(), "Publisher github://acme/conn is not yet trusted")
+	if count != 1 {
+		t.Errorf("trust banner appeared %d times across the suite; want 1\nstdout:\n%s", count, stdout.String())
+	}
+}
+
+// TestRunActionAddSuite_FailureSoftContinuesAfterMidStreamFailure
+// asserts the documented failure semantics: when one action fails,
+// the loop continues with the rest, the summary lists each
+// outcome, and the exit code is nonzero.
+func TestRunActionAddSuite_FailureSoftContinuesAfterMidStreamFailure(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+[suite]
+name = "mixed"
+description = "First and third succeed; second fails."
+
+[[actions]]
+fqn = "github://acme/conn/actions/foo@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/bar@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/baz@0.1.0"
+`)
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			if strings.Contains(fqn, "/bar") {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = io.WriteString(w, `{"error":{"code":"signature_failure","message":"bad signature"}}`)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				fqn, lastSegment(fqn))
+		},
+		nil,
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"-f", manifestPath, "--yes"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when an action fails; stderr=%s", stderr.String())
+	}
+	out := stdout.String()
+	// ANSI color codes wrap the ✓/✗ markers, so match the bare FQNs
+	// in the summary plus the failure-count footer.
+	for _, want := range []string{
+		"github://acme/conn/actions/foo@0.1.0",
+		"github://acme/conn/actions/bar@0.1.0",
+		"github://acme/conn/actions/baz@0.1.0",
+		"1 of 3 action(s) failed.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// The bar entry must show as a failure (exit code suffix); the
+	// other two as ✓-prefixed entries.
+	if !strings.Contains(out, "actions/bar@0.1.0 (exit 1)") {
+		t.Errorf("bar entry should render with (exit N) suffix:\n%s", out)
+	}
+}
+
+// TestRunActionAddSuite_AlreadyInstalledIsLoggedAsSuccess: when an
+// action is already installed at the same content hash, it counts
+// as a success in the summary (the suite intent — "have these
+// actions installed" — is satisfied).
+func TestRunActionAddSuite_AlreadyInstalledIsLoggedAsSuccess(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+[suite]
+name = "rerun"
+description = "Re-running with everything already installed."
+
+[[actions]]
+fqn = "github://acme/conn/actions/foo@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/bar@0.1.0"
+`)
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"already_installed":true,"connector_deps":[]}`,
+				fqn, lastSegment(fqn))
+		},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			t.Errorf("install endpoint should not be hit for already_installed entries (fqn=%s)", fqn)
+		},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"-f", manifestPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Count(out, "Already installed:") != 2 {
+		t.Errorf("expected 2 'Already installed' lines; got: %s", out)
+	}
+	if !strings.Contains(out, "All 2 action(s) installed.") {
+		t.Errorf("summary should treat already-installed as success: %s", out)
+	}
+}
+
+// TestRunActionAddSuite_MissingManifestFileExits1 surfaces a clear
+// error rather than a panic when the user points -f at a path that
+// doesn't exist.
+func TestRunActionAddSuite_MissingManifestFileExits1(t *testing.T) {
+	withSeededKeyring(t)
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"-f", "/no/such/file.toml"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "read suite manifest") {
+		t.Errorf("expected read-error in stderr; got: %s", stderr.String())
+	}
+}
+
+// TestRunActionAddSuite_RejectsCombinedPositionalAndFile: -f and
+// a positional FQN at the same time is ambiguous; surface it as
+// an error rather than picking one and ignoring the other.
+func TestRunActionAddSuite_RejectsCombinedPositionalAndFile(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+[suite]
+name = "x"
+description = "x"
+[[actions]]
+fqn = "github://acme/conn/actions/foo@0.1.0"
+`)
+	withSeededKeyring(t)
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"-f", manifestPath, "github://acme/conn/actions/extra@0.1.0"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when -f combined with positional; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "cannot combine") {
+		t.Errorf("expected 'cannot combine' error; got: %s", stderr.String())
+	}
+}
+
+// TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority:
+// when the user declines trust mid-suite, subsequent actions that
+// share the declined authority skip silently rather than re-
+// prompting. The user only sees the trust banner once.
+func TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	manifestPath := writeSuiteManifest(t, `
+[suite]
+name = "decline-test"
+description = "Decline trust; remaining actions should skip."
+
+[[actions]]
+fqn = "github://acme/conn/actions/foo@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/bar@0.1.0"
+
+[[actions]]
+fqn = "github://acme/conn/actions/baz@0.1.0"
+`)
+	previewHits := 0
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/actions/preview" {
+			previewHits++
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("n\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"-f", manifestPath}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when trust declined; stderr=%s", stderr.String())
+	}
+	if previewHits != 0 {
+		t.Errorf("preview hit %d times after trust decline; want 0", previewHits)
+	}
+	if strings.Count(stdout.String(), "Publisher github://acme/conn is not yet trusted") != 1 {
+		t.Errorf("trust banner should fire once across the suite, not per action:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "1 of 3") && !strings.Contains(stdout.String(), "3 of 3") {
+		t.Errorf("summary should report failures; got: %s", stdout.String())
+	}
+}
+
 // --- aileron audit ---
 
 // TestRunAudit_EmptyPrintsNoEntries: with no events the CLI prints a
