@@ -19,6 +19,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/config"
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
@@ -1466,7 +1467,12 @@ const connectorUsage = `usage:
   aileron connector check [--include-prerelease] [--json]`
 
 const actionUsage = `usage:
-  aileron action add <FQN> [--version=<v>] [--force] [--yes] [--no-bind]`
+  aileron action add <FQN> [--version=<v>] [--force] [--yes] [--no-bind]
+
+Trust + connector install are absorbed into this command (issue #563):
+on a fresh machine, the CLI prompts to trust the publisher's signing
+key before preview, then prompts for the action install consent. Pass
+--yes to auto-accept both prompts in non-interactive use.`
 
 // runConnector dispatches `aileron connector <subcommand>`.
 func runConnector(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -2164,6 +2170,25 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return 1
 	}
 
+	// Step 0 (issue #563): ensure the action's authority is trusted.
+	// Preview verifies the action signature against this authority's
+	// keys; without one, the daemon would fail with `signature_failure`
+	// before we ever rendered the consent prompt. Track which
+	// authorities we've already prompted for in this invocation so
+	// connector deps that share the action's authority don't double-
+	// prompt below.
+	actionFQN, perr := cstore.ParseFQN(resolvedFQN)
+	if perr != nil {
+		fmt.Fprintf(stderr, "error: %v\n", perr)
+		return 1
+	}
+	trustedThisRun := map[string]bool{}
+	if err := ensureAuthorityTrusted(actionFQN.Authority(), *yes, stdin, stdout, stderr); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	trustedThisRun[actionFQN.Authority()] = true
+
 	// Step 1: preview. Fetches + parses the action manifest plus
 	// enumerates connector deps with their already-installed status.
 	// Signature failure or parse error aborts here, before the
@@ -2197,6 +2222,31 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	// the connector deps split into "already installed" vs. "will
 	// be installed alongside this action".
 	renderActionPreview(stdout, &preview)
+
+	// Step 2b (issue #563): for any connector dep that will be newly
+	// installed and whose authority differs from the action's,
+	// prompt to trust before the install consent. Already-installed
+	// deps are skipped — their authorities were trusted on the
+	// install that put them in the cstore.
+	for _, dep := range preview.ConnectorDeps {
+		if dep.AlreadyInstalled {
+			continue
+		}
+		depFQN, perr := cstore.ParseFQN(dep.Fqn)
+		if perr != nil {
+			// The daemon already validated this — defensive skip.
+			continue
+		}
+		auth := depFQN.Authority()
+		if trustedThisRun[auth] {
+			continue
+		}
+		if err := ensureAuthorityTrusted(auth, *yes, stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		trustedThisRun[auth] = true
+	}
 
 	// Step 3: prompt unless --yes.
 	if !*yes {
