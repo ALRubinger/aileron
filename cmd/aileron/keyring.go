@@ -4,14 +4,28 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"os"
+	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
 )
+
+// publisherKeyPath is the conventional location of a connector
+// publisher's ed25519 public key inside the source repo (per
+// ADR-0002). One arg `aileron keyring trust <authority>` fetches
+// `<raw-host>/<owner>/<repo>/HEAD/keys/publisher.pub`.
+const publisherKeyPath = "keys/publisher.pub"
+
+// rawGitHubBase is the base URL for fetching files at a ref from
+// public GitHub repositories. Overridable in tests.
+var rawGitHubBase = "https://raw.githubusercontent.com"
+
+// publisherKeyFetchTimeout caps the auto-fetch HTTP call so a stalled
+// network does not leave the user staring at a quiet terminal.
+const publisherKeyFetchTimeout = 15 * time.Second
 
 // runKeyring dispatches `aileron keyring <subcommand>` to one of the
 // keyring management subcommands. The keyring is the v1 source of
@@ -41,17 +55,15 @@ func runKeyring(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
-// runKeyringTrust adds a publisher's ed25519 public key to the local
-// keyring. The key file may be a PEM-encoded SubjectPublicKeyInfo (as
-// produced by `openssl pkey -pubout`) or a raw 32-byte ed25519 public
-// key encoded in base64. Adding a key the keyring already trusts for
-// the same authority is a no-op (so re-running the command after a
-// non-rotation is safe).
+// runKeyringTrust fetches a publisher's ed25519 public key from the
+// conventional `keys/publisher.pub` path on the source repo's default
+// branch (per ADR-0002) and adds it to the local keyring. Adding a
+// key the keyring already trusts for the same authority is a no-op,
+// so re-running is safe.
 func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 2 {
-		fmt.Fprintln(stderr, "usage: aileron keyring trust <authority> <pubkey-file>")
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron keyring trust <authority>")
 		fmt.Fprintln(stderr, "  authority: e.g. github://ALRubinger/aileron-connector-google")
-		fmt.Fprintln(stderr, "  pubkey-file: PEM (openssl pkey -pubout) or base64 raw key file")
 		return 1
 	}
 	authority := args[0]
@@ -60,9 +72,9 @@ func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	pub, err := readPublicKey(args[1])
+	pub, err := fetchPublisherKey(authority)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: read public key: %v\n", err)
+		fmt.Fprintf(stderr, "error: fetch publisher key for %s: %v\n", authority, err)
 		return 1
 	}
 
@@ -78,7 +90,7 @@ func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if keyring.HasKey(authority, pub) {
-		fmt.Fprintf(stdout, "Already trusted: %s\n", authority)
+		fmt.Fprintf(stdout, "Known publisher already trusted: %s\n", authority)
 		fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
 		fmt.Fprintf(stdout, "  Keyring: %s\n", path)
 		return 0
@@ -94,6 +106,54 @@ func runKeyringTrust(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
 	fmt.Fprintf(stdout, "  Keyring: %s\n", path)
 	return 0
+}
+
+// fetchPublisherKey downloads the ed25519 public key a connector
+// publisher commits at `keys/publisher.pub` on the default branch
+// (per ADR-0002). v1 supports `github://` authorities only.
+//
+// The HTTP call is anonymous — the convention path is on the public
+// internet by definition, so no token plumbing is needed here.
+func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
+	fqn, err := cstore.ParseFQN(authority)
+	if err != nil {
+		return nil, fmt.Errorf("parse authority: %w", err)
+	}
+	if fqn.Scheme != "github" {
+		return nil, fmt.Errorf("auto-fetch supports github:// authorities only (got %s://)", fqn.Scheme)
+	}
+
+	// `HEAD` resolves to the repo's default branch on raw.githubusercontent.com,
+	// so we never have to ask the API "what's the default branch?" first.
+	keyURL := fmt.Sprintf("%s/%s/%s/HEAD/%s",
+		rawGitHubBase,
+		url.PathEscape(fqn.Owner),
+		url.PathEscape(fqn.Repo),
+		publisherKeyPath,
+	)
+
+	client := &http.Client{Timeout: publisherKeyFetchTimeout}
+	resp, err := client.Get(keyURL)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", keyURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s: HTTP %d (publisher must commit %s on the default branch)",
+			keyURL, resp.StatusCode, publisherKeyPath)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	pub, err := decodePublicKey(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", keyURL, err)
+	}
+	return pub, nil
 }
 
 // runKeyringList prints the trusted publishers and a fingerprint per
@@ -121,7 +181,7 @@ func runKeyringList(args []string, stdout, stderr io.Writer) int {
 	if len(authorities) == 0 {
 		fmt.Fprintln(stdout, "No trusted publishers.")
 		fmt.Fprintf(stdout, "  Keyring: %s\n", path)
-		fmt.Fprintln(stdout, "  Add one with `aileron keyring trust <authority> <pubkey-file>`.")
+		fmt.Fprintln(stdout, "  Add one with `aileron keyring trust <authority>`.")
 		return 0
 	}
 
@@ -171,20 +231,13 @@ func runKeyringRevoke(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// readPublicKey decodes an ed25519 public key from a file. Tries PEM
-// first (the format `openssl pkey -pubout` produces); falls back to
-// trimming whitespace and treating the contents as a base64 raw key.
-// Either form is acceptable in v1 — connector authors typically ship
-// PEM as their `keys/publisher.pub`, but operators wiring up a
-// keyring from a recovery snippet often paste the raw base64.
-func readPublicKey(path string) (ed25519.PublicKey, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("file not found: %s", path)
-		}
-		return nil, err
-	}
+// decodePublicKey decodes an ed25519 public key from raw bytes. Tries
+// PEM first (the format `openssl pkey -pubout` produces); falls back
+// to trimming whitespace and treating the contents as a base64 raw
+// key. Either form is acceptable in v1 — connector authors typically
+// commit PEM as their `keys/publisher.pub`, but raw base64 is also a
+// reasonable thing to find on the convention path.
+func decodePublicKey(data []byte) (ed25519.PublicKey, error) {
 	if pub, pemErr := cstore.ParsePEMPublicKey(data); pemErr == nil {
 		return pub, nil
 	}
@@ -204,7 +257,7 @@ func readPublicKey(path string) (ed25519.PublicKey, error) {
 				len(raw), ed25519.PublicKeySize)
 		}
 	}
-	return nil, fmt.Errorf("file %q is neither PEM nor base64-encoded raw ed25519 public key", path)
+	return nil, fmt.Errorf("not PEM and not base64-encoded raw ed25519 public key")
 }
 
 // stripWhitespace removes ASCII whitespace from s. Used to tolerate

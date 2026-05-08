@@ -233,30 +233,17 @@ Each `vX.Y.Z` push produces one connector release plus one per-action release, a
 
 ## How users trust your publisher
 
-Aileron ships with **no trusted publishers by default** — the keyring is fail-closed (`internal/cstore/keyring_config.go`). Users opt in to your publisher by adding the public key to `~/.aileron/keyring.json`:
-
-```json
-{
-  "version": 1,
-  "publishers": {
-    "github://ALRubinger/aileron-connector-google": [
-      "BASE64_ENCODED_RAW_ED25519_PUBLIC_KEY"
-    ]
-  }
-}
-```
-
-The authority key is the FQN base (`<scheme>://<owner>/<repo>`); the value is a list of public keys (a list to support key rotation — register the new key alongside the old, switch signing, drop the old).
-
-The keyring stores the **raw 32-byte ed25519 public key**, base64-encoded. `keys/publisher.pub` in your repo is the PEM form (a 44-byte SubjectPublicKeyInfo wrapping the same 32 raw bytes); consumers extract the raw form once with:
+Aileron ships with **no trusted publishers by default** — the keyring is fail-closed (`internal/cstore/keyring_config.go`). Users opt in to your publisher by running:
 
 ```sh
-PUB_KEY_RAW=$(openssl pkey -in keys/publisher.pub -pubin -outform DER | tail -c 32 | base64)
+aileron keyring trust github://<owner>/<repo>
 ```
 
-…then paste `$PUB_KEY_RAW` into the keyring entry above.
+The CLI fetches `keys/publisher.pub` from the default branch of your repo (the convention path ratified by [ADR-0002](/adr/0002-connector-model)), parses the key, and registers it under the authority `github://<owner>/<repo>`. **Committing `keys/publisher.pub` to your default branch is what makes that one-liner work** — the publisher key MUST be there, with that exact path, for users to trust you without manual ceremony.
 
-Document the extraction + registration steps in your connector's README so users know exactly what to copy into their keyring. Without an entry in the keyring for your authority, `aileron connector install` fails closed with `signature_failure` — unsigned or unverified binaries never reach disk.
+The keyring is a list per authority (to support rotation — register the new key alongside the old, switch signing, drop the old). Re-running `aileron keyring trust <authority>` after the publisher commits a new `keys/publisher.pub` adds the new key alongside the existing one; an already-trusted key is detected and reported as a no-op.
+
+Without an entry in the keyring for your authority, `aileron connector install` fails closed with `signature_failure` — unsigned or unverified binaries never reach disk.
 
 ## Action templates
 
@@ -302,14 +289,9 @@ Fetches a list of recent Gmail messages for the authenticated user.
 Once published, a user runs:
 
 ```sh
-# Trust the publisher (one-time per user)
-PUB_KEY_RAW=$(curl -fsSL https://raw.githubusercontent.com/ALRubinger/aileron-connector-google/main/keys/publisher.pub \
-  | openssl pkey -pubin -outform DER | tail -c 32 | base64)
-
-mkdir -p ~/.aileron
-jq -n --arg key "$PUB_KEY_RAW" \
-  '{version:1, publishers:{"github://ALRubinger/aileron-connector-google":[$key]}}' \
-  > ~/.aileron/keyring.json
+# Trust the publisher (one-time per user — fetches keys/publisher.pub
+# from the default branch of your repo).
+aileron keyring trust github://ALRubinger/aileron-connector-google
 
 # Install the connector at a specific tag
 aileron connector install github://ALRubinger/aileron-connector-google@0.0.1

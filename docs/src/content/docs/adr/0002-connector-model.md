@@ -228,6 +228,8 @@ The mechanics of how the user binds an abstract capability to a concrete resourc
 
 The publisher is implicit in the FQN's authority — `github://acme/gmail` is published by the `acme` GitHub organization. Signing keys are associated with that authority through the publication channel's own conventions (e.g., signing keys configured in the source repo or via sigstore identities tied to the org).
 
+**Convention: a connector repo MUST publish its current ed25519 public key at `keys/publisher.pub` on the source repo's default branch.** This is the path `aileron keyring trust <authority>` reads from when the user trusts a publisher. The file is the PEM form (`openssl pkey -pubout`) or raw 32-byte ed25519 public key in base64; the install tooling accepts either. Publishers who rotate keys commit a new `keys/publisher.pub` and consumers re-run `aileron keyring trust` to pick up the new key alongside the existing one.
+
 Install tooling verifies the binary's signature against keys authorized for the FQN's authority. A connector named `github://acme/gmail` signed by a key not associated with `acme`'s GitHub org is rejected at install. The `provenance_hash` field in the manifest records the binary's content hash at publish time; the runtime checks this matches actual on-disk bytes before every execution.
 
 The runtime treats signature *presence* as information, not as authorization. A signed connector and an unsigned connector both go through the same install consent path; signature status is shown to the user (and the Hub may use it to organize browse views), but a valid signature does not bypass any capability check or skip the consent prompt.
