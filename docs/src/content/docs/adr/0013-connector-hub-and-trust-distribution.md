@@ -104,7 +104,7 @@ Rejected for v0.x. Hub-as-registry creates hosting and abuse-moderation responsi
 
 ### Per-publisher trust as v0.x default — rejected
 
-The keyring stores per-publisher entries from day one. `aileron keyring trust github://owner key.pub` covers any repo under that owner.
+The keyring stores per-publisher (owner-level, not per-repo) entries from day one. `aileron keyring trust github://owner` covers any repo under that owner.
 
 Rejected for v0.x. With one connector per publisher today, per-publisher trust without Hub-driven enumeration means the user trusts a key for a publisher they cannot enumerate. The Microsoft model needs a discovery layer to be coherent. Per-repo trust is the right answer until the Hub is real and a publisher ships a second connector.
 

@@ -15,7 +15,6 @@ By the end you will have asked Claude Code "summarize my five most recent emails
 - **Node.js 24 or newer** and **pnpm 11.0.8 (within the 11.x line)**. The webapp and docs targets build through `pnpm`, so `task build` will fail without them. The simplest setup is `corepack enable` after installing Node, then `corepack prepare pnpm@11.0.8 --activate`.
 - **[Claude Code](https://docs.claude.com/en/docs/claude-code/setup) installed and configured** with an Anthropic API key in `ANTHROPIC_API_KEY`. Aileron's launcher routes Claude Code's LLM calls through the local Aileron daemon, but it does not supply or replace your API key.
 - **A Google account.** Gmail and Calendar must be enabled. The OAuth dance opens in your default browser.
-- **`jq` and `openssl`** for the one-liner that trusts the connector's signing key.
 
 There is no `brew install aileron` yet — for now you build from source. That is the path this guide follows.
 
@@ -80,11 +79,10 @@ You don't need to think about the daemon explicitly during this guide. If you wa
 
 Every connector install verifies an ed25519 signature against keys you have explicitly trusted (per [ADR-0002](/adr/0002-connector-model)). Without a trusted key for the publisher's authority, install fails closed before fetching anything.
 
-Download the `aileron-connector-google` publisher key and trust it:
+Trust the `aileron-connector-google` publisher — the CLI fetches the key from `keys/publisher.pub` on the repo's default branch:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/ALRubinger/aileron-connector-google/main/keys/publisher.pub
-aileron keyring trust github://ALRubinger/aileron-connector-google publisher.pub
+aileron keyring trust github://ALRubinger/aileron-connector-google
 ```
 
 You should see:

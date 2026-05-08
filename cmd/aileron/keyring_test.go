@@ -7,7 +7,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
-	"os"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,17 +32,6 @@ func genTestKey(t *testing.T) (ed25519.PublicKey, []byte) {
 	return pub, pemBytes
 }
 
-// writeKey writes data to a freshly-named temp file inside dir and
-// returns the path.
-func writeKey(t *testing.T, dir, name string, data []byte) string {
-	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-	return path
-}
-
 // withTempHome points $HOME at a fresh temp dir for the test, so the
 // CLI's DefaultKeyringPath() lands inside the test's filesystem and
 // the test does not pollute the user's real ~/.aileron.
@@ -52,48 +42,68 @@ func withTempHome(t *testing.T) string {
 	return dir
 }
 
-// --- readPublicKey ---
+// withMockGitHubRaw stands up an httptest server that mimics
+// raw.githubusercontent.com for one or more
+// `<owner>/<repo>/HEAD/keys/publisher.pub` paths and points the CLI
+// at it for the duration of the test. Returns a setter the test can
+// use to swap a path's body mid-test (e.g. to simulate publisher key
+// rotation between two `keyring trust` calls).
+func withMockGitHubRaw(t *testing.T, paths map[string][]byte) func(path string, body []byte) {
+	t.Helper()
 
-func TestReadPublicKey_PEMHappyPath(t *testing.T) {
-	dir := t.TempDir()
+	bodies := make(map[string][]byte, len(paths))
+	for k, v := range paths {
+		bodies[k] = v
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := bodies[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := rawGitHubBase
+	rawGitHubBase = srv.URL
+	t.Cleanup(func() { rawGitHubBase = prev })
+
+	return func(path string, body []byte) {
+		bodies[path] = body
+	}
+}
+
+// --- decodePublicKey ---
+
+func TestDecodePublicKey_PEMHappyPath(t *testing.T) {
 	pub, pemBytes := genTestKey(t)
-	path := writeKey(t, dir, "publisher.pub", pemBytes)
-
-	got, err := readPublicKey(path)
+	got, err := decodePublicKey(pemBytes)
 	if err != nil {
-		t.Fatalf("readPublicKey: %v", err)
+		t.Fatalf("decodePublicKey: %v", err)
 	}
 	if !ed25519.PublicKey(got).Equal(pub) {
 		t.Errorf("returned key does not match generated public key")
 	}
 }
 
-func TestReadPublicKey_RawBase64(t *testing.T) {
-	dir := t.TempDir()
+func TestDecodePublicKey_RawBase64(t *testing.T) {
 	pub, _ := genTestKey(t)
-	encoded := base64.StdEncoding.EncodeToString(pub)
-	path := writeKey(t, dir, "publisher.b64", []byte(encoded+"\n"))
-
-	got, err := readPublicKey(path)
+	encoded := base64.StdEncoding.EncodeToString(pub) + "\n"
+	got, err := decodePublicKey([]byte(encoded))
 	if err != nil {
-		t.Fatalf("readPublicKey: %v", err)
+		t.Fatalf("decodePublicKey: %v", err)
 	}
 	if !ed25519.PublicKey(got).Equal(pub) {
 		t.Errorf("returned key does not match generated public key")
 	}
 }
 
-func TestReadPublicKey_MissingFile(t *testing.T) {
-	if _, err := readPublicKey(filepath.Join(t.TempDir(), "nope.pub")); err == nil {
-		t.Fatal("expected error for missing file")
-	}
-}
-
-func TestReadPublicKey_GarbageContents(t *testing.T) {
-	dir := t.TempDir()
-	path := writeKey(t, dir, "garbage", []byte("not a key"))
-	if _, err := readPublicKey(path); err == nil {
-		t.Fatal("expected error for garbage file contents")
+func TestDecodePublicKey_GarbageContents(t *testing.T) {
+	if _, err := decodePublicKey([]byte("not a key")); err == nil {
+		t.Fatal("expected error for garbage contents")
 	}
 }
 
@@ -102,11 +112,13 @@ func TestReadPublicKey_GarbageContents(t *testing.T) {
 func TestKeyringTrust_AddsKeyAndPersists(t *testing.T) {
 	home := withTempHome(t)
 	pub, pemBytes := genTestKey(t)
-	keyPath := writeKey(t, t.TempDir(), "publisher.pub", pemBytes)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/example/repo/HEAD/keys/publisher.pub": pemBytes,
+	})
 
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	rc := runKeyring(
-		[]string{"trust", "github://example/repo", keyPath},
+		[]string{"trust", "github://example/repo"},
 		stdout, stderr,
 	)
 	if rc != 0 {
@@ -116,7 +128,6 @@ func TestKeyringTrust_AddsKeyAndPersists(t *testing.T) {
 		t.Errorf("expected success message; got: %s", stdout.String())
 	}
 
-	// Reload from disk and verify the key is persisted.
 	keyringPath := filepath.Join(home, ".aileron", "keyring.json")
 	kr, err := cstore.LoadKeyring(keyringPath)
 	if err != nil {
@@ -130,21 +141,26 @@ func TestKeyringTrust_AddsKeyAndPersists(t *testing.T) {
 func TestKeyringTrust_DuplicateAddIsNoOp(t *testing.T) {
 	withTempHome(t)
 	_, pemBytes := genTestKey(t)
-	keyPath := writeKey(t, t.TempDir(), "publisher.pub", pemBytes)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/example/repo/HEAD/keys/publisher.pub": pemBytes,
+	})
 
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	if rc := runKeyring([]string{"trust", "github://example/repo", keyPath}, stdout, stderr); rc != 0 {
+	if rc := runKeyring([]string{"trust", "github://example/repo"}, stdout, stderr); rc != 0 {
 		t.Fatalf("first trust: rc = %d; stderr = %s", rc, stderr.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	rc := runKeyring([]string{"trust", "github://example/repo", keyPath}, stdout, stderr)
+	rc := runKeyring([]string{"trust", "github://example/repo"}, stdout, stderr)
 	if rc != 0 {
 		t.Fatalf("re-trust rc = %d; stderr = %s", rc, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Already trusted") {
-		t.Errorf("expected duplicate-add to print 'Already trusted'; got: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "Known publisher already trusted") {
+		t.Errorf("expected duplicate-add to print 'Known publisher already trusted'; got: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "✓ Trusted publisher") {
+		t.Errorf("re-trust should not print success message; got: %s", stdout.String())
 	}
 }
 
@@ -152,15 +168,21 @@ func TestKeyringTrust_RotationAddsAlongsideExisting(t *testing.T) {
 	home := withTempHome(t)
 	pub1, pem1 := genTestKey(t)
 	pub2, pem2 := genTestKey(t)
-	dir := t.TempDir()
-	key1 := writeKey(t, dir, "k1.pub", pem1)
-	key2 := writeKey(t, dir, "k2.pub", pem2)
+	setBody := withMockGitHubRaw(t, map[string][]byte{
+		"/example/repo/HEAD/keys/publisher.pub": pem1,
+	})
 
-	for _, kp := range []string{key1, key2} {
-		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-		if rc := runKeyring([]string{"trust", "github://example/repo", kp}, stdout, stderr); rc != 0 {
-			t.Fatalf("trust %s: rc = %d; stderr = %s", kp, rc, stderr.String())
-		}
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	if rc := runKeyring([]string{"trust", "github://example/repo"}, stdout, stderr); rc != 0 {
+		t.Fatalf("first trust: rc = %d; stderr = %s", rc, stderr.String())
+	}
+
+	// Publisher rotates: same convention path, new key bytes.
+	setBody("/example/repo/HEAD/keys/publisher.pub", pem2)
+	stdout.Reset()
+	stderr.Reset()
+	if rc := runKeyring([]string{"trust", "github://example/repo"}, stdout, stderr); rc != 0 {
+		t.Fatalf("rotated trust: rc = %d; stderr = %s", rc, stderr.String())
 	}
 
 	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
@@ -168,10 +190,10 @@ func TestKeyringTrust_RotationAddsAlongsideExisting(t *testing.T) {
 		t.Fatalf("LoadKeyring: %v", err)
 	}
 	if !kr.HasKey("github://example/repo", pub1) {
-		t.Error("first key not preserved after second trust")
+		t.Error("first key not preserved after rotation")
 	}
 	if !kr.HasKey("github://example/repo", pub2) {
-		t.Error("second key not added")
+		t.Error("rotated key not added")
 	}
 	if got := len(kr.Keys("github://example/repo")); got != 2 {
 		t.Errorf("len(keys) = %d, want 2", got)
@@ -180,22 +202,77 @@ func TestKeyringTrust_RotationAddsAlongsideExisting(t *testing.T) {
 
 func TestKeyringTrust_RejectsEmptyAuthority(t *testing.T) {
 	withTempHome(t)
-	_, pemBytes := genTestKey(t)
-	keyPath := writeKey(t, t.TempDir(), "publisher.pub", pemBytes)
-
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	if rc := runKeyring([]string{"trust", "", keyPath}, stdout, stderr); rc == 0 {
+	if rc := runKeyring([]string{"trust", ""}, stdout, stderr); rc == 0 {
 		t.Fatal("expected non-zero exit for empty authority")
 	}
 }
 
 func TestKeyringTrust_WrongArgCount(t *testing.T) {
-	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	if rc := runKeyring([]string{"trust", "only-one-arg"}, stdout, stderr); rc == 0 {
-		t.Fatal("expected non-zero exit for missing pubkey-file arg")
+	cases := [][]string{
+		{"trust"},
+		{"trust", "github://example/repo", "extra-arg"},
 	}
-	if !strings.Contains(stderr.String(), "usage:") {
-		t.Errorf("expected usage hint; got: %s", stderr.String())
+	for _, args := range cases {
+		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+		if rc := runKeyring(args, stdout, stderr); rc == 0 {
+			t.Errorf("args=%v: expected non-zero exit", args)
+		}
+		if !strings.Contains(stderr.String(), "usage:") {
+			t.Errorf("args=%v: expected usage hint; got: %s", args, stderr.String())
+		}
+	}
+}
+
+func TestKeyringTrust_RejectsNonGitHubScheme(t *testing.T) {
+	withTempHome(t)
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "gitlab://example/repo"}, stdout, stderr)
+	if rc == 0 {
+		t.Fatal("expected non-zero exit for non-github scheme")
+	}
+	if !strings.Contains(stderr.String(), "github://") {
+		t.Errorf("expected error to point at github:// support; got: %s", stderr.String())
+	}
+}
+
+func TestKeyringTrust_InvalidAuthority(t *testing.T) {
+	withTempHome(t)
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	if rc := runKeyring([]string{"trust", "not-a-uri"}, stdout, stderr); rc == 0 {
+		t.Fatal("expected non-zero exit for malformed authority")
+	}
+	if !strings.Contains(stderr.String(), "fetch publisher key") {
+		t.Errorf("expected fetch error context; got: %s", stderr.String())
+	}
+}
+
+func TestKeyringTrust_MissingConventionPath(t *testing.T) {
+	withTempHome(t)
+	withMockGitHubRaw(t, map[string][]byte{}) // every path returns 404
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	rc := runKeyring([]string{"trust", "github://nope/no-such-repo"}, stdout, stderr)
+	if rc == 0 {
+		t.Fatal("expected non-zero exit when convention path is absent")
+	}
+	if !strings.Contains(stderr.String(), "404") {
+		t.Errorf("expected 404 in error; got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "keys/publisher.pub") {
+		t.Errorf("expected error to name the convention path; got: %s", stderr.String())
+	}
+}
+
+func TestKeyringTrust_GarbageBody(t *testing.T) {
+	withTempHome(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/owner/repo/HEAD/keys/publisher.pub": []byte("not a key"),
+	})
+
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	if rc := runKeyring([]string{"trust", "github://owner/repo"}, stdout, stderr); rc == 0 {
+		t.Fatal("expected non-zero exit for garbage body")
 	}
 }
 
@@ -216,14 +293,14 @@ func TestKeyringList_PrintsTrustedAuthoritiesSorted(t *testing.T) {
 	withTempHome(t)
 	_, pem1 := genTestKey(t)
 	_, pem2 := genTestKey(t)
-	dir := t.TempDir()
-	for authority, body := range map[string][]byte{
-		"github://b/second": pem1,
-		"github://a/first":  pem2,
-	} {
-		path := writeKey(t, dir, strings.ReplaceAll(authority, "/", "_")+".pub", body)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/b/second/HEAD/keys/publisher.pub": pem1,
+		"/a/first/HEAD/keys/publisher.pub":  pem2,
+	})
+
+	for _, authority := range []string{"github://b/second", "github://a/first"} {
 		stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-		if rc := runKeyring([]string{"trust", authority, path}, stdout, stderr); rc != 0 {
+		if rc := runKeyring([]string{"trust", authority}, stdout, stderr); rc != 0 {
 			t.Fatalf("seed %q: stderr = %s", authority, stderr.String())
 		}
 	}
@@ -248,10 +325,12 @@ func TestKeyringList_PrintsTrustedAuthoritiesSorted(t *testing.T) {
 func TestKeyringRevoke_RemovesAuthority(t *testing.T) {
 	home := withTempHome(t)
 	_, pemBytes := genTestKey(t)
-	keyPath := writeKey(t, t.TempDir(), "publisher.pub", pemBytes)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/example/repo/HEAD/keys/publisher.pub": pemBytes,
+	})
 
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
-	if rc := runKeyring([]string{"trust", "github://example/repo", keyPath}, stdout, stderr); rc != 0 {
+	if rc := runKeyring([]string{"trust", "github://example/repo"}, stdout, stderr); rc != 0 {
 		t.Fatalf("trust: rc = %d; stderr = %s", rc, stderr.String())
 	}
 
