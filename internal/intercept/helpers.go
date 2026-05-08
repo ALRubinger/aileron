@@ -1,9 +1,15 @@
 package intercept
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/failure"
@@ -91,6 +97,50 @@ func passThrough(w http.ResponseWriter, status int, headers http.Header, body []
 	}
 	w.WriteHeader(status)
 	w.Write(body)
+}
+
+// decompressUpstreamBody returns the body in its decoded form when
+// the upstream applied a Content-Encoding the gateway recognizes.
+// v1 supports `gzip` (the only encoding observed in the wild from
+// Anthropic and OpenAI), plus the no-op `identity` and absent header.
+//
+// The Claude / OpenAI SDKs send `Accept-Encoding: gzip` and
+// copyForwardableHeaders forwards it upstream verbatim. Go's
+// http.Transport only auto-decompresses when *it* added the header,
+// so when the agent's SDK sets it explicitly the response body comes
+// back compressed and io.ReadAll yields the raw gzipped bytes — which
+// then fails JSON parse and breaks the gateway's tool-call intercept
+// for that round.
+//
+// On a recognized encoding the returned headers strip Content-Encoding
+// and rewrite Content-Length so passThrough emits a coherent
+// uncompressed response to the agent. Unknown encodings (e.g. `br`,
+// `zstd`, `deflate`) and absent headers return the body and headers
+// unchanged — the parse path will still fail and log a body preview,
+// matching the pre-fix behavior for those cases.
+func decompressUpstreamBody(headers http.Header, body []byte) ([]byte, http.Header, error) {
+	enc := strings.TrimSpace(strings.ToLower(headers.Get("Content-Encoding")))
+	if enc == "" || enc == "identity" || enc != "gzip" {
+		return body, headers, nil
+	}
+	if len(body) == 0 {
+		// gzip.NewReader on an empty stream returns io.EOF; treat
+		// that as "nothing to decompress" rather than an error.
+		return body, headers, nil
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gr.Close()
+	decoded, err := io.ReadAll(gr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("gzip read: %w", err)
+	}
+	out := headers.Clone()
+	out.Del("Content-Encoding")
+	out.Set("Content-Length", strconv.Itoa(len(decoded)))
+	return decoded, out, nil
 }
 
 // errorBody is the JSON shape this package writes for gateway-side
