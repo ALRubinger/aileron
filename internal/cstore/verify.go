@@ -93,3 +93,37 @@ type PermissiveVerifier struct{}
 
 // Verify implements Verifier — always returns nil.
 func (PermissiveVerifier) Verify(_ string, _, _, _ []byte) error { return nil }
+
+// ReloadingKeyring is a Verifier that re-reads its keyring from Path
+// on every Verify call. Use this when the daemon must observe
+// out-of-band keyring writes (e.g. `aileron keyring trust ...` writes
+// directly to ~/.aileron/keyring.json without notifying the daemon)
+// without needing a restart.
+//
+// Failure modes match LoadKeyring + Ed25519Keyring.Verify:
+//
+//   - Path missing → empty keyring → ClassSignatureFailure ("no
+//     signing key registered for authority …"). Same fail-closed
+//     behavior as a freshly started daemon with no keyring file.
+//   - Path malformed → ClassValidationError surfaced to the caller.
+//     The install pipeline turns this into a 422 with the parse
+//     error embedded, which is the right place for the user to see
+//     it (vs. silently falling back to empty and reporting "no
+//     signing key" for an authority they thought they had trusted).
+//
+// The file is small (a handful of KB even with many publishers) and
+// installs are infrequent, so re-parsing on every call is negligible.
+type ReloadingKeyring struct {
+	Path string
+}
+
+// Verify implements Verifier by loading the keyring at Path and
+// delegating to its Verify. See ReloadingKeyring docs for failure
+// modes.
+func (r *ReloadingKeyring) Verify(authority string, binary, manifest, signature []byte) error {
+	keyring, err := LoadKeyring(r.Path)
+	if err != nil {
+		return err
+	}
+	return keyring.Verify(authority, binary, manifest, signature)
+}
