@@ -236,10 +236,18 @@ tasks:
     cmds:
       - task: test:go
       - task: test:ui
+      - task: test:docs
 
   test:ui:
     desc: Run UI unit and component tests
     dir: ui
+    cmds:
+      - pnpm install
+      - pnpm test
+
+  test:docs:
+    desc: Run docs unit tests (rehype plugins, etc.)
+    dir: docs
     cmds:
       - pnpm install
       - pnpm test

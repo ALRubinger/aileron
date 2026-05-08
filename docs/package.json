@@ -8,7 +8,8 @@
     "dev": "astro dev",
     "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "test": "node --test \"src/lib/**/*.test.mjs\""
   },
   "dependencies": {
     "@astrojs/mdx": "^5.0.4",
@@ -20,7 +21,8 @@
     "rehype-external-links": "^3.0.0",
     "svelte": "^5.55.4",
     "tailwind-merge": "^3.5.0",
-    "tailwind-variants": "^3.2.2"
+    "tailwind-variants": "^3.2.2",
+    "unist-util-visit": "^5.0.0"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.8",

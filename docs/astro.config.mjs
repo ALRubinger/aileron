@@ -3,6 +3,7 @@ import svelte from '@astrojs/svelte';
 import mdx from '@astrojs/mdx';
 import tailwindcss from '@tailwindcss/vite';
 import rehypeExternalLinks from 'rehype-external-links';
+import rehypeCopyButton from './src/lib/rehype-copy-button.mjs';
 import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
@@ -20,6 +21,9 @@ export default defineConfig({
           content: { type: 'text', value: ' ↗' }, // ↗
         },
       ],
+      // Wrap fenced code blocks with a "Copy" button. Inherited by MDX via
+      // @astrojs/mdx's default extendMarkdownConfig.
+      rehypeCopyButton,
     ],
   },
   vite: {
