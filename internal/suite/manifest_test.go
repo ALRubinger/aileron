@@ -3,38 +3,40 @@ package suite
 import (
 	"strings"
 	"testing"
+
+	"github.com/ALRubinger/aileron/internal/cstore"
 )
 
-// TestParse_HappyPath verifies a well-formed manifest decodes to the
-// expected struct shape. This is the contract the CLI's `-f` path
-// reads against.
+// --- Parse ---
+
+// TestParse_HappyPath verifies a well-formed v2 manifest decodes to
+// the expected struct shape. This is the contract the CLI's
+// `add-suite` paths read against.
 func TestParse_HappyPath(t *testing.T) {
 	data := []byte(`
-[suite]
 name = "gmail-and-calendar"
 description = "Read and draft Gmail; read and create calendar events"
 
-[[actions]]
-fqn = "github://owner/repo/actions/list-recent-emails@0.0.6"
-
-[[actions]]
-fqn = "github://owner/repo/actions/get-email@0.0.6"
+actions = [
+  "actions/list-recent-emails",
+  "actions/get-email",
+]
 `)
 	m, err := Parse("test.toml", data)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if m.Suite.Name != "gmail-and-calendar" {
-		t.Errorf("Suite.Name = %q", m.Suite.Name)
+	if m.Name != "gmail-and-calendar" {
+		t.Errorf("Name = %q", m.Name)
 	}
-	if m.Suite.Description == "" {
-		t.Error("Suite.Description should be set")
+	if m.Description == "" {
+		t.Error("Description should be set")
 	}
 	if len(m.Actions) != 2 {
 		t.Fatalf("len(Actions) = %d, want 2", len(m.Actions))
 	}
-	if m.Actions[0].FQN != "github://owner/repo/actions/list-recent-emails@0.0.6" {
-		t.Errorf("Actions[0].FQN = %q", m.Actions[0].FQN)
+	if m.Actions[0] != "actions/list-recent-emails" {
+		t.Errorf("Actions[0] = %q", m.Actions[0])
 	}
 }
 
@@ -43,15 +45,11 @@ fqn = "github://owner/repo/actions/get-email@0.0.6"
 // the wrong thing.
 func TestParse_RejectsUnknownTopLevelKey(t *testing.T) {
 	data := []byte(`
-[suite]
 name = "x"
 description = "x"
+maintainer = "alice"
 
-[bogus]
-key = "value"
-
-[[actions]]
-fqn = "github://owner/repo/actions/foo@1.0.0"
+actions = ["actions/foo"]
 `)
 	_, err := Parse("test.toml", data)
 	if err == nil {
@@ -62,82 +60,53 @@ fqn = "github://owner/repo/actions/foo@1.0.0"
 	}
 }
 
-// TestParse_RejectsUnknownActionKey: per-action keys are equally
-// closed. A user who types `name = "x"` (instead of editing the
-// FQN) should see an error, not a silently-misnamed install.
-func TestParse_RejectsUnknownActionKey(t *testing.T) {
+// TestParse_RejectsLegacySuiteTable: v1's `[suite]` block is no
+// longer accepted. Surface it as an unknown key so authors who
+// migrate get a clear "remove the table" signal.
+func TestParse_RejectsLegacySuiteTable(t *testing.T) {
 	data := []byte(`
 [suite]
 name = "x"
 description = "x"
 
-[[actions]]
-fqn = "github://owner/repo/actions/foo@1.0.0"
-nickname = "foo-action"
+actions = ["actions/foo"]
 `)
 	_, err := Parse("test.toml", data)
 	if err == nil {
-		t.Fatal("expected error for unknown action key")
+		t.Fatal("expected error for legacy [suite] table")
 	}
 	if !strings.Contains(err.Error(), "unknown key") {
-		t.Errorf("error should mention unknown key; got: %v", err)
+		t.Errorf("error should mention unknown key for [suite]; got: %v", err)
 	}
 }
 
-// TestParse_RejectsUnknownSuiteKey: same closed-schema rule for the
-// [suite] table itself.
-func TestParse_RejectsUnknownSuiteKey(t *testing.T) {
+// TestParse_RequiresName: missing required metadata fails.
+func TestParse_RequiresName(t *testing.T) {
 	data := []byte(`
-[suite]
-name = "x"
 description = "x"
-maintainer = "alice"
-
-[[actions]]
-fqn = "github://owner/repo/actions/foo@1.0.0"
+actions = ["actions/foo"]
 `)
 	_, err := Parse("test.toml", data)
 	if err == nil {
-		t.Fatal("expected error for unknown suite key")
+		t.Fatal("expected error for missing name")
 	}
-	if !strings.Contains(err.Error(), "unknown key") {
-		t.Errorf("error should mention unknown key; got: %v", err)
-	}
-}
-
-// TestParse_RequiresSuiteName: missing required metadata fails.
-func TestParse_RequiresSuiteName(t *testing.T) {
-	data := []byte(`
-[suite]
-description = "x"
-
-[[actions]]
-fqn = "github://owner/repo/actions/foo@1.0.0"
-`)
-	_, err := Parse("test.toml", data)
-	if err == nil {
-		t.Fatal("expected error for missing suite.name")
-	}
-	if !strings.Contains(err.Error(), "[suite].name") {
-		t.Errorf("error should mention [suite].name; got: %v", err)
+	if !strings.Contains(err.Error(), "name is required") {
+		t.Errorf("error should mention name; got: %v", err)
 	}
 }
 
-// TestParse_RequiresSuiteDescription: same for description.
-func TestParse_RequiresSuiteDescription(t *testing.T) {
+// TestParse_RequiresDescription: same for description.
+func TestParse_RequiresDescription(t *testing.T) {
 	data := []byte(`
-[suite]
 name = "x"
-
-[[actions]]
-fqn = "github://owner/repo/actions/foo@1.0.0"
+actions = ["actions/foo"]
 `)
 	_, err := Parse("test.toml", data)
 	if err == nil {
-		t.Fatal("expected error for missing suite.description")
+		t.Fatal("expected error for missing description")
 	}
-	if !strings.Contains(err.Error(), "[suite].description") {
-		t.Errorf("error should mention [suite].description; got: %v", err)
+	if !strings.Contains(err.Error(), "description is required") {
+		t.Errorf("error should mention description; got: %v", err)
 	}
 }
 
@@ -145,65 +114,41 @@ fqn = "github://owner/repo/actions/foo@1.0.0"
 // semantic meaning; surface it loudly.
 func TestParse_RejectsEmptyActions(t *testing.T) {
 	data := []byte(`
-[suite]
 name = "x"
 description = "x"
+actions = []
 `)
 	_, err := Parse("test.toml", data)
 	if err == nil {
 		t.Fatal("expected error for empty actions")
 	}
-	if !strings.Contains(err.Error(), "[[actions]]") {
-		t.Errorf("error should mention [[actions]]; got: %v", err)
+	if !strings.Contains(err.Error(), "actions") {
+		t.Errorf("error should mention actions; got: %v", err)
 	}
 }
 
-// TestParse_RejectsActionWithoutVersion: floating versions break
-// reproducibility — the same source could resolve to different
-// bytes on different days. v1 requires `@<version>`.
-func TestParse_RejectsActionWithoutVersion(t *testing.T) {
+// TestParse_RejectsEmptyEntry: a blank string in the array is a
+// misconfigured manifest.
+func TestParse_RejectsEmptyEntry(t *testing.T) {
 	data := []byte(`
-[suite]
 name = "x"
 description = "x"
-
-[[actions]]
-fqn = "github://owner/repo/actions/foo"
+actions = ["actions/foo", "  "]
 `)
 	_, err := Parse("test.toml", data)
 	if err == nil {
-		t.Fatal("expected error for action without @<version>")
+		t.Fatal("expected error for empty entry")
 	}
-	if !strings.Contains(err.Error(), "@<version>") {
-		t.Errorf("error should mention @<version>; got: %v", err)
-	}
-}
-
-// TestParse_RejectsEmptyActionFQN: an action entry with an explicit
-// empty fqn is a misconfigured manifest.
-func TestParse_RejectsEmptyActionFQN(t *testing.T) {
-	data := []byte(`
-[suite]
-name = "x"
-description = "x"
-
-[[actions]]
-fqn = ""
-`)
-	_, err := Parse("test.toml", data)
-	if err == nil {
-		t.Fatal("expected error for empty action fqn")
-	}
-	if !strings.Contains(err.Error(), "fqn is required") {
-		t.Errorf("error should mention fqn required; got: %v", err)
+	if !strings.Contains(err.Error(), "actions[1]") {
+		t.Errorf("error should name actions[1]; got: %v", err)
 	}
 }
 
 // TestParse_RejectsMalformedTOML: surface TOML decode errors
 // faithfully so users can locate the bad line.
 func TestParse_RejectsMalformedTOML(t *testing.T) {
-	data := []byte(`[suite
-name = "x"`)
+	data := []byte(`name =
+`)
 	_, err := Parse("test.toml", data)
 	if err == nil {
 		t.Fatal("expected error for malformed TOML")
@@ -214,27 +159,140 @@ name = "x"`)
 // in declaration order. Verify the parser keeps that order.
 func TestParse_PreservesActionOrder(t *testing.T) {
 	data := []byte(`
-[suite]
 name = "x"
 description = "x"
 
-[[actions]]
-fqn = "github://owner/repo/actions/aaa@1.0.0"
-
-[[actions]]
-fqn = "github://owner/repo/actions/bbb@1.0.0"
-
-[[actions]]
-fqn = "github://owner/repo/actions/ccc@1.0.0"
+actions = [
+  "actions/aaa",
+  "actions/bbb",
+  "actions/ccc",
+]
 `)
 	m, err := Parse("test.toml", data)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	want := []string{"aaa", "bbb", "ccc"}
+	want := []string{"actions/aaa", "actions/bbb", "actions/ccc"}
 	for i, w := range want {
-		if !strings.Contains(m.Actions[i].FQN, w) {
-			t.Errorf("Actions[%d].FQN = %q, want substring %q", i, m.Actions[i].FQN, w)
+		if m.Actions[i] != w {
+			t.Errorf("Actions[%d] = %q, want %q", i, m.Actions[i], w)
 		}
+	}
+}
+
+// --- Resolve ---
+
+// TestResolve_PathFormInherits the suite's repo and version; the
+// composed Ref points at <suiteFQN.Authority()>/<path>@<suiteVersion>.
+// This is the headline ergonomic of v2.
+func TestResolve_PathFormInheritsSuiteRefAndRepo(t *testing.T) {
+	m := &Manifest{
+		Name: "x", Description: "x",
+		Actions: []string{"actions/foo", "actions/bar"},
+	}
+	suiteFQN := cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn"}
+	refs, err := Resolve(m, suiteFQN, "0.0.6")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("len(refs) = %d, want 2", len(refs))
+	}
+	if got := refs[0].FQN.String(); got != "github://acme/conn/actions/foo" {
+		t.Errorf("refs[0].FQN = %q", got)
+	}
+	if refs[0].Version != "0.0.6" {
+		t.Errorf("refs[0].Version = %q, want 0.0.6", refs[0].Version)
+	}
+}
+
+// TestResolve_FQNFormUnchanged: an FQN-form entry skips the
+// inheritance machinery entirely; cstore.ParseRef does the work.
+func TestResolve_FQNFormUnchanged(t *testing.T) {
+	m := &Manifest{
+		Name: "x", Description: "x",
+		Actions: []string{"github://other/repo/actions/foo@1.2.3"},
+	}
+	refs, err := Resolve(m, cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn"}, "0.0.6")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := refs[0].FQN.String(); got != "github://other/repo/actions/foo" {
+		t.Errorf("refs[0].FQN = %q", got)
+	}
+	if refs[0].Version != "1.2.3" {
+		t.Errorf("refs[0].Version = %q, want 1.2.3", refs[0].Version)
+	}
+}
+
+// TestResolve_MixedEntries: path-form and FQN-form coexist in one
+// manifest. Path form inherits; FQN form uses its own version.
+func TestResolve_MixedEntries(t *testing.T) {
+	m := &Manifest{
+		Name: "x", Description: "x",
+		Actions: []string{
+			"actions/foo",
+			"github://other/repo/actions/bar@1.0.0",
+		},
+	}
+	suiteFQN := cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn"}
+	refs, err := Resolve(m, suiteFQN, "0.0.6")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if refs[0].Version != "0.0.6" {
+		t.Errorf("path-form should inherit 0.0.6; got %q", refs[0].Version)
+	}
+	if refs[1].Version != "1.0.0" {
+		t.Errorf("FQN-form should use 1.0.0; got %q", refs[1].Version)
+	}
+}
+
+// TestResolve_PathFormRequiresSuiteContext: a path-form entry in a
+// local manifest (zero suiteFQN/version) is a hard error so the
+// user sees the actual problem rather than installing under the
+// wrong publisher.
+func TestResolve_PathFormRequiresSuiteContext(t *testing.T) {
+	m := &Manifest{
+		Name: "x", Description: "x",
+		Actions: []string{"actions/foo"},
+	}
+	_, err := Resolve(m, cstore.FQN{}, "")
+	if err == nil {
+		t.Fatal("expected error for path-form in local mode")
+	}
+	if !strings.Contains(err.Error(), "path-form") {
+		t.Errorf("error should mention path-form; got: %v", err)
+	}
+}
+
+// TestResolve_FQNFormWithoutVersionErrors: matches cstore.ParseRef's
+// strict-SemVer rule. A v2 manifest can't omit @<version> on FQN-
+// form entries.
+func TestResolve_FQNFormWithoutVersionErrors(t *testing.T) {
+	m := &Manifest{
+		Name: "x", Description: "x",
+		Actions: []string{"github://acme/conn/actions/foo"},
+	}
+	_, err := Resolve(m, cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn"}, "0.0.6")
+	if err == nil {
+		t.Fatal("expected error for FQN without @<version>")
+	}
+}
+
+// TestResolve_PathFormStripsLeadingSlash: be forgiving of "/actions/foo"
+// vs. "actions/foo"; both compose to the same result.
+func TestResolve_PathFormStripsLeadingSlash(t *testing.T) {
+	m := &Manifest{
+		Name: "x", Description: "x",
+		Actions: []string{"/actions/foo"},
+	}
+	suiteFQN := cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn"}
+	refs, err := Resolve(m, suiteFQN, "0.0.6")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := refs[0].FQN.Subpath; got != "actions/foo" {
+		t.Errorf("subpath = %q, want actions/foo", got)
 	}
 }

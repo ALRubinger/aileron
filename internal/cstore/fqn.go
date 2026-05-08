@@ -72,6 +72,15 @@ var fqnSchemes = map[string]bool{
 // semverRe matches strict SemVer 2.0.0 per ADR-0002.
 var semverRe = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
 
+// IsStrictSemver reports whether v matches Aileron's strict SemVer
+// rule (the same rule ParseRef enforces on `@<version>` suffixes).
+// Exported so callers outside this package — e.g. the suite fetch
+// path that strips a `v` prefix from a release tag — can validate
+// the result without re-implementing the regex.
+func IsStrictSemver(v string) bool {
+	return semverRe.MatchString(v)
+}
+
 // ParseFQN parses an FQN string. Returns an error when the scheme is
 // unknown, the owner/repo segments are missing, or the URI is malformed.
 // Does NOT accept `@<version>` suffixes — those are stripped by ParseRef.

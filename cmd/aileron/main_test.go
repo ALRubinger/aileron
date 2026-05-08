@@ -4281,22 +4281,18 @@ func lastSegment(fqn string) string {
 }
 
 // TestRunActionAddSuite_HappyPathInstallsEveryAction is the headline
-// #564 test: a manifest with three actions installs all three and
-// the final summary lists them as added.
+// #564 test: a local v2 manifest with three actions installs all
+// three and the final summary lists them as added.
 func TestRunActionAddSuite_HappyPathInstallsEveryAction(t *testing.T) {
 	manifestPath := writeSuiteManifest(t, `
-[suite]
 name = "test-suite"
 description = "A test suite"
 
-[[actions]]
-fqn = "github://acme/conn/actions/foo@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/bar@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/baz@0.1.0"
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+  "github://acme/conn/actions/bar@0.1.0",
+  "github://acme/conn/actions/baz@0.1.0",
+]
 `)
 	installed := map[string]int{}
 	suiteInstallServer(t, []string{"github://acme/conn"}, nil, func(fqn string, w http.ResponseWriter, r *http.Request) {
@@ -4307,7 +4303,7 @@ fqn = "github://acme/conn/actions/baz@0.1.0"
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runActionAdd([]string{"-f", manifestPath, "--yes"}, strings.NewReader(""), &stdout, &stderr)
+	code := runActionAddSuite([]string{"--yes", manifestPath}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
 	}
@@ -4335,8 +4331,7 @@ fqn = "github://acme/conn/actions/baz@0.1.0"
 
 // TestRunActionAddSuite_SharesTrustPromptAcrossActions: when every
 // action in the suite shares an authority, the trust prompt fires
-// at most once per run. This is the "user doesn't see the same
-// trust prompt N times" guarantee from the acceptance criteria.
+// at most once per run.
 func TestRunActionAddSuite_SharesTrustPromptAcrossActions(t *testing.T) {
 	withTempHome(t)
 	_, pemBytes := genTestKey(t)
@@ -4345,18 +4340,14 @@ func TestRunActionAddSuite_SharesTrustPromptAcrossActions(t *testing.T) {
 	})
 
 	manifestPath := writeSuiteManifest(t, `
-[suite]
 name = "shared-trust"
 description = "Three actions, one publisher"
 
-[[actions]]
-fqn = "github://acme/conn/actions/foo@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/bar@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/baz@0.1.0"
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+  "github://acme/conn/actions/bar@0.1.0",
+  "github://acme/conn/actions/baz@0.1.0",
+]
 `)
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -4375,35 +4366,29 @@ fqn = "github://acme/conn/actions/baz@0.1.0"
 	})
 
 	var stdout, stderr bytes.Buffer
-	code := runActionAdd([]string{"-f", manifestPath, "--yes"}, strings.NewReader(""), &stdout, &stderr)
+	code := runActionAddSuite([]string{"--yes", manifestPath}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
 	}
-	// Trust prompt block lives in stdout. Count occurrences — must be 1.
 	count := strings.Count(stdout.String(), "Publisher github://acme/conn is not yet trusted")
 	if count != 1 {
 		t.Errorf("trust banner appeared %d times across the suite; want 1\nstdout:\n%s", count, stdout.String())
 	}
 }
 
-// TestRunActionAddSuite_FailureSoftContinuesAfterMidStreamFailure
-// asserts the documented failure semantics: when one action fails,
-// the loop continues with the rest, the summary lists each
-// outcome, and the exit code is nonzero.
+// TestRunActionAddSuite_FailureSoftContinuesAfterMidStreamFailure:
+// per-action failure → loop continues; summary lists each outcome;
+// nonzero exit.
 func TestRunActionAddSuite_FailureSoftContinuesAfterMidStreamFailure(t *testing.T) {
 	manifestPath := writeSuiteManifest(t, `
-[suite]
 name = "mixed"
 description = "First and third succeed; second fails."
 
-[[actions]]
-fqn = "github://acme/conn/actions/foo@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/bar@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/baz@0.1.0"
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+  "github://acme/conn/actions/bar@0.1.0",
+  "github://acme/conn/actions/baz@0.1.0",
+]
 `)
 	suiteInstallServer(t, []string{"github://acme/conn"},
 		func(fqn string, w http.ResponseWriter, r *http.Request) {
@@ -4420,13 +4405,11 @@ fqn = "github://acme/conn/actions/baz@0.1.0"
 	)
 
 	var stdout, stderr bytes.Buffer
-	code := runActionAdd([]string{"-f", manifestPath, "--yes"}, strings.NewReader(""), &stdout, &stderr)
+	code := runActionAddSuite([]string{"--yes", manifestPath}, strings.NewReader(""), &stdout, &stderr)
 	if code == 0 {
 		t.Errorf("expected nonzero exit when an action fails; stderr=%s", stderr.String())
 	}
 	out := stdout.String()
-	// ANSI color codes wrap the ✓/✗ markers, so match the bare FQNs
-	// in the summary plus the failure-count footer.
 	for _, want := range []string{
 		"github://acme/conn/actions/foo@0.1.0",
 		"github://acme/conn/actions/bar@0.1.0",
@@ -4437,28 +4420,23 @@ fqn = "github://acme/conn/actions/baz@0.1.0"
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
 	}
-	// The bar entry must show as a failure (exit code suffix); the
-	// other two as ✓-prefixed entries.
 	if !strings.Contains(out, "actions/bar@0.1.0 (exit 1)") {
 		t.Errorf("bar entry should render with (exit N) suffix:\n%s", out)
 	}
 }
 
-// TestRunActionAddSuite_AlreadyInstalledIsLoggedAsSuccess: when an
-// action is already installed at the same content hash, it counts
-// as a success in the summary (the suite intent — "have these
-// actions installed" — is satisfied).
+// TestRunActionAddSuite_AlreadyInstalledIsLoggedAsSuccess: an
+// already-installed action counts as success — the suite intent
+// is satisfied.
 func TestRunActionAddSuite_AlreadyInstalledIsLoggedAsSuccess(t *testing.T) {
 	manifestPath := writeSuiteManifest(t, `
-[suite]
 name = "rerun"
 description = "Re-running with everything already installed."
 
-[[actions]]
-fqn = "github://acme/conn/actions/foo@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/bar@0.1.0"
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+  "github://acme/conn/actions/bar@0.1.0",
+]
 `)
 	suiteInstallServer(t, []string{"github://acme/conn"},
 		func(fqn string, w http.ResponseWriter, r *http.Request) {
@@ -4472,7 +4450,7 @@ fqn = "github://acme/conn/actions/bar@0.1.0"
 	)
 
 	var stdout, stderr bytes.Buffer
-	code := runActionAdd([]string{"-f", manifestPath}, strings.NewReader(""), &stdout, &stderr)
+	code := runActionAddSuite([]string{manifestPath}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
 	}
@@ -4486,13 +4464,12 @@ fqn = "github://acme/conn/actions/bar@0.1.0"
 }
 
 // TestRunActionAddSuite_MissingManifestFileExits1 surfaces a clear
-// error rather than a panic when the user points -f at a path that
-// doesn't exist.
+// error when the local source path doesn't exist.
 func TestRunActionAddSuite_MissingManifestFileExits1(t *testing.T) {
 	withSeededKeyring(t)
 	var stdout, stderr bytes.Buffer
-	code := runActionAdd(
-		[]string{"-f", "/no/such/file.toml"},
+	code := runActionAddSuite(
+		[]string{"/no/such/file.toml"},
 		strings.NewReader(""), &stdout, &stderr,
 	)
 	if code == 0 {
@@ -4503,35 +4480,54 @@ func TestRunActionAddSuite_MissingManifestFileExits1(t *testing.T) {
 	}
 }
 
-// TestRunActionAddSuite_RejectsCombinedPositionalAndFile: -f and
-// a positional FQN at the same time is ambiguous; surface it as
-// an error rather than picking one and ignoring the other.
-func TestRunActionAddSuite_RejectsCombinedPositionalAndFile(t *testing.T) {
+// TestRunActionAddSuite_RejectsExtraPositional: more than one
+// source argument is a usage error.
+func TestRunActionAddSuite_RejectsExtraPositional(t *testing.T) {
 	manifestPath := writeSuiteManifest(t, `
-[suite]
 name = "x"
 description = "x"
-[[actions]]
-fqn = "github://acme/conn/actions/foo@0.1.0"
+actions = ["github://acme/conn/actions/foo@0.1.0"]
 `)
 	withSeededKeyring(t)
 	var stdout, stderr bytes.Buffer
-	code := runActionAdd(
-		[]string{"-f", manifestPath, "github://acme/conn/actions/extra@0.1.0"},
+	code := runActionAddSuite(
+		[]string{manifestPath, "github://acme/conn/actions/extra@0.1.0"},
 		strings.NewReader(""), &stdout, &stderr,
 	)
 	if code == 0 {
-		t.Errorf("expected nonzero exit when -f combined with positional; stderr=%s", stderr.String())
+		t.Errorf("expected nonzero exit with extra positional; stderr=%s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "cannot combine") {
-		t.Errorf("expected 'cannot combine' error; got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "exactly one source") {
+		t.Errorf("expected 'exactly one source' error; got: %s", stderr.String())
+	}
+}
+
+// TestRunActionAddSuite_PathFormInLocalManifestErrors: a local
+// manifest can't use path-form entries (no ref to inherit). Surface
+// the error, name the entry.
+func TestRunActionAddSuite_PathFormInLocalManifestErrors(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "bad-local"
+description = "Path-form requires a remote ref."
+
+actions = [
+  "actions/foo",
+]
+`)
+	withSeededKeyring(t)
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{manifestPath}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit for path-form in local manifest; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "path-form") {
+		t.Errorf("error should explain path-form rule; got: %s", stderr.String())
 	}
 }
 
 // TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority:
-// when the user declines trust mid-suite, subsequent actions that
-// share the declined authority skip silently rather than re-
-// prompting. The user only sees the trust banner once.
+// trust decline mid-suite → remaining same-authority actions skip
+// without re-prompting.
 func TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority(t *testing.T) {
 	withTempHome(t)
 	_, pemBytes := genTestKey(t)
@@ -4540,18 +4536,14 @@ func TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority(t *testing.T)
 	})
 
 	manifestPath := writeSuiteManifest(t, `
-[suite]
 name = "decline-test"
 description = "Decline trust; remaining actions should skip."
 
-[[actions]]
-fqn = "github://acme/conn/actions/foo@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/bar@0.1.0"
-
-[[actions]]
-fqn = "github://acme/conn/actions/baz@0.1.0"
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+  "github://acme/conn/actions/bar@0.1.0",
+  "github://acme/conn/actions/baz@0.1.0",
+]
 `)
 	previewHits := 0
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -4564,7 +4556,7 @@ fqn = "github://acme/conn/actions/baz@0.1.0"
 
 	stdin := bufio.NewReader(strings.NewReader("n\n"))
 	var stdout, stderr bytes.Buffer
-	code := runActionAdd([]string{"-f", manifestPath}, stdin, &stdout, &stderr)
+	code := runActionAddSuite([]string{manifestPath}, stdin, &stdout, &stderr)
 	if code == 0 {
 		t.Errorf("expected nonzero exit when trust declined; stderr=%s", stderr.String())
 	}
@@ -4576,6 +4568,263 @@ fqn = "github://acme/conn/actions/baz@0.1.0"
 	}
 	if !strings.Contains(stdout.String(), "1 of 3") && !strings.Contains(stdout.String(), "3 of 3") {
 		t.Errorf("summary should report failures; got: %s", stdout.String())
+	}
+}
+
+// --- runActionAddSuite: remote source (issue #564 phase 2) ---
+
+// remoteSuiteServer stands up two httptest servers (GitHub API for
+// resolveLatestRef + raw.githubusercontent.com for fetchSuiteTOML)
+// and points the CLI's globals at them. Returns nothing — the
+// fixtures register cleanup via t.Cleanup.
+//
+// suiteTOML is the body served at the raw URL; tagName is what
+// the releases-latest endpoint returns (empty → 404 to simulate
+// "no releases").
+func remoteSuiteServer(t *testing.T, owner, repo, filePath, tagName, suiteTOML string) {
+	t.Helper()
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := "/repos/" + owner + "/" + repo + "/releases/latest"
+		if r.URL.Path != want {
+			t.Errorf("unexpected api path: %s, want %s", r.URL.Path, want)
+		}
+		if tagName == "" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"tag_name":%q}`, tagName)
+	}))
+	t.Cleanup(apiSrv.Close)
+
+	rawSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// raw.githubusercontent.com serves /<owner>/<repo>/<ref>/<path>.
+		// Tests register at one specific ref path; anything else 404s.
+		if !strings.HasSuffix(r.URL.Path, "/"+filePath) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(suiteTOML))
+	}))
+	t.Cleanup(rawSrv.Close)
+
+	prevAPI := githubAPIBase
+	githubAPIBase = apiSrv.URL
+	t.Cleanup(func() { githubAPIBase = prevAPI })
+
+	prevRaw := rawGitHubBase
+	rawGitHubBase = rawSrv.URL
+	t.Cleanup(func() { rawGitHubBase = prevRaw })
+}
+
+// TestRunActionAddSuiteRemote_LatestResolvesAndInstalls is the
+// headline remote test: @latest resolves via the releases API,
+// the fetched manifest's path-form entries inherit the resolved
+// release tag's bare SemVer as their install version.
+func TestRunActionAddSuiteRemote_LatestResolvesAndInstalls(t *testing.T) {
+	const suiteTOML = `
+name = "remote-suite"
+description = "Three actions, all path-form."
+
+actions = [
+  "actions/foo",
+  "actions/bar",
+  "actions/baz",
+]
+`
+	remoteSuiteServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML)
+
+	installed := map[string]string{} // fqn -> version installed
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		nil,
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				Version string `json:"version"`
+			}
+			_ = json.Unmarshal(body, &req)
+			installed[fqn] = req.Version
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":%q,"source":"x","path":"/p"}`,
+				lastSegment(fqn), fqn, req.Version)
+		},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"--yes", "github://acme/conn/suite.toml@latest"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	for _, fqn := range []string{
+		"github://acme/conn/actions/foo",
+		"github://acme/conn/actions/bar",
+		"github://acme/conn/actions/baz",
+	} {
+		if installed[fqn] != "0.0.6" {
+			t.Errorf("install of %s: version = %q, want 0.0.6", fqn, installed[fqn])
+		}
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Resolving @latest",
+		"→ v0.0.6",
+		"Suite: remote-suite",
+		"All 3 action(s) installed.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAddSuiteRemote_PinnedTagSkipsAPI: an explicit
+// @<tag> ref doesn't hit the releases API.
+func TestRunActionAddSuiteRemote_PinnedTagSkipsAPI(t *testing.T) {
+	const suiteTOML = `
+name = "pinned"
+description = "Pinned to v0.0.6"
+
+actions = [
+  "actions/foo",
+]
+`
+	apiHits := 0
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits++
+		w.WriteHeader(http.StatusInternalServerError) // explode if hit
+	}))
+	defer apiSrv.Close()
+	prevAPI := githubAPIBase
+	githubAPIBase = apiSrv.URL
+	t.Cleanup(func() { githubAPIBase = prevAPI })
+
+	rawSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(suiteTOML))
+	}))
+	defer rawSrv.Close()
+	prevRaw := rawGitHubBase
+	rawGitHubBase = rawSrv.URL
+	t.Cleanup(func() { rawGitHubBase = prevRaw })
+
+	suiteInstallServer(t, []string{"github://acme/conn"}, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"--yes", "github://acme/conn/suite.toml@v0.0.6"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if apiHits != 0 {
+		t.Errorf("releases API hit %d times for a pinned ref; want 0", apiHits)
+	}
+}
+
+// TestRunActionAddSuiteRemote_NoReleasesFailsCleanly: @latest
+// against a repo with no releases surfaces the actionable hint.
+func TestRunActionAddSuiteRemote_NoReleasesFailsCleanly(t *testing.T) {
+	remoteSuiteServer(t, "acme", "conn", "suite.toml", "", "")
+	withSeededKeyring(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@latest"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when no releases; stderr=%s", stderr.String())
+	}
+	for _, want := range []string{"@<release-tag>", "@<sha>"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr should mention %q; got: %s", want, stderr.String())
+		}
+	}
+}
+
+// TestRunActionAddSuiteRemote_RawFetch404NamesURL: when the suite
+// manifest doesn't exist at the resolved ref, the user sees the
+// URL that was tried.
+func TestRunActionAddSuiteRemote_RawFetch404NamesURL(t *testing.T) {
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name":"v0.0.6"}`))
+	}))
+	defer apiSrv.Close()
+	prevAPI := githubAPIBase
+	githubAPIBase = apiSrv.URL
+	t.Cleanup(func() { githubAPIBase = prevAPI })
+
+	rawSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer rawSrv.Close()
+	prevRaw := rawGitHubBase
+	rawGitHubBase = rawSrv.URL
+	t.Cleanup(func() { rawGitHubBase = prevRaw })
+
+	withSeededKeyring(t)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/missing.toml@latest"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "missing.toml") {
+		t.Errorf("stderr should name the missing file; got: %s", stderr.String())
+	}
+}
+
+// TestRunActionAddSuiteRemote_MixedPathAndFQNEntries: a remote
+// manifest with one path-form entry (inherits ref) and one FQN-form
+// entry (explicit version) installs each at the right version.
+func TestRunActionAddSuiteRemote_MixedPathAndFQNEntries(t *testing.T) {
+	const suiteTOML = `
+name = "mixed"
+description = "Path-form inherits; FQN-form explicit."
+
+actions = [
+  "actions/foo",
+  "github://other/repo/actions/bar@1.0.0",
+]
+`
+	remoteSuiteServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML)
+
+	installedVersions := map[string]string{}
+	suiteInstallServer(t, []string{"github://acme/conn", "github://other/repo"},
+		nil,
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			var req struct {
+				Version string `json:"version"`
+			}
+			_ = json.Unmarshal(body, &req)
+			installedVersions[fqn] = req.Version
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":%q,"source":"x","path":"/p"}`,
+				lastSegment(fqn), fqn, req.Version)
+		},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"--yes", "github://acme/conn/suite.toml@latest"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if got := installedVersions["github://acme/conn/actions/foo"]; got != "0.0.6" {
+		t.Errorf("path-form should inherit 0.0.6; got %q", got)
+	}
+	if got := installedVersions["github://other/repo/actions/bar"]; got != "1.0.0" {
+		t.Errorf("FQN-form should use 1.0.0; got %q", got)
 	}
 }
 
