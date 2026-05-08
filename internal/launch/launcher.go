@@ -19,6 +19,15 @@ import (
 	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
 )
 
+// MCPServerName is the name Aileron registers itself under in
+// agents' MCP-server configs. The agent surfaces Aileron's tools as
+// `mcp__<MCPServerName>__<tool-name>`. Agent definitions reference
+// this when they wire host-level allowlists (e.g. Claude Code's
+// `--allowedTools mcp__aileron`) so Aileron remains the trust surface
+// per ADR-0009/0010 and the host doesn't double-prompt for tools the
+// daemon already gates.
+const MCPServerName = "aileron"
+
 // LaunchConfig holds the configuration for launching an agent.
 type LaunchConfig struct {
 	// Agent is the agent to launch.
@@ -181,8 +190,8 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		}
 		envJSON, _ := json.Marshal(mcpEnv)
 		mcpConfig := fmt.Sprintf(
-			`{"mcpServers":{"aileron":{"command":%q,"env":%s}}}`,
-			mcpBin, string(envJSON),
+			`{"mcpServers":{%q:{"command":%q,"env":%s}}}`,
+			MCPServerName, mcpBin, string(envJSON),
 		)
 		allArgs = append(allArgs, "--mcp-config", mcpConfig)
 	}

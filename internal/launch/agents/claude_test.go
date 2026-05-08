@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
 
@@ -25,14 +26,27 @@ func TestClaude(t *testing.T) {
 	if len(args) < 2 {
 		t.Fatal("expected Args with --allowedTools")
 	}
-	found := false
+	var allowedToolsValue string
 	for i, a := range args {
-		if a == "--allowedTools" && i+1 < len(args) && args[i+1] == "Bash(*)" {
-			found = true
+		if a == "--allowedTools" && i+1 < len(args) {
+			allowedToolsValue = args[i+1]
+			break
 		}
 	}
-	if !found {
-		t.Errorf("expected --allowedTools Bash(*) in Args, got %v", args)
+	if allowedToolsValue == "" {
+		t.Fatalf("expected --allowedTools <value> in Args, got %v", args)
+	}
+	if !strings.Contains(allowedToolsValue, "Bash(*)") {
+		t.Errorf("expected Bash(*) in --allowedTools value, got %q", allowedToolsValue)
+	}
+	// Finding #6 of #532: the Aileron MCP server's tools must be
+	// pre-approved so Claude Code does not double-prompt for tools
+	// the daemon already gates. The bare `mcp__<server>` form covers
+	// every tool from that server.
+	wantMCP := "mcp__" + launch.MCPServerName
+	if !strings.Contains(allowedToolsValue, wantMCP) {
+		t.Errorf("expected %q in --allowedTools value to suppress per-tool prompts for Aileron MCP tools, got %q",
+			wantMCP, allowedToolsValue)
 	}
 
 	env := c.Env()

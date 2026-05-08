@@ -16,10 +16,23 @@ type Claude struct{}
 func (c Claude) Name() string          { return "claude" }
 func (c Claude) BinaryNames() []string { return []string{"claude"} }
 
-// Args tells Claude Code to auto-approve all Bash commands so that
-// Aileron is the single approval layer for shell execution.
+// Args tells Claude Code to auto-approve:
+//   - Bash, so Aileron's shell-policy + approval layer is the single
+//     arbiter of shell execution rather than Claude Code's per-command
+//     prompt.
+//   - The Aileron MCP server's tools (`mcp__<launch.MCPServerName>`),
+//     so Claude Code does not double-prompt for tools whose execution
+//     the daemon already mediates per ADR-0009/0010. Without this,
+//     each unique mcp__aileron__* tool fires a "Yes / Yes don't ask
+//     again / No" prompt the first time the agent calls it, doubling
+//     the trust surface and leading the user to vest trust decisions
+//     in the agent CLI rather than Aileron.
+//
+// `--allowedTools` accepts a single value with space-separated
+// patterns; the bare `mcp__<server>` form whitelists every tool from
+// that server (including ones registered later in the session).
 func (c Claude) Args() []string {
-	return []string{"--allowedTools", "Bash(*)"}
+	return []string{"--allowedTools", "Bash(*) mcp__" + launch.MCPServerName}
 }
 
 // Env returns Claude-specific environment variables. CLAUDE_CODE_SHELL
