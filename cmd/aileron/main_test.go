@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
@@ -3396,6 +3397,7 @@ func TestRunAction_AddAutoPromptsForUnboundCapabilities(t *testing.T) {
 	// After install, the server returned `unbound_capabilities`; the
 	// CLI prompts the user, drops into binding setup for each yes,
 	// and runs the api_key flow when the connector declares api_key.
+	withSeededKeyring(t, "github://x/y")
 	var initHits, setupHits int
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -3444,6 +3446,7 @@ func TestRunAction_AddAutoPromptsForUnboundCapabilities(t *testing.T) {
 }
 
 func TestRunAction_AddDeclineDoesNotBindButPrintsHint(t *testing.T) {
+	withSeededKeyring(t, "github://x/y")
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/actions/preview":
@@ -3473,6 +3476,7 @@ func TestRunAction_AddDeclineDoesNotBindButPrintsHint(t *testing.T) {
 }
 
 func TestRunAction_AddNoBindFlagSkipsPrompt(t *testing.T) {
+	withSeededKeyring(t, "github://x/y")
 	hits := map[string]int{}
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		hits[r.URL.Path]++
@@ -3588,10 +3592,61 @@ func TestRunBinding_SetupOAuth2_PortBindFailsWhenSamePortInUse(t *testing.T) {
 
 // --- runActionAdd: auto-install missing connectors (issue #413) ---
 
+// withSeededKeyring isolates $HOME to a temp dir and pre-populates
+// `~/.aileron/keyring.json` with a fake key per supplied authority.
+// Used by action add / connector install tests so the auto-trust
+// prompt added in #563 is a no-op for the test fixture's authority.
+func withSeededKeyring(t *testing.T, authorities ...string) {
+	t.Helper()
+	withTempHome(t)
+	path := cstore.DefaultKeyringPath()
+	kr, err := cstore.LoadKeyring(path)
+	if err != nil {
+		t.Fatalf("withSeededKeyring: load: %v", err)
+	}
+	for _, auth := range authorities {
+		pub, _ := genTestKey(t)
+		kr.Add(auth, pub)
+	}
+	if err := kr.SaveKeyring(path); err != nil {
+		t.Fatalf("withSeededKeyring: save: %v", err)
+	}
+}
+
+// trustTestAuthority adds a fake key for `authority` to the keyring
+// at the default path (callers must have isolated $HOME first via
+// withSeededKeyring or withTempHome). Used to extend the seeded set
+// after the test fixture is up.
+func trustTestAuthority(t *testing.T, authority string) {
+	t.Helper()
+	path := cstore.DefaultKeyringPath()
+	kr, err := cstore.LoadKeyring(path)
+	if err != nil {
+		t.Fatalf("trustTestAuthority: load: %v", err)
+	}
+	pub, _ := genTestKey(t)
+	kr.Add(authority, pub)
+	if err := kr.SaveKeyring(path); err != nil {
+		t.Fatalf("trustTestAuthority: save: %v", err)
+	}
+}
+
 // actionInstallServer routes preview + install requests to two
 // separate handler functions. Mirrors connectorInstallServer.
 // Either handler may be nil to default to a simple OK response.
+//
+// Per issue #563, runActionAdd now ensures the action's authority is
+// trusted before posting to /actions/preview. The fixture pre-seeds
+// the keyring with keys for the authorities the action add tests in
+// this file actually exercise — `github://acme/x` and
+// `github://acme/conn` — so the trust check is a silent no-op and
+// these tests stay focused on the install flow rather than the
+// trust prompt. Tests that exercise additional authorities (e.g.
+// connector deps from a different publisher) call trustTestAuthority
+// to extend the seed; tests that assert the trust prompt itself
+// fires call withTempHome directly with no seed.
 func actionInstallServer(t *testing.T, onPreview, onInstall http.HandlerFunc) *httptest.Server {
+	withSeededKeyring(t, "github://acme/x", "github://acme/conn")
 	return fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/actions/preview":
@@ -3797,6 +3852,10 @@ func TestRunActionAdd_PreviewRendersAlreadyInstalledDeps(t *testing.T) {
 			]
 		}`)
 	}, nil)
+	// The new (not-yet-installed) dep authority is checked for trust
+	// before the install consent prompt; pre-trust it so this test
+	// stays focused on the rendering split.
+	trustTestAuthority(t, "github://acme/conn-new")
 
 	stdin := strings.NewReader("n\n") // cancel — we just want the rendering
 	var stdout, stderr bytes.Buffer
@@ -3812,6 +3871,340 @@ func TestRunActionAdd_PreviewRendersAlreadyInstalledDeps(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// --- runActionAdd: auto-trust publisher (issue #563) ---
+
+// TestRunActionAdd_AutoTrustPromptsAndInstalls is the headline #563
+// test: from a fresh machine (empty keyring, mock publisher.pub on
+// the convention path), `aileron action add <FQN>` walks the user
+// through the trust prompt → preview → install in one command. Both
+// the keyring entry and the install must land.
+func TestRunActionAdd_AutoTrustPromptsAndInstalls(t *testing.T) {
+	home := withTempHome(t)
+	pub, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	var previewCalled, installCalled bool
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/preview":
+			previewCalled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"fqn":"github://acme/conn/actions/run",
+				"version":"0.1.0",
+				"hash":"sha256:abc",
+				"name":"my-action",
+				"signature_status":"verified",
+				"connector_deps":[]
+			}`)
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// Two sequential prompts share one bufio.Reader; runAction wraps
+	// stdin so each prompt picks up where the previous left off.
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n")) // trust y, install y
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if !previewCalled {
+		t.Error("preview endpoint should have been called after trust prompt accepted")
+	}
+	if !installCalled {
+		t.Error("install endpoint should have been called after both prompts accepted")
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Publisher github://acme/conn is not yet trusted",
+		"Trust publisher github://acme/conn?",
+		"✓ Trusted publisher github://acme/conn",
+		"Action install preview",
+		"Install? [y/N]:",
+		"Added: my-action",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// Trust must persist across runs.
+	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !kr.HasKey("github://acme/conn", pub) {
+		t.Error("keyring should contain trusted key after auto-trust")
+	}
+}
+
+// TestRunActionAdd_TrustDeclineAbortsBeforePreview asserts the cancel
+// path: typing "n" at the trust prompt aborts with a nonzero exit
+// code and never calls /actions/preview. The keyring stays empty.
+func TestRunActionAdd_TrustDeclineAbortsBeforePreview(t *testing.T) {
+	home := withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	previewCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/actions/preview" {
+			previewCalled = true
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	})
+
+	stdin := strings.NewReader("n\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when trust declined; stderr=%s", stderr.String())
+	}
+	if previewCalled {
+		t.Error("preview endpoint should NOT be called when trust declined")
+	}
+	// Keyring should still be empty.
+	kr, _ := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if kr != nil && len(kr.Keys("github://acme/conn")) != 0 {
+		t.Error("keyring should remain empty when user declined trust")
+	}
+}
+
+// TestRunActionAdd_YesFlagAutoTrusts asserts the non-interactive
+// surface from #563 acceptance criteria: with --yes, the trust prompt
+// is auto-accepted (key fetched + persisted) and the install proceeds
+// without ever prompting. Suitable for CI scripts and agent-driven
+// installs.
+func TestRunActionAdd_YesFlagAutoTrusts(t *testing.T) {
+	home := withTempHome(t)
+	pub, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	installCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"fqn":"github://acme/conn/actions/run","version":"0.1.0",
+				"hash":"sha256:abc","name":"my-action",
+				"signature_status":"verified","connector_deps":[]
+			}`)
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"x","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0", "--yes"},
+		strings.NewReader(""), // empty stdin: prompts would EOF
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if !installCalled {
+		t.Error("install endpoint not called with --yes")
+	}
+	if strings.Contains(stdout.String(), "Trust publisher github://acme/conn?") {
+		t.Errorf("--yes should suppress the trust prompt; got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "✓ Trusted publisher github://acme/conn") {
+		t.Errorf("expected key-added confirmation line; got: %s", stdout.String())
+	}
+	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !kr.HasKey("github://acme/conn", pub) {
+		t.Error("keyring should contain trusted key after --yes auto-trust")
+	}
+}
+
+// TestRunActionAdd_AlreadyTrustedAuthorityIsSilent asserts the no-op
+// re-run path from #563 acceptance criteria: when the authority is
+// already trusted, runActionAdd does not render the trust prompt or
+// the "Trusted publisher" line — the user sees only the existing
+// preview / consent flow.
+func TestRunActionAdd_AlreadyTrustedAuthorityIsSilent(t *testing.T) {
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/conn/actions/run","version":"0.1.0",
+			"hash":"sha256:abc","name":"my-action",
+			"signature_status":"verified","connector_deps":[]
+		}`)
+	}, nil)
+
+	stdin := strings.NewReader("y\n") // only the install consent
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "Trust publisher") {
+		t.Errorf("trust prompt should not render when authority already trusted; got: %s", out)
+	}
+	if strings.Contains(out, "is not yet trusted") {
+		t.Errorf("trust banner should not render when authority already trusted; got: %s", out)
+	}
+}
+
+// TestRunActionAdd_CrossAuthorityDepPromptsTrust asserts the
+// connector-dep branch from the #563 acceptance criteria: when the
+// action's preview lists a not-yet-installed connector dep from a
+// *different* publisher, the CLI prompts to trust that publisher
+// before posting to /actions/install.
+func TestRunActionAdd_CrossAuthorityDepPromptsTrust(t *testing.T) {
+	home := withTempHome(t)
+	depPub, depPem := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn-dep/HEAD/keys/publisher.pub": depPem,
+	})
+	// Trust the action's authority but NOT the dep's authority.
+	trustTestAuthority(t, "github://acme/conn")
+
+	installCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"fqn":"github://acme/conn/actions/run","version":"0.1.0",
+				"hash":"sha256:abc","name":"my-action",
+				"signature_status":"verified",
+				"connector_deps":[
+					{"fqn":"github://acme/conn-dep","version":"1.0.0","hash":"sha256:dep","already_installed":false}
+				]
+			}`)
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"x","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n")) // trust dep, install
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if !installCalled {
+		t.Error("install should fire after trust + consent")
+	}
+	if !strings.Contains(stdout.String(), "Trust publisher github://acme/conn-dep?") {
+		t.Errorf("expected trust prompt for cross-authority dep; got: %s", stdout.String())
+	}
+	kr, _ := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if !kr.HasKey("github://acme/conn-dep", depPub) {
+		t.Error("dep authority should be trusted after auto-trust")
+	}
+}
+
+// TestRunActionAdd_AlreadyInstalledDepDoesNotPromptTrust asserts a
+// no-op no-op: when a connector dep is already_installed (per the
+// preview) the CLI does NOT prompt to trust its authority — the
+// connector pipeline already verified that signature when the dep
+// was first installed; re-prompting would be noise.
+func TestRunActionAdd_AlreadyInstalledDepDoesNotPromptTrust(t *testing.T) {
+	withSeededKeyring(t, "github://acme/conn") // action authority only
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"fqn":"github://acme/conn/actions/run","version":"0.1.0",
+				"hash":"sha256:abc","name":"my-action",
+				"signature_status":"verified",
+				"connector_deps":[
+					{"fqn":"github://acme/some-other-pub","version":"1.0.0","hash":"sha256:dep","already_installed":true}
+				]
+			}`)
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"x","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	stdin := strings.NewReader("y\n") // just the install consent
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Trust publisher github://acme/some-other-pub?") {
+		t.Errorf("should not prompt to trust an already-installed dep authority; got: %s", stdout.String())
+	}
+}
+
+// TestRunActionAdd_PublisherKeyFetchFailureExits1 asserts the failure
+// surface when the publisher hasn't committed `keys/publisher.pub`:
+// the CLI surfaces the fetch error and exits nonzero. The user is
+// not blocked staring at a quiet terminal — the trust step fails
+// loudly.
+func TestRunActionAdd_PublisherKeyFetchFailureExits1(t *testing.T) {
+	withTempHome(t)
+	// Mock GitHub raw with NO entry for the convention path → 404.
+	withMockGitHubRaw(t, map[string][]byte{})
+
+	previewCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/actions/preview" {
+			previewCalled = true
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0", "--yes"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit; stderr=%s", stderr.String())
+	}
+	if previewCalled {
+		t.Error("preview should not be called after a failed key fetch")
+	}
+	if !strings.Contains(stderr.String(), "fetch publisher key") {
+		t.Errorf("expected fetch error in stderr; got: %s", stderr.String())
 	}
 }
 

@@ -48,13 +48,18 @@ aileron dev (f66e51c)
 
 ## 2. Install Actions for Gmail and Calendar
 
-Every connector install verifies an ed25519 signature against keys you have explicitly trusted. Without a trusted key for the publisher's authority, install fails closed before fetching anything. Trust the `aileron-connector-google` publisher; the CLI fetches the key from `keys/publisher.pub` on the repo's default branch:
+`aileron action add` is the one command you need. On a fresh machine, the first invocation prompts to trust the publisher's signing key, installs the action's connector dependency, and walks you through Google's OAuth consent screen to bind a credential. Subsequent installs reuse the trust, the connector, and the binding.
+
+Pick the latest release tag from [the connector's releases page](https://github.com/ALRubinger/aileron-connector-google/releases) and substitute it for `0.0.6` below.
 
 ```sh
-aileron keyring trust github://ALRubinger/aileron-connector-google
+aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.6 && \
+  aileron action add github://ALRubinger/aileron-connector-google/actions/get-email@0.0.6 && \
+  aileron action add github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@0.0.6 && \
+  aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email@0.0.6
 ```
 
-This is the first command that touches your local secret store, so Aileron walks you through creating one before recording the trusted key. You'll see this prompt now:
+This is the first command that touches your local secret store, so Aileron walks you through creating one before recording trust. You'll see this prompt now:
 
 ```
   Creating a new Aileron vault.
@@ -74,26 +79,23 @@ Confirm passphrase: ********
 
 Pick a passphrase and confirm it. The vault is encrypted at rest with [Argon2id](https://datatracker.ietf.org/doc/html/rfc9106). You unlock it once per session and every later command reuses that unlocked state. See [The Vault](/concepts/the-vault/) for what it protects you from.
 
-After the passphrase is set, the trust command finishes:
+After the vault is up, the CLI prompts to trust the publisher. The key is fetched from `keys/publisher.pub` on the repo's default branch:
 
 ```
+Publisher github://ALRubinger/aileron-connector-google is not yet trusted.
+  Aileron will fetch keys/publisher.pub on the publisher's default branch
+  and use that key to verify signed installs from this publisher.
+Trust publisher github://ALRubinger/aileron-connector-google? [y/N]: y
 ✓ Trusted publisher github://ALRubinger/aileron-connector-google
   Fingerprint: sha256:...
   Keyring: /Users/you/.aileron/keyring.json
 ```
 
-Now add the Gmail and Calendar actions. Pick the latest release tag from [the connector's releases page](https://github.com/ALRubinger/aileron-connector-google/releases) and substitute it for `0.0.6` below.
-
-```sh
-aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@0.0.6 && \
-  aileron action add github://ALRubinger/aileron-connector-google/actions/get-email@0.0.6 && \
-  aileron action add github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@0.0.6 && \
-  aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email@0.0.6
-```
-
-The first `action add` resolves the action's connector dependency, fetches the connector tarball from the GitHub release, verifies the signature against your trusted key, computes the content hash, and walks you through Google's OAuth consent screen to bind a credential. Confirm each step. Subsequent action installs reuse the connector and the binding.
+The first `action add` then resolves the action's connector dependency, fetches the connector tarball from the GitHub release, verifies the signature against the trusted key, computes the content hash, and walks you through Google's OAuth consent screen to bind a credential. Confirm each step. Subsequent installs in the chain reuse the trust, the connector, and the binding.
 
 The connector's publisher already shipped a Desktop OAuth `client_id` and `client_secret` bound at release time, so there's no Google Cloud Console setup on your end. The token bytes are encrypted at rest; Aileron refreshes them transparently when they near expiry, and the connector never sees the credential.
+
+If you prefer to manage trust separately from install, run `aileron keyring trust <authority>` before `aileron action add`. Either path works; the unified flow is just the default.
 
 ## 3. Launch Claude Code through Aileron
 

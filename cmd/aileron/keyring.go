@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
@@ -154,6 +155,58 @@ func fetchPublisherKey(authority string) (ed25519.PublicKey, error) {
 		return nil, fmt.Errorf("parse %s: %w", keyURL, err)
 	}
 	return pub, nil
+}
+
+// ensureAuthorityTrusted is the install-time bridge to the keyring:
+// it checks whether the supplied authority has any keys registered
+// and, if not, prompts the operator (or proceeds when autoYes=true)
+// to fetch + add the publisher's `keys/publisher.pub`. Returns nil
+// when the authority is now trusted (already was, or just got added),
+// non-nil when the user declined or the fetch/persist failed.
+//
+// This is what collapses the historical "run `aileron keyring trust`
+// before `aileron action add`" two-step into the single-command
+// install flow per issue #563. Same fetch + verify path as the
+// standalone trust subcommand — re-uses fetchPublisherKey and the
+// keyring helpers so the policy stays in one place.
+func ensureAuthorityTrusted(authority string, autoYes bool, stdin io.Reader, stdout, stderr io.Writer) error {
+	path := cstore.DefaultKeyringPath()
+	if path == "" {
+		return fmt.Errorf("cannot determine home directory; set $HOME or run `aileron keyring trust %s` manually", authority)
+	}
+	keyring, err := cstore.LoadKeyring(path)
+	if err != nil {
+		return fmt.Errorf("load keyring %q: %w", path, err)
+	}
+	if len(keyring.Keys(authority)) > 0 {
+		return nil
+	}
+
+	fmt.Fprintln(stdout)
+	fmt.Fprintf(stdout, "Publisher %s is not yet trusted.\n", authority)
+	fmt.Fprintf(stdout, "  Aileron will fetch %s on the publisher's default branch\n", publisherKeyPath)
+	fmt.Fprintln(stdout, "  and use that key to verify signed installs from this publisher.")
+
+	if !autoYes {
+		ans := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout,
+			fmt.Sprintf("Trust publisher %s? [y/N]: ", authority))))
+		if ans != "y" && ans != "yes" {
+			return fmt.Errorf("publisher %s not trusted; aborting", authority)
+		}
+	}
+
+	pub, err := fetchPublisherKey(authority)
+	if err != nil {
+		return fmt.Errorf("fetch publisher key for %s: %w", authority, err)
+	}
+	keyring.Add(authority, pub)
+	if err := keyring.SaveKeyring(path); err != nil {
+		return fmt.Errorf("save keyring: %w", err)
+	}
+	fmt.Fprintf(stdout, "✓ Trusted publisher %s\n", authority)
+	fmt.Fprintf(stdout, "  Fingerprint: %s\n", fingerprint(pub))
+	fmt.Fprintf(stdout, "  Keyring: %s\n", path)
+	return nil
 }
 
 // runKeyringList prints the trusted publishers and a fingerprint per
