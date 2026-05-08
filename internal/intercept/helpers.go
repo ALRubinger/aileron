@@ -117,6 +117,20 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Write(body)
 }
 
+// truncateForLog clips s to maxRunes runes, appending "…" when
+// truncation happened. Used to bound upstream body previews in the
+// daemon log when an upstream returns a non-success body inside an
+// HTTP 200 envelope (e.g. Anthropic's overloaded_error wrapper) —
+// the body itself carries the operator-actionable signal but can be
+// arbitrarily large.
+func truncateForLog(s string, maxRunes int) string {
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
+}
+
 // writeFailure records the failure to the audit log and writes the
 // ADR-0010 envelope to the response. The audit_id stamped on the
 // failure is included in the envelope so callers can correlate.

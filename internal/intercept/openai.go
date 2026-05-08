@@ -100,6 +100,12 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if respStatus != http.StatusOK {
+			e.log.Warn("upstream non-success",
+				"protocol", "openai",
+				"upstream_status", respStatus,
+				"request_id", respHeaders.Get("x-request-id"),
+				"round", round,
+			)
 			roundSpan.SetAttributes(attribute.Int("aileron.intercept.upstream_status", respStatus))
 			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
@@ -108,6 +114,20 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 
 		assistantMsg, toolCalls, err := parseOpenAIChoice(respBody)
 		if err != nil {
+			// See the Anthropic handler for the full rationale: an
+			// HTTP 200 body that doesn't parse as a successful
+			// completion (error envelope or malformed JSON) needs an
+			// in-band log so the operator sees it in daemon.log
+			// instead of just an OTel span attribute. The body
+			// preview carries the upstream cause without provider-
+			// specific parsing here.
+			e.log.Warn("upstream returned unparseable success body",
+				"protocol", "openai",
+				"parse_error", err.Error(),
+				"body_preview", truncateForLog(string(respBody), 512),
+				"request_id", respHeaders.Get("x-request-id"),
+				"round", round,
+			)
 			roundSpan.SetStatus(codes.Error, "parse upstream response: "+err.Error())
 			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)

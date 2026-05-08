@@ -77,6 +77,12 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if respStatus != http.StatusOK {
+			e.log.Warn("upstream non-success",
+				"protocol", "anthropic",
+				"upstream_status", respStatus,
+				"request_id", respHeaders.Get("request-id"),
+				"round", round,
+			)
 			roundSpan.SetAttributes(attribute.Int("aileron.intercept.upstream_status", respStatus))
 			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
@@ -85,6 +91,28 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 
 		assistantContent, toolUses, err := parseAnthropicResponse(respBody)
 		if err != nil {
+			// Upstream returned HTTP 200 but the body isn't a usable
+			// message response. The two real-world cases:
+			//   1. An error envelope wrapped in a 200 (Anthropic's
+			//      `{"type":"error","error":{...}}` shape — overloaded
+			//      / rate-limit / etc. arriving inside an otherwise-
+			//      successful stream).
+			//   2. Genuinely malformed JSON.
+			// Either way the operator needs an in-band signal: without
+			// this, a 200 that took 72s looks identical to a slow-but-
+			// successful round in daemon.log, and the agent's SDK retry
+			// (or 13-minute hang on stuttering streams) is the first
+			// sign anything is wrong. The body preview carries the
+			// upstream error type for grep / `aileron sessions watch`
+			// without requiring provider-specific parsing here. The
+			// body still flows through to the agent verbatim.
+			e.log.Warn("upstream returned unparseable success body",
+				"protocol", "anthropic",
+				"parse_error", err.Error(),
+				"body_preview", truncateForLog(string(respBody), 512),
+				"request_id", respHeaders.Get("request-id"),
+				"round", round,
+			)
 			roundSpan.SetStatus(codes.Error, "parse upstream response: "+err.Error())
 			roundSpan.End()
 			passThrough(w, respStatus, respHeaders, respBody)
