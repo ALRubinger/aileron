@@ -74,37 +74,58 @@ builds:
       - arm64
 
 archives:
+  # One bundled archive per platform contains all four binaries
+  # (aileron, aileron-server, aileron-mcp, aileron-sh) versioned
+  # together. Matches the Linux nfpm package shape and the Homebrew
+  # formula install. Windows archives omit aileron-sh (POSIX-only).
   - id: aileron
     ids:
       - aileron
-    name_template: "aileron_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format_overrides:
-      - goos: windows
-        formats: [zip]
-
-  - id: aileron-sh
-    ids:
-      - aileron-sh
-    name_template: "aileron-sh_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-
-  - id: aileron-server
-    ids:
       - aileron-server
-    name_template: "aileron-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format_overrides:
-      - goos: windows
-        formats: [zip]
-
-  - id: aileron-mcp
-    ids:
       - aileron-mcp
-    name_template: "aileron-mcp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+      - aileron-sh
+    # Windows archives omit aileron-sh (POSIX-only) — fewer binaries
+    # than linux/darwin. Goreleaser flags this as a confusion risk by
+    # default; explicit acknowledgement here.
+    allow_different_binary_count: true
+    name_template: "aileron_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
         formats: [zip]
 
 checksum:
   name_template: "checksums.txt"
+
+homebrew_casks:
+  # Homebrew cask auto-published to the homebrew-aileron tap on each
+  # release. After release, users install with:
+  #   brew tap ALRubinger/aileron
+  #   brew install aileron
+  #
+  # Uses goreleaser's homebrew_casks (the brews field is deprecated as
+  # of v2; casks are the modern path for pre-compiled binaries).
+  #
+  # The tap is a separate GitHub repo (homebrew-aileron); goreleaser
+  # commits the cask there using HOMEBREW_TAP_GITHUB_TOKEN — a PAT
+  # with contents:write scope on the tap repo, set as a secret in this
+  # repo. Default GITHUB_TOKEN can't write across repos.
+  - name: aileron
+    ids:
+      - aileron # the bundled archive id above (all four binaries)
+    repository:
+      owner: ALRubinger
+      name: homebrew-aileron
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://withaileron.ai
+    description: Local LLM gateway for AI agents to take consequential action without holding credentials
+    license: Apache-2.0
+    # All four binaries from the bundled archive land on PATH.
+    binaries:
+      - aileron
+      - aileron-server
+      - aileron-mcp
+      - aileron-sh
 
 nfpms:
   # Linux distro packages: .deb (Debian/Ubuntu), .rpm (RHEL/Fedora),
