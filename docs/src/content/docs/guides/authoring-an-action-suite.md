@@ -17,7 +17,7 @@ Once committed at the root of your connector repo, users install everything you 
 aileron action add-suite github://you/your-connector/suite.toml@latest
 ```
 
-The trust prompt fires once for your publisher key. The connector tarball is fetched once and reused. OAuth consent (if your connector needs it) pops up once on the first action and binds for all of them. The CLI prints a per-action summary at the end.
+Per-run, the trust prompt fires once for your publisher key. The connector tarball is fetched once and reused. OAuth consent (if your connector needs it) pops up once on the first action and the resulting binding is reused for the rest. Per-action failures don't abort the run — they surface in a final summary, the remaining actions still install, and the command exits non-zero if any failed.
 
 ## When to publish a suite
 
@@ -130,11 +130,19 @@ Three ref forms cover the common patterns:
 
 | Form | When to use |
 |------|-------------|
-| `@latest` | The user wants whatever the connector's most recent release ships. The CLI hits `api.github.com/repos/<owner>/<repo>/releases/latest` and uses the returned `tag_name` as the suite's ref. |
+| `@latest` | The user wants whatever the connector's most recent release ships. The CLI hits `api.github.com/repos/<owner>/<repo>/releases/latest` and uses the returned `tag_name` as the suite's ref. Honors `GITHUB_TOKEN` for higher rate limits. |
 | `@<tag>` (e.g. `@v0.0.6`) | The user wants a specific release. The CLI uses the tag verbatim. |
-| `@<sha>` (40 hex chars) | The user wants a specific commit. The CLI uses the SHA verbatim. **Caveat:** path-form entries can't inherit a SHA as their install version (actions install by SemVer release tag, not by SHA). A `@<sha>` source must use FQN-form entries throughout. |
+| `@<sha>` (40 hex chars) | The user wants a specific commit. The CLI uses the SHA verbatim. **Caveat:** path-form entries can't inherit a SHA as their install version (actions install by SemVer release tag, not by SHA). A `@<sha>` source must use FQN-form entries throughout. Path-form inheritance also requires a `v`-prefixed SemVer tag (`v0.0.6`); other tag shapes leave nothing for path-form entries to inherit and surface the same error. |
 
 The `@<ref>` is required. There is no implicit "default branch HEAD" — that would silently shift what users install between days, breaking reproducibility.
+
+The same flags `aileron action add` accepts apply to the suite form:
+
+| Flag | Effect |
+|------|--------|
+| `--yes` | Auto-accept every trust and consent prompt across the run. Use in CI or scripted installs. Does not bypass server-side signature verification. |
+| `--force` | Overwrite existing actions with the same name. Without it, an entry whose name + hash already match the installed version is reported as already-installed and skipped. |
+| `--no-bind` | Skip the post-install auto-prompt to bind unbound credential capabilities. Useful when a script will run `aileron binding setup` separately. |
 
 ## Validation rules
 
