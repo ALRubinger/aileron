@@ -132,10 +132,21 @@ jobs:
         shell: bash
         run: |
           set -e
-          (cd internal && go test -race ./daemon/discovery/... ./daemon/spawn/...)
+          (cd internal && go test -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/...)
           # cmd/aileron's full suite is gated behind #577 on Windows.
           # Run only the helpers with a Windows-specific implementation.
-          (cd cmd/aileron && go test -race -run 'TestSignalDaemonStop' .)
+          (cd cmd/aileron && go test -race -coverprofile=coverage-windows-aileron.txt -run 'TestSignalDaemonStop' .)
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron
+          files: internal/coverage-windows-internal.txt,cmd/aileron/coverage-windows-aileron.txt
+          # Merge with the Linux unit-test flag so codecov reports a
+          # single, combined "unit" coverage; Windows uploads add the
+          # *_windows.go files that Linux runs cannot measure.
+          flags: unit
 
   test-ui:
     name: UI Tests
