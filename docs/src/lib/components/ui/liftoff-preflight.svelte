@@ -55,9 +55,11 @@
 		"[&[data-state=open]>svg]:rotate-180"
 	);
 	const itemClass = "border-b border-border";
+	// `cn-accordion-content` is the hook for the open/close height
+	// animation defined in global.css (driven by bits-ui's
+	// `--bits-accordion-content-height` CSS variable on data-state).
 	const contentClass = cn(
-		"overflow-hidden text-sm",
-		"data-[state=open]:pb-4 data-[state=closed]:pb-0",
+		"cn-accordion-content overflow-hidden pb-4 text-sm",
 		"[&_pre]:my-2"
 	);
 </script>

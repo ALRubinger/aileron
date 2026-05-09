@@ -2,6 +2,7 @@
 	import { Tabs as TabsPrimitive } from "bits-ui";
 	import { tabsListVariants } from "./tabs-list.svelte";
 	import { cn } from "$lib/utils.js";
+	import CodeBlock from "../code-block.svelte";
 
 	export type PlatformTabItem = {
 		value: string;
@@ -68,7 +69,7 @@
 			{#if item.note}
 				<p class="text-sm">{item.note}</p>
 			{/if}
-			<pre><code class={item.lang ? `language-${item.lang}` : undefined}>{item.code}</code></pre>
+			<CodeBlock code={item.code} lang={item.lang} />
 		</TabsPrimitive.Content>
 	{/each}
 </TabsPrimitive.Root>

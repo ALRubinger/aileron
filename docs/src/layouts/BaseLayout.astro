@@ -43,39 +43,51 @@ const nav = navigation;
     <div class="flex min-h-screen pt-16">
       <Sidebar currentPath={currentPath} navigation={nav} client:load />
 
-      <div class="flex-1">
+      <!-- min-w-0 is load-bearing: a flex item's default min-width is
+           `auto`, which uses the intrinsic content width as a floor.
+           Long lines inside <pre> blocks would otherwise widen this
+           column past the viewport. With min-w-0, the column shrinks
+           and individual <pre> blocks scroll horizontally on their
+           own (they already have overflow-x: auto). -->
+      <div class="flex-1 min-w-0">
         <slot />
       </div>
     </div>
     <script>
-      // Wire up the "Copy" buttons injected by rehype-copy-button.
-      // Each button is a sibling of the <pre> inside .code-block-wrapper;
-      // we read textContent off the <pre> so we never copy the button's own
-      // label or any surrounding markup.
+      // Wire up the icon copy buttons. Two sources emit them with
+      // identical structure: rehype-copy-button.mjs at build time
+      // (prose code blocks) and code-block.svelte at runtime
+      // (PlatformTabs / accordion). Event delegation here covers
+      // both, including buttons that hydrate after this script runs.
+      // The button's `is-copied` class swaps the clipboard icon for
+      // the check icon via CSS — no textContent munging.
       (function () {
         const RESET_MS = 1500;
-        const buttons = document.querySelectorAll('button.code-copy-button');
-        buttons.forEach((btn) => {
-          btn.addEventListener('click', async () => {
-            const wrapper = btn.closest('.code-block-wrapper');
-            if (!wrapper) return;
-            const pre = wrapper.querySelector('pre');
-            if (!pre) return;
-            const text = pre.innerText;
-            const labelDefault = btn.getAttribute('data-copy-label') || 'Copy';
-            const labelCopied = btn.getAttribute('data-copy-label-copied') || 'Copied';
-            try {
-              await navigator.clipboard.writeText(text);
-              btn.textContent = labelCopied;
-              btn.classList.add('is-copied');
-            } catch {
-              btn.textContent = 'Copy failed';
-            }
-            setTimeout(() => {
-              btn.textContent = labelDefault;
-              btn.classList.remove('is-copied');
-            }, RESET_MS);
-          });
+        document.addEventListener('click', async (event) => {
+          const target = event.target;
+          if (!(target instanceof Element)) return;
+          const btn = target.closest('button.code-copy-button');
+          if (!btn) return;
+          const wrapper = btn.closest('.code-block-wrapper');
+          if (!wrapper) return;
+          const pre = wrapper.querySelector('pre');
+          if (!pre) return;
+          // `textContent` reads DOM-only and excludes ::before / ::after
+          // pseudo-elements (the `$` prompt). `innerText` may include
+          // them in some browsers, which would leak the prompt into
+          // the clipboard. Stick with textContent — for <pre>, the
+          // whitespace and newlines are preserved as-is.
+          try {
+            await navigator.clipboard.writeText(pre.textContent ?? '');
+            btn.classList.add('is-copied');
+            btn.setAttribute('aria-label', 'Code copied');
+          } catch {
+            btn.setAttribute('aria-label', 'Copy failed');
+          }
+          setTimeout(() => {
+            btn.classList.remove('is-copied');
+            btn.setAttribute('aria-label', 'Copy code to clipboard');
+          }, RESET_MS);
         });
       })();
     </script>
