@@ -25,6 +25,28 @@ jobs:
             cmd/aileron-mcp/go.mod
             sdk/go/go.mod
 
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 11.0.8
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: webapp/pnpm-lock.yaml
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build webapp for embed
+        # aileron-server embeds internal/app/webapp_dist/ via go:embed. The dir
+        # is gitignored except .gitkeep, so a fresh checkout has no assets — a
+        # released binary built without this step would serve webappNotBuiltStub.
+        run: task build:webapp
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
