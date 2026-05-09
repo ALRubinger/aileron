@@ -106,6 +106,36 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+nfpms:
+  # Linux distro packages: .deb (Debian/Ubuntu), .rpm (RHEL/Fedora),
+  # .apk (Alpine). One bundled "aileron" package per format/arch
+  # contains the CLI, daemon, MCP server, and POSIX shell shim — all
+  # four binaries are versioned together.
+  #
+  # Install paths follow each distro's bin convention (/usr/bin). After
+  # install, `aileron version` works without further setup.
+  - id: aileron
+    package_name: aileron
+    ids:
+      - aileron
+      - aileron-server
+      - aileron-mcp
+      - aileron-sh
+    formats:
+      - deb
+      - rpm
+      - apk
+    vendor: Aileron
+    homepage: https://withaileron.ai
+    maintainer: Andrew Lee Rubinger <alr@alrubinger.com>
+    description: |-
+      Local LLM gateway giving AI agents the ability to take consequential
+      action on a user's behalf without ever holding their credentials in
+      the agent's process. Ships the CLI (aileron), daemon (aileron-server),
+      MCP server (aileron-mcp), and POSIX shell shim (aileron-sh).
+    license: Apache-2.0
+    bindir: /usr/bin
+
 signs:
   # Cosign keyless signing via GitHub Actions OIDC. Each artifact (archives,
   # checksums.txt, source) is signed; the bundle file pairs the signature with
