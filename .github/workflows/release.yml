@@ -59,3 +59,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with contents:write on ALRubinger/homebrew-aileron, used
+          # by goreleaser's brews step to commit Formula/aileron.rb.
+          # GITHUB_TOKEN scopes to this repo only and can't write
+          # across repos. Configure as a repo secret before tagging
+          # the first release.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
