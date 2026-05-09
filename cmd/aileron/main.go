@@ -2063,13 +2063,14 @@ func renderConnectorPreview(w io.Writer, p *connectorPreviewWire) {
 // locally so the CLI binary doesn't pull the full generated types
 // graph just to render this surface.
 type actionPreviewWire struct {
-	Fqn              string `json:"fqn"`
-	Version          string `json:"version"`
-	Hash             string `json:"hash"`
-	Name             string `json:"name"`
-	Intent           string `json:"intent,omitempty"`
-	SignatureStatus  string `json:"signature_status,omitempty"`
-	AlreadyInstalled bool   `json:"already_installed,omitempty"`
+	Fqn              string                  `json:"fqn"`
+	Version          string                  `json:"version"`
+	Hash             string                  `json:"hash"`
+	Name             string                  `json:"name"`
+	Intent           string                  `json:"intent,omitempty"`
+	SignatureStatus  string                  `json:"signature_status,omitempty"`
+	AlreadyInstalled bool                    `json:"already_installed,omitempty"`
+	Existing         *installedActionRefWire `json:"existing,omitempty"`
 	ConnectorDeps    []struct {
 		Fqn              string   `json:"fqn"`
 		Version          string   `json:"version"`
@@ -2077,6 +2078,16 @@ type actionPreviewWire struct {
 		Capabilities     []string `json:"capabilities,omitempty"`
 		AlreadyInstalled bool     `json:"already_installed"`
 	} `json:"connector_deps"`
+}
+
+// installedActionRefWire mirrors api.InstalledActionRef. Set by the
+// preview when an action with the same name is already installed but
+// its bytes differ — the CLI uses this to render the upgrade prompt.
+type installedActionRefWire struct {
+	Version string `json:"version"`
+	Hash    string `json:"hash"`
+	Source  string `json:"source"`
+	Path    string `json:"path"`
 }
 
 // renderActionPreview prints the consent-prompt summary for an
@@ -2144,6 +2155,30 @@ func renderActionPreview(w io.Writer, p *actionPreviewWire) {
 	fmt.Fprintln(w)
 }
 
+// renderActionUpgradeBanner prints the side-by-side "version X is
+// installed; version Y is requested" panel above the upgrade prompt.
+// Only called when preview.Existing is non-nil — the caller has
+// already rendered the regular preview, so this banner only needs to
+// surface the existing install the operator may not know about.
+func renderActionUpgradeBanner(w io.Writer, p *actionPreviewWire) {
+	if p.Existing == nil {
+		return
+	}
+	fmt.Fprintln(w, "\033[1;33mUpgrade required\033[0m — an action with this name is already installed.")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Installed:  v%s  hash: %s\n",
+		p.Existing.Version, shortHash(p.Existing.Hash))
+	if p.Existing.Source != "" {
+		fmt.Fprintf(w, "              source: %s\n", p.Existing.Source)
+	}
+	fmt.Fprintf(w, "  Requested:  v%s  hash: %s\n",
+		p.Version, shortHash(p.Hash))
+	fmt.Fprintf(w, "              source: %s@%s\n", p.Fqn, p.Version)
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Confirming will \033[1moverwrite\033[0m %s.\n", p.Existing.Path)
+	fmt.Fprintln(w)
+}
+
 // shortHash renders only the first 12 hex chars after the algorithm
 // prefix — enough to disambiguate but readable in the consent prompt.
 // Operators who want the full hash can read it from `aileron status`.
@@ -2169,7 +2204,32 @@ type actionAddOptions struct {
 	force   bool
 	yes     bool
 	noBind  bool
+	// outcome, when non-nil, is populated with a richer status code
+	// so the suite-install path can render a per-entry summary that
+	// distinguishes added / upgraded / already-installed / skipped /
+	// cancelled / failed. The single-action caller leaves it nil and
+	// relies on the int return alone.
+	outcome *actionInstallOutcome
 }
+
+// actionInstallOutcome is the rich status the suite path collects for
+// each entry. The integer return code from installOneAction tells the
+// caller success vs. failure; this struct adds the texture needed to
+// render "Upgraded" vs. "Added" vs. "Skipped" in the summary.
+type actionInstallOutcome struct {
+	status actionInstallStatus
+}
+
+type actionInstallStatus string
+
+const (
+	actionInstallStatusAdded            actionInstallStatus = "added"
+	actionInstallStatusUpgraded         actionInstallStatus = "upgraded"
+	actionInstallStatusAlreadyInstalled actionInstallStatus = "already_installed"
+	actionInstallStatusSkipped          actionInstallStatus = "skipped"
+	actionInstallStatusCancelled        actionInstallStatus = "cancelled"
+	actionInstallStatusFailed           actionInstallStatus = "failed"
+)
 
 // runActionAdd installs a single action by FQN (issue #563
 // auto-trust + connector install). Suite installs go through the
@@ -2215,9 +2275,15 @@ func runActionAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 // connector and retries the install with `auto_install_connectors=true`
 // so the server runs the connector pipeline transparently.
 func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.Writer, trust *trustState) int {
+	setOutcome := func(s actionInstallStatus) {
+		if opts.outcome != nil {
+			opts.outcome.status = s
+		}
+	}
 	resolvedFQN, resolvedVersion, perr := splitFQNVersion(opts.fqn, opts.version)
 	if perr != nil {
 		fmt.Fprintf(stderr, "%v\n", perr)
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 
@@ -2228,10 +2294,12 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 	actionFQN, perr := cstore.ParseFQN(resolvedFQN)
 	if perr != nil {
 		fmt.Fprintf(stderr, "error: %v\n", perr)
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 	if err := trust.ensure(actionFQN.Authority(), opts.yes, stdin, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 
@@ -2245,15 +2313,18 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		strings.NewReader(string(previewJSON)))
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 	if previewStatus != http.StatusOK {
 		fmt.Fprintf(stderr, "server returned %d: %s\n", previewStatus, string(previewRaw))
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 	var preview actionPreviewWire
 	if err := json.Unmarshal(previewRaw, &preview); err != nil {
 		fmt.Fprintf(stderr, "error parsing preview: %v\n", err)
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 
@@ -2261,8 +2332,19 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 	// prompt, no install. Mirrors the connector-install pattern.
 	if preview.AlreadyInstalled {
 		fmt.Fprintf(stdout, "Already installed: %s\n  hash: %s\n", preview.Name, preview.Hash)
+		setOutcome(actionInstallStatusAlreadyInstalled)
 		return 0
 	}
+
+	// Upgrade detection: same name on disk but different bytes.
+	// We render the regular preview so the operator sees the
+	// incoming manifest, plus an upgrade banner showing the
+	// installed version side-by-side, then prompt for confirmation
+	// to overwrite. On accept, the install retries with force=true;
+	// on decline, exit 0 with a "skipped" outcome so the suite
+	// summary doesn't count it as a failure.
+	upgrade := preview.Existing != nil
+	forceForInstall := opts.force
 
 	// Step 2: render the consent prompt. Shows action metadata plus
 	// the connector deps split into "already installed" vs. "will
@@ -2285,17 +2367,42 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		}
 		if err := trust.ensure(depFQN.Authority(), opts.yes, stdin, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
+			setOutcome(actionInstallStatusFailed)
 			return 1
 		}
 	}
 
-	// Step 3: prompt unless --yes.
+	// Step 3: prompt unless --yes. Upgrades get a different prompt
+	// that names both versions so the operator can't miss that
+	// they're overwriting an existing install.
 	if !opts.yes {
-		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/N]: ")))
+		var prompt string
+		if upgrade {
+			renderActionUpgradeBanner(stdout, &preview)
+			prompt = fmt.Sprintf("Replace v%s with v%s? [y/N]: ",
+				preview.Existing.Version, preview.Version)
+		} else {
+			prompt = "Install? [y/N]: "
+		}
+		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, prompt)))
 		if answer != "y" && answer != "yes" {
-			fmt.Fprintln(stdout, "Cancelled.")
+			if upgrade {
+				fmt.Fprintf(stdout, "Skipped: %s (kept v%s)\n",
+					preview.Name, preview.Existing.Version)
+				setOutcome(actionInstallStatusSkipped)
+			} else {
+				fmt.Fprintln(stdout, "Cancelled.")
+				setOutcome(actionInstallStatusCancelled)
+			}
 			return 0
 		}
+		if upgrade {
+			forceForInstall = true
+		}
+	} else if upgrade {
+		// --yes implies consent to upgrade, mirroring how --yes
+		// implies consent to fresh install.
+		forceForInstall = true
 	}
 
 	// Step 4: install. The server walks the connector deps server-
@@ -2306,7 +2413,7 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		"version":                 resolvedVersion,
 		"auto_install_connectors": true,
 	}
-	if opts.force {
+	if forceForInstall {
 		body["force"] = true
 	}
 	bodyJSON, _ := json.Marshal(body)
@@ -2314,10 +2421,12 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		strings.NewReader(string(bodyJSON)))
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 	if status != http.StatusCreated && status != http.StatusOK {
 		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 	var resp struct {
@@ -2335,11 +2444,19 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
 	verb := "Added"
-	if resp.AlreadyInstalled {
+	switch {
+	case resp.AlreadyInstalled:
 		verb = "Already installed"
+		setOutcome(actionInstallStatusAlreadyInstalled)
+	case upgrade:
+		verb = "Upgraded"
+		setOutcome(actionInstallStatusUpgraded)
+	default:
+		setOutcome(actionInstallStatusAdded)
 	}
 	fmt.Fprintf(stdout, "%s: %s\n  source: %s\n  path: %s\n",
 		verb, resp.Name, resp.Source, resp.Path)
@@ -2516,8 +2633,9 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actio
 
 	trust := newTrustState()
 	type result struct {
-		ref string
-		rc  int
+		ref     string
+		rc      int
+		outcome actionInstallStatus
 	}
 	results := make([]result, 0, len(refs))
 	for i, ref := range refs {
@@ -2525,27 +2643,97 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actio
 		fmt.Fprintf(stdout, "── [%d/%d] %s\n", i+1, len(refs), ref.String())
 		entryOpts := opts
 		entryOpts.fqn = ref.String()
+		var outcome actionInstallOutcome
+		entryOpts.outcome = &outcome
 		rc := installOneAction(entryOpts, stdin, stdout, stderr, trust)
-		results = append(results, result{ref: ref.String(), rc: rc})
+		results = append(results, result{ref: ref.String(), rc: rc, outcome: outcome.status})
 	}
 
 	fmt.Fprintln(stdout)
 	fmt.Fprintln(stdout, "Suite install summary:")
-	failures := 0
+	var counts struct {
+		added, upgraded, alreadyInstalled, skipped, cancelled, failed int
+	}
 	for _, r := range results {
-		if r.rc == 0 {
-			fmt.Fprintf(stdout, "  \033[32m✓\033[0m %s\n", r.ref)
-		} else {
-			fmt.Fprintf(stdout, "  \033[31m✗\033[0m %s (exit %d)\n", r.ref, r.rc)
-			failures++
+		marker, label := summaryLine(r.outcome, r.rc)
+		fmt.Fprintf(stdout, "  %s %s%s\n", marker, r.ref, label)
+		switch r.outcome {
+		case actionInstallStatusAdded:
+			counts.added++
+		case actionInstallStatusUpgraded:
+			counts.upgraded++
+		case actionInstallStatusAlreadyInstalled:
+			counts.alreadyInstalled++
+		case actionInstallStatusSkipped:
+			counts.skipped++
+		case actionInstallStatusCancelled:
+			counts.cancelled++
+		case actionInstallStatusFailed:
+			counts.failed++
+		default:
+			// Defensive: an unset outcome with rc=0 is treated as
+			// "added"; with rc!=0 as "failed". Keeps the summary sane
+			// if a future code path forgets to call setOutcome.
+			if r.rc == 0 {
+				counts.added++
+			} else {
+				counts.failed++
+			}
 		}
 	}
-	if failures > 0 {
-		fmt.Fprintf(stdout, "\n%d of %d action(s) failed.\n", failures, len(results))
+
+	fmt.Fprintln(stdout)
+	parts := make([]string, 0, 6)
+	if counts.added > 0 {
+		parts = append(parts, fmt.Sprintf("%d added", counts.added))
+	}
+	if counts.upgraded > 0 {
+		parts = append(parts, fmt.Sprintf("%d upgraded", counts.upgraded))
+	}
+	if counts.alreadyInstalled > 0 {
+		parts = append(parts, fmt.Sprintf("%d already installed", counts.alreadyInstalled))
+	}
+	if counts.skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped", counts.skipped))
+	}
+	if counts.cancelled > 0 {
+		parts = append(parts, fmt.Sprintf("%d cancelled", counts.cancelled))
+	}
+	if counts.failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", counts.failed))
+	}
+	fmt.Fprintf(stdout, "%d action(s): %s.\n", len(results), strings.Join(parts, ", "))
+	if counts.failed > 0 {
 		return 1
 	}
-	fmt.Fprintf(stdout, "\nAll %d action(s) installed.\n", len(results))
 	return 0
+}
+
+// summaryLine returns the per-entry marker glyph and trailing label
+// the suite summary uses for one result. Failures still surface as a
+// red ✗; non-failure no-ops (already installed, declined upgrade, fresh
+// cancel) get neutral markers so the operator doesn't read them as
+// errors.
+func summaryLine(s actionInstallStatus, rc int) (string, string) {
+	switch s {
+	case actionInstallStatusAdded:
+		return "\033[32m✓\033[0m", " (added)"
+	case actionInstallStatusUpgraded:
+		return "\033[32m✓\033[0m", " (upgraded)"
+	case actionInstallStatusAlreadyInstalled:
+		return "\033[2m✓\033[0m", " (already installed)"
+	case actionInstallStatusSkipped:
+		return "\033[2m·\033[0m", " (skipped — kept existing version)"
+	case actionInstallStatusCancelled:
+		return "\033[2m·\033[0m", " (cancelled)"
+	case actionInstallStatusFailed:
+		return "\033[31m✗\033[0m", fmt.Sprintf(" (exit %d)", rc)
+	default:
+		if rc == 0 {
+			return "\033[32m✓\033[0m", ""
+		}
+		return "\033[31m✗\033[0m", fmt.Sprintf(" (exit %d)", rc)
+	}
 }
 
 // extractPositional pulls the first non-flag argument out of args and

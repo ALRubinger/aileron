@@ -3807,6 +3807,142 @@ func TestRunActionAdd_AlreadyInstalledShortCircuits(t *testing.T) {
 	}
 }
 
+// TestRunActionAdd_UpgradePromptAcceptForcesInstall asserts the
+// upgrade-candidate path: preview reports `existing` (same name on
+// disk with different bytes — typically a previous version), the CLI
+// renders the upgrade banner with old→new versions, and on "y" sends
+// install with force=true so the server overwrites the prior file
+// instead of returning 409. Without this prompt, suite installs hit
+// `action_exists` whenever the user already has any version of the
+// action installed.
+func TestRunActionAdd_UpgradePromptAcceptForcesInstall(t *testing.T) {
+	var installBody []byte
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/conn/actions/run",
+			"version":"0.2.0",
+			"hash":"sha256:newbytes",
+			"name":"my-action",
+			"signature_status":"verified",
+			"existing":{
+				"version":"0.1.0",
+				"hash":"sha256:oldbytes",
+				"source":"github://acme/conn/actions/run@0.1.0",
+				"path":"/Users/alr/.aileron/actions/my-action.md"
+			},
+			"connector_deps":[]
+		}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.2.0","source":"github://acme/conn/actions/run@0.2.0","path":"/Users/alr/.aileron/actions/my-action.md"}`)
+	})
+
+	stdin := strings.NewReader("y\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"github://acme/conn/actions/run@0.2.0"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(string(installBody), `"force":true`) {
+		t.Errorf("install body should set force=true on upgrade accept: %s", installBody)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Upgrade required",
+		"Installed:  v0.1.0",
+		"Requested:  v0.2.0",
+		"Replace v0.1.0 with v0.2.0?",
+		"Upgraded: my-action",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAdd_UpgradePromptDeclineSkipsInstall: declining the
+// upgrade prompt does NOT call /actions/install and exits 0. The
+// summary message should make clear the existing version was kept,
+// not that the install failed.
+func TestRunActionAdd_UpgradePromptDeclineSkipsInstall(t *testing.T) {
+	installCalled := false
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/conn/actions/run",
+			"version":"0.2.0",
+			"hash":"sha256:newbytes",
+			"name":"my-action",
+			"signature_status":"verified",
+			"existing":{
+				"version":"0.1.0",
+				"hash":"sha256:oldbytes",
+				"source":"github://acme/conn/actions/run@0.1.0",
+				"path":"/Users/alr/.aileron/actions/my-action.md"
+			},
+			"connector_deps":[]
+		}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+	})
+
+	stdin := strings.NewReader("n\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd([]string{"github://acme/conn/actions/run@0.2.0"}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("decline should exit 0, got %d; stderr=%s", code, stderr.String())
+	}
+	if installCalled {
+		t.Error("install endpoint must not be called when operator declines upgrade")
+	}
+	if !strings.Contains(stdout.String(), "Skipped: my-action (kept v0.1.0)") {
+		t.Errorf("expected skip-with-kept-version message; got: %s", stdout.String())
+	}
+}
+
+// TestRunActionAdd_UpgradeYesFlagForcesInstall: --yes implies consent
+// to upgrade just as it implies consent to fresh install — so a suite
+// with --yes can run unattended even when actions are at older
+// versions on disk.
+func TestRunActionAdd_UpgradeYesFlagForcesInstall(t *testing.T) {
+	var installBody []byte
+	actionInstallServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{
+			"fqn":"github://acme/conn/actions/run",
+			"version":"0.2.0",
+			"hash":"sha256:newbytes",
+			"name":"my-action",
+			"signature_status":"verified",
+			"existing":{
+				"version":"0.1.0",
+				"hash":"sha256:oldbytes",
+				"source":"github://acme/conn/actions/run@0.1.0",
+				"path":"/Users/alr/.aileron/actions/my-action.md"
+			},
+			"connector_deps":[]
+		}`)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		installBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.2.0","source":"x","path":"/p"}`)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.2.0", "--yes"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Errorf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(string(installBody), `"force":true`) {
+		t.Errorf("--yes on upgrade should send force=true: %s", installBody)
+	}
+}
+
 // TestRunActionAdd_PreviewSignatureFailureExits1 asserts ADR-0007's
 // "signature failure is a hard fail" contract from the action
 // path: preview returns 422, CLI exits 1 BEFORE prompting, install
@@ -4321,7 +4457,7 @@ actions = [
 		"Suite: test-suite",
 		"3 action(s) to install",
 		"Suite install summary:",
-		"All 3 action(s) installed.",
+		"3 action(s): 3 added.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -4414,7 +4550,7 @@ actions = [
 		"github://acme/conn/actions/foo@0.1.0",
 		"github://acme/conn/actions/bar@0.1.0",
 		"github://acme/conn/actions/baz@0.1.0",
-		"1 of 3 action(s) failed.",
+		"3 action(s): 2 added, 1 failed.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -4458,8 +4594,134 @@ actions = [
 	if strings.Count(out, "Already installed:") != 2 {
 		t.Errorf("expected 2 'Already installed' lines; got: %s", out)
 	}
-	if !strings.Contains(out, "All 2 action(s) installed.") {
+	if !strings.Contains(out, "2 action(s): 2 already installed.") {
 		t.Errorf("summary should treat already-installed as success: %s", out)
+	}
+}
+
+// TestRunActionAddSuite_MixedBucketSummary asserts the v2 summary
+// shape: each entry lands in one of {added, upgraded, already
+// installed} and the footer aggregates the buckets. Regression for
+// the issue surfaced during the Getting Started walkthrough where a
+// 4-of-6 already-installed suite ran successfully but rendered the
+// already-installed entries as failures.
+func TestRunActionAddSuite_MixedBucketSummary(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "mixed-buckets"
+description = "One added, one upgraded, one already installed."
+
+actions = [
+  "github://acme/conn/actions/foo@0.2.0",
+  "github://acme/conn/actions/bar@0.2.0",
+  "github://acme/conn/actions/baz@0.2.0",
+]
+`)
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			name := lastSegment(fqn)
+			switch name {
+			case "foo": // already installed at the same hash
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:foo","name":%q,"already_installed":true,"connector_deps":[]}`,
+					fqn, name)
+			case "bar": // upgrade from v0.1.0 to v0.2.0
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:barnew","name":%q,"signature_status":"verified","existing":{"version":"0.1.0","hash":"sha256:barold","source":"github://acme/conn/actions/bar@0.1.0","path":"/p/bar.md"},"connector_deps":[]}`,
+					fqn, name)
+			case "baz": // fresh install
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:baz","name":%q,"signature_status":"verified","connector_deps":[]}`,
+					fqn, name)
+			}
+		},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			name := lastSegment(fqn)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.2.0","source":"x","path":"/p"}`, name, fqn)
+		},
+	)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{"--yes", manifestPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d (mixed buckets must not be a failure); stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Suite install summary:",
+		"3 action(s): 1 added, 1 upgraded, 1 already installed.",
+		"actions/foo@0.2.0 (already installed)",
+		"actions/bar@0.2.0 (upgraded)",
+		"actions/baz@0.2.0 (added)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAddSuite_DeclinedUpgradeIsSkippedNotFailed: when the
+// user declines the upgrade prompt for one entry mid-suite, the
+// summary buckets it as "skipped" (not failed) and the run exits 0.
+// This is the v2 fix for the bug where add-suite returned exit 1
+// because already-installed-with-different-bytes entries were treated
+// as 409 conflicts.
+func TestRunActionAddSuite_DeclinedUpgradeIsSkippedNotFailed(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "decline-upgrade"
+description = "User keeps the existing version of bar."
+
+actions = [
+  "github://acme/conn/actions/foo@0.2.0",
+  "github://acme/conn/actions/bar@0.2.0",
+]
+`)
+	installCalls := map[string]int{}
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			name := lastSegment(fqn)
+			if name == "bar" {
+				// Upgrade candidate.
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:new","name":%q,"signature_status":"verified","existing":{"version":"0.1.0","hash":"sha256:old","source":"github://acme/conn/actions/bar@0.1.0","path":"/p/bar.md"},"connector_deps":[]}`,
+					fqn, name)
+				return
+			}
+			// Fresh.
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:foo","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				fqn, name)
+		},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			installCalls[fqn]++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.2.0","source":"x","path":"/p"}`, lastSegment(fqn), fqn)
+		},
+	)
+
+	// Two prompts the suite will surface in order:
+	//   1. "Install? [y/N]" for foo (fresh) → "y"
+	//   2. "Replace v0.1.0 with v0.2.0?" for bar (upgrade) → "n"
+	stdin := strings.NewReader("y\nn\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{manifestPath}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("declined upgrade should not fail the suite; exit=%d stderr=%s", code, stderr.String())
+	}
+	if installCalls["github://acme/conn/actions/bar@0.2.0"] != 0 {
+		t.Errorf("bar install must not be called when operator declines upgrade; calls=%d",
+			installCalls["github://acme/conn/actions/bar@0.2.0"])
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Replace v0.1.0 with v0.2.0?",
+		"Skipped: bar (kept v0.1.0)",
+		"actions/bar@0.2.0 (skipped — kept existing version)",
+		"2 action(s): 1 added, 1 skipped.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -4566,7 +4828,7 @@ actions = [
 	if strings.Count(stdout.String(), "Publisher github://acme/conn is not yet trusted") != 1 {
 		t.Errorf("trust banner should fire once across the suite, not per action:\n%s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "1 of 3") && !strings.Contains(stdout.String(), "3 of 3") {
+	if !strings.Contains(stdout.String(), "failed.") {
 		t.Errorf("summary should report failures; got: %s", stdout.String())
 	}
 }
@@ -4672,7 +4934,7 @@ actions = [
 		"Resolving @latest",
 		"→ v0.0.6",
 		"Suite: remote-suite",
-		"All 3 action(s) installed.",
+		"3 action(s): 3 added.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

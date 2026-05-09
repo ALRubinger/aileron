@@ -4619,6 +4619,17 @@ components:
             True when an action with this name is already installed
             and its hash matches. The CLI uses this to short-circuit
             past the consent prompt.
+        existing:
+          $ref: "#/components/schemas/InstalledActionRef"
+          description: |
+            Set when an action with the same `name` is already
+            installed but its bytes differ from the previewed
+            manifest (typically a different version). Mutually
+            exclusive with `already_installed = true`. The CLI uses
+            this to render an upgrade prompt instead of treating
+            the install as fresh — the operator sees the installed
+            version side-by-side with the requested version and can
+            choose to overwrite.
         connector_deps:
           type: array
           items:
@@ -4658,6 +4669,31 @@ components:
             cstore. The CLI renders this so the operator sees which
             deps are new (will be installed) versus existing (no
             change).
+
+    InstalledActionRef:
+      type: object
+      required: [version, hash, source, path]
+      description: |
+        Snapshot of an action already on disk at install time. Used in
+        the preview response to surface the installed version when its
+        bytes differ from the requested install — the CLI renders this
+        so the operator can confirm an upgrade.
+      properties:
+        version:
+          type: string
+          description: Version field from the installed manifest's frontmatter.
+        hash:
+          type: string
+          description: |
+            `sha256:<hex>` of the installed manifest's bytes on disk.
+            Differs from the previewed `hash` whenever this object is
+            populated.
+        source:
+          type: string
+          description: Provenance URI recorded on the installed manifest's `source` field.
+        path:
+          type: string
+          description: Absolute path of the installed action file on disk.
 
     InstalledAction:
       type: object

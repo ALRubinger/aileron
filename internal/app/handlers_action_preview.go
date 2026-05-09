@@ -130,12 +130,29 @@ func (s *apiServer) PreviewAction(w http.ResponseWriter, r *http.Request) {
 	// action hash as sha256 of the raw manifest bytes — that's the
 	// thing on disk after install, and matches what an operator
 	// would expect from `sha256sum ~/.aileron/actions/<name>.md`.
+	//
+	// Three states the CLI cares about:
+	//   1. No action with this name on disk → fresh install.
+	//   2. Same name, identical bytes → no-op (`already_installed`).
+	//   3. Same name, different bytes → upgrade candidate
+	//      (`existing` populated). The CLI prompts before forcing
+	//      an overwrite so the operator confirms the version
+	//      change rather than silently clobbering pinned bytes.
 	actionHash := "sha256:" + hashHex(tb.Manifest)
 	alreadyInstalled := false
+	var existingRef *api.InstalledActionRef
 	if existing, err := s.actions.Get(manifest.Name); err == nil {
 		if existingBytes, rErr := readFileSafe(existing.Path); rErr == nil {
-			if "sha256:"+hashHex(existingBytes) == actionHash {
+			existingHash := "sha256:" + hashHex(existingBytes)
+			if existingHash == actionHash {
 				alreadyInstalled = true
+			} else {
+				existingRef = &api.InstalledActionRef{
+					Version: existing.Manifest.Version,
+					Hash:    existingHash,
+					Source:  existing.Manifest.Source,
+					Path:    existing.Path,
+				}
 			}
 		}
 	}
@@ -147,6 +164,7 @@ func (s *apiServer) PreviewAction(w http.ResponseWriter, r *http.Request) {
 		Name:             manifest.Name,
 		SignatureStatus:  &signatureStatus,
 		AlreadyInstalled: &alreadyInstalled,
+		Existing:         existingRef,
 		ConnectorDeps:    deps,
 	}
 	if intent := manifest.Match.Intent; intent != "" {

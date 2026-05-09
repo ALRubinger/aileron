@@ -206,4 +206,95 @@ func TestPreviewAction_AlreadyInstalledFlag(t *testing.T) {
 	if got.AlreadyInstalled == nil || !*got.AlreadyInstalled {
 		t.Errorf("AlreadyInstalled = %v, want pointer to true", got.AlreadyInstalled)
 	}
+	if got.Existing != nil {
+		t.Errorf("Existing = %+v, want nil when bytes match", got.Existing)
+	}
+}
+
+// TestPreviewAction_ExistingPopulatedOnVersionMismatch asserts the
+// upgrade-candidate path: an action with the same name is on disk
+// with different bytes (e.g. an earlier version) → preview reports
+// already_installed=false AND populates `existing` with the on-disk
+// version + hash + source + path. The CLI uses this to render the
+// upgrade prompt rather than treating the install as fresh.
+func TestPreviewAction_ExistingPopulatedOnVersionMismatch(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	depFQN := "github://ALRubinger/aileron-connector-github"
+	depHash := fakeConnectorHash(depFQN, "1.0.0", "api_key")
+
+	// First install: version 0.1.0 of "list-recent-prs".
+	v1Ref, _ := cstore.ParseRef("github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.1.0")
+	v1MD := goodActionMD(depFQN, depHash)
+	srv := installActionTestServer(t, v1Ref, buildActionTarball(t, v1MD, priv), pub, depFQN)
+	if rec := postInstallAction(srv, `{
+		"fqn": "github://ALRubinger/aileron-connector-github/actions/list-recent-prs",
+		"version": "0.1.0"
+	}`); rec.Code != http.StatusCreated {
+		t.Fatalf("setup install failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Build a v0.2.0 manifest reusing the same name. The rest of the
+	// bytes only need to differ; goodActionMDVersion swaps in the new
+	// version + source so the file content really is different.
+	v2MD := []byte(`+++
+name = "list-recent-prs"
+version = "0.2.0"
+source = "github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.2.0"
+
+[[requires.connectors]]
+name = "` + depFQN + `"
+version = "1.0.0"
+hash = "` + depHash + `"
+capabilities = ["list_prs"]
+
+[match]
+intent = "list pull requests"
+
+[[execute]]
+id = "list"
+connector = "` + depFQN + `"
+op = "list_prs"
++++
+
+# List Recent PRs (v2)
+
+Lists recent merged PRs from a GitHub repository.
+`)
+	v2Ref, _ := cstore.ParseRef("github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.2.0")
+	v2URL, _ := srv.installer.Resolver.ResolveTarball(v2Ref)
+	v2Tarball := buildActionTarball(t, v2MD, priv)
+	srv.installer.Fetcher = &fakeFetcher{bytesAt: map[string][]byte{v2URL: v2Tarball}}
+
+	rec := postPreviewAction(srv, `{
+		"fqn": "github://ALRubinger/aileron-connector-github/actions/list-recent-prs",
+		"version": "0.2.0"
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.ActionPreview
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AlreadyInstalled != nil && *got.AlreadyInstalled {
+		t.Errorf("AlreadyInstalled = true; want false because bytes differ")
+	}
+	if got.Existing == nil {
+		t.Fatal("Existing = nil; want populated because v0.1.0 is on disk with different bytes")
+	}
+	if got.Existing.Version != "0.1.0" {
+		t.Errorf("Existing.Version = %q, want 0.1.0", got.Existing.Version)
+	}
+	if !strings.HasPrefix(got.Existing.Hash, "sha256:") {
+		t.Errorf("Existing.Hash = %q, want sha256: prefix", got.Existing.Hash)
+	}
+	if got.Existing.Hash == got.Hash {
+		t.Errorf("Existing.Hash == previewed Hash %q; want different (bytes diverged)", got.Hash)
+	}
+	if got.Existing.Path == "" {
+		t.Errorf("Existing.Path is empty")
+	}
+	if got.Existing.Source != "github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.1.0" {
+		t.Errorf("Existing.Source = %q, want v0.1.0 source", got.Existing.Source)
+	}
 }
