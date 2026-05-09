@@ -16,7 +16,7 @@ function makeTree(children) {
   return { type: 'root', children };
 }
 
-function preWithCode(text) {
+function preWithCode(text, lang = 'sh') {
   return {
     type: 'element',
     tagName: 'pre',
@@ -25,7 +25,7 @@ function preWithCode(text) {
       {
         type: 'element',
         tagName: 'code',
-        properties: {},
+        properties: lang ? { className: [`language-${lang}`] } : {},
         children: [{ type: 'text', value: text }],
       },
     ],
@@ -53,6 +53,64 @@ test('wraps a <pre><code> in .code-block-wrapper with a copy button', () => {
   assert.equal(button.properties['aria-label'], 'Copy code to clipboard');
   assert.equal(pre.tagName, 'pre');
   assert.equal(pre.children[0].tagName, 'code');
+});
+
+test('wraps Shiki-shaped <pre data-language="sh"><code> (post-highlight)', () => {
+  // After Astro's Shiki transformer, the language has moved from
+  // <code class="language-sh"> to <pre data-language="sh" class="astro-code">.
+  const shikiPre = {
+    type: 'element',
+    tagName: 'pre',
+    properties: {
+      'data-language': 'sh',
+      className: ['astro-code'],
+    },
+    children: [
+      {
+        type: 'element',
+        tagName: 'code',
+        properties: {},
+        children: [{ type: 'text', value: 'aileron version' }],
+      },
+    ],
+  };
+  const tree = makeTree([shikiPre]);
+  run(tree);
+  assert.equal(tree.children.length, 1);
+  assert.equal(tree.children[0].tagName, 'div');
+  assert.deepEqual(tree.children[0].properties.className, ['code-block-wrapper']);
+});
+
+test('leaves a <pre><code> without language class alone (output sample, not a command)', () => {
+  const tree = makeTree([preWithCode('Output line 1\nOutput line 2', null)]);
+  run(tree);
+  assert.equal(tree.children.length, 1);
+  assert.equal(tree.children[0].tagName, 'pre');
+});
+
+test('leaves a Shiki <pre data-language="plaintext"> alone (unfenced ``` block)', () => {
+  // Shiki labels every unfenced ``` block `data-language="plaintext"`.
+  // We treat that as "no language" so console output stays unadorned.
+  const plaintextPre = {
+    type: 'element',
+    tagName: 'pre',
+    properties: {
+      'data-language': 'plaintext',
+      className: ['astro-code'],
+    },
+    children: [
+      {
+        type: 'element',
+        tagName: 'code',
+        properties: {},
+        children: [{ type: 'text', value: 'aileron dev (abc1234)' }],
+      },
+    ],
+  };
+  const tree = makeTree([plaintextPre]);
+  run(tree);
+  assert.equal(tree.children.length, 1);
+  assert.equal(tree.children[0].tagName, 'pre');
 });
 
 test('leaves a <pre> without <code> child alone', () => {
