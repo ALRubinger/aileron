@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -278,6 +279,12 @@ func TestTailSessionLog_CancelDuringFilePolling(t *testing.T) {
 }
 
 func TestTailSessionLog_OpenFailureSurfaced(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// 0o000 dir mode is a no-op on Windows (chmod only toggles the
+		// read-only attribute, which doesn't restrict file open inside
+		// the directory). The error path under test is unreachable here.
+		t.Skip("0o000 dir mode does not restrict access on Windows")
+	}
 	withFastTailInterval(t)
 	// A path under a non-readable parent yields a non-ErrNotExist
 	// open error; tailSessionLog must surface it rather than

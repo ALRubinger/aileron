@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
@@ -312,12 +311,14 @@ func urlToHostPort(u string) (string, error) {
 // daemon's stdio is detached and redirected to <stateDir>/daemon.log
 // so it survives the parent's exit and produces a debuggable trail.
 //
-// Setsid puts the daemon in its own session so SIGHUP from the
-// parent's terminal does not propagate. The daemon's lifetime is
-// independent of the parent — the returned channel is sent on (with
-// the wait error or nil) when the child exits, and waitForDaemon
-// uses that signal to fail fast when the daemon dies before
-// publishing daemon.json.
+// The daemon is detached from the parent via [detachProcAttrs] so its
+// lifetime is independent of the parent: on POSIX, Setsid puts the
+// daemon in its own session so SIGHUP from the parent's terminal does
+// not propagate; on Windows, DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP
+// disconnects from the parent's console and signal group. The returned
+// channel is sent on (with the wait error or nil) when the child
+// exits, and waitForDaemon uses that signal to fail fast when the
+// daemon dies before publishing daemon.json.
 func forkExec(binary string, args []string) func(context.Context, string) (<-chan error, error) {
 	return func(_ context.Context, stateDir string) (<-chan error, error) {
 		if binary == "" {
@@ -327,7 +328,7 @@ func forkExec(binary string, args []string) func(context.Context, string) (<-cha
 			return nil, fmt.Errorf("create state dir: %w", err)
 		}
 		cmd := exec.Command(binary, args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		cmd.SysProcAttr = detachProcAttrs()
 		cmd.Stdin = nil
 
 		logPath := filepath.Join(stateDir, discovery.LogFile)

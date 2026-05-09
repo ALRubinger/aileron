@@ -105,6 +105,49 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  test-windows:
+    # Targeted Windows job: exercises the platform-specific lock and
+    # process-detach primitives added for Windows support (#574) —
+    # discovery (LockFileEx, GetFileInformationByHandle) and spawn
+    # (DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP). The full test suite
+    # still runs on ubuntu-latest above.
+    #
+    # Scope is intentionally narrow: cmd/aileron's existing tests have
+    # POSIX-isms (HOME vs USERPROFILE, exec.LookPath without `.exe`,
+    # chmod 0o000) that long predate this PR. Tracked in #577 — running
+    # them here would mask the real signal from the new code paths.
+    name: Unit Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache-dependency-path: |
+            internal/go.mod
+            cmd/aileron/go.mod
+
+      - name: Run platform-specific tests
+        shell: bash
+        run: |
+          set -e
+          (cd internal && go test -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/...)
+          # cmd/aileron's full suite is gated behind #577 on Windows.
+          # Run only the helpers with a Windows-specific implementation.
+          (cd cmd/aileron && go test -race -coverprofile=coverage-windows-aileron.txt -run 'TestSignalDaemonStop' .)
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron
+          files: internal/coverage-windows-internal.txt,cmd/aileron/coverage-windows-aileron.txt
+          # Merge with the Linux unit-test flag so codecov reports a
+          # single, combined "unit" coverage; Windows uploads add the
+          # *_windows.go files that Linux runs cannot measure.
+          flags: unit
+
   test-ui:
     name: UI Tests
     runs-on: ubuntu-latest

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"syscall"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
@@ -90,15 +89,16 @@ func runDaemonStop(_ []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if err := syscall.Kill(info.PID, syscall.SIGTERM); err != nil {
+	notRunning, err := signalDaemonStop(info.PID)
+	if notRunning {
 		// PID is not alive: stale daemon.json from a prior crash.
 		// Clean it up for the operator and exit 0; the daemon is
 		// effectively stopped already.
-		if errors.Is(err, syscall.ESRCH) {
-			_ = discovery.Remove(stateDir)
-			fmt.Fprintln(stdout, "Aileron daemon was not running (stale daemon.json removed).")
-			return 0
-		}
+		_ = discovery.Remove(stateDir)
+		fmt.Fprintln(stdout, "Aileron daemon was not running (stale daemon.json removed).")
+		return 0
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "aileron: signal daemon (pid %d): %v\n", info.PID, err)
 		return 1
 	}

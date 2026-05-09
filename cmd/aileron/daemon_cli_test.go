@@ -426,6 +426,27 @@ func TestSpawnResolveOnce_PropagatesSpawnError(t *testing.T) {
 // fake subprocess is fragile across shells/platforms — coverage
 // gain isn't worth the test-flakiness risk.
 
+// --- signalDaemonStop direct contract ---
+
+// TestSignalDaemonStop_NotRunningPID pins the cross-platform contract:
+// a not-alive PID returns (notRunning=true, err=nil) so callers can
+// clean up stale daemon.json without surfacing an error. POSIX maps
+// this to syscall.ESRCH from kill(); Windows maps it to FindProcess
+// failing or Kill returning os.ErrProcessDone.
+//
+// Uses PID 9999999 — above macOS's PID_MAX (99999), well below Linux's
+// default kernel.pid_max (4194304) being reused, and unlikely to be a
+// live process on a Windows runner.
+func TestSignalDaemonStop_NotRunningPID(t *testing.T) {
+	notRunning, err := signalDaemonStop(9999999)
+	if err != nil {
+		t.Fatalf("signalDaemonStop(9999999): unexpected err: %v", err)
+	}
+	if !notRunning {
+		t.Fatal("signalDaemonStop(9999999): notRunning = false, want true (PID should not exist)")
+	}
+}
+
 // --- defaultStateDir / daemonBinaryPath ---
 
 func TestDefaultStateDir_UnderHome(t *testing.T) {
