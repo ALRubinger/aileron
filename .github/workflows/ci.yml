@@ -126,11 +126,16 @@ jobs:
           go-version: "1.25"
           cache-dependency-path: |
             internal/go.mod
+            cmd/aileron/go.mod
 
       - name: Run platform-specific tests
         shell: bash
-        working-directory: internal
-        run: go test -race ./daemon/discovery/... ./daemon/spawn/...
+        run: |
+          set -e
+          (cd internal && go test -race ./daemon/discovery/... ./daemon/spawn/...)
+          # cmd/aileron's full suite is gated behind #577 on Windows.
+          # Run only the helpers with a Windows-specific implementation.
+          (cd cmd/aileron && go test -race -run 'TestSignalDaemonStop' .)
 
   test-ui:
     name: UI Tests
