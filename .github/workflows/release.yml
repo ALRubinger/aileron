@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write # cosign keyless signing via OIDC
 
 jobs:
   release:
@@ -46,6 +47,9 @@ jobs:
         # is gitignored except .gitkeep, so a fresh checkout has no assets — a
         # released binary built without this step would serve webappNotBuiltStub.
         run: task build:webapp
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

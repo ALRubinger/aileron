@@ -75,36 +75,57 @@ builds:
 
 archives:
   - id: aileron
-    builds:
+    ids:
       - aileron
     name_template: "aileron_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
 
   - id: aileron-sh
-    builds:
+    ids:
       - aileron-sh
     name_template: "aileron-sh_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
   - id: aileron-server
-    builds:
+    ids:
       - aileron-server
     name_template: "aileron-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
 
   - id: aileron-mcp
-    builds:
+    ids:
       - aileron-mcp
     name_template: "aileron-mcp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
 
 checksum:
   name_template: "checksums.txt"
+
+signs:
+  # Cosign keyless signing via GitHub Actions OIDC. Each artifact (archives,
+  # checksums.txt, source) is signed; the bundle file pairs the signature with
+  # the Fulcio cert + Rekor log entry, so users verify with one command.
+  #
+  # Verify (replace ${ARTIFACT} with e.g. aileron_0.0.1_darwin_arm64.tar.gz):
+  #   cosign verify-blob \
+  #     --bundle ${ARTIFACT}.sigstore.json \
+  #     --certificate-identity-regexp 'https://github.com/ALRubinger/aileron/.github/workflows/release.yml@.*' \
+  #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  #     ${ARTIFACT}
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: all
+    output: true
 
 changelog:
   sort: asc
