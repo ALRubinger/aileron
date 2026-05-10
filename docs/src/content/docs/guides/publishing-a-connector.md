@@ -312,6 +312,36 @@ aileron launch claude
 - Action templates pin a specific connector version + hash. Updating an action to use a newer connector requires republishing the action with the new pin.
 - Pre-MVP convention: stay at `0.x.y` until your service surface is stable.
 
+## Testing spawn-primitive connectors
+
+Connectors that wrap a local CLI via the spawn primitive (per [ADR-0002](/adr/0002-connector-model) and [ADR-0014](/adr/0014-spawn-sandbox-technology)) need an analog of `httptest.Server` that records subprocess invocations without forking a real binary on CI runners. The runtime ships two helpers under `internal/sandbox/sandboxtest/`:
+
+- **`sandboxtest.RecordingExecutor`**. Implements `sandbox.SpawnExecutor`. Every `aileron_host.spawn` call goes through it; tests inspect the recorded envelopes the way they would on an `httptest.Server`'s recorded requests. Substitute via `sandbox.WithSpawnExecutor`.
+- **`sandboxtest.FakeBinary`**. Writes a scripted shell stub to a tempdir. The stub emits configured stdout, stderr, and exit code, and optionally records its argv, env, and cwd to a JSON file. Use this when the test should exercise the real `os/exec` path through the platform sandbox.
+
+Sketch of a connector-side spawn test:
+
+```go
+import (
+    "github.com/ALRubinger/aileron/internal/sandbox"
+    "github.com/ALRubinger/aileron/internal/sandbox/sandboxtest"
+)
+
+func TestSpawnConnector_LogSubcommandHonorsArgvPattern(t *testing.T) {
+    rec := &sandboxtest.RecordingExecutor{
+        Result: sandbox.SpawnResult{ExitCode: 0, Stdout: []byte("commit-list\n")},
+    }
+    rt, _ := sandbox.NewWazeroRuntime(ctx, sandbox.WithSpawnExecutor(rec))
+    // ... compile your connector, invoke its `log` op ...
+
+    if got := rec.LastCall().Argv[1]; got != "log" {
+        t.Errorf("argv[1] = %q, want log", got)
+    }
+}
+```
+
+Connector repos publish their own integration tests against real binaries; this in-process harness covers the gate, the host-function plumbing, and the manifest-shape contracts without paying the per-test process-fork cost.
+
 ## See also
 
 - [ADR-0002: Connector Model](/adr/0002-connector-model)
@@ -319,3 +349,4 @@ aileron launch claude
 - [ADR-0004: Dependency Resolution](/adr/0004-dependency-resolution)
 - [ADR-0006: Capability Binding UX](/adr/0006-capability-binding-ux)
 - [ADR-0007: Install Consent](/adr/0007-install-consent)
+- [ADR-0014: Spawn Sandbox Technology](/adr/0014-spawn-sandbox-technology)
