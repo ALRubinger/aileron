@@ -222,46 +222,89 @@ Publisher-owned apps fix that. Aileron-the-runtime is just machinery (PKCE, call
 
 A connector frequently needs to invoke an existing local CLI rather than re-implement its protocol. Examples include `git`, `slackdump`, or an OS messaging client. The spawn primitive is the runtime's mechanism for permitting that on the connector's behalf under the same trust model as the other primitives. Declared in the manifest, gated host-side, audited.
 
-The connector itself never calls `os/exec` directly. The connector is a sandboxed WASM module without OS-process privileges. Instead, the connector calls a host function (`aileron_host.spawn`) that the runtime exposes, and the runtime is what owns the `os.exec.Command` call. The runtime enforces the manifest's `[capabilities.spawn]` declaration on every invocation, exactly as `HostPolicy.CheckURL` (at `internal/sandbox/network.go:43-84`) enforces `[capabilities.network]` on every outbound HTTP call. Same gate pattern, different syscall.
+The connector itself never calls `os/exec` directly. The connector is a sandboxed WASM module without OS-process privileges. Instead, the connector calls a host function (`aileron_host.spawn` or `aileron_host.spawn_op`) and the runtime is what owns the `os/exec.Command` call. The runtime enforces the manifest's `[capabilities.spawn]` declaration on every invocation, exactly as `HostPolicy.CheckURL` (at `internal/sandbox/network.go:43-84`) enforces `[capabilities.network]` on every outbound HTTP call. Same gate pattern, different syscall.
 
-#### Manifest declaration
+The platform-level enforcement mechanism (how the kernel actually confines the subprocess to its declared filesystem scope, blocks network access from the subprocess itself, and prevents privilege escalation) is the subject of [ADR-0014](/adr/0014-spawn-sandbox-technology). This ADR commits to the property: the subprocess executes under an enforcement boundary that the runtime owns. It does not commit to a specific mechanism.
+
+#### Shared spawn-forwarder is the common shape
+
+For the vast majority of spawn-primitive connectors (wrapping a CLI like `gitcrawl`, `slackdump`, or `imsg`), the WASM body is identical boilerplate: read an op name and a parameters object from stdin, look up the operation in the manifest, substitute placeholders, call the host function, emit the captured output. The interesting variation between one wrap and the next lives entirely in the manifest.
+
+Aileron ships a single WASM module (the **spawn forwarder**) embedded in the daemon binary. When a connector manifest declares `forwarder = "builtin://spawn-forwarder"` in its `[connector]` block, the runtime loads the embedded bytes; the manifest is the connector's complete identity. There is no per-wrap WASM binary to build, sign, or publish.
+
+This collapses the cost of "wrap any CLI as a connector" from a per-CLI repo with its own CI and signing pipeline down to a manifest file. The `aileron action wrap <cli>` tool from [#511](https://github.com/ALRubinger/aileron/issues/511) emits a forwarder-referencing manifest directly; `aileron action wrap <cli> --install` registers the manifest with the daemon in one step, no build required.
+
+Connectors that need more than the forwarder offers (custom retry logic, response shaping, multiple primitives in one connector) continue to ship their own WASM body and omit the `forwarder` field. The two modes coexist; the manifest's `forwarder` field is what tells the install pipeline which one applies.
+
+#### Enforcement and audit
+
+Every spawn call passes through `SpawnPolicy.CheckSpawn(envelope)` before the runtime exec's anything. The check is the gate. It validates:
+
+1. `program` resolves to a declared entry in `[capabilities.spawn].programs` (path match, hash match when declared).
+2. `argv` matches the operation's declared `argv` pattern after placeholder substitution.
+3. Every key in `env` is in `env_passthrough` (no exfiltration of arbitrary host env into the subprocess).
+4. `cwd` (when set) is within `fs_read`.
+5. The action's declared capability subset permits spawn. The runtime enforces both the connector manifest and the action's narrower subset, the same two-boundary defense in depth the rest of the model uses.
+
+Denials raise `capability_denied` (the same error class as network denials) and are audited identically. Each allowed or denied spawn emits a structured audit event with the connector identity, program, argv shape (placeholders preserved, not interpolated arguments), exit code, and content hashes of stdout and stderr.
+
+#### Credential injection
+
+Vault credentials never reach the subprocess as files or arguments. When a connector's spawn invocation references a credential, the runtime resolves the vault entry (via the existing `credentialResolver`), sets the corresponding env var on the subprocess only, and discards the value when the subprocess exits. The connector never holds the credential bytes either. The env-var channel matches the manifest's `env_passthrough` declaration and is gated by it.
+
+This preserves the same sealed-credential property the runtime enforces for HTTP calls. The credential exists at three layers (vault, subprocess env, never connector), and the trust boundary between connector and credential remains intact.
+
+#### Implementation details
+
+The mechanics below are the deeper spec for runtime and tooling implementors; readers seeking only the model can skip this subsection.
+
+##### Manifest schema
 
 ```toml
+[connector]
+name      = "github://alr/local-gitcrawl"
+version   = "0.0.1"
+forwarder = "builtin://spawn-forwarder"   # opt into the daemon-embedded WASM
+
 [capabilities.spawn]
-programs = [
-  { path = "/usr/bin/git", hash = "sha256:bd6e..." },
-]
-argv_patterns = [
-  "git log --since={since} --author={author} --format=%H%x09%s",
-]
+programs = [{ path = "/usr/bin/git", hash = "sha256:bd6e..." }]
 env_passthrough = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
 fs_read  = ["~/code/", "~/.gitconfig"]
 fs_write = ["~/.cache/aileron/gitcrawl/"]
 cwd      = "~/code/"
+
+[capabilities.spawn.operations.log]
+argv        = "git log --since={since} --author={author} --format=%H%x09%s"
+description = "List commits since a date by an author"
+
+[capabilities.spawn.operations.status]
+argv        = "git status --short"
+description = "Show working-tree state"
 ```
 
-- **`programs`**: list of allowed binaries. Each entry pins the binary by exact filesystem path and optionally a content hash. The runtime resolves the path before exec and refuses to spawn if it does not match an entry. When `hash` is set, the runtime additionally verifies the binary's bytes; a mismatch fails the spawn loudly.
-- **`argv_patterns`**: templated argv shapes. Each pattern is a literal argv with `{name}` placeholders that the connector fills at call time. Patterns are an allow-list. An argv that does not match any declared pattern after placeholder substitution is denied.
-- **`env_passthrough`**: environment keys the runtime is permitted to set on the subprocess. The subprocess receives only declared keys; nothing is forwarded by default. Credential injection rides this channel (see below).
-- **`fs_read` / `fs_write`**: filesystem scopes. Absolute paths or `~/`-anchored. The sandbox restricts the subprocess to these scopes for the corresponding access mode. The enforcement mechanism is platform-specific and lives in [ADR-0014](/adr/0014-spawn-sandbox-technology) (separate sub-ADR).
-- **`cwd`**: optional working-directory policy. When set, the runtime invokes the subprocess with this cwd. When unset, the runtime uses a per-invocation temporary directory.
+- **`programs`** lists allowed binaries. Each entry pins the binary by exact filesystem path and optionally a content hash. The runtime resolves the path before exec and refuses to spawn if it does not match an entry. When `hash` is set, the runtime additionally verifies the binary's bytes; a mismatch fails the spawn loudly.
+- **`operations`** is a TOML table keyed by operation name. Each entry's `argv` is a templated argv with `{name}` placeholders the runtime substitutes from the agent's args at call time. The runtime derives the gate's argv-pattern allow-list from the union of `operations[*].argv`. An incoming op whose name is not in this table is denied.
+- **`env_passthrough`** is the closed set of environment keys the runtime is permitted to set on the subprocess. The subprocess receives only declared keys; nothing is forwarded by default. Credential injection rides this channel.
+- **`fs_read` / `fs_write`** are filesystem scopes (absolute or `~/`-anchored). The sandbox restricts the subprocess to these scopes for the corresponding access mode. The enforcement mechanism is platform-specific (see [ADR-0014](/adr/0014-spawn-sandbox-technology)).
+- **`cwd`** is the optional working-directory policy. When set, the runtime invokes the subprocess with this cwd. When unset, the runtime uses a per-invocation temporary directory.
 
 Each rule is enumerable and bounded. There is no `*`, no shell evaluation, no glob in argv. A connector that did not declare a program cannot spawn it, period.
 
-#### Host-function shape
+##### Host-function ABI
 
-The connector calls into the runtime through four host functions, registered in the existing `aileron_host` module alongside `http_request` and friends:
+The runtime registers the following functions under the existing `aileron_host` module:
 
 | Function | Shape | Purpose |
 |---|---|---|
-| `spawn` | `(envelope_ptr, envelope_len) -> handle` | Submits a spawn request. The envelope is JSON: `{ program, argv, env, cwd?, stdin? }`. Returns an opaque per-invocation handle. |
+| `spawn` | `(envelope_ptr, envelope_len) -> handle` | Low-level. Submits a fully-formed spawn envelope: `{ program, argv, env, cwd?, stdin? }`. Used by custom-WASM connectors that need envelope control. |
+| `spawn_op` | `(op_ptr, op_len, args_ptr, args_len) -> handle` | High-level. Names an operation declared in `[capabilities.spawn.operations]` and a JSON map of placeholder values. The runtime substitutes, builds the envelope, and dispatches through the same gate as `spawn`. Used by the shared forwarder. |
 | `spawn_status` | `(handle) -> exit_code` | Returns the subprocess exit code (or a negative sentinel for runtime-side denial). |
 | `spawn_output_size` | `(handle, which) -> n_bytes` | Reports the captured size of stdout (`which=0`) or stderr (`which=1`). |
 | `spawn_output_read` | `(handle, which, dst_ptr, dst_len) -> n_read` | Copies captured output bytes into the connector's linear memory. |
 
-This is the same retrieval pattern as `http_response_*`. The buffered output never leaves the runtime's address space until the connector pulls it; the subprocess itself writes to runtime-owned pipes.
+Output retrieval uses the same `_size` / `_read` pattern as `http_response_*`. The buffered output never leaves the runtime's address space until the connector pulls it; the subprocess itself writes to runtime-owned pipes.
 
-Envelope schema:
+Envelope schema (for `spawn`):
 
 ```json
 {
@@ -273,35 +316,42 @@ Envelope schema:
 }
 ```
 
-Return shape (read back by the connector via the helper functions):
+For `spawn_op`, the connector passes only the op name and a parameter map; the runtime constructs the equivalent envelope from the manifest:
 
 ```json
-{
-  "exit_code": 0,
-  "stdout_bytes": 4096,
-  "stderr_bytes": 0
-}
+{ "op": "log", "args": { "since": "2026-04-01", "author": "alr" } }
 ```
 
-#### Enforcement and audit
+A `{name}` placeholder with no value in `args` produces `capability_denied` with `boundary_detail: "envelope"`. The forwarder cannot exceed the manifest's declarations any more than a per-CLI WASM body could.
 
-Every spawn call passes through `HostPolicy.CheckSpawn(envelope)` before the runtime exec's anything. The check is the gate. It validates:
+##### Connector identity for shared-forwarder connectors
 
-1. `program` resolves to a declared entry in `[capabilities.spawn].programs` (path match, hash match when declared).
-2. `argv` matches at least one `argv_patterns` entry after placeholder substitution.
-3. Every key in `env` is in `env_passthrough` (no exfiltration of arbitrary host env into the subprocess).
-4. `cwd` (when set) is within `fs_read`.
-5. The action's declared capability subset permits spawn. The runtime enforces both the connector manifest and the action's narrower subset, the same two-boundary defense in depth the rest of the model uses.
+ADR-0002's content-hash invariant (the connector's identity is the content hash of binary plus manifest) holds for both modes:
 
-Denials raise `capability_denied` (the same error class as network denials) and are audited identically. Each allowed or denied spawn emits a structured audit event with the connector identity, program, argv shape (placeholders preserved, not interpolated arguments), exit code, and content hashes of stdout and stderr.
+- **Per-binary connector** (no `connector.forwarder` field): hash is `sha256(binary || manifest.toml)` as before.
+- **Shared-forwarder connector** (`connector.forwarder = "builtin://spawn-forwarder"`): hash is `sha256(forwarder_bytes || manifest.toml)`, where `forwarder_bytes` is the daemon-embedded forwarder for the running daemon's release. Tampering with the manifest after install still produces a hash mismatch; the trust boundary for a wrapped CLI flows from the user's manifest plus the Aileron daemon binary they ran.
 
-The sandbox technology (which OS-level mechanism actually confines the subprocess to its declared filesystem scope, blocks network access from the subprocess itself, and prevents privilege escalation) is the subject of [ADR-0014](/adr/0014-spawn-sandbox-technology). This ADR commits to the property: the subprocess executes under an enforcement boundary that the runtime owns. It does not commit to a specific mechanism.
+For wraps the user pulled from a Hub entry or a friend's gist, the manifest's signature (an ed25519 signature over the manifest bytes) is verified at install. The embedded forwarder is implicitly trusted because it is part of the daemon binary, which the user already accepted by running it.
 
-#### Credential injection
+A daemon upgrade that ships new forwarder bytes invalidates every shared-forwarder wrap's cached hash on the host. The install pipeline detects the mismatch and re-stores the manifest under the new hash; the manifest content is unchanged.
 
-Vault credentials never reach the subprocess as files or arguments. When a connector's spawn invocation references a credential, the runtime resolves the vault entry (via the existing `credentialResolver`), sets the corresponding env var on the subprocess only, and discards the value when the subprocess exits. The connector never holds the credential bytes either. The env-var channel matches the manifest's `env_passthrough` declaration and is gated by it.
+##### Distribution: embedded in the daemon, addressable by a reserved FQN
 
-This preserves the same sealed-credential property the runtime enforces for HTTP calls. The credential exists at three layers (vault, subprocess env, never connector), and the trust boundary between connector and credential remains intact.
+The forwarder ships inside the Aileron daemon binary via `go:embed`. The reserved FQN `builtin://spawn-forwarder` is the only `builtin://` scheme defined in v1; the scheme is closed and not user-extensible. Adding more `builtin://` entries (a future shared-HTTP-forwarder, for example) is an explicit ADR decision, never a manifest-side configuration.
+
+The install pipeline routes around the binary fetch when `connector.forwarder` is set: it verifies the manifest's signature, writes the manifest into `~/.aileron/store/connectors/sha256/<hash>/`, and never goes to the network. The forwarder is loaded from the daemon binary at execution time.
+
+##### Tooling: `aileron action wrap`
+
+With the forwarder in place, `aileron action wrap <cli>` produces a complete, locally-runnable connector source tree without a WASM build step. The Taskfile.yml and `release.yml` stubs the tool currently emits become optional (only useful when the user wants to publish the manifest to a Hub entry). The default output is:
+
+```
+connector/manifest.toml         (with [capabilities.spawn.operations] and forwarder reference)
+actions/<op>/action.md          (one per declared operation)
+keys/README.md                  (optional, only for publishing)
+```
+
+A new `aileron action wrap --install` short-circuits the source-tree step: it writes the manifest directly to the daemon's connector store and emits action.md files into the user's `~/.aileron/actions/`. The "wrap" verb then matches the user's mental model: in one command, a local CLI becomes an action surface the agent can call.
 
 ### Capabilities are abstract types, not concrete resources
 
