@@ -30,9 +30,9 @@ func goodSpawnManifest() *cstore.Manifest {
 				Programs: []cstore.ManifestSpawnProgram{
 					{Path: "/usr/bin/git"},
 				},
-				ArgvPatterns: []string{
-					"git log --since={since}",
-					"git status",
+				Operations: map[string]cstore.ManifestSpawnOperation{
+					"log":    {Argv: "git log --since={since}"},
+					"status": {Argv: "git status"},
 				},
 				EnvPassthrough: []string{"GIT_AUTHOR_NAME", "GH_TOKEN"},
 				FSRead:         []string{"~/code/"},

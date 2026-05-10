@@ -62,6 +62,7 @@ func BuildManifest(s *Spec) *cstore.Manifest {
 			Name:      s.Connector.Name,
 			Version:   s.Connector.Version,
 			Publisher: s.Connector.Publisher,
+			Forwarder: cstore.BuiltinForwarderSpawn,
 		},
 	}
 	if s.Credential != nil {
@@ -78,9 +79,13 @@ func BuildManifest(s *Spec) *cstore.Manifest {
 		FSRead:         append([]string(nil), s.FSRead...),
 		FSWrite:        append([]string(nil), s.FSWrite...),
 		Cwd:            s.Cwd,
+		Operations:     map[string]cstore.ManifestSpawnOperation{},
 	}
 	for _, sub := range s.Subcommands {
-		spawn.ArgvPatterns = append(spawn.ArgvPatterns, sub.Argv)
+		spawn.Operations[sub.Name] = cstore.ManifestSpawnOperation{
+			Argv:        sub.Argv,
+			Description: sub.Description,
+		}
 	}
 	m.Capabilities.Spawn = spawn
 	return m

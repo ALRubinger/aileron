@@ -419,8 +419,10 @@ func TestValidateManifest_AllowsLoopbackHTTPForLocalDev(t *testing.T) {
 
 func goodSpawn() *ManifestSpawn {
 	return &ManifestSpawn{
-		Programs:       []ManifestSpawnProgram{{Path: "/usr/bin/git"}},
-		ArgvPatterns:   []string{"git log --since={since} --author={author}"},
+		Programs: []ManifestSpawnProgram{{Path: "/usr/bin/git"}},
+		Operations: map[string]ManifestSpawnOperation{
+			"log": {Argv: "git log --since={since} --author={author}"},
+		},
 		EnvPassthrough: []string{"GIT_AUTHOR_NAME"},
 		FSRead:         []string{"~/code/"},
 		FSWrite:        []string{"~/.cache/aileron/gitcrawl/"},
@@ -439,11 +441,13 @@ func TestValidateManifest_AcceptsFullSpawnBlock(t *testing.T) {
 
 func TestValidateManifest_AcceptsMinimalSpawnBlock(t *testing.T) {
 	// FSRead, FSWrite, EnvPassthrough are optional. The minimum is
-	// one program and one argv pattern.
+	// one program and one operation.
 	m := canonicalManifestForTest()
 	m.Capabilities.Spawn = &ManifestSpawn{
-		Programs:     []ManifestSpawnProgram{{Path: "/usr/bin/git"}},
-		ArgvPatterns: []string{"git status"},
+		Programs: []ManifestSpawnProgram{{Path: "/usr/bin/git"}},
+		Operations: map[string]ManifestSpawnOperation{
+			"status": {Argv: "git status"},
+		},
 	}
 	if err := ValidateManifest(m, "ok.toml"); err != nil {
 		t.Errorf("Validate() = %v", err)
@@ -483,12 +487,15 @@ func TestValidateManifest_RejectsBadSpawnFields(t *testing.T) {
 		{"hash prefix only", func(s *ManifestSpawn) {
 			s.Programs = []ManifestSpawnProgram{{Path: "/usr/bin/git", Hash: "sha256:"}}
 		}, "sha256:"},
-		{"empty argv_patterns", func(s *ManifestSpawn) {
-			s.ArgvPatterns = nil
-		}, "argv_patterns is required"},
-		{"blank argv pattern", func(s *ManifestSpawn) {
-			s.ArgvPatterns = []string{"   "}
-		}, "is empty"},
+		{"empty operations", func(s *ManifestSpawn) {
+			s.Operations = nil
+		}, "operations] is required"},
+		{"blank operation argv", func(s *ManifestSpawn) {
+			s.Operations = map[string]ManifestSpawnOperation{"x": {Argv: "   "}}
+		}, "argv is required"},
+		{"invalid op name", func(s *ManifestSpawn) {
+			s.Operations = map[string]ManifestSpawnOperation{"BadName": {Argv: "git status"}}
+		}, "name must match"},
 		{"env key leading digit", func(s *ManifestSpawn) {
 			s.EnvPassthrough = []string{"1VAR"}
 		}, "valid environment variable"},
@@ -532,6 +539,102 @@ func TestValidateManifest_RejectsBadSpawnFields(t *testing.T) {
 	}
 }
 
+func TestValidateManifest_AcceptsForwarderConnector(t *testing.T) {
+	// A connector that opts into the daemon-embedded forwarder declares
+	// connector.forwarder plus a normal spawn block. Validation accepts.
+	m := canonicalManifestForTest()
+	m.Connector.Forwarder = BuiltinForwarderSpawn
+	m.Capabilities.Spawn = goodSpawn()
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsUnknownForwarder(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Connector.Forwarder = "builtin://something-else"
+	m.Capabilities.Spawn = goodSpawn()
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error for unknown forwarder")
+	}
+	if !strings.Contains(err.Error(), "not recognized") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsForwarderWithoutSpawn(t *testing.T) {
+	// The forwarder needs a spawn capability to drive; setting it
+	// without [capabilities.spawn] is meaningless.
+	m := canonicalManifestForTest()
+	m.Connector.Forwarder = BuiltinForwarderSpawn
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error when forwarder is set but no spawn block")
+	}
+	if !strings.Contains(err.Error(), "[capabilities.spawn]") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidateManifest_AcceptsForwarderFreeSpawnConnector(t *testing.T) {
+	// A connector can use spawn without opting into the forwarder
+	// (e.g. a custom WASM body that calls aileron_host.spawn directly).
+	m := canonicalManifestForTest()
+	m.Capabilities.Spawn = goodSpawn()
+	// Forwarder field intentionally absent.
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestManifestSpawn_ArgvPatternsDerivedFromOperations(t *testing.T) {
+	s := &ManifestSpawn{
+		Operations: map[string]ManifestSpawnOperation{
+			"log":    {Argv: "git log --since={since}"},
+			"status": {Argv: "git status"},
+		},
+	}
+	got := s.ArgvPatterns()
+	if len(got) != 2 {
+		t.Fatalf("ArgvPatterns() len = %d, want 2", len(got))
+	}
+	// Map iteration order is unstable; assert both entries appear.
+	seen := map[string]bool{}
+	for _, p := range got {
+		seen[p] = true
+	}
+	if !seen["git log --since={since}"] || !seen["git status"] {
+		t.Errorf("ArgvPatterns() = %v; want both entries", got)
+	}
+}
+
+func TestManifestSpawn_ArgvPatternsHandlesNil(t *testing.T) {
+	var s *ManifestSpawn
+	if got := s.ArgvPatterns(); got != nil {
+		t.Errorf("nil receiver should return nil; got %v", got)
+	}
+	empty := &ManifestSpawn{}
+	if got := empty.ArgvPatterns(); got != nil {
+		t.Errorf("empty Operations should return nil; got %v", got)
+	}
+}
+
+func TestOpNameRegex_AcceptsValidNames(t *testing.T) {
+	good := []string{"log", "list", "list_recent", "send-msg", "x1"}
+	for _, n := range good {
+		if !opNameRe.MatchString(n) {
+			t.Errorf("opNameRe rejected valid name %q", n)
+		}
+	}
+	bad := []string{"", "Log", "1log", "log!", "_internal", "Send-Msg"}
+	for _, n := range bad {
+		if opNameRe.MatchString(n) {
+			t.Errorf("opNameRe accepted invalid name %q", n)
+		}
+	}
+}
+
 func TestValidateManifest_AcceptsTildeOnlyPath(t *testing.T) {
 	// `~` (no trailing slash) is the user's home directory; the
 	// validator accepts it as an anchored path.
@@ -563,7 +666,6 @@ name = "github://acme/gitcrawl"
 version = "1.0.0"
 
 [capabilities.spawn]
-argv_patterns = ["git log --since={since}"]
 env_passthrough = ["GIT_AUTHOR_NAME"]
 fs_read = ["~/code/"]
 fs_write = ["~/.cache/aileron/gitcrawl/"]
@@ -572,6 +674,10 @@ cwd = "~/code/"
 [[capabilities.spawn.programs]]
 path = "/usr/bin/git"
 hash = "sha256:abc123"
+
+[capabilities.spawn.operations.log]
+argv = "git log --since={since}"
+description = "List commits since a date"
 `)
 	m, err := ParseManifest("x.toml", body)
 	if err != nil {
@@ -587,8 +693,15 @@ hash = "sha256:abc123"
 	if sp.Programs[0].Hash != "sha256:abc123" {
 		t.Errorf("Programs[0].Hash = %q", sp.Programs[0].Hash)
 	}
-	if len(sp.ArgvPatterns) != 1 || sp.ArgvPatterns[0] != "git log --since={since}" {
-		t.Errorf("ArgvPatterns = %v", sp.ArgvPatterns)
+	logOp, ok := sp.Operations["log"]
+	if !ok {
+		t.Fatalf("Operations missing 'log': %v", sp.Operations)
+	}
+	if logOp.Argv != "git log --since={since}" {
+		t.Errorf("Operations.log.argv = %q", logOp.Argv)
+	}
+	if logOp.Description != "List commits since a date" {
+		t.Errorf("Operations.log.description = %q", logOp.Description)
 	}
 	if len(sp.EnvPassthrough) != 1 || sp.EnvPassthrough[0] != "GIT_AUTHOR_NAME" {
 		t.Errorf("EnvPassthrough = %v", sp.EnvPassthrough)
@@ -611,7 +724,6 @@ name = "github://acme/gitcrawl"
 version = "1.0.0"
 
 [capabilities.spawn]
-argv_patterns = ["git status", "git log --since={since}"]
 env_passthrough = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
 fs_read = ["~/code/", "~/.gitconfig"]
 fs_write = ["~/.cache/aileron/gitcrawl/"]
@@ -619,6 +731,12 @@ fs_write = ["~/.cache/aileron/gitcrawl/"]
 [[capabilities.spawn.programs]]
 path = "/usr/bin/git"
 hash = "sha256:bd6e"
+
+[capabilities.spawn.operations.log]
+argv = "git log --since={since}"
+
+[capabilities.spawn.operations.status]
+argv = "git status"
 `)
 	m1, err := ParseManifest("a.toml", body)
 	if err != nil {
@@ -657,8 +775,16 @@ func spawnEqual(a, b *ManifestSpawn) bool {
 			return false
 		}
 	}
-	return stringSliceEqual(a.ArgvPatterns, b.ArgvPatterns) &&
-		stringSliceEqual(a.EnvPassthrough, b.EnvPassthrough) &&
+	if len(a.Operations) != len(b.Operations) {
+		return false
+	}
+	for name, opA := range a.Operations {
+		opB, ok := b.Operations[name]
+		if !ok || opA != opB {
+			return false
+		}
+	}
+	return stringSliceEqual(a.EnvPassthrough, b.EnvPassthrough) &&
 		stringSliceEqual(a.FSRead, b.FSRead) &&
 		stringSliceEqual(a.FSWrite, b.FSWrite) &&
 		a.Cwd == b.Cwd

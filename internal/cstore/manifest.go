@@ -65,6 +65,14 @@ type ManifestConnector struct {
 	// install consent UI. Not load-bearing; provenance lives in the FQN.
 	Publisher string `toml:"publisher"`
 
+	// Forwarder, when set, opts the connector into the daemon-embedded
+	// shared spawn-forwarder WASM (per ADR-0002's spawn-primitive
+	// section). The only allowed value in v1 is "builtin://spawn-forwarder".
+	// When set, the install pipeline routes around the per-connector
+	// WASM fetch; the daemon supplies the forwarder bytes at execution
+	// time and the manifest is the connector's complete identity.
+	Forwarder string `toml:"forwarder,omitempty"`
+
 	// Idempotency is the optional `[connector.idempotency]` block per
 	// ADR-0010. Absent → idempotent default; present → must declare
 	// `default = "idempotent" | "not_idempotent"`. The retry primitive
@@ -72,6 +80,11 @@ type ManifestConnector struct {
 	// retry a failed call.
 	Idempotency *ManifestIdempotency `toml:"idempotency"`
 }
+
+// BuiltinForwarderSpawn is the reserved FQN for the daemon-embedded
+// spawn-forwarder. The only allowed value of ManifestConnector.Forwarder
+// in v1; new builtin:// shapes require an ADR amendment.
+const BuiltinForwarderSpawn = "builtin://spawn-forwarder"
 
 // ManifestIdempotency is `[connector.idempotency]` — the connector's
 // declaration of whether a retry could double-send a side effect.
@@ -195,11 +208,18 @@ type ManifestSpawn struct {
 	// the runtime additionally verifies the binary's bytes.
 	Programs []ManifestSpawnProgram `toml:"programs"`
 
-	// ArgvPatterns is an allow-list of templated argv shapes the
-	// connector may invoke. Each pattern is a literal argv with
-	// `{name}` placeholders the connector fills at call time. An argv
-	// that does not match any pattern after substitution is denied.
-	ArgvPatterns []string `toml:"argv_patterns"`
+	// Operations is the closed map of operations the connector exposes.
+	// Each entry is keyed by op name (matched at call time against the
+	// agent's tool-call op) and carries an argv pattern with `{name}`
+	// placeholders the runtime substitutes from the agent's args. The
+	// gate's argv allow-list is derived from operations[*].argv.
+	//
+	// An incoming op whose name is not in this map is denied with
+	// capability_denied. The forwarder WASM consumes this table via the
+	// aileron_host.spawn_op host function; per-binary connectors using
+	// the low-level aileron_host.spawn can also read it from the runtime
+	// gate.
+	Operations map[string]ManifestSpawnOperation `toml:"operations"`
 
 	// EnvPassthrough is the closed set of environment keys the runtime
 	// may set on the subprocess. The subprocess receives only declared
@@ -220,6 +240,36 @@ type ManifestSpawn struct {
 	// within FSRead. When unset, the runtime uses a per-invocation
 	// temporary directory.
 	Cwd string `toml:"cwd,omitempty"`
+}
+
+// ManifestSpawnOperation is one entry in [capabilities.spawn.operations]:
+// an argv template the runtime substitutes from the agent's args plus
+// optional human-readable description for action.md generation.
+type ManifestSpawnOperation struct {
+	// Argv is the templated argv shape. Tokens are whitespace-separated;
+	// each token may contain `{name}` placeholders that bind to the
+	// agent's args at call time. The runtime validates the substituted
+	// argv against this pattern and refuses any envelope whose argv
+	// doesn't match.
+	Argv string `toml:"argv"`
+
+	// Description is a one-line human-readable summary. Surfaced in the
+	// agent's tool list and the wrap tool's generated action.md.
+	Description string `toml:"description,omitempty"`
+}
+
+// ArgvPatterns returns the flat list of argv templates derived from the
+// manifest's operations map. The sandbox gate (SpawnPolicy.CheckSpawn)
+// consumes this list as its argv allow-list.
+func (s *ManifestSpawn) ArgvPatterns() []string {
+	if s == nil || len(s.Operations) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.Operations))
+	for _, op := range s.Operations {
+		out = append(out, op.Argv)
+	}
+	return out
 }
 
 // ManifestSpawnProgram is one entry in [capabilities.spawn].programs:
@@ -281,6 +331,17 @@ func ValidateManifest(m *Manifest, file string) error {
 	if m.Connector.ProvenanceHash != "" {
 		if !strings.HasPrefix(m.Connector.ProvenanceHash, "sha256:") || len(m.Connector.ProvenanceHash) <= len("sha256:") {
 			return newValidationErr(file, "[connector].provenance_hash %q must be prefixed with sha256:", m.Connector.ProvenanceHash)
+		}
+	}
+	if m.Connector.Forwarder != "" {
+		if m.Connector.Forwarder != BuiltinForwarderSpawn {
+			return newValidationErr(file,
+				"[connector].forwarder %q is not recognized; v1 supports only %q",
+				m.Connector.Forwarder, BuiltinForwarderSpawn)
+		}
+		if m.Capabilities.Spawn == nil {
+			return newValidationErr(file,
+				"[connector].forwarder is set but [capabilities.spawn] is absent; the forwarder requires a spawn capability to drive")
 		}
 	}
 	if m.Capabilities.Network != nil {
@@ -395,6 +456,12 @@ func validateOAuth2(o *ManifestOAuth2, file string) error {
 // letter or underscore, followed by letters, digits, or underscores.
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// opNameRe matches an operation name in [capabilities.spawn.operations].
+// Lowercase, alphanumeric, underscores, and hyphens; must begin with a
+// letter. Names appear in action.md filenames and in the agent's tool
+// surface, so the shape is conservative.
+var opNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+
 // validateSpawn enforces the [capabilities.spawn] schema described in
 // ADR-0002's spawn-primitive section. See also ADR-0014 for the runtime
 // enforcement mechanism the declaration translates into.
@@ -429,14 +496,19 @@ func validateSpawn(s *ManifestSpawn, file string) error {
 			}
 		}
 	}
-	if len(s.ArgvPatterns) == 0 {
+	if len(s.Operations) == 0 {
 		return newValidationErr(file,
-			"[capabilities.spawn].argv_patterns is required (at least one)")
+			"[capabilities.spawn.operations] is required (at least one operation)")
 	}
-	for i, pat := range s.ArgvPatterns {
-		if strings.TrimSpace(pat) == "" {
+	for name, op := range s.Operations {
+		if !opNameRe.MatchString(name) {
 			return newValidationErr(file,
-				"[capabilities.spawn].argv_patterns[%d] is empty", i)
+				"[capabilities.spawn.operations].%q name must match %s",
+				name, opNameRe.String())
+		}
+		if strings.TrimSpace(op.Argv) == "" {
+			return newValidationErr(file,
+				"[capabilities.spawn.operations].%q.argv is required", name)
 		}
 	}
 	for i, k := range s.EnvPassthrough {
