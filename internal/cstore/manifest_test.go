@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 const validManifestTOML = `[connector]
@@ -410,6 +412,288 @@ func TestValidateManifest_AllowsLoopbackHTTPForLocalDev(t *testing.T) {
 				t.Errorf("loopback http should be allowed: %v", err)
 			}
 		})
+	}
+}
+
+// --- spawn capability validation (#509) ---
+
+func goodSpawn() *ManifestSpawn {
+	return &ManifestSpawn{
+		Programs:       []ManifestSpawnProgram{{Path: "/usr/bin/git"}},
+		ArgvPatterns:   []string{"git log --since={since} --author={author}"},
+		EnvPassthrough: []string{"GIT_AUTHOR_NAME"},
+		FSRead:         []string{"~/code/"},
+		FSWrite:        []string{"~/.cache/aileron/gitcrawl/"},
+	}
+}
+
+func TestValidateManifest_AcceptsFullSpawnBlock(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Spawn = goodSpawn()
+	m.Capabilities.Spawn.Cwd = "~/code/"
+	m.Capabilities.Spawn.Programs[0].Hash = "sha256:abc123"
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_AcceptsMinimalSpawnBlock(t *testing.T) {
+	// FSRead, FSWrite, EnvPassthrough are optional. The minimum is
+	// one program and one argv pattern.
+	m := canonicalManifestForTest()
+	m.Capabilities.Spawn = &ManifestSpawn{
+		Programs:     []ManifestSpawnProgram{{Path: "/usr/bin/git"}},
+		ArgvPatterns: []string{"git status"},
+	}
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_AcceptsAbsentSpawnBlock(t *testing.T) {
+	// The whole [capabilities.spawn] block is optional — connectors
+	// that do not spawn anything simply omit it.
+	m := canonicalManifestForTest()
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsBadSpawnFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*ManifestSpawn)
+		want   string
+	}{
+		{"empty programs", func(s *ManifestSpawn) {
+			s.Programs = nil
+		}, "programs is required"},
+		{"empty program path", func(s *ManifestSpawn) {
+			s.Programs = []ManifestSpawnProgram{{Path: ""}}
+		}, "path is required"},
+		{"whitespace program path", func(s *ManifestSpawn) {
+			s.Programs = []ManifestSpawnProgram{{Path: "   "}}
+		}, "path is required"},
+		{"relative program path", func(s *ManifestSpawn) {
+			s.Programs = []ManifestSpawnProgram{{Path: "git"}}
+		}, "absolute"},
+		{"bad program hash prefix", func(s *ManifestSpawn) {
+			s.Programs = []ManifestSpawnProgram{{Path: "/usr/bin/git", Hash: "md5:abc"}}
+		}, "sha256:"},
+		{"hash prefix only", func(s *ManifestSpawn) {
+			s.Programs = []ManifestSpawnProgram{{Path: "/usr/bin/git", Hash: "sha256:"}}
+		}, "sha256:"},
+		{"empty argv_patterns", func(s *ManifestSpawn) {
+			s.ArgvPatterns = nil
+		}, "argv_patterns is required"},
+		{"blank argv pattern", func(s *ManifestSpawn) {
+			s.ArgvPatterns = []string{"   "}
+		}, "is empty"},
+		{"env key leading digit", func(s *ManifestSpawn) {
+			s.EnvPassthrough = []string{"1VAR"}
+		}, "valid environment variable"},
+		{"env key with dash", func(s *ManifestSpawn) {
+			s.EnvPassthrough = []string{"MY-VAR"}
+		}, "valid environment variable"},
+		{"env key empty", func(s *ManifestSpawn) {
+			s.EnvPassthrough = []string{""}
+		}, "valid environment variable"},
+		{"relative fs_read", func(s *ManifestSpawn) {
+			s.FSRead = []string{"code/"}
+		}, "absolute"},
+		{"relative fs_write", func(s *ManifestSpawn) {
+			s.FSWrite = []string{"cache/"}
+		}, "absolute"},
+		{"relative cwd", func(s *ManifestSpawn) {
+			s.Cwd = "code/"
+		}, "absolute"},
+		{"windows-style cwd", func(s *ManifestSpawn) {
+			s.Cwd = `C:\Users\me`
+		}, "absolute"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			sp := goodSpawn()
+			tc.mutate(sp)
+			m.Capabilities.Spawn = sp
+			err := ValidateManifest(m, "x.toml")
+			if err == nil {
+				t.Fatalf("Validate accepted; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q; want substring %q", err.Error(), tc.want)
+			}
+			var aerr *Error
+			if !errors.As(err, &aerr) || aerr.Class != ClassValidationError {
+				t.Errorf("expected ClassValidationError, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_AcceptsTildeOnlyPath(t *testing.T) {
+	// `~` (no trailing slash) is the user's home directory; the
+	// validator accepts it as an anchored path.
+	m := canonicalManifestForTest()
+	sp := goodSpawn()
+	sp.FSRead = []string{"~"}
+	sp.Cwd = "~"
+	m.Capabilities.Spawn = sp
+	if err := ValidateManifest(m, "x.toml"); err != nil {
+		t.Errorf("`~` should be accepted: %v", err)
+	}
+}
+
+func TestValidateManifest_AcceptsAbsoluteUnixPaths(t *testing.T) {
+	m := canonicalManifestForTest()
+	sp := goodSpawn()
+	sp.FSRead = []string{"/var/spool/", "/etc/aileron/"}
+	sp.FSWrite = []string{"/tmp/aileron/"}
+	sp.Cwd = "/tmp/aileron/"
+	m.Capabilities.Spawn = sp
+	if err := ValidateManifest(m, "x.toml"); err != nil {
+		t.Errorf("absolute paths should be accepted: %v", err)
+	}
+}
+
+func TestParseManifest_AcceptsSpawnTOML(t *testing.T) {
+	body := []byte(`[connector]
+name = "github://acme/gitcrawl"
+version = "1.0.0"
+
+[capabilities.spawn]
+argv_patterns = ["git log --since={since}"]
+env_passthrough = ["GIT_AUTHOR_NAME"]
+fs_read = ["~/code/"]
+fs_write = ["~/.cache/aileron/gitcrawl/"]
+cwd = "~/code/"
+
+[[capabilities.spawn.programs]]
+path = "/usr/bin/git"
+hash = "sha256:abc123"
+`)
+	m, err := ParseManifest("x.toml", body)
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	sp := m.Capabilities.Spawn
+	if sp == nil {
+		t.Fatal("Spawn block not parsed")
+	}
+	if len(sp.Programs) != 1 || sp.Programs[0].Path != "/usr/bin/git" {
+		t.Errorf("Programs = %v", sp.Programs)
+	}
+	if sp.Programs[0].Hash != "sha256:abc123" {
+		t.Errorf("Programs[0].Hash = %q", sp.Programs[0].Hash)
+	}
+	if len(sp.ArgvPatterns) != 1 || sp.ArgvPatterns[0] != "git log --since={since}" {
+		t.Errorf("ArgvPatterns = %v", sp.ArgvPatterns)
+	}
+	if len(sp.EnvPassthrough) != 1 || sp.EnvPassthrough[0] != "GIT_AUTHOR_NAME" {
+		t.Errorf("EnvPassthrough = %v", sp.EnvPassthrough)
+	}
+	if sp.Cwd != "~/code/" {
+		t.Errorf("Cwd = %q", sp.Cwd)
+	}
+	if err := ValidateManifest(m, "x.toml"); err != nil {
+		t.Errorf("ValidateManifest after Parse: %v", err)
+	}
+}
+
+func TestParseManifest_SpawnRoundTrip(t *testing.T) {
+	// Round-trip property: a manifest with [capabilities.spawn] parses,
+	// validates, then re-encodes to TOML that parses back identically.
+	// Mirrors the parse/validate property expected of every capability
+	// block per issue #509's acceptance criterion.
+	body := []byte(`[connector]
+name = "github://acme/gitcrawl"
+version = "1.0.0"
+
+[capabilities.spawn]
+argv_patterns = ["git status", "git log --since={since}"]
+env_passthrough = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
+fs_read = ["~/code/", "~/.gitconfig"]
+fs_write = ["~/.cache/aileron/gitcrawl/"]
+
+[[capabilities.spawn.programs]]
+path = "/usr/bin/git"
+hash = "sha256:bd6e"
+`)
+	m1, err := ParseManifest("a.toml", body)
+	if err != nil {
+		t.Fatalf("first parse: %v", err)
+	}
+	if err := ValidateManifest(m1, "a.toml"); err != nil {
+		t.Fatalf("first validate: %v", err)
+	}
+	var buf strings.Builder
+	enc := toml.NewEncoder(&buf)
+	if err := enc.Encode(m1); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	m2, err := ParseManifest("b.toml", []byte(buf.String()))
+	if err != nil {
+		t.Fatalf("second parse: %v\nencoded:\n%s", err, buf.String())
+	}
+	if err := ValidateManifest(m2, "b.toml"); err != nil {
+		t.Fatalf("second validate: %v", err)
+	}
+	if !spawnEqual(m1.Capabilities.Spawn, m2.Capabilities.Spawn) {
+		t.Errorf("round-trip diverged:\n  before: %+v\n  after:  %+v",
+			m1.Capabilities.Spawn, m2.Capabilities.Spawn)
+	}
+}
+
+func spawnEqual(a, b *ManifestSpawn) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if len(a.Programs) != len(b.Programs) {
+		return false
+	}
+	for i := range a.Programs {
+		if a.Programs[i] != b.Programs[i] {
+			return false
+		}
+	}
+	return stringSliceEqual(a.ArgvPatterns, b.ArgvPatterns) &&
+		stringSliceEqual(a.EnvPassthrough, b.EnvPassthrough) &&
+		stringSliceEqual(a.FSRead, b.FSRead) &&
+		stringSliceEqual(a.FSWrite, b.FSWrite) &&
+		a.Cwd == b.Cwd
+}
+
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestIsAbsoluteOrTildePath(t *testing.T) {
+	cases := map[string]bool{
+		"/usr/bin/git":         true,
+		"/":                    true,
+		"~":                    true,
+		"~/code":               true,
+		"~/code/":              true,
+		"":                     false,
+		"git":                  false,
+		"./bin/git":            false,
+		"../bin/git":           false,
+		`C:\Program Files\git`: false,
+		"~user/code":           false,
+	}
+	for p, want := range cases {
+		if got := isAbsoluteOrTildePath(p); got != want {
+			t.Errorf("isAbsoluteOrTildePath(%q) = %v, want %v", p, got, want)
+		}
 	}
 }
 
