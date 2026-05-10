@@ -1,11 +1,12 @@
 ---
 title: "Prepare for Liftoff"
-description: "Build Aileron from source, install Gmail and Calendar actions, and launch Claude Code with everything wired in."
+description: "Install Aileron, install Gmail and Calendar actions, and launch Claude Code with everything wired in."
 order: 2
 ---
 
 import HighlightCard from '$lib/components/ui/highlight-card.svelte';
 import LiftoffPreflight from '$lib/components/ui/liftoff-preflight.svelte';
+import PlatformTabs from '$lib/components/ui/tabs/platform-tabs.svelte';
 
 <HighlightCard>
 
@@ -23,16 +24,30 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
 
 <LiftoffPreflight client:load />
 
-## 1. Build Aileron
+## 1. Install Aileron
 
-> **Note:** there is no `brew install aileron` yet. This guide builds from source; package distribution is coming shortly.
-
-```sh
-git clone https://github.com/ALRubinger/aileron.git && \
-  cd aileron && \
-  task build:cli build:server build:mcp build:sh && \
-  export PATH="$PWD/build:$PATH"
-```
+<PlatformTabs items={[
+  {
+    value: "macos",
+    label: "macOS",
+    lang: "sh",
+    code: "brew tap ALRubinger/aileron\nbrew install aileron",
+  },
+  {
+    value: "linux",
+    label: "Linux",
+    lang: "sh",
+    note: "Debian/Ubuntu shown; .rpm and .apk packages are attached to every release alongside .deb.",
+    code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.deb\nsudo dpkg -i aileron_0.0.2_linux_amd64.deb",
+  },
+  {
+    value: "windows",
+    label: "Windows",
+    lang: "powershell",
+    note: "Extract the zip and add the directory to PATH.",
+    code: "Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron",
+  },
+]} client:load />
 
 Verify:
 
@@ -43,8 +58,10 @@ aileron version
 You should see something like:
 
 ```
-aileron dev (f66e51c)
+aileron 0.0.2 (697521b)
 ```
+
+> Want to build from source? Clone [the repo](https://github.com/ALRubinger/aileron) and follow the README. The prebuilt path above is the standard install for everyone else.
 
 ## 2. Install Actions for Gmail and Calendar
 
