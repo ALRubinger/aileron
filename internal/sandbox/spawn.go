@@ -65,7 +65,7 @@ func NewSpawnPolicy(m *cstore.Manifest) *SpawnPolicy {
 	for _, prog := range s.Programs {
 		p.programs[prog.Path] = prog.Hash
 	}
-	for _, pat := range s.ArgvPatterns {
+	for _, pat := range s.ArgvPatterns() {
 		p.argvPatterns = append(p.argvPatterns, parseArgvPattern(pat))
 	}
 	for _, k := range s.EnvPassthrough {

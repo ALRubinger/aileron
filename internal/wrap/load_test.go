@@ -273,8 +273,8 @@ func TestEmit_ProducesValidManifest(t *testing.T) {
 	if m.Capabilities.Spawn == nil {
 		t.Fatal("manifest is missing [capabilities.spawn]")
 	}
-	if got, want := len(m.Capabilities.Spawn.ArgvPatterns), 2; got != want {
-		t.Errorf("argv_patterns count = %d, want %d", got, want)
+	if got, want := len(m.Capabilities.Spawn.Operations), 2; got != want {
+		t.Errorf("operations count = %d, want %d", got, want)
 	}
 }
 
