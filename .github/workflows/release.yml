@@ -77,17 +77,22 @@ jobs:
         # Railway only auto-rebuilds on push-to-main; a release tag
         # alone doesn't move main, so the docs would otherwise stay
         # frozen at the previous release until the next code push.
-        # Hit Railway's deploy hook to force a rebuild.
         #
-        # If RAILWAY_DOCS_DEPLOY_HOOK isn't configured, skip silently
-        # — the docs will catch up on the next push to main.
+        # Railway has no built-in deploy webhook, so use the Railway
+        # CLI with a project-scoped token. Create the token in Railway
+        # dashboard → project → Settings → Tokens → Create, then add
+        # it as the RAILWAY_TOKEN repo secret. If the token isn't
+        # configured, skip silently — docs catch up on next push.
+        #
+        # The --service value must match the docs service name in the
+        # Railway project; adjust if it ever differs from "docs".
         if: success()
         run: |
-          if [ -z "${RAILWAY_DOCS_DEPLOY_HOOK}" ]; then
-            echo "RAILWAY_DOCS_DEPLOY_HOOK not configured; skipping docs rebuild trigger"
+          if [ -z "${RAILWAY_TOKEN}" ]; then
+            echo "RAILWAY_TOKEN not configured; skipping docs rebuild"
             exit 0
           fi
-          curl -fsSL -X POST "${RAILWAY_DOCS_DEPLOY_HOOK}"
+          npx -y @railway/cli redeploy --service docs --yes
           echo "Triggered Railway docs rebuild"
         env:
-          RAILWAY_DOCS_DEPLOY_HOOK: ${{ secrets.RAILWAY_DOCS_DEPLOY_HOOK }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
