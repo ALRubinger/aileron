@@ -46,6 +46,7 @@ The runtime knows about a small, fixed set of primitive capability types:
 - **Network access** — outbound TCP/HTTP to declared `host:port` pairs.
 - **Credential access** — a vault credential of a declared kind (`oauth2`, `api_key`, `basic`, etc.) with declared scopes.
 - **Host functions** — narrow capabilities the runtime exposes (e.g. structured logging, audit-event emission, time, RNG).
+- **Spawn** — bounded execution of a local CLI subprocess on the connector's behalf. Declared programs, argv shapes, environment, and filesystem scope; output captured and returned to the connector. See "Spawn primitive: bounded subprocess execution" below.
 
 The runtime does *not* know about Gmail, Slack, Stripe, GitHub, or any other named service. Service-specific knowledge — endpoints, request shapes, OAuth flow particulars, retry semantics — lives entirely inside the connector binary. Adding support for a new external service is an entirely out-of-tree activity: write a connector, declare its needs, ship it.
 
@@ -176,6 +177,7 @@ Manifest fields:
 - `[capabilities.network]` — outbound network grants. Pinned to specific `host:port` pairs; no wildcards.
 - `[capabilities.credential]` — credential kinds and scopes the connector needs. The connector declares the *type*; the user binds a concrete vault entry at install or first use.
 - `[capabilities.runtime]` — host-function imports the connector uses (audit emit, logging, time, RNG, etc.).
+- `[capabilities.spawn]` — local subprocess grants. Declares allowed programs, argv patterns, environment passthrough, filesystem scope, and cwd policy. Optional; absent for connectors that do not spawn subprocesses.
 - `[provides]` — what intents this connector implements. Used by actions when declaring `requires.connectors` and by the Hub for discovery.
 
 Each capability section is enumerable and bounded. There is no `*` and no implicit grant. A connector that did not declare network access cannot dial out, period.
@@ -215,6 +217,91 @@ Publisher-owned apps fix that. Aileron-the-runtime is just machinery (PKCE, call
   Providers that genuinely treat `client_secret` as a server-only credential (web-app flows behind a hosted backend) MUST NOT have it set in a connector manifest at all.
 - **Loopback redirect only.** The runtime serves the OAuth callback at `http://localhost:<random-port>/callback`. The publisher MUST register `http://localhost` as a valid redirect URI on their OAuth app. Niche providers without loopback support are post-MVP.
 - **Token storage.** The runtime persists the resulting `{access_token, refresh_token, expires_at, ...}` envelope in the user's vault. The connector never sees the token bytes — the runtime injects `Authorization: Bearer <access_token>` host-side, refreshing transparently before injection when the token is near expiry.
+
+### Spawn primitive: bounded subprocess execution
+
+A connector frequently needs to invoke an existing local CLI rather than re-implement its protocol. Examples include `git`, `slackdump`, or an OS messaging client. The spawn primitive is the runtime's mechanism for permitting that on the connector's behalf under the same trust model as the other primitives. Declared in the manifest, gated host-side, audited.
+
+The connector itself never calls `os/exec` directly. The connector is a sandboxed WASM module without OS-process privileges. Instead, the connector calls a host function (`aileron_host.spawn`) that the runtime exposes, and the runtime is what owns the `os.exec.Command` call. The runtime enforces the manifest's `[capabilities.spawn]` declaration on every invocation, exactly as `HostPolicy.CheckURL` (at `internal/sandbox/network.go:43-84`) enforces `[capabilities.network]` on every outbound HTTP call. Same gate pattern, different syscall.
+
+#### Manifest declaration
+
+```toml
+[capabilities.spawn]
+programs = [
+  { path = "/usr/bin/git", hash = "sha256:bd6e..." },
+]
+argv_patterns = [
+  "git log --since={since} --author={author} --format=%H%x09%s",
+]
+env_passthrough = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"]
+fs_read  = ["~/code/", "~/.gitconfig"]
+fs_write = ["~/.cache/aileron/gitcrawl/"]
+cwd      = "~/code/"
+```
+
+- **`programs`**: list of allowed binaries. Each entry pins the binary by exact filesystem path and optionally a content hash. The runtime resolves the path before exec and refuses to spawn if it does not match an entry. When `hash` is set, the runtime additionally verifies the binary's bytes; a mismatch fails the spawn loudly.
+- **`argv_patterns`**: templated argv shapes. Each pattern is a literal argv with `{name}` placeholders that the connector fills at call time. Patterns are an allow-list. An argv that does not match any declared pattern after placeholder substitution is denied.
+- **`env_passthrough`**: environment keys the runtime is permitted to set on the subprocess. The subprocess receives only declared keys; nothing is forwarded by default. Credential injection rides this channel (see below).
+- **`fs_read` / `fs_write`**: filesystem scopes. Absolute paths or `~/`-anchored. The sandbox restricts the subprocess to these scopes for the corresponding access mode. The enforcement mechanism is platform-specific and lives in [ADR-0014](/adr/0014-spawn-sandbox-technology) (separate sub-ADR).
+- **`cwd`**: optional working-directory policy. When set, the runtime invokes the subprocess with this cwd. When unset, the runtime uses a per-invocation temporary directory.
+
+Each rule is enumerable and bounded. There is no `*`, no shell evaluation, no glob in argv. A connector that did not declare a program cannot spawn it, period.
+
+#### Host-function shape
+
+The connector calls into the runtime through four host functions, registered in the existing `aileron_host` module alongside `http_request` and friends:
+
+| Function | Shape | Purpose |
+|---|---|---|
+| `spawn` | `(envelope_ptr, envelope_len) -> handle` | Submits a spawn request. The envelope is JSON: `{ program, argv, env, cwd?, stdin? }`. Returns an opaque per-invocation handle. |
+| `spawn_status` | `(handle) -> exit_code` | Returns the subprocess exit code (or a negative sentinel for runtime-side denial). |
+| `spawn_output_size` | `(handle, which) -> n_bytes` | Reports the captured size of stdout (`which=0`) or stderr (`which=1`). |
+| `spawn_output_read` | `(handle, which, dst_ptr, dst_len) -> n_read` | Copies captured output bytes into the connector's linear memory. |
+
+This is the same retrieval pattern as `http_response_*`. The buffered output never leaves the runtime's address space until the connector pulls it; the subprocess itself writes to runtime-owned pipes.
+
+Envelope schema:
+
+```json
+{
+  "program": "/usr/bin/git",
+  "argv": ["git", "log", "--since=2026-04-01", "--author=alr", "--format=%H%x09%s"],
+  "env":  { "GIT_AUTHOR_NAME": "...", "GIT_AUTHOR_EMAIL": "..." },
+  "cwd":  "/Users/alr/code/aileron",
+  "stdin": null
+}
+```
+
+Return shape (read back by the connector via the helper functions):
+
+```json
+{
+  "exit_code": 0,
+  "stdout_bytes": 4096,
+  "stderr_bytes": 0
+}
+```
+
+#### Enforcement and audit
+
+Every spawn call passes through `HostPolicy.CheckSpawn(envelope)` before the runtime exec's anything. The check is the gate. It validates:
+
+1. `program` resolves to a declared entry in `[capabilities.spawn].programs` (path match, hash match when declared).
+2. `argv` matches at least one `argv_patterns` entry after placeholder substitution.
+3. Every key in `env` is in `env_passthrough` (no exfiltration of arbitrary host env into the subprocess).
+4. `cwd` (when set) is within `fs_read`.
+5. The action's declared capability subset permits spawn. The runtime enforces both the connector manifest and the action's narrower subset, the same two-boundary defense in depth the rest of the model uses.
+
+Denials raise `capability_denied` (the same error class as network denials) and are audited identically. Each allowed or denied spawn emits a structured audit event with the connector identity, program, argv shape (placeholders preserved, not interpolated arguments), exit code, and content hashes of stdout and stderr.
+
+The sandbox technology (which OS-level mechanism actually confines the subprocess to its declared filesystem scope, blocks network access from the subprocess itself, and prevents privilege escalation) is the subject of [ADR-0014](/adr/0014-spawn-sandbox-technology). This ADR commits to the property: the subprocess executes under an enforcement boundary that the runtime owns. It does not commit to a specific mechanism.
+
+#### Credential injection
+
+Vault credentials never reach the subprocess as files or arguments. When a connector's spawn invocation references a credential, the runtime resolves the vault entry (via the existing `credentialResolver`), sets the corresponding env var on the subprocess only, and discards the value when the subprocess exits. The connector never holds the credential bytes either. The env-var channel matches the manifest's `env_passthrough` declaration and is gated by it.
+
+This preserves the same sealed-credential property the runtime enforces for HTTP calls. The credential exists at three layers (vault, subprocess env, never connector), and the trust boundary between connector and credential remains intact.
 
 ### Capabilities are abstract types, not concrete resources
 
