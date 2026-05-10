@@ -2,6 +2,7 @@ package cstore
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -341,6 +342,136 @@ func (s *Store) commit(t *Tarball, ref Ref, hashHex string) error {
 		return wrapStoreErr(err)
 	}
 	return s.recordIndex(ref, "sha256:"+hashHex)
+}
+
+// ForwarderConnectorHash returns the canonical content hash for a
+// shared-forwarder connector (per ADR-0002's spawn-primitive section).
+// The connector binary is the daemon-embedded forwarder bytes; the
+// connector identity is the manifest. The hash is therefore
+// `sha256(forwarder_bytes || manifest_bytes)`, the same canonical
+// shape as the per-binary case but with the forwarder bytes
+// supplying the "binary" half.
+//
+// The returned value carries the `sha256:` prefix to match the
+// declared-hash format used elsewhere in cstore.
+func ForwarderConnectorHash(forwarderBytes, manifestBytes []byte) string {
+	h := sha256.New()
+	h.Write(forwarderBytes)
+	h.Write(manifestBytes)
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// InstallForwarderManifest writes a forwarder-shaped manifest into the
+// content-addressed store. No binary fetch happens: forwarderBytes are
+// the daemon-embedded WASM the runtime supplies at execution time,
+// passed in here so cstore can compute the content hash without taking
+// a dependency on internal/sandbox/forwarder.
+//
+// The manifest must declare `connector.forwarder = "builtin://spawn-forwarder"`,
+// must parse and validate cleanly, and must agree with `ref` on FQN
+// and version. On success the manifest lives at
+// <root>/connectors/sha256/<hash>/manifest.toml; no connector.wasm or
+// signature.sig is written for the local-publisher case (the user is
+// the publisher and the manifest's content hash is the trust anchor).
+//
+// Returns the same shape as Installer.Install: hash + entry dir, plus
+// AlreadyInstalled when an entry with the matching hash existed before
+// this call.
+func (s *Store) InstallForwarderManifest(manifestBytes, forwarderBytes []byte, ref Ref) (*InstallResult, error) {
+	parsed, err := ParseManifest("", manifestBytes)
+	if err != nil {
+		return nil, err
+	}
+	if vErr := ValidateManifest(parsed, ""); vErr != nil {
+		return nil, vErr
+	}
+	if parsed.Connector.Forwarder != BuiltinForwarderSpawn {
+		return nil, &Error{
+			Class:    ClassValidationError,
+			Boundary: BoundaryRuntime,
+			Message:  "manifest does not opt into the shared forwarder",
+			Details: map[string]any{
+				"connector.forwarder": parsed.Connector.Forwarder,
+				"expected":            BuiltinForwarderSpawn,
+			},
+		}
+	}
+	if parsed.Connector.Name != ref.FQN.String() {
+		return nil, &Error{
+			Class:    ClassFQNMismatch,
+			Boundary: BoundaryRuntime,
+			Message:  "manifest FQN does not match install ref",
+			Details: map[string]any{
+				"requested_fqn": ref.FQN.String(),
+				"manifest_fqn":  parsed.Connector.Name,
+			},
+		}
+	}
+	if parsed.Connector.Version != ref.Version {
+		return nil, &Error{
+			Class:    ClassFQNMismatch,
+			Boundary: BoundaryRuntime,
+			Message:  "manifest version does not match install ref",
+			Details: map[string]any{
+				"requested_version": ref.Version,
+				"manifest_version":  parsed.Connector.Version,
+			},
+		}
+	}
+
+	hash := ForwarderConnectorHash(forwarderBytes, manifestBytes)
+	hashHex := strings.TrimPrefix(hash, "sha256:")
+
+	if err := os.MkdirAll(s.tmpRoot(), 0o755); err != nil {
+		return nil, wrapStoreErr(err)
+	}
+	if err := os.MkdirAll(s.sha256Root(), 0o755); err != nil {
+		return nil, wrapStoreErr(err)
+	}
+
+	dst := filepath.Join(s.sha256Root(), hashHex)
+	if _, err := os.Stat(dst); err == nil {
+		// Already-installed: identical manifest already in store at this
+		// hash (same forwarder bytes + same manifest bytes => same hash).
+		if err := s.recordIndex(ref, hash); err != nil {
+			return nil, err
+		}
+		return &InstallResult{
+			Hash:             hash,
+			EntryDir:         dst,
+			AlreadyInstalled: true,
+		}, nil
+	}
+
+	tmp, err := uniqueTempDir(s.tmpRoot())
+	if err != nil {
+		return nil, wrapStoreErr(err)
+	}
+	defer os.RemoveAll(tmp)
+
+	if err := writeFile(filepath.Join(tmp, tarManifestFile), manifestBytes, 0o644); err != nil {
+		return nil, wrapStoreErr(err)
+	}
+
+	if err := os.Rename(tmp, dst); err != nil {
+		// Concurrent install: re-stat and treat as no-op if dst now
+		// exists (mirrors Store.commit's race handling).
+		if _, sErr := os.Stat(dst); sErr == nil {
+			if err := s.recordIndex(ref, hash); err != nil {
+				return nil, err
+			}
+			return &InstallResult{
+				Hash:             hash,
+				EntryDir:         dst,
+				AlreadyInstalled: true,
+			}, nil
+		}
+		return nil, wrapStoreErr(err)
+	}
+	if err := s.recordIndex(ref, hash); err != nil {
+		return nil, err
+	}
+	return &InstallResult{Hash: hash, EntryDir: dst}, nil
 }
 
 // uniqueTempDir creates and returns a fresh subdirectory of parent.
