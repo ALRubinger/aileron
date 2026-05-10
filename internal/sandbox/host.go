@@ -67,11 +67,34 @@ type hostState struct {
 	// `binding_required` if the connector tries to use the path.
 	credentialResolver credential.Resolver
 
-	mu        sync.Mutex
-	logs      []LogLine
-	response  []byte
-	respCode  int
-	respErr   *Error // sticky: set when http_request itself was denied or failed
+	// spawnPolicy is the connector manifest's [capabilities.spawn]
+	// declaration in enforced form (per ADR-0002 spawn primitive,
+	// ADR-0014 sandbox tech). Nil when the connector did not declare
+	// spawn — every spawn host-function call then refuses with
+	// capability_denied.
+	spawnPolicy *SpawnPolicy
+
+	// spawnExecutor is the platform-specific subprocess executor.
+	// Defaults to defaultSpawnExecutor when the runtime was built
+	// without WithSpawnExecutor; tests inject fakes.
+	spawnExecutor SpawnExecutor
+
+	// actionSpawnGrant is the action manifest's declared subset of
+	// programs the connector may spawn. Empty means the action did
+	// not narrow the connector's grant. Non-empty entries act as the
+	// second-line gate alongside the connector manifest's policy.
+	actionSpawnGrant map[string]struct{}
+
+	mu             sync.Mutex
+	logs           []LogLine
+	response       []byte
+	respCode       int
+	respErr        *Error // sticky: set when http_request itself was denied or failed
+	spawnExitCode  int
+	spawnStdout    []byte
+	spawnStderr    []byte
+	spawnErr       *Error // sticky: set when spawn was denied or failed
+	spawnHasResult bool
 }
 
 // hostStateKey is the context key used to thread per-invocation state

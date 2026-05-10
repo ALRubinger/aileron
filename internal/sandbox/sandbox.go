@@ -89,6 +89,14 @@ type Call struct {
 	Limits             Limits
 	AllowedAuthority   []string
 	CredentialResolver credential.Resolver
+
+	// AllowedSpawnPrograms is the action manifest's declared subset of
+	// programs the connector may invoke via aileron_host.spawn. Each
+	// entry is an absolute (or ~/-anchored) program path matching the
+	// connector manifest's [capabilities.spawn].programs declaration.
+	// Empty means the action did not narrow the connector's grant; the
+	// connector manifest's policy is the only spawn gate.
+	AllowedSpawnPrograms []string
 }
 
 // Result is what the sandbox produced. Successful runs surface their
