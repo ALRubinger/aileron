@@ -78,21 +78,29 @@ jobs:
         # alone doesn't move main, so the docs would otherwise stay
         # frozen at the previous release until the next code push.
         #
-        # Railway has no built-in deploy webhook, so use the Railway
-        # CLI with a project-scoped token. Create the token in Railway
-        # dashboard → project → Settings → Tokens → Create, then add
-        # it as the RAILWAY_TOKEN repo secret. If the token isn't
-        # configured, skip silently — docs catch up on next push.
+        # Hits Railway's GraphQL deploymentCreate mutation directly.
+        # Inlined here (rather than a separate workflow on `release:
+        # published`) because events triggered by GITHUB_TOKEN don't
+        # cascade into other workflow runs — goreleaser publishes the
+        # release using GITHUB_TOKEN, so a `release: published` listener
+        # would never fire.
         #
-        # The --service value must match the docs service name in the
-        # Railway project; adjust if it ever differs from "docs".
+        # The serviceId and environmentId are project-scoped UUIDs from
+        # Railway dashboard → project → service → Settings (or the
+        # auto-generated example in dashboard's deploy-via-API helper).
+        # They're identifiers, not credentials — fine to commit.
         if: success()
         run: |
           if [ -z "${RAILWAY_TOKEN}" ]; then
             echo "RAILWAY_TOKEN not configured; skipping docs rebuild"
             exit 0
           fi
-          npx -y @railway/cli redeploy --service docs --yes
+          curl -fsSL -X POST https://api.railway.app/graphql \
+            -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "query": "mutation { deploymentCreate(input: {serviceId: \"f8f317e4-02d1-4e41-9375-d570214702f4\", environmentId: \"64bbbfb8-a7ce-4caf-96cb-df94e1c7356e\"}) { id } }"
+            }'
           echo "Triggered Railway docs rebuild"
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
