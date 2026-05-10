@@ -76,7 +76,7 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
     label: "Build from source",
     note: "Expand each prerequisite for per-OS install commands, then run the build:",
     lang: "sh",
-    code: "git clone https://github.com/ALRubinger/aileron.git\ncd aileron\ntask build:cli build:server build:mcp build:sh\nexport PATH=\"$PWD/build:$PATH\"",
+    code: "git clone https://github.com/ALRubinger/aileron.git && \\\n  cd aileron && \\\n  task build:cli build:server build:mcp build:sh && \\\n  export PATH=\"$PWD/build:$PATH\"",
   },
 ]} client:load />
 
