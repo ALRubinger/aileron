@@ -53,6 +53,12 @@ type SpawnPolicy struct {
 	// Used by spawn_op to populate the envelope env in a stable order
 	// from os.Environ values.
 	envOrder []string
+	// credentialEnvKeys is the manifest's declared list of env keys
+	// the runtime should fill with the resolved credential value.
+	// Each entry is also in envOrder; spawn_op propagates the list
+	// into the SpawnEnvelope.CredentialEnvKeys so processSpawn's
+	// existing credential-injection path handles the rest.
+	credentialEnvKeys []string
 	// fsRead and fsWrite are the declared filesystem scopes the
 	// platform sandbox is expected to enforce. The gate rejects
 	// envelopes whose cwd falls outside fsRead.
@@ -92,6 +98,7 @@ func NewSpawnPolicy(m *cstore.Manifest) *SpawnPolicy {
 		p.envAllowed[k] = struct{}{}
 	}
 	p.envOrder = append(p.envOrder, s.EnvPassthrough...)
+	p.credentialEnvKeys = append(p.credentialEnvKeys, s.CredentialEnvKeys...)
 	p.fsRead = append(p.fsRead, s.FSRead...)
 	p.fsWrite = append(p.fsWrite, s.FSWrite...)
 	p.cwd = s.Cwd
@@ -158,10 +165,11 @@ func (p *SpawnPolicy) BuildEnvelopeFromOp(opName string, args map[string]string,
 		}
 	}
 	return SpawnEnvelope{
-		Program: p.primaryProgram,
-		Argv:    argv,
-		Env:     env,
-		Cwd:     p.cwd,
+		Program:           p.primaryProgram,
+		Argv:              argv,
+		Env:               env,
+		Cwd:               p.cwd,
+		CredentialEnvKeys: append([]string(nil), p.credentialEnvKeys...),
 	}, nil
 }
 

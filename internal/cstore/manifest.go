@@ -227,6 +227,13 @@ type ManifestSpawn struct {
 	// this channel (per ADR-0002 spawn-primitive credential rule).
 	EnvPassthrough []string `toml:"env_passthrough"`
 
+	// CredentialEnvKeys is the subset of EnvPassthrough into which the
+	// runtime injects the resolved credential value (per [capabilities.credential]).
+	// Forwarder connectors use this declaration so the runtime knows
+	// which env keys to fill with the vault binding at spawn_op time.
+	// Each entry must also appear in EnvPassthrough.
+	CredentialEnvKeys []string `toml:"credential_env_keys,omitempty"`
+
 	// FSRead is the filesystem read scope. Each entry is an absolute
 	// path or `~/`-anchored path. The sandbox restricts subprocess
 	// reads to these paths.
@@ -511,10 +518,24 @@ func validateSpawn(s *ManifestSpawn, file string) error {
 				"[capabilities.spawn.operations].%q.argv is required", name)
 		}
 	}
+	envSet := make(map[string]struct{}, len(s.EnvPassthrough))
 	for i, k := range s.EnvPassthrough {
 		if !envKeyRe.MatchString(k) {
 			return newValidationErr(file,
 				"[capabilities.spawn].env_passthrough[%d] %q is not a valid environment variable name",
+				i, k)
+		}
+		envSet[k] = struct{}{}
+	}
+	for i, k := range s.CredentialEnvKeys {
+		if !envKeyRe.MatchString(k) {
+			return newValidationErr(file,
+				"[capabilities.spawn].credential_env_keys[%d] %q is not a valid environment variable name",
+				i, k)
+		}
+		if _, ok := envSet[k]; !ok {
+			return newValidationErr(file,
+				"[capabilities.spawn].credential_env_keys[%d] %q must also appear in env_passthrough",
 				i, k)
 		}
 	}

@@ -65,6 +65,12 @@ tasks:
     cmds:
       - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
 
+  build:forwarder:
+    desc: Build the shared spawn-forwarder WASM and write it into internal/sandbox/forwarder/spawn-forwarder.wasm (embedded into the daemon binary at compile time)
+    dir: internal/sandbox/forwarder/src
+    cmds:
+      - GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags="-s -w" -o ../spawn-forwarder.wasm .
+
   build:enclave:
     desc: Build the enclave binary locally
     vars:
