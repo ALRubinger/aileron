@@ -945,6 +945,20 @@ func TestSpawnPolicy_BuildEnvelopeFromOp_NoSpawnBlockDenied(t *testing.T) {
 	}
 }
 
+func TestSpawnPolicy_BuildEnvelopeFromOp_CredentialEnvKeysPropagated(t *testing.T) {
+	m := goodSpawnManifest()
+	m.Capabilities.Spawn.EnvPassthrough = append(m.Capabilities.Spawn.EnvPassthrough, "API_TOKEN")
+	m.Capabilities.Spawn.CredentialEnvKeys = []string{"API_TOKEN"}
+	policy := NewSpawnPolicy(m)
+	env, err := policy.BuildEnvelopeFromOp("status", nil, func(string) string { return "" })
+	if err != nil {
+		t.Fatalf("BuildEnvelopeFromOp: %v", err)
+	}
+	if len(env.CredentialEnvKeys) != 1 || env.CredentialEnvKeys[0] != "API_TOKEN" {
+		t.Errorf("CredentialEnvKeys = %v, want [API_TOKEN]", env.CredentialEnvKeys)
+	}
+}
+
 func TestSpawnPolicy_BuildEnvelopeFromOp_CwdPropagatesFromManifest(t *testing.T) {
 	m := goodSpawnManifest()
 	m.Capabilities.Spawn.Cwd = "~/code/"

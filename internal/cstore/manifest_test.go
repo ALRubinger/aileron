@@ -539,6 +539,48 @@ func TestValidateManifest_RejectsBadSpawnFields(t *testing.T) {
 	}
 }
 
+func TestValidateManifest_AcceptsCredentialEnvKeys(t *testing.T) {
+	m := canonicalManifestForTest()
+	sp := goodSpawn()
+	sp.EnvPassthrough = []string{"GIT_AUTHOR_NAME", "GH_TOKEN"}
+	sp.CredentialEnvKeys = []string{"GH_TOKEN"}
+	m.Capabilities.Spawn = sp
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsCredentialKeyNotInPassthrough(t *testing.T) {
+	m := canonicalManifestForTest()
+	sp := goodSpawn()
+	sp.EnvPassthrough = []string{"GIT_AUTHOR_NAME"}
+	sp.CredentialEnvKeys = []string{"GH_TOKEN"} // not in env_passthrough
+	m.Capabilities.Spawn = sp
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected denial when credential key is not in env_passthrough")
+	}
+	if !strings.Contains(err.Error(), "env_passthrough") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsInvalidCredentialKeyName(t *testing.T) {
+	m := canonicalManifestForTest()
+	sp := goodSpawn()
+	sp.EnvPassthrough = []string{"1BAD"}
+	sp.CredentialEnvKeys = []string{"1BAD"}
+	m.Capabilities.Spawn = sp
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected denial for invalid env name")
+	}
+	// First error surfaces from env_passthrough validation.
+	if !strings.Contains(err.Error(), "valid environment variable") {
+		t.Errorf("err = %v", err)
+	}
+}
+
 func TestValidateManifest_AcceptsForwarderConnector(t *testing.T) {
 	// A connector that opts into the daemon-embedded forwarder declares
 	// connector.forwarder plus a normal spawn block. Validation accepts.
