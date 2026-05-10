@@ -1,0 +1,206 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/wrap"
+)
+
+// --- YAML mode ---
+
+func TestRunActionWrap_YAMLMode_EmitsValidConnector(t *testing.T) {
+	tmp := t.TempDir()
+	yamlPath := filepath.Join(tmp, "spec.yaml")
+	if err := os.WriteFile(yamlPath, []byte(testWrapYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(tmp, "connector")
+	var stdout, stderr bytes.Buffer
+	code := runActionWrap(
+		[]string{"--config=" + yamlPath, "--out=" + out},
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr: %s", code, stderr.String())
+	}
+	manifest := filepath.Join(out, "connector/manifest.toml")
+	body, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatalf("manifest not written: %v", err)
+	}
+	m, err := cstore.ParseManifest("manifest.toml", body)
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	if err := cstore.ValidateManifest(m, "manifest.toml"); err != nil {
+		t.Errorf("emitted manifest does not validate: %v", err)
+	}
+}
+
+func TestRunActionWrap_YAMLMode_RejectsMissingFile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runActionWrap(
+		[]string{"--config=/nonexistent/spec.yaml", "--out=/tmp/x"},
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Error("expected nonzero exit on missing config")
+	}
+}
+
+func TestRunActionWrap_YAMLMode_PropagatesValidationErrors(t *testing.T) {
+	tmp := t.TempDir()
+	yamlPath := filepath.Join(tmp, "spec.yaml")
+	bad := strings.Replace(testWrapYAML, "/usr/bin/git", "git", 1)
+	if err := os.WriteFile(yamlPath, []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runActionWrap(
+		[]string{"--config=" + yamlPath, "--out=" + tmp + "/c"},
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Fatal("expected nonzero exit on validation failure")
+	}
+	if !strings.Contains(stderr.String(), "absolute") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// --- --help mode ---
+
+func TestRunActionWrap_HelpMode_RequiresName(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runActionWrap([]string{"/usr/bin/git"}, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when --name is missing")
+	}
+}
+
+func TestRunActionWrap_HelpMode_RequiresProgram(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runActionWrap(
+		[]string{"--name=github://x/y"},
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Error("expected nonzero exit when no CLI is supplied and no --config")
+	}
+}
+
+func TestRunActionWrap_HelpMode_EmitsScaffoldFromFakeHelpRunner(t *testing.T) {
+	tmp := t.TempDir()
+	out := filepath.Join(tmp, "connector")
+
+	// Swap the help runner with a static fake. The runner returns
+	// a cobra-style subcommand list; the wrap loader scaffolds from
+	// it.
+	orig := actionWrapHelpRunner
+	actionWrapHelpRunner = func(_ context.Context, _ string, _ []string) (string, error) {
+		return `gh works with GitHub.
+
+Available Commands:
+  pr       Manage pull requests
+  issue    Manage issues
+`, nil
+	}
+	t.Cleanup(func() { actionWrapHelpRunner = orig })
+
+	var stdout, stderr bytes.Buffer
+	code := runActionWrap(
+		[]string{"--name=github://aileron-test/gh", "--out=" + out, "/usr/bin/gh"},
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr: %s", code, stderr.String())
+	}
+	manifest := filepath.Join(out, "connector/manifest.toml")
+	if _, err := os.Stat(manifest); err != nil {
+		t.Errorf("manifest not written: %v", err)
+	}
+	for _, sub := range []string{"pr", "issue"} {
+		if _, err := os.Stat(filepath.Join(out, "actions", sub, "action.md")); err != nil {
+			t.Errorf("missing action.md for %q: %v", sub, err)
+		}
+	}
+}
+
+func TestRunActionWrap_ForceOverwritesExisting(t *testing.T) {
+	tmp := t.TempDir()
+	yamlPath := filepath.Join(tmp, "spec.yaml")
+	if err := os.WriteFile(yamlPath, []byte(testWrapYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(tmp, "c")
+	var stdout, stderr bytes.Buffer
+	if code := runActionWrap([]string{"--config=" + yamlPath, "--out=" + out}, &stdout, &stderr); code != 0 {
+		t.Fatalf("first emit failed: %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runActionWrap([]string{"--config=" + yamlPath, "--out=" + out}, &stdout, &stderr); code == 0 {
+		t.Fatal("expected refusal without --force")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runActionWrap([]string{"--config=" + yamlPath, "--out=" + out, "--force"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("--force failed: %s", stderr.String())
+	}
+}
+
+// --- Spec round-trip across the CLI surface ---
+
+func TestRunActionWrap_PreservesSubcommandsAcrossYAMLAndHelp(t *testing.T) {
+	tmp := t.TempDir()
+	yamlPath := filepath.Join(tmp, "spec.yaml")
+	if err := os.WriteFile(yamlPath, []byte(testWrapYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := wrap.LoadYAML(yamlPath, []byte(testWrapYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spec.Subcommands) == 0 {
+		t.Fatal("test fixture has no subcommands")
+	}
+}
+
+const testWrapYAML = `connector:
+  name: github://aileron-test/gitcrawl
+  version: 1.0.0
+  publisher: aileron-test
+
+program:
+  path: /usr/bin/git
+  hash: sha256:abc
+
+env_passthrough:
+  - GIT_AUTHOR_NAME
+
+fs_read:
+  - ~/code/
+
+fs_write:
+  - ~/.cache/aileron/gitcrawl/
+
+cwd: ~/code/
+
+subcommands:
+  - name: log
+    description: List commits since a date.
+    argv: git log --since={since}
+    params:
+      - name: since
+        type: string
+        required: true
+  - name: status
+    description: Show working tree state.
+    argv: git status
+`
