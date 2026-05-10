@@ -74,7 +74,7 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
   {
     value: "source",
     label: "Build from source",
-    note: 'Requires Go 1.25, Task, Node.js 24, and pnpm 11.0.8 on PATH. See the <a href="https://github.com/ALRubinger/aileron#building-from-source">repo README</a> for prerequisite install commands.',
+    note: "Expand each prerequisite for per-OS install commands, then run the build:",
     lang: "sh",
     code: "git clone https://github.com/ALRubinger/aileron.git\ncd aileron\ntask build:cli build:server build:mcp build:sh\nexport PATH=\"$PWD/build:$PATH\"",
   },

@@ -3,6 +3,7 @@
 	import { tabsListVariants } from "./tabs-list.svelte";
 	import { cn } from "$lib/utils.js";
 	import CodeBlock from "../code-block.svelte";
+	import BuildPrereqs from "../build-prereqs.svelte";
 
 	export type InstallVariant = {
 		value: string;
@@ -81,10 +82,29 @@
 		variantValue = { ...variantValue, [`${methodKey}/${platformKey}`]: value };
 	}
 
-	const triggerClass = cn(
+	// Visual hierarchy: each tab level gets a distinct trigger size +
+	// list style so the user reads "Install vs Build from source" as
+	// the major decision, "macOS / Linux / Windows" as the platform
+	// pivot, and "deb / rpm / apk" as the smaller package-format
+	// pivot. Without this differentiation all three rows look like
+	// equally-weighted choices.
+	const methodTriggerClass = cn(
+		"cn-tabs-trigger relative inline-flex items-center justify-center whitespace-nowrap rounded-md px-4 py-1.5 text-base font-medium transition-all",
+		"text-foreground/60 hover:text-foreground",
+		"data-active:bg-background data-active:text-foreground data-active:shadow-sm",
+		"focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+	);
+	const platformTriggerClass = cn(
 		"cn-tabs-trigger relative inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1 text-sm transition-all",
 		"text-foreground/60 hover:text-foreground",
 		"data-active:bg-background data-active:text-foreground data-active:shadow-sm",
+		"focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+	);
+	const variantTriggerClass = cn(
+		"cn-tabs-trigger relative inline-flex items-center justify-center whitespace-nowrap px-2 py-0.5 text-xs transition-colors",
+		"text-foreground/50 hover:text-foreground/80",
+		"border-b-2 border-transparent",
+		"data-active:text-foreground data-active:border-foreground",
 		"focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
 	);
 
@@ -110,13 +130,13 @@
 	<TabsPrimitive.List
 		data-slot="tabs-list"
 		data-variant="default"
-		class={cn(tabsListVariants({ variant: "default" }), "rounded-md p-1")}
+		class={cn(tabsListVariants({ variant: "default" }), "rounded-lg p-1")}
 	>
 		{#each methods as method (method.value)}
 			<TabsPrimitive.Trigger
 				value={method.value}
 				data-slot="tabs-trigger"
-				class={triggerClass}
+				class={methodTriggerClass}
 			>
 				{method.label}
 			</TabsPrimitive.Trigger>
@@ -127,10 +147,14 @@
 		<TabsPrimitive.Content
 			value={method.value}
 			data-slot="tabs-content"
-			class={cn("cn-tabs-content flex-1 outline-none mt-2")}
+			class={cn("cn-tabs-content flex-1 outline-none mt-4")}
 		>
 			{#if method.note}
 				<p class="text-sm">{@html method.note}</p>
+			{/if}
+
+			{#if method.value === "source"}
+				<BuildPrereqs />
 			{/if}
 
 			{#if method.platforms && method.platforms.length > 0}
@@ -144,7 +168,7 @@
 						class={cn(tabsListVariants({ variant: "default" }), "rounded-md p-1")}
 					>
 						{#each method.platforms as platform (platform.value)}
-							<TabsPrimitive.Trigger value={platform.value} class={triggerClass}>
+							<TabsPrimitive.Trigger value={platform.value} class={platformTriggerClass}>
 								{platform.label}
 							</TabsPrimitive.Trigger>
 						{/each}
@@ -153,7 +177,7 @@
 					{#each method.platforms as platform (platform.value)}
 						<TabsPrimitive.Content
 							value={platform.value}
-							class={cn("cn-tabs-content flex-1 outline-none mt-2")}
+							class={cn("cn-tabs-content flex-1 outline-none mt-3")}
 						>
 							{#if platform.note}
 								<p class="text-sm">{@html platform.note}</p>
@@ -166,11 +190,11 @@
 									class="cn-tabs flex flex-col mt-2"
 								>
 									<TabsPrimitive.List
-										data-variant="default"
-										class={cn(tabsListVariants({ variant: "default" }), "rounded-md p-1")}
+										data-variant="line"
+										class={cn(tabsListVariants({ variant: "line" }), "border-b border-border")}
 									>
 										{#each platform.variants as variant (variant.value)}
-											<TabsPrimitive.Trigger value={variant.value} class={triggerClass}>
+											<TabsPrimitive.Trigger value={variant.value} class={variantTriggerClass}>
 												{variant.label}
 											</TabsPrimitive.Trigger>
 										{/each}
