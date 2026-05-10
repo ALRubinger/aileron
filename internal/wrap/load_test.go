@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/action"
 	"github.com/ALRubinger/aileron/internal/cstore"
 )
 
@@ -248,15 +249,19 @@ func TestEmit_ProducesValidManifest(t *testing.T) {
 	}
 	want := []string{
 		"connector/manifest.toml",
-		"actions/log/action.md",
-		"actions/status/action.md",
-		"Taskfile.yml",
-		".github/workflows/release.yml",
-		"keys/README.md",
+		"actions/log.md",
+		"actions/status.md",
 	}
 	for _, p := range want {
 		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
 			t.Errorf("expected %s to exist: %v", p, err)
+		}
+	}
+	// Default output is slim: no Taskfile/release.yml/keys
+	// — shared-forwarder connectors don't build their own WASM.
+	for _, p := range []string{"Taskfile.yml", ".github/workflows/release.yml", "keys/README.md"} {
+		if _, err := os.Stat(filepath.Join(dir, p)); err == nil {
+			t.Errorf("default output should not include %s", p)
 		}
 	}
 	body, err := os.ReadFile(filepath.Join(dir, "connector/manifest.toml"))
@@ -275,6 +280,71 @@ func TestEmit_ProducesValidManifest(t *testing.T) {
 	}
 	if got, want := len(m.Capabilities.Spawn.Operations), 2; got != want {
 		t.Errorf("operations count = %d, want %d", got, want)
+	}
+}
+
+func TestEmit_ActionMDIsParseableByActionLoader(t *testing.T) {
+	// The daemon's internal/action loader expects +++-delimited TOML
+	// frontmatter. Earlier versions of wrap emitted ---/YAML, which
+	// the loader rejected silently. This is the regression test.
+	dir := t.TempDir()
+	s, _ := LoadYAML("a.yaml", []byte(goodYAML))
+	if err := Emit(s, dir, false); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "actions/log.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, parseErr := action.Parse("log.md", body)
+	if parseErr != nil {
+		t.Fatalf("emitted action.md does not parse: %v\n%s", parseErr, body)
+	}
+	if manifest.Name != "log" {
+		t.Errorf("manifest.Name = %q, want log", manifest.Name)
+	}
+	if got := len(manifest.Requires.Connectors); got != 1 {
+		t.Fatalf("requires.connectors len = %d, want 1", got)
+	}
+	if got := manifest.Requires.Connectors[0].Name; got != "github://aileron-test/gitcrawl" {
+		t.Errorf("connector ref name = %q", got)
+	}
+	if got := manifest.Requires.Connectors[0].Hash; got != "sha256:bound-at-install" {
+		t.Errorf("connector ref hash = %q, want placeholder", got)
+	}
+	if len(manifest.Execute) != 1 || manifest.Execute[0].Op != "log" {
+		t.Errorf("execute = %+v", manifest.Execute)
+	}
+}
+
+func TestEmit_ActionMDInputsLandWhenSpecDeclaresParams(t *testing.T) {
+	// The "log" subcommand in goodYAML has params (since, author);
+	// the emitted action.md should surface them as [[inputs]] entries
+	// with [execute.inputs] interpolation, so the agent can pass args
+	// through to the connector's spawn_op call.
+	dir := t.TempDir()
+	s, _ := LoadYAML("a.yaml", []byte(goodYAML))
+	if err := Emit(s, dir, false); err != nil {
+		t.Fatalf("Emit: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "actions/log.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := action.Parse("log.md", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Inputs) == 0 {
+		t.Fatal("expected [[inputs]] entries from spec params")
+	}
+	// Inputs flow into the [execute.inputs] interpolation map.
+	if len(manifest.Execute) != 1 || len(manifest.Execute[0].Inputs) == 0 {
+		t.Fatalf("execute.inputs missing: %+v", manifest.Execute)
+	}
+	since, _ := manifest.Execute[0].Inputs["since"].(string)
+	if since != "${args.since}" {
+		t.Errorf("execute.inputs.since = %q, want ${args.since}", since)
 	}
 }
 
@@ -334,6 +404,129 @@ func TestBuildManifest_PreservesSpawnFields(t *testing.T) {
 	}
 	if sp.Cwd != "~/code/" {
 		t.Errorf("Cwd = %q", sp.Cwd)
+	}
+}
+
+// --- Install (write to daemon store + actions dir) ---
+
+func TestInstall_WritesManifestToStoreAndActionFiles(t *testing.T) {
+	s, err := LoadYAML("a.yaml", []byte(goodYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeRoot := t.TempDir()
+	actionsDir := t.TempDir()
+	store := cstore.NewStore(storeRoot)
+	forwarderBytes := []byte("FORWARDER-TEST")
+
+	res, err := Install(s, store, actionsDir, forwarderBytes, false)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.Hash == "" || !strings.HasPrefix(res.Hash, "sha256:") {
+		t.Errorf("Hash = %q, want sha256:<hex>", res.Hash)
+	}
+	if res.AlreadyInstalled {
+		t.Error("first install reported AlreadyInstalled")
+	}
+	if _, err := os.Stat(filepath.Join(res.EntryDir, "manifest.toml")); err != nil {
+		t.Errorf("store manifest missing: %v", err)
+	}
+	if len(res.ActionFiles) != len(s.Subcommands) {
+		t.Errorf("ActionFiles len = %d, want %d", len(res.ActionFiles), len(s.Subcommands))
+	}
+	// Action files use a connector-leaf prefix so multiple wraps with
+	// the same op name don't collide.
+	wantNames := []string{"gitcrawl-log.md", "gitcrawl-status.md"}
+	for _, name := range wantNames {
+		if _, err := os.Stat(filepath.Join(actionsDir, name)); err != nil {
+			t.Errorf("expected %s in actions dir: %v", name, err)
+		}
+	}
+	// And those action files parse via the daemon's loader.
+	body, err := os.ReadFile(filepath.Join(actionsDir, "gitcrawl-log.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := action.Parse("gitcrawl-log.md", body)
+	if err != nil {
+		t.Fatalf("installed action.md does not parse: %v", err)
+	}
+	// In --install mode the connector hash is baked in pre-bound,
+	// not the bound-at-install placeholder.
+	if m.Requires.Connectors[0].Hash != res.Hash {
+		t.Errorf("connector hash in action.md = %q, want store hash %q",
+			m.Requires.Connectors[0].Hash, res.Hash)
+	}
+}
+
+func TestInstall_ReinstallSameSpecIsIdempotent(t *testing.T) {
+	s, _ := LoadYAML("a.yaml", []byte(goodYAML))
+	store := cstore.NewStore(t.TempDir())
+	actionsDir := t.TempDir()
+	fw := []byte("FW")
+	first, err := Install(s, store, actionsDir, fw, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Second install with force=true (we already wrote the action.md files).
+	second, err := Install(s, store, actionsDir, fw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Hash != second.Hash {
+		t.Errorf("hashes diverged: %q vs %q", first.Hash, second.Hash)
+	}
+	if !second.AlreadyInstalled {
+		t.Error("second install should report AlreadyInstalled")
+	}
+}
+
+func TestInstall_RefusesToClobberActionFilesWithoutForce(t *testing.T) {
+	s, _ := LoadYAML("a.yaml", []byte(goodYAML))
+	store := cstore.NewStore(t.TempDir())
+	actionsDir := t.TempDir()
+	if _, err := Install(s, store, actionsDir, []byte("FW"), false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Install(s, store, actionsDir, []byte("FW"), false)
+	if err == nil {
+		t.Fatal("expected refusal on second install without force")
+	}
+	if !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestInstall_RejectsBadConnectorFQN(t *testing.T) {
+	s, _ := LoadYAML("a.yaml", []byte(goodYAML))
+	s.Connector.Name = "not-a-valid-fqn" // bypass LoadYAML's earlier validation
+	store := cstore.NewStore(t.TempDir())
+	_, err := Install(s, store, t.TempDir(), []byte("FW"), false)
+	if err == nil {
+		t.Fatal("expected error for unparseable FQN")
+	}
+}
+
+func TestActionFileName_DerivedFromConnectorLeaf(t *testing.T) {
+	cases := []struct {
+		fqn  string
+		op   string
+		want string
+	}{
+		{"github://acme/gitcrawl", "log", "gitcrawl-log.md"},
+		{"github://acme/integrations/connectors/imsg", "send", "imsg-send.md"},
+		// No slash → no leaf segment to derive; the file lands as
+		// "<op>.md" without a prefix. In practice the FQN is parsed
+		// before this is reached, so this case is mostly defensive.
+		{"weird-no-slash", "op", "op.md"},
+	}
+	for _, c := range cases {
+		s := &Spec{Connector: ConnectorSpec{Name: c.fqn}}
+		got := actionFileName(s, SubcommandSpec{Name: c.op})
+		if got != c.want {
+			t.Errorf("actionFileName(%q, %q) = %q, want %q", c.fqn, c.op, got, c.want)
+		}
 	}
 }
 
