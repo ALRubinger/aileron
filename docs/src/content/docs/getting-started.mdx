@@ -6,7 +6,7 @@ order: 2
 
 import HighlightCard from '$lib/components/ui/highlight-card.svelte';
 import LiftoffPreflight from '$lib/components/ui/liftoff-preflight.svelte';
-import PlatformTabs from '$lib/components/ui/tabs/platform-tabs.svelte';
+import InstallTabs from '$lib/components/ui/tabs/install-tabs.svelte';
 
 <HighlightCard>
 
@@ -26,26 +26,57 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
 
 ## 1. Install Aileron
 
-<PlatformTabs items={[
+<InstallTabs methods={[
   {
-    value: "macos",
-    label: "macOS",
-    lang: "sh",
-    code: "brew tap ALRubinger/aileron\nbrew install aileron",
+    value: "install",
+    label: "Install",
+    platforms: [
+      {
+        value: "macos",
+        label: "macOS",
+        lang: "sh",
+        note: 'Uses <a href="https://brew.sh">Homebrew</a>. Don\'t have it yet? Install it first.',
+        code: "brew tap ALRubinger/aileron\nbrew install aileron",
+      },
+      {
+        value: "linux",
+        label: "Linux",
+        variants: [
+          {
+            value: "deb",
+            label: "Debian / Ubuntu (.deb)",
+            lang: "sh",
+            code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.deb\nsudo dpkg -i aileron_0.0.2_linux_amd64.deb",
+          },
+          {
+            value: "rpm",
+            label: "RHEL / Fedora (.rpm)",
+            lang: "sh",
+            code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.rpm\nsudo rpm -i aileron_0.0.2_linux_amd64.rpm",
+          },
+          {
+            value: "apk",
+            label: "Alpine (.apk)",
+            lang: "sh",
+            code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.apk\nsudo apk add --allow-untrusted aileron_0.0.2_linux_amd64.apk",
+          },
+        ],
+      },
+      {
+        value: "windows",
+        label: "Windows",
+        lang: "powershell",
+        note: "Extract the zip and add the directory to PATH.",
+        code: "Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron",
+      },
+    ],
   },
   {
-    value: "linux",
-    label: "Linux",
+    value: "source",
+    label: "Build from source",
+    note: 'Requires Go 1.25, Task, Node.js 24, and pnpm 11.0.8 on PATH. See the <a href="https://github.com/ALRubinger/aileron#building-from-source">repo README</a> for prerequisite install commands.',
     lang: "sh",
-    note: "Debian/Ubuntu shown; .rpm and .apk packages are attached to every release alongside .deb.",
-    code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.deb\nsudo dpkg -i aileron_0.0.2_linux_amd64.deb",
-  },
-  {
-    value: "windows",
-    label: "Windows",
-    lang: "powershell",
-    note: "Extract the zip and add the directory to PATH.",
-    code: "Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron",
+    code: "git clone https://github.com/ALRubinger/aileron.git\ncd aileron\ntask build:cli build:server build:mcp build:sh\nexport PATH=\"$PWD/build:$PATH\"",
   },
 ]} client:load />
 
@@ -60,8 +91,6 @@ You should see something like:
 ```
 aileron 0.0.2 (697521b)
 ```
-
-> Want to build from source? Clone [the repo](https://github.com/ALRubinger/aileron) and follow the README. The prebuilt path above is the standard install for everyone else.
 
 ## 2. Install Actions for Gmail and Calendar
 
