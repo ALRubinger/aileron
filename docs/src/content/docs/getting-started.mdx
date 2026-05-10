@@ -7,6 +7,7 @@ order: 2
 import HighlightCard from '$lib/components/ui/highlight-card.svelte';
 import LiftoffPreflight from '$lib/components/ui/liftoff-preflight.svelte';
 import InstallTabs from '$lib/components/ui/tabs/install-tabs.svelte';
+import { latestRelease } from '$lib/data/release';
 
 <HighlightCard>
 
@@ -46,19 +47,19 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
             value: "deb",
             label: "Debian / Ubuntu (.deb)",
             lang: "sh",
-            code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.deb\nsudo dpkg -i aileron_0.0.2_linux_amd64.deb",
+            code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.deb\nsudo dpkg -i aileron_${latestRelease.version}_linux_amd64.deb`,
           },
           {
             value: "rpm",
             label: "RHEL / Fedora (.rpm)",
             lang: "sh",
-            code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.rpm\nsudo rpm -i aileron_0.0.2_linux_amd64.rpm",
+            code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.rpm\nsudo rpm -i aileron_${latestRelease.version}_linux_amd64.rpm`,
           },
           {
             value: "apk",
             label: "Alpine (.apk)",
             lang: "sh",
-            code: "curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_linux_amd64.apk\nsudo apk add --allow-untrusted aileron_0.0.2_linux_amd64.apk",
+            code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.apk\nsudo apk add --allow-untrusted aileron_${latestRelease.version}_linux_amd64.apk`,
           },
         ],
       },
@@ -67,7 +68,7 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
         label: "Windows",
         lang: "powershell",
         note: "Extract the zip and add the directory to PATH.",
-        code: "Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_0.0.2_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron",
+        code: `Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron`,
       },
     ],
   },
@@ -86,11 +87,9 @@ Verify:
 aileron version
 ```
 
-You should see something like:
+You should see the installed version:
 
-```
-aileron 0.0.2 (697521b)
-```
+<pre><code>{`aileron ${latestRelease.version}`}</code></pre>
 
 ## 2. Install Actions for Gmail and Calendar
 
