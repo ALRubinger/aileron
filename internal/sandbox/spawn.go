@@ -32,13 +32,27 @@ type SpawnPolicy struct {
 	// content hash. An empty hash means "any bytes at this path are
 	// allowed"; a non-empty hash pins exact bytes.
 	programs map[string]string
+	// primaryProgram is the first declared program path. The high-level
+	// host function aileron_host.spawn_op uses this when constructing
+	// envelopes from the manifest's operations table; per-program op
+	// routing for multi-program connectors is a future extension that
+	// would live on each operation entry.
+	primaryProgram string
 	// argvPatterns is the parsed allow-list of argv shapes. An incoming
 	// argv must match at least one pattern after placeholder substitution.
 	argvPatterns []argvPattern
+	// operations maps op name to the parsed argv pattern declared in
+	// [capabilities.spawn.operations]. aileron_host.spawn_op resolves
+	// an op name against this map to substitute placeholders.
+	operations map[string]argvPattern
 	// envAllowed is the closed set of environment keys the runtime is
 	// permitted to set on the subprocess. The connector cannot pass any
 	// other key.
 	envAllowed map[string]struct{}
+	// envOrder is the manifest's declared env_passthrough sequence.
+	// Used by spawn_op to populate the envelope env in a stable order
+	// from os.Environ values.
+	envOrder []string
 	// fsRead and fsWrite are the declared filesystem scopes the
 	// platform sandbox is expected to enforce. The gate rejects
 	// envelopes whose cwd falls outside fsRead.
@@ -57,6 +71,7 @@ func NewSpawnPolicy(m *cstore.Manifest) *SpawnPolicy {
 	p := &SpawnPolicy{
 		programs:   map[string]string{},
 		envAllowed: map[string]struct{}{},
+		operations: map[string]argvPattern{},
 	}
 	if m == nil || m.Capabilities.Spawn == nil {
 		return p
@@ -65,16 +80,89 @@ func NewSpawnPolicy(m *cstore.Manifest) *SpawnPolicy {
 	for _, prog := range s.Programs {
 		p.programs[prog.Path] = prog.Hash
 	}
-	for _, pat := range s.ArgvPatterns() {
-		p.argvPatterns = append(p.argvPatterns, parseArgvPattern(pat))
+	if len(s.Programs) > 0 {
+		p.primaryProgram = s.Programs[0].Path
+	}
+	for name, op := range s.Operations {
+		parsed := parseArgvPattern(op.Argv)
+		p.operations[name] = parsed
+		p.argvPatterns = append(p.argvPatterns, parsed)
 	}
 	for _, k := range s.EnvPassthrough {
 		p.envAllowed[k] = struct{}{}
 	}
+	p.envOrder = append(p.envOrder, s.EnvPassthrough...)
 	p.fsRead = append(p.fsRead, s.FSRead...)
 	p.fsWrite = append(p.fsWrite, s.FSWrite...)
 	p.cwd = s.Cwd
 	return p
+}
+
+// BuildEnvelopeFromOp resolves `opName` against the manifest's
+// [capabilities.spawn.operations] table, substitutes `{name}`
+// placeholders in the operation's argv pattern from `args`, and
+// returns a fully-formed SpawnEnvelope ready for CheckSpawn /
+// processSpawn.
+//
+// `getEnv` resolves the values for the manifest's env_passthrough keys
+// from a source the caller chooses (e.g. os.Getenv in production; a
+// fake in tests). Empty values are omitted from the envelope.
+//
+// Returns a structured *Error of class capability_denied when:
+//   - The op name is not declared in the manifest's operations table
+//     (boundary_detail: connector_manifest).
+//   - A placeholder in the operation's argv has no matching arg
+//     (boundary_detail: envelope, set by argvPattern.Substitute).
+//   - The policy has no primary program (no programs declared).
+func (p *SpawnPolicy) BuildEnvelopeFromOp(opName string, args map[string]string, getEnv func(string) string) (SpawnEnvelope, *Error) {
+	if p == nil || len(p.operations) == 0 {
+		return SpawnEnvelope{}, newCapabilityDenied(
+			"spawn_op: connector did not declare any spawn operations",
+			map[string]any{
+				"requested":       "spawn_op:" + opName,
+				"boundary_detail": "connector_manifest",
+			})
+	}
+	pat, ok := p.operations[opName]
+	if !ok {
+		granted := make([]string, 0, len(p.operations))
+		for k := range p.operations {
+			granted = append(granted, k)
+		}
+		return SpawnEnvelope{}, newCapabilityDenied(
+			"spawn_op: operation not declared in manifest",
+			map[string]any{
+				"requested":       "spawn_op:" + opName,
+				"granted":         granted,
+				"boundary_detail": "connector_manifest",
+			})
+	}
+	if p.primaryProgram == "" {
+		return SpawnEnvelope{}, newCapabilityDenied(
+			"spawn_op: connector did not declare a program",
+			map[string]any{
+				"requested":       "spawn_op:" + opName,
+				"boundary_detail": "connector_manifest",
+			})
+	}
+	argv, denyErr := pat.Substitute(args)
+	if denyErr != nil {
+		return SpawnEnvelope{}, denyErr
+	}
+	env := map[string]string{}
+	if getEnv != nil {
+		for _, k := range p.envOrder {
+			if v := getEnv(k); v != "" {
+				env[k] = v
+			}
+		}
+	}
+	return SpawnEnvelope{
+		Program: p.primaryProgram,
+		Argv:    argv,
+		Env:     env,
+		Cwd:     p.cwd,
+	}, nil
 }
 
 // SpawnEnvelope is the JSON shape connectors marshal as input to
@@ -130,6 +218,10 @@ type argvPattern struct {
 type argvSegment struct {
 	literal       string
 	isPlaceholder bool
+	// name is the placeholder's bound name (e.g. "since") when
+	// isPlaceholder is true. Matching ignores the name; substitution
+	// (via Substitute) requires it.
+	name string
 }
 
 // parseArgvPattern tokenizes a manifest argv pattern. Tokens are
@@ -173,9 +265,43 @@ func splitTokenSegments(tok string) []argvSegment {
 		if open > 0 {
 			out = append(out, argvSegment{literal: tok[:open]})
 		}
-		out = append(out, argvSegment{isPlaceholder: true})
+		out = append(out, argvSegment{isPlaceholder: true, name: tok[open+1 : close]})
 		tok = tok[close+1:]
 	}
+}
+
+// Substitute fills the placeholder segments of this pattern using
+// values from `args` and returns the substituted argv tokens. Returns
+// a structured *Error of class capability_denied (boundary=envelope)
+// when a placeholder has no matching arg.
+//
+// The resulting argv is whatever the pattern produced. The caller is
+// responsible for re-matching the substituted argv against the
+// pattern via SpawnPolicy.CheckSpawn — substitution does not bypass
+// the gate.
+func (p argvPattern) Substitute(args map[string]string) ([]string, *Error) {
+	out := make([]string, 0, len(p.tokens))
+	for _, segs := range p.tokens {
+		var b strings.Builder
+		for _, seg := range segs {
+			if !seg.isPlaceholder {
+				b.WriteString(seg.literal)
+				continue
+			}
+			v, ok := args[seg.name]
+			if !ok {
+				return nil, newCapabilityDenied(
+					"spawn_op: missing value for placeholder",
+					map[string]any{
+						"placeholder":     "{" + seg.name + "}",
+						"boundary_detail": "envelope",
+					})
+			}
+			b.WriteString(v)
+		}
+		out = append(out, b.String())
+	}
+	return out, nil
 }
 
 // matches reports whether `argv` matches this pattern. Token count
@@ -508,6 +634,89 @@ func hostSpawn(ctx context.Context, mod api.Module, reqPtr, reqLen uint32) int32
 		return -2
 	}
 	return processSpawn(ctx, s, raw)
+}
+
+// hostSpawnOp implements `aileron_host.spawn_op(op_ptr, op_len, args_ptr, args_len) -> i32`.
+//
+// op is a UTF-8 string naming an operation declared in the manifest's
+// [capabilities.spawn.operations] table. args is a JSON object mapping
+// placeholder names to substitution values.
+//
+// The runtime resolves the op against the manifest, substitutes
+// placeholders, builds the spawn envelope from the manifest's program
+// and env_passthrough, then dispatches through the same gate / executor
+// / audit path as `spawn`. The forwarder WASM is the canonical caller;
+// the function is the high-level convenience for connectors that
+// don't need direct envelope control.
+//
+// Return codes match `spawn`:
+//
+//	 0  on success
+//	-1  on capability_denied
+//	-2  on a malformed request (bad JSON, invalid memory)
+//	-3  on spawn_sandbox_unavailable
+func hostSpawnOp(ctx context.Context, mod api.Module, opPtr, opLen, argsPtr, argsLen uint32) int32 {
+	s := stateFromCtx(ctx)
+	if s == nil {
+		return -1
+	}
+	opBytes := readMemory(mod, opPtr, opLen)
+	if opBytes == nil && opLen > 0 {
+		s.mu.Lock()
+		s.spawnErr = newConnectorRuntimeError("spawn_op: invalid op memory range")
+		s.mu.Unlock()
+		return -2
+	}
+	argsBytes := readMemory(mod, argsPtr, argsLen)
+	if argsBytes == nil && argsLen > 0 {
+		s.mu.Lock()
+		s.spawnErr = newConnectorRuntimeError("spawn_op: invalid args memory range")
+		s.mu.Unlock()
+		return -2
+	}
+	return processSpawnOp(ctx, s, string(opBytes), argsBytes)
+}
+
+// processSpawnOp is the memory-independent core of hostSpawnOp. Exposed
+// for tests so we can exercise the op-lookup + substitution + dispatch
+// path without going through wazero linear memory.
+func processSpawnOp(ctx context.Context, s *hostState, opName string, argsRaw []byte) int32 {
+	var args map[string]string
+	if len(argsRaw) > 0 {
+		if err := json.Unmarshal(argsRaw, &args); err != nil {
+			s.mu.Lock()
+			s.spawnErr = newConnectorRuntimeError(fmt.Sprintf("spawn_op: invalid JSON args: %s", err.Error()))
+			s.mu.Unlock()
+			return -2
+		}
+	}
+	if s.spawnPolicy == nil {
+		s.mu.Lock()
+		s.spawnErr = newCapabilityDenied(
+			"spawn_op: connector did not declare [capabilities.spawn]",
+			map[string]any{
+				"requested":       "spawn_op:" + opName,
+				"connector":       s.connectorFQN,
+				"boundary_detail": "connector_manifest",
+			})
+		s.mu.Unlock()
+		return -1
+	}
+	envelope, denyErr := s.spawnPolicy.BuildEnvelopeFromOp(opName, args, os.Getenv)
+	if denyErr != nil {
+		s.mu.Lock()
+		s.spawnErr = denyErr
+		s.mu.Unlock()
+		return -1
+	}
+	rawEnvelope, err := json.Marshal(envelope)
+	if err != nil {
+		s.mu.Lock()
+		s.spawnErr = newConnectorRuntimeError(fmt.Sprintf("spawn_op: marshal envelope: %s", err.Error()))
+		s.mu.Unlock()
+		return -2
+	}
+	return processSpawn(ctx, s, rawEnvelope)
 }
 
 // processSpawn is the memory-independent core of hostSpawn: it parses

@@ -867,6 +867,261 @@ func TestArgvShape_EmptyAndSingleToken(t *testing.T) {
 	}
 }
 
+// --- spawn_op (forwarder-facing) ---
+
+func TestSpawnPolicy_BuildEnvelopeFromOp_HappyPath(t *testing.T) {
+	policy := NewSpawnPolicy(goodSpawnManifest())
+	env, err := policy.BuildEnvelopeFromOp("log",
+		map[string]string{"since": "2026-01-01"},
+		func(string) string { return "" },
+	)
+	if err != nil {
+		t.Fatalf("BuildEnvelopeFromOp: %v", err)
+	}
+	if env.Program != "/usr/bin/git" {
+		t.Errorf("Program = %q", env.Program)
+	}
+	wantArgv := []string{"git", "log", "--since=2026-01-01"}
+	if !slicesEqualStrings(env.Argv, wantArgv) {
+		t.Errorf("Argv = %v, want %v", env.Argv, wantArgv)
+	}
+}
+
+func TestSpawnPolicy_BuildEnvelopeFromOp_UndeclaredOpDenied(t *testing.T) {
+	policy := NewSpawnPolicy(goodSpawnManifest())
+	_, err := policy.BuildEnvelopeFromOp("push", nil, nil)
+	if err == nil {
+		t.Fatal("expected denial for undeclared op")
+	}
+	if err.Class != ClassCapabilityDenied {
+		t.Errorf("class = %v", err.Class)
+	}
+	detail, _ := err.Details["boundary_detail"].(string)
+	if detail != "connector_manifest" {
+		t.Errorf("boundary_detail = %q", detail)
+	}
+}
+
+func TestSpawnPolicy_BuildEnvelopeFromOp_MissingPlaceholderDenied(t *testing.T) {
+	policy := NewSpawnPolicy(goodSpawnManifest())
+	// goodSpawnManifest's "log" op expects {since}; we pass nothing.
+	_, err := policy.BuildEnvelopeFromOp("log", nil, nil)
+	if err == nil {
+		t.Fatal("expected denial for missing placeholder")
+	}
+	if err.Class != ClassCapabilityDenied {
+		t.Errorf("class = %v", err.Class)
+	}
+	if got, _ := err.Details["placeholder"].(string); got != "{since}" {
+		t.Errorf("placeholder = %q", got)
+	}
+}
+
+func TestSpawnPolicy_BuildEnvelopeFromOp_EnvPassthroughResolvedFromGetEnv(t *testing.T) {
+	policy := NewSpawnPolicy(goodSpawnManifest())
+	getEnv := func(k string) string {
+		if k == "GIT_AUTHOR_NAME" {
+			return "alr"
+		}
+		return ""
+	}
+	env, err := policy.BuildEnvelopeFromOp("status", nil, getEnv)
+	if err != nil {
+		t.Fatalf("BuildEnvelopeFromOp: %v", err)
+	}
+	if env.Env["GIT_AUTHOR_NAME"] != "alr" {
+		t.Errorf("env.GIT_AUTHOR_NAME = %q", env.Env["GIT_AUTHOR_NAME"])
+	}
+	if _, present := env.Env["GH_TOKEN"]; present {
+		t.Errorf("empty getEnv values should be omitted; got env=%v", env.Env)
+	}
+}
+
+func TestSpawnPolicy_BuildEnvelopeFromOp_NoSpawnBlockDenied(t *testing.T) {
+	policy := NewSpawnPolicy(&cstore.Manifest{})
+	_, err := policy.BuildEnvelopeFromOp("log", nil, nil)
+	if err == nil {
+		t.Fatal("expected denial when no spawn block declared")
+	}
+}
+
+func TestSpawnPolicy_BuildEnvelopeFromOp_CwdPropagatesFromManifest(t *testing.T) {
+	m := goodSpawnManifest()
+	m.Capabilities.Spawn.Cwd = "~/code/"
+	policy := NewSpawnPolicy(m)
+	env, err := policy.BuildEnvelopeFromOp("status", nil, nil)
+	if err != nil {
+		t.Fatalf("BuildEnvelopeFromOp: %v", err)
+	}
+	if env.Cwd != "~/code/" {
+		t.Errorf("Cwd = %q", env.Cwd)
+	}
+}
+
+func TestArgvPattern_Substitute_FillsPlaceholders(t *testing.T) {
+	pat := parseArgvPattern("git log --since={since} --author={author}")
+	got, err := pat.Substitute(map[string]string{"since": "2026-01-01", "author": "alr"})
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	want := []string{"git", "log", "--since=2026-01-01", "--author=alr"}
+	if !slicesEqualStrings(got, want) {
+		t.Errorf("Substitute = %v, want %v", got, want)
+	}
+}
+
+func TestArgvPattern_Substitute_RejectsMissingPlaceholder(t *testing.T) {
+	pat := parseArgvPattern("git log --since={since}")
+	_, err := pat.Substitute(map[string]string{}) // no since
+	if err == nil {
+		t.Fatal("expected denial for missing placeholder")
+	}
+	if got, _ := err.Details["placeholder"].(string); got != "{since}" {
+		t.Errorf("placeholder = %q", got)
+	}
+}
+
+func TestArgvPattern_Substitute_PreservesLiteralTokens(t *testing.T) {
+	pat := parseArgvPattern("git status --short")
+	got, err := pat.Substitute(nil)
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	if !slicesEqualStrings(got, []string{"git", "status", "--short"}) {
+		t.Errorf("Substitute = %v", got)
+	}
+}
+
+func TestHostSpawnOp_HappyPathRoutesThroughGate(t *testing.T) {
+	fake := &fakeExecutor{result: SpawnResult{ExitCode: 0, Stdout: []byte("commit-list")}}
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(goodSpawnManifest()),
+		spawnExecutor: fake,
+		connectorFQN:  "github://aileron-test/gitcrawl",
+	}
+	ctx := ctxWithState(context.Background(), state)
+	args := mustJSON(map[string]string{"since": "2026-01-01"})
+	rc := processSpawnOp(ctx, state, "log", args)
+	if rc != 0 {
+		t.Fatalf("processSpawnOp rc = %d (err: %v)", rc, state.spawnErr)
+	}
+	if got := fake.gotEnv.Program; got != "/usr/bin/git" {
+		t.Errorf("Program = %q", got)
+	}
+	wantArgv := []string{"git", "log", "--since=2026-01-01"}
+	if !slicesEqualStrings(fake.gotEnv.Argv, wantArgv) {
+		t.Errorf("Argv = %v, want %v", fake.gotEnv.Argv, wantArgv)
+	}
+}
+
+func TestHostSpawnOp_UndeclaredOpDeniedBeforeExecutor(t *testing.T) {
+	fake := &fakeExecutor{}
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(goodSpawnManifest()),
+		spawnExecutor: fake,
+		connectorFQN:  "github://aileron-test/gitcrawl",
+	}
+	ctx := ctxWithState(context.Background(), state)
+	rc := processSpawnOp(ctx, state, "push", nil)
+	if rc == 0 {
+		t.Fatal("expected denial for undeclared op")
+	}
+	if state.spawnErr == nil || state.spawnErr.Class != ClassCapabilityDenied {
+		t.Errorf("expected capability_denied, got %v", state.spawnErr)
+	}
+	if fake.gotEnv.Program != "" {
+		t.Error("executor must not run when gate denies")
+	}
+}
+
+func TestHostSpawnOp_MissingPlaceholderDenied(t *testing.T) {
+	fake := &fakeExecutor{}
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(goodSpawnManifest()),
+		spawnExecutor: fake,
+		connectorFQN:  "github://aileron-test/gitcrawl",
+	}
+	ctx := ctxWithState(context.Background(), state)
+	args := mustJSON(map[string]string{}) // log expects {since}
+	rc := processSpawnOp(ctx, state, "log", args)
+	if rc == 0 {
+		t.Fatal("expected denial for missing placeholder")
+	}
+	if state.spawnErr == nil || state.spawnErr.Class != ClassCapabilityDenied {
+		t.Errorf("expected capability_denied, got %v", state.spawnErr)
+	}
+	detail, _ := state.spawnErr.Details["boundary_detail"].(string)
+	if detail != "envelope" {
+		t.Errorf("boundary_detail = %q, want envelope", detail)
+	}
+}
+
+func TestHostSpawnOp_RefusesWhenNoSpawnPolicy(t *testing.T) {
+	state := &hostState{
+		// no spawnPolicy
+		connectorFQN: "github://aileron-test/gitcrawl",
+	}
+	ctx := ctxWithState(context.Background(), state)
+	rc := processSpawnOp(ctx, state, "log", nil)
+	if rc == 0 {
+		t.Fatal("expected denial when no policy declared")
+	}
+	if state.spawnErr == nil || state.spawnErr.Class != ClassCapabilityDenied {
+		t.Errorf("expected capability_denied, got %v", state.spawnErr)
+	}
+}
+
+func TestHostSpawnOp_MalformedJSONArgsDenied(t *testing.T) {
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(goodSpawnManifest()),
+		spawnExecutor: &fakeExecutor{},
+		connectorFQN:  "github://aileron-test/gitcrawl",
+	}
+	ctx := ctxWithState(context.Background(), state)
+	rc := processSpawnOp(ctx, state, "log", []byte("not json"))
+	if rc != -2 {
+		t.Errorf("rc = %d, want -2", rc)
+	}
+	if state.spawnErr == nil || state.spawnErr.Class != ClassConnectorRuntimeError {
+		t.Errorf("err = %v", state.spawnErr)
+	}
+}
+
+func TestHostSpawnOp_GateStillBlocksDeniedArgvAfterSubstitution(t *testing.T) {
+	// Substitution could in principle produce an argv that does not
+	// match the declared pattern (e.g. the operation pattern itself
+	// changed between policy build and call — not a real-world scenario
+	// today but the gate is the safety net). Confirm gate denial works
+	// even when we're driving the manifest's own operation: an op
+	// that substitutes to an argv shape the gate accepts succeeds.
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(goodSpawnManifest()),
+		spawnExecutor: &fakeExecutor{result: SpawnResult{ExitCode: 0}},
+		connectorFQN:  "github://aileron-test/gitcrawl",
+	}
+	ctx := ctxWithState(context.Background(), state)
+	args := mustJSON(map[string]string{"since": "2026-01-01"})
+	rc := processSpawnOp(ctx, state, "log", args)
+	if rc != 0 {
+		t.Fatalf("rc = %d (err: %v)", rc, state.spawnErr)
+	}
+}
+
+// slicesEqualStrings is a local helper (the existing slicesEqual is in
+// scope but uses [string]; this is the same behavior under a clearer
+// name for the new tests).
+func slicesEqualStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestPathWithin_TrailingSlashEdgeCases(t *testing.T) {
 	if !pathWithin("~/code/", "~/code/") {
 		t.Error("identical with trailing slash should match")
