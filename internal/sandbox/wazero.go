@@ -28,9 +28,10 @@ import (
 // instance down — the per-invocation isolation required by ADR-0005's
 // acceptance criterion #8.
 type WazeroRuntime struct {
-	rt   wazero.Runtime
-	doer HTTPDoer
-	log  *slog.Logger
+	rt            wazero.Runtime
+	doer          HTTPDoer
+	log           *slog.Logger
+	spawnExecutor SpawnExecutor
 
 	// hostMu guards host-module installation so concurrent Compile
 	// calls do not race the WASI registration.
@@ -83,11 +84,15 @@ func NewWazeroRuntime(ctx context.Context, opts ...RuntimeOption) (*WazeroRuntim
 	return w, nil
 }
 
-// installHostModule registers the four Aileron host functions
-// (`log`, `http_request`, `http_response_size`, `http_response_status`,
-// `http_response_read`) under the `aileron_host` module name. The
-// per-invocation state is threaded through context.Context so the
-// module can be installed once and reused.
+// installHostModule registers the Aileron host functions under the
+// `aileron_host` module name. Per-invocation state is threaded through
+// context.Context so the module can be installed once and reused.
+//
+// HTTP-side imports: `log`, `http_request`, `http_response_size`,
+// `http_response_status`, `http_response_read`.
+//
+// Spawn-side imports (per ADR-0002 spawn primitive): `spawn`,
+// `spawn_status`, `spawn_output_size`, `spawn_output_read`.
 func (w *WazeroRuntime) installHostModule(ctx context.Context) error {
 	w.hostMu.Lock()
 	defer w.hostMu.Unlock()
@@ -108,6 +113,18 @@ func (w *WazeroRuntime) installHostModule(ctx context.Context) error {
 		NewFunctionBuilder().
 		WithFunc(hostHTTPResponseRead).
 		Export("http_response_read").
+		NewFunctionBuilder().
+		WithFunc(hostSpawn).
+		Export("spawn").
+		NewFunctionBuilder().
+		WithFunc(hostSpawnStatus).
+		Export("spawn_status").
+		NewFunctionBuilder().
+		WithFunc(hostSpawnOutputSize).
+		Export("spawn_output_size").
+		NewFunctionBuilder().
+		WithFunc(hostSpawnOutputRead).
+		Export("spawn_output_read").
 		Instantiate(ctx)
 	return err
 }
@@ -131,21 +148,22 @@ func (w *WazeroRuntime) Compile(ctx context.Context, manifest *cstore.Manifest, 
 		return nil, newConnectorLoadFailed(fmt.Sprintf("compile WASM: %s", err.Error()))
 	}
 	return &wazeroConnector{
-		runtime:  w,
-		manifest: manifest,
-		compiled: compiled,
-		policy:   NewHostPolicy(manifest),
+		runtime:     w,
+		manifest:    manifest,
+		compiled:    compiled,
+		policy:      NewHostPolicy(manifest),
+		spawnPolicy: NewSpawnPolicy(manifest),
 	}, nil
 }
 
 // wazeroConnector is the per-binary handle: caches the compiled module
-// and the parsed network policy so repeated invocations don't redo
-// either.
+// and the parsed policies so repeated invocations don't redo either.
 type wazeroConnector struct {
-	runtime  *WazeroRuntime
-	manifest *cstore.Manifest
-	compiled wazero.CompiledModule
-	policy   *HostPolicy
+	runtime     *WazeroRuntime
+	manifest    *cstore.Manifest
+	compiled    wazero.CompiledModule
+	policy      *HostPolicy
+	spawnPolicy *SpawnPolicy
 }
 
 // Close implements [Connector]. Releases the cached compiled module.
@@ -178,6 +196,9 @@ func (c *wazeroConnector) Invoke(ctx context.Context, call Call) (Result, error)
 		connectorFQN:           manifestFQN(c.manifest),
 		expectedCredentialKind: manifestCredentialKind(c.manifest),
 		credentialResolver:     call.CredentialResolver,
+		spawnPolicy:            c.spawnPolicy,
+		spawnExecutor:          c.runtime.spawnExecutor,
+		actionSpawnGrant:       toSet(call.AllowedSpawnPrograms),
 	}
 	callCtx = ctxWithState(callCtx, state)
 
