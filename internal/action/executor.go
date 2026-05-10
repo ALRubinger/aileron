@@ -14,6 +14,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/sandbox"
+	"github.com/ALRubinger/aileron/internal/sandbox/forwarder"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -392,13 +393,9 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 	if err != nil {
 		return nil, nil, "", err
 	}
-	binPath := filepath.Join(entryDir, "connector.wasm")
-	if _, statErr := os.Stat(binPath); errors.Is(statErr, os.ErrNotExist) {
-		binPath = filepath.Join(entryDir, "connector.wat")
-	}
-	binBytes, err := os.ReadFile(binPath)
+	binBytes, err := loadConnectorBytes(cmf, entryDir)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("read connector binary: %w", err)
+		return nil, nil, "", err
 	}
 	conn, err := e.Runtime.Compile(ctx, cmf, binBytes)
 	if err != nil {
@@ -408,6 +405,31 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 	e.cache[dep.Hash] = cachedConnector{conn: conn, manifest: cmf}
 	e.mu.Unlock()
 	return conn, cmf, dep.Hash, nil
+}
+
+// loadConnectorBytes returns the WASM bytes the runtime should compile
+// for `cmf`. For forwarder-shaped connectors (those whose manifest
+// declares `connector.forwarder = "builtin://spawn-forwarder"`), the
+// bytes are the daemon-embedded forwarder; entryDir holds the manifest
+// only. For per-binary connectors, the bytes are read from disk under
+// entryDir as before.
+func loadConnectorBytes(cmf *cstore.Manifest, entryDir string) ([]byte, error) {
+	if cmf != nil && cmf.Connector.Forwarder == cstore.BuiltinForwarderSpawn {
+		// The forwarder bytes are part of the daemon binary; the
+		// manifest's content hash already includes them via
+		// cstore.ForwarderConnectorHash so the store does not need a
+		// copy on disk.
+		return forwarder.WASM, nil
+	}
+	binPath := filepath.Join(entryDir, "connector.wasm")
+	if _, statErr := os.Stat(binPath); errors.Is(statErr, os.ErrNotExist) {
+		binPath = filepath.Join(entryDir, "connector.wat")
+	}
+	binBytes, err := os.ReadFile(binPath)
+	if err != nil {
+		return nil, fmt.Errorf("read connector binary: %w", err)
+	}
+	return binBytes, nil
 }
 
 // resolverFor returns the credential.Resolver for the named connector,
