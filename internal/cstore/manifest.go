@@ -12,6 +12,7 @@
 package cstore
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -95,6 +96,7 @@ type ManifestCapabilities struct {
 	Network    *ManifestNetwork    `toml:"network"`
 	Credential *ManifestCredential `toml:"credential"`
 	Runtime    *ManifestRuntime    `toml:"runtime"`
+	Spawn      *ManifestSpawn      `toml:"spawn"`
 }
 
 // ManifestNetwork is `[capabilities.network]` — declared outbound grants.
@@ -175,6 +177,63 @@ type ManifestRuntime struct {
 	Imports []string `toml:"imports"`
 }
 
+// ManifestSpawn is `[capabilities.spawn]` (per ADR-0002 spawn primitive,
+// ADR-0014 sandbox technology). Declares the connector's local subprocess
+// grants: which programs may be invoked, with which argv shapes, which
+// environment keys may be forwarded, and which filesystem scopes the
+// subprocess may read or write. Absent block means the connector may not
+// spawn anything.
+//
+// The runtime enforces this declaration at host-function call time via
+// HostPolicy.CheckSpawn, mirroring the network primitive's
+// HostPolicy.CheckURL.
+type ManifestSpawn struct {
+	// Programs lists allowed binaries. Each entry pins the binary by
+	// absolute filesystem path (or `~/`-anchored path) and optionally
+	// by content hash. The runtime resolves the path before exec and
+	// refuses spawn if it does not match an entry. When Hash is set,
+	// the runtime additionally verifies the binary's bytes.
+	Programs []ManifestSpawnProgram `toml:"programs"`
+
+	// ArgvPatterns is an allow-list of templated argv shapes the
+	// connector may invoke. Each pattern is a literal argv with
+	// `{name}` placeholders the connector fills at call time. An argv
+	// that does not match any pattern after substitution is denied.
+	ArgvPatterns []string `toml:"argv_patterns"`
+
+	// EnvPassthrough is the closed set of environment keys the runtime
+	// may set on the subprocess. The subprocess receives only declared
+	// keys; nothing is forwarded by default. Credential injection rides
+	// this channel (per ADR-0002 spawn-primitive credential rule).
+	EnvPassthrough []string `toml:"env_passthrough"`
+
+	// FSRead is the filesystem read scope. Each entry is an absolute
+	// path or `~/`-anchored path. The sandbox restricts subprocess
+	// reads to these paths.
+	FSRead []string `toml:"fs_read"`
+
+	// FSWrite is the filesystem write scope. Same shape as FSRead.
+	FSWrite []string `toml:"fs_write"`
+
+	// Cwd is the optional working-directory policy. When set, the
+	// runtime invokes the subprocess with this cwd; the cwd must be
+	// within FSRead. When unset, the runtime uses a per-invocation
+	// temporary directory.
+	Cwd string `toml:"cwd,omitempty"`
+}
+
+// ManifestSpawnProgram is one entry in [capabilities.spawn].programs:
+// a program path plus an optional content-hash pin.
+type ManifestSpawnProgram struct {
+	// Path is the absolute (or `~/`-anchored) filesystem path of the
+	// binary. The runtime resolves the path and compares before exec.
+	Path string `toml:"path"`
+
+	// Hash is the optional SHA-256 of the binary's bytes, prefixed
+	// with `sha256:`. When set, the runtime verifies on every call.
+	Hash string `toml:"hash,omitempty"`
+}
+
 // ManifestProvides is `[provides]` — discovery metadata. Not enforced by
 // the runtime; consumed by the Hub and by action authors.
 type ManifestProvides struct {
@@ -233,6 +292,11 @@ func ValidateManifest(m *Manifest, file string) error {
 	}
 	if cred := m.Capabilities.Credential; cred != nil {
 		if err := validateCredential(cred, file); err != nil {
+			return err
+		}
+	}
+	if sp := m.Capabilities.Spawn; sp != nil {
+		if err := validateSpawn(sp, file); err != nil {
 			return err
 		}
 	}
@@ -325,6 +389,101 @@ func validateOAuth2(o *ManifestOAuth2, file string) error {
 		}
 	}
 	return nil
+}
+
+// envKeyRe matches a POSIX-shape environment variable name: a leading
+// letter or underscore, followed by letters, digits, or underscores.
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateSpawn enforces the [capabilities.spawn] schema described in
+// ADR-0002's spawn-primitive section. See also ADR-0014 for the runtime
+// enforcement mechanism the declaration translates into.
+//
+// A spawn block is only meaningful when it grants at least one program;
+// an empty programs list is rejected so a connector cannot accidentally
+// ship an unenforceable spawn capability. All paths (program paths, FS
+// scopes, cwd) must be absolute or `~/`-anchored so the runtime can
+// resolve them portably across Linux, macOS, and Windows. Argv patterns
+// must each have at least one token. Environment keys must be valid
+// POSIX-shape identifiers.
+func validateSpawn(s *ManifestSpawn, file string) error {
+	if len(s.Programs) == 0 {
+		return newValidationErr(file,
+			"[capabilities.spawn].programs is required (at least one)")
+	}
+	for i, p := range s.Programs {
+		if strings.TrimSpace(p.Path) == "" {
+			return newValidationErr(file,
+				"[capabilities.spawn].programs[%d].path is required", i)
+		}
+		if !isAbsoluteOrTildePath(p.Path) {
+			return newValidationErr(file,
+				"[capabilities.spawn].programs[%d].path %q must be absolute (/...) or ~/-anchored",
+				i, p.Path)
+		}
+		if p.Hash != "" {
+			if !strings.HasPrefix(p.Hash, "sha256:") || len(p.Hash) <= len("sha256:") {
+				return newValidationErr(file,
+					"[capabilities.spawn].programs[%d].hash %q must be prefixed with sha256:",
+					i, p.Hash)
+			}
+		}
+	}
+	if len(s.ArgvPatterns) == 0 {
+		return newValidationErr(file,
+			"[capabilities.spawn].argv_patterns is required (at least one)")
+	}
+	for i, pat := range s.ArgvPatterns {
+		if strings.TrimSpace(pat) == "" {
+			return newValidationErr(file,
+				"[capabilities.spawn].argv_patterns[%d] is empty", i)
+		}
+	}
+	for i, k := range s.EnvPassthrough {
+		if !envKeyRe.MatchString(k) {
+			return newValidationErr(file,
+				"[capabilities.spawn].env_passthrough[%d] %q is not a valid environment variable name",
+				i, k)
+		}
+	}
+	for i, p := range s.FSRead {
+		if !isAbsoluteOrTildePath(p) {
+			return newValidationErr(file,
+				"[capabilities.spawn].fs_read[%d] %q must be absolute (/...) or ~/-anchored",
+				i, p)
+		}
+	}
+	for i, p := range s.FSWrite {
+		if !isAbsoluteOrTildePath(p) {
+			return newValidationErr(file,
+				"[capabilities.spawn].fs_write[%d] %q must be absolute (/...) or ~/-anchored",
+				i, p)
+		}
+	}
+	if s.Cwd != "" && !isAbsoluteOrTildePath(s.Cwd) {
+		return newValidationErr(file,
+			"[capabilities.spawn].cwd %q must be absolute (/...) or ~/-anchored",
+			s.Cwd)
+	}
+	return nil
+}
+
+// isAbsoluteOrTildePath reports whether p is either an absolute path
+// (`/...`) or a `~`-anchored path (`~`, `~/...`). Windows-style
+// drive-rooted paths (`C:\...`) are not accepted in the manifest
+// schema; per ADR-0014 the runtime translates `~/`-anchored paths to
+// the host's user profile on Windows.
+func isAbsoluteOrTildePath(p string) bool {
+	if p == "" {
+		return false
+	}
+	if strings.HasPrefix(p, "/") {
+		return true
+	}
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		return true
+	}
+	return false
 }
 
 // isAllowedOAuthURL reports whether s is an allowable OAuth provider
