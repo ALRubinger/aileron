@@ -3,6 +3,11 @@ import Content from "./tabs-content.svelte";
 import List, { tabsListVariants, type TabsListVariant } from "./tabs-list.svelte";
 import Trigger from "./tabs-trigger.svelte";
 import PlatformTabs, { type PlatformTabItem } from "./platform-tabs.svelte";
+import InstallTabs, {
+	type InstallMethod,
+	type InstallPlatform,
+	type InstallVariant,
+} from "./install-tabs.svelte";
 
 export {
 	Root,
@@ -19,4 +24,9 @@ export {
 	//
 	PlatformTabs,
 	type PlatformTabItem,
+	//
+	InstallTabs,
+	type InstallMethod,
+	type InstallPlatform,
+	type InstallVariant,
 };
