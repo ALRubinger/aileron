@@ -126,7 +126,7 @@ Available Commands:
 		t.Errorf("manifest not written: %v", err)
 	}
 	for _, sub := range []string{"pr", "issue"} {
-		if _, err := os.Stat(filepath.Join(out, "actions", sub, "action.md")); err != nil {
+		if _, err := os.Stat(filepath.Join(out, "actions", sub+".md")); err != nil {
 			t.Errorf("missing action.md for %q: %v", sub, err)
 		}
 	}
@@ -152,6 +152,93 @@ func TestRunActionWrap_ForceOverwritesExisting(t *testing.T) {
 	stderr.Reset()
 	if code := runActionWrap([]string{"--config=" + yamlPath, "--out=" + out, "--force"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("--force failed: %s", stderr.String())
+	}
+}
+
+// --- --install mode ---
+
+func TestRunActionWrap_InstallMode_WritesToStoreAndActionsDir(t *testing.T) {
+	// --install reads HOME-rooted paths. Redirect HOME so the test is
+	// hermetic and doesn't touch the user's real ~/.aileron.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Swap the embedded forwarder for a tiny payload so the test
+	// doesn't pull a 3 MB binary into its store; the wrap.Install path
+	// is forwarder-bytes-agnostic — it just hashes them.
+	origFW := actionWrapForwarder
+	actionWrapForwarder = []byte("FORWARDER-TEST")
+	t.Cleanup(func() { actionWrapForwarder = origFW })
+
+	tmp := t.TempDir()
+	yamlPath := filepath.Join(tmp, "spec.yaml")
+	if err := os.WriteFile(yamlPath, []byte(testWrapYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runActionWrap(
+		[]string{"--config=" + yamlPath, "--install"},
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr: %s", code, stderr.String())
+	}
+
+	// Action files land under ~/.aileron/actions/<connector-leaf>-<op>.md.
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	for _, name := range []string{"gitcrawl-log.md", "gitcrawl-status.md"} {
+		if _, err := os.Stat(filepath.Join(actionsDir, name)); err != nil {
+			t.Errorf("expected action file %s: %v", name, err)
+		}
+	}
+	// Manifest lands in the daemon's connector store under the
+	// computed hash.
+	storeSha := filepath.Join(home, ".aileron", "store", "connectors", "sha256")
+	entries, err := os.ReadDir(storeSha)
+	if err != nil {
+		t.Fatalf("store dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("store sha256 dir has %d entries, want 1", len(entries))
+	}
+	if _, err := os.Stat(filepath.Join(storeSha, entries[0].Name(), "manifest.toml")); err != nil {
+		t.Errorf("manifest.toml missing in store: %v", err)
+	}
+	// No source tree written to --out (the flag's irrelevant in
+	// --install mode).
+	if _, err := os.Stat(filepath.Join(tmp, "aileron-connector")); err == nil {
+		t.Error("--install should not produce a source tree")
+	}
+}
+
+func TestRunActionWrap_InstallMode_IdempotentOnSecondCall(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	origFW := actionWrapForwarder
+	actionWrapForwarder = []byte("FORWARDER-TEST")
+	t.Cleanup(func() { actionWrapForwarder = origFW })
+
+	yamlPath := filepath.Join(t.TempDir(), "spec.yaml")
+	if err := os.WriteFile(yamlPath, []byte(testWrapYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runActionWrap([]string{"--config=" + yamlPath, "--install"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("first install: %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	// Without --force the second install fails on action.md clobber.
+	if code := runActionWrap([]string{"--config=" + yamlPath, "--install"}, &stdout, &stderr); code == 0 {
+		t.Error("expected refusal to clobber on second --install")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runActionWrap([]string{"--config=" + yamlPath, "--install", "--force"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("--install --force: %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "already installed") {
+		t.Errorf("expected 'already installed' message; got %q", stdout.String())
 	}
 }
 
