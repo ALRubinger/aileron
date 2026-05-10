@@ -126,6 +126,19 @@ homebrew_casks:
       - aileron-server
       - aileron-mcp
       - aileron-sh
+    # macOS Gatekeeper blocks first-run of unsigned/non-notarized
+    # binaries with "Apple could not verify ... is free of malware."
+    # Until we set up Apple Developer ID notarization (needs $99/yr
+    # enrollment + macOS runner + notarytool), strip the quarantine
+    # xattr at install time. The user already trusted the cask by
+    # `brew install`-ing it; getting hit by Gatekeeper after that is
+    # bad UX and the cosign signature is the real trust signal.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", staged_path]
+          end
 
 nfpms:
   # Linux distro packages: .deb (Debian/Ubuntu), .rpm (RHEL/Fedora),
