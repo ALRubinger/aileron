@@ -64,6 +64,31 @@ func resolveSibling(selfPath, name string) (string, error) {
 	return exec.LookPath(name)
 }
 
+// resolveMCPBinary locates aileron-mcp. The MCP server is a required
+// runtime dependency of `aileron launch` per ADR-0015 — without it the
+// agent has no path to Aileron's tools, the vault, or the action-
+// approval surface. Missing aileron-mcp is a hard error with a
+// remediation hint, not a silent skip.
+//
+// Lookup order: next to the running aileron binary first (the shape
+// the Homebrew cask, deb/rpm/apk packages, and `task build:cli + task
+// build:mcp` all produce), then $PATH (covers `go install` users who
+// installed only the CLI or unusual layouts).
+func resolveMCPBinary(selfPath string) (string, error) {
+	mcpBin, err := resolveSibling(selfPath, "aileron-mcp")
+	if err == nil {
+		return mcpBin, nil
+	}
+	siblingDir := "<unknown>"
+	if selfPath != "" {
+		siblingDir = filepath.Dir(selfPath)
+	}
+	return "", fmt.Errorf(
+		"aileron-mcp not found next to %s/aileron or on PATH; reinstall aileron from the official packages, or build and place aileron-mcp alongside aileron (task build:mcp; cp build/aileron-mcp %s/)",
+		siblingDir, siblingDir,
+	)
+}
+
 // Launch starts the agent as a child process under Aileron's daemon.
 //
 // Per ADR-0015 the launcher is the daemon-connection + MCP-registration
@@ -97,16 +122,26 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	daemonURL = trimTrailingSlash(daemonURL)
 	client := newDaemonClient(daemonURL)
 
+	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
+	}
+
+	// Resolve aileron-mcp up front. Per ADR-0015 the MCP server is the
+	// runtime path for every Aileron tool the agent calls; running
+	// without it isn't running. Resolve before session registration so
+	// a missing binary fails before the daemon has anything to clean up.
+	selfPath, _ := os.Executable()
+	mcpBin, err := resolveMCPBinary(selfPath)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+
 	regCtx, cancelReg := context.WithTimeout(ctx, daemonHTTPTimeout)
 	sessionID, err := client.RegisterSession(regCtx, config.Agent.Name(), config.Dir)
 	cancelReg()
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("register session: %w", err)
-	}
-
-	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
-	if err != nil {
-		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
 	}
 
 	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), daemonURL)
@@ -118,20 +153,17 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// (Claude, Pi) or config-file (Codex, Goose, OpenCode). The env
 	// passed here ends up inside the MCP server process so it can
 	// reach the daemon's session-scoped surfaces.
-	selfPath, _ := os.Executable()
-	if mcpBin, err := resolveSibling(selfPath, "aileron-mcp"); err == nil {
-		mcpEnv := map[string]string{
-			"AILERON_URL":          daemonURL,
-			"AILERON_COMMS_URL":    daemonURL,
-			"AILERON_SESSION_ID":   sessionID,
-			"AILERON_APPROVAL_URL": daemonURL + "/approvals",
-		}
-		extraArgs, mcpErr := config.Agent.ConfigureMCP(mcpBin, mcpEnv, config.Dir)
-		if mcpErr != nil {
-			return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
-		}
-		allArgs = append(allArgs, extraArgs...)
+	mcpEnv := map[string]string{
+		"AILERON_URL":          daemonURL,
+		"AILERON_COMMS_URL":    daemonURL,
+		"AILERON_SESSION_ID":   sessionID,
+		"AILERON_APPROVAL_URL": daemonURL + "/approvals",
 	}
+	extraArgs, mcpErr := config.Agent.ConfigureMCP(mcpBin, mcpEnv, config.Dir)
+	if mcpErr != nil {
+		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
+	}
+	allArgs = append(allArgs, extraArgs...)
 
 	cmd := exec.CommandContext(ctx, agentPath, allArgs...)
 	cmd.Env = env

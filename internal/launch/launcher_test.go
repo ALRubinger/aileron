@@ -159,6 +159,8 @@ func TestLaunch_WorkingDirectory(t *testing.T) {
 }
 
 func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
+	// aileron-mcp resolution is handled package-wide by TestMain
+	// (a fake binary is on PATH for every test).
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "args.txt")
 	// Capture argv as one line per argument so we can assert presence.
@@ -166,18 +168,6 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+outFile+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	// The launcher only calls ConfigureMCP when aileron-mcp resolves
-	// (next to the test binary or on PATH). Without that, MCP wiring is
-	// silently skipped and the assertions below would fail with no signal
-	// about why. Pin a fake aileron-mcp at the head of PATH so the
-	// resolution succeeds in every environment (CI, fresh checkouts).
-	mcpDir := t.TempDir()
-	mcpBin := filepath.Join(mcpDir, "aileron-mcp")
-	if err := os.WriteFile(mcpBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", mcpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
 		Agent: scriptAgent{
@@ -203,6 +193,31 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 		if !found {
 			t.Errorf("expected arg %q in child argv, got %v", w, args)
 		}
+	}
+}
+
+func TestLaunch_AileronMCPMissing_FailsLoud(t *testing.T) {
+	// Strip the package-wide fake aileron-mcp from PATH and point HOME
+	// at a tempdir so resolveSibling has no chance of finding one.
+	// Launch should fail with a structured error before session
+	// registration happens.
+	t.Setenv("PATH", "")
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent: scriptAgent{script: "/bin/sh"},
+	})
+	if err == nil {
+		t.Fatal("expected error when aileron-mcp is unresolvable, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "aileron-mcp") {
+		t.Errorf("error message does not mention aileron-mcp: %q", msg)
+	}
+	// The message should point the user at the lookup paths it tried so
+	// they can debug installation issues without diving into source.
+	if !strings.Contains(msg, "PATH") {
+		t.Errorf("error message does not mention PATH: %q", msg)
 	}
 }
 
