@@ -16,11 +16,9 @@ The suite is published from the [`aileron-connector-google`](https://github.com/
 aileron action add-suite github://ALRubinger/aileron-connector-google/suite.toml@latest
 ```
 
-One command. The CLI prompts to trust the publisher's signing key (once per machine), pulls the suite manifest, installs all six actions in declaration order with a single install-consent prompt, and finishes by prompting you to bind the Google OAuth account. The OAuth dance opens a browser to Google's consent screen, captures the redirect on a loopback port, and stores the access + refresh tokens encrypted in your local vault.
-
 ### Individual actions
 
-Pick whichever actions you actually want exposed to the agent. Each line is independently copyable. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
+Pick whichever actions you actually want exposed to the agent.
 
 ```sh
 aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@latest

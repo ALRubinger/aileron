@@ -22,11 +22,9 @@ The connector runs as a sandboxed WASM module talking only to `localhost:1234`; 
 aileron action add-suite github://ALRubinger/aileron-connector-bluebubbles/suite.toml@latest
 ```
 
-One command. The CLI prompts to trust the publisher's signing key (once per machine), pulls the suite manifest, installs all three actions in declaration order with a single install-consent prompt, and finishes by prompting you for the BlueBubbles server password. The password lands encrypted in your local vault.
-
 ### Individual actions
 
-Pick whichever actions you actually want exposed to the agent. Each line is independently copyable. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
+Pick whichever actions you actually want exposed to the agent.
 
 ```sh
 aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/list-recent-chats@latest
