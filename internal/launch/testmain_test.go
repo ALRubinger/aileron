@@ -5,25 +5,33 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// TestMain spins up a fake daemon and points AILERON_API_URL at it
-// for every test in this package. spawn.Resolve honors the env var
-// and returns the URL immediately without trying to fork-exec a real
-// daemon binary — so tests don't need `server` on PATH.
+// TestMain spins up a fake daemon, points AILERON_API_URL at it, and
+// installs a fake aileron-mcp on PATH for every test in this package.
 //
-// The fake handles the three endpoints Launch hits:
+// Fake daemon (AILERON_API_URL): spawn.Resolve honors the env var and
+// returns the URL immediately without trying to fork-exec a real
+// daemon binary. The fake handles the endpoints Launch hits:
 //
 //   - POST /v1/sessions          mints a stable test session id
 //   - POST /v1/sessions/{id}/end accepts and returns the record
 //   - GET  /v1/vault/local/status reports unlocked
 //
-// Tests that need a different fake (e.g., to assert the request body
-// or simulate a locked vault) can set AILERON_API_URL themselves to
-// override the package-wide one.
+// Fake aileron-mcp: per ADR-0015, Launch requires aileron-mcp to be
+// resolvable (next to the running binary or on PATH). Production
+// always satisfies this; the test binary doesn't, so we plant a
+// no-op shell script in a tempdir and prepend that dir to PATH. The
+// MCP server never runs in these tests — Launch only resolves the
+// path to hand to the agent's ConfigureMCP method.
+//
+// Tests that need a different fake (e.g., to assert the request body,
+// simulate a locked vault, or exercise the missing-aileron-mcp error
+// path) can override the relevant env vars themselves.
 func TestMain(m *testing.M) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -52,5 +60,17 @@ func TestMain(m *testing.M) {
 	}))
 	defer srv.Close()
 	_ = os.Setenv("AILERON_API_URL", srv.URL)
+
+	mcpDir, err := os.MkdirTemp("", "aileron-mcp-fake-")
+	if err != nil {
+		panic("creating fake aileron-mcp dir: " + err.Error())
+	}
+	defer os.RemoveAll(mcpDir)
+	mcpBin := filepath.Join(mcpDir, "aileron-mcp")
+	if err := os.WriteFile(mcpBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		panic("writing fake aileron-mcp: " + err.Error())
+	}
+	_ = os.Setenv("PATH", mcpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	os.Exit(m.Run())
 }
