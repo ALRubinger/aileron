@@ -62,6 +62,7 @@ export const navigation: NavItem[] = [
       { label: 'Installing an Action', href: '/guides/installing-an-action/' },
       { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' },
       { label: 'Wrapping a CLI', href: '/guides/wrapping-a-cli/' },
+      { label: 'Setting up BlueBubbles for Aileron', href: '/guides/setting-up-bluebubbles/' },
       { label: 'Authoring an Action', href: '/guides/authoring-an-action/' },
       { label: 'Authoring an Action Suite', href: '/guides/authoring-an-action-suite/' },
       { label: 'Publishing a Connector', href: '/guides/publishing-a-connector/' },
