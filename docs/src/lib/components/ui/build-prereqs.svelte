@@ -62,10 +62,10 @@
 </script>
 
 <!--
-  BuildPrereqs is the dev-toolchain accordion shown under the "Build
-  from source" method tab in InstallTabs. Single Svelte component
-  owning the Accordion primitives directly so bits-ui's accordion
-  context stays intact (the same constraint that Tabs has).
+  BuildPrereqs is the dev-toolchain accordion shown on the Building
+  from Source page. Single Svelte component owning the Accordion
+  primitives directly so bits-ui's accordion context stays intact
+  (the same constraint that Tabs has).
 -->
 <AccordionPrimitive.Root type="multiple" class="cn-build-prereqs my-2 w-full">
 	<AccordionPrimitive.Item value="go" class={itemClass}>

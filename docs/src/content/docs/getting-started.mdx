@@ -6,18 +6,27 @@ order: 2
 
 import HighlightCard from '$lib/components/ui/highlight-card.svelte';
 import LiftoffPreflight from '$lib/components/ui/liftoff-preflight.svelte';
-import InstallTabs from '$lib/components/ui/tabs/install-tabs.svelte';
+import OsInstallTabs from '$lib/components/ui/tabs/os-install-tabs.svelte';
 import { latestRelease } from '$lib/data/release';
 
 <HighlightCard>
 
-We're about to take your first flight with Aileron. In under 5 minutes, you'll be securely equipping Claude Code to use your real Gmail and Calendar account. Along the way we'll introduce Connectors and Actions, a joyful way to add powerful features to your agent. Your agent never sees the keys to your private services, and you always retain approval before taking an irreversible action like sending an email. Let's take off.
+We're about to take your first flight with Aileron. In under 5 minutes, you'll be securely equipping Claude Code to use your real Gmail and Google Calendar account. Along the way we'll introduce [Connectors](/concepts/connectors/) and [Actions](/concepts/connectors/), a joyful way to add powerful features to your agent. Your agent never sees the keys to your private services, and you always retain approval before taking an irreversible action like sending an email. Let's take off.
 
 </HighlightCard>
 
-<HighlightCard title="What to expect" variant="muted">
+<HighlightCard variant="muted">
 
-Estimated time: 5 minutes. What happens: Summarize five most recent emails, draft an email, execute secured actions in a sandboxed environment, get proof of the audit trail for what was done — all without giving your agent or LLM direct access to your Google Account.
+**Estimated time**: 5 minutes. 
+
+**What happens**: 
+
+* Summarize your recent emails
+* See how much time you're planning to spend in meetings next week
+* Draft an email
+* Review the audit trail of what was done
+
+...all executed in a sandboxed environment without giving your agent or LLM direct access to your Google Account.
 
 </HighlightCard>
 
@@ -27,59 +36,48 @@ Estimated time: 5 minutes. What happens: Summarize five most recent emails, draf
 
 ## 1. Install Aileron
 
-<InstallTabs methods={[
+<OsInstallTabs platforms={[
   {
-    value: "install",
-    label: "Install",
-    platforms: [
+    value: "macos",
+    label: "macOS",
+    lang: "sh",
+    note: 'Requires <a href="https://brew.sh">Homebrew</a>.',
+    code: "brew install --cask ALRubinger/aileron/aileron",
+  },
+  {
+    value: "linux",
+    label: "Linux",
+    variants: [
       {
-        value: "macos",
-        label: "macOS",
+        value: "deb",
+        label: "Debian / Ubuntu (.deb)",
         lang: "sh",
-        note: 'Uses <a href="https://brew.sh">Homebrew</a>. Don\'t have it yet? Install it first.',
-        code: "brew install --cask ALRubinger/aileron/aileron",
+        code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.deb\nsudo dpkg -i aileron_${latestRelease.version}_linux_amd64.deb`,
       },
       {
-        value: "linux",
-        label: "Linux",
-        variants: [
-          {
-            value: "deb",
-            label: "Debian / Ubuntu (.deb)",
-            lang: "sh",
-            code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.deb\nsudo dpkg -i aileron_${latestRelease.version}_linux_amd64.deb`,
-          },
-          {
-            value: "rpm",
-            label: "RHEL / Fedora (.rpm)",
-            lang: "sh",
-            code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.rpm\nsudo rpm -i aileron_${latestRelease.version}_linux_amd64.rpm`,
-          },
-          {
-            value: "apk",
-            label: "Alpine (.apk)",
-            lang: "sh",
-            code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.apk\nsudo apk add --allow-untrusted aileron_${latestRelease.version}_linux_amd64.apk`,
-          },
-        ],
+        value: "rpm",
+        label: "RHEL / Fedora (.rpm)",
+        lang: "sh",
+        code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.rpm\nsudo rpm -i aileron_${latestRelease.version}_linux_amd64.rpm`,
       },
       {
-        value: "windows",
-        label: "Windows",
-        lang: "powershell",
-        note: "Extract the zip and add the directory to PATH.",
-        code: `Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron`,
+        value: "apk",
+        label: "Alpine (.apk)",
+        lang: "sh",
+        code: `curl -LO https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_linux_amd64.apk\nsudo apk add --allow-untrusted aileron_${latestRelease.version}_linux_amd64.apk`,
       },
     ],
   },
   {
-    value: "source",
-    label: "Build from source",
-    note: "Expand each prerequisite for per-OS install commands, then run the build:",
-    lang: "sh",
-    code: "git clone https://github.com/ALRubinger/aileron.git && \\\n  cd aileron && \\\n  task build:cli build:server build:mcp build:sh && \\\n  export PATH=\"$PWD/build:$PATH\"",
+    value: "windows",
+    label: "Windows",
+    lang: "powershell",
+    note: "Extract the zip and add the directory to PATH. Note that Windows support is not yet confirmed; file an issue if not working correctly.",
+    code: `Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron`,
   },
 ]} client:load />
+
+Prefer to compile it yourself? See [Building from Source](/development/building-from-source/).
 
 Verify:
 

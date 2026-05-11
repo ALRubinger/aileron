@@ -27,6 +27,7 @@
   only ships on this one page.
 -->
 <AccordionPrimitive.Root type="multiple" class="cn-preflight my-6 w-full">
+
 	<AccordionPrimitive.Item value="claude-code" class={itemClass}>
 		<AccordionPrimitive.Header>
 			<AccordionPrimitive.Trigger class={triggerClass}>

@@ -4,19 +4,20 @@ description: "Prerequisites, Taskfile entry points, and how the embedded assets 
 order: 3
 ---
 
+import BuildPrereqs from '$lib/components/ui/build-prereqs.svelte';
+import BuildExtras from '$lib/components/ui/build-extras.svelte';
+
 End users install pre-built binaries via Homebrew, apt, yum, or apk (see [Getting Started](/getting-started/)). This page is for contributors who want to build everything locally from a fresh clone.
 
 ## Prerequisites
 
-- **Go 1.25+** — the toolchain version pinned in `go.mod`. Anything newer in the 1.x line should work; we stay close to the latest stable per the project's upstream-deps convention.
-- **Node.js 20+ via [nvm](https://github.com/nvm-sh/nvm)** — for the webapp build and the docs site. `pnpm` is the package manager.
-- **[Task](https://taskfile.dev)** — the project orchestrator. All builds go through `task <name>`. The Taskfile lives at the repo root.
+Expand each one for per-OS install commands.
 
-Recommended extras:
+<BuildPrereqs client:load />
 
-- **`golangci-lint`** — if you want lint feedback ahead of CI.
-- **`gh`** — for the PR workflow.
-- **`docker`** — only required if you're touching the Docker images under `deploy/`.
+## Recommended extras
+
+<BuildExtras client:load />
 
 ## Build everything
 
