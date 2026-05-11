@@ -96,16 +96,7 @@ export type PendingActionApprovalKind =
 	| 'action'
 	| 'comms_send'
 	| 'comms_draft'
-	| 'http_request'
-	| 'shell';
-
-/** Persistence intent on a shell-kind approval (#427). Empty (or
- *  absent) means approve once without saving; "project" / "user"
- *  ride through `ActionApprovalDecision.edited_payload.save_policy`
- *  and tell the launch-side approval socket to reply allow_project /
- *  allow_user, which makes aileron-sh write a new allow rule to the
- *  project's `aileron.yaml` or to `~/.aileron/settings.yaml`. */
-export type SavePolicy = '' | 'project' | 'user';
+	| 'http_request';
 
 export type PendingActionApproval = {
 	id: string;

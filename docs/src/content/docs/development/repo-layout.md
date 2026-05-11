@@ -45,8 +45,7 @@ saas/             SaaS-specific code paths. Off the default critical
 | `internal/server` | The daemon's HTTP API. Auto-generated server interface from `internal/api/openapi.yaml`. |
 | `internal/api` | OpenAPI spec plus its generated Go types. The spec is the source of truth; never hand-edit the generated files. |
 | `internal/app` | The webapp embed and HTTP handlers. |
-| `internal/launch` | `aileron launch` wiring: spawns the agent host with the MCP transport pointed at the daemon. |
-| `internal/policy` | The shell policy engine (`aileron-sh`'s decisioning). |
+| `internal/launch` | `aileron launch` wiring: spawns the agent host with the MCP transport pointed at the daemon (per [ADR-0015](/adr/0015-launch-audit-scope)). Per-agent definitions live under `internal/launch/agents/`. |
 | `internal/audit` | OTel-shaped audit event schema. Per-event attribute keys. |
 | `internal/sessions` | Session records for `aileron launch` runs. |
 | `internal/observability` | OTel exporters and trace propagation. |

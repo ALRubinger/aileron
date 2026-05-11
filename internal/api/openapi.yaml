@@ -791,54 +791,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
-  /v1/sessions/{session_id}/approvals/shell:
-    post:
-      tags: [Sessions]
-      summary: Request user approval for a shell command (long-poll)
-      description: |
-        Called by `aileron-sh` (the policy-enforced shell shim) when a
-        command matches an `ask:` policy rule. The daemon registers a
-        shell-kind entry on its action-approval queue, surfaces it on
-        the webapp's /approvals page, and blocks the response until the
-        user decides — or until the 5-minute server-side timeout fires.
-
-        Replaces the per-launch unix socket
-        (`/tmp/ai-{sessionID}.sock`) the launch process used to bind
-        for this same flow. The wire vocabulary is unchanged: the four
-        decisions `aileron-sh` understands map to the four buttons on
-        the webapp approval card (Approve once / Deny / Approve + save
-        for project / Approve + save for user). On any error path the
-        response is `deny` so the policy-enforced shell fails closed.
-      operationId: requestShellApproval
-      security: []
-      parameters:
-        - name: session_id
-          in: path
-          required: true
-          schema:
-            type: string
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ShellApprovalRequest"
-      responses:
-        "200":
-          description: User decided (or the timeout produced a deny).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ShellApprovalResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "503":
-          description: Action-approval queue is not configured on this daemon.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
-
   /v1/sessions/{session_id}/comms/messages:
     get:
       tags: [Sessions]
@@ -4993,7 +4945,7 @@ components:
           description: Opaque server-minted identifier for this request.
         kind:
           type: string
-          enum: [action, comms_send, comms_draft, http_request, shell]
+          enum: [action, comms_send, comms_draft, http_request]
           description: |
             Discriminates the user-facing card layout the webapp
             should render.
@@ -5011,15 +4963,6 @@ components:
                 args carry `method`, `url`, `body`, `secret_name`
                 (the matched binding name; the value is never
                 surfaced to the webapp).
-              - `shell` — aileron-sh shell-shim per-command approval
-                (#427); args carry `command`, `reason`, optional
-                `cwd`. The card offers four buttons; the chosen
-                "save" mode rides back as
-                `ActionApprovalDecision.edited_payload.save_policy`
-                (`""` | `"project"` | `"user"`), which the launch-
-                side approval socket translates into the
-                `allow_once` / `allow_project` / `allow_user` wire
-                string aileron-sh writes the new rule under.
         action_name:
           type: string
           description: |
@@ -6473,38 +6416,6 @@ components:
             Agent process exit code. Omit or send null to mark the
             session as ended-with-unknown-status (same shape the
             orphan-reaper produces on daemon restart).
-
-    ShellApprovalRequest:
-      type: object
-      required: [command]
-      description: |
-        Wire shape `aileron-sh` POSTs when a shell command needs user
-        approval. session_id rides in the URL path so the daemon can
-        attribute the approval to its session for audit + the webapp
-        list.
-      properties:
-        command:
-          type: string
-          description: The shell command awaiting approval.
-        reason:
-          type: string
-          description: Human-readable reason from the policy rule that asked.
-        cwd:
-          type: string
-          description: Working directory of the agent that invoked the command.
-
-    ShellApprovalResponse:
-      type: object
-      required: [decision]
-      description: |
-        The user's verdict, mapped to the four-option vocabulary the
-        policy-enforced shell understands. `aileron-sh` writes
-        allow rules to disk on `allow_project` / `allow_user`; the
-        daemon only routes the verdict.
-      properties:
-        decision:
-          type: string
-          enum: [allow_once, deny, allow_project, allow_user]
 
     CommsMessage:
       type: object

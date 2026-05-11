@@ -4,7 +4,6 @@ use (
 	./cmd/aileron
 	./cmd/aileron-enclave
 	./cmd/aileron-mcp
-	./cmd/aileron-sh
 	./internal
 	./sdk/go
 	./test/integration

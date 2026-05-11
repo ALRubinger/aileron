@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
@@ -99,19 +98,6 @@ func TestRun_LaunchNoAgent(t *testing.T) {
 	}
 }
 
-func TestRun_LaunchValidAgentNoShim(t *testing.T) {
-	// "claude" is a valid agent, but aileron-sh won't be found next to the
-	// test binary or on PATH (in CI), so this exercises the shim error path.
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"launch", "claude"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "error:") {
-		t.Errorf("expected error about shim resolution, got %q", stderr.String())
-	}
-}
-
 func TestRun_LaunchUnknownAgent(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"launch", "bogus-agent"}, newTestRegistry(), &stdout, &stderr)
@@ -131,14 +117,10 @@ func TestRun_LaunchUnknownAgent(t *testing.T) {
 // working_dir. Before the fix, Dir was the empty string at the call site,
 // and every `aileron sessions list` row showed cwd="".
 func TestRun_LaunchPopulatesWorkingDir(t *testing.T) {
-	origShim := resolveShimFn
 	origLaunch := launchFn
 	t.Cleanup(func() {
-		resolveShimFn = origShim
 		launchFn = origLaunch
 	})
-
-	resolveShimFn = func() (string, error) { return "/fake/aileron-sh", nil }
 
 	var captured launch.LaunchConfig
 	launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
@@ -161,19 +143,6 @@ func TestRun_LaunchPopulatesWorkingDir(t *testing.T) {
 	}
 }
 
-func TestRun_LaunchLogLevelFlag(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	// --log-level is parsed before the agent name; exercises the flag path.
-	code := run([]string{"launch", "--log-level=debug", "claude"}, newTestRegistry(), &stdout, &stderr)
-	// Will fail at shim resolution, but the flag parsing should succeed.
-	if code != 1 {
-		t.Errorf("expected exit code 1 (shim not found), got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "error:") {
-		t.Errorf("expected shim error, got %q", stderr.String())
-	}
-}
-
 func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"launch", "--log-level=debug"}, newTestRegistry(), &stdout, &stderr)
@@ -185,249 +154,19 @@ func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
 	}
 }
 
-func TestRunInit_CreatesFile(t *testing.T) {
-	dir := t.TempDir()
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"init"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "aileron.yaml") {
-		t.Errorf("expected file creation message, got: %s", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "built in") {
-		t.Errorf("expected built-in defaults message, got: %s", stdout.String())
-	}
-	if _, err := os.Stat(filepath.Join(dir, "aileron.yaml")); err != nil {
-		t.Error("aileron.yaml was not created")
-	}
-}
 
-func TestRunInit_AlreadyExists(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1"), 0o644)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"init"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "already exists") {
-		t.Errorf("expected 'already exists' error, got: %s", stderr.String())
-	}
-}
 
-func TestRunInit_OutputMessage(t *testing.T) {
-	dir := t.TempDir()
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"init"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	// Should explain that defaults are built in.
-	if !strings.Contains(stdout.String(), "built in") {
-		t.Errorf("expected built-in message, got: %s", stdout.String())
-	}
-}
 
-func TestRunInit_InHelp(t *testing.T) {
-	var stdout bytes.Buffer
-	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
-	if !strings.Contains(stdout.String(), "aileron init") {
-		t.Error("expected 'aileron init' in help output")
-	}
-}
 
-func TestRunLog_WithEntries(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(path, audit.ShellEntry{
-		SessionID: "s1", Command: "echo hello", Disposition: "allow", RuleID: "allow_0",
-	})
-	audit.AppendShellEntry(path, audit.ShellEntry{
-		SessionID: "s1", Command: "rm -rf /", Disposition: "deny", RuleID: "deny_0",
-	})
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"log", "--path", path}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "echo hello") {
-		t.Errorf("expected 'echo hello' in output, got:\n%s", out)
-	}
-	if !strings.Contains(out, "deny") {
-		t.Errorf("expected 'deny' in output, got:\n%s", out)
-	}
-}
 
-func TestRunLog_FilterByDisposition(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(path, audit.ShellEntry{
-		SessionID: "s1", Command: "echo hello", Disposition: "allow",
-	})
-	audit.AppendShellEntry(path, audit.ShellEntry{
-		SessionID: "s1", Command: "rm -rf /", Disposition: "deny",
-	})
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"log", "--path", path, "--disposition", "deny"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	out := stdout.String()
-	if strings.Contains(out, "echo hello") {
-		t.Error("should not show allow entries when filtering by deny")
-	}
-	if !strings.Contains(out, "rm -rf") {
-		t.Error("expected denied entry in output")
-	}
-}
-
-func TestRunLog_NoEntries(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "empty.jsonl")
-	os.WriteFile(path, nil, 0o644)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"log", "--path", path}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	if !strings.Contains(stdout.String(), "No audit entries") {
-		t.Error("expected 'No audit entries' message")
-	}
-}
-
-func TestRunLog_MissingFile(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"log", "--path", "/nonexistent/audit.jsonl"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-}
-
-func TestRunPolicyTest_Allow(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
-default: deny
-allow:
-  - "echo *"
-`), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "test", "echo hello"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0 for allowed command, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "allow") {
-		t.Errorf("expected 'allow' in output, got:\n%s", stdout.String())
-	}
-}
-
-func TestRunPolicyTest_Deny(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
-default: allow
-deny:
-  - command: "rm -rf *"
-    description: "no recursive delete"
-`), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "test", "rm -rf /tmp"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 for denied command, got %d", code)
-	}
-	if !strings.Contains(stdout.String(), "deny") {
-		t.Errorf("expected 'deny' in output, got:\n%s", stdout.String())
-	}
-}
-
-func TestRunPolicyTest_MultipleCommands(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
-default: ask
-allow:
-  - "echo *"
-`), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "test", "echo hello", "curl evil.com"}, newTestRegistry(), &stdout, &stderr)
-	_ = code // mixed results
-	out := stdout.String()
-	if !strings.Contains(out, "allow") {
-		t.Error("expected allow for echo")
-	}
-	if !strings.Contains(out, "ask") {
-		t.Error("expected ask for curl")
-	}
-}
-
-func TestRunPolicyTest_NoPolicyFile(t *testing.T) {
-	dir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "test", "echo hello"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "no aileron.yaml") {
-		t.Errorf("expected 'no aileron.yaml' error, got: %s", stderr.String())
-	}
-}
-
-func TestRunPolicyTest_NoCommands(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "test"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 for no commands, got %d", code)
-	}
-}
-
-func TestRunPolicyTest_InHelp(t *testing.T) {
-	var stdout bytes.Buffer
-	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
-	if !strings.Contains(stdout.String(), "aileron policy test") {
-		t.Error("expected 'aileron policy test' in help output")
-	}
-}
 
 func TestRunStatus_All(t *testing.T) {
 	dir := t.TempDir()
@@ -442,11 +181,8 @@ func TestRunStatus_All(t *testing.T) {
 		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "Policy") {
-		t.Error("expected Policy section")
-	}
-	if !strings.Contains(out, "Environment") {
-		t.Error("expected Environment section")
+	if !strings.Contains(out, "Runtime") {
+		t.Error("expected Runtime section")
 	}
 	if !strings.Contains(out, "Notifications") {
 		t.Error("expected Notifications section")
@@ -454,69 +190,9 @@ func TestRunStatus_All(t *testing.T) {
 	if !strings.Contains(out, "Vault") {
 		t.Error("expected Vault section")
 	}
-	if !strings.Contains(out, "Built-in defaults") {
-		t.Error("expected built-in defaults count")
-	}
 }
 
-func TestRunStatus_Policy(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
-default: ask
-deny:
-  - command: "deploy --force *"
-    description: "no force deploy"
-`), 0o644)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"status", "policy"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "aileron.yaml") {
-		t.Error("expected project policy path")
-	}
-	if !strings.Contains(out, "1 deny") {
-		t.Error("expected project deny count")
-	}
-}
-
-func TestRunStatus_Env(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
-env:
-  scrub:
-    - "AWS_*"
-  passthrough:
-    - "HOME"
-`), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"status", "env"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "AWS_*") {
-		t.Error("expected scrub pattern")
-	}
-	if !strings.Contains(out, "HOME") {
-		t.Error("expected passthrough pattern")
-	}
-}
 
 func TestRunStatus_Notifications(t *testing.T) {
 	dir := t.TempDir()
@@ -605,79 +281,8 @@ func TestRunStatus_InHelp(t *testing.T) {
 	}
 }
 
-func TestRunStatus_PolicyWithUserSettings(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
 
-	// Create user settings with a rule.
-	settingsDir := filepath.Join(dir, ".aileron")
-	os.MkdirAll(settingsDir, 0o755)
-	os.WriteFile(filepath.Join(settingsDir, "settings.yaml"), []byte(`
-version: 1
-allow:
-  - "my-custom-tool *"
-`), 0o644)
 
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte(`
-version: 1
-default: deny
-deny:
-  - command: "deploy --force *"
-`), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"status", "policy"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "1 allow") {
-		t.Error("expected user settings allow count")
-	}
-	if !strings.Contains(out, "deny") {
-		t.Error("expected default disposition 'deny'")
-	}
-}
-
-func TestRunStatus_EnvNoPolicy(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"status", "env"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	if !strings.Contains(stdout.String(), "No env scrubbing") {
-		t.Error("expected no env scrubbing message when no policy")
-	}
-}
-
-func TestRunStatus_NotificationsNoPolicy(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"status", "notifications"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d", code)
-	}
-	if !strings.Contains(stdout.String(), "No notifications") {
-		t.Error("expected no notifications message")
-	}
-}
 
 // TestRunStatus_RuntimeUnreachable covers the offline path: with no
 // daemon listening, `aileron status runtime` must exit cleanly and
@@ -788,13 +393,6 @@ func TestRunStatus_RuntimeIncludedInDefault(t *testing.T) {
 	}
 }
 
-func TestRunLog_HelpShownInUsage(t *testing.T) {
-	var stdout bytes.Buffer
-	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
-	if !strings.Contains(stdout.String(), "aileron log") {
-		t.Error("expected 'aileron log' in help output")
-	}
-}
 
 func TestRunSecret_NoSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -1534,388 +1132,22 @@ func TestRunBinding_UnknownSubcommand(t *testing.T) {
 	}
 }
 
-func TestRunPolicySave_NoEntries(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	os.WriteFile(path, nil, 0o644)
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", path}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "No user-approved commands") {
-		t.Errorf("expected 'No user-approved' message, got: %s", stdout.String())
-	}
-}
 
-func TestRunPolicySave_WithApprovedCommands(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
 
-	// Create audit log with ask_approved entries.
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
-	})
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "npm install", Disposition: "ask_approved",
-	})
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "echo hello", Disposition: "allow",
-	})
 
-	// Create a project policy file.
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "2 approved command(s)") {
-		t.Errorf("expected '2 approved command(s)', got:\n%s", out)
-	}
-	if !strings.Contains(out, "Saved 2 rule(s)") {
-		t.Errorf("expected 'Saved 2 rule(s)', got:\n%s", out)
-	}
 
-	// Verify the rules were written to the policy file.
-	data, _ := os.ReadFile(filepath.Join(dir, "aileron.yaml"))
-	content := string(data)
-	if !strings.Contains(content, "git push") {
-		t.Errorf("expected 'git push' in policy file, got:\n%s", content)
-	}
-	if !strings.Contains(content, "npm install") {
-		t.Errorf("expected 'npm install' in policy file, got:\n%s", content)
-	}
-}
 
-func TestRunPolicySave_DryRun(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
 
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
-	})
 
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
 
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
 
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--dry-run"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "dry run") {
-		t.Errorf("expected 'dry run' message, got: %s", stdout.String())
-	}
 
-	// Verify nothing was written.
-	data, _ := os.ReadFile(filepath.Join(dir, "aileron.yaml"))
-	if strings.Contains(string(data), "git push") {
-		t.Error("dry run should not modify the policy file")
-	}
-}
 
-func TestRunPolicySave_DeduplicatesCommands(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
 
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
-	})
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s2", Command: "git push", Disposition: "ask_approved",
-	})
 
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "1 approved command(s)") {
-		t.Errorf("expected deduplication to 1 command, got:\n%s", stdout.String())
-	}
-}
-
-func TestRunPolicySave_SkipsAlreadyAllowed(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
-	})
-
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\nallow:\n  - \"git push\"\n"), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "already in the policy") {
-		t.Errorf("expected 'already in the policy' message, got: %s", stdout.String())
-	}
-}
-
-func TestRunPolicySave_UserScope(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "curl api.com", Disposition: "ask_approved",
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--scope", "user"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "user settings") {
-		t.Errorf("expected 'user settings' label, got: %s", stdout.String())
-	}
-
-	// Verify written to user settings.
-	data, _ := os.ReadFile(filepath.Join(dir, ".aileron", "settings.yaml"))
-	if !strings.Contains(string(data), "curl api.com") {
-		t.Errorf("expected 'curl api.com' in user settings, got:\n%s", string(data))
-	}
-}
-
-func TestRunPolicySave_FilterBySession(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "git push", Disposition: "ask_approved",
-	})
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s2", Command: "npm install", Disposition: "ask_approved",
-	})
-
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--session", "s1", "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "1 approved command(s)") {
-		t.Errorf("expected 1 command for session s1, got:\n%s", stdout.String())
-	}
-}
-
-func TestRunPolicySave_InvalidScope(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--scope", "bogus"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 for invalid scope, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "invalid scope") {
-		t.Errorf("expected 'invalid scope' error, got: %s", stderr.String())
-	}
-}
-
-func TestRunPolicySave_MissingAuditFile(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", "/nonexistent/audit.jsonl"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-}
-
-func TestRunPolicySave_NoSubcommand(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "usage: aileron policy") {
-		t.Errorf("expected usage message, got: %s", stderr.String())
-	}
-}
-
-func TestRunPolicySave_InHelp(t *testing.T) {
-	var stdout bytes.Buffer
-	run([]string{"help"}, newTestRegistry(), &stdout, &bytes.Buffer{})
-	if !strings.Contains(stdout.String(), "aileron policy save") {
-		t.Error("expected 'aileron policy save' in help output")
-	}
-}
-
-func TestRunPolicySave_NoPolicyForProject(t *testing.T) {
-	dir := t.TempDir()
-
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
-	})
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 when no aileron.yaml, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "no aileron.yaml") {
-		t.Errorf("expected 'no aileron.yaml' error, got: %s", stderr.String())
-	}
-}
-
-func TestRunPolicySave_DefaultScopeIsProject(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "make build", Disposition: "ask_approved",
-	})
-
-	os.WriteFile(filepath.Join(dir, "aileron.yaml"), []byte("version: 1\n"), 0o644)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	// No --scope flag: should default to "project".
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "project policy") {
-		t.Errorf("expected 'project policy' label when no scope given, got:\n%s", out)
-	}
-
-	data, _ := os.ReadFile(filepath.Join(dir, "aileron.yaml"))
-	if !strings.Contains(string(data), "make build") {
-		t.Errorf("expected 'make build' in policy file, got:\n%s", string(data))
-	}
-}
-
-func TestRunPolicySave_AppendRuleError(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
-	})
-
-	// Create aileron.yaml as a directory to trigger a write error.
-	os.MkdirAll(filepath.Join(dir, "aileron.yaml"), 0o755)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	var stdout, stderr bytes.Buffer
-	_ = run([]string{"policy", "save", "--path", logPath, "--scope", "project"}, newTestRegistry(), &stdout, &stderr)
-	// Should still exit 0 since it reports partial saves.
-	out := stdout.String()
-	if !strings.Contains(out, "Saved 0 rule(s)") {
-		t.Errorf("expected 'Saved 0 rule(s)' when write fails, got:\n%s", out)
-	}
-	if !strings.Contains(stderr.String(), "error saving rule") {
-		t.Errorf("expected error saving rule in stderr, got: %s", stderr.String())
-	}
-}
-
-func TestRunPolicySave_UserScopeNoHome(t *testing.T) {
-	dir := t.TempDir()
-	// Set HOME to empty so UserHomeDir returns empty.
-	t.Setenv("HOME", "")
-
-	logPath := filepath.Join(dir, "audit.jsonl")
-	audit.AppendShellEntry(logPath, audit.ShellEntry{
-		SessionID: "s1", Command: "echo test", Disposition: "ask_approved",
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--path", logPath, "--scope", "user"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 when HOME is empty, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), "cannot determine home directory") {
-		t.Errorf("expected home directory error, got: %s", stderr.String())
-	}
-}
-
-func TestRunPolicySave_InvalidFlag(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--bogus-flag"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("expected exit code 1 for invalid flag, got %d", code)
-	}
-}
-
-func TestRunPolicySave_DefaultAuditLogPath(t *testing.T) {
-	// When --path is not given, runPolicySave uses ResolveAuditLogFromCwd
-	// which (post-ADR-0012) returns the user-scope audit state dir.
-	// Audit files live at <HOME>/.aileron/audit/audit-YYYY-MM-DD.jsonl.
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	oldWd, _ := os.Getwd()
-	os.Chdir(dir)
-	defer os.Chdir(oldWd)
-
-	// Create an audit file at today's daily-rotated location.
-	auditPath := audit.DailyPath(filepath.Join(dir, ".aileron"))
-	if err := os.MkdirAll(filepath.Dir(auditPath), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	audit.AppendShellEntry(auditPath, audit.ShellEntry{
-		SessionID: "s1", Command: "docker push myimage", Disposition: "ask_approved",
-	})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"policy", "save", "--dry-run"}, newTestRegistry(), &stdout, &stderr)
-	if code != 0 {
-		t.Errorf("expected exit code 0, got %d; stderr: %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "docker push myimage") {
-		t.Errorf("expected command in dry-run output, got: %s", stdout.String())
-	}
-}
 
 func TestRunSecret_InHelp(t *testing.T) {
 	var stdout bytes.Buffer

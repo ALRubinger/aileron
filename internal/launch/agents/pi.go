@@ -3,79 +3,44 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+
+	"github.com/ALRubinger/aileron/internal/launch"
 )
 
 // Pi is the agent definition for the pi.dev coding agent.
-// Pi ignores $SHELL and resolves its shell via its own settings file,
-// so ConfigureShell writes .pi/settings.json with the shim path.
 type Pi struct{}
 
 func (p Pi) Name() string          { return "pi" }
 func (p Pi) BinaryNames() []string { return []string{"pi"} }
 
-// Args returns the flags needed to make Pi auto-approve shell commands
-// so that Aileron is the single approval layer. Pi's --tools flag
-// controls which built-in tools are enabled.
+// Args returns the flags needed to make Pi auto-approve its built-in
+// tools. Per ADR-0015, Aileron is not the trust surface for the agent's
+// local shell commands; --tools just suppresses Pi's per-tool prompt
+// surface so the user is not double-prompted.
 func (p Pi) Args() []string {
 	return []string{"--tools", "bash,read,edit,write,grep,find,ls"}
 }
 
-func (p Pi) Env() map[string]string {
-	return map[string]string{
-		"AILERON_REAL_SHELL": "/bin/bash",
-	}
-}
+func (p Pi) Env() map[string]string { return nil }
 
 // LLMEndpointEnv returns "" — Pi resolves its API endpoint via its
-// settings file rather than an environment variable, so launch does not
-// route Pi's LLM calls through the embedded gateway today. Adding gateway
-// support for Pi would require extending ConfigureShell to write the
+// settings file rather than an environment variable, so launch does
+// not route Pi's LLM calls through the embedded gateway. Gateway
+// routing for Pi would require ConfigureMCP to also write the
 // gateway URL into .pi/settings.json.
 func (p Pi) LLMEndpointEnv() string { return "" }
 
-// NormalizeCommand returns the command as-is for policy evaluation.
-// Pi does not wrap commands in a template like Claude Code does.
-func (p Pi) NormalizeCommand(raw string) (string, bool) {
-	return raw, true
-}
-
-// ConfigureShell writes a project-local .pi/settings.json that points
-// Pi's shellPath at aileron-sh. Pi ignores $SHELL and resolves its
-// shell from this settings file instead.
-func (p Pi) ConfigureShell(shimPath, dir string) error {
-	if dir == "" {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil {
-			return fmt.Errorf("determining working directory: %w", err)
-		}
-	}
-
-	piDir := filepath.Join(dir, ".pi")
-	if err := os.MkdirAll(piDir, 0o755); err != nil {
-		return fmt.Errorf("creating .pi directory: %w", err)
-	}
-
-	settingsPath := filepath.Join(piDir, "settings.json")
-
-	// Read existing settings to preserve other fields.
-	existing := make(map[string]any)
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		_ = json.Unmarshal(data, &existing)
-	}
-
-	existing["shellPath"] = shimPath
-
-	data, err := json.MarshalIndent(existing, "", "  ")
+// ConfigureMCP returns the CLI flags that register aileron-mcp with
+// Pi. Pi accepts Claude-Code-compatible --mcp-config flag handling, so
+// the wire shape matches Claude's.
+func (p Pi) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+	envJSON, err := json.Marshal(mcpEnv)
 	if err != nil {
-		return fmt.Errorf("marshaling Pi settings: %w", err)
+		return nil, fmt.Errorf("marshaling MCP env: %w", err)
 	}
-
-	if err := os.WriteFile(settingsPath, append(data, '\n'), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", settingsPath, err)
-	}
-
-	return nil
+	mcpConfig := fmt.Sprintf(
+		`{"mcpServers":{%q:{"command":%q,"env":%s}}}`,
+		launch.MCPServerName, mcpBin, string(envJSON),
+	)
+	return []string{"--mcp-config", mcpConfig}, nil
 }
