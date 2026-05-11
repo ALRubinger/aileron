@@ -131,6 +131,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "stop":
 		// Alias for `aileron daemon stop` per ADR-0012.
 		return runDaemonStop(args[1:], stdout, stderr)
+	case "open":
+		return runOpen(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout, registry)
 		return 0
@@ -169,6 +171,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron sessions [list|get]        View `aileron launch` session records (ADR-0012)")
 	fmt.Fprintln(w, "  aileron daemon start|stop|status   Manage the local Aileron daemon (auto-spawned on demand)")
 	fmt.Fprintln(w, "  aileron stop                       Alias for 'aileron daemon stop'")
+	fmt.Fprintln(w, "  aileron open [approvals|approval <id>]  Open the Aileron webapp (default: root) in your browser")
 	fmt.Fprintln(w, "  aileron version                    Print version information")
 	fmt.Fprintln(w, "  aileron help                       Show this help")
 	fmt.Fprintln(w)
