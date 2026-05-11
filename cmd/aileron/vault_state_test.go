@@ -810,6 +810,170 @@ func TestPromptAndUnlockRunning_PrompterErrorPropagates(t *testing.T) {
 	}
 }
 
+// --- Aileron ASCII-art welcome banner ---
+
+// aileronBannerMarker is a substring unique to printAileronBanner's
+// output. Tests use it to assert the banner appeared (or didn't).
+const aileronBannerMarker = "░█▀█░▀█▀"
+
+// State 2 (daemon running, vault locked) + interactive: the Aileron
+// welcome banner prints to stderr before the first passphrase prompt.
+func TestEnsureVaultUnlocked_RunningLocked_AileronBannerOnInteractive(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"locked":true,"state":"locked"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead: func(string) (discovery.Info, error) { return discovery.Info{URL: srv.URL}, nil },
+		prompt: func(prompt string, w io.Writer) (string, error) {
+			if w != nil && prompt != "" {
+				_, _ = w.Write([]byte(prompt))
+			}
+			return "good-pass", nil
+		},
+		postUnlock: func(string, string) error { return nil },
+	})
+
+	var stderr bytes.Buffer
+	if err := ensureVaultUnlocked("", &stderr); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	out := stderr.String()
+	bannerAt := strings.Index(out, aileronBannerMarker)
+	promptAt := strings.Index(out, "Vault passphrase:")
+	if bannerAt < 0 {
+		t.Fatalf("Aileron banner missing from stderr: %q", out)
+	}
+	if promptAt < 0 {
+		t.Fatalf("first prompt missing from stderr: %q", out)
+	}
+	if bannerAt > promptAt {
+		t.Errorf("Aileron banner must appear BEFORE 'Vault passphrase:' prompt; banner@%d, prompt@%d", bannerAt, promptAt)
+	}
+}
+
+// State 2 + non-interactive: env-supplied passphrase must NOT print the
+// Aileron banner. Banner is interactive-only so scripted callers don't
+// get ASCII art dumped into their logs.
+func TestEnsureVaultUnlocked_RunningLocked_NoAileronBannerForEnv(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	t.Setenv(envVaultPassphrase, "from-env")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"locked":true,"state":"locked"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead: func(string) (discovery.Info, error) { return discovery.Info{URL: srv.URL}, nil },
+		postUnlock:    func(string, string) error { return nil },
+	})
+
+	var stderr bytes.Buffer
+	if err := ensureVaultUnlocked("", &stderr); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	if strings.Contains(stderr.String(), aileronBannerMarker) {
+		t.Errorf("Aileron banner must NOT appear for env-supplied passphrase; stderr=%q", stderr.String())
+	}
+}
+
+// State 3 (daemon stopped, vault present) + interactive: the Aileron
+// welcome banner prints to stderr before the first passphrase prompt.
+func TestEnsureVaultUnlocked_StoppedPresent_AileronBannerOnInteractive(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead:   func(string) (discovery.Info, error) { return discovery.Info{}, discovery.ErrNotRunning },
+		vaultCheckState: func(string) (vault.State, error) { return vault.StateReady, nil },
+		prompt: func(prompt string, w io.Writer) (string, error) {
+			if w != nil && prompt != "" {
+				_, _ = w.Write([]byte(prompt))
+			}
+			return "good-pass", nil
+		},
+		spawnResolve: func() (string, error) { return "http://x/v1", nil },
+		postUnlock:   func(string, string) error { return nil },
+	})
+
+	var stderr bytes.Buffer
+	if err := ensureVaultUnlocked("", &stderr); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	out := stderr.String()
+	bannerAt := strings.Index(out, aileronBannerMarker)
+	promptAt := strings.Index(out, "Vault passphrase:")
+	if bannerAt < 0 {
+		t.Fatalf("Aileron banner missing from stderr: %q", out)
+	}
+	if promptAt < 0 {
+		t.Fatalf("first prompt missing from stderr: %q", out)
+	}
+	if bannerAt > promptAt {
+		t.Errorf("Aileron banner must appear BEFORE 'Vault passphrase:' prompt; banner@%d, prompt@%d", bannerAt, promptAt)
+	}
+}
+
+// State 3 + non-interactive: env-supplied passphrase must NOT print the
+// Aileron banner.
+func TestEnsureVaultUnlocked_StoppedPresent_NoAileronBannerForEnv(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	t.Setenv(envVaultPassphrase, "stored-pass")
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead:   func(string) (discovery.Info, error) { return discovery.Info{}, discovery.ErrNotRunning },
+		vaultCheckState: func(string) (vault.State, error) { return vault.StateReady, nil },
+		spawnResolve:    func() (string, error) { return "http://x/v1", nil },
+		postUnlock:      func(string, string) error { return nil },
+	})
+
+	var stderr bytes.Buffer
+	if err := ensureVaultUnlocked("", &stderr); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	if strings.Contains(stderr.String(), aileronBannerMarker) {
+		t.Errorf("Aileron banner must NOT appear for env-supplied passphrase; stderr=%q", stderr.String())
+	}
+}
+
+// State 4 (first-run create) + interactive: the Aileron welcome banner
+// prints before the irretrievable-passphrase warning. Ordering matters
+// — the welcome is the first thing the user sees, then the warning,
+// then the prompt.
+func TestEnsureVaultUnlocked_StoppedMissing_AileronBannerBeforeNewVaultBanner(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	answers := []string{"new-pass", "new-pass"}
+	idx := 0
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead:   func(string) (discovery.Info, error) { return discovery.Info{}, discovery.ErrNotRunning },
+		vaultCheckState: func(string) (vault.State, error) { return vault.StateMissing, nil },
+		prompt: func(string, io.Writer) (string, error) {
+			a := answers[idx]
+			idx++
+			return a, nil
+		},
+		vaultInit:    func(string, string) (vault.Vault, error) { return vault.NewMemVault(), nil },
+		spawnResolve: func() (string, error) { return "http://x/v1", nil },
+		postUnlock:   func(string, string) error { return nil },
+	})
+
+	var stderr bytes.Buffer
+	if err := ensureVaultUnlocked("", &stderr); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	out := stderr.String()
+	aileronAt := strings.Index(out, aileronBannerMarker)
+	newVaultAt := strings.Index(out, "Creating a new Aileron vault")
+	if aileronAt < 0 {
+		t.Fatalf("Aileron banner missing from stderr: %q", out)
+	}
+	if newVaultAt < 0 {
+		t.Fatalf("new-vault banner missing from stderr: %q", out)
+	}
+	if aileronAt > newVaultAt {
+		t.Errorf("Aileron banner must appear BEFORE new-vault banner; aileron@%d, newVault@%d", aileronAt, newVaultAt)
+	}
+}
+
 // --- readVaultPassphrase: file read failure surfaces clean error ---
 
 func TestReadVaultPassphrase_FileReadError(t *testing.T) {
