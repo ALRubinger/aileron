@@ -315,8 +315,11 @@ func TestHandleOpenAI_InterceptsAileronToolCall(t *testing.T) {
 	if len(exec.calls) != 1 {
 		t.Fatalf("executor calls = %d, want 1", len(exec.calls))
 	}
-	if exec.calls[0].Name != "ship_update" {
-		t.Errorf("called name = %q, want ship_update", exec.calls[0].Name)
+	// Executor receives the manifest name (kebab-case), not the
+	// snake_case wire name the LLM sees — the intercept layer
+	// translates between them via aug.Names. Regression for #641.
+	if exec.calls[0].Name != "ship-update" {
+		t.Errorf("called name = %q, want ship-update", exec.calls[0].Name)
 	}
 	if exec.calls[0].Args["channel"] != "#engineering" {
 		t.Errorf("called args.channel = %v, want #engineering", exec.calls[0].Args["channel"])
@@ -600,6 +603,41 @@ func TestHandleAnthropic_InterceptsAileronToolUse(t *testing.T) {
 	contentBlocks := user["content"].([]any)
 	if contentBlocks[0].(map[string]any)["type"] != "tool_result" {
 		t.Errorf("expected tool_result block; got %v", contentBlocks[0])
+	}
+}
+
+// TestHandleAnthropic_CollisionRenamedActionInvokesManifestName
+// regresses #641 for the collision-rename path. An agent-declared
+// tool already named `ship_update` forces Aileron's matching action
+// to take the reserved-prefix wire name `aileron.ship_update`. When
+// the model calls back with that prefixed name, the intercept layer
+// must still hand the executor the original manifest name
+// (`ship-update`) — the case a naive snake→kebab string replace gets
+// wrong.
+func TestHandleAnthropic_CollisionRenamedActionInvokesManifestName(t *testing.T) {
+	upstream, _ := newScriptedUpstream(t,
+		`{"id":"msg1","type":"message","role":"assistant","model":"c","content":[{"type":"tool_use","id":"tu_1","name":"aileron.ship_update","input":{"channel":"#eng"}}],"stop_reason":"tool_use"}`,
+		`{"id":"msg2","type":"message","role":"assistant","model":"c","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}`,
+	)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	exec := &staticExecutor{result: action.Result{Content: `{"posted":true}`}}
+	e := engineFor(t, "", upstream.URL, store, exec)
+
+	// Agent declares a tool with the same name as Aileron's action,
+	// triggering the forward-collision rename.
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1024,"messages":[{"role":"user","content":"x"}],"tools":[{"name":"ship_update","description":"agent's","input_schema":{"type":"object"}}]}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if len(exec.calls) != 1 {
+		t.Fatalf("executor calls = %d, want 1", len(exec.calls))
+	}
+	if exec.calls[0].Name != "ship-update" {
+		t.Errorf("called name = %q, want ship-update (executor must see manifest name even when wire name is collision-prefixed)", exec.calls[0].Name)
 	}
 }
 
