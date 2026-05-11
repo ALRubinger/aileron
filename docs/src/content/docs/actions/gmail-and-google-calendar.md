@@ -8,38 +8,28 @@ The Gmail and Google Calendar suite gives your agent six capabilities against th
 
 The suite is published from the [`aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) repo. The connector runs as a sandboxed WASM module talking to `gmail.googleapis.com` and `www.googleapis.com`; the user's OAuth token lives in the Aileron vault and is injected host-side at the network boundary — the connector code never sees the token bytes.
 
-## Prerequisites
-
-- The user runs `aileron binding setup github://ALRubinger/aileron-connector-google` once to drive the OAuth dance. The runtime opens a browser to Google's consent screen, captures the redirect on a loopback port, and stores the access + refresh tokens encrypted in the local vault. ([ADR-0006](/adr/0006-capability-binding-ux) covers the binding flow.)
-
 ## Install
 
 ### Whole suite (recommended)
 
 ```sh
-aileron keyring trust github://ALRubinger/aileron-connector-google
 aileron action add-suite github://ALRubinger/aileron-connector-google/suite.toml@latest
-aileron binding setup github://ALRubinger/aileron-connector-google
 ```
 
-The first command trusts the publisher's signing key (once per machine). The second pulls the suite manifest at the latest release and installs all six actions in declaration order, sharing the install consent prompt across the set. The third binds the OAuth account.
+One command. The CLI prompts to trust the publisher's signing key (once per machine), pulls the suite manifest, installs all six actions in declaration order with a single install-consent prompt, and finishes by prompting you to bind the Google OAuth account. The OAuth dance opens a browser to Google's consent screen, captures the redirect on a loopback port, and stores the access + refresh tokens encrypted in your local vault.
 
 ### Individual actions
 
 ```sh
-aileron keyring trust github://ALRubinger/aileron-connector-google
-
 aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@latest
 aileron action add github://ALRubinger/aileron-connector-google/actions/get-email@latest
 aileron action add github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@latest
 aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email@latest
 aileron action add github://ALRubinger/aileron-connector-google/actions/send-email@latest
 aileron action add github://ALRubinger/aileron-connector-google/actions/create-calendar-event@latest
-
-aileron binding setup github://ALRubinger/aileron-connector-google
 ```
 
-Pick whichever actions you actually want exposed to the agent. The connector and the trust grant are shared across all of them.
+Pick whichever actions you actually want exposed to the agent. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
 
 ## Actions
 

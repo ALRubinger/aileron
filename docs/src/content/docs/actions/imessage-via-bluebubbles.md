@@ -10,36 +10,29 @@ Aileron does not touch Messages.app directly. The connector talks to a local [Bl
 
 The connector runs as a sandboxed WASM module talking only to `localhost:1234`; the BlueBubbles server password lives in the Aileron vault and is injected host-side at the network boundary — the connector code never sees the password bytes.
 
-## Prerequisites
+## Prerequisite
 
-- **Install and configure BlueBubbles Server** per the [setup guide](/guides/setting-up-bluebubbles/). About five minutes, one-time per Mac. Without BlueBubbles running, every action returns a `bridge_unreachable` error with setup pointers.
-- **Bind the BlueBubbles password** to your Aileron vault. The install flow below runs `aileron binding setup` to prompt for it once.
+**Install and configure BlueBubbles Server** per the [setup guide](/guides/setting-up-bluebubbles/). About five minutes, one-time per Mac. Without BlueBubbles running, every action returns a `bridge_unreachable` error with setup pointers.
 
 ## Install
 
 ### Whole suite (recommended)
 
 ```sh
-aileron keyring trust github://ALRubinger/aileron-connector-bluebubbles
 aileron action add-suite github://ALRubinger/aileron-connector-bluebubbles/suite.toml@latest
-aileron binding setup github://ALRubinger/aileron-connector-bluebubbles
 ```
 
-The first command trusts the publisher's signing key (once per machine). The second pulls the suite manifest at the latest release and installs all three actions in declaration order, sharing the install consent prompt across the set. The third binds the BlueBubbles password to your vault.
+One command. The CLI prompts to trust the publisher's signing key (once per machine), pulls the suite manifest, installs all three actions in declaration order with a single install-consent prompt, and finishes by prompting you for the BlueBubbles server password. The password lands encrypted in your local vault.
 
 ### Individual actions
 
 ```sh
-aileron keyring trust github://ALRubinger/aileron-connector-bluebubbles
-
 aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/list-recent-chats@latest
 aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/read-chat@latest
 aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/send-message@latest
-
-aileron binding setup github://ALRubinger/aileron-connector-bluebubbles
 ```
 
-Pick whichever actions you actually want exposed to the agent. The connector, the trust grant, and the password binding are shared across all of them.
+Pick whichever actions you actually want exposed to the agent. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
 
 ## Actions
 

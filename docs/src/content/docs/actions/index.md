@@ -22,12 +22,10 @@ Read recent iMessage conversations and send new ones through a local [BlueBubble
 
 Every suite page leads with two install paths:
 
-- **Install the whole suite.** One `aileron action add-suite` command. The CLI pulls the suite manifest at the named release tag, trusts the publisher's signing key (one-time per publisher), and installs every action in declaration order. Per-action failures surface in a final summary but don't stop the rest of the suite from installing.
-- **Install individual actions.** One `aileron action add` command per action, useful when you only want a subset.
+- **Install the whole suite.** One `aileron action add-suite` command. The CLI pulls the suite manifest at the named release tag, prompts to trust the publisher's signing key the first time you install from that publisher, installs every action in declaration order with a single install-consent prompt, and at the end prompts you to bind the credential the connector needs (an OAuth account for Gmail, a server password for BlueBubbles).
+- **Install individual actions.** One `aileron action add` command per action, useful when you only want a subset. The first `add` for a given publisher walks through the trust and binding flows; subsequent ones reuse those grants.
 
-Both paths produce the same result for the actions they install. The suite path is shorter; the individual path lets you cherry-pick.
-
-After installing actions, run `aileron binding setup <connector-fqn>` once to bind the credential the connector needs (an OAuth account for Gmail, a server password for BlueBubbles). The agent can use the actions from the next `aileron launch` onward.
+Both paths produce the same result for the actions they install. The suite path is shorter; the individual path lets you cherry-pick. Trust grants and credential bindings carry across both. Once installed, the actions are available to the agent from the next `aileron launch` onward.
 
 ## Authoring your own
 
