@@ -222,3 +222,91 @@ export async function decideActionApproval(
 		body: JSON.stringify(body)
 	});
 }
+
+// --- Connector Hub (ADR-0013, #488) ---
+//
+// The daemon shallow-clones the public `aileron-connectors-hub` repo
+// per query and serves discovery via /v1/hub/*. The webapp is one of
+// two thin clients on top — the CLI (`aileron hub …`) is the other.
+// The install modal layers on top of `/v1/hub/install-decision` and
+// `/v1/connectors/install` to surface publisher trust before installing.
+
+/** Single Hub connector entry. Mirrors `api.HubConnectorEntry` in the
+ *  Go codegen — keep these shapes in sync with `internal/api/openapi.yaml`.
+ *  Field names match the JSON wire format directly (snake_case). */
+export type HubConnectorEntry = {
+	fqn: string;
+	description: string;
+	publisher_github: string;
+	key_url: string;
+	release_pattern: string;
+};
+
+export type HubConnectorList = {
+	connectors: HubConnectorEntry[];
+};
+
+/** Trust-state enum for the install-decision payload. Drives the
+ *  modal's color and copy. `unknown` = first install from this
+ *  publisher at this FQN; `already_trusted` = key already on the
+ *  local keyring; `conflict` = the publisher's key differs from one
+ *  the operator trusts for a sibling repo (rotation, MITM, or
+ *  impersonation — surface in red). */
+export type HubTrustState = 'already_trusted' | 'unknown' | 'conflict';
+
+/** Pre-computed install-decision payload. Mirrors api.HubInstallDecision.
+ *  The daemon fetches the publisher's current key, computes its
+ *  fingerprint, and folds in local keyring state before responding,
+ *  so the client renders the trust decision without ever holding key
+ *  bytes. */
+export type HubInstallDecision = {
+	fqn: string;
+	description: string;
+	publisher_github: string;
+	fingerprint: string;
+	trust_state: HubTrustState;
+	publisher_footprint: string[];
+	risk_indicators: string[];
+};
+
+/** Lists every connector published to the Hub. Pass `q` to filter
+ *  server-side (case-insensitive match on FQN and description). */
+export async function listHubConnectors(q?: string): Promise<HubConnectorList> {
+	const qs = q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : '';
+	return apiFetch(`/v1/hub/connectors${qs}`);
+}
+
+/** Fetches the install-decision payload for a single FQN. Returns the
+ *  same shape the CLI's `aileron connector install` renders. */
+export async function getHubInstallDecision(fqn: string): Promise<HubInstallDecision> {
+	return apiFetch(`/v1/hub/install-decision?fqn=${encodeURIComponent(fqn)}`);
+}
+
+/** Installed-connector envelope returned by POST /v1/connectors/install
+ *  on success. `already_installed` is set when an offline-cached hash
+ *  short-circuits the install pipeline (ADR-0004 §"Offline behavior"). */
+export type InstalledConnector = {
+	fqn: string;
+	version: string;
+	hash: string;
+	entry_dir: string;
+	already_installed?: boolean;
+};
+
+/** Runs the connector install pipeline. `confirmed_fingerprint` (per
+ *  ADR-0013 / #487 Q4) triggers daemon-side trust persistence: the
+ *  daemon verifies the publisher key's fingerprint matches what the
+ *  webapp confirmed at the modal, then writes the key to the keyring
+ *  under the FQN before running the install. Trust persists even if
+ *  the install pipeline later fails. */
+export async function installConnector(args: {
+	fqn: string;
+	version: string;
+	confirmed_fingerprint?: string;
+	expected_hash?: string;
+}): Promise<InstalledConnector> {
+	return apiFetch('/v1/connectors/install', {
+		method: 'POST',
+		body: JSON.stringify(args)
+	});
+}
