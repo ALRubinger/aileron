@@ -37,7 +37,7 @@ Re-running the command after the publisher rotates their key adds the new key al
 
 The keyring is fail-closed by default. There are no pre-trusted publishers shipped with Aileron; every publisher you install from has to be explicitly added.
 
-> **Note on auto-trust:** `aileron action add` auto-prompts to trust an action's publisher (and any new connector dep publishers) before the install. Standalone `aileron connector install` does not — run `aileron keyring trust` first.
+> **Note on auto-trust:** `aileron action add` auto-prompts to trust an action's publisher (and any new connector dep publishers) before the install. `aileron connector install` also auto-prompts when the FQN is published to the [Connector Hub](/adr/0013-connector-hub-and-trust-distribution/) (ADR-0013): the daemon renders a y/N/d=details decision with the publisher's key fingerprint, trust state, and risk indicators, and on confirm writes the publisher key to the keyring before installing. For an FQN not listed in the Hub (private repos, BYOCLI wrappers), run `aileron keyring trust` first.
 
 ## Preview and install
 

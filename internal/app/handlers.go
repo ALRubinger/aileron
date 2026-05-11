@@ -1047,6 +1047,24 @@ func (s *apiServer) InstallConnector(w http.ResponseWriter, r *http.Request) {
 	if req.ExpectedHash != nil {
 		expected = *req.ExpectedHash
 	}
+
+	// Hub-confirmed install (ADR-0013, #487): when the client passes
+	// the fingerprint the operator confirmed at the prompt, the daemon
+	// resolves the publisher key via the Hub entry, verifies it matches
+	// the supplied fingerprint (anti-tampering check between what the
+	// operator saw and what the install endpoint uses), then writes the
+	// key to the keyring under the FQN's authority. Persisting trust
+	// here means a subsequent failed install does not erase the trust
+	// decision — re-running install picks back up from the same
+	// position. The reloading verifier inside the installer picks up
+	// the newly-trusted key on its next read.
+	if req.ConfirmedFingerprint != nil && *req.ConfirmedFingerprint != "" {
+		if code, msg := s.confirmHubTrust(r.Context(), ref.FQN.String(), *req.ConfirmedFingerprint); code != 0 {
+			writeError(w, code, msg.code, msg.message)
+			return
+		}
+	}
+
 	res, err := s.installer.Install(r.Context(), cstore.InstallRequest{
 		Ref:          ref,
 		ExpectedHash: expected,
@@ -1097,6 +1115,71 @@ func (s *apiServer) recordConnectorInstalled(ctx context.Context, ref cstore.Ref
 			"aileron.consent.decision":          "approved",
 			"aileron.install.already_installed": res.AlreadyInstalled,
 		})
+}
+
+// confirmHubTrust resolves the publisher key for a Hub-listed FQN,
+// verifies its fingerprint matches what the operator confirmed at the
+// install prompt, and persists the key to the keyring so the install
+// pipeline's reloading verifier picks it up. Returns (0, _) on success;
+// otherwise an HTTP status code and an error pair to surface to the
+// client. Per #487 Q4, trust persists if the subsequent install fails.
+//
+// The Hub lookup uses the daemon's configured Hub client. When Hub is
+// disabled (hub == nil) the call is rejected with 503 — supplying a
+// confirmed fingerprint only makes sense when the client could have
+// rendered a Hub install-decision in the first place.
+func (s *apiServer) confirmHubTrust(ctx context.Context, fqn, confirmed string) (int, struct{ code, message string }) {
+	if s.hub == nil {
+		return http.StatusServiceUnavailable, struct{ code, message string }{
+			"hub_disabled", "hub client not configured; cannot honor confirmed_fingerprint",
+		}
+	}
+	entry, err := s.hub.FetchByFQN(ctx, fqn)
+	if err != nil {
+		if errors.Is(err, hub.ErrNotFound) {
+			return http.StatusNotFound, struct{ code, message string }{
+				"not_found", "no Hub entry for " + fqn,
+			}
+		}
+		s.log.Warn("hub: fetch failed", "error", err)
+		return http.StatusBadGateway, struct{ code, message string }{
+			"hub_unreachable", err.Error(),
+		}
+	}
+	pub, fingerprint, err := s.hub.FetchPublisherKey(ctx, entry.KeyURL)
+	if err != nil {
+		s.log.Warn("hub: fetch publisher key failed", "key_url", entry.KeyURL, "error", err)
+		return http.StatusBadGateway, struct{ code, message string }{
+			"key_fetch_failed", err.Error(),
+		}
+	}
+	if fingerprint != confirmed {
+		return http.StatusUnprocessableEntity, struct{ code, message string }{
+			"fingerprint_mismatch",
+			"publisher key fingerprint changed since the operator confirmed it",
+		}
+	}
+	path := s.resolveKeyringPath()
+	if path == "" {
+		return http.StatusInternalServerError, struct{ code, message string }{
+			"keyring_unavailable", "cannot determine keyring path",
+		}
+	}
+	kr, err := cstore.LoadKeyring(path)
+	if err != nil {
+		return http.StatusInternalServerError, struct{ code, message string }{
+			"keyring_load_failed", err.Error(),
+		}
+	}
+	if !kr.HasKey(fqn, pub) {
+		kr.Add(fqn, pub)
+		if err := kr.SaveKeyring(path); err != nil {
+			return http.StatusInternalServerError, struct{ code, message string }{
+				"keyring_save_failed", err.Error(),
+			}
+		}
+	}
+	return 0, struct{ code, message string }{}
 }
 
 // installHTTPStatus maps a cstore failure class to an HTTP status. Per
