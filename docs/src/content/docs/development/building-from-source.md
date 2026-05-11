@@ -1,0 +1,105 @@
+---
+title: "Building from Source"
+description: "Prerequisites, Taskfile entry points, and how the embedded assets fold into the daemon binary."
+order: 3
+---
+
+End users install pre-built binaries via Homebrew, apt, yum, or apk (see [Getting Started](/getting-started/)). This page is for contributors who want to build everything locally from a fresh clone.
+
+## Prerequisites
+
+- **Go 1.25+** — the toolchain version pinned in `go.mod`. Anything newer in the 1.x line should work; we stay close to the latest stable per the project's upstream-deps convention.
+- **Node.js 20+ via [nvm](https://github.com/nvm-sh/nvm)** — for the webapp build and the docs site. `pnpm` is the package manager.
+- **[Task](https://taskfile.dev)** — the project orchestrator. All builds go through `task <name>`. The Taskfile lives at the repo root.
+
+Recommended extras:
+
+- **`golangci-lint`** — if you want lint feedback ahead of CI.
+- **`gh`** — for the PR workflow.
+- **`docker`** — only required if you're touching the Docker images under `deploy/`.
+
+## Build everything
+
+```sh
+task build
+```
+
+This is the all-in-one entry point. It builds the four binaries, the docs site, the webapp, and the Docker containers. Output lands under `build/`. The first run pulls Go modules and `pnpm install`s the webapp and docs dependencies; subsequent runs are incremental.
+
+## Build a single binary
+
+The four binaries each have their own Taskfile entry. Output is the same `build/<binary>` path:
+
+```sh
+task build:cli      # aileron
+task build:mcp      # aileron-mcp
+task build:sh       # aileron-sh
+task build:enclave  # aileron-enclave
+```
+
+The CLI build embeds the webapp and the spawn-forwarder WASM. If you've made changes to either, regenerate them first (see the next two sections).
+
+## Embedded assets
+
+### The local webapp
+
+The daemon ships with the local webapp embedded via `go:embed` from `internal/app/webapp_dist/`. To pick up webapp changes in the daemon:
+
+```sh
+task build:webapp   # builds webapp/, copies output into internal/app/webapp_dist
+task build:cli      # re-embeds the new webapp bytes into the daemon binary
+```
+
+For iterating on the webapp without rebuilding the daemon every change, use `task dev:webapp`. The dev server at `localhost:5173` hot-reloads; `aileron launch` continues serving the embedded build.
+
+### The spawn-forwarder WASM
+
+The daemon ships a shared spawn-forwarder WASM module (per [ADR-0002](/adr/0002-connector-model)'s spawn-primitive section). The bytes are committed at `internal/sandbox/forwarder/spawn-forwarder.wasm` so a fresh clone builds without a WASM toolchain dependency.
+
+If you change the forwarder source under `internal/sandbox/forwarder/src/`, regenerate the WASM and rebuild:
+
+```sh
+task build:forwarder   # rebuilds spawn-forwarder.wasm against the wasip1 target
+task build:cli         # picks up the new bytes via go:embed
+```
+
+The forwarder build needs Go's `wasip1` target only (no extra toolchain). The resulting WASM is around 3 MB; smaller alternatives like TinyGo are on the table for v3.
+
+### Generated API types
+
+The daemon's HTTP API is defined in `internal/api/openapi.yaml`. Server interfaces and request/response types are generated:
+
+```sh
+task generate:api
+```
+
+Per the project's CLAUDE.md, the spec is the source of truth. Hand-editing `internal/api/gen/server.gen.go` is not supported; any API change starts in the spec.
+
+## Build the docs site
+
+```sh
+task build:docs   # static build under docs/dist/
+task dev:docs     # live dev server at localhost:4321
+```
+
+The docs site is Astro + Svelte. Pages live under `docs/src/content/docs/` (Markdown / MDX); the sidebar is configured in `docs/src/lib/navigation.ts`. Build artifacts are not committed.
+
+## Build for release
+
+```sh
+task release:snapshot   # GoReleaser snapshot (no publish)
+```
+
+This produces the same artifacts CI ships on tag pushes: `.deb`, `.rpm`, `.apk`, and the Homebrew formulas. The snapshot run does not publish anything; it's the dry run.
+
+## Reproducibility notes
+
+- The committed `spawn-forwarder.wasm` is built with `-trimpath -ldflags="-s -w"` so the bytes are stable across machines. A build that produces different bytes against the same source is a regression worth investigating.
+- The `go.work` workspace pins the Go module set across `cmd/`, `internal/`, `sdk/`, and `test/`. `go build ./...` from the root won't work; always invoke from a specific module directory or use `task`.
+- The four binaries are version-coupled. A `task build` is the supported way to get a matched set; ad-hoc `go build` against one of the four is fine for iteration but the resulting binary is only guaranteed to talk to a same-commit peer.
+
+## See also
+
+- [Repo Layout](/development/repo-layout/)
+- [Binary Architecture](/development/binary-architecture/)
+- [Running Tests](/development/running-tests/)

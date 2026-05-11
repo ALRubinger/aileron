@@ -1,0 +1,21 @@
+---
+title: "Development"
+description: "How to build, test, and contribute to Aileron."
+order: 0
+---
+
+This section is for contributors. It covers how the repo is laid out, which binaries make up an Aileron install, how to build them from source, how to run the test suites, and what's expected of a change before it lands on `main`.
+
+If you're looking for end-user docs, the [Getting Started](/getting-started/) guide and the [Guides](/guides/) section are likely what you want. The pages here go one level deeper into the codebase.
+
+## What's in this section
+
+- [Repo Layout](/development/repo-layout/) — the directory tree, where each concern lives, and how the workspace is wired.
+- [Binary Architecture](/development/binary-architecture/) — the four binaries Aileron ships, who calls whom, and which process owns which trust boundary.
+- [Building from Source](/development/building-from-source/) — prerequisites, the Taskfile entry points, and how the embedded assets (webapp, forwarder WASM) get folded in.
+- [Running Tests](/development/running-tests/) — unit, integration, race, coverage. What CI runs, and how to reproduce a CI failure locally.
+- [Submitting Changes](/development/submitting-changes/) — branch and PR conventions, commit message format, ADR amendments, what gets reviewed.
+
+## A note on the docs site versus the repo
+
+The repo's `README.md` is the entry point for someone landing on the GitHub page. The docs here are the longer-form companion. When you change build flags, tasks, or binaries, update both: README for the overview, this section for the depth.
