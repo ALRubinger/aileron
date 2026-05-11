@@ -68,6 +68,18 @@ export const navigation: NavItem[] = [
     ]
   },
   {
+    label: 'Development',
+    defaultOpen: false,
+    children: [
+      { label: 'Overview', href: '/development/' },
+      { label: 'Repo Layout', href: '/development/repo-layout/' },
+      { label: 'Binary Architecture', href: '/development/binary-architecture/' },
+      { label: 'Building from Source', href: '/development/building-from-source/' },
+      { label: 'Running Tests', href: '/development/running-tests/' },
+      { label: 'Submitting Changes', href: '/development/submitting-changes/' }
+    ]
+  },
+  {
     label: 'Architecture Decisions',
     children: [
       { label: 'Overview', href: '/adr/' },
@@ -81,7 +93,10 @@ export const navigation: NavItem[] = [
       { label: 'ADR-0008: Intent Matching', href: '/adr/0008-intent-matching/' },
       { label: 'ADR-0009: User Channel', href: '/adr/0009-user-channel/' },
       { label: 'ADR-0010: Failure Handling', href: '/adr/0010-failure-handling/' },
-      { label: 'ADR-0011: Local Credential Vault', href: '/adr/0011-local-credential-vault/' }
+      { label: 'ADR-0011: Local Credential Vault', href: '/adr/0011-local-credential-vault/' },
+      { label: 'ADR-0012: Local Daemon Architecture', href: '/adr/0012-local-daemon-architecture/' },
+      { label: 'ADR-0013: Connector Hub and Trust Distribution', href: '/adr/0013-connector-hub-and-trust-distribution/' },
+      { label: 'ADR-0014: Spawn Sandbox Technology', href: '/adr/0014-spawn-sandbox-technology/' }
     ]
   }
 ];
