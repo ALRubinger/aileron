@@ -4,7 +4,7 @@ vars:
   COMPOSE_FILE: deploy/docker-compose.yml
   # Single source of truth for Go test/vet package set, shared by local
   # (test:go, vet:go) and CI (test:go:ci) targets.
-  GO_TEST_PACKAGES: ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./cmd/aileron-sh/... ./sdk/go/...
+  GO_TEST_PACKAGES: ./internal/... ./cmd/aileron/... ./cmd/aileron-enclave/... ./cmd/aileron-mcp/... ./sdk/go/...
 
 tasks:
   default:
@@ -29,7 +29,7 @@ tasks:
       - api/gen/server.gen.go
 
   build:
-    desc: Build everything (containers, server, MCP, enclave, CLI, shell shim, webapp, docs)
+    desc: Build everything (containers, server, MCP, enclave, CLI, webapp, docs)
     cmds:
       - task: build:docker
       - task: build:webapp
@@ -37,7 +37,6 @@ tasks:
       - task: build:mcp
       - task: build:enclave
       - task: build:cli
-      - task: build:sh
       - task: build:docs
 
   build:docker:
@@ -108,11 +107,6 @@ tasks:
         sh: git rev-parse --short HEAD
     cmds:
       - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron ./cmd/aileron
-
-  build:sh:
-    desc: Build the aileron-sh shell shim binary locally
-    cmds:
-      - go build -o build/aileron-sh ./cmd/aileron-sh
 
   build:webapp:
     desc: Install webapp dependencies, build static output, copy into internal/app/webapp_dist for Go embed

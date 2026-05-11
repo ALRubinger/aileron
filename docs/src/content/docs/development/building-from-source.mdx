@@ -25,16 +25,15 @@ Expand each one for per-OS install commands.
 task build
 ```
 
-This is the all-in-one entry point. It builds the four binaries, the docs site, the webapp, and the Docker containers. Output lands under `build/`. The first run pulls Go modules and `pnpm install`s the webapp and docs dependencies; subsequent runs are incremental.
+This is the all-in-one entry point. It builds the three binaries, the docs site, the webapp, and the Docker containers. Output lands under `build/`. The first run pulls Go modules and `pnpm install`s the webapp and docs dependencies; subsequent runs are incremental.
 
 ## Build a single binary
 
-The four binaries each have their own Taskfile entry. Output is the same `build/<binary>` path:
+Each binary has its own Taskfile entry. Output is the same `build/<binary>` path:
 
 ```sh
 task build:cli      # aileron
 task build:mcp      # aileron-mcp
-task build:sh       # aileron-sh
 task build:enclave  # aileron-enclave
 ```
 

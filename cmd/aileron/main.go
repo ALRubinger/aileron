@@ -17,15 +17,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
-	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/oauth"
-	launchpolicy "github.com/ALRubinger/aileron/internal/policy/launch"
 	"github.com/ALRubinger/aileron/internal/suite"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
@@ -36,6 +33,9 @@ func main() {
 	registry := launch.NewRegistry()
 	registry.Register(agents.Claude{})
 	registry.Register(agents.Pi{})
+	registry.Register(agents.Codex{})
+	registry.Register(agents.Goose{})
+	registry.Register(agents.OpenCode{})
 	os.Exit(run(os.Args[1:], registry, os.Stdout, os.Stderr))
 }
 
@@ -85,12 +85,6 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 			return 1
 		}
 
-		shimPath, err := resolveShimFn()
-		if err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return 1
-		}
-
 		// Capture cwd so the daemon's session record carries working_dir
 		// (rendered by `aileron sessions list`). os.Getwd basically never
 		// errors in practice; on the rare case it does, fall through with
@@ -98,30 +92,16 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		cwd, _ := os.Getwd()
 
 		result, err := launchFn(context.Background(), launch.LaunchConfig{
-			Agent:     agent,
-			ShellShim: shimPath,
-			Args:      launchArgs[1:],
-			Dir:       cwd,
-			LogLevel:  launch.ParseLogLevel(*logLevel),
+			Agent:    agent,
+			Args:     launchArgs[1:],
+			Dir:      cwd,
+			LogLevel: launch.ParseLogLevel(*logLevel),
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return 1
 		}
 		return result.ExitCode
-	case "init":
-		return runInit(stdout, stderr)
-	case "policy":
-		if len(args) >= 2 {
-			switch args[1] {
-			case "test":
-				return runPolicyTest(args[2:], stdout, stderr)
-			case "save":
-				return runPolicySave(args[2:], stdout, stderr)
-			}
-		}
-		fmt.Fprintln(stderr, "usage: aileron policy <test|save>")
-		return 1
 	case "secret":
 		return runSecret(args[1:], stdout, stderr)
 	case "binding":
@@ -140,8 +120,6 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runStatus(args[1:], stdout, stderr)
 	case "sync":
 		return runSync(args[1:], os.Stdin, stdout, stderr)
-	case "log":
-		return runLog(args[1:], stdout, stderr)
 	case "audit":
 		return runAudit(args[1:], stdout, stderr)
 	case "sessions":
@@ -167,10 +145,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "aileron — the execution layer for AI coding agents")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  aileron init                       Scaffold aileron.yaml for this project")
-	fmt.Fprintln(w, "  aileron launch [--verbose] <agent>  Launch an agent with policy-enforced shell")
-	fmt.Fprintln(w, "  aileron policy test <cmd> [cmd..]  Dry-run commands against loaded policy")
-	fmt.Fprintln(w, "  aileron policy save [flags]        Save user-approved commands as policy rules")
+	fmt.Fprintln(w, "  aileron launch <agent> [args...]   Launch an AI coding agent connected to the Aileron daemon")
 	fmt.Fprintln(w, "  aileron vault init                 Create the local encrypted vault with a passphrase")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
@@ -188,9 +163,8 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron approval list              List pending action-approval requests")
 	fmt.Fprintln(w, "  aileron approval approve <id>      Approve a pending action — agent's tool call unblocks")
 	fmt.Fprintln(w, "  aileron approval deny <id>         Deny a pending action — agent receives approval_denied")
-	fmt.Fprintln(w, "  aileron status [section]           Show daemon runtime + merged config (runtime, policy, env, notifications, vault)")
+	fmt.Fprintln(w, "  aileron status [section]           Show daemon runtime + config (runtime, notifications, vault)")
 	fmt.Fprintln(w, "  aileron sync [--bind-all] [--yes]  Reconcile installed actions: install missing connectors; report unbound capabilities")
-	fmt.Fprintln(w, "  aileron log [flags]                View the shell-policy log")
 	fmt.Fprintln(w, "  aileron audit [list|show]          View the action-execution audit log (ADR-0010)")
 	fmt.Fprintln(w, "  aileron sessions [list|get]        View `aileron launch` session records (ADR-0012)")
 	fmt.Fprintln(w, "  aileron daemon start|stop|status   Manage the local Aileron daemon (auto-spawned on demand)")
@@ -199,254 +173,6 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron help                       Show this help")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "agents: %s\n", strings.Join(registry.Names(), ", "))
-}
-
-// runInit scaffolds an aileron.yaml in the current directory.
-func runInit(stdout, stderr io.Writer) int {
-	dir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	path, err := launch.InitPolicy(dir)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-
-	fmt.Fprintf(stdout, "Created %s\n", filepath.Base(path))
-	fmt.Fprintln(stdout, "Language toolchain and OS rules are built in — no configuration needed.")
-	return 0
-}
-
-// runPolicyTest evaluates commands against the loaded policy without executing them.
-func runPolicyTest(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aileron policy test <command> [command...]")
-		return 1
-	}
-
-	dir, _ := os.Getwd()
-	policyPath := launch.FindPolicyFile(dir)
-
-	if policyPath == "" {
-		fmt.Fprintln(stderr, "no aileron.yaml found (run 'aileron init' to create one)")
-		return 1
-	}
-
-	fmt.Fprintf(stdout, "Policy: %s\n\n", policyPath)
-
-	exitCode := 0
-	for _, cmd := range args {
-		result := launch.EvaluateCommand(policyPath, cmd, dir)
-
-		var icon, label string
-		switch result.Disposition {
-		case model.DispositionAllow:
-			icon, label = "\033[32m✓\033[0m", "allow"
-		case model.DispositionDeny:
-			icon, label = "\033[31m✗\033[0m", "deny"
-			exitCode = 1
-		default:
-			icon, label = "\033[33m?\033[0m", "ask"
-		}
-
-		fmt.Fprintf(stdout, "  %s %-5s  %s", icon, label, cmd)
-		if result.Reason != "" {
-			fmt.Fprintf(stdout, "  (%s)", result.Reason)
-		}
-		if result.RuleID != "" {
-			if result.Layer != "" {
-				fmt.Fprintf(stdout, "  [%s] (%s)", result.RuleID, result.Layer)
-			} else {
-				fmt.Fprintf(stdout, "  [%s]", result.RuleID)
-			}
-		}
-		fmt.Fprintln(stdout)
-	}
-	return exitCode
-}
-
-// runPolicySave reads the audit log for user-approved commands and offers to
-// save them as persistent policy rules. Commands already present in the
-// allow list are skipped.
-func runPolicySave(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("policy save", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	session := fs.String("session", "", "Filter by session ID (default: all sessions)")
-	path := fs.String("path", "", "Audit log file path (default: auto-detect)")
-	scope := fs.String("scope", "", "Save scope: project or user (default: prompt)")
-	dryRun := fs.Bool("dry-run", false, "Show what would be saved without writing")
-
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-
-	logPath := *path
-	if logPath == "" {
-		logPath = launch.ResolveAuditLogFromCwd()
-	}
-
-	entries, err := audit.ReadShellEntriesFiltered(logPath, audit.ShellFilter{
-		SessionID:   *session,
-		Disposition: "ask_approved",
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "error reading audit log %s: %v\n", logPath, err)
-		return 1
-	}
-
-	if len(entries) == 0 {
-		fmt.Fprintln(stdout, "No user-approved commands found in the audit log.")
-		return 0
-	}
-
-	// Deduplicate commands.
-	seen := make(map[string]bool)
-	var commands []string
-	for _, e := range entries {
-		if !seen[e.Command] {
-			seen[e.Command] = true
-			commands = append(commands, e.Command)
-		}
-	}
-
-	// Resolve policy paths.
-	dir, _ := os.Getwd()
-	policyPath := launch.FindPolicyFile(dir)
-	home, _ := os.UserHomeDir()
-	userPath := ""
-	if home != "" {
-		userPath = filepath.Join(home, ".aileron", "settings.yaml")
-	}
-
-	// Filter out commands already in the allow list.
-	commands = filterAlreadyAllowed(commands, policyPath, userPath)
-	if len(commands) == 0 {
-		fmt.Fprintln(stdout, "All approved commands are already in the policy. Nothing to save.")
-		return 0
-	}
-
-	fmt.Fprintf(stdout, "Found %d approved command(s) not yet in policy:\n\n", len(commands))
-	for i, cmd := range commands {
-		fmt.Fprintf(stdout, "  %d. %s\n", i+1, cmd)
-	}
-	fmt.Fprintln(stdout)
-
-	if *dryRun {
-		fmt.Fprintln(stdout, "(dry run — no changes written)")
-		return 0
-	}
-
-	// Determine target scope.
-	saveScope := *scope
-	if saveScope == "" {
-		saveScope = "project"
-	}
-
-	var targetPath, label string
-	switch saveScope {
-	case "project":
-		if policyPath == "" {
-			fmt.Fprintln(stderr, "no aileron.yaml found (run 'aileron init' to create one)")
-			return 1
-		}
-		targetPath = policyPath
-		label = "project policy"
-	case "user":
-		if userPath == "" {
-			fmt.Fprintln(stderr, "cannot determine home directory for user settings")
-			return 1
-		}
-		targetPath = userPath
-		label = "user settings"
-	default:
-		fmt.Fprintf(stderr, "invalid scope %q (must be 'project' or 'user')\n", saveScope)
-		return 1
-	}
-
-	saved := 0
-	for _, cmd := range commands {
-		if err := launchpolicy.AppendAllowRule(targetPath, cmd); err != nil {
-			fmt.Fprintf(stderr, "error saving rule %q: %v\n", cmd, err)
-			continue
-		}
-		saved++
-	}
-
-	fmt.Fprintf(stdout, "Saved %d rule(s) to %s (%s)\n", saved, targetPath, label)
-	return 0
-}
-
-// filterAlreadyAllowed removes commands that are already in the allow lists
-// of the project or user policy files.
-func filterAlreadyAllowed(commands []string, projectPath, userPath string) []string {
-	allowed := make(map[string]bool)
-
-	loadAllowed := func(path string) {
-		if path == "" {
-			return
-		}
-		pf, err := launchpolicy.Load(path)
-		if err != nil {
-			return
-		}
-		for _, rule := range pf.Allow {
-			allowed[rule.Command] = true
-		}
-	}
-
-	loadAllowed(projectPath)
-	loadAllowed(userPath)
-
-	var filtered []string
-	for _, cmd := range commands {
-		if !allowed[cmd] {
-			filtered = append(filtered, cmd)
-		}
-	}
-	return filtered
-}
-
-// runLog reads and displays the audit trail.
-func runLog(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("log", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	session := fs.String("session", "", "Filter by session ID")
-	disposition := fs.String("disposition", "", "Filter by disposition (allow/deny/ask_approved/ask_denied)")
-	command := fs.String("command", "", "Filter by command substring")
-	path := fs.String("path", "", "Audit log file path (default: auto-detect)")
-
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-
-	logPath := *path
-	if logPath == "" {
-		logPath = launch.ResolveAuditLogFromCwd()
-	}
-
-	entries, err := audit.ReadShellEntriesFiltered(logPath, audit.ShellFilter{
-		SessionID:      *session,
-		Disposition:    *disposition,
-		CommandPattern: *command,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "error reading audit log %s: %v\n", logPath, err)
-		return 1
-	}
-
-	if len(entries) == 0 {
-		fmt.Fprintln(stdout, "No audit entries found.")
-		return 0
-	}
-
-	for _, e := range entries {
-		ts := e.Timestamp.Format("15:04:05")
-		fmt.Fprintf(stdout, "%s  %-13s  %-12s  %s\n", ts, e.Disposition, e.RuleID, e.Command)
-	}
-	return 0
 }
 
 // runSecret handles the "aileron secret" subcommands.
@@ -673,13 +399,9 @@ var (
 // without fork-execing a real daemon binary.
 var spawnResolveFn = spawn.Resolve
 
-// launchFn / resolveShimFn are package-level seams so tests can assert on
-// the LaunchConfig the CLI builds without depending on a real shim or a
-// running daemon.
-var (
-	launchFn      = launch.Launch
-	resolveShimFn = resolveShim
-)
+// launchFn is a package-level seam so tests can assert on the
+// LaunchConfig the CLI builds without depending on a running daemon.
+var launchFn = launch.Launch
 
 // ensureVaultUnlockedFn is the seam for the run() vault state-machine
 // hook. Tests for the dispatched commands swap this to a no-op so they
@@ -1214,22 +936,12 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	case "":
 		showStatusRuntime(stdout)
 		fmt.Fprintln(stdout)
-		showStatusPolicy(dir, stdout)
-		fmt.Fprintln(stdout)
-		showStatusEnv(dir, stdout)
-		fmt.Fprintln(stdout)
 		showStatusNotifications(dir, stdout)
 		fmt.Fprintln(stdout)
 		showStatusVault(dir, stdout)
 		return 0
 	case "runtime":
 		showStatusRuntime(stdout)
-		return 0
-	case "policy":
-		showStatusPolicy(dir, stdout)
-		return 0
-	case "env":
-		showStatusEnv(dir, stdout)
 		return 0
 	case "notifications":
 		showStatusNotifications(dir, stdout)
@@ -1239,7 +951,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		return 0
 	default:
 		fmt.Fprintf(stderr, "unknown status section: %q\n", section)
-		fmt.Fprintln(stderr, "usage: aileron status [runtime|policy|env|notifications|vault]")
+		fmt.Fprintln(stderr, "usage: aileron status [runtime|notifications|vault]")
 		return 1
 	}
 }
@@ -1322,81 +1034,6 @@ func showStatusRuntime(w io.Writer) {
 	fmt.Fprintf(w, "  Bindings:          %d active\n", rs.BindingCount)
 }
 
-func showStatusPolicy(dir string, w io.Writer) {
-	fmt.Fprintln(w, "\033[1mPolicy\033[0m")
-
-	defaults := launchpolicy.DefaultPolicy()
-	fmt.Fprintf(w, "  Built-in defaults: %d allow, %d deny\n",
-		len(defaults.Allow), len(defaults.Deny))
-
-	userSettings, err := launchpolicy.LoadUserSettings()
-	if err != nil {
-		fmt.Fprintf(w, "  User settings:     error: %v\n", err)
-	} else {
-		total := len(userSettings.Allow) + len(userSettings.Deny) + len(userSettings.Ask)
-		if total == 0 {
-			fmt.Fprintln(w, "  User settings:     (none)")
-		} else {
-			fmt.Fprintf(w, "  User settings:     %d allow, %d deny, %d ask\n",
-				len(userSettings.Allow), len(userSettings.Deny), len(userSettings.Ask))
-		}
-	}
-
-	policyPath := launch.FindPolicyFile(dir)
-	if policyPath == "" {
-		fmt.Fprintln(w, "  Project policy:    (no aileron.yaml found)")
-	} else {
-		project, err := launchpolicy.Load(policyPath)
-		if err != nil {
-			fmt.Fprintf(w, "  Project policy:    error: %v\n", err)
-		} else {
-			fmt.Fprintf(w, "  Project policy:    %s\n", policyPath)
-			total := len(project.Allow) + len(project.Deny) + len(project.Ask)
-			if total > 0 {
-				fmt.Fprintf(w, "                     %d allow, %d deny, %d ask\n",
-					len(project.Allow), len(project.Deny), len(project.Ask))
-			}
-			if project.Default != "" {
-				fmt.Fprintf(w, "  Default:           %s\n", project.Default)
-			}
-		}
-	}
-}
-
-func showStatusEnv(dir string, w io.Writer) {
-	fmt.Fprintln(w, "\033[1mEnvironment\033[0m")
-
-	policyPath := launch.FindPolicyFile(dir)
-	var merged *launchpolicy.PolicyFile
-	if policyPath != "" {
-		var err error
-		merged, err = launchpolicy.LoadWithProfiles(policyPath)
-		if err != nil {
-			fmt.Fprintf(w, "  error: %v\n", err)
-			return
-		}
-	} else {
-		merged = launchpolicy.DefaultPolicy()
-	}
-
-	if merged.Env == nil {
-		fmt.Fprintln(w, "  No env scrubbing configured.")
-		return
-	}
-	if len(merged.Env.Scrub) > 0 {
-		fmt.Fprintln(w, "  Scrub:")
-		for _, p := range merged.Env.Scrub {
-			fmt.Fprintf(w, "    - %s\n", p)
-		}
-	}
-	if len(merged.Env.Passthrough) > 0 {
-		fmt.Fprintln(w, "  Passthrough:")
-		for _, p := range merged.Env.Passthrough {
-			fmt.Fprintf(w, "    - %s\n", p)
-		}
-	}
-}
-
 // showStatusNotifications surfaces the user-scoped notification config
 // (Slack / Discord / quiet hours) the daemon reads at startup. Lives in
 // `~/.aileron/config.yaml` per ADR-0012 step 9B-2 — moved out of the
@@ -1452,19 +1089,6 @@ func showStatusVault(dir string, w io.Writer) {
 	for _, name := range names {
 		fmt.Fprintf(w, "    - %s\n", name)
 	}
-}
-
-// resolveShim finds the aileron-sh binary next to this executable, or on PATH.
-func resolveShim() (string, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolving self path: %w", err)
-	}
-	self, err = filepath.EvalSymlinks(self)
-	if err != nil {
-		return "", fmt.Errorf("resolving self symlinks: %w", err)
-	}
-	return launch.ResolveShim(self)
 }
 
 // --- Connector / action install (ADR-0004 / ADR-0003 + #366) ---

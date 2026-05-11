@@ -7,144 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 )
 
-// ShellEntry is a single audit record for a shell command decision.
-// Written as one JSONL line per entry by aileron-sh.
-type ShellEntry struct {
-	Timestamp   time.Time `json:"timestamp"`
-	SessionID   string    `json:"session_id"`
-	Command     string    `json:"command"`
-	Disposition string    `json:"disposition"` // allow, deny, ask_approved, ask_denied
-	RuleID      string    `json:"rule_id"`     // which policy rule matched
-	Agent       string    `json:"agent"`
-}
-
-// AppendShellEntry appends one audit entry to the JSONL log file.
-// Uses O_APPEND for atomic writes (safe for concurrent aileron-sh processes
-// as long as each write is under PIPE_BUF).
-func AppendShellEntry(path string, entry ShellEntry) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating audit log directory: %w", err)
-	}
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("opening audit log: %w", err)
-	}
-	defer f.Close()
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("encoding audit entry: %w", err)
-	}
-	data = append(data, '\n')
-
-	_, err = f.Write(data)
-	return err
-}
-
-// ReadShellEntries reads all JSONL entries from the audit log.
-// Malformed lines are silently skipped.
-//
-// path may be either a single JSONL file (legacy / test use) or the
-// daily-rotated directory `<stateDir>/audit/`. When it's a directory,
-// every `audit-*.jsonl` file inside is read, sorted by name (which is
-// chronological since filenames embed the date).
-func ReadShellEntries(path string) ([]ShellEntry, error) {
-	files, err := resolveAuditFiles(path)
-	if err != nil {
-		return nil, err
-	}
-	var entries []ShellEntry
-	for _, p := range files {
-		got, err := readShellEntriesFromFile(p)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, got...)
-	}
-	return entries, nil
-}
-
-func readShellEntriesFromFile(path string) ([]ShellEntry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var entries []ShellEntry
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		var entry ShellEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue // skip malformed lines
-		}
-		entries = append(entries, entry)
-	}
-	return entries, scanner.Err()
-}
-
-// resolveAuditFiles returns the list of files to read for `path`.
-// If path is a directory, lists every `audit-*.jsonl` file inside,
-// sorted by name. If path is a file (or does not exist), returns
-// just that path.
-func resolveAuditFiles(path string) ([]string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		// Caller-friendly: a missing file is an error from the
-		// stat below in readShellEntriesFromFile, not here.
-		if os.IsNotExist(err) {
-			return []string{path}, nil
-		}
-		return nil, err
-	}
-	if !info.IsDir() {
-		return []string{path}, nil
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-	var files []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() {
-			continue
-		}
-		if !isAuditFileName(name) {
-			continue
-		}
-		files = append(files, filepath.Join(path, name))
-	}
-	sort.Strings(files)
-	return files, nil
-}
-
-// ShellFilter specifies criteria for filtering audit entries.
-type ShellFilter struct {
-	SessionID      string
-	Disposition    string
-	CommandPattern string // substring match
-}
-
 // MessageEntry is a single audit record for a message event.
 type MessageEntry struct {
-	Timestamp   time.Time `json:"timestamp"`
-	SessionID   string    `json:"session_id"`
-	Event       string    `json:"event"`                 // message_received, message_sent, message_denied, message_dismissed, draft_requested, reply_sent
-	Service     string    `json:"service"`               // slack, discord
-	Channel     string    `json:"channel"`
-	Author      string    `json:"author,omitempty"`      // sender for inbound messages
-	Body        string    `json:"body,omitempty"`        // message content
-	InReplyTo   string    `json:"in_reply_to,omitempty"` // original message ID
+	Timestamp time.Time `json:"timestamp"`
+	SessionID string    `json:"session_id"`
+	Event     string    `json:"event"`                 // message_received, message_sent, message_denied, message_dismissed, draft_requested, reply_sent
+	Service   string    `json:"service"`               // slack, discord
+	Channel   string    `json:"channel"`
+	Author    string    `json:"author,omitempty"`      // sender for inbound messages
+	Body      string    `json:"body,omitempty"`        // message content
+	InReplyTo string    `json:"in_reply_to,omitempty"` // original message ID
 }
 
 // AppendMessageEntry appends one message audit entry to the JSONL log file.
@@ -170,9 +45,12 @@ func AppendMessageEntry(path string, entry MessageEntry) error {
 }
 
 // ReadMessageEntries reads all message JSONL entries from the audit log.
-// Only entries with an "event" field are returned (shell entries are skipped).
+// Only entries with an "event" field are returned (other entries are skipped).
 //
-// path follows the same dir-or-file rule as [ReadShellEntries].
+// path may be either a single JSONL file or the daily-rotated directory
+// `<stateDir>/audit/`. When it's a directory, every `audit-*.jsonl` file
+// inside is read, sorted by name (chronological since filenames embed
+// the date).
 func ReadMessageEntries(path string) ([]MessageEntry, error) {
 	files, err := resolveAuditFiles(path)
 	if err != nil {
@@ -208,32 +86,43 @@ func readMessageEntriesFromFile(path string) ([]MessageEntry, error) {
 			continue
 		}
 		if entry.Event == "" {
-			continue // skip shell entries
+			continue
 		}
 		entries = append(entries, entry)
 	}
 	return entries, scanner.Err()
 }
 
-// ReadShellEntriesFiltered reads entries matching the given filter.
-func ReadShellEntriesFiltered(path string, filter ShellFilter) ([]ShellEntry, error) {
-	all, err := ReadShellEntries(path)
+// resolveAuditFiles returns the list of files to read for `path`.
+// If path is a directory, lists every `audit-*.jsonl` file inside,
+// sorted by name. If path is a file (or does not exist), returns
+// just that path.
+func resolveAuditFiles(path string) ([]string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{path}, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []string{path}, nil
+	}
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		return nil, err
 	}
-
-	var filtered []ShellEntry
-	for _, e := range all {
-		if filter.SessionID != "" && e.SessionID != filter.SessionID {
+	var files []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
 			continue
 		}
-		if filter.Disposition != "" && e.Disposition != filter.Disposition {
+		if !isAuditFileName(name) {
 			continue
 		}
-		if filter.CommandPattern != "" && !strings.Contains(e.Command, filter.CommandPattern) {
-			continue
-		}
-		filtered = append(filtered, e)
+		files = append(files, filepath.Join(path, name))
 	}
-	return filtered, nil
+	sort.Strings(files)
+	return files, nil
 }

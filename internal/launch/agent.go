@@ -1,5 +1,16 @@
-// Package launch provides the launcher for AI coding agents under Aileron's
-// policy-enforced shell.
+// Package launch provides the launcher for AI coding agents under
+// Aileron's daemon. Per ADR-0015, the launcher's job is to:
+//
+//  1. Resolve the daemon and register a session.
+//  2. Route the agent's LLM traffic through the daemon's gateway (when
+//     the agent exposes an env-controllable base URL).
+//  3. Register aileron-mcp with the agent so Aileron's tools are
+//     callable as mcp__aileron__*.
+//
+// The launcher does not replace $SHELL, install wrapper scripts, write
+// policy files, or audit shell commands the agent runs locally. The
+// audit boundary is "actions Aileron executes" (ADR-0010 audit store),
+// not "every command the agent runs."
 package launch
 
 import "sort"
@@ -15,31 +26,30 @@ type Agent interface {
 	// before any user-supplied arguments.
 	Args() []string
 	// Env returns additional environment variables to set for the agent
-	// process, beyond the standard SHELL/AILERON_REAL_SHELL manipulation.
-	// Returns nil if no extra env is needed.
+	// process. Returns nil if no extra env is needed.
 	Env() map[string]string
 	// LLMEndpointEnv returns the name of the environment variable the
 	// agent's LLM client honours to override its default API endpoint
 	// (e.g. "ANTHROPIC_BASE_URL" for Claude Code, "OPENAI_BASE_URL" for
-	// OpenAI-compatible clients). Returns "" when the agent does not
-	// support endpoint override via env (some agents resolve the
-	// endpoint from a settings file, requiring per-agent ConfigureShell
-	// adjustments instead). When non-empty and the launcher has a
-	// gateway URL available, the launcher routes the agent's LLM calls
-	// through Aileron's embedded gateway by setting this variable.
+	// Codex CLI). Returns "" when the agent does not support endpoint
+	// override via env (some agents resolve the endpoint from a settings
+	// file; gateway routing is not available for those agents under launch).
 	LLMEndpointEnv() string
-	// NormalizeCommand extracts the user command from the agent's shell
-	// wrapper before policy evaluation. Returns the normalized command and
-	// whether policy should evaluate it. Agents that don't wrap commands
-	// return (raw, true).
-	NormalizeCommand(raw string) (command string, evaluate bool)
-	// ConfigureShell performs any agent-specific setup needed to make the
-	// agent use the aileron-sh shim for shell execution. shimPath is the
-	// absolute path to aileron-sh. dir is the working directory where the
-	// agent will run. Agents that respect $SHELL can return nil. Agents
-	// that use their own shell resolution (e.g. a config file) should
-	// write the necessary configuration here.
-	ConfigureShell(shimPath, dir string) error
+	// ConfigureMCP arranges for the agent to discover Aileron's MCP
+	// server. Agents that accept MCP wiring on the CLI (Claude Code's
+	// --mcp-config) return extra args; agents that read MCP server
+	// configuration from a config file (Codex's ~/.codex/config.toml,
+	// Goose's ~/.config/goose/config.yaml, OpenCode's opencode.json)
+	// write the file and return nil args.
+	//
+	// mcpBin is the absolute path to the aileron-mcp binary.
+	// mcpEnv is the environment the MCP server needs (AILERON_URL,
+	// AILERON_SESSION_ID, etc.) — agents that write the config file
+	// must persist these in the file's env block; agents that pass via
+	// CLI must serialize them into their flag value.
+	// dir is the launch working directory (project root for agents that
+	// write per-project config like OpenCode); empty means "use cwd".
+	ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string) ([]string, error)
 }
 
 // Registry maps agent names to their definitions.

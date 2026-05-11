@@ -1,8 +1,7 @@
 package agents_test
 
 import (
-	"os"
-	"path/filepath"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,141 +9,70 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
 
-func TestClaude(t *testing.T) {
+func TestClaude_Identity(t *testing.T) {
 	c := agents.Claude{}
-
 	if c.Name() != "claude" {
-		t.Errorf("expected name 'claude', got %q", c.Name())
+		t.Errorf("Name() = %q, want %q", c.Name(), "claude")
 	}
-
-	names := c.BinaryNames()
-	if len(names) != 1 || names[0] != "claude" {
-		t.Errorf("expected BinaryNames [\"claude\"], got %v", names)
+	if got := c.BinaryNames(); len(got) != 1 || got[0] != "claude" {
+		t.Errorf("BinaryNames() = %v, want [\"claude\"]", got)
 	}
-
-	args := c.Args()
-	if len(args) < 2 {
-		t.Fatal("expected Args with --allowedTools")
+	if c.LLMEndpointEnv() != "ANTHROPIC_BASE_URL" {
+		t.Errorf("LLMEndpointEnv() = %q, want %q", c.LLMEndpointEnv(), "ANTHROPIC_BASE_URL")
 	}
-	var allowedToolsValue string
-	for i, a := range args {
-		if a == "--allowedTools" && i+1 < len(args) {
-			allowedToolsValue = args[i+1]
-			break
-		}
-	}
-	if allowedToolsValue == "" {
-		t.Fatalf("expected --allowedTools <value> in Args, got %v", args)
-	}
-	if !strings.Contains(allowedToolsValue, "Bash(*)") {
-		t.Errorf("expected Bash(*) in --allowedTools value, got %q", allowedToolsValue)
-	}
-	// Finding #6 of #532: the Aileron MCP server's tools must be
-	// pre-approved so Claude Code does not double-prompt for tools
-	// the daemon already gates. The bare `mcp__<server>` form covers
-	// every tool from that server.
-	wantMCP := "mcp__" + launch.MCPServerName
-	if !strings.Contains(allowedToolsValue, wantMCP) {
-		t.Errorf("expected %q in --allowedTools value to suppress per-tool prompts for Aileron MCP tools, got %q",
-			wantMCP, allowedToolsValue)
-	}
-
-	env := c.Env()
-	if env == nil {
-		t.Fatal("expected non-nil Env")
-	}
-	if env["AILERON_REAL_SHELL"] != "/bin/bash" {
-		t.Errorf("expected AILERON_REAL_SHELL=/bin/bash, got %q", env["AILERON_REAL_SHELL"])
-	}
-	if env["CLAUDE_CODE_SHELL"] == "" {
-		t.Error("expected CLAUDE_CODE_SHELL to be set")
-	}
-	if !strings.Contains(env["CLAUDE_CODE_SHELL"], "bash") {
-		t.Errorf("CLAUDE_CODE_SHELL path must contain 'bash', got %q", env["CLAUDE_CODE_SHELL"])
+	if c.Env() != nil {
+		t.Errorf("Env() = %v, want nil", c.Env())
 	}
 }
 
-func TestClaude_NormalizeCommand_EvalWrapper(t *testing.T) {
-	c := agents.Claude{}
-
-	wrapped := "shopt -u extglob 2>/dev/null || true && eval 'echo hello' < /dev/null && pwd -P >| /tmp/cwd"
-	cmd, eval := c.NormalizeCommand(wrapped)
-	if !eval {
-		t.Fatal("expected evaluate=true for eval-wrapped command")
+func TestClaude_Args_AllowsBashAndAileronMCP(t *testing.T) {
+	args := agents.Claude{}.Args()
+	if len(args) != 2 {
+		t.Fatalf("Args() = %v, want 2 entries", args)
 	}
-	if cmd != "echo hello" {
-		t.Errorf("expected 'echo hello', got %q", cmd)
+	if args[0] != "--allowedTools" {
+		t.Errorf("Args()[0] = %q, want --allowedTools", args[0])
 	}
-}
-
-func TestClaude_NormalizeCommand_UnquotedEval(t *testing.T) {
-	c := agents.Claude{}
-
-	wrapped := `shopt -u extglob 2>/dev/null || true && eval echo hello \< /dev/null && pwd -P >| /tmp/cwd`
-	cmd, eval := c.NormalizeCommand(wrapped)
-	if !eval {
-		t.Fatal("expected evaluate=true for unquoted eval command")
+	if !strings.Contains(args[1], "Bash(*)") {
+		t.Errorf("Args()[1] = %q, should allow Bash(*)", args[1])
 	}
-	if cmd != "echo hello" {
-		t.Errorf("expected 'echo hello', got %q", cmd)
+	if !strings.Contains(args[1], "mcp__"+launch.MCPServerName) {
+		t.Errorf("Args()[1] = %q, should allow mcp__%s", args[1], launch.MCPServerName)
 	}
 }
 
-func TestClaude_NormalizeCommand_Infrastructure(t *testing.T) {
-	c := agents.Claude{}
-
-	infra := `SNAPSHOT_FILE=/tmp/test.sh; echo "# snapshot" > "$SNAPSHOT_FILE"`
-	cmd, eval := c.NormalizeCommand(infra)
-	if eval {
-		t.Fatal("expected evaluate=false for infrastructure command")
+func TestClaude_ConfigureMCP_EmitsMCPConfigFlag(t *testing.T) {
+	mcpEnv := map[string]string{
+		"AILERON_URL":        "http://127.0.0.1:7000",
+		"AILERON_SESSION_ID": "sess-abc",
 	}
-	if cmd != infra {
-		t.Errorf("expected command unchanged, got %q", cmd)
-	}
-}
-
-func TestClaude_ConfigureShell_InstallsWrapper(t *testing.T) {
-	c := agents.Claude{}
-	dir := t.TempDir()
-	t.Setenv("HOME", dir)
-
-	if err := c.ConfigureShell("/usr/local/bin/aileron-sh", t.TempDir()); err != nil {
-		t.Fatalf("ConfigureShell failed: %v", err)
-	}
-
-	wrapperPath := filepath.Join(dir, ".aileron", "bash")
-	info, err := os.Stat(wrapperPath)
+	args, err := agents.Claude{}.ConfigureMCP("/usr/local/bin/aileron-mcp", mcpEnv, "")
 	if err != nil {
-		t.Fatalf("expected wrapper at %s: %v", wrapperPath, err)
+		t.Fatalf("ConfigureMCP returned error: %v", err)
 	}
-	if info.Mode()&0o111 == 0 {
-		t.Error("wrapper should be executable")
+	if len(args) != 2 || args[0] != "--mcp-config" {
+		t.Fatalf("ConfigureMCP() = %v, want [--mcp-config <json>]", args)
 	}
-}
-
-func TestClaude_NormalizeCommand_UnquotedEvalNoSeparator(t *testing.T) {
-	c := agents.Claude{}
-
-	// Unquoted eval with no separator — the entire rest is the command.
-	wrapped := "shopt -u extglob 2>/dev/null || true && eval ls"
-	cmd, eval := c.NormalizeCommand(wrapped)
-	if !eval {
-		t.Fatal("expected evaluate=true")
+	var payload struct {
+		MCPServers map[string]struct {
+			Command string            `json:"command"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
 	}
-	if cmd != "ls" {
-		t.Errorf("expected 'ls', got %q", cmd)
+	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil {
+		t.Fatalf("ConfigureMCP returned non-JSON value: %v\n%s", err, args[1])
 	}
-}
-
-func TestClaude_NormalizeCommand_EvalWithEscapedQuotes(t *testing.T) {
-	c := agents.Claude{}
-
-	wrapped := `shopt -u extglob 2>/dev/null || true && eval 'echo '\''hello world'\''' < /dev/null && pwd -P >| /tmp/cwd`
-	cmd, eval := c.NormalizeCommand(wrapped)
-	if !eval {
-		t.Fatal("expected evaluate=true")
+	server, ok := payload.MCPServers[launch.MCPServerName]
+	if !ok {
+		t.Fatalf("MCP config missing entry %q: %+v", launch.MCPServerName, payload)
 	}
-	if cmd != "echo 'hello world'" {
-		t.Errorf("expected \"echo 'hello world'\", got %q", cmd)
+	if server.Command != "/usr/local/bin/aileron-mcp" {
+		t.Errorf("server.Command = %q, want /usr/local/bin/aileron-mcp", server.Command)
+	}
+	if server.Env["AILERON_URL"] != "http://127.0.0.1:7000" {
+		t.Errorf("server.Env[AILERON_URL] = %q, want http://127.0.0.1:7000", server.Env["AILERON_URL"])
+	}
+	if server.Env["AILERON_SESSION_ID"] != "sess-abc" {
+		t.Errorf("server.Env[AILERON_SESSION_ID] = %q, want sess-abc", server.Env["AILERON_SESSION_ID"])
 	}
 }
