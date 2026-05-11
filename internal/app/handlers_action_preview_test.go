@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -296,5 +298,136 @@ Lists recent merged PRs from a GitHub repository.
 	}
 	if got.Existing.Source != "github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.1.0" {
 		t.Errorf("Existing.Source = %q, want v0.1.0 source", got.Existing.Source)
+	}
+}
+
+// TestPreviewAction_ExistingDetectedFromDiskWhenStoreEmpty asserts the
+// regression for the suite-install 409 trail: when an action file
+// exists at the canonical `<actions-dir>/<name>.md` path but the
+// in-memory action store does not know about it (e.g. the daemon
+// started after the file was written, or a Load failed for an
+// unrelated reason), the preview must still detect the existing
+// install and populate `existing`. Otherwise the CLI renders a
+// fresh-install prompt, accepts it, and the install POST returns
+// 409 because the file is already on disk — surfacing as a red ✗
+// in the suite summary even though the action is "already installed".
+//
+// The fix has the preview consult the filesystem directly, mirroring
+// what the install handler does, so preview and install agree.
+func TestPreviewAction_ExistingDetectedFromDiskWhenStoreEmpty(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	depFQN := "github://ALRubinger/aileron-connector-github"
+	depHash := fakeConnectorHash(depFQN, "1.0.0", "api_key")
+
+	ref, _ := cstore.ParseRef("github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.2.0")
+	v2MD := []byte(`+++
+name = "list-recent-prs"
+version = "0.2.0"
+source = "github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.2.0"
+
+[[requires.connectors]]
+name = "` + depFQN + `"
+version = "1.0.0"
+hash = "` + depHash + `"
+capabilities = ["list_prs"]
+
+[match]
+intent = "list pull requests"
+
+[[execute]]
+id = "list"
+connector = "` + depFQN + `"
+op = "list_prs"
++++
+
+# List Recent PRs (v2)
+`)
+	srv := installActionTestServer(t, ref, buildActionTarball(t, v2MD, priv), pub, depFQN)
+
+	// Plant a v0.1.0 manifest at the canonical install path *without*
+	// reloading the in-memory store. This is the load-bearing setup:
+	// the file is on disk, but `srv.actions.Get("list-recent-prs")`
+	// will return ErrNotFound.
+	v1MD := goodActionMD(depFQN, depHash)
+	dest := filepath.Join(srv.actions.Dir(), "list-recent-prs.md")
+	if err := os.WriteFile(dest, v1MD, 0o644); err != nil {
+		t.Fatalf("seed v1 manifest: %v", err)
+	}
+	if _, err := srv.actions.Get("list-recent-prs"); err == nil {
+		t.Fatal("test precondition: in-memory store should not know about the planted file")
+	}
+
+	rec := postPreviewAction(srv, `{
+		"fqn": "github://ALRubinger/aileron-connector-github/actions/list-recent-prs",
+		"version": "0.2.0"
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.ActionPreview
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AlreadyInstalled != nil && *got.AlreadyInstalled {
+		t.Errorf("AlreadyInstalled = true; want false because bytes differ")
+	}
+	if got.Existing == nil {
+		t.Fatal("Existing = nil; want populated because v0.1.0 is on disk even though the store doesn't know it")
+	}
+	if got.Existing.Version != "0.1.0" {
+		t.Errorf("Existing.Version = %q, want 0.1.0 (parsed from the on-disk bytes)", got.Existing.Version)
+	}
+	if got.Existing.Path != dest {
+		t.Errorf("Existing.Path = %q, want %q", got.Existing.Path, dest)
+	}
+	if !strings.HasPrefix(got.Existing.Hash, "sha256:") {
+		t.Errorf("Existing.Hash = %q, want sha256: prefix", got.Existing.Hash)
+	}
+	if got.Existing.Hash == got.Hash {
+		t.Errorf("Existing.Hash == previewed Hash; want different (bytes diverged)")
+	}
+}
+
+// TestPreviewAction_ExistingDetectedFromDiskWhenOnDiskManifestMalformed
+// covers the parse-fallback edge of the same fix: when the file at
+// the canonical path can't be parsed (operator hand-edited it into an
+// invalid state, partial write, etc.), the preview still surfaces an
+// `existing` entry — with empty version/source — so the CLI can
+// render an upgrade prompt instead of letting the install POST hit
+// a confusing 409. An overwrite is the only way out, and the operator
+// needs to know that's what's happening.
+func TestPreviewAction_ExistingDetectedFromDiskWhenOnDiskManifestMalformed(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	depFQN := "github://ALRubinger/aileron-connector-github"
+	depHash := fakeConnectorHash(depFQN, "1.0.0", "api_key")
+	ref, _ := cstore.ParseRef("github://ALRubinger/aileron-connector-github/actions/list-recent-prs@0.1.0")
+	md := goodActionMD(depFQN, depHash)
+	srv := installActionTestServer(t, ref, buildActionTarball(t, md, priv), pub, depFQN)
+
+	// Plant unparseable bytes at the canonical path.
+	dest := filepath.Join(srv.actions.Dir(), "list-recent-prs.md")
+	if err := os.WriteFile(dest, []byte("this is not a valid action manifest"), 0o644); err != nil {
+		t.Fatalf("seed garbage: %v", err)
+	}
+
+	rec := postPreviewAction(srv, `{
+		"fqn": "github://ALRubinger/aileron-connector-github/actions/list-recent-prs",
+		"version": "0.1.0"
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.ActionPreview
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Existing == nil {
+		t.Fatal("Existing = nil; want populated so the CLI can prompt for overwrite")
+	}
+	if got.Existing.Path != dest {
+		t.Errorf("Existing.Path = %q, want %q", got.Existing.Path, dest)
+	}
+	if !strings.HasPrefix(got.Existing.Hash, "sha256:") {
+		t.Errorf("Existing.Hash = %q, want sha256: prefix", got.Existing.Hash)
 	}
 }
