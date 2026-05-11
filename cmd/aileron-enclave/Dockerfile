@@ -1,4 +1,4 @@
-FROM golang:1.25 AS builder
+FROM golang:1.26 AS builder
 WORKDIR /build
 
 # Build outside the workspace so we only need the modules the enclave imports.
