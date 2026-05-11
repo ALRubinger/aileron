@@ -1215,12 +1215,15 @@ paths:
       tags: [Approvals]
       summary: Approve or deny a pending action-level approval
       description: |
-        Resolves a pending action-level approval. The runtime's
-        held-open `POST /v1/actions/{name}/run` response unblocks on
-        the next tick; on `approved = true` the action proceeds and
-        returns its normal result, on `approved = false` it returns
-        an `approval_denied` failure envelope per ADR-0010 with the
-        supplied reason.
+        Resolves a pending action-level approval. The daemon's
+        background executor for this approval wakes up and, on
+        `approved = true`, runs the action and stores its result against
+        the approval id (retrievable via
+        `GET /v1/action-approvals/{id}/result`). On `approved = false`
+        the entry's stored status becomes `denied` with the supplied
+        reason. The agent's original `POST /v1/actions/{name}/run`
+        call has already returned 202 — Decide does not unblock
+        anything inline.
       operationId: decideActionApproval
       parameters:
         - name: approval_id
@@ -1239,6 +1242,49 @@ paths:
           description: Decision recorded
         "404":
           description: Approval id is unknown or already resolved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/action-approvals/{approval_id}/result:
+    get:
+      tags: [Approvals]
+      summary: Poll an action approval's status and result
+      description: |
+        Returns the current status of an action approval — whether it
+        is still awaiting the user's decision, running, completed, or
+        denied — and the action's result payload once execution has
+        finished.
+
+        Designed for the agent (via the `aileron-mcp` `check_action_status`
+        tool) to close the loop on a `POST /v1/actions/{name}/run` that
+        returned 202 with `status = pending_approval`. The agent does
+        not need to poll — the original tool call's 202 carries the
+        approval id and a prompt for the user to approve via the
+        webapp; this endpoint exists for agents that want to surface
+        the eventual result without asking the user.
+
+        The queue is in-memory and per-process; entries survive Decide
+        (so this endpoint can serve completed/denied results) but not
+        daemon restart. After restart, `/result` returns 404 for any
+        approval id minted in a previous process.
+      operationId: getActionApprovalResult
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Approval status and (if available) result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionApprovalResult"
+        "404":
+          description: Approval id is unknown.
           content:
             application/json:
               schema:
@@ -2180,23 +2226,33 @@ paths:
   /v1/actions/{name}/run:
     post:
       tags: [Actions]
-      summary: Execute an installed action synchronously
+      summary: Execute an installed action
       description: |
-        Synchronously executes an installed action by name with the
-        supplied arguments. Used by `cmd/aileron-mcp` to route MCP
-        `tools/call` invocations to Aileron's action runtime when MCP is
-        the canonical surface for action exposure.
+        Executes an installed action by name with the supplied
+        arguments. Used by `cmd/aileron-mcp` to route MCP `tools/call`
+        invocations to Aileron's action runtime when MCP is the
+        canonical surface for action exposure.
 
         Per ADR-0010 and ADR-0011, the runtime requires an unlocked
         vault before any action can resolve its bound credentials; calls
         against a locked vault fail with `binding_required`.
 
+        Two response shapes:
+
+        - **200 OK** — action ran synchronously, no approval gate. The
+          body carries the audit id and the action's result payload.
+        - **202 Accepted** — action's manifest declares `[approval]
+          required = true`. The daemon registered a pending approval
+          and a background executor; the body carries the approval id,
+          a review URL, and a message for the agent to surface to the
+          user. The agent can poll `GET /v1/action-approvals/{id}/result`
+          to learn the outcome later, or simply return — the action
+          will run server-side once the user approves.
+
         Action-side failures (capability denied, binding required,
-        connector runtime error, etc.) are returned as a 4xx/5xx
-        FailureEnvelope per ADR-0010 — callers should branch on the
-        envelope's `class` field to decide how to surface the failure
-        to their caller. The 200 response carries a successful Result
-        whose `result` is the action's output payload.
+        connector runtime error, etc.) on the synchronous path are
+        returned as 4xx/5xx FailureEnvelopes per ADR-0010. Failures
+        after a 202 are surfaced through `/result`.
       operationId: runAction
       parameters:
         - name: name
@@ -2212,11 +2268,20 @@ paths:
               $ref: "#/components/schemas/ActionRunRequest"
       responses:
         "200":
-          description: Action executed successfully
+          description: Action executed synchronously (no approval gate)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ActionRunResponse"
+        "202":
+          description: |
+            Action requires user approval; a pending approval has been
+            registered and a background executor spawned. Poll
+            `/v1/action-approvals/{id}/result` for the eventual outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionRunPendingResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -5198,6 +5263,92 @@ components:
             as a tool result when the action runs through the gateway's
             intercept path. Typically a JSON document; may be plain
             prose for actions whose output is naturally a sentence.
+
+    ActionRunPendingResponse:
+      type: object
+      description: |
+        Response body for the 202 case of `POST /v1/actions/{name}/run`:
+        the action's manifest declared `[approval] required = true`, so
+        the daemon registered a pending approval and a background
+        executor instead of running the action inline. The agent is
+        expected to surface `message` to the user verbatim so they
+        learn where to approve.
+      required: [status, approval_id, message]
+      properties:
+        status:
+          type: string
+          enum: [pending_approval]
+          description: |
+            Discriminator. Always `pending_approval` for this shape;
+            included so the agent's MCP wrapper can branch without
+            inspecting the HTTP status code.
+        approval_id:
+          type: string
+          description: |
+            Opaque server-minted id for the pending approval entry.
+            The agent passes this to the `check_action_status` MCP
+            tool (or to `GET /v1/action-approvals/{id}/result`) to
+            learn the outcome.
+        review_url:
+          type: string
+          description: |
+            Deep link to the webapp's approvals page anchored at this
+            approval (`<webapp>/approvals?focus=<id>`). Empty when the
+            daemon has no webapp URL configured.
+        message:
+          type: string
+          description: |
+            Human-readable instruction the agent should surface to the
+            user verbatim. Names the approval, the review URL, and the
+            `aileron open approval <id>` shell command alternative.
+
+    ActionApprovalResult:
+      type: object
+      description: |
+        Current status and (when available) result of an action
+        approval entry. Returned by
+        `GET /v1/action-approvals/{id}/result`. The shape is discriminated
+        on `status`: terminal statuses (`completed`, `denied`, `failed`)
+        carry the relevant outcome fields; transient statuses
+        (`pending_approval`, `running`) carry only `status`.
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum:
+            - pending_approval
+            - running
+            - completed
+            - denied
+            - failed
+          description: |
+            - `pending_approval` — the user has not yet decided.
+            - `running` — the user approved; the daemon is executing
+              the action.
+            - `completed` — the action ran successfully; see `audit_id`
+              and `result`.
+            - `denied` — the user denied the approval; see `reason`.
+            - `failed` — the action was approved but its execution
+              errored; see `failure`.
+        audit_id:
+          type: string
+          description: Audit log id; populated when `status = completed`.
+        result:
+          type: string
+          description: |
+            Action output payload; populated when `status = completed`.
+            Same shape as `ActionRunResponse.result`.
+        reason:
+          type: string
+          description: |
+            User's deny commentary; populated when `status = denied`.
+            May be empty if the user denied without a reason.
+        failure:
+          $ref: "#/components/schemas/FailureEnvelope"
+          description: |
+            Action-side failure envelope; populated when
+            `status = failed`. Same shape the synchronous path would
+            have returned as a 4xx/5xx body.
 
     Binding:
       type: object

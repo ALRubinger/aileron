@@ -83,17 +83,20 @@ func TestDispatchTool_UnknownTool(t *testing.T) {
 
 // --- Tool listing ---
 
+// TestAvailableTools_* lists also include `check_action_status`,
+// which the MCP server registers unconditionally so the agent can
+// poll outcomes from any session.
 func TestAvailableTools_CommsOnly(t *testing.T) {
 	s := &server{commsURL:    "http://x", sessionID: "sess-x", httpClient: &http.Client{}}
 	tools := s.availableTools()
-	if len(tools) != 4 {
-		t.Fatalf("expected 4 comms tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("expected 4 comms tools + check_action_status, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, td := range tools {
 		names[td.Name] = true
 	}
-	for _, want := range []string{"read_messages", "draft_reply", "send_message", "http_request"} {
+	for _, want := range []string{"read_messages", "draft_reply", "send_message", "http_request", "check_action_status"} {
 		if !names[want] {
 			t.Errorf("missing tool: %s", want)
 		}
@@ -108,11 +111,15 @@ func TestAvailableTools_ActionsOnly(t *testing.T) {
 		},
 	}
 	tools := s.availableTools()
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 action tool, got %d", len(tools))
+	if len(tools) != 2 {
+		t.Fatalf("expected 1 action tool + check_action_status, got %d", len(tools))
 	}
-	if tools[0].Name != "ship_update" {
-		t.Errorf("got %q", tools[0].Name)
+	names := map[string]bool{}
+	for _, td := range tools {
+		names[td.Name] = true
+	}
+	if !names["ship_update"] || !names["check_action_status"] {
+		t.Errorf("tools = %v, want ship_update + check_action_status", names)
 	}
 }
 
@@ -126,8 +133,8 @@ func TestAvailableTools_CommsAndActions(t *testing.T) {
 		},
 	}
 	tools := s.availableTools()
-	if len(tools) != 6 {
-		t.Fatalf("expected 4 comms + 2 action = 6 tools, got %d", len(tools))
+	if len(tools) != 7 {
+		t.Fatalf("expected 4 comms + 2 action + check_action_status = 7 tools, got %d", len(tools))
 	}
 }
 
@@ -187,11 +194,13 @@ func TestDeriveDescription_HeadingOnlyAndNilMatchReturnsEmpty(t *testing.T) {
 
 // TestDeriveDescription_AppendsApprovalNoticeWhenRequired asserts that
 // when an action's manifest declares `[approval] required = true`, the
-// derived MCP tool description ends with a notice naming the approval
-// URL. The agent reads this as part of MCP tool discovery and surfaces
-// it to the user when invoking the tool.
+// derived MCP tool description ends with a notice describing the
+// async-return contract: the call does NOT block, the agent surfaces
+// the daemon's verbatim `message` (which itself carries the URL and
+// the `aileron open approval <id>` shell alternative), and
+// check_action_status is the polling tool. The URL is supplied per-
+// call by the 202 response, not embedded in the description.
 func TestDeriveDescription_AppendsApprovalNoticeWhenRequired(t *testing.T) {
-	t.Setenv("AILERON_APPROVAL_URL", "http://127.0.0.1:54321/approvals")
 	required := true
 	a := actionMeta{
 		Body:     "# Send Email\n\nSends a Gmail message.",
@@ -201,11 +210,10 @@ func TestDeriveDescription_AppendsApprovalNoticeWhenRequired(t *testing.T) {
 	if !strings.Contains(got, "Sends a Gmail message.") {
 		t.Errorf("base description lost; got %q", got)
 	}
-	if !strings.Contains(got, "http://127.0.0.1:54321/approvals") {
-		t.Errorf("approval URL not present in description; got %q", got)
-	}
-	if !strings.Contains(got, "requires user approval") {
-		t.Errorf("approval notice phrasing missing; got %q", got)
+	for _, want := range []string{"requires user approval", "does NOT block", "pending_approval", "check_action_status"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("approval notice missing %q; got %q", want, got)
+		}
 	}
 }
 
@@ -213,7 +221,6 @@ func TestDeriveDescription_AppendsApprovalNoticeWhenRequired(t *testing.T) {
 // actions without `[approval] required = true` get the unmodified
 // description — the legacy path is unchanged.
 func TestDeriveDescription_NoNoticeWhenApprovalNotRequired(t *testing.T) {
-	t.Setenv("AILERON_APPROVAL_URL", "http://127.0.0.1:54321/approvals")
 	a := actionMeta{
 		Body: "# Read Mail\n\nLists recent inbox messages.",
 	}
@@ -226,24 +233,21 @@ func TestDeriveDescription_NoNoticeWhenApprovalNotRequired(t *testing.T) {
 	}
 }
 
-// TestDeriveDescription_FallbackPhrasingWhenURLUnset asserts that when
-// AILERON_APPROVAL_URL is not set (e.g. running aileron-mcp standalone
-// without launch), the notice still fires but uses generic "the Aileron
-// webapp" wording rather than dropping the warning entirely. Better to
-// keep the agent informed even without an actionable URL.
-func TestDeriveDescription_FallbackPhrasingWhenURLUnset(t *testing.T) {
-	t.Setenv("AILERON_APPROVAL_URL", "")
+// TestDeriveDescription_NoticeIsURLAgnostic asserts the new notice
+// does NOT embed AILERON_APPROVAL_URL. Under the async contract the
+// per-call review URL is on the daemon's 202 response; baking a URL
+// into the description would make it stale across calls and across
+// daemons. Regression-guards against a future revert.
+func TestDeriveDescription_NoticeIsURLAgnostic(t *testing.T) {
+	t.Setenv("AILERON_APPROVAL_URL", "http://127.0.0.1:54321/approvals")
 	required := true
 	a := actionMeta{
 		Body:     "# Send Email\n\nSends a Gmail message.",
 		Approval: &actionApprovalPolicy{Required: &required},
 	}
 	got := deriveDescription(a)
-	if !strings.Contains(got, "the Aileron webapp") {
-		t.Errorf("fallback phrasing missing; got %q", got)
-	}
 	if strings.Contains(got, "http://") {
-		t.Errorf("unexpected URL in fallback path; got %q", got)
+		t.Errorf("description should not embed a URL under the async contract; got %q", got)
 	}
 }
 
@@ -449,6 +453,176 @@ func TestRunAction_DecodeFailureReturnsError(t *testing.T) {
 	got := s.runAction(context.Background(), "x", nil)
 	if !got.IsError {
 		t.Fatal("expected error for bad response JSON")
+	}
+}
+
+// --- Async approval flow ---
+
+// TestRunAction_PendingApprovalSurfacedAsToolText: a 202 response from
+// the daemon (approval-gated action) is NOT treated as an error. The
+// daemon's `message` lands in the tool's text content so the LLM
+// surfaces the approve-here instruction to the user. The approval id
+// must be visible so a follow-up check_action_status call can
+// reference it.
+func TestRunAction_PendingApprovalSurfacedAsToolText(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(actionRunPendingResponse{
+			Status:     "pending_approval",
+			ApprovalID: "act-42",
+			ReviewURL:  "http://127.0.0.1:50419/approvals?focus=act-42",
+			Message:    "Approval needed for send-email. Visit http://127.0.0.1:50419/approvals?focus=act-42 to approve, or run 'aileron open approval act-42' from any terminal.",
+		})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.runAction(context.Background(), "send-email", nil)
+	if got.IsError {
+		t.Fatalf("202 must not be an error result; got error: %s", got.Content[0].Text)
+	}
+	text := got.Content[0].Text
+	for _, want := range []string{"Approval needed", "act-42", "aileron open approval act-42"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("content missing %q; got %q", want, text)
+		}
+	}
+}
+
+// TestRunAction_PendingApprovalFallbackWhenMessageEmpty: if a daemon
+// sends a 202 with an empty `message` (shouldn't happen under the
+// current contract, but defending against future spec drift), the
+// MCP wrapper still surfaces a non-empty text block carrying the
+// approval id so the LLM has something to work with.
+func TestRunAction_PendingApprovalFallbackWhenMessageEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(actionRunPendingResponse{
+			Status:     "pending_approval",
+			ApprovalID: "act-99",
+			Message:    "",
+		})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.runAction(context.Background(), "send-email", nil)
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	if !strings.Contains(got.Content[0].Text, "act-99") {
+		t.Errorf("fallback content should carry approval id; got %q", got.Content[0].Text)
+	}
+}
+
+// TestCheckActionStatus_FormatsCompleted: the check_action_status
+// tool's text output names the status, surfaces audit id and result
+// when present. Keeps the format terse — LLMs read this, not humans.
+func TestCheckActionStatus_FormatsCompleted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/action-approvals/act-1/result" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		auditID := "audit_xyz"
+		result := `{"sent":true}`
+		_ = json.NewEncoder(w).Encode(actionApprovalResult{
+			Status:  "completed",
+			AuditID: &auditID,
+			Result:  &result,
+		})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.checkActionStatus(context.Background(), map[string]any{"approval_id": "act-1"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	for _, want := range []string{"status: completed", "audit_id=audit_xyz", `{"sent":true}`} {
+		if !strings.Contains(got.Content[0].Text, want) {
+			t.Errorf("output missing %q; got %q", want, got.Content[0].Text)
+		}
+	}
+}
+
+// TestCheckActionStatus_FormatsDeniedWithReason: denied entries
+// expose the user's reason so the LLM can apologize / retry / pivot.
+func TestCheckActionStatus_FormatsDeniedWithReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reason := "wrong recipient"
+		_ = json.NewEncoder(w).Encode(actionApprovalResult{
+			Status: "denied",
+			Reason: &reason,
+		})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.checkActionStatus(context.Background(), map[string]any{"approval_id": "act-1"})
+	if got.IsError {
+		t.Fatalf("denied is not an error result; got error: %s", got.Content[0].Text)
+	}
+	for _, want := range []string{"status: denied", "wrong recipient"} {
+		if !strings.Contains(got.Content[0].Text, want) {
+			t.Errorf("output missing %q; got %q", want, got.Content[0].Text)
+		}
+	}
+}
+
+// TestCheckActionStatus_FormatsPendingApproval: transient statuses
+// (pending_approval, running) carry only the status word — no other
+// fields are populated by the daemon. The formatter shouldn't invent
+// any.
+func TestCheckActionStatus_FormatsPendingApproval(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(actionApprovalResult{Status: "pending_approval"})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.checkActionStatus(context.Background(), map[string]any{"approval_id": "act-1"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	if got.Content[0].Text != "status: pending_approval" {
+		t.Errorf("output = %q, want bare status line", got.Content[0].Text)
+	}
+}
+
+// TestCheckActionStatus_NotFoundIsAnError: a 404 from the daemon
+// (unknown approval id — including ids minted before a daemon
+// restart) surfaces as a tool error so the LLM recognizes it as a
+// failure to recover from rather than a transient state.
+func TestCheckActionStatus_NotFoundIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found"}}`))
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	got := s.checkActionStatus(context.Background(), map[string]any{"approval_id": "ghost"})
+	if !got.IsError {
+		t.Fatal("404 should surface as a tool error")
+	}
+	if !strings.Contains(got.Content[0].Text, "ghost") {
+		t.Errorf("error text should name the missing id; got %q", got.Content[0].Text)
+	}
+}
+
+// TestCheckActionStatus_MissingApprovalIDReturnsError: the LLM
+// occasionally calls a tool without all required args. Surface the
+// missing-arg case as a usable error rather than letting it 400 from
+// the daemon with a less obvious shape.
+func TestCheckActionStatus_MissingApprovalIDReturnsError(t *testing.T) {
+	s := &server{aileronURL: "http://x", httpClient: &http.Client{}}
+	got := s.checkActionStatus(context.Background(), map[string]any{})
+	if !got.IsError {
+		t.Fatal("missing approval_id should be a tool error")
+	}
+	if !strings.Contains(got.Content[0].Text, "approval_id") {
+		t.Errorf("error text should name the missing arg; got %q", got.Content[0].Text)
 	}
 }
 
@@ -695,8 +869,8 @@ func TestHandle_ToolsList_ReturnsTools(t *testing.T) {
 	}
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]toolDef)
-	if len(tools) != 4 {
-		t.Errorf("expected 4 comms tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Errorf("expected 4 comms tools + check_action_status, got %d", len(tools))
 	}
 }
 

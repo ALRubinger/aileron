@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/model"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -237,15 +238,26 @@ type ResolvedActionApproval struct {
 // when the requested approval id is unknown or already resolved.
 var ErrActionApprovalNotFound = errors.New("action approval not found")
 
-// ActionApprovalQueue is the in-memory store of pending action-level
-// approvals. v0.x is per-process; restarts drop pending requests.
-// Persistent backing parallels the audit-log persistence work in
-// #412 — same architectural decision deferred for the same reasons.
+// ActionApprovalQueue is the in-memory store of action-level approval
+// entries. Entries are retained through their full lifecycle —
+// pending_approval → running → completed/denied/failed — so the agent
+// can poll `/v1/action-approvals/{id}/result` for the outcome of an
+// approval that was registered out from under it. v0.x is per-process;
+// restarts drop every entry. Persistent backing parallels the audit-
+// log persistence work in #412 — same architectural decision deferred
+// for the same reasons.
 //
 // All methods are safe for concurrent use.
 type ActionApprovalQueue struct {
 	mu      sync.Mutex
 	pending map[string]*ActionApproval
+
+	// outcomes carries the lifecycle state for every entry the queue
+	// has ever minted (until process restart). Keyed by approval id;
+	// always populated for ids present in `pending`. Reads / writes
+	// go through queue methods so the mutex bounds them — callers
+	// must not snoop at this map directly.
+	outcomes map[string]*Outcome
 
 	// idGen mints opaque ids. Tests inject a deterministic generator;
 	// production wiring uses a UUID-style helper.
@@ -303,6 +315,7 @@ func NewActionApprovalQueue(idGen func() string, now func() time.Time) *ActionAp
 	}
 	return &ActionApprovalQueue{
 		pending:     map[string]*ActionApproval{},
+		outcomes:    map[string]*Outcome{},
 		idGen:       idGen,
 		now:         now,
 		subscribers: map[chan ActionApprovalEvent]struct{}{},
@@ -429,6 +442,7 @@ func (q *ActionApprovalQueue) RegisterKind(kind ApprovalKind, actionName, connec
 		decision:     make(chan ActionDecision, 1),
 	}
 	q.pending[a.ID] = a
+	q.outcomes[a.ID] = &Outcome{Status: OutcomePendingApproval}
 	cb := q.onRegister
 	rec := q.auditRec
 	q.mu.Unlock()
@@ -494,11 +508,19 @@ func (q *ActionApprovalQueue) RegisterHTTPRequest(method, url, body, secretName,
 // List returns the snapshot of currently pending approvals, ordered
 // by RequestedAt ascending (oldest first). The slice is freshly
 // allocated; the caller may mutate it without affecting the queue.
+//
+// Entries whose outcome has progressed past [OutcomePendingApproval]
+// (running, completed, denied, failed) are excluded — the webapp's
+// pending list and the SSE snapshot want only the actionable subset.
+// The agent retrieves terminal outcomes via [Outcome].
 func (q *ActionApprovalQueue) List() []*ActionApproval {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	out := make([]*ActionApproval, 0, len(q.pending))
-	for _, a := range q.pending {
+	for id, a := range q.pending {
+		if o, ok := q.outcomes[id]; ok && o.Status != OutcomePendingApproval {
+			continue
+		}
 		out = append(out, a)
 	}
 	// Stable order: by RequestedAt ascending. Insertion order would
@@ -522,11 +544,17 @@ func (q *ActionApprovalQueue) Get(id string) (*ActionApproval, bool) {
 }
 
 // Decide resolves a pending approval with the user's verdict. The
-// pending entry is removed atomically — a second Decide call on the
-// same id returns ErrActionApprovalNotFound. The runtime's blocked
-// Wait unblocks on the next tick; the channel is buffered so this
-// call never blocks even if the runtime has already moved on (ctx
-// cancelled, timeout fired) before the user clicked.
+// entry is retained — the queue keeps it through its full lifecycle
+// so the agent can poll `/v1/action-approvals/{id}/result` for the
+// outcome. A second Decide call on the same id returns
+// ErrActionApprovalNotFound (already resolved or unknown).
+//
+// On approve, the outcome flips to [OutcomeRunning]; the background
+// executor that registered to listen on the entry's decision channel
+// is expected to call [SetRunning]/[SetCompleted]/[SetFailed] as it
+// progresses. On deny, the outcome flips to [OutcomeDenied] and the
+// executor's goroutine is expected to exit cleanly without invoking
+// the action.
 //
 // editedPayload carries kind-specific fields the user changed before
 // approving — e.g. the edited reply body for [ApprovalKindCommsDraft]
@@ -538,9 +566,20 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 		q.mu.Unlock()
 		return ErrActionApprovalNotFound
 	}
-	delete(q.pending, id)
+	outcome, hasOutcome := q.outcomes[id]
+	if !hasOutcome || outcome.Status != OutcomePendingApproval {
+		// Already resolved — Decide is single-shot per entry.
+		q.mu.Unlock()
+		return ErrActionApprovalNotFound
+	}
 	kind := a.Kind
 	rec := q.auditRec
+	if approved {
+		outcome.Status = OutcomeRunning
+	} else {
+		outcome.Status = OutcomeDenied
+		outcome.DenyReason = reason
+	}
 	q.mu.Unlock()
 	decidedAt := q.now()
 	a.decision <- ActionDecision{
@@ -561,6 +600,74 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 		},
 	})
 	return nil
+}
+
+// SetCompleted records a successful action execution against an
+// approved entry. Called by the background executor after the
+// action's runtime returns a non-failure result. Flips the outcome
+// to [OutcomeCompleted] and stores the audit id + result payload for
+// later retrieval by `/v1/action-approvals/{id}/result`.
+//
+// Idempotent for the terminal-state contract: calling on an already-
+// terminal entry is a no-op (the queue's outcome is single-shot per
+// entry). Returns ErrActionApprovalNotFound for unknown ids.
+func (q *ActionApprovalQueue) SetCompleted(id, auditID, result string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	outcome, ok := q.outcomes[id]
+	if !ok {
+		return ErrActionApprovalNotFound
+	}
+	if outcome.Status == OutcomeCompleted || outcome.Status == OutcomeFailed || outcome.Status == OutcomeDenied {
+		return nil
+	}
+	outcome.Status = OutcomeCompleted
+	outcome.AuditID = auditID
+	outcome.Result = result
+	return nil
+}
+
+// SetFailed records an execution failure against an approved entry.
+// The background executor calls this when [action.Executor.Execute]
+// returns an error (errorMessage non-empty, failure nil) or when the
+// executor returns a structured FailureEnvelope (failure non-nil).
+// Exactly one of failure / errorMessage should be populated; both
+// nil/empty produces a generic "execution failed" entry to keep the
+// invariant non-nil for /result consumers.
+//
+// Idempotent for the terminal-state contract: a no-op on already-
+// terminal entries. Returns ErrActionApprovalNotFound for unknown ids.
+func (q *ActionApprovalQueue) SetFailed(id string, fail *failure.Failure, errorMessage string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	outcome, ok := q.outcomes[id]
+	if !ok {
+		return ErrActionApprovalNotFound
+	}
+	if outcome.Status == OutcomeCompleted || outcome.Status == OutcomeFailed || outcome.Status == OutcomeDenied {
+		return nil
+	}
+	outcome.Status = OutcomeFailed
+	outcome.Failure = fail
+	outcome.ErrorMessage = errorMessage
+	if fail == nil && errorMessage == "" {
+		outcome.ErrorMessage = "execution failed"
+	}
+	return nil
+}
+
+// Outcome returns the current lifecycle state for an entry by id.
+// Returns false for unknown ids (including ids minted in a previous
+// process — the queue is in-memory). The returned Outcome is a copy;
+// callers can safely retain it.
+func (q *ActionApprovalQueue) Outcome(id string) (Outcome, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	o, ok := q.outcomes[id]
+	if !ok {
+		return Outcome{}, false
+	}
+	return *o, true
 }
 
 // recordRequested emits an approval.requested audit event. Best-

@@ -1301,10 +1301,13 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 
 	// Approval gate. When the action's manifest declares
 	// `[approval] required = true` the runtime registers a pending
-	// approval and holds the response open until the user decides
-	// (via the webapp at #418 or `aileron approval` CLI). The agent
-	// learns to surface the approval URL to the user during this
-	// pause via templated MCP tool descriptions in `aileron-mcp`.
+	// approval and returns 202 to the caller immediately — the agent's
+	// tool-call HTTP response does not block on the user. A background
+	// goroutine waits on the queue's decision channel; on approve it
+	// runs the action and stores the result against the approval id;
+	// on deny it leaves the queue's outcome at denied. The agent (or
+	// any other client) retrieves the eventual outcome via
+	// `GET /v1/action-approvals/{id}/result`.
 	if loaded.Manifest.ApprovalRequired() && s.actionApprovals != nil {
 		connFQN := ""
 		if len(loaded.Manifest.Execute) > 0 {
@@ -1312,28 +1315,18 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 		}
 		sessionID := r.Header.Get("X-Aileron-Session-Id")
 		entry := s.actionApprovals.Register(name, connFQN, sessionID, args)
-		decision, waitErr := entry.Wait(r.Context(), s.actionApprovalTimeout())
-		if errors.Is(waitErr, approval.ErrActionApprovalTimeout) {
-			writeError(w, http.StatusRequestTimeout, "approval_timeout",
-				"action requires user approval; no decision received before timeout")
-			return
-		}
-		if waitErr != nil {
-			// Most likely r.Context() cancelled (client disconnect);
-			// surface as a generic failure for the audit log. Don't
-			// emit a body when the client is gone.
-			writeError(w, http.StatusInternalServerError, "approval_wait_error", waitErr.Error())
-			return
-		}
-		if !decision.Approved {
-			msg := "user denied approval"
-			if decision.Reason != "" {
-				msg = msg + ": " + decision.Reason
-			}
-			writeError(w, http.StatusForbidden, "approval_denied", msg)
-			return
-		}
-		// Approved; fall through to execute.
+
+		// Background executor: lives until the queue resolves the
+		// entry. Uses a detached context (not r.Context()) so a
+		// client disconnect after the 202 doesn't cancel the wait or
+		// the eventual Execute. Daemon shutdown drops in-flight
+		// approvals — the in-memory queue already has that limitation.
+		go s.executeApprovedAction(entry, name, connFQN, args, sessionID)
+
+		respBody := buildPendingApprovalResponse(entry.ID, name, connFQN,
+			buildApprovalsReviewURL(s.webappURL, "", entry.ID))
+		writeJSON(w, http.StatusAccepted, respBody)
+		return
 	}
 
 	result, err := s.executor.Execute(r.Context(), name, args)
@@ -1360,6 +1353,88 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// executeApprovedAction is the background-executor goroutine spawned
+// for every approval-gated RunAction. Waits for the user's decision on
+// the queue, executes the action on approval, and stores the eventual
+// outcome (completed / failed / denied) against the approval id so
+// `GET /v1/action-approvals/{id}/result` can serve it.
+//
+// Uses context.Background — the agent's HTTP request has already
+// returned 202 by the time this goroutine starts, so r.Context() is
+// gone. Daemon shutdown drops in-flight approvals (in-memory queue
+// limitation tracked for the persistence follow-up).
+func (s *apiServer) executeApprovedAction(entry *approval.ActionApproval, name, connFQN string, args map[string]any, sessionID string) {
+	ctx := context.Background()
+
+	// No timeout: the user can approve or deny whenever they want.
+	// time.Duration(math.MaxInt64) ≈ 292 years is effectively forever
+	// while keeping the queue's existing Wait signature in play. The
+	// only thing that cancels this is ctx done (which never happens on
+	// context.Background — daemon shutdown drops the goroutine without
+	// going through ctx).
+	decision, waitErr := entry.Wait(ctx, time.Duration(1<<62))
+	if waitErr != nil {
+		// ctx.Err() — daemon shutting down. Leave the outcome at
+		// pending_approval; the queue is going away.
+		return
+	}
+	if !decision.Approved {
+		// Queue already flipped the outcome to denied in Decide; nothing
+		// more to do.
+		return
+	}
+
+	// Approved. Queue's outcome is already at running. Execute and
+	// store whatever comes back. The args passed at Register-time win
+	// over EditedPayload by default — EditedPayload is a comms_draft
+	// feature, not used for action-kind entries. (Comms approvals
+	// follow a different dispatch path that consumes EditedPayload
+	// inline; see internal/app/handlers_comms.go.)
+	_ = connFQN
+	_ = sessionID
+	result, err := s.executor.Execute(ctx, name, args)
+	if err != nil {
+		_ = s.actionApprovals.SetFailed(entry.ID, nil, err.Error())
+		return
+	}
+	if result.Failure != nil {
+		_ = s.actionApprovals.SetFailed(entry.ID, result.Failure, "")
+		return
+	}
+	auditID := ""
+	if s.newID != nil {
+		auditID = s.newID()
+	}
+	_ = s.actionApprovals.SetCompleted(entry.ID, auditID, result.Content)
+}
+
+// buildPendingApprovalResponse composes the 202 body for an approval-
+// gated RunAction. The `message` is the human-readable instruction the
+// agent's MCP wrapper surfaces to the LLM (and thereby to the user) —
+// it names the action, the per-approval review URL, and the
+// `aileron open approval <id>` shell command alternative, so the user
+// has two equivalent paths to the approve / deny decision.
+func buildPendingApprovalResponse(approvalID, actionName, connFQN, reviewURL string) api.ActionRunPendingResponse {
+	subject := actionName
+	if connFQN != "" {
+		subject = actionName + " on " + connFQN
+	}
+	msg := fmt.Sprintf(
+		"This action requires user approval before it runs. Tell the user verbatim: "+
+			"\"Approval needed for %s. Visit %s to approve, or run 'aileron open approval %s' from any terminal.\" "+
+			"The action will run server-side once the user approves. You may call check_action_status with approval_id=%q "+
+			"to learn the outcome, or simply continue with other work — the user knows the next move.",
+		subject, reviewURL, approvalID, approvalID,
+	)
+	return api.ActionRunPendingResponse{
+		Status:     api.ActionRunPendingResponseStatusPendingApproval,
+		ApprovalId: approvalID,
+		ReviewUrl:  ptr(reviewURL),
+		Message:    msg,
+	}
+}
+
 
 func manifestToAPI(la action.LoadedAction) api.Action {
 	m := la.Manifest

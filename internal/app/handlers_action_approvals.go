@@ -10,18 +10,25 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
+	"github.com/ALRubinger/aileron/internal/failure"
 )
 
-// defaultActionApprovalTimeout is how long RunAction holds the
-// response open waiting for a user decision when an action is gated
-// on approval. 5 minutes balances "user actually has time to read
-// and decide" against "MCP/HTTP timeouts somewhere upstream don't
-// kill the request."
+// defaultActionApprovalTimeout is how long the still-synchronous
+// approval-gated paths (the comms send_message / draft_reply /
+// http_request handlers in handlers_comms.go) hold their response
+// open waiting for a user decision. RunAction no longer uses this —
+// gated /v1/actions/{name}/run calls return 202 immediately and the
+// decision wait runs in a background goroutine without a timeout
+// (the user can approve / deny whenever).
+//
+// The comms paths follow the same shape today as RunAction did
+// before the async-return contract landed; converting them to the
+// new contract is a follow-up to keep this PR scoped.
 const defaultActionApprovalTimeout = 5 * time.Minute
 
-// actionApprovalTimeout returns the wait window for a pending
-// approval. Overridable via apiServer.actionApprovalTTL so tests can
-// drive deterministic timeouts without sleeping for minutes.
+// actionApprovalTimeout returns the wait window for the synchronous
+// comms-approval paths. Overridable via apiServer.actionApprovalTTL so
+// tests can drive deterministic timeouts without sleeping for minutes.
 func (s *apiServer) actionApprovalTimeout() time.Duration {
 	if s.actionApprovalTTL > 0 {
 		return s.actionApprovalTTL
@@ -87,6 +94,90 @@ func (s *apiServer) DecideActionApproval(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// GetActionApprovalResult serves the agent's poll for an approval's
+// status and (when available) result. Returns 404 when the approval
+// id is unknown — including ids minted in a previous daemon process,
+// since the queue is in-memory.
+//
+// Status discriminates the body: terminal statuses (completed, denied,
+// failed) carry their respective outcome fields; transient statuses
+// (pending_approval, running) carry only `status`.
+func (s *apiServer) GetActionApprovalResult(w http.ResponseWriter, _ *http.Request, approvalID string) {
+	if s.actionApprovals == nil {
+		writeError(w, http.StatusServiceUnavailable, "action_approvals_disabled",
+			"action-approval queue is not configured")
+		return
+	}
+	outcome, ok := s.actionApprovals.Outcome(approvalID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found",
+			"approval id is unknown")
+		return
+	}
+	writeJSON(w, http.StatusOK, toActionApprovalResult(outcome))
+}
+
+// toActionApprovalResult shapes an approval Outcome into the API's
+// ActionApprovalResult wire type. Each status maps to its discriminator
+// + the relevant payload fields; transient statuses carry only Status.
+func toActionApprovalResult(o approval.Outcome) api.ActionApprovalResult {
+	out := api.ActionApprovalResult{
+		Status: api.ActionApprovalResultStatus(o.Status),
+	}
+	switch o.Status {
+	case approval.OutcomeCompleted:
+		out.AuditId = optStr(o.AuditID)
+		out.Result = optStr(o.Result)
+	case approval.OutcomeDenied:
+		out.Reason = optStr(o.DenyReason)
+	case approval.OutcomeFailed:
+		if o.Failure != nil {
+			env := failureToAPIEnvelope(o.Failure)
+			out.Failure = &env
+		}
+		// For executor-level errors with no FailureEnvelope, surface
+		// the plain-text reason via Reason so callers always have
+		// some non-empty signal beyond the bare "failed" status.
+		if o.Failure == nil && o.ErrorMessage != "" {
+			out.Reason = optStr(o.ErrorMessage)
+		}
+	}
+	return out
+}
+
+// failureToAPIEnvelope maps the failure package's internal Envelope
+// shape onto the generated API's FailureEnvelope. The two have
+// identical JSON wire shapes per ADR-0010 (failure_test.go pins this);
+// the duplication exists because the API types are generated and can't
+// depend on the failure package directly.
+func failureToAPIEnvelope(f *failure.Failure) api.FailureEnvelope {
+	env := failure.ToEnvelope(f)
+	out := api.FailureEnvelope{}
+	out.Error.Class = api.FailureClass(env.Error.Class)
+	out.Error.Boundary = api.FailureBoundary(env.Error.Boundary)
+	out.Error.Message = env.Error.Message
+	out.Error.Retriable = env.Error.Retriable
+	if env.Error.AuditID != "" {
+		id := env.Error.AuditID
+		out.Error.AuditId = &id
+	}
+	if len(env.Error.Details) > 0 {
+		details := env.Error.Details
+		anyMap := map[string]any(details)
+		out.Error.Details = &anyMap
+	}
+	return out
+}
+
+// optStr returns nil for an empty string and a pointer otherwise, for
+// the API's optional string fields.
+func optStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // actionApprovalSSEHeartbeat is how often the SSE handler emits a
