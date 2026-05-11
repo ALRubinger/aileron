@@ -12,11 +12,11 @@ Posts are made with the authorizing user's token, not as a bot. Messages appear 
 
 ## Prerequisite
 
-The Aileron Slack app must be installed into your workspace before OAuth consent can complete. For most workspaces this happens automatically as part of `aileron binding setup`: the first authorization from a workspace installs the app there as a side effect of the OAuth dance, and subsequent users in the same workspace skip straight to the consent screen.
+The Aileron Slack app must be installed into your workspace. `aileron action add` (and `add-suite`) handles this for you: the CLI opens Slack's consent screen in your browser, and clicking Allow installs the app and authorizes your user in one step.
 
-If your workspace gates third-party apps behind admin approval (Settings → Permissions → "Require App Approval"), the OAuth flow offers to send an install request to a workspace admin instead of completing authorization. Ask an admin to approve the request, then re-run `aileron binding setup`. The four scopes the admin sees during approval are the same ones listed in [Scopes the consent screen asks for](#scopes-the-consent-screen-asks-for) below; nothing additional is requested.
+If your workspace requires admin approval for third-party apps, Slack shows a "Request to install" button instead of Allow. A workspace admin approves the request, then you re-run the same `aileron action add` command.
 
-Workspaces that disable third-party apps entirely cannot use this connector. The Aileron Slack app is registered by the connector publisher (`ALRubinger`); your workspace admin chooses whether to allow it. No part of `aileron-connector-slack` can bypass that choice.
+The Aileron Slack app is not on the Slack Marketplace, so there's no App Directory page to install from. The CLI is the install path.
 
 ## Install
 
