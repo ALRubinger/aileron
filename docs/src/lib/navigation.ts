@@ -66,6 +66,7 @@ export const navigation: NavItem[] = [
   {
     label: 'Guides',
     children: [
+      { label: 'Discovering Connectors', href: '/guides/discovering-connectors/' },
       { label: 'Installing a Connector', href: '/guides/installing-a-connector/' },
       { label: 'Installing an Action', href: '/guides/installing-an-action/' },
       { label: 'Authoring a Connector', href: '/guides/authoring-a-connector/' },
@@ -74,6 +75,7 @@ export const navigation: NavItem[] = [
       { label: 'Authoring an Action', href: '/guides/authoring-an-action/' },
       { label: 'Authoring an Action Suite', href: '/guides/authoring-an-action-suite/' },
       { label: 'Publishing a Connector', href: '/guides/publishing-a-connector/' },
+      { label: 'Publishing to the Hub', href: '/guides/publishing-to-the-hub/' },
       { label: 'Observability', href: '/guides/observability/' }
     ]
   },
