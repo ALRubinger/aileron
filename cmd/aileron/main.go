@@ -2065,6 +2065,14 @@ type actionAddOptions struct {
 	force   bool
 	yes     bool
 	noBind  bool
+	// suiteConsented is set by the suite-install path after the user
+	// has approved the suite-level consent screen. installOneAction
+	// then skips its own per-action Y/N prompt and the per-action
+	// preview render — both have already been surfaced at the suite
+	// level. Distinct from `yes` (which means "the operator passed
+	// --yes on the CLI; skip every interactive prompt including
+	// publisher trust") so each path can degrade independently.
+	suiteConsented bool
 	// outcome, when non-nil, is populated with a richer status code
 	// so the suite-install path can render a per-entry summary that
 	// distinguishes added / upgraded / already-installed / skipped /
@@ -2210,13 +2218,23 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 	// Step 2: render the consent prompt. Shows action metadata plus
 	// the connector deps split into "already installed" vs. "will
 	// be installed alongside this action".
-	renderActionPreview(stdout, &preview)
+	//
+	// Suite-consented installs skip this render: the suite preview
+	// already showed the operator what's coming. Per-action verbosity
+	// during the install loop would just repeat that for every entry.
+	if !opts.suiteConsented {
+		renderActionPreview(stdout, &preview)
+	}
 
 	// Step 2b (issue #563): for any connector dep that will be newly
 	// installed and whose authority differs from the action's,
 	// prompt to trust before the install consent. Already-installed
 	// deps are skipped — their authorities were trusted on the
 	// install that put them in the cstore.
+	//
+	// Suite-consented installs pre-resolve every dep authority in the
+	// preflight phase, so this loop sees trustState.ensure as a fast
+	// no-op (already-trusted short-circuit) and never prompts.
 	for _, dep := range preview.ConnectorDeps {
 		if dep.AlreadyInstalled {
 			continue
@@ -2233,10 +2251,19 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		}
 	}
 
-	// Step 3: prompt unless --yes. Upgrades get a different prompt
-	// that names both versions so the operator can't miss that
-	// they're overwriting an existing install.
-	if !opts.yes {
+	// Step 3: prompt unless --yes or suite-consented. Upgrades get a
+	// different prompt that names both versions so the operator can't
+	// miss that they're overwriting an existing install.
+	switch {
+	case opts.yes, opts.suiteConsented:
+		// --yes implies consent to upgrade just like fresh install.
+		// suite-consented inherits the user's "install all" decision
+		// covering both shapes, so the same force-on-upgrade rule
+		// applies.
+		if upgrade {
+			forceForInstall = true
+		}
+	default:
 		var prompt string
 		if upgrade {
 			renderActionUpgradeBanner(stdout, &preview)
@@ -2260,10 +2287,6 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		if upgrade {
 			forceForInstall = true
 		}
-	} else if upgrade {
-		// --yes implies consent to upgrade, mirroring how --yes
-		// implies consent to fresh install.
-		forceForInstall = true
 	}
 
 	// Step 4: install. The server walks the connector deps server-
@@ -2479,12 +2502,21 @@ func runActionAddSuiteRemote(source string, opts actionAddOptions, stdin *bufio.
 	return installSuiteEntries(manifest, refs, opts, stdin, stdout, stderr)
 }
 
-// installSuiteEntries is the shared per-entry loop + summary used
-// by both local and remote suite paths. Each entry installs via
-// installOneAction; one trustState threads through every call so
-// publisher prompts fire at most once per run. Per-entry failures
-// are captured for the final summary; the loop never aborts mid-
-// stream (failure-soft).
+// installSuiteEntries drives a suite install in three phases (#640):
+//
+//  1. Preflight: ensure publisher trust for every action authority,
+//     preview every ref against the daemon, ensure trust for every
+//     new connector-dep authority. Every prompt the run will issue
+//     happens here, before the user commits.
+//  2. Consent: render the collapsed suite preview (one line per
+//     action) and prompt once for the whole suite. --yes skips the
+//     prompt. All-already-installed skips the prompt. Decline marks
+//     every action as cancelled and exits 0.
+//  3. Install: call installOneAction per ref with suiteConsented=true.
+//     trustState is fully populated; per-action previews are silent
+//     (already shown in phase 2); no Y/N prompts fire. Per-action
+//     failures stay failure-soft; the summary at the end reports
+//     counts and a nonzero exit if anything failed.
 func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actionAddOptions, stdin *bufio.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Suite: %s\n", manifest.Name)
 	if manifest.Description != "" {
@@ -2493,31 +2525,328 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actio
 	fmt.Fprintf(stdout, "  %d action(s) to install\n", len(refs))
 
 	trust := newTrustState()
-	type result struct {
-		ref     string
-		rc      int
-		outcome actionInstallStatus
+
+	// Phase 1a: trust action authorities up front so preview can
+	// verify signatures. Any decline here aborts the suite before
+	// the consent screen — the operator hasn't committed yet.
+	if rc := trustAuthoritiesForRefs(refs, opts.yes, trust, stdin, stdout, stderr); rc != 0 {
+		return rc
 	}
-	results := make([]result, 0, len(refs))
+
+	// Phase 1b: preview every ref. Per-ref preview failures land in
+	// the preflight result with a clear status so the consent screen
+	// surfaces them; the user can still install the healthy actions.
+	previews := previewSuiteRefs(refs, stdout)
+
+	// Phase 1c: trust new connector-dep authorities. Same abort-on-
+	// decline rule as 1a; the consent screen wouldn't render honest
+	// data with mixed trust state otherwise.
+	if rc := trustConnectorDepAuthorities(previews, opts.yes, trust, stdin, stdout, stderr); rc != 0 {
+		return rc
+	}
+
+	// Phase 2: collapsed consent screen + single Y/N.
+	plan := buildSuitePlan(refs, previews)
+	if plan.toInstall == 0 && plan.previewFailed == 0 {
+		fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "All %d action(s) already installed; nothing to do.\n", len(refs))
+		return 0
+	}
+	cancelled := false
+	if !opts.yes {
+		renderSuitePreview(stdout, manifest, plan)
+		ans := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/N]: ")))
+		if ans != "y" && ans != "yes" {
+			cancelled = true
+		}
+	}
+
+	// Phase 3: install loop. Cancellation collapses every still-
+	// pending ref into actionInstallStatusCancelled; preview-failed
+	// refs stay failed regardless. The trustState carries the
+	// authorities resolved in phase 1.
+	results := runSuiteInstallLoop(refs, previews, opts, trust, cancelled, stdin, stdout, stderr)
+	return renderSuiteSummary(stdout, results)
+}
+
+// suiteRefPreview pairs a ref with its preview attempt. err is non-
+// nil when the daemon refused to preview the action; the consent
+// screen surfaces that explicitly and the install loop short-circuits
+// the ref as failed.
+type suiteRefPreview struct {
+	ref     cstore.Ref
+	preview *actionPreviewWire
+	err     error
+}
+
+// suitePlan is the per-ref classification the consent screen renders
+// and the install loop consults. Built once at the boundary between
+// preflight and consent so both paths see the same view.
+type suitePlan struct {
+	entries         []suitePlanEntry
+	toInstall       int
+	alreadyExisting int
+	previewFailed   int
+	hasUpgrade      bool
+	connectors      []suitePlanConnector
+}
+
+type suitePlanEntry struct {
+	ref             string
+	name            string
+	version         string
+	status          suitePlanStatus
+	existingVersion string // populated for statusUpgrade
+	previewErr      string // populated for statusPreviewFailed
+}
+
+type suitePlanStatus int
+
+const (
+	statusFresh suitePlanStatus = iota
+	statusUpgrade
+	statusAlreadyInstalled
+	statusPreviewFailed
+)
+
+type suitePlanConnector struct {
+	fqn              string
+	version          string
+	alreadyInstalled bool
+}
+
+func buildSuitePlan(refs []cstore.Ref, previews []suiteRefPreview) suitePlan {
+	plan := suitePlan{entries: make([]suitePlanEntry, 0, len(previews))}
+	seenConnectors := map[string]suitePlanConnector{}
+	for i, p := range previews {
+		entry := suitePlanEntry{ref: refs[i].String()}
+		switch {
+		case p.err != nil:
+			entry.status = statusPreviewFailed
+			entry.previewErr = p.err.Error()
+			plan.previewFailed++
+		case p.preview != nil && p.preview.AlreadyInstalled:
+			entry.name = p.preview.Name
+			entry.version = p.preview.Version
+			entry.status = statusAlreadyInstalled
+			plan.alreadyExisting++
+		case p.preview != nil && p.preview.Existing != nil:
+			entry.name = p.preview.Name
+			entry.version = p.preview.Version
+			entry.status = statusUpgrade
+			entry.existingVersion = p.preview.Existing.Version
+			plan.toInstall++
+			plan.hasUpgrade = true
+		case p.preview != nil:
+			entry.name = p.preview.Name
+			entry.version = p.preview.Version
+			entry.status = statusFresh
+			plan.toInstall++
+		}
+		plan.entries = append(plan.entries, entry)
+
+		// Aggregate connectors deduped by FQN+version. New (not yet
+		// installed) trumps already-installed when the same FQN
+		// shows up under multiple actions in either state.
+		if p.preview == nil {
+			continue
+		}
+		for _, dep := range p.preview.ConnectorDeps {
+			key := dep.Fqn + "@" + dep.Version
+			cur, exists := seenConnectors[key]
+			if !exists {
+				seenConnectors[key] = suitePlanConnector{
+					fqn: dep.Fqn, version: dep.Version, alreadyInstalled: dep.AlreadyInstalled,
+				}
+				continue
+			}
+			if cur.alreadyInstalled && !dep.AlreadyInstalled {
+				cur.alreadyInstalled = false
+				seenConnectors[key] = cur
+			}
+		}
+	}
+	plan.connectors = make([]suitePlanConnector, 0, len(seenConnectors))
+	for _, c := range seenConnectors {
+		plan.connectors = append(plan.connectors, c)
+	}
+	return plan
+}
+
+func renderSuitePreview(w io.Writer, manifest *suite.Manifest, plan suitePlan) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "\033[1mSuite install preview\033[0m")
+	fmt.Fprintln(w)
+	header := fmt.Sprintf("Install %d action(s) from this suite", plan.toInstall)
+	if plan.alreadyExisting > 0 {
+		header += fmt.Sprintf(" (%d already installed will be skipped)", plan.alreadyExisting)
+	}
+	if plan.previewFailed > 0 {
+		header += fmt.Sprintf(" (%d preview-failed will be marked failed)", plan.previewFailed)
+	}
+	fmt.Fprintln(w, header+":")
+	for _, e := range plan.entries {
+		switch e.status {
+		case statusFresh:
+			fmt.Fprintf(w, "  \033[32m+\033[0m %-30s v%s   (new)\n", e.name, e.version)
+		case statusUpgrade:
+			fmt.Fprintf(w, "  \033[33m↺\033[0m %-30s v%s   (upgrade from v%s)\n",
+				e.name, e.version, e.existingVersion)
+		case statusAlreadyInstalled:
+			fmt.Fprintf(w, "  \033[2m✓\033[0m \033[2m%-30s v%s   (already installed)\033[0m\n",
+				e.name, e.version)
+		case statusPreviewFailed:
+			fmt.Fprintf(w, "  \033[31m✗\033[0m %-30s        (preview failed: %s)\n",
+				e.ref, e.previewErr)
+		}
+	}
+	if len(plan.connectors) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "\033[1mConnectors:\033[0m")
+		for _, c := range plan.connectors {
+			if c.alreadyInstalled {
+				fmt.Fprintf(w, "  \033[2m✓ %s@%s   (already installed)\033[0m\n", c.fqn, c.version)
+			} else {
+				fmt.Fprintf(w, "  \033[32m+\033[0m %s@%s   (new)\n", c.fqn, c.version)
+			}
+		}
+	}
+	fmt.Fprintln(w)
+}
+
+// trustAuthoritiesForRefs runs trust.ensure for every unique action
+// authority across the refs. Returns nonzero when any authority is
+// declined or the keyring write fails — the suite cannot proceed past
+// preview without trust, and per-issue #640 the suite is atomic at
+// the consent layer, so a partial set of trusted authorities does not
+// produce a partial install. Authorities the user already trusts in
+// this run short-circuit at trustState.ensure with no further prompt.
+func trustAuthoritiesForRefs(refs []cstore.Ref, autoYes bool, trust *trustState, stdin io.Reader, stdout, stderr io.Writer) int {
+	for _, ref := range refs {
+		// ref.FQN.Authority() is the canonical accessor; the FQN was
+		// already validated by suite.Resolve, so no parse error is
+		// expected here.
+		if err := trust.ensure(ref.FQN.Authority(), autoYes, stdin, stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+	}
+	return 0
+}
+
+// previewSuiteRefs calls /actions/preview for every ref in declaration
+// order. Failures are captured per-entry rather than aborting the
+// loop; the consent screen surfaces them with their error so the
+// operator sees what went wrong.
+func previewSuiteRefs(refs []cstore.Ref, _ io.Writer) []suiteRefPreview {
+	out := make([]suiteRefPreview, 0, len(refs))
+	for _, ref := range refs {
+		fqnStr, version, _ := splitFQNVersion(ref.String(), "")
+		body, _ := json.Marshal(map[string]any{"fqn": fqnStr, "version": version})
+		status, raw, err := bindingDoRequest(http.MethodPost, "/actions/preview",
+			strings.NewReader(string(body)))
+		if err != nil {
+			out = append(out, suiteRefPreview{ref: ref, err: err})
+			continue
+		}
+		if status != http.StatusOK {
+			out = append(out, suiteRefPreview{ref: ref,
+				err: fmt.Errorf("daemon returned %d", status)})
+			continue
+		}
+		var preview actionPreviewWire
+		if err := json.Unmarshal(raw, &preview); err != nil {
+			out = append(out, suiteRefPreview{ref: ref, err: err})
+			continue
+		}
+		out = append(out, suiteRefPreview{ref: ref, preview: &preview})
+	}
+	return out
+}
+
+// trustConnectorDepAuthorities walks the preflight previews, collects
+// the unique authorities of every new (not-already-installed)
+// connector dep, and runs trust.ensure for each. Same atomic semantics
+// as trustAuthoritiesForRefs — any decline aborts before consent.
+func trustConnectorDepAuthorities(previews []suiteRefPreview, autoYes bool, trust *trustState, stdin io.Reader, stdout, stderr io.Writer) int {
+	for _, p := range previews {
+		if p.preview == nil {
+			continue
+		}
+		for _, dep := range p.preview.ConnectorDeps {
+			if dep.AlreadyInstalled {
+				continue
+			}
+			depFQN, perr := cstore.ParseFQN(dep.Fqn)
+			if perr != nil {
+				continue
+			}
+			if err := trust.ensure(depFQN.Authority(), autoYes, stdin, stdout, stderr); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+// suiteInstallResult mirrors the per-ref slot of the pre-#640 anonymous
+// struct in installSuiteEntries; named here so the helper can return
+// a clean slice.
+type suiteInstallResult struct {
+	ref     string
+	rc      int
+	outcome actionInstallStatus
+}
+
+// runSuiteInstallLoop runs installOneAction per ref, threading the
+// already-populated trustState through. cancelled=true short-circuits
+// every ref into actionInstallStatusCancelled and skips the install
+// call entirely (this is what fires after the user says "n" at the
+// suite consent prompt).
+//
+// Preview-failed refs (from phase 1b) are reported as failed without
+// re-running installOneAction — the underlying preview call would
+// just fail again.
+func runSuiteInstallLoop(refs []cstore.Ref, previews []suiteRefPreview, opts actionAddOptions, trust *trustState, cancelled bool, stdin *bufio.Reader, stdout, stderr io.Writer) []suiteInstallResult {
+	results := make([]suiteInstallResult, 0, len(refs))
 	for i, ref := range refs {
 		fmt.Fprintln(stdout)
 		fmt.Fprintf(stdout, "── [%d/%d] %s\n", i+1, len(refs), ref.String())
+		if previews[i].err != nil {
+			fmt.Fprintf(stderr, "  preview failed earlier: %v\n", previews[i].err)
+			results = append(results, suiteInstallResult{ref: ref.String(), rc: 1, outcome: actionInstallStatusFailed})
+			continue
+		}
+		if cancelled {
+			results = append(results, suiteInstallResult{ref: ref.String(), rc: 0, outcome: actionInstallStatusCancelled})
+			continue
+		}
 		entryOpts := opts
 		entryOpts.fqn = ref.String()
+		entryOpts.suiteConsented = true
 		var outcome actionInstallOutcome
 		entryOpts.outcome = &outcome
 		rc := installOneAction(entryOpts, stdin, stdout, stderr, trust)
-		results = append(results, result{ref: ref.String(), rc: rc, outcome: outcome.status})
+		results = append(results, suiteInstallResult{ref: ref.String(), rc: rc, outcome: outcome.status})
 	}
+	return results
+}
 
-	fmt.Fprintln(stdout)
-	fmt.Fprintln(stdout, "Suite install summary:")
+// renderSuiteSummary prints the per-ref outcome list + the rolled-up
+// count line. Mirrors the pre-#640 trailing summary; returns the exit
+// code (nonzero if any ref failed). Cancellation counts toward the
+// summary; the user explicitly chose to cancel, so the run is "all
+// cancelled" rather than "0 added, 4 cancelled".
+func renderSuiteSummary(w io.Writer, results []suiteInstallResult) int {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Suite install summary:")
 	var counts struct {
 		added, upgraded, alreadyInstalled, skipped, cancelled, failed int
 	}
 	for _, r := range results {
 		marker, label := summaryLine(r.outcome, r.rc)
-		fmt.Fprintf(stdout, "  %s %s%s\n", marker, r.ref, label)
+		fmt.Fprintf(w, "  %s %s%s\n", marker, r.ref, label)
 		switch r.outcome {
 		case actionInstallStatusAdded:
 			counts.added++
@@ -2532,9 +2861,6 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actio
 		case actionInstallStatusFailed:
 			counts.failed++
 		default:
-			// Defensive: an unset outcome with rc=0 is treated as
-			// "added"; with rc!=0 as "failed". Keeps the summary sane
-			// if a future code path forgets to call setOutcome.
 			if r.rc == 0 {
 				counts.added++
 			} else {
@@ -2542,8 +2868,7 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actio
 			}
 		}
 	}
-
-	fmt.Fprintln(stdout)
+	fmt.Fprintln(w)
 	parts := make([]string, 0, 6)
 	if counts.added > 0 {
 		parts = append(parts, fmt.Sprintf("%d added", counts.added))
@@ -2563,7 +2888,7 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actio
 	if counts.failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", counts.failed))
 	}
-	fmt.Fprintf(stdout, "%d action(s): %s.\n", len(results), strings.Join(parts, ", "))
+	fmt.Fprintf(w, "%d action(s): %s.\n", len(results), strings.Join(parts, ", "))
 	if counts.failed > 0 {
 		return 1
 	}
