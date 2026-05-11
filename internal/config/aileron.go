@@ -16,7 +16,21 @@ import (
 // Missing or empty file is fine.
 type AileronConfig struct {
 	Notifications *NotifyConfig `yaml:"notifications,omitempty"`
+	Hub           *HubConfig    `yaml:"hub,omitempty"`
 }
+
+// HubConfig points the daemon at the connector-discovery Hub repo
+// (ADR-0013, #486). The default is the public Aileron Hub. Tests and
+// downstream forks override the URL to a local fixture or a private
+// hub. v0.x does not persist a Hub cache — see #486 and #614.
+type HubConfig struct {
+	// URL is a git-clonable URL for the Hub repo. A file://, https://,
+	// or ssh git URL all work. Empty means "use the default public Hub."
+	URL string `yaml:"url,omitempty"`
+}
+
+// DefaultHubURL is the public Aileron connector Hub.
+const DefaultHubURL = "https://github.com/ALRubinger/aileron-connectors-hub.git"
 
 // NotifyConfig holds the daemon-wide quiet-hours window. Type names
 // mirror the pre-9B types in `internal/policy/launch/schema.go` so

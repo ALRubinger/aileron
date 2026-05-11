@@ -69,6 +69,16 @@ tags:
       Sessions survive daemon restarts; sessions left running when the
       daemon is killed are reaped to a known-orphaned state on next
       start (EndedAt set, ExitCode left null).
+  - name: Hub
+    description: |
+      Discovery layer for community-published connectors, ratified by
+      ADR-0013. The daemon shallow-clones the public
+      `aileron-connectors-hub` repo on each query (no persisted cache, no
+      `api.github.com` calls per #486), parses entry YAML files, and
+      serves them to CLI and webapp clients. Hub entries are pointers
+      to connectors at canonical `github://OWNER/REPO` FQNs — the Hub
+      does not host or vet connectors. Trust is a separate decision
+      handled by the keyring and the install-time prompt.
 
 paths:
   /v1/health:
@@ -1918,6 +1928,118 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "422":
           description: Install pipeline failed (hash mismatch, signature failure, malformed tarball, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/hub/connectors:
+    get:
+      tags: [Hub]
+      summary: List Hub connector entries
+      description: |
+        Returns all community-published connector entries listed in the
+        Hub. Each entry is a pointer to a connector at its canonical
+        `github://OWNER/REPO` FQN. Optionally filter by keyword: matches
+        against FQN and description (substring, case-insensitive).
+      operationId: listHubConnectors
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional keyword filter applied to FQN and description.
+      responses:
+        "200":
+          description: Connector entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubConnectorList"
+        "503":
+          description: Hub unreachable (failed to fetch from upstream)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/hub/connector:
+    get:
+      tags: [Hub]
+      summary: Look up a single Hub connector entry by FQN
+      description: |
+        Returns the Hub entry for the given FQN. FQN is passed as a query
+        parameter (path parameters can't carry the `://` and `/` in FQN
+        cleanly under Go's ServeMux pattern matching).
+      operationId: getHubConnector
+      security: []
+      parameters:
+        - name: fqn
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Connector FQN, e.g. `github://ALRubinger/aileron-connector-google`.
+      responses:
+        "200":
+          description: Hub connector entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubConnectorEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Hub unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/hub/install-decision:
+    get:
+      tags: [Hub]
+      summary: Pre-computed install-decision payload for a Hub connector
+      description: |
+        Returns the data the CLI y/N prompt and the webapp install modal
+        consume to render the install-time trust decision. The daemon
+        looks up the Hub entry, fetches the publisher's signing key from
+        `key_url`, computes its SHA-256 fingerprint, reads the current
+        keyring state for the FQN, and derives risk indicators (e.g.
+        "first connector by this publisher", "fingerprint differs from
+        sibling-repo trust"). Resolved in #487.
+      operationId: getHubInstallDecision
+      security: []
+      parameters:
+        - name: fqn
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Connector FQN, e.g. `github://ALRubinger/aileron-connector-google`.
+      responses:
+        "200":
+          description: Install-decision payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubInstallDecision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          description: Failed to fetch the publisher's key from `key_url`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Hub unreachable
           content:
             application/json:
               schema:
@@ -6488,3 +6610,99 @@ components:
             the upstream HTTP response (status code in id, body in body).
           items:
             $ref: "#/components/schemas/CommsMessage"
+
+    HubConnectorEntry:
+      type: object
+      required: [fqn, description, publisher_github, key_url, release_pattern]
+      description: |
+        A single Hub entry. Matches the YAML files committed to the
+        `aileron-connectors-hub` repo under `connectors/`. Pointer to a
+        connector hosted at the canonical FQN; the Hub does not host the
+        binary.
+      properties:
+        fqn:
+          type: string
+          description: Canonical FQN, e.g. `github://OWNER/REPO`.
+        description:
+          type: string
+          description: One-line description of what the connector does.
+        publisher_github:
+          type: string
+          description: GitHub user or org name that owns the connector repo.
+        key_url:
+          type: string
+          description: |
+            Public URL of the publisher's ed25519 signing key.
+            Typically `https://raw.githubusercontent.com/OWNER/REPO/main/keys/publisher.pub`.
+        release_pattern:
+          type: string
+          description: Glob matching the release tags Aileron should consider.
+
+    HubConnectorList:
+      type: object
+      required: [connectors]
+      properties:
+        connectors:
+          type: array
+          items:
+            $ref: "#/components/schemas/HubConnectorEntry"
+
+    HubTrustState:
+      type: string
+      enum: [already_trusted, unknown, conflict]
+      description: |
+        Trust state for the connector's FQN against the local keyring.
+        `already_trusted`: the keyring has the publisher's key for this
+        FQN. `unknown`: no keyring entry for this FQN.
+        `conflict`: keyring has a key for the same publisher under a
+        sibling FQN, and that key differs from the one declared by the
+        Hub entry — surface as a risk indicator.
+
+    HubInstallDecision:
+      type: object
+      required:
+        - fqn
+        - description
+        - publisher_github
+        - fingerprint
+        - trust_state
+        - publisher_footprint
+        - risk_indicators
+      description: |
+        Pre-computed payload for the install-time prompt (CLI y/N and
+        webapp modal). Shape resolved in #487. Publisher info is
+        informational context, NOT a trust target: v0.x trust is
+        strictly per-repo (per-FQN).
+      properties:
+        fqn:
+          type: string
+          description: Canonical FQN.
+        description:
+          type: string
+        publisher_github:
+          type: string
+        fingerprint:
+          type: string
+          description: |
+            SHA-256 fingerprint of the publisher's signing key, formatted
+            as `sha256:<base64-without-padding>` to match
+            `aileron keyring trust` output.
+        trust_state:
+          $ref: "#/components/schemas/HubTrustState"
+        publisher_footprint:
+          type: array
+          description: |
+            FQNs of the publisher's other connectors listed in the Hub
+            (informational context for the user's decision).
+          items:
+            type: string
+        risk_indicators:
+          type: array
+          description: |
+            Human-readable risk strings derived from the trust state and
+            keyring contents, e.g. "First connector by this publisher
+            you've installed" (informational, yellow) or "Key fingerprint
+            differs from one you trust for a sibling repo" (conflict,
+            red).
+          items:
+            type: string
