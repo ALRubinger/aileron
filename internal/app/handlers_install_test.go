@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -476,6 +477,119 @@ func TestInstallConnector_ConfirmedFingerprintTrustPersistsOnInstallFailure(t *t
 	}
 	if got := kr.Keys(ref.FQN.String()); len(got) != 1 {
 		t.Errorf("keyring keys for %s after install failure: got %d, want 1 (trust must persist)", ref.FQN, len(got))
+	}
+}
+
+func TestInstallConnector_ConfirmedFingerprintKeyFetchFailureReturns502(t *testing.T) {
+	// The Hub entry is present, but the publisher's key_url is dead.
+	// The daemon reports this as `key_fetch_failed` so the operator
+	// can distinguish "publisher rotated their key in a bad way" from
+	// "publisher repo doesn't exist on the Hub."
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+
+	// Standalone Hub fixture pointing at a 404-only key server.
+	keySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "missing", http.StatusNotFound)
+	}))
+	defer keySrv.Close()
+	hubURL := makeHubFixture(t, map[string]string{
+		"e.yaml": entryYAML(ref.FQN.String(), "test connector", "test", keySrv.URL+"/missing.pub"),
+	})
+
+	srv := &apiServer{
+		log: slog.Default(),
+		installer: &cstore.Installer{
+			Resolver: cstore.DefaultResolver(),
+			Store:    cstore.NewStore(t.TempDir()),
+		},
+		hub:         &hub.Client{URL: hubURL, HTTP: keySrv.Client()},
+		keyringPath: filepath.Join(t.TempDir(), "keyring.json"),
+	}
+	body := `{"fqn":"github://aileron/slack","version":"1.2.0","confirmed_fingerprint":"sha256:irrelevant"}`
+	rec := postInstall(srv, body)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "key_fetch_failed") {
+		t.Errorf("expected key_fetch_failed code, got: %s", rec.Body.String())
+	}
+}
+
+func TestInstallConnector_ConfirmedFingerprintHubUnreachableReturns502(t *testing.T) {
+	// Hub returns an error other than ErrNotFound (clone fails). The
+	// daemon surfaces this as `hub_unreachable` (502) rather than 404
+	// so the operator knows the Hub itself is unhappy.
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+	srv := &apiServer{
+		log: slog.Default(),
+		installer: &cstore.Installer{
+			Resolver: cstore.DefaultResolver(),
+			Store:    cstore.NewStore(t.TempDir()),
+		},
+		// Pointing at a directory that doesn't exist forces shallow-clone
+		// to fail, hitting the non-ErrNotFound branch in confirmHubTrust.
+		hub:         &hub.Client{URL: "file:///nonexistent-aileron-test-hub"},
+		keyringPath: filepath.Join(t.TempDir(), "keyring.json"),
+	}
+	_ = ref
+	body := `{"fqn":"github://aileron/slack","version":"1.2.0","confirmed_fingerprint":"sha256:any"}`
+	rec := postInstall(srv, body)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "hub_unreachable") {
+		t.Errorf("expected hub_unreachable code, got: %s", rec.Body.String())
+	}
+}
+
+func TestInstallConnector_ConfirmedFingerprintMalformedKeyringReturns500(t *testing.T) {
+	// A pre-existing keyring file that's syntactically broken is a
+	// system-administration problem, not user input. Surface as 500
+	// rather than 4xx so the operator looks at the file rather than
+	// re-typing the install command.
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+	srv, _, fingerprint, keyringPath := installTestServerWithHub(t, ref)
+
+	// Overwrite the test keyring with garbage. cstore.LoadKeyring
+	// surfaces ClassValidationError.
+	if err := os.WriteFile(keyringPath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	body := `{"fqn":"github://aileron/slack","version":"1.2.0","confirmed_fingerprint":"` + fingerprint + `"}`
+	rec := postInstall(srv, body)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500; body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "keyring_load_failed") {
+		t.Errorf("expected keyring_load_failed code, got: %s", rec.Body.String())
+	}
+}
+
+func TestInstallConnector_ConfirmedFingerprintIdempotentReConfirm(t *testing.T) {
+	// Confirming twice in a row must not pile up duplicate keys in the
+	// keyring. The second install sees HasKey == true and skips the
+	// Add/Save pair entirely. The install pipeline itself is allowed
+	// to take whichever 2xx path it normally would on a repeat — this
+	// test cares only that the trust state on disk is unchanged.
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+	srv, _, fingerprint, keyringPath := installTestServerWithHub(t, ref)
+
+	body := `{"fqn":"github://aileron/slack","version":"1.2.0","confirmed_fingerprint":"` + fingerprint + `"}`
+
+	if rec := postInstall(srv, body); rec.Code/100 != 2 {
+		t.Fatalf("first install status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := postInstall(srv, body); rec.Code/100 != 2 {
+		t.Fatalf("second install status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	kr, err := cstore.LoadKeyring(keyringPath)
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if got := len(kr.Keys(ref.FQN.String())); got != 1 {
+		t.Errorf("keyring keys for %s after two confirms: got %d, want 1 (idempotent)", ref.FQN, got)
 	}
 }
 

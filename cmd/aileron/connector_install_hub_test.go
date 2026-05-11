@@ -328,6 +328,165 @@ func TestRunConnectorInstall_HubServiceUnavailableFallsBack(t *testing.T) {
 	}
 }
 
+// TestRunConnectorInstall_HubFlowInstallServerErrorSurfaces: when the
+// install endpoint rejects the confirmed fingerprint (e.g., the daemon
+// looked up the publisher key and its fingerprint doesn't match the
+// one the operator confirmed), the CLI surfaces the status + body to
+// stderr and exits non-zero. No silent fall-through.
+func TestRunConnectorInstall_HubFlowInstallServerErrorSurfaces(t *testing.T) {
+	hubInstallServer(t, nil, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"fingerprint_mismatch","message":"publisher key fingerprint changed"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("y\n")
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code == 0 {
+		t.Errorf("expected nonzero exit on install 422; stdout=%s", stdout.String())
+	}
+	for _, want := range []string{"422", "fingerprint_mismatch"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+// TestRunConnectorInstall_HubFlowAlreadyInstalledVerb: when the daemon
+// returns 200 with already_installed=true (Hub-confirmed reinstall of
+// an offline-cached hash), the CLI renders "Already installed:" rather
+// than "Installed:" so the operator sees that nothing new hit the
+// store.
+func TestRunConnectorInstall_HubFlowAlreadyInstalledVerb(t *testing.T) {
+	hubInstallServer(t, nil, nil, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","entry_dir":"/path","already_installed":true}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0", "--yes"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Already installed:") {
+		t.Errorf("stdout missing 'Already installed:' verb:\n%s", stdout.String())
+	}
+}
+
+// TestRunConnectorInstall_HubMalformedDecisionFallsBack: a 200 with
+// unparseable body shouldn't crash or mislead — emit a one-line note
+// and fall back to the legacy preview flow so users with a flaky Hub
+// proxy can still install pre-trusted connectors.
+func TestRunConnectorInstall_HubMalformedDecisionFallsBack(t *testing.T) {
+	var previewCalled bool
+	hubInstallServer(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{not valid json`)
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			previewCalled = true
+			_, _ = io.WriteString(w, previewBody("github://acme/x", "1.0.0", "sha256:abc"))
+		},
+		nil)
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("y\n")
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !previewCalled {
+		t.Error("preview should have been called after malformed Hub response")
+	}
+	if !strings.Contains(stderr.String(), "could not parse hub install-decision") {
+		t.Errorf("expected parse-failure note in stderr, got: %s", stderr.String())
+	}
+}
+
+// TestRunConnectorInstall_HubFlowSecondDetailsAnswerCancels: typing
+// `d` a second time (after the verbose render has already shown
+// everything) is treated as cancel rather than looping forever. The
+// loop has a documented two-state contract — there is no third level
+// of detail to expand to.
+func TestRunConnectorInstall_HubFlowSecondDetailsAnswerCancels(t *testing.T) {
+	installCalled := false
+	hubInstallServer(t, nil, nil, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		w.WriteHeader(http.StatusCreated)
+	})
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("d\nd\n")
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if installCalled {
+		t.Error("install should not have been called after two `d` answers")
+	}
+	if !strings.Contains(stdout.String(), "Cancelled") {
+		t.Errorf("expected Cancelled message, got:\n%s", stdout.String())
+	}
+}
+
+// TestRunConnectorInstall_HubFlowInvalidAnswerCancels: an answer that
+// isn't y/n/d (e.g., "maybe") falls into the default branch and
+// cancels. Mirrors the legacy preview-flow behavior where anything
+// other than `y` is treated as `no`. Prevents typos from accidentally
+// confirming an install.
+func TestRunConnectorInstall_HubFlowInvalidAnswerCancels(t *testing.T) {
+	installCalled := false
+	hubInstallServer(t, nil, nil, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		w.WriteHeader(http.StatusCreated)
+	})
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("maybe\n")
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if installCalled {
+		t.Error("install should not have been called for an invalid answer")
+	}
+}
+
+// TestRunConnectorInstall_HubFlowYesWordAlsoAccepted: full-word `yes`
+// is equivalent to `y`. Common shell habit; explicit so the prompt
+// doesn't quietly reject the word the user typed.
+func TestRunConnectorInstall_HubFlowYesWordAlsoAccepted(t *testing.T) {
+	installCalled := false
+	hubInstallServer(t, nil, nil, func(w http.ResponseWriter, r *http.Request) {
+		installCalled = true
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"fqn":"github://acme/x","version":"1.0.0","hash":"sha256:abc","entry_dir":"/path"}`)
+	})
+	var stdout, stderr bytes.Buffer
+	stdin := strings.NewReader("yes\n")
+	code := runConnectorInstall(
+		[]string{"github://acme/x@1.0.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !installCalled {
+		t.Error("install should have been called for `yes` answer")
+	}
+}
+
 // TestRunConnectorInstall_HubDecisionURLEncodesFQN: FQNs carry `://`
 // and `/`, which the daemon's mux can't match in a single path
 // segment. The CLI must URL-encode the fqn into the query string for
