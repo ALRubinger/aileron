@@ -66,10 +66,10 @@ tasks:
       - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
 
   build:forwarder:
-    desc: Build the shared spawn-forwarder WASM and write it into internal/sandbox/forwarder/spawn-forwarder.wasm (embedded into the daemon binary at compile time)
+    desc: Build the shared spawn-forwarder WASM into internal/sandbox/forwarder/embedded/spawn-forwarder.wasm (embedded into the daemon binary at compile time). The embedded WASM is gitignored; this target is the only path that writes the file.
     dir: internal/sandbox/forwarder/src
     cmds:
-      - GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags="-s -w" -o ../spawn-forwarder.wasm .
+      - GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags="-s -w" -o ../embedded/spawn-forwarder.wasm .
 
   build:enclave:
     desc: Build the enclave binary locally
@@ -99,7 +99,9 @@ tasks:
         echo "Image digest: $DIGEST"
 
   build:cli:
-    desc: Build the aileron CLI binary locally
+    desc: Build the aileron CLI binary locally (embeds internal/sandbox/forwarder/embedded/spawn-forwarder.wasm)
+    deps:
+      - build:forwarder
     vars:
       VERSION: dev
       COMMIT:
@@ -259,12 +261,16 @@ tasks:
       - pnpm test
 
   test:go:
-    desc: Run Go tests
+    desc: Run Go tests (depends on the spawn-forwarder WASM so internal/sandbox/forwarder tests can load real bytes)
+    deps:
+      - build:forwarder
     cmds:
       - go test {{.GO_TEST_PACKAGES}}
 
   test:go:cover:
     desc: Run Go tests with coverage; print summary excluding generated and test-helper code
+    deps:
+      - build:forwarder
     cmds:
       - go test -coverprofile=coverage-raw.txt {{.GO_TEST_PACKAGES}}
       - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
@@ -273,6 +279,8 @@ tasks:
 
   test:go:ci:
     desc: Run Go tests with race, coverage, and JUnit output (used by CI)
+    deps:
+      - build:forwarder
     cmds:
       - gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt {{.GO_TEST_PACKAGES}}
       # Strip generated code (oapi-codegen) and test-helper packages

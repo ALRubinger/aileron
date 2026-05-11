@@ -48,6 +48,15 @@ jobs:
         # released binary built without this step would serve webappNotBuiltStub.
         run: task build:webapp
 
+      - name: Build spawn-forwarder WASM for embed
+        # cmd/aileron embeds internal/sandbox/forwarder/embedded/spawn-forwarder.wasm
+        # via go:embed (per ADR-0002's spawn-primitive section). The dir is
+        # gitignored except .gitkeep — same pattern as webapp_dist — so a fresh
+        # checkout has no WASM. A released binary built without this step would
+        # have an empty forwarder.WASM, and the action executor would refuse to
+        # load any connector that declares connector.forwarder.
+        run: task build:forwarder
+
       - name: Install cosign
         # Pinned to v4.1.2 (the latest v4.x at time of pinning). The
         # repo doesn't publish a moving `v4` major-version tag — only

@@ -419,6 +419,16 @@ func loadConnectorBytes(cmf *cstore.Manifest, entryDir string) ([]byte, error) {
 		// manifest's content hash already includes them via
 		// cstore.ForwarderConnectorHash so the store does not need a
 		// copy on disk.
+		//
+		// Empty WASM means this daemon was built without
+		// `task build:forwarder` (the embed wrapper falls back to a
+		// zero-length slice when the file is absent at compile time).
+		// Surface that loudly rather than handing empty bytes to
+		// Wazero's compiler.
+		if len(forwarder.WASM) == 0 {
+			return nil, fmt.Errorf("connector %q uses %s but this daemon was built without the forwarder WASM; rebuild with `task build:cli` (or `task build`)",
+				cmf.Connector.Name, cstore.BuiltinForwarderSpawn)
+		}
 		return forwarder.WASM, nil
 	}
 	binPath := filepath.Join(entryDir, "connector.wasm")

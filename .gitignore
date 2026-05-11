@@ -32,6 +32,16 @@ webapp/node_modules/
 internal/app/webapp_dist/*
 !internal/app/webapp_dist/.gitkeep
 
+# Shared spawn-forwarder WASM. Same pattern as webapp_dist/: the file
+# is build output written by `task build:forwarder` and embedded into
+# the daemon binary at compile time. The `.gitkeep` guarantees the
+# directory exists so `//go:embed all:embedded` matches at least one
+# file on a fresh clone; the WASM itself is omitted from git so source
+# (`internal/sandbox/forwarder/src/main.go`) is the single source of
+# truth and PR diffs stay free of regenerated binary churn.
+internal/sandbox/forwarder/embedded/*
+!internal/sandbox/forwarder/embedded/.gitkeep
+
 # Go test artifacts (task test:go:ci output)
 /junit.xml
 /coverage.txt
