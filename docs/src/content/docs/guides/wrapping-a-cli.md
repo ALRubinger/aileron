@@ -5,7 +5,9 @@ description: "Turn a local CLI into an Aileron action surface with one command. 
 
 If you have a CLI installed on your machine, you can give your agent access to it under Aileron's capability bounds without writing or building a connector. The `aileron action wrap` command does the work: it generates a manifest, lands it in the daemon's connector store, writes action files under `~/.aileron/actions/`, and the wrapped subcommands become tool calls the agent can invoke.
 
-This is the spawn primitive's payoff (per [ADR-0002](/adr/0002-connector-model)'s spawn-primitive section). Where [Authoring a Connector](/guides/authoring-a-connector/) is the path for new services that need their own WASM, this guide is the path for the long tail of existing CLIs (`git`, `gh`, `slackdump`, `imsg`, anything POSIX) that already do the work you want the agent to compose with.
+This is the spawn primitive's payoff (per [ADR-0002](/adr/0002-connector-model)'s spawn-primitive section). Where [Authoring a Connector](/guides/authoring-a-connector/) is the path for new services that need their own WASM, this guide is the path for the long tail of existing CLIs (`git`, `gh`, `slackdump`, anything POSIX) that already do the work you want the agent to compose with.
+
+> **Not for iMessage.** Apple's data model is locked down enough that there is no usable CLI to wrap. The iMessage connector takes a different path: it talks over HTTP to a local [BlueBubbles](https://bluebubbles.app/) bridge that holds the platform permissions instead. See [Setting up BlueBubbles for Aileron](/guides/setting-up-bluebubbles/).
 
 ## What you get
 
@@ -252,3 +254,4 @@ The daemon rebuilds its index on next start. A more polished `aileron connector 
 - [ADR-0014: Spawn Sandbox Technology](/adr/0014-spawn-sandbox-technology) — what kernel mechanism confines the subprocess on each platform.
 - [Authoring a Connector](/guides/authoring-a-connector/) — for services that need their own WASM rather than a CLI wrap.
 - [Publishing a Connector](/guides/publishing-a-connector/) — if you want to publish your manifest under a stable FQN for others to install.
+- [Setting up BlueBubbles for Aileron](/guides/setting-up-bluebubbles/) — the iMessage path, which uses HTTP-to-a-local-bridge instead of a CLI wrap.
