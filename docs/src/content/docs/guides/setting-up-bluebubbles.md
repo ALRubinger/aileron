@@ -50,7 +50,7 @@ If you changed the default port during setup, substitute that port number in the
 ## 4. Install Aileron's iMessage connector
 
 ```sh
-aileron connector install github://ALRubinger/aileron-connector-imsg@latest
+aileron connector install github://ALRubinger/aileron-connector-bluebubbles@latest
 ```
 
 Aileron prompts you for the BlueBubbles server password you set in step 1. Paste it in. The credential lands in your Aileron vault encrypted; Aileron's connector reads it only at call time, and the bytes never reach the agent.
@@ -62,7 +62,7 @@ If your BlueBubbles is on a non-default port, you'll see a follow-up prompt for 
 Install one of the iMessage actions, then ask your agent something simple:
 
 ```sh
-aileron action add github://ALRubinger/aileron-connector-imsg/actions/list-recent-chats@latest
+aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/list-recent-chats@latest
 aileron launch claude
 ```
 
@@ -76,7 +76,7 @@ The agent should return a list of recent chats. If you see a `bridge_unreachable
 
 **`permission_denied` or similar OS-level error**: You probably granted BlueBubbles Full Disk Access but not Automation (or vice versa). Re-check both *System Settings → Privacy & Security → Full Disk Access* and *Automation* per step 2, then relaunch BlueBubbles.
 
-**`unauthorized` from BlueBubbles**: The password Aileron is sending doesn't match the one BlueBubbles expects. Run `aileron binding setup github://ALRubinger/aileron-connector-imsg` to re-bind with the correct password.
+**`unauthorized` from BlueBubbles**: The password Aileron is sending doesn't match the one BlueBubbles expects. Run `aileron binding setup github://ALRubinger/aileron-connector-bluebubbles` to re-bind with the correct password.
 
 **Wrong port**: If you changed BlueBubbles' port during setup, Aileron needs to know. Update the URL by re-running `aileron binding setup` for the connector and providing the new URL when prompted.
 
