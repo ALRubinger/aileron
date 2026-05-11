@@ -166,6 +166,33 @@ type actionRunResponse struct {
 	Result  *string `json:"result,omitempty"`
 }
 
+// actionRunPendingResponse mirrors the 202 body the daemon returns
+// for approval-gated actions: a discriminator, the approval id, a
+// per-approval review URL, and the message the LLM is meant to
+// surface to the user verbatim. JSON shape pinned by the OpenAPI
+// spec; only the fields the MCP wrapper needs are decoded.
+type actionRunPendingResponse struct {
+	Status     string `json:"status"`
+	ApprovalID string `json:"approval_id"`
+	ReviewURL  string `json:"review_url,omitempty"`
+	Message    string `json:"message"`
+}
+
+// actionApprovalResult mirrors the daemon's /v1/action-approvals/{id}/result
+// body. Optional fields are pointer-typed so the formatter can
+// distinguish "field omitted" from "present but empty" — the daemon
+// only populates the fields relevant to the current status.
+type actionApprovalResult struct {
+	Status  string  `json:"status"`
+	AuditID *string `json:"audit_id,omitempty"`
+	Result  *string `json:"result,omitempty"`
+	Reason  *string `json:"reason,omitempty"`
+	// Failure is the structured ADR-0010 envelope when the daemon
+	// surfaces one; decoded as raw JSON so the formatter can echo it
+	// without re-implementing the FailureEnvelope shape here.
+	Failure json.RawMessage `json:"failure,omitempty"`
+}
+
 // --- Server ---
 
 type server struct {
@@ -231,6 +258,18 @@ var draftReplyTool = toolDef{
 			"body":       {Type: "string", Description: "Your suggested reply text"},
 		},
 		Required: []string{"message_id", "body"},
+	},
+}
+
+var checkActionStatusTool = toolDef{
+	Name: "check_action_status",
+	Description: "Check the status of an approval-gated action call. Call this when an earlier tool returned a `pending_approval` response carrying an approval_id, and you want to know whether the user has approved, denied, or whether the action has finished running. The response carries one of: pending_approval, running, completed (with the result), denied (with the user's reason), failed (with the failure details). Polling is optional — the user knows the next move once they see the approval prompt; this tool exists for agents that want to close the loop on an action they initiated.",
+	InputSchema: schema{
+		Type: "object",
+		Properties: map[string]schemaProp{
+			"approval_id": {Type: "string", Description: "Approval id returned from the original tool call's pending_approval response."},
+		},
+		Required: []string{"approval_id"},
 	},
 }
 
@@ -386,6 +425,10 @@ func (s *server) availableTools() []toolDef {
 	// than the OpenAI/Anthropic shape because the agent host's MCP
 	// integration is the consumer here).
 	tools = append(tools, s.actionTools...)
+	// check_action_status is always available — even when no actions
+	// are discovered (a fresh daemon), the agent might be working
+	// against an approval id minted by an earlier session.
+	tools = append(tools, checkActionStatusTool)
 	return tools
 }
 
@@ -404,6 +447,8 @@ func (s *server) dispatchTool(ctx context.Context, name string, args map[string]
 		return s.sendMessage(args)
 	case "http_request":
 		return s.httpRequest(args)
+	case "check_action_status":
+		return s.checkActionStatus(ctx, args)
 	default:
 		return errorResult("unknown tool: " + name)
 	}
@@ -724,21 +769,133 @@ func (s *server) runActionInner(ctx context.Context, manifestName string, args m
 	if err != nil {
 		return errorResult("reading response: " + err.Error())
 	}
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var arr actionRunResponse
+		if err := json.Unmarshal(rawBody, &arr); err != nil {
+			return errorResult("decoding response: " + err.Error())
+		}
+		content := ""
+		if arr.Result != nil {
+			content = *arr.Result
+		}
+		return toolResult{
+			Content: []toolContent{{Type: "text", Text: content}},
+		}
+	case http.StatusAccepted:
+		// Approval-gated path: the daemon registered a pending entry
+		// and returned the agent-facing instruction in `message`. Pass
+		// it through verbatim so the LLM surfaces it to the user. Not
+		// an error result — the tool call succeeded (we successfully
+		// requested approval); the action's outcome is a separate
+		// concern reachable via check_action_status.
+		var pending actionRunPendingResponse
+		if err := json.Unmarshal(rawBody, &pending); err != nil {
+			return errorResult("decoding pending response: " + err.Error())
+		}
+		text := pending.Message
+		if text == "" {
+			text = "Approval requested. Approval id: " + pending.ApprovalID
+		}
+		return toolResult{
+			Content: []toolContent{{Type: "text", Text: text}},
+		}
+	default:
 		// Non-2xx: surface the FailureEnvelope (or whatever body the
 		// daemon returned) so the agent sees the actionable detail.
 		return errorResult(string(rawBody))
 	}
-	var arr actionRunResponse
-	if err := json.Unmarshal(rawBody, &arr); err != nil {
+}
+
+// checkActionStatus implements the check_action_status MCP tool. It
+// calls the daemon's `GET /v1/action-approvals/{id}/result` endpoint
+// and formats the response as a single text block for the agent.
+//
+// The response shape varies by status: completed entries return the
+// result payload; denied entries return the user's reason; failed
+// entries return the failure envelope or executor-error text;
+// transient statuses return only the status word. The agent decides
+// how to react.
+func (s *server) checkActionStatus(ctx context.Context, args map[string]any) toolResult {
+	if s.aileronURL == "" {
+		return errorResult("Aileron daemon not configured (AILERON_URL not set)")
+	}
+	approvalID, _ := args["approval_id"].(string)
+	if approvalID == "" {
+		return errorResult("check_action_status requires approval_id")
+	}
+	url := s.aileronURL + "/v1/action-approvals/" + approvalID + "/result"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return errorResult("creating request: " + err.Error())
+	}
+	if s.aileronToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
+	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return errorResult("daemon unreachable: " + err.Error())
+	}
+	defer resp.Body.Close()
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return errorResult("reading response: " + err.Error())
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return errorResult("approval id not found: " + approvalID +
+			" (the approval queue is in-memory; ids from a previous daemon process do not survive restart)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return errorResult(string(rawBody))
+	}
+	var result actionApprovalResult
+	if err := json.Unmarshal(rawBody, &result); err != nil {
 		return errorResult("decoding response: " + err.Error())
 	}
-	content := ""
-	if arr.Result != nil {
-		content = *arr.Result
-	}
 	return toolResult{
-		Content: []toolContent{{Type: "text", Text: content}},
+		Content: []toolContent{{Type: "text", Text: formatActionApprovalResult(result)}},
+	}
+}
+
+// formatActionApprovalResult turns the API response into an LLM-
+// friendly text block. The status word is always the first line; for
+// terminal states the relevant payload follows. Kept terse — the LLM
+// is the consumer here, not a human reading logs.
+func formatActionApprovalResult(r actionApprovalResult) string {
+	switch r.Status {
+	case "completed":
+		audit := ""
+		if r.AuditID != nil && *r.AuditID != "" {
+			audit = " (audit_id=" + *r.AuditID + ")"
+		}
+		result := ""
+		if r.Result != nil {
+			result = *r.Result
+		}
+		return "status: completed" + audit + "\nresult: " + result
+	case "denied":
+		reason := ""
+		if r.Reason != nil {
+			reason = *r.Reason
+		}
+		if reason == "" {
+			return "status: denied (user did not provide a reason)"
+		}
+		return "status: denied\nreason: " + reason
+	case "failed":
+		if r.Failure != nil {
+			b, _ := json.Marshal(r.Failure)
+			return "status: failed\nfailure: " + string(b)
+		}
+		reason := ""
+		if r.Reason != nil {
+			reason = *r.Reason
+		}
+		return "status: failed\nreason: " + reason
+	default:
+		// pending_approval, running — terminal statuses are above.
+		return "status: " + r.Status
 	}
 }
 
@@ -776,30 +933,23 @@ func toolName(manifestName string) string {
 // match.intent when the body is empty.
 //
 // When the action's manifest declares `[approval] required = true`,
-// appends a notice instructing the agent to surface the approval URL
-// to the user immediately on tool invocation. The URL is read from
-// AILERON_APPROVAL_URL (set by launch's embedded gateway) so the
-// agent's prompt to the user names a real, clickable target rather
-// than a generic "check the webapp." Tool descriptions are part of
-// the MCP system context the LLM factors into planning, so this is
-// the natural place for the signal — no mid-conversation injection.
+// appends a notice describing the asynchronous approval contract: the
+// tool call returns immediately with a `pending_approval` response
+// (carrying the approval id and a verbatim message for the user),
+// the action runs server-side after the user approves, and
+// check_action_status is available for closing the loop. Tool
+// descriptions are part of the MCP system context the LLM factors
+// into planning, so this is the natural place for the signal — no
+// mid-conversation injection.
 func deriveDescription(a actionMeta) string {
 	desc := deriveBaseDescription(a)
 	if a.requiresApproval() {
-		approvalURL := os.Getenv("AILERON_APPROVAL_URL")
-		if approvalURL == "" {
-			// Fall back to a generic instruction when launch hasn't
-			// set the URL (e.g. running aileron-mcp standalone).
-			// Better than dropping the notice entirely.
-			approvalURL = "the Aileron webapp"
-		}
-		notice := fmt.Sprintf(
-			"\n\n⚠️ This action requires user approval before it runs. When you call this tool, "+
-				"immediately tell the user: \"This action needs your approval — please review and "+
-				"approve at %s\". The tool call will block until they decide. Do not paraphrase the "+
-				"URL; deliver it verbatim so the user can click through.",
-			approvalURL,
-		)
+		notice := "\n\nThis action requires user approval. Calling it does NOT block: " +
+			"the daemon returns a `pending_approval` response with an `approval_id` and a `message` " +
+			"naming the review URL and an `aileron open approval <id>` shell alternative. " +
+			"Surface the `message` to the user verbatim — do not paraphrase the URL or the command. " +
+			"The action runs server-side once the user approves; you may continue with other work. " +
+			"Call `check_action_status` with the `approval_id` later if you want to learn the outcome."
 		desc = strings.TrimSpace(desc) + notice
 	}
 	return desc

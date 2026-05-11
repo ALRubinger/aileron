@@ -207,6 +207,138 @@ func TestDecideActionApproval_DenyForwardsReason(t *testing.T) {
 	}
 }
 
+// TestGetActionApprovalResult_PendingApprovalShape: a freshly
+// registered entry returns status = pending_approval with no other
+// fields. The agent's check_action_status tool surfaces this verbatim
+// while waiting for the user.
+func TestGetActionApprovalResult_PendingApprovalShape(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	entry := q.Register("send-email", "github://x/y", "", nil)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/action-approvals/"+entry.ID+"/result", nil)
+	rec := httptest.NewRecorder()
+	srv.GetActionApprovalResult(rec, req, entry.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"status":"pending_approval"`) {
+		t.Errorf("body missing pending_approval status; got %s", body)
+	}
+}
+
+// TestGetActionApprovalResult_DeniedSurfacesReason: after Decide(false)
+// the endpoint returns status = denied with the user's reason
+// attached. Reason is optional (a user denying without commentary
+// leaves it empty) but the field is surfaced when present.
+func TestGetActionApprovalResult_DeniedSurfacesReason(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	entry := q.Register("send-email", "github://x/y", "", nil)
+	if err := q.Decide(entry.ID, false, "wrong recipient", nil); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/action-approvals/"+entry.ID+"/result", nil)
+	rec := httptest.NewRecorder()
+	srv.GetActionApprovalResult(rec, req, entry.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"status":"denied"`) {
+		t.Errorf("body missing denied status; got %s", body)
+	}
+	if !strings.Contains(body, "wrong recipient") {
+		t.Errorf("body missing reason; got %s", body)
+	}
+}
+
+// TestGetActionApprovalResult_CompletedSurfacesResult: the queue
+// records a SetCompleted on the entry; the endpoint returns
+// status = completed with audit_id and result populated.
+func TestGetActionApprovalResult_CompletedSurfacesResult(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	entry := q.Register("send-email", "github://x/y", "", nil)
+	if err := q.SetCompleted(entry.ID, "audit-42", `{"sent":true}`); err != nil {
+		t.Fatalf("SetCompleted: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/action-approvals/"+entry.ID+"/result", nil)
+	rec := httptest.NewRecorder()
+	srv.GetActionApprovalResult(rec, req, entry.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"status":"completed"`, `"audit_id":"audit-42"`, `{\"sent\":true}`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q; got %s", want, body)
+		}
+	}
+}
+
+// TestGetActionApprovalResult_FailedWithExecutorError: an executor
+// error (no FailureEnvelope) surfaces via the `reason` field. The
+// `failure` envelope field stays absent — the API spec treats it as
+// optional and a freeform error message is the right shape for an
+// executor-level bug rather than a structured ADR-0010 failure.
+func TestGetActionApprovalResult_FailedWithExecutorError(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	entry := q.Register("send-email", "github://x/y", "", nil)
+	if err := q.SetFailed(entry.ID, nil, "connector binary not found"); err != nil {
+		t.Fatalf("SetFailed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/action-approvals/"+entry.ID+"/result", nil)
+	rec := httptest.NewRecorder()
+	srv.GetActionApprovalResult(rec, req, entry.ID)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"status":"failed"`) {
+		t.Errorf("body missing failed status; got %s", body)
+	}
+	if !strings.Contains(body, "connector binary not found") {
+		t.Errorf("body missing executor error text; got %s", body)
+	}
+}
+
+// TestGetActionApprovalResult_UnknownIDReturns404: ids from a
+// previous daemon process, or typos, return 404. The agent's
+// check_action_status tool surfaces this as a normal not-found error.
+func TestGetActionApprovalResult_UnknownIDReturns404(t *testing.T) {
+	srv, _ := newActionApprovalsTestServer(t)
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/action-approvals/never-minted/result", nil)
+	rec := httptest.NewRecorder()
+	srv.GetActionApprovalResult(rec, req, "never-minted")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGetActionApprovalResult_NilQueueReturns503: a daemon built
+// without an action-approval queue returns 503 from /result, same
+// shape the rest of the action-approval endpoints use.
+func TestGetActionApprovalResult_NilQueueReturns503(t *testing.T) {
+	srv := &apiServer{}
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/action-approvals/anything/result", nil)
+	rec := httptest.NewRecorder()
+	srv.GetActionApprovalResult(rec, req, "anything")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
 // TestDecideActionApproval_UnknownIDReturns404 covers the race-loser
 // path: a second webapp tab decides the same id, or the runtime
 // timed out before the user clicked. Both end up here. The 404
