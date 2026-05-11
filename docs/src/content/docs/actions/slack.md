@@ -10,6 +10,14 @@ The suite is published from the [`aileron-connector-slack`](https://github.com/A
 
 Posts are made with the authorizing user's token, not as a bot. Messages appear in Slack authored by the user. This is the right shape for the Monday catch-up demo and for power-user automation generally; it is the wrong shape if you want a dedicated app identity for posts.
 
+## Prerequisite
+
+The Aileron Slack app must be installed into your workspace. `aileron action add` (and `add-suite`) handles this for you: the CLI opens Slack's consent screen in your browser, and clicking Allow installs the app and authorizes your user in one step.
+
+If your workspace requires admin approval for third-party apps, Slack shows a "Request to install" button instead of Allow. A workspace admin approves the request, then you re-run the same `aileron action add` command.
+
+The Aileron Slack app is not on the Slack Marketplace, so there's no App Directory page to install from. The CLI is the install path.
+
 ## Install
 
 ### Whole suite (recommended)
