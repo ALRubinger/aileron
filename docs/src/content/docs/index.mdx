@@ -1,52 +1,60 @@
 ---
 title: "Aileron"
-description: "Aileron is the runtime that lets your AI agent act in the real world — sealed credentials, deterministic execution, your approval where it matters."
+description: "Aileron is the runtime that lets your AI agent act in the real world. Sealed credentials, deterministic execution, your approval where it matters."
 order: 1
 ---
 
 import * as Card from '$lib/components/ui/card/index.js';
 import Feature from '$lib/components/ui/feature.svelte';
-import Lock from '@lucide/svelte/icons/lock';
-import Repeat from '@lucide/svelte/icons/repeat';
-import ShieldCheck from '@lucide/svelte/icons/shield-check';
+import LiftoffCta from '$lib/components/ui/liftoff-cta.svelte';
 import Braces from '@lucide/svelte/icons/braces';
 import Plane from '@lucide/svelte/icons/plane';
 import McpLogo from '$lib/components/icons/mcp-logo.svelte';
 import Target from '@lucide/svelte/icons/target';
 import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 import KeyRound from '@lucide/svelte/icons/key-round';
-import EyeOff from '@lucide/svelte/icons/eye-off';
 
 ## Let your AI agent fly in the real world
 
-You'd never hand an agent the keys to your email, your calendar, your messaging services. You don't have to.
+AI agents are getting alarmingly capable. They can read your email, draft replies, draw on your calendar, propose action across every service you depend on. But you'd never hand one the keys to those services. The risk is too lopsided. One hallucination, one prompt injection, one buggy retry, and your agent has done something you can't take back.
+
+Aileron is the runtime that closes the gap. It gives your AI agent real-world powers without giving it real-world keys.
+
+- **Capabilities exposed to your agent.** Install actions from a catalog of services. Your agent's tool surface is exactly what you decide it should be, nothing more.
+- **Sandboxed execution.** Every action runs inside a strict boundary. The agent can do what you've authorized, and nothing else.
+- **Credentials sealed from the agent.** Your secrets live in a local vault Aileron alone unlocks. The agent sees results, never keys.
+- **Approval on consequential actions.** Irreversible steps wait for your sign-off. Sending an email, posting to Slack, placing a calendar event. Reversible work runs without ceremony.
+
+<LiftoffCta />
+
+## In flight
+
+Once installed, one chained command takes you from zero to flying.
 
 ```sh
-$ brew install --cask ALRubinger/aileron/aileron
-$ aileron launch
-
-  First launch — let's configure your upstream LLM.
-
-  ? Provider · Anthropic
-  ? API key · sk-ant-api03-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-  ? Model · claude-sonnet-4-5
-
-  ✓ Configuration saved to ~/.aileron/config.toml
-
-  Aileron is running at http://localhost:8721/v1
+brew install --cask ALRubinger/aileron/aileron && \
+  aileron action add-suite github://ALRubinger/aileron-connector-google/suite.toml@latest && \
+  aileron launch claude
 ```
 
-Then point your AI agent at `http://localhost:8721/v1`. You're ready to give your agent new powers.
+```
+Creating a new Aileron vault.
+Vault passphrase: ********
 
-Browse the Actions Hub and install capabilities you never would have let your agent do before. Slack the team an update on the GitHub feature you just shipped. Reply to your product manager's email about last week's release. Or write your own Action.
+Trust publisher github://ALRubinger/aileron-connector-google? [y/N]: y
+Authorize Gmail and Calendar in your browser... done
+✓ Installed 6 actions
 
-<Feature icon={ShieldCheck} title="Your review and approval">
-  No surprises. You see exactly what's proposed, and Aileron executes only what you've allowed.
-</Feature>
+✈️  Aileron — session 01HK6...
+```
+
+Claude Code now has six Gmail and Calendar capabilities in its catalog: list recent emails, list upcoming events, get an email, draft an email, send an email, and create a calendar event. The first four run silently when your agent reaches for them. The last two pause for your approval. Sent mail and a placed event aren't things you take back.
+
+Aileron ships connectors for Slack and iMessage today, and `aileron action wrap` turns any CLI you already use into a sandboxed capability your agent can call. Browse the full catalog in [Actions](/actions/gmail-and-google-calendar/).
 
 ## Put first principles back into AI
 
-LLMs and AI agents excel at what they're built for: synthesizing information and proposing actions. They are not designed for consistency or precision. 
+LLMs and AI agents excel at what they're built for: synthesizing information and proposing actions. They are not designed for consistency or precision.
 
 The LLM may pick different tools each time you run the same prompt. A retry double-posts the announcement to `#engineering`. Inference may leak the secrets you let it touch.
 
@@ -59,11 +67,11 @@ Aileron adds three fundamentals of quality software to your agent.
 </Feature>
 
 <Feature icon={RotateCcw} title="Idempotency">
-  **Reliability**. Safe to retry. The network drops, you click approve twice, the system retries — the action runs once. You don't get two invoices, two emails.
+  **Reliability**. Safe to retry. The network drops, you click approve twice, the system retries, and the action still runs once. You don't get two invoices, two emails.
 </Feature>
 
 <Feature icon={KeyRound} title="Security">
-  Your keys never reach the LLM. Stripe, Gmail, Slack, GitHub — all live in a vault Aileron alone uses. The LLM sees results, not secrets.
+  Your keys never reach the LLM. Gmail, Slack, iMessage, and every other service live in a vault Aileron alone uses. The LLM sees results, not secrets.
 </Feature>
 
 </div>
@@ -72,41 +80,45 @@ The result: AI and traditional software each do what they're best at, in the sam
 
 ## Discover what your agent can do
 
-A few ideas, unthinkable yesterday. **Now you can Open the Claw.**
+A few ideas that map to what Aileron ships today.
 
 <div class="not-prose grid gap-4 md:grid-cols-3 my-6">
 
 <Card.Root>
   <Card.Header>
-    <Card.Title>Inbox watcher</Card.Title>
+    <Card.Title>Monday catch-up</Card.Title>
   </Card.Header>
   <Card.Content class="text-muted-foreground space-y-3">
 
-_"When my Amazon package is delivered, text my partner to grab it from the lobby before it walks off."_
+_"Summarize what I missed over the weekend in `#engineering` and draft a reply to the thread about the migration."_
 
-OpenClaw watches your inbox via an Aileron action, sees the delivery confirmation arrive two days later, drafts the message, and surfaces it for your approval. You tap approve and Aileron sends the text.
+The agent calls `search-messages` and `list-channels` from the [Slack connector](/actions/slack/), synthesizes a summary, then proposes a reply. The approval card surfaces in your local webapp. You tap approve and Aileron posts as you through `send-message`.
 
   </Card.Content>
 </Card.Root>
 
 <Card.Root>
   <Card.Header>
-    <Card.Title>Slack ship-update</Card.Title>
+    <Card.Title>iMessage from your inbox</Card.Title>
   </Card.Header>
   <Card.Content class="text-muted-foreground space-y-3">
 
-"Tell the team I shipped the migration." Aileron reads your recent issues, PRs, and commits from GitHub, passes along to the agent to write a summarized message, and surfaces it for your review. You tap approve and Aileron posts in your team's Slack channel.
+_"When the Amazon delivery email arrives, text my partner."_
+
+The agent watches Gmail through `list-recent-emails`, spots the delivery confirmation, drafts the message, and surfaces it for your approval. You tap approve and Aileron sends through [iMessage via BlueBubbles](/actions/imessage-via-bluebubbles/).
 
   </Card.Content>
 </Card.Root>
 
 <Card.Root>
   <Card.Header>
-    <Card.Title>Stripe invoice</Card.Title>
+    <Card.Title>Reply triage</Card.Title>
   </Card.Header>
   <Card.Content class="text-muted-foreground space-y-3">
 
-"Send Acme the invoice for last month's work." Aileron pulls the time entries from your tracker, passes along to the agent to draft the invoice email, and surfaces it for your review. You tap approve and Aileron sends it via Stripe.
+_"Draft replies to anything from a customer in the last 48 hours."_
+
+The agent reads recent threads through the [Gmail connector](/actions/gmail-and-google-calendar/) and lands a draft in your Drafts folder via `draft-email`. Drafts are reversible, so this one's not gated. The existing "click Send in Gmail" step is the human review.
 
   </Card.Content>
 </Card.Root>
@@ -117,25 +129,34 @@ You could do this before. It was a lot of config to wire up. And you didn't, bec
 
 ## Built to soar with Tools and MCP
 
-Aileron doesn't replace Tool Calling or MCP — it complements them. Each layer in the agent stack owns a different job.
+Aileron doesn't replace Tool Calling or MCP. It complements them. Each layer in the agent stack owns a different job.
 
 <div class="not-prose grid gap-6 md:grid-cols-3 my-6">
 
 <Feature icon={Braces} title="Tool Calling">
-  How the LLM expresses tool intent — OpenAI's `tools` array, Anthropic's `tools`, the function-calling spec inside the LLM API.
+  How the LLM expresses tool intent. OpenAI's `tools` array, Anthropic's `tools`, the function-calling spec inside the LLM API.
 </Feature>
 
 <Feature icon={McpLogo} title="MCP">
-  How external tools and data get exposed to the LLM — a protocol for tool discovery and surfacing.
+  How external tools and data get exposed to the LLM. A protocol for tool discovery and surfacing.
 </Feature>
 
 <Feature icon={Plane} title="Aileron">
-  How tool calls actually get executed — deterministically, with sealed credentials, your approval, and a complete audit trail.
+  How tool calls actually get executed. Deterministically, with sealed credentials, your approval, and a complete audit trail.
 </Feature>
 
 </div>
 
-Your agent's existing MCP servers keep exposing tools the same way. The LLM still uses Tool Calling to express intent. Aileron is the layer that runs underneath — making the execution of those tool calls safe to use against your real systems.
+Your agent's existing MCP servers keep exposing tools the same way. The LLM still uses Tool Calling to express intent. Aileron is the layer that runs underneath, making the execution of those tool calls safe to use against your real systems.
+
+## Where Aileron is today
+
+The architecture above is real, shipped, and runs against real APIs. Two milestones anchor it:
+
+- **[Milestone v1](https://github.com/ALRubinger/aileron/issues/493)** — First end-to-end install-and-execute path. A signed reference connector ([`aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google)) is installed by FQN, six Gmail and Calendar actions are bound to OAuth credentials in the local vault, and `aileron launch claude` runs the whole loop with sealed credentials, capability bounds, and audit emission. Ratified by 11 ADRs at [docs.withaileron.ai/adr](/adr/).
+- **[Milestone v2](https://github.com/ALRubinger/aileron/issues/505)** — Personal-context demo for power users. Adds the spawn capability primitive ([ADR-0002](/adr/0002-connector-model/), [ADR-0014](/adr/0014-spawn-sandbox-technology/)) so sandboxed connectors can request the host to run a bounded local CLI subprocess. The shared spawn-forwarder lets you wrap any CLI with a manifest, no per-tool WASM build. Native HTTP connectors for [Slack](/actions/slack/) and [iMessage via BlueBubbles](/actions/imessage-via-bluebubbles/) ship alongside the [Wrapping a CLI](/guides/wrapping-a-cli/) guide.
+
+The [ADR index](/adr/) is the canonical record of every architectural decision that got us here.
 
 ## About
 

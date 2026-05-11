@@ -94,6 +94,8 @@
 .prose a:hover { opacity: 0.8; }
 .prose strong { font-weight: 600; }
 .prose ul, .prose ol { margin-top: 0; margin-bottom: 1.25rem; padding-left: 1.625rem; }
+.prose ul { list-style-type: disc; }
+.prose ol { list-style-type: decimal; }
 .prose li { margin-top: 0.25rem; margin-bottom: 0.25rem; }
 .prose code { font-size: 0.875em; background: var(--muted); padding: 0.2em 0.4em; border-radius: 0.25rem; }
 .prose pre { background: var(--muted); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-top: 0; margin-bottom: 1.25rem; }
