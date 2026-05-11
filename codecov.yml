@@ -1,6 +1,6 @@
 codecov:
   notify:
-    after_n_builds: 4
+    after_n_builds: 5
 
 coverage:
   status:
@@ -8,7 +8,7 @@ coverage:
       default:
         target: auto
         threshold: 2%
-        after_n_builds: 4
+        after_n_builds: 5
       ui:
         target: auto
         threshold: 5%
@@ -18,7 +18,7 @@ coverage:
       default:
         target: 80%
         threshold: 2%
-        after_n_builds: 4
+        after_n_builds: 5
 
 flags:
   unit:
