@@ -682,6 +682,239 @@ func TestHandleAnthropic_StreamingEmittedAsSSE(t *testing.T) {
 	}
 }
 
+// Regression test for #638: when Aileron rebuilds an SSE stream from a
+// non-streamed upstream response, every content block's content fields
+// must arrive via content_block_delta events (not be embedded in
+// content_block_start). Anthropic SDK clients — Claude Code included
+// — accumulate content from deltas; if Aileron stuffs the full block
+// into content_block_start, the client's accumulator stays empty,
+// thinking/text/tool_use content gets lost mid-flight, and the next
+// turn fails with "messages.N.content.M.thinking: each thinking block
+// must contain thinking".
+//
+// Contract under test: for each content block type the engine emits,
+// reading the delta events back must reconstruct the original
+// content. content_block_start carries only the block's metadata
+// fields (type, id, name, signature shape) — never the content.
+func TestHandleAnthropic_StreamingRebuild_DeltasAccumulateToOriginalContent(t *testing.T) {
+	// Upstream returns a multi-block assistant response: thinking
+	// (the case that surfaced #638) + text. tool_use is exercised by
+	// the existing interception tests; here the goal is the terminal
+	// emit path that runs when no Aileron tool_use is present.
+	upstream, _ := newScriptedUpstream(t, `{
+		"id":"msg_x","type":"message","role":"assistant","model":"c",
+		"content":[
+			{"type":"thinking","thinking":"Let me reason about this carefully.","signature":"sig_abc123"},
+			{"type":"text","text":"Hello, world!"}
+		],
+		"stop_reason":"end_turn"
+	}`)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", upstream.URL, store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1024,"messages":[],"stream":true}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	events := parseSSEEvents(t, w.Body.String())
+
+	// Block 0 (thinking): start with empty fields, thinking_delta
+	// carrying the reasoning, signature_delta carrying the signature,
+	// then stop.
+	thinkingStart := findBlockEvent(t, events, "content_block_start", 0)
+	startBlock0, _ := thinkingStart["content_block"].(map[string]any)
+	if startBlock0["type"] != "thinking" {
+		t.Errorf("block 0 start type = %v, want thinking", startBlock0["type"])
+	}
+	if startBlock0["thinking"] != "" {
+		t.Errorf("block 0 start.thinking = %q, want empty (content rides on deltas)", startBlock0["thinking"])
+	}
+
+	thinkingDeltas := findBlockEvents(events, "content_block_delta", 0)
+	gotThinking := accumulateDeltaField(thinkingDeltas, "thinking_delta", "thinking")
+	if gotThinking != "Let me reason about this carefully." {
+		t.Errorf("accumulated thinking = %q, want original; deltas = %+v", gotThinking, thinkingDeltas)
+	}
+	gotSig := accumulateDeltaField(thinkingDeltas, "signature_delta", "signature")
+	if gotSig != "sig_abc123" {
+		t.Errorf("accumulated signature = %q, want sig_abc123", gotSig)
+	}
+
+	// Block 1 (text): start with empty text, text_delta carrying the
+	// content, then stop.
+	textStart := findBlockEvent(t, events, "content_block_start", 1)
+	startBlock1, _ := textStart["content_block"].(map[string]any)
+	if startBlock1["type"] != "text" {
+		t.Errorf("block 1 start type = %v, want text", startBlock1["type"])
+	}
+	if startBlock1["text"] != "" {
+		t.Errorf("block 1 start.text = %q, want empty", startBlock1["text"])
+	}
+
+	textDeltas := findBlockEvents(events, "content_block_delta", 1)
+	gotText := accumulateDeltaField(textDeltas, "text_delta", "text")
+	if gotText != "Hello, world!" {
+		t.Errorf("accumulated text = %q, want original; deltas = %+v", gotText, textDeltas)
+	}
+
+	// Each block must have its content_block_stop with the matching index.
+	for i := 0; i < 2; i++ {
+		stop := findBlockEvent(t, events, "content_block_stop", i)
+		if int(stop["index"].(float64)) != i {
+			t.Errorf("stop event %d has index %v", i, stop["index"])
+		}
+	}
+}
+
+func TestHandleAnthropic_StreamingRebuild_ToolUseInputArrivesAsDelta(t *testing.T) {
+	// Terminal response from upstream where the model called an
+	// agent-declared tool (not an Aileron tool — that path would
+	// continue the loop). Aileron rebuilds SSE; the input must ride
+	// in input_json_delta, with the start event carrying id/name and
+	// an empty input.
+	upstream, _ := newScriptedUpstream(t, `{
+		"id":"msg_x","type":"message","role":"assistant","model":"c",
+		"content":[
+			{"type":"tool_use","id":"tu_1","name":"agent_tool","input":{"x":42,"y":"hello"}}
+		],
+		"stop_reason":"tool_use"
+	}`)
+	store := loadStore(t, map[string]string{"ship-update.md": shipUpdateAction})
+	e := engineFor(t, "", upstream.URL, store, nil)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"c","max_tokens":1024,"messages":[],"stream":true}`))
+	w := httptest.NewRecorder()
+	e.HandleAnthropic(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	events := parseSSEEvents(t, w.Body.String())
+
+	start := findBlockEvent(t, events, "content_block_start", 0)
+	startBlock, _ := start["content_block"].(map[string]any)
+	if startBlock["type"] != "tool_use" {
+		t.Errorf("start.type = %v, want tool_use", startBlock["type"])
+	}
+	if startBlock["id"] != "tu_1" || startBlock["name"] != "agent_tool" {
+		t.Errorf("start missing id/name: %+v", startBlock)
+	}
+	input, _ := startBlock["input"].(map[string]any)
+	if len(input) != 0 {
+		t.Errorf("start.input = %+v, want empty (rides on delta)", input)
+	}
+
+	deltas := findBlockEvents(events, "content_block_delta", 0)
+	gotJSON := accumulateDeltaField(deltas, "input_json_delta", "partial_json")
+	if gotJSON == "" {
+		t.Fatalf("input_json_delta missing; deltas = %+v", deltas)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(gotJSON), &parsed); err != nil {
+		t.Fatalf("partial_json not valid JSON: %v\n%s", err, gotJSON)
+	}
+	if parsed["x"].(float64) != 42 || parsed["y"] != "hello" {
+		t.Errorf("decoded input = %+v, want {x:42, y:hello}", parsed)
+	}
+}
+
+// parseSSEEvents parses an SSE stream into a slice of
+// {event, data-map} entries. Order is preserved. Only events with a
+// JSON-decodable data field land in the slice — any other lines (e.g.
+// comments) are ignored.
+func parseSSEEvents(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var events []map[string]any
+	for _, block := range strings.Split(body, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		var eventName, dataLine string
+		for _, line := range strings.Split(block, "\n") {
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				eventName = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				dataLine = strings.TrimPrefix(line, "data: ")
+			}
+		}
+		if eventName == "" || dataLine == "" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(dataLine), &data); err != nil {
+			t.Fatalf("SSE data line is not JSON: %v\nline=%s", err, dataLine)
+		}
+		data["__event"] = eventName
+		events = append(events, data)
+	}
+	return events
+}
+
+// findBlockEvent returns the first event with the given name whose
+// `index` field matches blockIndex. Fails the test if no such event
+// exists.
+func findBlockEvent(t *testing.T, events []map[string]any, name string, blockIndex int) map[string]any {
+	t.Helper()
+	for _, e := range events {
+		if e["__event"] != name {
+			continue
+		}
+		idx, ok := e["index"].(float64)
+		if !ok {
+			continue
+		}
+		if int(idx) == blockIndex {
+			return e
+		}
+	}
+	t.Fatalf("no %s event with index %d in: %+v", name, blockIndex, events)
+	return nil
+}
+
+// findBlockEvents returns every event with the given name whose
+// `index` matches blockIndex.
+func findBlockEvents(events []map[string]any, name string, blockIndex int) []map[string]any {
+	var out []map[string]any
+	for _, e := range events {
+		if e["__event"] != name {
+			continue
+		}
+		idx, ok := e["index"].(float64)
+		if !ok {
+			continue
+		}
+		if int(idx) == blockIndex {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// accumulateDeltaField walks a slice of content_block_delta event
+// payloads and concatenates the named field from every delta of the
+// matching type. Mirrors how a real Anthropic SDK client builds the
+// final block content from its delta stream.
+func accumulateDeltaField(events []map[string]any, deltaType, field string) string {
+	var out strings.Builder
+	for _, e := range events {
+		d, ok := e["delta"].(map[string]any)
+		if !ok || d["type"] != deltaType {
+			continue
+		}
+		if s, ok := d[field].(string); ok {
+			out.WriteString(s)
+		}
+	}
+	return out.String()
+}
+
 // --- OpenAI: invalid LLM JSON args become tool-result errors ---
 
 func TestHandleOpenAI_InvalidArgsJSON_BecomesToolResultError(t *testing.T) {
