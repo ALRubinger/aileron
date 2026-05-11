@@ -69,7 +69,7 @@ func IsVaultRef(value string) bool {
 
 // ValidateTokenRef checks that a token value is either empty or a vault
 // reference. Plaintext tokens are rejected to prevent secrets from being
-// committed to version control in aileron.yaml.
+// committed to version control alongside source.
 func ValidateTokenRef(field, value string) error {
 	if value == "" || IsVaultRef(value) {
 		return nil

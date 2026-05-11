@@ -15,6 +15,7 @@ If you're looking for end-user docs, the [Getting Started](/getting-started/) gu
 - [Building from Source](/development/building-from-source/) — prerequisites, the Taskfile entry points, and how the embedded assets (webapp, forwarder WASM) get folded in.
 - [Running Tests](/development/running-tests/) — unit, integration, race, coverage. What CI runs, and how to reproduce a CI failure locally.
 - [Submitting Changes](/development/submitting-changes/) — branch and PR conventions, commit message format, ADR amendments, what gets reviewed.
+- [Adding an Agent](/development/adding-an-agent/) — how to wire a new AI coding agent into `aileron launch` via the `Agent` SPI.
 
 ## A note on the docs site versus the repo
 
