@@ -193,21 +193,48 @@ signs:
 
 changelog:
   sort: asc
+  # Scope-class `[^)]+` is broader than the previous `[[:word:]]+`
+  # (which excluded hyphens and so dropped scopes like
+  # `feat(connector-install):` into Other). Conventional Commits is
+  # permissive about scope characters; the regex should be too.
+  #
+  # Order is load-bearing: the first matching group wins. Breaking
+  # Changes is at the top so `feat!:` / `fix!:` land there rather than
+  # in Features / Bug Fixes, which use overlapping regex.
   groups:
-    - title: Features
-      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+    - title: 'Breaking Changes ⚠️'
+      regexp: '^.*?(feat|fix)(\([^)]+\))??!:.+$'
       order: 0
-    - title: Bug Fixes
-      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+    - title: Features
+      regexp: '^.*?feat(\([^)]+\))??!?:.+$'
       order: 1
-    - title: Performance
-      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([^)]+\))??!?:.+$'
       order: 2
-    - title: Documentation
-      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+    - title: Performance
+      regexp: '^.*?perf(\([^)]+\))??!?:.+$'
       order: 3
+    - title: Documentation
+      regexp: '^.*?docs(\([^)]+\))??!?:.+$'
+      order: 4
     - title: Other
       order: 999
+  filters:
+    # Hide commit types that contribute no signal to a user-facing
+    # changelog. Conventional Commits keeps these in git history; the
+    # release notes call out what the user gets, not how the sausage
+    # got made. `fix(deps)` / `chore(deps)` / `build(deps)` are
+    # Renovate-style bumps; they'd otherwise dominate Bug Fixes and
+    # Other.
+    exclude:
+      - '^.*?chore(\([^)]+\))??!?:.+$'
+      - '^.*?style(\([^)]+\))??!?:.+$'
+      - '^.*?test(\([^)]+\))??!?:.+$'
+      - '^.*?refactor(\([^)]+\))??!?:.+$'
+      - '^.*?build(\([^)]+\))??!?:.+$'
+      - '^.*?ci(\([^)]+\))??!?:.+$'
+      - '^.*?revert(\([^)]+\))??!?:.+$'
+      - '^.*?(fix|chore|build)\(deps\)!?:.+$'
 
 release:
   github:
