@@ -26,13 +26,19 @@ One command. The CLI prompts to trust the publisher's signing key (once per mach
 
 ### Individual actions
 
+Pick whichever actions you actually want exposed to the agent. Each line is independently copyable. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
+
 ```sh
 aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/list-recent-chats@latest
-aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/read-chat@latest
-aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/send-message@latest
 ```
 
-Pick whichever actions you actually want exposed to the agent. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
+```sh
+aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/read-chat@latest
+```
+
+```sh
+aileron action add github://ALRubinger/aileron-connector-bluebubbles/actions/send-message@latest
+```
 
 ## Actions
 

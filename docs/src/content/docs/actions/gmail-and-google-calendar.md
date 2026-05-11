@@ -20,16 +20,31 @@ One command. The CLI prompts to trust the publisher's signing key (once per mach
 
 ### Individual actions
 
+Pick whichever actions you actually want exposed to the agent. Each line is independently copyable. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
+
 ```sh
 aileron action add github://ALRubinger/aileron-connector-google/actions/list-recent-emails@latest
-aileron action add github://ALRubinger/aileron-connector-google/actions/get-email@latest
-aileron action add github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@latest
-aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email@latest
-aileron action add github://ALRubinger/aileron-connector-google/actions/send-email@latest
-aileron action add github://ALRubinger/aileron-connector-google/actions/create-calendar-event@latest
 ```
 
-Pick whichever actions you actually want exposed to the agent. The first `aileron action add` for a given publisher walks you through the trust and binding flows; subsequent ones reuse those grants.
+```sh
+aileron action add github://ALRubinger/aileron-connector-google/actions/get-email@latest
+```
+
+```sh
+aileron action add github://ALRubinger/aileron-connector-google/actions/list-upcoming-events@latest
+```
+
+```sh
+aileron action add github://ALRubinger/aileron-connector-google/actions/draft-email@latest
+```
+
+```sh
+aileron action add github://ALRubinger/aileron-connector-google/actions/send-email@latest
+```
+
+```sh
+aileron action add github://ALRubinger/aileron-connector-google/actions/create-calendar-event@latest
+```
 
 ## Actions
 
