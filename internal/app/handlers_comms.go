@@ -3,9 +3,9 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +21,38 @@ import (
 // /comms/http surfaces back to the agent. Matches the pre-9B per-launch
 // CommsServer's limit so behaviour is unchanged for callers.
 const commsResponseLimit = 1 << 20
+
+// commsApprovalWait is the duration the background-dispatch goroutine
+// passes to [approval.ActionApproval.Wait]. Mirrors the action-run
+// path's "effectively forever" — the user can approve or deny on
+// their own schedule; daemon shutdown drops the goroutine without
+// going through ctx (in-memory queue, persistence is the #648
+// follow-up).
+const commsApprovalWait = time.Duration(math.MaxInt64)
+
+// commsRunResult is the wire shape the comms goroutines JSON-encode
+// into the run-record's [approval.Outcome.Result] string. Mirrors the
+// pre-async `CommsToolResponse` body so any agent-side parsers that
+// were reading `ok` / `error` / `messages` keep working when they
+// migrate from "decode the sync 200 body" to "decode result on the
+// /v1/action-approvals/{id}/result body".
+type commsRunResult struct {
+	Ok       bool                  `json:"ok"`
+	Error    string                `json:"error,omitempty"`
+	Messages []commsRunResultEntry `json:"messages,omitempty"`
+}
+
+// commsRunResultEntry is a single message in [commsRunResult]. Used
+// chiefly by /comms/http to carry the upstream response — status code
+// in id, body in body — mirroring the legacy CommsMessage shape.
+type commsRunResultEntry struct {
+	Id        string    `json:"id"`
+	Service   string    `json:"service"`
+	Channel   string    `json:"channel"`
+	Author    string    `json:"author"`
+	Body      string    `json:"body"`
+	Timestamp time.Time `json:"timestamp"`
+}
 
 // ReadCommsMessages handles `GET /v1/sessions/{id}/comms/messages`.
 // Replaces the per-launch unix-socket `read_messages` IPC method that
@@ -73,9 +105,13 @@ func (s *apiServer) ReadCommsMessages(w http.ResponseWriter, r *http.Request, se
 }
 
 // SendCommsMessage handles `POST /v1/sessions/{id}/comms/send`.
-// Mirrors the 9A shell-approval pattern: register an entry on the
-// daemon's action-approval queue, long-poll for the user's verdict,
-// dispatch on approve.
+// Registers a [comms_send] entry on the action-approval queue and
+// returns 202 with an ActionRunPendingResponse immediately. A
+// background goroutine waits for the user's decision and, on approve,
+// dispatches via the matching listener and records the outcome
+// against the approval id. Mirrors the contract ratified by #648 for
+// approval-gated [RunAction]; agents poll
+// `GET /v1/action-approvals/{id}/result` to learn what happened.
 func (s *apiServer) SendCommsMessage(w http.ResponseWriter, r *http.Request, sessionID string) {
 	if !s.commsConfigured() {
 		writeError(w, http.StatusServiceUnavailable, "comms_disabled",
@@ -98,53 +134,86 @@ func (s *apiServer) SendCommsMessage(w http.ResponseWriter, r *http.Request, ses
 			"service, channel, and body are required")
 		return
 	}
-
-	sender, ok := s.listeners.Get(req.Service)
-	if !ok {
+	if _, ok := s.listeners.Get(req.Service); !ok {
+		// Fail fast: no listener means there's no point asking the
+		// user to approve a dispatch we already know can't happen.
+		// Pre-async this came back as 200/{ok:false}; under the new
+		// async contract a 400 is more honest — the request was
+		// never queued at all, so the caller has no approval id to
+		// poll.
 		s.logCommsEvent("message_denied_no_listener", sessionID, req.Service, req.Channel, "", req.Body, "")
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("send_message: no listener for service: " + req.Service)})
+		writeError(w, http.StatusBadRequest, "no_listener",
+			"send_message: no listener for service: "+req.Service)
 		return
 	}
 
 	entry := s.actionApprovals.RegisterCommsSend(req.Service, req.Channel, req.Body, sessionID)
-	decision, waitErr := entry.Wait(r.Context(), s.actionApprovalTimeout())
-	if errors.Is(waitErr, approval.ErrActionApprovalTimeout) {
-		s.logCommsEvent("message_denied_timeout", sessionID, req.Service, req.Channel, "", req.Body, "")
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("send_message: user did not respond before timeout")})
-		return
-	}
+	go s.executeApprovedCommsSend(entry, req.Service, req.Channel, req.Body, sessionID)
+
+	respBody := buildPendingApprovalResponse(entry.ID, "send_message", "",
+		buildApprovalsReviewURL(s.webappURL, "", entry.ID))
+	writeJSON(w, http.StatusAccepted, respBody)
+}
+
+// executeApprovedCommsSend is the background-dispatch goroutine for
+// [SendCommsMessage]. Waits for the user's decision on the queue,
+// dispatches via the matching listener on approve, and stores the
+// outcome (completed / failed) against the approval id so
+// `/v1/action-approvals/{id}/result` can serve it.
+//
+// Mirrors [executeApprovedAction]'s shape so future readers find one
+// pattern across both surfaces.
+func (s *apiServer) executeApprovedCommsSend(entry *approval.ActionApproval, service, channel, body, sessionID string) {
+	ctx := context.Background()
+	decision, waitErr := entry.Wait(ctx, commsApprovalWait)
 	if waitErr != nil {
-		s.logCommsEvent("message_denied_error", sessionID, req.Service, req.Channel, "", req.Body, "")
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("send_message: " + waitErr.Error())})
+		// ctx.Err() — daemon shutting down; leave the outcome at its
+		// current state. The queue is going away with us.
 		return
 	}
 	if !decision.Approved {
-		s.logCommsEvent("message_denied", sessionID, req.Service, req.Channel, "", req.Body, "")
-		msg := "send_message: user denied"
-		if decision.Reason != "" {
-			msg += ": " + decision.Reason
-		}
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr(msg)})
+		// Decide already flipped the outcome to denied; record the
+		// audit-channel event for parity with the legacy synchronous
+		// path so a "what did I deny today?" lookup still works.
+		s.logCommsEvent("message_denied", sessionID, service, channel, "", body, "")
 		return
 	}
 
-	if err := sender.Send(context.Background(), comms.OutgoingMessage{
-		Channel: req.Channel,
-		Body:    req.Body,
-	}); err != nil {
-		s.logCommsEvent("message_send_failed", sessionID, req.Service, req.Channel, "", req.Body, "")
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("send_message: dispatch failed: " + err.Error())})
+	sender, ok := s.listeners.Get(service)
+	if !ok {
+		// Race: listener was registered when the request landed but
+		// removed before the user decided. Surface as a failure so
+		// the agent sees actionable detail rather than a silent
+		// terminal state.
+		s.logCommsEvent("message_send_failed", sessionID, service, channel, "", body, "")
+		_ = s.actionApprovals.SetFailed(entry.ID, nil,
+			"send_message: no listener for service: "+service)
 		return
 	}
-	s.logCommsEvent("message_sent", sessionID, req.Service, req.Channel, "", req.Body, "")
-	writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: true})
+	if err := sender.Send(ctx, comms.OutgoingMessage{
+		Channel: channel,
+		Body:    body,
+	}); err != nil {
+		s.logCommsEvent("message_send_failed", sessionID, service, channel, "", body, "")
+		_ = s.actionApprovals.SetFailed(entry.ID, nil,
+			"send_message: dispatch failed: "+err.Error())
+		return
+	}
+	s.logCommsEvent("message_sent", sessionID, service, channel, "", body, "")
+	auditID := ""
+	if s.newID != nil {
+		auditID = s.newID()
+	}
+	_ = s.actionApprovals.SetCompleted(entry.ID, auditID,
+		marshalCommsResult(commsRunResult{Ok: true}))
 }
 
 // DraftCommsReply handles `POST /v1/sessions/{id}/comms/draft`.
 // Looks up the original incoming message in the notify queue by
-// `reply_to`, registers a [comms_draft] approval entry, blocks on the
-// user's verdict, and on approve dispatches the (possibly user-edited)
-// reply through the matching listener.
+// `reply_to`, registers a [comms_draft] entry, returns 202 with an
+// ActionRunPendingResponse, and dispatches the (possibly user-edited)
+// reply through the matching listener in a background goroutine once
+// the user decides.
 func (s *apiServer) DraftCommsReply(w http.ResponseWriter, r *http.Request, sessionID string) {
 	if !s.commsConfigured() {
 		writeError(w, http.StatusServiceUnavailable, "comms_disabled",
@@ -174,6 +243,10 @@ func (s *apiServer) DraftCommsReply(w http.ResponseWriter, r *http.Request, sess
 	originalAuthor := original.Author
 	originalBody := original.Body
 	if !found {
+		// Surface the empty values to the approval card so the user
+		// can still see what the agent attempted; the goroutine
+		// converts the missing-original into a SetFailed after the
+		// user decides.
 		service = ""
 		channel = ""
 		originalAuthor = ""
@@ -181,58 +254,69 @@ func (s *apiServer) DraftCommsReply(w http.ResponseWriter, r *http.Request, sess
 	}
 
 	entry := s.actionApprovals.RegisterCommsDraft(service, channel, originalAuthor, originalBody, req.Body, req.ReplyTo, sessionID)
-	decision, waitErr := entry.Wait(r.Context(), s.actionApprovalTimeout())
-	if errors.Is(waitErr, approval.ErrActionApprovalTimeout) {
-		s.logCommsEvent("draft_denied_timeout", sessionID, service, channel, "", req.Body, req.ReplyTo)
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("draft_reply: user did not respond before timeout")})
-		return
-	}
+	go s.executeApprovedCommsDraft(entry, service, channel, req.Body, req.ReplyTo, found, sessionID)
+
+	respBody := buildPendingApprovalResponse(entry.ID, "draft_reply", "",
+		buildApprovalsReviewURL(s.webappURL, "", entry.ID))
+	writeJSON(w, http.StatusAccepted, respBody)
+}
+
+// executeApprovedCommsDraft is the background-dispatch goroutine for
+// [DraftCommsReply]. Handles the user-edited-body case (the queue
+// stamps the edited bytes onto [approval.ActionDecision.EditedPayload]
+// when the user approved via the webapp's draft card) and the
+// original-message-evicted case (SetFailed with a descriptive error).
+func (s *apiServer) executeApprovedCommsDraft(entry *approval.ActionApproval, service, channel, originalBody, replyTo string, originalFound bool, sessionID string) {
+	ctx := context.Background()
+	decision, waitErr := entry.Wait(ctx, commsApprovalWait)
 	if waitErr != nil {
-		s.logCommsEvent("draft_denied_error", sessionID, service, channel, "", req.Body, req.ReplyTo)
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("draft_reply: " + waitErr.Error())})
 		return
 	}
 	if !decision.Approved {
-		s.logCommsEvent("draft_discarded", sessionID, service, channel, "", req.Body, req.ReplyTo)
-		msg := "draft_reply: user discarded"
-		if decision.Reason != "" {
-			msg += ": " + decision.Reason
-		}
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr(msg)})
+		s.logCommsEvent("draft_discarded", sessionID, service, channel, "", originalBody, replyTo)
 		return
 	}
 
-	body := req.Body
+	body := originalBody
 	if edited, ok := decision.EditedPayload["body"].(string); ok && edited != "" {
 		body = edited
-		s.logCommsEvent("draft_edited", sessionID, service, channel, "", body, req.ReplyTo)
+		s.logCommsEvent("draft_edited", sessionID, service, channel, "", body, replyTo)
 	}
-	if !found || service == "" || channel == "" {
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("draft_reply: original message is no longer available; cannot dispatch")})
+	if !originalFound || service == "" || channel == "" {
+		_ = s.actionApprovals.SetFailed(entry.ID, nil,
+			"draft_reply: original message is no longer available; cannot dispatch")
 		return
 	}
 	sender, ok := s.listeners.Get(service)
 	if !ok {
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("draft_reply: no listener for service: " + service)})
+		_ = s.actionApprovals.SetFailed(entry.ID, nil,
+			"draft_reply: no listener for service: "+service)
 		return
 	}
-	if err := sender.Send(context.Background(), comms.OutgoingMessage{
+	if err := sender.Send(ctx, comms.OutgoingMessage{
 		Channel: channel,
 		Body:    body,
 	}); err != nil {
-		s.logCommsEvent("draft_send_failed", sessionID, service, channel, "", body, req.ReplyTo)
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("draft_reply: dispatch failed: " + err.Error())})
+		s.logCommsEvent("draft_send_failed", sessionID, service, channel, "", body, replyTo)
+		_ = s.actionApprovals.SetFailed(entry.ID, nil,
+			"draft_reply: dispatch failed: "+err.Error())
 		return
 	}
-	s.logCommsEvent("reply_sent", sessionID, service, channel, "", body, req.ReplyTo)
-	writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: true})
+	s.logCommsEvent("reply_sent", sessionID, service, channel, "", body, replyTo)
+	auditID := ""
+	if s.newID != nil {
+		auditID = s.newID()
+	}
+	_ = s.actionApprovals.SetCompleted(entry.ID, auditID,
+		marshalCommsResult(commsRunResult{Ok: true}))
 }
 
 // RequestCommsHTTP handles `POST /v1/sessions/{id}/comms/http`. Matches
 // the URL against api_key vault entries (where `metadata.type=api_key`
 // and `metadata.labels[url-pattern]` matches), registers a
-// [http_request] approval entry, long-polls, and on approve issues the
-// HTTP call with the matched secret injected as a Bearer token.
+// [http_request] entry, returns 202 with an ActionRunPendingResponse,
+// and issues the HTTP call with the matched secret injected as a
+// Bearer token in a background goroutine once the user decides.
 //
 // `commsConfigured()` is intentionally NOT checked here: `http_request`
 // has no listener dependency. It only needs the vault for credential
@@ -269,24 +353,25 @@ func (s *apiServer) RequestCommsHTTP(w http.ResponseWriter, r *http.Request, ses
 	secretName, _ := s.matchAPIKeyForURL(r.Context(), req.Url)
 
 	entry := s.actionApprovals.RegisterHTTPRequest(req.Method, req.Url, body, secretName, sessionID)
-	decision, waitErr := entry.Wait(r.Context(), s.actionApprovalTimeout())
-	if errors.Is(waitErr, approval.ErrActionApprovalTimeout) {
-		s.logCommsEvent("http_request_denied_timeout", sessionID, req.Method, req.Url, "", body, "")
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("http_request: user did not respond before timeout")})
-		return
-	}
+	go s.executeApprovedCommsHTTP(entry, req.Method, req.Url, body, headersJSON, secretName, sessionID)
+
+	respBody := buildPendingApprovalResponse(entry.ID, "http_request", "",
+		buildApprovalsReviewURL(s.webappURL, "", entry.ID))
+	writeJSON(w, http.StatusAccepted, respBody)
+}
+
+// executeApprovedCommsHTTP is the background-dispatch goroutine for
+// [RequestCommsHTTP]. Issues the HTTP call after approval and stores
+// the upstream response (status code + body, capped at
+// [commsResponseLimit]) against the approval id.
+func (s *apiServer) executeApprovedCommsHTTP(entry *approval.ActionApproval, method, urlStr, body, headersJSON, secretName, sessionID string) {
+	ctx := context.Background()
+	decision, waitErr := entry.Wait(ctx, commsApprovalWait)
 	if waitErr != nil {
-		s.logCommsEvent("http_request_denied_error", sessionID, req.Method, req.Url, "", body, "")
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("http_request: " + waitErr.Error())})
 		return
 	}
 	if !decision.Approved {
-		s.logCommsEvent("http_request_denied", sessionID, req.Method, req.Url, "", body, "")
-		msg := "http_request: user denied"
-		if decision.Reason != "" {
-			msg += ": " + decision.Reason
-		}
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr(msg)})
+		s.logCommsEvent("http_request_denied", sessionID, method, urlStr, "", body, "")
 		return
 	}
 
@@ -294,9 +379,10 @@ func (s *apiServer) RequestCommsHTTP(w http.ResponseWriter, r *http.Request, ses
 	if body != "" {
 		bodyReader = strings.NewReader(body)
 	}
-	httpReq, err := http.NewRequestWithContext(r.Context(), req.Method, req.Url, bodyReader)
+	httpReq, err := http.NewRequestWithContext(ctx, method, urlStr, bodyReader)
 	if err != nil {
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("http_request: invalid request: " + err.Error())})
+		_ = s.actionApprovals.SetFailed(entry.ID, nil,
+			"http_request: invalid request: "+err.Error())
 		return
 	}
 	if headersJSON != "" {
@@ -308,7 +394,7 @@ func (s *apiServer) RequestCommsHTTP(w http.ResponseWriter, r *http.Request, ses
 		}
 	}
 	if secretName != "" && s.vault != nil {
-		secret, err := s.vault.Get(r.Context(), secretName)
+		secret, err := s.vault.Get(ctx, secretName)
 		if err == nil {
 			httpReq.Header.Set("Authorization", "Bearer "+string(secret.Value))
 		}
@@ -320,24 +406,38 @@ func (s *apiServer) RequestCommsHTTP(w http.ResponseWriter, r *http.Request, ses
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		writeJSON(w, http.StatusOK, api.CommsToolResponse{Ok: false, Error: ptr("http_request: dispatch failed: " + err.Error())})
+		_ = s.actionApprovals.SetFailed(entry.ID, nil,
+			"http_request: dispatch failed: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, commsResponseLimit))
-	s.logCommsEvent("http_request_sent", sessionID, req.Method, req.Url, "", string(respBody), "")
-	out := api.CommsToolResponse{
-		Ok: true,
-		Messages: &[]api.CommsMessage{{
-			Id:        fmt.Sprintf("%d", resp.StatusCode),
-			Service:   "",
-			Channel:   "",
-			Author:    "",
-			Body:      string(respBody),
-			Timestamp: time.Now(),
-		}},
+	s.logCommsEvent("http_request_sent", sessionID, method, urlStr, "", string(respBody), "")
+	auditID := ""
+	if s.newID != nil {
+		auditID = s.newID()
 	}
-	writeJSON(w, http.StatusOK, out)
+	_ = s.actionApprovals.SetCompleted(entry.ID, auditID,
+		marshalCommsResult(commsRunResult{
+			Ok: true,
+			Messages: []commsRunResultEntry{{
+				Id:        fmt.Sprintf("%d", resp.StatusCode),
+				Body:      string(respBody),
+				Timestamp: time.Now(),
+			}},
+		}))
+}
+
+// marshalCommsResult JSON-encodes a [commsRunResult] for storage in
+// the approval queue's [approval.Outcome.Result] string. Encoding
+// failures fall back to a minimal error envelope so the result field
+// is never empty when the goroutine reached this point.
+func marshalCommsResult(r commsRunResult) string {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return `{"ok":false,"error":"comms result marshal failed"}`
+	}
+	return string(b)
 }
 
 // commsConfigured reports whether the daemon has a usable comms

@@ -838,14 +838,21 @@ paths:
   /v1/sessions/{session_id}/comms/send:
     post:
       tags: [Sessions]
-      summary: Request user approval to send a message (long-poll)
+      summary: Request user approval to send a message
       description: |
         Called by `aileron-mcp`'s `send_message` tool. The daemon
-        registers a [comms_send] entry on the action-approval queue,
-        long-polls until the user decides via the webapp, and on
-        approve dispatches the message via the matching listener.
-        Returns 200 + `{ok:true}` on approve, `{ok:false,error:...}`
-        on deny / timeout / dispatch failure.
+        registers a [comms_send] entry on the action-approval queue
+        and returns `202` with an `ActionRunPendingResponse`
+        immediately. A background goroutine waits on the queue for
+        the user's decision; on approve it dispatches the message
+        via the matching listener and records the outcome against the
+        approval id. Agents poll
+        `GET /v1/action-approvals/{approval_id}/result` to retrieve
+        the eventual outcome.
+
+        Aligns with the action-run flow ratified by #648 — agents
+        with short request deadlines no longer time out on a held-
+        open response.
       operationId: sendCommsMessage
       security: []
       parameters:
@@ -861,12 +868,16 @@ paths:
             schema:
               $ref: "#/components/schemas/SendCommsMessageRequest"
       responses:
-        "200":
-          description: User decided (approved → dispatched, denied / timeout / dispatch error → ok=false).
+        "202":
+          description: |
+            Approval pending; the daemon will dispatch the message in
+            the background once the user decides. Poll
+            `GET /v1/action-approvals/{approval_id}/result` for the
+            outcome.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CommsToolResponse"
+                $ref: "#/components/schemas/ActionRunPendingResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "503":
@@ -879,14 +890,18 @@ paths:
   /v1/sessions/{session_id}/comms/draft:
     post:
       tags: [Sessions]
-      summary: Submit a draft reply for user review (long-poll)
+      summary: Submit a draft reply for user review
       description: |
         Called by `aileron-mcp`'s `draft_reply` tool. Looks up the
         original incoming message in the notify queue by `reply_to`,
         registers a [comms_draft] entry on the action-approval queue
-        with the editable draft body, long-polls, and on approve
-        dispatches the (possibly user-edited) reply through the
-        matching listener.
+        with the editable draft body, and returns `202` with an
+        `ActionRunPendingResponse` immediately. A background goroutine
+        waits for the user's decision; on approve it dispatches the
+        (possibly user-edited) reply through the matching listener
+        and records the outcome against the approval id. Agents poll
+        `GET /v1/action-approvals/{approval_id}/result` to retrieve
+        the eventual outcome.
       operationId: draftCommsReply
       security: []
       parameters:
@@ -902,12 +917,16 @@ paths:
             schema:
               $ref: "#/components/schemas/DraftCommsReplyRequest"
       responses:
-        "200":
-          description: User decided (approved → dispatched, discarded / timeout → ok=false).
+        "202":
+          description: |
+            Approval pending; the daemon will dispatch the reply in
+            the background once the user decides. Poll
+            `GET /v1/action-approvals/{approval_id}/result` for the
+            outcome.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CommsToolResponse"
+                $ref: "#/components/schemas/ActionRunPendingResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "503":
@@ -920,16 +939,21 @@ paths:
   /v1/sessions/{session_id}/comms/http:
     post:
       tags: [Sessions]
-      summary: Issue an authenticated HTTP request (long-poll approval)
+      summary: Issue an authenticated HTTP request with user approval
       description: |
         Called by `aileron-mcp`'s `http_request` tool. The daemon
         matches the URL against api_key vault entries (where
         `metadata.type=api_key` and `metadata.labels[url-pattern]`
-        matches), registers a [http_request] approval entry, long-polls,
-        and on approve issues the HTTP call with the matched secret
-        injected as a Bearer token. The response body is returned in
-        `messages[0].body` with the upstream status code in
-        `messages[0].id`.
+        matches), registers a [http_request] entry on the
+        action-approval queue, and returns `202` with an
+        `ActionRunPendingResponse` immediately. A background goroutine
+        waits for the user's decision; on approve it issues the HTTP
+        call with the matched secret injected as a Bearer token and
+        records the upstream response (status code + body) against
+        the approval id. Agents poll
+        `GET /v1/action-approvals/{approval_id}/result` to retrieve
+        the result; the `result` field carries a JSON-encoded
+        envelope with the upstream status code and body.
       operationId: requestCommsHTTP
       security: []
       parameters:
@@ -945,12 +969,16 @@ paths:
             schema:
               $ref: "#/components/schemas/RequestCommsHTTPRequest"
       responses:
-        "200":
-          description: User decided (approved → dispatched, denied / timeout / dispatch error → ok=false).
+        "202":
+          description: |
+            Approval pending; the daemon will issue the HTTP call in
+            the background once the user decides. Poll
+            `GET /v1/action-approvals/{approval_id}/result` for the
+            upstream response.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CommsToolResponse"
+                $ref: "#/components/schemas/ActionRunPendingResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "503":
