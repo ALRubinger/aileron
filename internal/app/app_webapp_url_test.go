@@ -44,29 +44,33 @@ func (r *recordingNotifier) snapshot() []notify.Notification {
 
 // TestBuildApprovalsReviewURL_Precedence covers the two-tier
 // configuration — cfg.WebappURL takes precedence; env-var falls in
-// when cfg is empty; both empty returns "" so the desktop notifier
+// when cfg is empty; both empty returns "" so the terminal notifier
 // emits the fallback prompt. Tested through the production helper
 // (not a parallel implementation in the test) so refactors stay
-// covered.
+// covered. The third argument is the approval ID; an empty ID
+// returns the bare list URL, a non-empty ID appends `?focus=<id>`.
 func TestBuildApprovalsReviewURL_Precedence(t *testing.T) {
 	cases := []struct {
-		name   string
-		cfgURL string
-		envURL string
-		want   string
+		name       string
+		cfgURL     string
+		envURL     string
+		approvalID string
+		want       string
 	}{
-		{"cfg-set wins", "http://127.0.0.1:54321", "http://localhost:5173", "http://127.0.0.1:54321/approvals"},
-		{"cfg-empty falls back to env", "", "http://localhost:5173", "http://localhost:5173/approvals"},
-		{"both empty returns empty", "", "", ""},
-		{"trailing slash on cfg is stripped", "http://127.0.0.1:54321/", "", "http://127.0.0.1:54321/approvals"},
-		{"trailing slash on env is stripped", "", "http://localhost:5173/", "http://localhost:5173/approvals"},
-		{"empty cfg + empty env precedence stays empty", "", "", ""},
+		{"cfg-set wins (no id)", "http://127.0.0.1:54321", "http://localhost:5173", "", "http://127.0.0.1:54321/approvals"},
+		{"cfg-empty falls back to env (no id)", "", "http://localhost:5173", "", "http://localhost:5173/approvals"},
+		{"both empty returns empty", "", "", "", ""},
+		{"both empty returns empty even with id", "", "", "act-1", ""},
+		{"trailing slash on cfg is stripped", "http://127.0.0.1:54321/", "", "", "http://127.0.0.1:54321/approvals"},
+		{"trailing slash on env is stripped", "", "http://localhost:5173/", "", "http://localhost:5173/approvals"},
+		{"focus appended when id present", "http://127.0.0.1:54321", "", "act-42", "http://127.0.0.1:54321/approvals?focus=act-42"},
+		{"focus value is query-escaped", "http://127.0.0.1:54321", "", "act/with spaces", "http://127.0.0.1:54321/approvals?focus=act%2Fwith+spaces"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := buildApprovalsReviewURL(c.cfgURL, c.envURL); got != c.want {
-				t.Errorf("buildApprovalsReviewURL(%q, %q) = %q, want %q",
-					c.cfgURL, c.envURL, got, c.want)
+			if got := buildApprovalsReviewURL(c.cfgURL, c.envURL, c.approvalID); got != c.want {
+				t.Errorf("buildApprovalsReviewURL(%q, %q, %q) = %q, want %q",
+					c.cfgURL, c.envURL, c.approvalID, got, c.want)
 			}
 		})
 	}
@@ -99,7 +103,6 @@ func TestNewHandlerWithConfig_ApprovalNotificationCarriesWebappURL(t *testing.T)
 	// Wire the same SetOnRegister callback NewHandlerWithConfig
 	// would, with our recording notifier and the test's WebappURL.
 	const webappURL = "http://127.0.0.1:54321"
-	reviewURL := buildApprovalsReviewURL(webappURL, "")
 	srv.actionApprovals.SetOnRegister(func(a *approval.ActionApproval) {
 		summary := a.ActionName
 		if a.ConnectorFQN != "" {
@@ -108,7 +111,7 @@ func TestNewHandlerWithConfig_ApprovalNotificationCarriesWebappURL(t *testing.T)
 		_ = rec.Notify(context.Background(), notify.Notification{
 			ApprovalID: a.ID,
 			Summary:    summary,
-			ReviewURL:  reviewURL,
+			ReviewURL:  buildApprovalsReviewURL(webappURL, "", a.ID),
 		})
 	})
 	_ = log
@@ -129,8 +132,9 @@ func TestNewHandlerWithConfig_ApprovalNotificationCarriesWebappURL(t *testing.T)
 		t.Fatalf("notifications = %d, want 1; payloads = %+v", len(got), got)
 	}
 	n := got[0]
-	if n.ReviewURL != "http://127.0.0.1:54321/approvals" {
-		t.Errorf("ReviewURL = %q, want http://127.0.0.1:54321/approvals", n.ReviewURL)
+	wantURL := "http://127.0.0.1:54321/approvals?focus=" + n.ApprovalID
+	if n.ReviewURL != wantURL {
+		t.Errorf("ReviewURL = %q, want %q", n.ReviewURL, wantURL)
 	}
 	if n.Summary == "" {
 		t.Error("Summary is empty; want action + connector")

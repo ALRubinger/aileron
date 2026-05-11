@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -69,13 +70,15 @@ type Config struct {
 
 	// WebappURL is the base URL of the Aileron webapp the user opens to
 	// approve / deny gated actions (#418). When set, the action-approval
-	// notification's ReviewURL is built as `<WebappURL>/approvals` so
-	// the desktop notification carries a clickable target.
+	// notification's ReviewURL is built as
+	// `<WebappURL>/approvals?focus=<id>` so the terminal-printed block
+	// carries a per-approval deep link the operator can click or
+	// re-open via `aileron open approval <id>`.
 	//
 	// Empty falls back to the AILERON_WEBAPP_URL environment variable.
-	// Both empty means notifications fire with a generic "Open the
-	// Aileron webapp to approve or deny" prompt instead of a URL —
-	// the operator at least learns something needs attention.
+	// Both empty means notifications fire with a generic prompt
+	// instead of a URL — the operator at least learns something needs
+	// attention.
 	//
 	// Launch sets this to the embedded gateway's own URL so the
 	// notification points at the same daemon the agent is talking to.
@@ -86,10 +89,10 @@ type Config struct {
 	WebappURL string
 
 	// Notifier overrides the default notification dispatcher (log +
-	// desktop multi). Production wiring leaves this nil; tests inject
+	// terminal multi). Production wiring leaves this nil; tests inject
 	// a recorder to observe the action-approval notification payload
-	// without firing OS notifications. The injected notifier replaces
-	// the default — when set, no log / desktop notifications fire from
+	// without writing to stderr. The injected notifier replaces the
+	// default — when set, no log / terminal notifications fire from
 	// this handler, only the supplied notifier.
 	Notifier notify.Notifier
 
@@ -166,13 +169,17 @@ type Config struct {
 // embedded gateway's URL — production path) takes precedence over the
 // AILERON_WEBAPP_URL environment variable (the standalone-server case
 // where users may run the webapp dev server elsewhere). Both empty
-// returns "", which the desktop notifier handles by falling back to a
-// generic "Open the Aileron webapp" prompt — the user at least learns
-// something needs attention even without a clickable target.
+// returns "", which the terminal notifier handles by falling back to a
+// generic prompt — the user at least learns something needs attention
+// even without a clickable target.
+//
+// When approvalID is non-empty, the URL carries a `?focus=<id>` query
+// so the webapp's approvals page can scroll/highlight the specific
+// entry. Empty approvalID returns the bare list URL.
 //
 // Trailing slashes on the base URL are tolerated and stripped so the
 // resulting URL never has a doubled slash before /approvals.
-func buildApprovalsReviewURL(cfgURL, envURL string) string {
+func buildApprovalsReviewURL(cfgURL, envURL, approvalID string) string {
 	base := cfgURL
 	if base == "" {
 		base = envURL
@@ -180,7 +187,11 @@ func buildApprovalsReviewURL(cfgURL, envURL string) string {
 	if base == "" {
 		return ""
 	}
-	return strings.TrimRight(base, "/") + "/approvals"
+	out := strings.TrimRight(base, "/") + "/approvals"
+	if approvalID != "" {
+		out = out + "?focus=" + url.QueryEscape(approvalID)
+	}
+	return out
 }
 
 // NewHandlerWithConfig is the configurable entry point. The launcher
@@ -297,17 +308,22 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	}
 
 	// --- Notifier ---
-	// Multi-notifier: log first (always works), desktop second (best-
-	// effort native OS notifications via osascript / notify-send). The
-	// desktop notifier is what nudges the user toward the webapp when
-	// an action-approval lands; the log notifier is the durable
-	// backstop.
+	// Multi-notifier: log first (machine-readable, lands in
+	// daemon.log), terminal second (human-readable block on stderr —
+	// the daemon's stderr is redirected into daemon.log too, so a
+	// `tail -f ~/.aileron/daemon.log` surfaces the formatted block
+	// with the review URL and the `aileron open approval <id>` hint).
+	//
+	// The terminal notifier replaces an earlier desktop notifier
+	// (osascript / notify-send) that fired native OS notifications
+	// with no working click action on macOS — clicks resolved to
+	// Finder, which was strictly worse than no notification at all.
 	//
 	// Tests inject a recorder via cfg.Notifier; that replaces the
-	// default — no OS notifications fire from a test process.
+	// default — no stderr writes happen from a test process.
 	var notifier notify.Notifier = notify.NewMulti(
 		notify.NewLogNotifier(log),
-		notify.NewDesktopNotifier(log),
+		notify.NewTerminalNotifier(os.Stderr, log),
 	)
 	if cfg.Notifier != nil {
 		notifier = cfg.Notifier
@@ -455,18 +471,19 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 
 	// On Register, fire a notification so the user knows the agent is
 	// blocked. The notification's ReviewURL points at the webapp's
-	// /approvals page; precedence is cfg.WebappURL (set by launch to
+	// /approvals page anchored at this approval via `?focus=<id>`;
+	// precedence for the base URL is cfg.WebappURL (set by launch to
 	// the embedded gateway's URL) → AILERON_WEBAPP_URL env var (for
 	// the standalone-server case where users may run the webapp dev
 	// server elsewhere) → empty, which falls back to a generic prompt
-	// inside the desktop notifier so the user at least learns
+	// inside the terminal notifier so the user at least learns
 	// something needs attention.
 	webappURL := cfg.WebappURL
 	if webappURL == "" {
 		webappURL = os.Getenv("AILERON_WEBAPP_URL")
 	}
 	server.webappURL = webappURL
-	reviewURL := buildApprovalsReviewURL(cfg.WebappURL, os.Getenv("AILERON_WEBAPP_URL"))
+	envWebappURL := os.Getenv("AILERON_WEBAPP_URL")
 	server.actionApprovals.SetOnRegister(func(a *approval.ActionApproval) {
 		summary := a.ActionName
 		if a.ConnectorFQN != "" {
@@ -475,7 +492,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		_ = notifier.Notify(context.Background(), notify.Notification{
 			ApprovalID: a.ID,
 			Summary:    summary,
-			ReviewURL:  reviewURL,
+			ReviewURL:  buildApprovalsReviewURL(cfg.WebappURL, envWebappURL, a.ID),
 		})
 	})
 
