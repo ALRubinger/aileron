@@ -66,6 +66,18 @@ func TestDerive_KebabToSnake(t *testing.T) {
 	}
 }
 
+func TestDerive_PreservesManifestName(t *testing.T) {
+	// Derive must keep the original kebab-case manifest name alongside
+	// the snake_case wire name. The intercept layer needs the original
+	// to look the action up in the executor's store, which is keyed by
+	// manifest name. Regression for #641.
+	la := loadedAction(t, "ship-update", "body", nil)
+	got := Derive(la)
+	if got.ManifestName != "ship-update" {
+		t.Errorf("ManifestName = %q, want ship-update", got.ManifestName)
+	}
+}
+
 func TestDerive_StripsLeadingHeading(t *testing.T) {
 	la := loadedAction(t, "x", "# Title\n\nThe real description.", nil)
 	got := Derive(la)
@@ -236,6 +248,49 @@ func TestAugmentOpenAI_NameCollision_RenamesAileronAction(t *testing.T) {
 	}
 	if len(got.OurNames) != 1 || got.OurNames[0] != "aileron.search" {
 		t.Errorf("OurNames = %v, want [aileron.search] (post-collision)", got.OurNames)
+	}
+}
+
+func TestAugmentOpenAI_NamesMapsWireNameToManifestName(t *testing.T) {
+	// Names is the inverse-lookup used by the intercept layer to find
+	// the executor's store key (the manifest name) from the wire name
+	// the LLM emitted. Critically, when the Aileron action is renamed
+	// because of a forward collision (gets the `aileron.` prefix), the
+	// map must still point at the unprefixed manifest name — that's
+	// the case a naive snake→kebab string replace gets wrong, and the
+	// motivating reason for using a map at all. Regression for #641.
+	body := []byte(`{"model":"gpt-4","messages":[],"tools":[{"type":"function","function":{"name":"search"}}]}`)
+	actions := []DerivedAction{
+		{Name: "ship_update", ManifestName: "ship-update", Description: "x", Parameters: map[string]any{"type": "object"}},
+		{Name: "search", ManifestName: "search", Description: "Aileron's", Parameters: map[string]any{"type": "object"}},
+	}
+	got, err := AugmentOpenAI(body, actions, nil)
+	if err != nil {
+		t.Fatalf("AugmentOpenAI: %v", err)
+	}
+	if got.Names["ship_update"] != "ship-update" {
+		t.Errorf("Names[ship_update] = %q, want ship-update", got.Names["ship_update"])
+	}
+	if got.Names["aileron.search"] != "search" {
+		t.Errorf("Names[aileron.search] = %q, want search (collision-renamed wire name must still point at unprefixed manifest)", got.Names["aileron.search"])
+	}
+}
+
+func TestAugmentAnthropic_NamesMapsWireNameToManifestName(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-4-6","max_tokens":1,"messages":[],"tools":[{"name":"search","input_schema":{"type":"object"}}]}`)
+	actions := []DerivedAction{
+		{Name: "ship_update", ManifestName: "ship-update", Description: "x", Parameters: map[string]any{"type": "object"}},
+		{Name: "search", ManifestName: "search", Description: "Aileron's", Parameters: map[string]any{"type": "object"}},
+	}
+	got, err := AugmentAnthropic(body, actions, nil)
+	if err != nil {
+		t.Fatalf("AugmentAnthropic: %v", err)
+	}
+	if got.Names["ship_update"] != "ship-update" {
+		t.Errorf("Names[ship_update] = %q, want ship-update", got.Names["ship_update"])
+	}
+	if got.Names["aileron.search"] != "search" {
+		t.Errorf("Names[aileron.search] = %q, want search (collision-renamed wire name must still point at unprefixed manifest)", got.Names["aileron.search"])
 	}
 }
 

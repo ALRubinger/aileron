@@ -33,6 +33,12 @@ type DerivedAction struct {
 	// manifest's kebab-case `name`).
 	Name string
 
+	// ManifestName is the original action manifest name (kebab-case,
+	// as it appears in the action store). The intercept layer uses
+	// this to reverse the wire-name mapping when invoking the
+	// executor, which is keyed by manifest name.
+	ManifestName string
+
 	// Description is the prose the LLM sees when choosing among tools —
 	// the action's Markdown body with a leading `# Heading` line
 	// stripped, falling back to `Match.Intent` if the body is empty.
@@ -49,9 +55,10 @@ type DerivedAction struct {
 func Derive(la action.LoadedAction) DerivedAction {
 	m := la.Manifest
 	return DerivedAction{
-		Name:        toolName(m.Name),
-		Description: deriveDescription(m),
-		Parameters:  deriveParameters(m),
+		Name:         toolName(m.Name),
+		ManifestName: m.Name,
+		Description:  deriveDescription(m),
+		Parameters:   deriveParameters(m),
 	}
 }
 
@@ -127,9 +134,17 @@ func deriveParameters(m *action.Manifest) map[string]any {
 // decide whether a tool call coming back from the upstream LLM should
 // be intercepted (Aileron-owned) or passed through unchanged
 // (agent-declared).
+//
+// Names maps each post-collision wire name to the original manifest
+// name. The intercept layer uses this to translate the LLM-emitted
+// tool name back to the manifest name the executor's store is keyed
+// by — a naive snake→kebab string replace would round-trip
+// incorrectly for any manifest that legitimately uses underscores or
+// any wire name renamed by the collision rules.
 type Augmented struct {
 	Body     []byte
 	OurNames []string
+	Names    map[string]string
 }
 
 // AugmentOpenAI parses an OpenAI Chat Completions request body, applies
@@ -153,12 +168,14 @@ func AugmentOpenAI(body []byte, actions []DerivedAction, log Logger) (Augmented,
 	declared := agentDeclaredOpenAI(tools, log)
 
 	ourNames := make([]string, 0, len(actions))
+	names := make(map[string]string, len(actions))
 	for _, a := range actions {
 		finalName := a.Name
 		if declared[finalName] {
 			finalName = "aileron." + finalName
 		}
 		ourNames = append(ourNames, finalName)
+		names[finalName] = a.ManifestName
 		tools = append(tools, map[string]any{
 			"type": "function",
 			"function": map[string]any{
@@ -173,7 +190,7 @@ func AugmentOpenAI(body []byte, actions []DerivedAction, log Logger) (Augmented,
 	if err != nil {
 		return Augmented{}, err
 	}
-	return Augmented{Body: out, OurNames: ourNames}, nil
+	return Augmented{Body: out, OurNames: ourNames, Names: names}, nil
 }
 
 // AugmentAnthropic parses an Anthropic Messages request body, applies
@@ -197,12 +214,14 @@ func AugmentAnthropic(body []byte, actions []DerivedAction, log Logger) (Augment
 	declared := agentDeclaredAnthropic(tools, log)
 
 	ourNames := make([]string, 0, len(actions))
+	names := make(map[string]string, len(actions))
 	for _, a := range actions {
 		finalName := a.Name
 		if declared[finalName] {
 			finalName = "aileron." + finalName
 		}
 		ourNames = append(ourNames, finalName)
+		names[finalName] = a.ManifestName
 		tools = append(tools, map[string]any{
 			"name":         finalName,
 			"description":  a.Description,
@@ -214,7 +233,7 @@ func AugmentAnthropic(body []byte, actions []DerivedAction, log Logger) (Augment
 	if err != nil {
 		return Augmented{}, err
 	}
-	return Augmented{Body: out, OurNames: ourNames}, nil
+	return Augmented{Body: out, OurNames: ourNames, Names: names}, nil
 }
 
 // agentDeclaredOpenAI walks the OpenAI-shape tools array, applies the

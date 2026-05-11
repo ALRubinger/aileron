@@ -153,7 +153,7 @@ func (e *Engine) HandleOpenAI(w http.ResponseWriter, r *http.Request) {
 		}
 		roundSpan.SetAttributes(attribute.Int("aileron.intercept.tool_calls_count", len(ours)))
 
-		toolMessages, execErr := e.executeOpenAIToolCalls(roundCtx, ours)
+		toolMessages, execErr := e.executeOpenAIToolCalls(roundCtx, ours, aug.Names)
 		if execErr != nil {
 			roundSpan.SetStatus(codes.Error, "executor fatal: "+execErr.Error())
 			roundSpan.End()
@@ -307,13 +307,25 @@ func classifyOpenAIToolCalls(calls []map[string]any, ours map[string]bool) (mine
 // executeOpenAIToolCalls runs each Aileron tool call through the
 // engine's Executor and produces the matching `tool` role messages
 // to inject into the continuation request.
-func (e *Engine) executeOpenAIToolCalls(ctx context.Context, calls []map[string]any) ([]map[string]any, error) {
+//
+// names maps the post-collision wire name (the LLM-facing identifier
+// that appears in the tool_call) to the manifest name the executor's
+// store is keyed by. The mapping is built by the augment layer at
+// the same point the wire names are generated. The `name` field
+// echoed back in the synthesized tool-role message stays as the wire
+// name, since the LLM called the tool by that name.
+func (e *Engine) executeOpenAIToolCalls(ctx context.Context, calls []map[string]any, names map[string]string) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(calls))
 	for _, tc := range calls {
 		id, _ := tc["id"].(string)
 		fn, _ := tc["function"].(map[string]any)
-		name, _ := fn["name"].(string)
+		wireName, _ := fn["name"].(string)
 		argsRaw, _ := fn["arguments"].(string)
+
+		manifestName, ok := names[wireName]
+		if !ok || manifestName == "" {
+			manifestName = wireName
+		}
 
 		args := map[string]any{}
 		if argsRaw != "" {
@@ -321,13 +333,13 @@ func (e *Engine) executeOpenAIToolCalls(ctx context.Context, calls []map[string]
 				// LLM produced invalid JSON args. Surface this as a
 				// tool-result error so the LLM can correct, rather
 				// than failing the whole turn.
-				out = append(out, openAIErrorToolMessage(id, name,
+				out = append(out, openAIErrorToolMessage(id, wireName,
 					fmt.Sprintf("invalid JSON arguments: %s", err.Error())))
 				continue
 			}
 		}
 
-		res, err := e.executor.Execute(ctx, name, args)
+		res, err := e.executor.Execute(ctx, manifestName, args)
 		if err != nil {
 			return nil, err
 		}
@@ -335,14 +347,14 @@ func (e *Engine) executeOpenAIToolCalls(ctx context.Context, calls []map[string]
 			// Audit-record the action-side failure so the audit_id is
 			// stamped onto the failure before it reaches the LLM.
 			e.recorder.RecordFailure(ctx, res.Failure,
-				model.ActorRef{ID: name, Type: model.ActorTypeConnectorRuntime})
-			out = append(out, failure.ToOpenAIToolMessage(res.Failure, id, name))
+				model.ActorRef{ID: manifestName, Type: model.ActorTypeConnectorRuntime})
+			out = append(out, failure.ToOpenAIToolMessage(res.Failure, id, wireName))
 			continue
 		}
 		out = append(out, map[string]any{
 			"role":         "tool",
 			"tool_call_id": id,
-			"name":         name,
+			"name":         wireName,
 			"content":      res.Content,
 		})
 	}

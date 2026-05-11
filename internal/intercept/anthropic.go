@@ -136,7 +136,7 @@ func (e *Engine) HandleAnthropic(w http.ResponseWriter, r *http.Request) {
 		}
 		roundSpan.SetAttributes(attribute.Int("aileron.intercept.tool_calls_count", len(ours)))
 
-		toolResultBlocks, execErr := e.executeAnthropicToolUses(roundCtx, ours)
+		toolResultBlocks, execErr := e.executeAnthropicToolUses(roundCtx, ours, aug.Names)
 		if execErr != nil {
 			roundSpan.SetStatus(codes.Error, "executor fatal: "+execErr.Error())
 			roundSpan.End()
@@ -266,23 +266,38 @@ func classifyAnthropicToolUses(uses []map[string]any, ours map[string]bool) (min
 // executeAnthropicToolUses runs each Aileron tool_use block through
 // the engine's Executor and produces matching tool_result content
 // blocks for injection as a synthesized user message.
-func (e *Engine) executeAnthropicToolUses(ctx context.Context, uses []map[string]any) ([]map[string]any, error) {
+//
+// names maps the post-collision wire name (the LLM-facing identifier
+// that appears in the tool_use block) to the manifest name the
+// executor's store is keyed by. The mapping is built by the augment
+// layer at the same point the wire names are generated.
+func (e *Engine) executeAnthropicToolUses(ctx context.Context, uses []map[string]any, names map[string]string) ([]map[string]any, error) {
 	out := make([]map[string]any, 0, len(uses))
 	for _, u := range uses {
 		id, _ := u["id"].(string)
-		name, _ := u["name"].(string)
+		wireName, _ := u["name"].(string)
 		input, _ := u["input"].(map[string]any)
 		if input == nil {
 			input = map[string]any{}
 		}
 
-		res, err := e.executor.Execute(ctx, name, input)
+		manifestName, ok := names[wireName]
+		if !ok || manifestName == "" {
+			// The classifier should have filtered out anything not in
+			// OurNames; reaching here means augment/intercept have
+			// drifted out of sync. Fall back to the wire name so the
+			// executor produces a deterministic not-found error
+			// instead of silently misbehaving.
+			manifestName = wireName
+		}
+
+		res, err := e.executor.Execute(ctx, manifestName, input)
 		if err != nil {
 			return nil, err
 		}
 		if res.Failure != nil {
 			e.recorder.RecordFailure(ctx, res.Failure,
-				model.ActorRef{ID: name, Type: model.ActorTypeConnectorRuntime})
+				model.ActorRef{ID: manifestName, Type: model.ActorTypeConnectorRuntime})
 			out = append(out, failure.ToAnthropicToolResult(res.Failure, id))
 			continue
 		}
