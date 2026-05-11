@@ -3793,10 +3793,12 @@ actions = [
 	}
 }
 
-// TestRunActionAddSuite_AlreadyInstalledIsLoggedAsSuccess: an
-// already-installed action counts as success — the suite intent
-// is satisfied.
-func TestRunActionAddSuite_AlreadyInstalledIsLoggedAsSuccess(t *testing.T) {
+// TestRunActionAddSuite_AlreadyInstalledShortCircuits: when every
+// action in the suite is already installed, the consent prompt is
+// suppressed and the run exits 0 with a single all-already-installed
+// message. Per #640, the suite-level consent screen is only shown
+// when there is install work to commit.
+func TestRunActionAddSuite_AlreadyInstalledShortCircuits(t *testing.T) {
 	manifestPath := writeSuiteManifest(t, `
 name = "rerun"
 description = "Re-running with everything already installed."
@@ -3817,17 +3819,20 @@ actions = [
 		},
 	)
 
+	// Empty stdin: the suite must not prompt — if the consent screen
+	// fired, the read would race and the test would be flaky.
 	var stdout, stderr bytes.Buffer
 	code := runActionAddSuite([]string{manifestPath}, strings.NewReader(""), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if strings.Count(out, "Already installed:") != 2 {
-		t.Errorf("expected 2 'Already installed' lines; got: %s", out)
+	if !strings.Contains(out, "All 2 action(s) already installed") {
+		t.Errorf("expected all-already-installed short-circuit: %s", out)
 	}
-	if !strings.Contains(out, "2 action(s): 2 already installed.") {
-		t.Errorf("summary should treat already-installed as success: %s", out)
+	// The interactive consent screen must not have rendered.
+	if strings.Contains(out, "Install?") {
+		t.Errorf("consent prompt should be suppressed when nothing to do:\n%s", out)
 	}
 }
 
@@ -3892,16 +3897,19 @@ actions = [
 	}
 }
 
-// TestRunActionAddSuite_DeclinedUpgradeIsSkippedNotFailed: when the
-// user declines the upgrade prompt for one entry mid-suite, the
-// summary buckets it as "skipped" (not failed) and the run exits 0.
-// This is the v2 fix for the bug where add-suite returned exit 1
-// because already-installed-with-different-bytes entries were treated
-// as 409 conflicts.
-func TestRunActionAddSuite_DeclinedUpgradeIsSkippedNotFailed(t *testing.T) {
+// TestRunActionAddSuite_DeclineCancelsEveryEntry: per #640, the
+// suite is atomic at the consent layer. One Y/N prompt covers the
+// whole suite (whether the entries are fresh, upgrades, or a mix);
+// "n" cancels every entry, no install endpoint is called, and the
+// run exits 0 with a summary that bucketed every entry as cancelled.
+//
+// Replaces the pre-#640 per-action upgrade-decline behavior that
+// allowed partial install when one entry of a multi-entry suite was
+// declined.
+func TestRunActionAddSuite_DeclineCancelsEveryEntry(t *testing.T) {
 	manifestPath := writeSuiteManifest(t, `
-name = "decline-upgrade"
-description = "User keeps the existing version of bar."
+name = "decline-suite"
+description = "Decline the suite; nothing installs."
 
 actions = [
   "github://acme/conn/actions/foo@0.2.0",
@@ -3913,13 +3921,11 @@ actions = [
 		func(fqn string, w http.ResponseWriter, r *http.Request) {
 			name := lastSegment(fqn)
 			if name == "bar" {
-				// Upgrade candidate.
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:new","name":%q,"signature_status":"verified","existing":{"version":"0.1.0","hash":"sha256:old","source":"github://acme/conn/actions/bar@0.1.0","path":"/p/bar.md"},"connector_deps":[]}`,
 					fqn, name)
 				return
 			}
-			// Fresh.
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:foo","name":%q,"signature_status":"verified","connector_deps":[]}`,
 				fqn, name)
@@ -3931,28 +3937,136 @@ actions = [
 		},
 	)
 
-	// Two prompts the suite will surface in order:
-	//   1. "Install? [y/N]" for foo (fresh) → "y"
-	//   2. "Replace v0.1.0 with v0.2.0?" for bar (upgrade) → "n"
-	stdin := strings.NewReader("y\nn\n")
+	// One suite-level prompt; "n" cancels everything.
+	stdin := strings.NewReader("n\n")
 	var stdout, stderr bytes.Buffer
 	code := runActionAddSuite([]string{manifestPath}, stdin, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("declined upgrade should not fail the suite; exit=%d stderr=%s", code, stderr.String())
+		t.Fatalf("decline must not be a failure; exit=%d stderr=%s", code, stderr.String())
 	}
-	if installCalls["github://acme/conn/actions/bar@0.2.0"] != 0 {
-		t.Errorf("bar install must not be called when operator declines upgrade; calls=%d",
-			installCalls["github://acme/conn/actions/bar@0.2.0"])
+	if len(installCalls) > 0 {
+		t.Errorf("install endpoint must not be hit when suite is declined; calls=%+v", installCalls)
 	}
 	out := stdout.String()
+	// Exactly one consent prompt, regardless of fresh + upgrade mix.
+	if got := strings.Count(out, "Install? [y/N]: "); got != 1 {
+		t.Errorf("expected exactly 1 suite-level prompt, got %d:\n%s", got, out)
+	}
 	for _, want := range []string{
-		"Replace v0.1.0 with v0.2.0?",
-		"Skipped: bar (kept v0.1.0)",
-		"actions/bar@0.2.0 (skipped — kept existing version)",
-		"2 action(s): 1 added, 1 skipped.",
+		"Suite install preview",
+		"actions/foo@0.2.0 (cancelled)",
+		"actions/bar@0.2.0 (cancelled)",
+		"2 action(s): 2 cancelled.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAddSuite_SingleConsentPromptForManyActions: the
+// headline #640 contract. A suite with N actions surfaces exactly one
+// "Install?" prompt under interactive mode. Pre-#640, each action got
+// its own prompt; for the Gmail+Calendar suite that was 6 prompts in
+// a row.
+func TestRunActionAddSuite_SingleConsentPromptForManyActions(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "many"
+description = "Six actions; one prompt."
+
+actions = [
+  "github://acme/conn/actions/a1@0.1.0",
+  "github://acme/conn/actions/a2@0.1.0",
+  "github://acme/conn/actions/a3@0.1.0",
+  "github://acme/conn/actions/a4@0.1.0",
+  "github://acme/conn/actions/a5@0.1.0",
+  "github://acme/conn/actions/a6@0.1.0",
+]
+`)
+	installCalls := map[string]int{}
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				fqn, lastSegment(fqn))
+		},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			installCalls[fqn]++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":"x","path":"/p"}`, lastSegment(fqn), fqn)
+		},
+	)
+
+	stdin := strings.NewReader("y\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{manifestPath}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if got := strings.Count(out, "Install? [y/N]: "); got != 1 {
+		t.Errorf("expected exactly 1 suite-level prompt for 6 actions, got %d:\n%s", got, out)
+	}
+	if len(installCalls) != 6 {
+		t.Errorf("expected install endpoint hit 6 times, got %d:\n%+v", len(installCalls), installCalls)
+	}
+}
+
+// TestRunActionAddSuite_MixedFreshAndUpgradeInPreview: the suite
+// preview labels each entry by status — fresh (+), upgrade (↺),
+// already installed (✓). Visual-regression test for the consent
+// screen #640 introduces.
+func TestRunActionAddSuite_MixedFreshAndUpgradeInPreview(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "mixed-preview"
+description = "Fresh + upgrade + already-installed in one preview."
+
+actions = [
+  "github://acme/conn/actions/foo@0.2.0",
+  "github://acme/conn/actions/bar@0.2.0",
+  "github://acme/conn/actions/baz@0.2.0",
+]
+`)
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			name := lastSegment(fqn)
+			switch name {
+			case "foo":
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:foo","name":%q,"signature_status":"verified","connector_deps":[]}`,
+					fqn, name)
+			case "bar":
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:new","name":%q,"signature_status":"verified","existing":{"version":"0.1.0","hash":"sha256:old","source":"github://acme/conn/actions/bar@0.1.0","path":"/p/bar.md"},"connector_deps":[]}`,
+					fqn, name)
+			case "baz":
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"fqn":%q,"version":"0.2.0","hash":"sha256:baz","name":%q,"already_installed":true,"connector_deps":[]}`,
+					fqn, name)
+			}
+		},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.2.0","source":"x","path":"/p"}`, lastSegment(fqn), fqn)
+		},
+	)
+
+	stdin := strings.NewReader("n\n") // decline so we only assert preview rendering.
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{manifestPath}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Suite install preview",
+		"Install 2 action(s) from this suite (1 already installed will be skipped):",
+		"(new)",
+		"(upgrade from v0.1.0)",
+		"(already installed)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preview missing %q:\n%s", want, out)
 		}
 	}
 }
@@ -4019,10 +4133,13 @@ actions = [
 	}
 }
 
-// TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority:
-// trust decline mid-suite → remaining same-authority actions skip
-// without re-prompting.
-func TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority(t *testing.T) {
+// TestRunActionAddSuite_TrustDeclineAbortsBeforeConsent: per #640's
+// atomic-at-consent rule, trust prompts happen up front during the
+// preflight phase. Declining trust for the suite's publisher aborts
+// the run cleanly: no /actions/preview calls, no consent screen, no
+// install attempt — and exits non-zero so a script that ran the
+// suite install sees the failure.
+func TestRunActionAddSuite_TrustDeclineAbortsBeforeConsent(t *testing.T) {
 	withTempHome(t)
 	_, pemBytes := genTestKey(t)
 	withMockGitHubRaw(t, map[string][]byte{
@@ -4031,7 +4148,7 @@ func TestRunActionAddSuite_TrustDeclineSkipsRemainingSameAuthority(t *testing.T)
 
 	manifestPath := writeSuiteManifest(t, `
 name = "decline-test"
-description = "Decline trust; remaining actions should skip."
+description = "Decline trust; the run aborts before consent."
 
 actions = [
   "github://acme/conn/actions/foo@0.1.0",
@@ -4060,8 +4177,10 @@ actions = [
 	if strings.Count(stdout.String(), "Publisher github://acme/conn is not yet trusted") != 1 {
 		t.Errorf("trust banner should fire once across the suite, not per action:\n%s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "failed.") {
-		t.Errorf("summary should report failures; got: %s", stdout.String())
+	// The interactive consent screen must not have rendered — the
+	// run aborted before reaching it.
+	if strings.Contains(stdout.String(), "Suite install preview") {
+		t.Errorf("consent screen should not render after trust decline:\n%s", stdout.String())
 	}
 }
 
