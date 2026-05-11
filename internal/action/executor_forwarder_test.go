@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
@@ -79,6 +80,32 @@ func TestLoadConnectorBytes_PerBinaryFallsBackToConnectorWAT(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("wat fallback = %q, want %q", got, want)
+	}
+}
+
+func TestLoadConnectorBytes_ForwarderEmptyWASMReturnsClearError(t *testing.T) {
+	// Empty forwarder.WASM is what a daemon built without
+	// `task build:forwarder` ships. The load path should surface a
+	// targeted error rather than handing a zero-length slice to
+	// Wazero, which would produce an opaque "invalid magic number"
+	// failure from somewhere deep in the compiler.
+	orig := forwarder.WASM
+	forwarder.WASM = nil
+	t.Cleanup(func() { forwarder.WASM = orig })
+
+	manifest := &cstore.Manifest{
+		Connector: cstore.ManifestConnector{
+			Name:      "github://acme/gitcrawl",
+			Version:   "0.0.1",
+			Forwarder: cstore.BuiltinForwarderSpawn,
+		},
+	}
+	_, err := loadConnectorBytes(manifest, "/does/not/exist")
+	if err == nil {
+		t.Fatal("expected error when forwarder WASM is empty")
+	}
+	if !strings.Contains(err.Error(), "task build:") {
+		t.Errorf("error should mention the remediation; got %v", err)
 	}
 }
 
