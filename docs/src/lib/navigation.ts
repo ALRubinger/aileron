@@ -56,6 +56,13 @@ export const navigation: NavItem[] = [
     ]
   },
   {
+    label: 'Actions',
+    children: [
+      { label: 'Gmail and Google Calendar', href: '/actions/gmail-and-google-calendar/' },
+      { label: 'iMessage via BlueBubbles', href: '/actions/imessage-via-bluebubbles/' }
+    ]
+  },
+  {
     label: 'Guides',
     children: [
       { label: 'Installing a Connector', href: '/guides/installing-a-connector/' },
