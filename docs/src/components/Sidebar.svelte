@@ -13,6 +13,7 @@
   import Layers from '@lucide/svelte/icons/layers';
   import BookOpen from '@lucide/svelte/icons/book-open';
   import Terminal from '@lucide/svelte/icons/terminal';
+  import Zap from '@lucide/svelte/icons/zap';
 
   let { currentPath = '', navigation = [] as NavItem[] }: { currentPath?: string; navigation?: NavItem[] } = $props();
   let mobileOpen = $state(false);
@@ -62,6 +63,7 @@
     'Development': Wrench,
     'Architecture Decisions': GitFork,
     'Concepts': Layers,
+    'Actions': Zap,
     'Guides': BookOpen,
     'CLI Reference': Terminal,
     'API Reference': Braces
