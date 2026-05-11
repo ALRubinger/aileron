@@ -167,6 +167,18 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The launcher only calls ConfigureMCP when aileron-mcp resolves
+	// (next to the test binary or on PATH). Without that, MCP wiring is
+	// silently skipped and the assertions below would fail with no signal
+	// about why. Pin a fake aileron-mcp at the head of PATH so the
+	// resolution succeeds in every environment (CI, fresh checkouts).
+	mcpDir := t.TempDir()
+	mcpBin := filepath.Join(mcpDir, "aileron-mcp")
+	if err := os.WriteFile(mcpBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", mcpDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
 		Agent: scriptAgent{
 			script:  script,
