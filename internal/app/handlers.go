@@ -20,6 +20,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/comms"
+	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/config"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/crypto"
@@ -99,6 +100,10 @@ type apiServer struct {
 	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
 	oauth2Sessions     *oauth2Sessions   // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
 	oauth2HTTPClient   *http.Client      // for OAuth token exchanges; nil → http.DefaultClient
+
+	// --- Hub (ADR-0013, #486, #487) ---
+	hub          *hub.Client // connector-discovery Hub client; nil disables /v1/hub/* endpoints
+	keyringPath  string      // path to ~/.aileron/keyring.json for install-decision trust state; "" falls back to cstore.DefaultKeyringPath()
 
 	// --- Comms (ADR-0012 step 9B-2) ---
 	notifyQueue   *comms.NotifyQueue        // daemon-wide inbound messages; nil disables /comms/* endpoints
