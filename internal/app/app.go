@@ -27,6 +27,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
+	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/intercept"
 	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/notify"
@@ -373,6 +374,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		actions:            action.NewStore(action.DefaultDir()),
 		installer:          newConnectorInstaller(log),
 		versionLister:      cstore.DefaultVersionLister(),
+		hub:                newHubClient(),
 	}
 	if res, err := server.actions.Load(); err != nil {
 		log.Warn("failed to load actions directory", "dir", server.actions.Dir(), "error", err)
@@ -839,4 +841,21 @@ func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
 		Verifier: &cstore.ReloadingKeyring{Path: cstore.DefaultKeyringPath()},
 		Store:    store,
 	}
+}
+
+// newHubClient builds the Hub client (ADR-0013) using config from
+// `~/.aileron/config.yaml`. A missing or empty config falls back to
+// the public Aileron connector Hub. Tests construct apiServer with
+// a different `hub *hub.Client` value pointing at a file:// fixture.
+//
+// Returns a fully-initialized client even on config load error — a
+// broken `~/.aileron/config.yaml` shouldn't disable Hub functionality
+// silently. The error path logs and proceeds with defaults.
+func newHubClient() *hub.Client {
+	cfg, _ := config.LoadAileronConfig(config.DefaultAileronConfigPath())
+	url := config.DefaultHubURL
+	if cfg != nil && cfg.Hub != nil && cfg.Hub.URL != "" {
+		url = cfg.Hub.URL
+	}
+	return &hub.Client{URL: url}
 }
