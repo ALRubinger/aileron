@@ -61,18 +61,16 @@ The closest prior art is `packages.microsoft.com`: one publisher, one key, many 
 
 ### Daemon owns Hub data; CLI and webapp are thin clients
 
-Per [ADR-0012](/adr/0012-local-daemon-architecture), the local daemon is the runtime process. Hub data follows the same model. The daemon clones the Hub repo, refreshes it on a configurable cadence, proxies GitHub API calls (popularity signals, fingerprints), and exposes `/v1/hub/*` HTTP endpoints. CLI and webapp are thin clients that read from the daemon API.
+Per [ADR-0012](/adr/0012-local-daemon-architecture), the local daemon is the runtime process. Hub data follows the same model. The daemon shallow-clones the Hub repo per query (no persisted cache, no `api.github.com` calls) and exposes `/v1/hub/*` HTTP endpoints. CLI and webapp are thin clients that read from the daemon API.
 
 This keeps the trust decision coherent across surfaces. Both `aileron connector install <fqn>` (terminal y/N) and the webapp install modal consume the same `/v1/hub/install-decision/{fqn}` payload from the daemon. The user sees the same fingerprint, the same publisher footprint, the same risk indicators regardless of where they are running.
 
 The daemon owns:
 
-- The local Hub clone at `~/.aileron/hub-cache/`.
-- Cache TTL by data class (entries refresh daily; popularity hourly).
-- GitHub API rate-limit handling.
+- Fetching the Hub repo (shallow clone per query, no persisted state).
 - Pre-computation of the install-decision payload (fingerprint, publisher's other Hub connectors, current keyring state for the authority).
 
-Cache strategy specifics are tracked in #486.
+#486 settled the no-cache, no-GitHub-API shape for v0.x. A server-side metadata service that would re-introduce caching and popularity signals is tracked as a future improvement in [#614](https://github.com/ALRubinger/aileron/issues/614).
 
 ### Sigstore deferred; static keys with three known limitations accepted
 
@@ -88,9 +86,9 @@ Deferring Sigstore is a conscious trade-off. The cost is three accepted limitati
 
 Revisit when v1 stability work begins. Until then, these limitations are documented and lived with.
 
-### No Aileron-operated telemetry in v0.x
+### No popularity signals and no Aileron-operated telemetry in v0.x
 
-Popularity signals come from GitHub: release download counts via the GitHub API, repo stars, last-commit recency. The daemon fetches and caches these on the user's behalf when they query the Hub.
+Popularity signals (stars, last-commit recency, release download counts) are out of scope for v0.x. With a handful of connectors and no users, popularity adds little value and forces every user's daemon to hit `api.github.com` against a 60/hr unauthenticated budget. A server-side metadata service that would re-introduce popularity is tracked as a future improvement in [#614](https://github.com/ALRubinger/aileron/issues/614).
 
 Opt-out telemetry (PostHog or similar analytics fired on every install) was considered and rejected for v0.x. The position "Aileron assumes no responsibility for vetting" is hard to reconcile with "Aileron collects analytics on what you install." Opt-in telemetry remains a future option if precise install counts ever become a real driver.
 
@@ -154,7 +152,7 @@ Discovery is via the Hub: `aileron hub search`, the webapp's Hub page, or organi
 
 ### For the daemon
 
-The daemon gains responsibility for Hub data: clone, cache, GitHub API integration, install-decision payload pre-computation. The `/v1/hub/*` HTTP endpoint set is added to the daemon's API surface.
+The daemon gains responsibility for Hub data: shallow-clone-per-query of the Hub repo and install-decision payload pre-computation. The `/v1/hub/*` HTTP endpoint set is added to the daemon's API surface.
 
 ## Examples
 
@@ -173,9 +171,8 @@ release_pattern: v*
 ```
 GET  /v1/hub/connectors                  # list all entries
 GET  /v1/hub/connectors?q=<query>        # keyword search
-GET  /v1/hub/connectors/{fqn}            # single entry + popularity
+GET  /v1/hub/connectors/{fqn}            # single entry
 GET  /v1/hub/install-decision/{fqn}      # pre-computed install-decision payload
-POST /v1/hub/refresh                     # force cache refresh
 ```
 
 ### Install-decision payload (sketch)
@@ -190,11 +187,6 @@ The payload shape is finalized in #487. At minimum:
   "fingerprint": "sha256:i4l2kuD8q++d5b9v8/LLI1",
   "trust_state": "unknown",
   "publisher_footprint": ["github://ALRubinger/aileron-connector-slack"],
-  "github_signals": {
-    "stars": 1247,
-    "last_commit": "2026-05-03T14:12:00Z",
-    "latest_release_downloads": 8412
-  },
   "risk_indicators": [
     "First connector by this publisher you've installed"
   ]
