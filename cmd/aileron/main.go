@@ -1922,7 +1922,38 @@ type installedConnectorWireForInstall struct {
 	AlreadyInstalled bool   `json:"already_installed"`
 }
 
-// runConnectorInstall implements the consent flow per ADR-0007:
+// hubInstallDecisionWire mirrors api.HubInstallDecision on the wire.
+// Declared locally for the same reason as the other CLI wire types:
+// keep the binary off the generated-types dependency graph.
+type hubInstallDecisionWire struct {
+	Fqn                string   `json:"fqn"`
+	Description        string   `json:"description"`
+	PublisherGithub    string   `json:"publisher_github"`
+	Fingerprint        string   `json:"fingerprint"`
+	TrustState         string   `json:"trust_state"`
+	PublisherFootprint []string `json:"publisher_footprint"`
+	RiskIndicators     []string `json:"risk_indicators"`
+}
+
+// runConnectorInstall implements the consent flow per ADR-0007 with
+// the Hub install-decision layer added on top per ADR-0013 / #487:
+//
+//  1. GET /v1/hub/install-decision?fqn=<fqn>. If the FQN is in the Hub
+//     (200), render the publisher / fingerprint / trust-state / risks
+//     and prompt y/N/d=details. On confirm, call install with
+//     `confirmed_fingerprint`; the daemon writes per-FQN trust to the
+//     keyring before running the install pipeline (#487 Q4).
+//
+//  2. If the FQN is not in the Hub (404), fall back to the legacy
+//     preview-then-install flow. Trust must be pre-established via
+//     `aileron keyring trust` for that path to succeed.
+//
+//  3. Other failure modes on the Hub call (503 hub_disabled,
+//     hub_unreachable) also fall back to the legacy flow with a one-
+//     line stderr note so users with daemon-side Hub config issues can
+//     still install connectors they've pre-trusted.
+//
+// The legacy preview flow remains unchanged:
 //
 //  1. POST /v1/connectors/preview to fetch + verify + parse without
 //     committing. Signature failure or hash mismatch aborts here.
@@ -1959,6 +1990,19 @@ func runConnectorInstall(args []string, stdin io.Reader, stdout, stderr io.Write
 	if perr != nil {
 		fmt.Fprintf(stderr, "%v\n", perr)
 		return 1
+	}
+
+	// Step 0 (ADR-0013 / #487): try the Hub install-decision flow. If
+	// the FQN is in the Hub we render the publisher / risk surface and
+	// pass the confirmed fingerprint to the install endpoint, which
+	// writes per-FQN trust before running the install pipeline.
+	confirmedFP, hubCancelled, hubPath := tryHubInstallDecisionFlow(
+		resolvedFQN, *yes, stdin, stdout, stderr)
+	if hubCancelled {
+		return 0
+	}
+	if hubPath {
+		return doConfirmedInstall(resolvedFQN, resolvedVersion, *hash, confirmedFP, stdout, stderr)
 	}
 
 	// Step 1: preview.
@@ -2025,6 +2069,190 @@ func runConnectorInstall(args []string, stdin io.Reader, stdout, stderr io.Write
 	}
 	fmt.Fprintf(stdout, "%s: %s@%s\n  hash: %s\n  path: %s\n",
 		verb, resp.Fqn, resp.Version, resp.Hash, resp.EntryDir)
+	return 0
+}
+
+// tryHubInstallDecisionFlow asks the daemon for the Hub install-decision
+// payload for the FQN. Returns:
+//
+//   - (fingerprint, false, true)  → operator confirmed. Caller should
+//     POST /v1/connectors/install with confirmed_fingerprint.
+//   - ("", true, true)            → operator declined. Caller stops.
+//   - ("", false, false)          → no Hub entry (404) or Hub error.
+//     Caller falls back to the legacy preview flow.
+//
+// `--yes` short-circuits the prompt and auto-confirms.
+//
+// Hub failures other than 404 (503 hub_disabled, hub_unreachable) emit
+// a one-line stderr note and return as fall-through. Users with broken
+// daemon-side Hub config can still install connectors they've pre-
+// trusted via `aileron keyring trust`.
+func tryHubInstallDecisionFlow(fqn string, autoYes bool, stdin io.Reader, stdout, stderr io.Writer) (string, bool, bool) {
+	q := url.Values{"fqn": []string{fqn}}.Encode()
+	status, body, err := bindingDoRequest(http.MethodGet, "/hub/install-decision?"+q, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "note: hub install-decision unavailable (%v); using local trust\n", err)
+		return "", false, false
+	}
+	if status == http.StatusNotFound {
+		return "", false, false
+	}
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "note: hub install-decision returned %d; using local trust\n", status)
+		return "", false, false
+	}
+	var d hubInstallDecisionWire
+	if err := json.Unmarshal(body, &d); err != nil {
+		fmt.Fprintf(stderr, "note: could not parse hub install-decision (%v); using local trust\n", err)
+		return "", false, false
+	}
+
+	if autoYes {
+		return d.Fingerprint, false, true
+	}
+
+	// Wrap stdin once so the `d`-then-`y` two-line flow doesn't lose
+	// buffered bytes between iterations. promptLine builds its own
+	// bufio.Reader when handed a raw reader, and the buffered bytes
+	// inside that local reader are discarded when the call returns.
+	br, ok := stdin.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(stdin)
+	}
+
+	showDetails := false
+	for {
+		renderHubInstallDecision(stdout, &d, showDetails)
+		var ans string
+		if showDetails {
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Install? [y/N]: ")))
+		} else {
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Install? [y/N/d=details]: ")))
+		}
+		switch ans {
+		case "y", "yes":
+			return d.Fingerprint, false, true
+		case "d", "details":
+			if showDetails {
+				// Already showing details; treat as 'no'.
+				fmt.Fprintln(stdout, "Cancelled.")
+				return "", true, true
+			}
+			showDetails = true
+			continue
+		default:
+			fmt.Fprintln(stdout, "Cancelled.")
+			return "", true, true
+		}
+	}
+}
+
+// renderHubInstallDecision prints the install-time trust summary for a
+// Hub-listed connector. Trust state is colored — green when the
+// publisher key is already trusted at this FQN, yellow when it's the
+// first time, red when a sibling repo by the same publisher carries a
+// different key (likely rotation, possibly impersonation). Risk
+// indicators inherit the same red/yellow distinction.
+//
+// `verbose` adds the full publisher_footprint (every other Hub-listed
+// connector by this publisher) and any further risk lines. Compact
+// mode prints the first risk indicator only.
+func renderHubInstallDecision(w io.Writer, d *hubInstallDecisionWire, verbose bool) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "\033[1mHub install-decision\033[0m")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  FQN:         %s\n", d.Fqn)
+	if d.Description != "" {
+		fmt.Fprintf(w, "  Description: %s\n", d.Description)
+	}
+	fmt.Fprintf(w, "  Publisher:   %s\n", d.PublisherGithub)
+	fmt.Fprintf(w, "  Fingerprint: %s\n", d.Fingerprint)
+	fmt.Fprintf(w, "  Trust:       %s\n", colorizeTrustState(d.TrustState))
+	if len(d.RiskIndicators) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  \033[1mRisk indicators:\033[0m")
+		risks := d.RiskIndicators
+		if !verbose && len(risks) > 1 {
+			risks = risks[:1]
+		}
+		for _, r := range risks {
+			fmt.Fprintf(w, "    %s\n", colorizeRisk(d.TrustState, r))
+		}
+	}
+	if verbose && len(d.PublisherFootprint) > 0 {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "  \033[1mOther connectors by this publisher:\033[0m")
+		for _, fqn := range d.PublisherFootprint {
+			fmt.Fprintf(w, "    - %s\n", fqn)
+		}
+	}
+	fmt.Fprintln(w)
+}
+
+// colorizeTrustState renders a trust-state label with ANSI color:
+// green for already_trusted, yellow for unknown, red for conflict.
+// Unknown labels are returned unstyled so future enum additions don't
+// surface as terminal escape codes the operator can't decipher.
+func colorizeTrustState(state string) string {
+	switch state {
+	case "already_trusted":
+		return "\033[32malready trusted\033[0m"
+	case "unknown":
+		return "\033[33munknown (first install)\033[0m"
+	case "conflict":
+		return "\033[31mconflict — key differs from a trusted sibling repo\033[0m"
+	default:
+		return state
+	}
+}
+
+// colorizeRisk maps a single risk indicator string to a colored
+// rendering: red when the umbrella trust state is `conflict`, yellow
+// otherwise (the indicator is informational, not blocking).
+func colorizeRisk(state, risk string) string {
+	if state == "conflict" {
+		return "\033[31m✘ " + risk + "\033[0m"
+	}
+	return "\033[33m• " + risk + "\033[0m"
+}
+
+// doConfirmedInstall calls /v1/connectors/install with confirmed_
+// fingerprint set. The daemon writes per-FQN trust to the keyring
+// before running the install pipeline, so a missing publisher key in
+// the local keyring isn't a blocker — that's the point of the Hub
+// install-decision flow. The legacy preview-flow path of
+// runConnectorInstall is bypassed entirely.
+func doConfirmedInstall(fqn, version, expectedHash, fingerprint string, stdout, stderr io.Writer) int {
+	body := map[string]any{
+		"fqn":                   fqn,
+		"version":               version,
+		"confirmed_fingerprint": fingerprint,
+	}
+	if expectedHash != "" {
+		body["expected_hash"] = expectedHash
+	}
+	payload, _ := json.Marshal(body)
+	status, resp, err := bindingDoRequest(http.MethodPost, "/connectors/install",
+		strings.NewReader(string(payload)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status != http.StatusCreated && status != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(resp))
+		return 1
+	}
+	var installed installedConnectorWireForInstall
+	if err := json.Unmarshal(resp, &installed); err != nil {
+		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		return 1
+	}
+	verb := "Installed"
+	if installed.AlreadyInstalled {
+		verb = "Already installed"
+	}
+	fmt.Fprintf(stdout, "%s: %s@%s\n  hash: %s\n  path: %s\n",
+		verb, installed.Fqn, installed.Version, installed.Hash, installed.EntryDir)
 	return 0
 }
 

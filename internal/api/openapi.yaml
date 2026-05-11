@@ -4560,6 +4560,27 @@ components:
             nothing is written to the store. When omitted (typical for
             first install), the pipeline records whatever hash the bytes
             produce.
+        confirmed_fingerprint:
+          type: string
+          description: |
+            Optional publisher-key fingerprint the operator confirmed at
+            the install prompt (terminal y/N/d or webapp install modal),
+            per ADR-0013 / #487. Format matches `aileron keyring trust`
+            output: `sha256:<22 base64-no-padding chars>`.
+
+            When supplied, the daemon looks up the FQN in the Hub, fetches
+            the publisher's current key, verifies its fingerprint matches
+            this value (anti-tampering — the client and daemon must agree
+            on what the operator saw), then writes the key to the keyring
+            at the FQN authority before running the install pipeline.
+            Trust persists even if the install later fails, matching the
+            #487 Q4 resolution.
+
+            When omitted, the install requires the publisher key to be
+            pre-established in the keyring (typical for non-TTY installs
+            and connectors not listed in the Hub). Mismatch returns
+            `fingerprint_mismatch`; an FQN with no Hub entry returns
+            `not_found`.
 
     ConnectorPreview:
       type: object
