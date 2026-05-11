@@ -160,6 +160,18 @@ func willPromptInteractively(passphraseFile string) bool {
 	return passphraseFile == "" && os.Getenv(envVaultPassphrase) == ""
 }
 
+// printAileronBanner prints the Aileron ASCII-art welcome shown at the
+// top of any interactive vault create/unlock prompt. Callers gate this
+// on [willPromptInteractively] so non-interactive callers (env var,
+// --passphrase-file) don't get a banner dumped into their logs.
+func printAileronBanner(w io.Writer) {
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, `░█▀█░▀█▀░█░░░█▀▀░█▀▄░█▀█░█▀█`)
+	fmt.Fprintln(w, `░█▀█░░█░░█░░░█▀▀░█▀▄░█░█░█░█`)
+	fmt.Fprintln(w, `░▀░▀░▀▀▀░▀▀▀░▀▀▀░▀░▀░▀▀▀░▀░▀`)
+	fmt.Fprintln(w, "")
+}
+
 // printNewVaultBanner prints the irretrievable-passphrase warning. Same
 // language as runSecretSet's inline first-run banner — kept in sync so
 // users see the same warning regardless of which path created the vault.

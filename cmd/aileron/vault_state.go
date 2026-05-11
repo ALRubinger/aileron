@@ -76,6 +76,9 @@ func ensureVaultUnlocked(passphraseFile string, stderr io.Writer) error {
 // Retries once on a 401 for interactive entry — file/env sources don't
 // retry because the source isn't going to change between attempts.
 func promptAndUnlockRunning(daemonURL, passphraseFile string, stderr io.Writer) error {
+	if willPromptInteractively(passphraseFile) {
+		printAileronBanner(stderr)
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		passphrase, source, err := readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
 		if err != nil {
@@ -108,6 +111,7 @@ func promptCreateAndUnlock(vaultPath, passphraseFile string, stderr io.Writer) e
 	// File/env sources skip the banner (non-interactive callers don't
 	// need the warning).
 	if willPromptInteractively(passphraseFile) {
+		printAileronBanner(stderr)
 		printNewVaultBanner(stderr, vaultPath)
 	}
 	passphrase, source, err := readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
@@ -149,6 +153,9 @@ func promptCreateAndUnlock(vaultPath, passphraseFile string, stderr io.Writer) e
 // branch. Prompts, spawns the daemon (which starts vault-locked under
 // selectVault's no-TTY path), then POSTs /v1/vault/unlock.
 func promptAndSpawnUnlock(passphraseFile string, stderr io.Writer) error {
+	if willPromptInteractively(passphraseFile) {
+		printAileronBanner(stderr)
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		passphrase, source, err := readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
 		if err != nil {
