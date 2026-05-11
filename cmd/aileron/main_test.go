@@ -4071,6 +4071,185 @@ actions = [
 	}
 }
 
+// TestRunActionAddSuite_PreviewFailureMarkedFailedInSummary: when
+// the daemon refuses to preview one ref (e.g. signature_failure on a
+// rotated key), the suite consent screen surfaces the failure with
+// the ✗ marker, the user can still install the healthy entries, and
+// the summary buckets the broken one as `failed` while reporting the
+// rest as added. Preview-failed entries never reach the install
+// endpoint.
+func TestRunActionAddSuite_PreviewFailureMarkedFailedInSummary(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "preview-fail"
+description = "One bad apple; the rest install."
+
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+  "github://acme/conn/actions/bar@0.1.0",
+  "github://acme/conn/actions/baz@0.1.0",
+]
+`)
+	installCalls := map[string]int{}
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			if strings.Contains(fqn, "/bar") {
+				// Simulate the daemon refusing to preview this ref
+				// (rotated signing key, missing keyring entry, etc.).
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = io.WriteString(w, `{"error":{"code":"signature_failure","message":"key not found"}}`)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				fqn, lastSegment(fqn))
+		},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			installCalls[fqn]++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":"x","path":"/p"}`, lastSegment(fqn), fqn)
+		},
+	)
+
+	stdin := strings.NewReader("y\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{manifestPath}, stdin, &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("expected nonzero exit when a preview fails; stderr=%s", stderr.String())
+	}
+	// The two healthy refs install; the broken one is never sent to
+	// /actions/install (it short-circuits as failed before the loop
+	// even runs the entry). Install endpoint receives the bare FQN
+	// (the @<version> rides in the request body, not the FQN field).
+	if installCalls["github://acme/conn/actions/bar"] != 0 {
+		t.Errorf("install endpoint hit for preview-failed ref; calls=%d",
+			installCalls["github://acme/conn/actions/bar"])
+	}
+	if installCalls["github://acme/conn/actions/foo"] != 1 ||
+		installCalls["github://acme/conn/actions/baz"] != 1 {
+		t.Errorf("expected healthy refs to install; calls=%+v", installCalls)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Suite install preview",
+		"(preview failed",
+		"actions/bar@0.1.0",
+		"actions/foo@0.1.0 (added)",
+		"actions/baz@0.1.0 (added)",
+		"3 action(s): 2 added, 1 failed.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAddSuite_YesFlagSkipsSuiteConsentPrompt: --yes is an
+// explicit "skip every prompt including the suite-level one". Pin
+// the contract: zero "Install?" prompts in the output regardless of
+// how many actions are in the suite.
+func TestRunActionAddSuite_YesFlagSkipsSuiteConsentPrompt(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "yes-skips"
+description = "Four actions; --yes; zero prompts."
+
+actions = [
+  "github://acme/conn/actions/a1@0.1.0",
+  "github://acme/conn/actions/a2@0.1.0",
+  "github://acme/conn/actions/a3@0.1.0",
+  "github://acme/conn/actions/a4@0.1.0",
+]
+`)
+	installCalls := map[string]int{}
+	suiteInstallServer(t, []string{"github://acme/conn"}, nil,
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			installCalls[fqn]++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":"x","path":"/p"}`, lastSegment(fqn), fqn)
+		},
+	)
+
+	// Empty stdin: if a prompt fires, the test deadlocks (the daemon
+	// is mocked but stdin is bounded). Asserting 0 prompts in stdout
+	// is the explicit contract.
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{"--yes", manifestPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Count(stdout.String(), "Install? [y/N]: "); got != 0 {
+		t.Errorf("--yes must suppress every consent prompt, got %d:\n%s", got, stdout.String())
+	}
+	if got := strings.Count(stdout.String(), "Suite install preview"); got != 0 {
+		t.Errorf("--yes must suppress the suite preview screen, got %d:\n%s", got, stdout.String())
+	}
+	if len(installCalls) != 4 {
+		t.Errorf("expected 4 install calls under --yes; got %d (%+v)", len(installCalls), installCalls)
+	}
+}
+
+// TestRunActionAddSuite_ConnectorDepsAggregatedAndDeduped: the suite
+// preview's "Connectors:" section lists every distinct dep once. Two
+// actions sharing a dep render that dep on one line; a third action
+// declaring a different dep adds a second line. Exercises
+// buildSuitePlan's dedup-by-FQN+version path.
+func TestRunActionAddSuite_ConnectorDepsAggregatedAndDeduped(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "shared-deps"
+description = "Two share a connector dep; one is on its own."
+
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+  "github://acme/conn/actions/bar@0.1.0",
+  "github://acme/conn/actions/baz@0.1.0",
+]
+`)
+	suiteInstallServer(t, []string{"github://acme/conn"},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			name := lastSegment(fqn)
+			// foo + bar share connector "google"; baz declares
+			// "calendar". Both are not-already-installed.
+			var deps string
+			switch name {
+			case "foo", "bar":
+				deps = `[{"fqn":"github://acme/google","version":"0.0.7","hash":"sha256:g","capabilities":["network"],"already_installed":false}]`
+			case "baz":
+				deps = `[{"fqn":"github://acme/calendar","version":"0.0.3","hash":"sha256:c","capabilities":["network"],"already_installed":false}]`
+			}
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":%s}`,
+				fqn, name, deps)
+		},
+		func(fqn string, w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":"x","path":"/p"}`, lastSegment(fqn), fqn)
+		},
+	)
+	// Seed trust for both connector authorities so the preflight
+	// trust pass doesn't prompt; the test is about preview rendering.
+	withSeededKeyring(t, "github://acme/conn", "github://acme/google", "github://acme/calendar")
+
+	stdin := strings.NewReader("n\n") // decline to focus on the rendered preview
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{manifestPath}, stdin, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Connectors:",
+		"github://acme/google@0.0.7",
+		"github://acme/calendar@0.0.3",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preview missing %q:\n%s", want, out)
+		}
+	}
+	// The shared dep must appear exactly once, not once per action.
+	if got := strings.Count(out, "github://acme/google@0.0.7"); got != 1 {
+		t.Errorf("shared connector listed %d times, want exactly 1:\n%s", got, out)
+	}
+}
+
 // TestRunActionAddSuite_MissingManifestFileExits1 surfaces a clear
 // error when the local source path doesn't exist.
 func TestRunActionAddSuite_MissingManifestFileExits1(t *testing.T) {
