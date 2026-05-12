@@ -237,6 +237,18 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	}
 
 	url := "http://" + listener.Addr().String()
+
+	// The daemon serves the webapp itself (see internal/app/webapp_embed.go),
+	// so its own bound URL is the right default for the approval review URL
+	// surfaced in agent-facing messages. Operators running behind a reverse
+	// proxy or on a non-loopback bind (`--bind 0.0.0.0:...`) must override
+	// via `AILERON_WEBAPP_URL` so the message names the hostname users
+	// actually reach. Defaulting here means the common single-user local
+	// case works with no configuration.
+	if cfg.WebappURL == "" && os.Getenv("AILERON_WEBAPP_URL") == "" {
+		cfg.WebappURL = url
+	}
+
 	info := discovery.Info{
 		URL:       url,
 		PID:       os.Getpid(),
