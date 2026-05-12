@@ -93,7 +93,11 @@ func (s *apiServer) DecideActionApproval(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, "decide_error", err.Error())
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	// 204, not 200. The webapp's JSON client deserializes every 2xx
+	// it doesn't special-case, and 200 with an empty body would crash
+	// it on `res.json()`. 204 is the HTTP-canonical shape for "success,
+	// no body" and the client already handles it.
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // GetActionApprovalResult serves the agent's poll for an approval's
