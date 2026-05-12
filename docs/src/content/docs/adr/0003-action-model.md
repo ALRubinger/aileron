@@ -146,7 +146,7 @@ Fields:
 - `required` — optional, defaults to `true`. Set to `false` to make the argument optional.
 - `description` — required. Becomes the field-level description the LLM sees when the action is exposed as a tool.
 
-The `[[inputs]]` block is the contract between the action and the LLM (per [ADR-0008](/adr/0008-intent-matching)). When Aileron augments the agent's tool catalog with an action, it derives a JSON Schema `parameters` object directly from the inputs:
+The `[[inputs]]` block is the contract between the action and the LLM (per [ADR-0008](/adr/0008-intent-matching)). When `aileron-mcp` exposes an installed action as an MCP tool, it derives a JSON Schema `parameters` object directly from the inputs:
 
 ```json
 {
@@ -259,7 +259,7 @@ Rejected because it ossifies behavior at a layer that should remain flexible. A 
 ### Open implementation questions (deferred)
 
 - *How does `aileron action add` resolve missing connector dependencies and walk the user through bindings?* — deferred to [ADR-0004](/adr/0004-dependency-resolution) and [ADR-0007](/adr/0007-install-consent).
-- *How does the runtime match agent intent to a specific installed action?* — deferred to [ADR-0008](/adr/0008-intent-matching).
+- *How are installed actions exposed to agents and matched to user intent?* — deferred to [ADR-0008](/adr/0008-intent-matching).
 - *How does an action behave when one of its connector calls fails partway through?* — deferred to [ADR-0010](/adr/0010-failure-handling).
 - *Will Aileron support a project-level action surface (`<project>/actions/`) for teams that want to commit shared action sets?* — deliberately deferred. v1 is user-level only. The shape of any future project-level surface (precedence rules, merging behavior, conflict resolution) will be ratified when concrete teams ask for it.
 

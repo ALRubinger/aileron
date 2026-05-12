@@ -190,7 +190,7 @@ For end-to-end timing or correlation with the rest of your agent stack, Aileron 
 
 ## What you've built
 
-You ran a real LLM through a local proxy that augmented its tool catalog with installed actions, executed those actions inside a WASM sandbox, mediated OAuth tokens at the network boundary so the LLM never held a credential, and recorded every decision and execution in an audit log.
+You ran a real agent against a real LLM. Your installed actions reached the agent through Aileron's MCP server (one tool per action, description drawn from the action's Markdown body). When the LLM picked one, the agent host dispatched the call back through MCP to the daemon, which executed the action inside a WASM sandbox, mediated OAuth tokens at the network boundary so the LLM never held a credential, and recorded every decision and execution in an audit log.
 
 This is the loop the rest of the docs builds on. From here:
 

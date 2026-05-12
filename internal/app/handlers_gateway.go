@@ -7,23 +7,24 @@ import (
 	"net/url"
 
 	"github.com/ALRubinger/aileron/internal/failure"
-	"github.com/ALRubinger/aileron/internal/intercept"
 )
 
-// PostChatCompletions handles POST /v1/chat/completions.
-//
-// When no actions are installed, the request is forwarded through a
-// transparent reverse proxy (stage 2 behavior). When the user has
-// installed actions, the request is delegated to the intercept engine
-// which augments the tool catalog (stage 3) and intercepts Aileron
-// tool calls (stage 4) before forwarding the final assistant message
-// to the agent.
+// PostChatCompletions handles `POST /v1/chat/completions` as a
+// transparent reverse proxy to the configured upstream OpenAI-shaped
+// provider. Aileron does not augment the agent's tool catalog or
+// intercept tool calls in the LLM stream — actions are exposed to the
+// agent over MCP via `aileron-mcp` and executed through
+// `POST /v1/actions/{name}/run`, which is the single chokepoint where
+// the manifest's `[approval]` block is honored. Keeping the gateway
+// purely pass-through guarantees there is one execution path for
+// every action, regardless of which agent is launched.
 //
 // When the local credential vault is locked (per ADR-0011), the
 // endpoint refuses to serve — the runtime cannot resolve any
-// credential a connector might need. The agent receives a 423
-// FailureEnvelope with class `binding_required`, prompting them to
-// surface the unlock requirement to the user.
+// credential a connector might need on a subsequent MCP-driven action
+// invocation. The agent receives a 423 FailureEnvelope with class
+// `binding_required`, prompting them to surface the unlock requirement
+// to the user.
 func (s *apiServer) PostChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.vaultLocked {
 		writeVaultLocked(w)
@@ -34,15 +35,11 @@ func (s *apiServer) PostChatCompletions(w http.ResponseWriter, r *http.Request) 
 			"OpenAI gateway upstream is not configured")
 		return
 	}
-	if !s.hasInstalledActions() {
-		s.openAIProxy.ServeHTTP(w, r)
-		return
-	}
-	s.interceptEngine.HandleOpenAI(w, r)
+	s.openAIProxy.ServeHTTP(w, r)
 }
 
-// PostMessages handles POST /v1/messages with the same logic shaped
-// for the Anthropic Messages protocol.
+// PostMessages handles `POST /v1/messages` with the same pass-through
+// semantics for the Anthropic Messages protocol.
 func (s *apiServer) PostMessages(w http.ResponseWriter, r *http.Request) {
 	if s.vaultLocked {
 		writeVaultLocked(w)
@@ -53,11 +50,7 @@ func (s *apiServer) PostMessages(w http.ResponseWriter, r *http.Request) {
 			"Anthropic gateway upstream is not configured")
 		return
 	}
-	if !s.hasInstalledActions() {
-		s.anthropicProxy.ServeHTTP(w, r)
-		return
-	}
-	s.interceptEngine.HandleAnthropic(w, r)
+	s.anthropicProxy.ServeHTTP(w, r)
 }
 
 // writeVaultLocked emits the canonical FailureEnvelope for "the
@@ -75,17 +68,6 @@ func writeVaultLocked(w http.ResponseWriter) {
 		}),
 	)
 	failure.WriteHTTP(w, f)
-}
-
-// hasInstalledActions reports whether at least one action is loaded
-// in the user's actions store. Without actions there is nothing to
-// augment or intercept, so the gateway can stay on the lightweight
-// reverse-proxy path.
-func (s *apiServer) hasInstalledActions() bool {
-	if s.actions == nil || s.interceptEngine == nil {
-		return false
-	}
-	return len(s.actions.List()) > 0
 }
 
 // newGatewayProxy builds an HTTP reverse proxy that forwards requests
@@ -117,14 +99,3 @@ func newGatewayProxy(upstream *url.URL, providerLabel string, log *slog.Logger) 
 	}
 	return rp
 }
-
-// interceptEngineHandle is the contract apiServer relies on. The
-// concrete implementation lives in internal/intercept; the interface
-// keeps this package decoupled from intercept's internal state.
-type interceptEngineHandle interface {
-	HandleOpenAI(w http.ResponseWriter, r *http.Request)
-	HandleAnthropic(w http.ResponseWriter, r *http.Request)
-}
-
-// Compile-time assertion: *intercept.Engine satisfies the handle.
-var _ interceptEngineHandle = (*intercept.Engine)(nil)
