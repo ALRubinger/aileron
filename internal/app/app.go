@@ -56,24 +56,23 @@ type Config struct {
 	// rather than in a process-lifetime memory vault.
 	Vault vault.Vault
 
-	// WebappURL is the base URL of the Aileron webapp the user opens to
-	// approve / deny gated actions (#418). When set, the action-approval
-	// notification's ReviewURL is built as
+	// WebappURL is the base URL the action-approval review surface is
+	// reachable at (#418). The notification's ReviewURL is built as
 	// `<WebappURL>/approvals?focus=<id>` so the terminal-printed block
-	// carries a per-approval deep link the operator can click or
-	// re-open via `aileron open approval <id>`.
+	// and agent-facing approval message carry a per-approval deep link
+	// the user can click or re-open via `aileron open approval <id>`.
 	//
-	// Empty falls back to the AILERON_WEBAPP_URL environment variable.
-	// Both empty means notifications fire with a generic prompt
-	// instead of a URL — the operator at least learns something needs
-	// attention.
+	// The daemon serves the webapp itself (see webapp_embed.go), so the
+	// natural default is the daemon's own bound URL. Production wiring
+	// (`internal/server`) sets that default after binding. This field
+	// and the `AILERON_WEBAPP_URL` environment variable are overrides
+	// for deployments where the daemon's bound URL is not what users
+	// hit: reverse-proxied installs, `--bind 0.0.0.0:...` containers, or
+	// a future split-origin webapp.
 	//
-	// Launch sets this to the embedded gateway's own URL so the
-	// notification points at the same daemon the agent is talking to.
-	// Once the daemon serves `ui/build` directly (post-MVP cleanup),
-	// that URL becomes the working webapp entry point automatically.
-	// Until then, users running the webapp dev server elsewhere can
-	// override via AILERON_WEBAPP_URL.
+	// Precedence: cfg.WebappURL (this field) → AILERON_WEBAPP_URL env →
+	// empty. Empty surfaces a generic prompt instead of a URL — the
+	// operator at least learns something needs attention.
 	WebappURL string
 
 	// Notifier overrides the default notification dispatcher (log +

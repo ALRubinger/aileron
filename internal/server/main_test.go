@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -311,6 +312,109 @@ func TestRun_PublishesDiscoveryAndCleansUp(t *testing.T) {
 			t.Errorf("%s still exists after shutdown (err: %v)", name, err)
 		}
 	}
+}
+
+// TestRun_WebappURL_DefaultsToBoundURL pins the contract that the
+// daemon's own bound URL becomes the default WebappURL surfaced in
+// agent-facing approval messages. Without this default, an
+// approval-gated action's review URL is rendered as "Visit  to
+// approve" — empty between "Visit" and "to" — because
+// `buildPendingApprovalResponse` interpolates `s.webappURL` directly.
+// The daemon serves the webapp itself (see internal/app/webapp_embed.go),
+// so its own URL is the right out-of-the-box answer for the common
+// local case.
+//
+// `AILERON_WEBAPP_URL` (covered by [TestRun_WebappURL_EnvOverrides])
+// remains an operator override for reverse-proxied deployments.
+func TestRun_WebappURL_DefaultsToBoundURL(t *testing.T) {
+	t.Setenv("AILERON_WEBAPP_URL", "")
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := options{
+		BindAddr:  "127.0.0.1:0",
+		StateDir:  stateDir,
+		VaultPath: vaultPath,
+		IsTTY:     false,
+		Stderr:    io.Discard,
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, log, opts) }()
+
+	info := waitForDaemon(t, stateDir, 3*time.Second)
+
+	got := fetchStatusGatewayURL(t, info.URL)
+	if got != info.URL {
+		t.Errorf("gateway_url = %q, want %q (the daemon's own bound URL)", got, info.URL)
+	}
+
+	cancel()
+	<-runErr
+}
+
+// TestRun_WebappURL_EnvOverrides asserts that `AILERON_WEBAPP_URL`,
+// when set, takes precedence over the bound-URL default. This is the
+// escape hatch for reverse-proxied or `--bind 0.0.0.0:...` deployments
+// where the bound URL is not what users see.
+func TestRun_WebappURL_EnvOverrides(t *testing.T) {
+	const override = "https://aileron.example.com"
+	t.Setenv("AILERON_WEBAPP_URL", override)
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := options{
+		BindAddr:  "127.0.0.1:0",
+		StateDir:  stateDir,
+		VaultPath: vaultPath,
+		IsTTY:     false,
+		Stderr:    io.Discard,
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, log, opts) }()
+
+	info := waitForDaemon(t, stateDir, 3*time.Second)
+
+	got := fetchStatusGatewayURL(t, info.URL)
+	if got != override {
+		t.Errorf("gateway_url = %q, want %q (env override wins over bound URL)", got, override)
+	}
+
+	cancel()
+	<-runErr
+}
+
+// fetchStatusGatewayURL hits the daemon's `/v1/status` endpoint and
+// returns the `gateway_url` field (which surfaces `s.webappURL` per
+// handlers_status.go). Empty string when the field is absent.
+func fetchStatusGatewayURL(t *testing.T, daemonURL string) string {
+	t.Helper()
+	resp, err := http.Get(daemonURL + "/v1/status")
+	if err != nil {
+		t.Fatalf("GET /v1/status: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/status status = %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		GatewayURL string `json:"gateway_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	return body.GatewayURL
 }
 
 // TestRun_RefusesWhenAnotherDaemonHoldsLock asserts the singleton
