@@ -1101,9 +1101,18 @@ const connectorUsage = `usage:
   aileron connector check [--include-prerelease] [--json]`
 
 const actionUsage = `usage:
+  aileron action list                  [--json]
+  aileron action enable <NAME>
+  aileron action disable <NAME>
   aileron action add <FQN>             [--version=<v>] [--force] [--yes] [--no-bind]
   aileron action add-suite <SOURCE>    [--force] [--yes] [--no-bind]
   aileron action wrap <CLI>            [--config=<yaml>] [--out=<dir>] [--name=<fqn>] [--version=<v>] [--force]
+
+The list/enable/disable subcommands inspect and control which installed
+actions are surfaced to the LLM. Disabling does NOT uninstall the action;
+the manifest file is left in place and the change is recorded in
+~/.aileron/action-state.json. MCP servers that cached the tool list at
+boot need to be restarted before a toggle takes effect with the LLM.
 
 Single-action form: install one action by FQN. Trust + connector
 install are absorbed into this command (issue #563): on a fresh
@@ -1281,6 +1290,12 @@ func runAction(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runActionAddSuite(args[1:], br, stdout, stderr)
 	case "wrap":
 		return runActionWrap(args[1:], stdout, stderr)
+	case "list":
+		return runActionList(args[1:], stdout, stderr)
+	case "enable":
+		return runActionToggle(args[1:], true, stdout, stderr)
+	case "disable":
+		return runActionToggle(args[1:], false, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown action command: %q\n", args[0])
 		fmt.Fprintln(stderr, actionUsage)

@@ -128,6 +128,16 @@ type actionMeta struct {
 	Inputs   []actionInput         `json:"inputs"`
 	Match    *actionMatch          `json:"match,omitempty"`
 	Approval *actionApprovalPolicy `json:"approval,omitempty"`
+	// Enabled mirrors the daemon's per-action overlay state. Absent in
+	// older responses; treat as enabled in that case so a daemon that
+	// predates the toggle feature still exposes every installed action.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// isEnabled reports whether the daemon currently exposes this action.
+// Treats nil (older daemons) and explicit true as enabled.
+func (a actionMeta) isEnabled() bool {
+	return a.Enabled == nil || *a.Enabled
 }
 
 type actionApprovalPolicy struct {
@@ -703,6 +713,13 @@ func (s *server) discoverActions(ctx context.Context) ([]toolDef, map[string]str
 	tools := make([]toolDef, 0, len(alr.Items))
 	nameMap := make(map[string]string, len(alr.Items))
 	for _, a := range alr.Items {
+		// Disabled actions are hidden from tools/list so the LLM never
+		// learns they exist this session. The MCP server caches at boot,
+		// so a re-enable requires a restart to surface the action again
+		// — documented behavior, deliberate trade-off vs. polling.
+		if !a.isEnabled() {
+			continue
+		}
 		td := actionToolDef(a)
 		tools = append(tools, td)
 		nameMap[td.Name] = a.Name

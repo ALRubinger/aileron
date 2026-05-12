@@ -360,6 +360,41 @@ func TestDiscoverActions_Success(t *testing.T) {
 	}
 }
 
+func TestDiscoverActions_OmitsDisabledActions(t *testing.T) {
+	disabled := false
+	enabled := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(actionListResponse{
+			Items: []actionMeta{
+				{Name: "ship-update", Body: "# Ship", Enabled: &enabled},
+				{Name: "list-emails", Body: "# List", Enabled: &disabled},
+				// Missing Enabled — older-daemon shape, treated as enabled.
+				{Name: "legacy-tool", Body: "# Legacy"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	s := &server{aileronURL: srv.URL, httpClient: srv.Client()}
+	tools, nameMap, err := s.discoverActions(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("len(tools) = %d, want 2 (disabled action filtered)", len(tools))
+	}
+	if _, ok := nameMap["list_emails"]; ok {
+		t.Errorf("disabled action 'list-emails' leaked into nameMap")
+	}
+	if _, ok := nameMap["ship_update"]; !ok {
+		t.Errorf("enabled action 'ship-update' missing from nameMap")
+	}
+	if _, ok := nameMap["legacy_tool"]; !ok {
+		t.Errorf("nil-Enabled action 'legacy-tool' should default to enabled")
+	}
+}
+
 func TestDiscoverActions_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

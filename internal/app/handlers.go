@@ -88,6 +88,7 @@ type apiServer struct {
 	localVaultMu       sync.Mutex                  // serializes /v1/vault/unlock so concurrent submits don't both call vault.Unlock
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
+	actionState        action.StateStore // per-action user preferences (enabled/disabled overlay); nil means defaults apply
 	executor           action.Executor   // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
 	installer          *cstore.Installer    // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
 	versionLister      cstore.VersionLister // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
@@ -1223,7 +1224,7 @@ func (s *apiServer) ListActions(w http.ResponseWriter, r *http.Request) {
 	loaded := s.actions.List()
 	items := make([]api.Action, 0, len(loaded))
 	for _, la := range loaded {
-		items = append(items, manifestToAPI(la))
+		items = append(items, manifestToAPI(la, s.actionEnabled(la.Manifest.Name)))
 	}
 	resp := api.ActionListResponse{Items: &items}
 	if res.HasErrors() {
@@ -1253,7 +1254,70 @@ func (s *apiServer) GetAction(w http.ResponseWriter, r *http.Request, name strin
 		writeError(w, http.StatusInternalServerError, "actions_lookup_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, manifestToAPI(la))
+	writeJSON(w, http.StatusOK, manifestToAPI(la, s.actionEnabled(la.Manifest.Name)))
+}
+
+// PatchAction updates the per-user overlay state for an installed action.
+// Only the fields present in the request body are applied — omitted
+// fields preserve their current overlay value, so callers may toggle
+// `enabled` without having to re-send every other preference. The
+// action's manifest file is left untouched: the overlay is the only
+// thing that changes here.
+//
+// Returns the action's full updated view (manifest + overlay) so the
+// caller doesn't need a follow-up GET to display the new state.
+func (s *apiServer) PatchAction(w http.ResponseWriter, r *http.Request, name string) {
+	if s.actions == nil {
+		writeError(w, http.StatusNotFound, "not_found", "action not found")
+		return
+	}
+	la, err := s.actions.Get(name)
+	if errors.Is(err, action.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "action not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "actions_lookup_failed", err.Error())
+		return
+	}
+
+	var req api.ActionPatchRequest
+	if err := decodeBody(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
+		return
+	}
+
+	if s.actionState == nil {
+		// Overlay isn't writable on this daemon (load failed at startup).
+		// Surface the constraint instead of silently dropping the toggle.
+		writeError(w, http.StatusInternalServerError, "action_state_unavailable",
+			"action state overlay is unavailable; cannot apply update")
+		return
+	}
+
+	current := s.actionState.Get(name)
+	if req.Enabled != nil {
+		v := *req.Enabled
+		current.Enabled = &v
+	}
+	if err := s.actionState.Set(name, current); err != nil {
+		writeError(w, http.StatusInternalServerError, "action_state_write_failed", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, manifestToAPI(la, current.IsEnabled()))
+}
+
+// actionEnabled reports whether the named action is currently enabled
+// per the user-preference overlay. Returns true when no overlay store
+// is configured (the daemon couldn't open `~/.aileron/action-state.json`
+// at startup) so unconfigured callers see the same view as users with
+// an empty overlay — every installed action is callable.
+func (s *apiServer) actionEnabled(name string) bool {
+	if s.actionState == nil {
+		return true
+	}
+	return s.actionState.Get(name).IsEnabled()
 }
 
 // RunAction synchronously executes an installed action with the supplied
@@ -1285,6 +1349,18 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 		return
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "actions_lookup_failed", err.Error())
+		return
+	}
+
+	// Disabled actions refuse invocation even if a stale tool reference
+	// reaches the daemon (the user toggled the action off while an MCP
+	// session was still running with its boot-time tool cache). The error
+	// is explicit so the agent can surface it to the user rather than
+	// hiding the action behind an opaque 404 that looks like "action
+	// uninstalled".
+	if !s.actionEnabled(name) {
+		writeError(w, http.StatusConflict, "action_disabled",
+			"action is disabled; enable it via PATCH /v1/actions/"+name)
 		return
 	}
 
@@ -1435,7 +1511,7 @@ func buildPendingApprovalResponse(approvalID, actionName, connFQN, reviewURL str
 }
 
 
-func manifestToAPI(la action.LoadedAction) api.Action {
+func manifestToAPI(la action.LoadedAction, enabled bool) api.Action {
 	m := la.Manifest
 	connectors := make([]api.ActionRequiresConnector, 0, len(m.Requires.Connectors))
 	for _, c := range m.Requires.Connectors {
@@ -1466,6 +1542,7 @@ func manifestToAPI(la action.LoadedAction) api.Action {
 	}
 	body := m.Body
 	path := la.Path
+	enabledCopy := enabled
 	out := api.Action{
 		Name:    m.Name,
 		Version: m.Version,
@@ -1475,6 +1552,7 @@ func manifestToAPI(la action.LoadedAction) api.Action {
 		},
 		Match:   api.ActionMatch{Intent: m.Match.Intent},
 		Execute: steps,
+		Enabled: &enabledCopy,
 	}
 	if body != "" {
 		out.Body = &body
