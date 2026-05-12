@@ -669,6 +669,48 @@ func TestWatchActionApprovals_DisabledReturns503(t *testing.T) {
 	}
 }
 
+// TestWatchActionApprovals_ThroughLoggingMiddleware is the regression
+// test for the SSE stream stalling at "Connecting to the approval
+// stream…" in the webapp. The handler asserts `w.(http.Flusher)`; an
+// earlier statusWriter wrapper in loggingMiddleware did not proxy
+// Flush, so the assertion failed and the handler returned 500
+// streaming_unsupported. The webapp's onError path doesn't clear its
+// loading flag, so the page sat on the placeholder forever.
+//
+// The contract the SSE handler depends on is: any ResponseWriter
+// wrapper in the middleware chain MUST preserve http.Flusher when
+// the underlying writer supports it. This test exercises the handler
+// through loggingMiddleware end-to-end and asserts the snapshot event
+// is delivered with a 200 — which only happens if Flush proxies
+// through the wrapper.
+func TestWatchActionApprovals_ThroughLoggingMiddleware(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.Register("send-email", "github://x/y", "sess-1", map[string]any{"to": "alice"})
+
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	wrapped := loggingMiddleware(logger, http.HandlerFunc(srv.WatchActionApprovals))
+	httpSrv := httptest.NewServer(wrapped)
+	defer httpSrv.Close()
+
+	resp, err := http.Get(httpSrv.URL)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (SSE handler must work through loggingMiddleware)", resp.StatusCode)
+	}
+
+	r := bufio.NewReader(resp.Body)
+	ev, err := readSSEEvent(r)
+	if err != nil {
+		t.Fatalf("read snapshot: %v (handler never flushed through the middleware)", err)
+	}
+	if ev.Event != "snapshot" {
+		t.Errorf("first event = %q, want snapshot", ev.Event)
+	}
+}
+
 // TestWatchActionApprovals_ClientDisconnectReleases asserts the
 // handler returns when the client disconnects. Without proper
 // context handling, every closed tab would leak a goroutine

@@ -135,7 +135,13 @@
 			onPending: applyPending,
 			onResolved: (r) => applyResolved(r.id),
 			onError: (e) => {
+				// Surface the failure instead of leaving the page on the
+				// "Connecting…" placeholder forever. `loading` is also
+				// cleared here so the error branch renders — the SSE
+				// stream may never deliver a snapshot if the browser gave
+				// up (readyState === CLOSED).
 				error = e instanceof Error ? e.message : String(e);
+				loading = false;
 			}
 		});
 		return () => {
