@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -210,5 +211,172 @@ func TestRunActionToggle_RequiresName(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "usage:") {
 		t.Errorf("stderr missing usage hint: %s", stderr.String())
+	}
+}
+
+func TestRunActionToggle_BlankNameRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runActionToggle([]string{"   "}, true, &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit for whitespace-only name")
+	}
+}
+
+func TestRunActionList_BaseURLError(t *testing.T) {
+	orig := bindingAPIBaseURL
+	bindingAPIBaseURL = func() (string, error) { return "", fmt.Errorf("spawn boom") }
+	t.Cleanup(func() { bindingAPIBaseURL = orig })
+
+	var stdout, stderr bytes.Buffer
+	if code := runActionList(nil, &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit when baseURL fails")
+	}
+	if !strings.Contains(stderr.String(), "spawn boom") {
+		t.Errorf("stderr missing base-URL error: %s", stderr.String())
+	}
+}
+
+func TestRunActionList_TransportError(t *testing.T) {
+	// Point at an address that will refuse the connection so the HTTP
+	// transport fails before the daemon has a chance to respond.
+	setBindingBase(t, "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	if code := runActionList(nil, &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit on transport failure")
+	}
+}
+
+func TestRunActionList_MalformedJSONResponse(t *testing.T) {
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("not-json"))
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	if code := runActionList(nil, &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit when daemon returns garbage")
+	}
+	if !strings.Contains(stderr.String(), "decoding response") {
+		t.Errorf("stderr missing decode-error hint: %s", stderr.String())
+	}
+}
+
+func TestRunActionList_EmptyJSONMode(t *testing.T) {
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(actionListWireResponse{Items: nil})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	if code := runActionList([]string{"--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "[]" {
+		t.Errorf("expected [] for empty JSON, got: %q", stdout.String())
+	}
+}
+
+func TestRunActionToggle_BaseURLError(t *testing.T) {
+	orig := bindingAPIBaseURL
+	bindingAPIBaseURL = func() (string, error) { return "", fmt.Errorf("spawn boom") }
+	t.Cleanup(func() { bindingAPIBaseURL = orig })
+
+	var stdout, stderr bytes.Buffer
+	if code := runActionToggle([]string{"x"}, true, &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit when baseURL fails")
+	}
+}
+
+func TestRunActionToggle_TransportError(t *testing.T) {
+	setBindingBase(t, "http://127.0.0.1:1")
+	var stdout, stderr bytes.Buffer
+	if code := runActionToggle([]string{"x"}, false, &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit on transport failure")
+	}
+}
+
+// --- dispatcher (cmd/aileron/main.go runAction switch) ---
+
+func TestRunAction_DispatchesList(t *testing.T) {
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(actionListWireResponse{Items: nil})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runAction([]string{"list"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No actions installed") {
+		t.Errorf("list dispatch did not call runActionList: %s", stdout.String())
+	}
+}
+
+func TestRunAction_DispatchesEnable(t *testing.T) {
+	var gotBody []byte
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "x"})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runAction([]string{"enable", "ship-update"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	var parsed struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(gotBody, &parsed); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !parsed.Enabled {
+		t.Errorf("enable dispatch sent enabled=false")
+	}
+}
+
+func TestRunAction_DispatchesDisable(t *testing.T) {
+	var gotBody []byte
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "x"})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runAction([]string{"disable", "ship-update"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	var parsed struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(gotBody, &parsed); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if parsed.Enabled {
+		t.Errorf("disable dispatch sent enabled=true")
+	}
+}
+
+func TestRunAction_NoArgsShowsUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runAction(nil, strings.NewReader(""), &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit when no subcommand supplied")
+	}
+	if !strings.Contains(stderr.String(), "usage:") {
+		t.Errorf("stderr missing usage: %s", stderr.String())
+	}
+}
+
+func TestRunAction_UnknownSubcommand_State(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runAction([]string{"frobnicate"}, strings.NewReader(""), &stdout, &stderr); code == 0 {
+		t.Errorf("expected non-zero exit for unknown subcommand")
+	}
+	if !strings.Contains(stderr.String(), "unknown action command") {
+		t.Errorf("stderr missing unknown-command hint: %s", stderr.String())
 	}
 }

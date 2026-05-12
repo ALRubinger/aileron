@@ -146,6 +146,48 @@ func TestFileStateStore_ConcurrentSetsAllPersist(t *testing.T) {
 	}
 }
 
+func TestFileStateStore_SetReturnsErrorWhenDirCannotBeCreated(t *testing.T) {
+	// Open the store at a path under an existing directory, then turn
+	// that directory into a file before calling Set. flushLocked's
+	// MkdirAll returns ENOTDIR because the path no longer references a
+	// directory. Exercises the error-bubbling path that surfaces disk
+	// failures rather than silently dropping the write.
+	root := t.TempDir()
+	subdir := filepath.Join(root, "sub")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	path := filepath.Join(subdir, "state.json")
+	s, err := NewFileStateStore(path)
+	if err != nil {
+		t.Fatalf("NewFileStateStore: %v", err)
+	}
+	// Replace subdir with a regular file so MkdirAll(subdir) fails.
+	if err := os.RemoveAll(subdir); err != nil {
+		t.Fatalf("rm subdir: %v", err)
+	}
+	if err := os.WriteFile(subdir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	if err := s.Set("x", State{Enabled: ptrBool(false)}); err == nil {
+		t.Errorf("Set: err = nil, want non-nil when parent is not a directory")
+	}
+}
+
+func TestFileStateStore_EmptyFileTreatedAsEmptyState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	s, err := NewFileStateStore(path)
+	if err != nil {
+		t.Fatalf("NewFileStateStore: %v", err)
+	}
+	if got := s.All(); len(got) != 0 {
+		t.Errorf("All() = %v, want empty for zero-byte file", got)
+	}
+}
+
 func TestDefaultStatePath_UsesHomeAileronDir(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {

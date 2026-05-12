@@ -3,8 +3,12 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -205,6 +209,83 @@ func TestPatchAction_NilActionsStoreReturns404(t *testing.T) {
 	srv.PatchAction(rec, req, "x")
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 when actions store is nil", rec.Code)
+	}
+}
+
+// failingStateStore implements action.StateStore but errors on every
+// Set so PatchAction's disk-write error path is exercisable.
+type failingStateStore struct {
+	state map[string]action.State
+	err   error
+}
+
+func newFailingStateStore(err error) *failingStateStore {
+	return &failingStateStore{state: map[string]action.State{}, err: err}
+}
+
+func (f *failingStateStore) Get(name string) action.State { return f.state[name] }
+func (f *failingStateStore) Set(name string, s action.State) error {
+	return f.err
+}
+func (f *failingStateStore) All() map[string]action.State {
+	out := map[string]action.State{}
+	for k, v := range f.state {
+		out[k] = v
+	}
+	return out
+}
+
+func TestPatchAction_StoreSetFailureReturns500(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	srv.actionState = newFailingStateStore(errors.New("disk full"))
+
+	req := httptest.NewRequest(http.MethodPatch, "/v1/actions/ship-update",
+		bytes.NewReader([]byte(`{"enabled":false}`)))
+	rec := httptest.NewRecorder()
+	srv.PatchAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500 when state store Set fails", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("disk full")) {
+		t.Errorf("response missing underlying error text: %s", rec.Body.String())
+	}
+}
+
+func TestNewActionStateStore_RecoversFromMalformedOverlay(t *testing.T) {
+	// Point HOME at a tempdir whose action-state.json is unparseable.
+	// newActionStateStore should warn and return nil — leaving the
+	// daemon healthy with every installed action treated as enabled.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".aileron"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".aileron", "action-state.json"),
+		[]byte("not-json"), 0o644); err != nil {
+		t.Fatalf("seed overlay: %v", err)
+	}
+	t.Setenv("HOME", dir)
+
+	if got := newActionStateStore(slog.New(slog.NewJSONHandler(io.Discard, nil))); got != nil {
+		t.Errorf("newActionStateStore(malformed) = %v, want nil for graceful fallback", got)
+	}
+}
+
+func TestNewActionStateStore_HappyPathReturnsStore(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	got := newActionStateStore(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if got == nil {
+		t.Fatalf("newActionStateStore over fresh HOME returned nil")
+	}
+	// The store should round-trip a write so the wiring is exercised
+	// end-to-end (file creation under HOME/.aileron/).
+	if err := got.Set("x", action.State{Enabled: boolPtr(false)}); err != nil {
+		t.Fatalf("Set on fresh store: %v", err)
+	}
+	if got.Get("x").IsEnabled() {
+		t.Errorf("Get after Set(false) reported enabled=true")
 	}
 }
 
