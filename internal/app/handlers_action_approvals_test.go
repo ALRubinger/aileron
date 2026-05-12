@@ -145,6 +145,92 @@ func TestListActionApprovals_PopulatedQueueSurfacesAllFields(t *testing.T) {
 	}
 }
 
+// TestListActionApprovals_PreviewRoundTripsThroughTheWire pins the
+// load-bearing wire shape for ADR-0016: an entry registered with a
+// preview payload surfaces every preview field through the listing
+// endpoint so the webapp's pending card can render it without a
+// second fetch. Without this round-trip, the daemon would invoke the
+// preview op for no observable effect — the user would still see only
+// the raw inputs.
+func TestListActionApprovals_PreviewRoundTripsThroughTheWire(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.RegisterKindWithPreview(approval.ApprovalKindAction,
+		"send-draft", "github://aileron/google", "session-42",
+		map[string]any{"draft_id": "r-12345"},
+		&approval.ActionApprovalPreview{
+			Fields: []approval.ActionApprovalPreviewField{
+				{Label: "To", Value: "alice@example.com"},
+				{Label: "Subject", Missing: true},
+			},
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals", nil)
+	rec := httptest.NewRecorder()
+	srv.ListActionApprovals(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.ActionApprovalListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("Items len = %d, want 1", len(got.Items))
+	}
+	preview := got.Items[0].Preview
+	if preview == nil {
+		t.Fatal("Preview = nil, want populated preview after RegisterKindWithPreview")
+	}
+	if preview.Fields == nil || len(*preview.Fields) != 2 {
+		t.Fatalf("Preview.Fields = %v, want 2 fields", preview.Fields)
+	}
+	fields := *preview.Fields
+	if fields[0].Label != "To" {
+		t.Errorf("Fields[0].Label = %q, want %q", fields[0].Label, "To")
+	}
+	if fields[0].Value == nil || *fields[0].Value != "alice@example.com" {
+		t.Errorf("Fields[0].Value = %v, want pointer to %q", fields[0].Value, "alice@example.com")
+	}
+	if fields[1].Missing == nil || !*fields[1].Missing {
+		t.Errorf("Fields[1].Missing = %v, want pointer to true", fields[1].Missing)
+	}
+}
+
+// TestListActionApprovals_PreviewUnavailableSurfacesAcrossWire asserts
+// the wholesale-failure shape (ADR-0016) reaches the wire intact. The
+// "preview unavailable: <reason>" string is the only signal the user
+// sees that the preview op itself failed; suppressing it would let
+// the user approve a doomed call without warning.
+func TestListActionApprovals_PreviewUnavailableSurfacesAcrossWire(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.RegisterKindWithPreview(approval.ApprovalKindAction,
+		"send-draft", "github://aileron/google", "",
+		map[string]any{"draft_id": "wrong"},
+		&approval.ActionApprovalPreview{
+			Unavailable: "preview unavailable: Gmail API returned 404",
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals", nil)
+	rec := httptest.NewRecorder()
+	srv.ListActionApprovals(rec, req)
+
+	var got api.ActionApprovalListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	preview := got.Items[0].Preview
+	if preview == nil || preview.Unavailable == nil {
+		t.Fatal("Preview.Unavailable = nil, want populated reason")
+	}
+	if *preview.Unavailable != "preview unavailable: Gmail API returned 404" {
+		t.Errorf("Preview.Unavailable = %q, want the 404 reason", *preview.Unavailable)
+	}
+	if preview.Fields != nil {
+		t.Errorf("Preview.Fields = %v, want nil on wholesale failure", preview.Fields)
+	}
+}
+
 // TestDecideActionApproval_ApproveResolves is the handler-side
 // regression for the approve path: a POST with `approved: true`
 // resolves the queue entry; a follow-up List shows it gone. The

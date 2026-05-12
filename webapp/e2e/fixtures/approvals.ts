@@ -26,6 +26,8 @@ import { expect, test as base, type Page, type Request } from '@playwright/test'
  */
 
 import type {
+	ActionApprovalPreview,
+	ActionApprovalPreviewField,
 	PendingActionApproval,
 	ResolvedActionApproval
 } from '../../src/lib/api';
@@ -288,5 +290,49 @@ export const fixture = {
 		approved,
 		reason,
 		decided_at: '2026-05-04T12:05:00Z'
+	}),
+	/**
+	 * Build a {@link PendingActionApproval} for an action-kind entry
+	 * that carries an `[approval.preview]` payload (ADR-0016). The
+	 * default mirrors the worked example from the ADR (`send-draft`
+	 * with To/Subject/Preview fields fetched authoritatively from
+	 * Gmail).
+	 */
+	actionWithPreview: (
+		overrides?: Partial<PendingActionApproval>,
+		previewOverrides?: Partial<ActionApprovalPreview>
+	): PendingActionApproval => ({
+		id: 'act-preview-1',
+		kind: 'action',
+		action_name: 'send-draft',
+		connector_fqn: 'github://aileron/aileron-connector-google',
+		args: { draft_id: 'r-12345' },
+		session_id: 'session-42',
+		requested_at: '2026-05-04T12:00:00Z',
+		preview: {
+			fields: [
+				{ label: 'To', value: 'alice@example.com' },
+				{ label: 'Subject', value: 'Weekly recap' },
+				{ label: 'Preview', value: "Here's the recap from this week's standup..." }
+			],
+			...previewOverrides
+		},
+		...overrides
+	}),
+	/**
+	 * Convenience for the wholesale-failure shape (ADR-0016 failure
+	 * modes table). The card renders the unavailable reason instead
+	 * of the fields list.
+	 */
+	previewUnavailable: (reason: string): ActionApprovalPreview => ({
+		unavailable: reason
+	}),
+	previewField: (
+		label: string,
+		opts?: { value?: string; missing?: boolean }
+	): ActionApprovalPreviewField => ({
+		label,
+		...(opts?.value !== undefined ? { value: opts.value } : {}),
+		...(opts?.missing ? { missing: true } : {})
 	})
 };

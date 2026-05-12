@@ -129,6 +129,9 @@ func Validate(m *Manifest, file string) error {
 	for _, c := range m.Requires.Connectors {
 		connectorByFQN[c.Name] = true
 	}
+	if err := validatePreview(m, file, inputNames); err != nil {
+		return err
+	}
 	stepIDs := map[string]bool{}
 	for i, s := range m.Execute {
 		if s.ID == "" {
@@ -161,6 +164,58 @@ func Validate(m *Manifest, file string) error {
 	return nil
 }
 
+// validatePreview enforces the per-manifest [approval.preview] rules
+// from [ADR-0016]:
+//
+//   - `op` is required and non-empty.
+//   - `render` is required and non-empty.
+//   - every `${args.X}` reference in `args` resolves to a declared
+//     [[inputs]] entry on the gated action.
+//
+// Cross-manifest rules (preview op declared idempotent in some action
+// manifest, preview op not itself approval-gated) are enforced by
+// validatePreviewBundle at store-load time. The "op exists on the same
+// connector" rule is enforced by the connector at runtime: an op the
+// connector does not implement returns a structured error that the
+// runtime surfaces as the "Preview unavailable" fallback.
+//
+// Returns nil when the manifest declares no [approval.preview] block,
+// matching the opt-in nature of the directive.
+//
+// [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
+func validatePreview(m *Manifest, file string, inputNames map[string]bool) error {
+	preview := m.ApprovalPreview()
+	if preview == nil {
+		return nil
+	}
+	if strings.TrimSpace(preview.Op) == "" {
+		return newValidationErr(file, "[approval.preview].op is required")
+	}
+	if len(preview.Render) == 0 {
+		return newValidationErr(file, "[approval.preview].render must declare at least one field")
+	}
+	for k, v := range preview.Args {
+		refs := argsRefs(v)
+		for _, ref := range refs {
+			if !inputNames[ref] {
+				return newValidationErr(file,
+					"[approval.preview].args[%q] references ${args.%s} but no [[inputs]] block declares %q",
+					k, ref, ref)
+			}
+		}
+	}
+	for label, path := range preview.Render {
+		if strings.TrimSpace(label) == "" {
+			return newValidationErr(file, "[approval.preview].render label is empty")
+		}
+		if strings.TrimSpace(path) == "" {
+			return newValidationErr(file,
+				"[approval.preview].render[%q] path is empty", label)
+		}
+	}
+	return nil
+}
+
 // argsRe matches `${args.NAME}` interpolation references inside an
 // execute step's input value. The captured group is the argument name.
 var argsRe = regexp.MustCompile(`\$\{args\.([a-z][a-z0-9_]*)\}`)
@@ -182,6 +237,74 @@ func argsRefs(v any) []string {
 	case map[string]any:
 		for _, item := range val {
 			out = append(out, argsRefs(item)...)
+		}
+	}
+	return out
+}
+
+// validatePreviewBundle enforces the cross-manifest [approval.preview]
+// rules from [ADR-0016] that depend on inspecting other action
+// manifests in the bundle:
+//
+//   - The preview op must be declared `idempotent = true` in at least
+//     one bundled action manifest that targets the same connector.
+//   - The preview op must NOT itself appear as an approval-gated op in
+//     any bundled action manifest (no preview-of-preview recursion).
+//
+// `bundle` is every action manifest the store has loaded. For each
+// preview directive, the function walks the bundle once and reports
+// the first failing rule. Returns a per-file *Error so the caller
+// (the store's Load) can aggregate alongside parse and per-manifest
+// validation errors.
+//
+// [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
+func validatePreviewBundle(bundle map[string]LoadedAction) []*Error {
+	type opKey struct {
+		connector string
+		op        string
+	}
+	idempotentOps := map[opKey]bool{}
+	approvalOps := map[opKey]bool{}
+	for _, la := range bundle {
+		m := la.Manifest
+		gated := m.ApprovalRequired()
+		for _, step := range m.Execute {
+			key := opKey{connector: step.Connector, op: step.Op}
+			if step.Idempotent != nil && *step.Idempotent {
+				idempotentOps[key] = true
+			}
+			if gated {
+				approvalOps[key] = true
+			}
+		}
+	}
+	var out []*Error
+	for _, la := range bundle {
+		preview := la.Manifest.ApprovalPreview()
+		if preview == nil {
+			continue
+		}
+		gatedConnector := ""
+		if len(la.Manifest.Execute) > 0 {
+			gatedConnector = la.Manifest.Execute[0].Connector
+		}
+		if gatedConnector == "" {
+			out = append(out, newValidationErr(la.Path,
+				"[approval.preview] requires the gated action to declare at least one [[execute]] step (to resolve the preview op's connector)"))
+			continue
+		}
+		key := opKey{connector: gatedConnector, op: preview.Op}
+		if !idempotentOps[key] {
+			out = append(out, newValidationErr(la.Path,
+				"[approval.preview].op %q is not declared `idempotent = true` in any bundled action manifest targeting connector %q",
+				preview.Op, gatedConnector))
+			continue
+		}
+		if approvalOps[key] {
+			out = append(out, newValidationErr(la.Path,
+				"[approval.preview].op %q is gated by [approval] required = true in a bundled action manifest; preview ops must be safe to invoke without approval",
+				preview.Op))
+			continue
 		}
 	}
 	return out

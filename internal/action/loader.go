@@ -112,6 +112,19 @@ func (s *Store) Load() (*LoadResult, error) {
 		loaded[manifest.Name] = LoadedAction{Manifest: manifest, Path: path}
 	}
 
+	// Cross-manifest validation pass for [approval.preview] (ADR-0016).
+	// Manifests whose preview directive references an op that is not
+	// declared idempotent in the bundle, or that is itself approval-
+	// gated, are reported as errors but the offending action is left
+	// loaded — the runtime resolves the preview at call time and falls
+	// back to "Preview unavailable" rather than gating the entire
+	// action behind a bundle-load failure. Callers (the daemon's
+	// startup) surface the errors via the existing LoadResult.Errors
+	// surface.
+	for _, e := range validatePreviewBundle(loaded) {
+		res.Errors = append(res.Errors, e)
+	}
+
 	s.replace(loaded)
 	return res, nil
 }

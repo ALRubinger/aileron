@@ -5080,6 +5080,46 @@ components:
           description: |
             When true, `POST /v1/actions/{name}/run` blocks on user approval
             before executing. Default false.
+        preview:
+          $ref: "#/components/schemas/ActionApprovalPreviewPolicy"
+
+    ActionApprovalPreviewPolicy:
+      type: object
+      description: |
+        Optional `[approval.preview]` directive (ADR-0016). When present, the
+        runtime invokes the named connector op before showing the approval
+        prompt and renders the response alongside the gated call's inputs so
+        the user sees an authoritative summary of what they are approving
+        rather than agent-supplied hints.
+      required: [op, render]
+      properties:
+        op:
+          type: string
+          description: |
+            Connector op the runtime calls before approval. Must live on the
+            same connector as the gated action's first execute step, must be
+            declared `idempotent = true` in at least one bundled action
+            manifest, and must not itself carry `[approval] required = true`
+            (no preview-of-preview recursion).
+        args:
+          type: object
+          additionalProperties: true
+          description: |
+            Inline argument table passed to the preview op. Values may
+            interpolate `${args.<name>}` against the gated action's
+            call-time inputs.
+        render:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Map of user-facing labels to dotted JSON paths into the preview
+            op's response. Header-style arrays (e.g. Gmail's
+            `message.payload.headers`) use a shorthand: a path segment beyond
+            such an array is interpreted as "find the entry whose `name`
+            equals the segment, return its `value`". Paths that fail to
+            resolve at runtime surface as per-field "n/a" indicators on the
+            approval prompt; the approval still proceeds.
 
     PendingActionApproval:
       type: object
@@ -5142,6 +5182,60 @@ components:
           type: string
           format: date-time
           description: When the queue minted this request.
+        preview:
+          $ref: "#/components/schemas/ActionApprovalPreview"
+
+    ActionApprovalPreview:
+      type: object
+      description: |
+        Rendered output of the action manifest's `[approval.preview]`
+        directive (ADR-0016). Surfaced on the approval prompt so the user
+        sees an authoritative summary of what they are approving rather than
+        agent-supplied hints. Two terminal shapes:
+
+          - On success, `fields` carries the rendered entries in the
+            manifest's declared order. A field whose render path did not
+            resolve in the preview response carries `missing=true` so the UI
+            renders "n/a" rather than silently omitting the row.
+          - On wholesale failure (HTTP non-2xx, timeout, sandbox denial,
+            WASM trap), `unavailable` carries a short user-facing reason
+            (e.g. "preview unavailable: timeout") and `fields` is omitted.
+            The approval still proceeds; the user can decline based on the
+            raw inputs plus the failure note.
+      properties:
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionApprovalPreviewField"
+          description: |
+            Rendered entries in the manifest's declared order. Omitted on
+            wholesale preview failure.
+        unavailable:
+          type: string
+          description: |
+            User-facing reason a wholesale preview failure occurred. Empty
+            on success (even when some individual fields had missing paths).
+
+    ActionApprovalPreviewField:
+      type: object
+      required: [label]
+      description: One rendered entry on the approval prompt.
+      properties:
+        label:
+          type: string
+          description: User-facing key from the manifest's `render` table.
+        value:
+          type: string
+          description: |
+            Resolved string. Empty when `missing=true`; the UI renders "n/a"
+            in that case.
+        missing:
+          type: boolean
+          description: |
+            True when the manifest's render path did not resolve in the
+            preview op's response. The UI surfaces these as "n/a" so the
+            user sees that the connector did not return the field, rather
+            than the field being silently absent.
 
     ActionApprovalListResponse:
       type: object

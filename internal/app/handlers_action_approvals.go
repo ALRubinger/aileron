@@ -367,5 +367,40 @@ func toPendingActionApproval(a *approval.ActionApproval) api.PendingActionApprov
 		out.SessionId = &sid
 	}
 	out.Args = &args
+	if a.Preview != nil {
+		out.Preview = previewToAPI(a.Preview)
+	}
 	return out
+}
+
+// previewToAPI marshals an internal preview record onto the API
+// surface shape. Returns nil when the input is nil so callers can pass
+// the result through to `PendingActionApproval.Preview` without a
+// surrounding nil check.
+func previewToAPI(p *approval.ActionApprovalPreview) *api.ActionApprovalPreview {
+	if p == nil {
+		return nil
+	}
+	out := api.ActionApprovalPreview{}
+	if p.Unavailable != "" {
+		u := p.Unavailable
+		out.Unavailable = &u
+	}
+	if len(p.Fields) > 0 {
+		fields := make([]api.ActionApprovalPreviewField, len(p.Fields))
+		for i, f := range p.Fields {
+			af := api.ActionApprovalPreviewField{Label: f.Label}
+			if f.Value != "" {
+				v := f.Value
+				af.Value = &v
+			}
+			if f.Missing {
+				missing := true
+				af.Missing = &missing
+			}
+			fields[i] = af
+		}
+		out.Fields = &fields
+	}
+	return &out
 }

@@ -99,6 +99,19 @@ type ActionApproval struct {
 	// when one is in scope. Empty for daemon-direct callers.
 	SessionID string
 
+	// Preview carries the rendered output of the action manifest's
+	// [approval.preview] directive ([ADR-0016]). Populated by the
+	// runtime ahead of Register when the action declares a preview op;
+	// nil for actions without one. The webapp renders Fields in order
+	// alongside the action's raw inputs so the user sees an
+	// authoritative summary of what they are approving rather than
+	// agent-supplied (and forgeable) hints.
+	//
+	// Read-only after Register.
+	//
+	// [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
+	Preview *ActionApprovalPreview
+
 	// RequestedAt is when the queue minted this request. Read-only.
 	RequestedAt time.Time
 
@@ -107,6 +120,36 @@ type ActionApproval struct {
 	// so a Decide call never blocks even if the runtime moved on
 	// (e.g. context cancelled before the user answered).
 	decision chan ActionDecision
+}
+
+// ActionApprovalPreview is the rendered output of the action manifest's
+// [approval.preview] directive ([ADR-0016]) attached to a pending
+// ActionApproval. Two terminal shapes:
+//
+//   - Success: Fields populated in the manifest's declared order.
+//     Each field carries either a resolved value or Missing=true (the
+//     UI surfaces "n/a" for missing paths).
+//   - Wholesale failure: Unavailable non-empty (e.g. "preview
+//     unavailable: timeout"), Fields nil. The approval still proceeds.
+//
+// [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
+type ActionApprovalPreview struct {
+	// Fields is the ordered render output on a successful preview.
+	Fields []ActionApprovalPreviewField
+
+	// Unavailable is the user-facing reason a wholesale preview
+	// failure occurred. Empty when the preview ran successfully.
+	Unavailable string
+}
+
+// ActionApprovalPreviewField is one rendered entry on the approval
+// prompt. Mirrors action.PreviewField at the API boundary so the
+// approval queue does not depend on the action package's preview
+// model.
+type ActionApprovalPreviewField struct {
+	Label   string
+	Value   string
+	Missing bool
 }
 
 // ActionDecision is the user's verdict on an [ActionApproval].
@@ -427,6 +470,18 @@ func (q *ActionApprovalQueue) Register(actionName, connectorFQN, sessionID strin
 // this directly when they want full control of the queue entry's
 // fields.
 func (q *ActionApprovalQueue) RegisterKind(kind ApprovalKind, actionName, connectorFQN, sessionID string, args map[string]any) *ActionApproval {
+	return q.RegisterKindWithPreview(kind, actionName, connectorFQN, sessionID, args, nil)
+}
+
+// RegisterKindWithPreview is the kind-aware Register that additionally
+// attaches a pre-rendered [approval.preview] payload ([ADR-0016]) to
+// the queue entry. The webapp surfaces the preview alongside the raw
+// args so the user sees an authoritative summary of what they are
+// approving. Pass preview=nil to skip the preview slot — equivalent
+// to [RegisterKind].
+//
+// [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
+func (q *ActionApprovalQueue) RegisterKindWithPreview(kind ApprovalKind, actionName, connectorFQN, sessionID string, args map[string]any, preview *ActionApprovalPreview) *ActionApproval {
 	if kind == "" {
 		kind = ApprovalKindAction
 	}
@@ -438,6 +493,7 @@ func (q *ActionApprovalQueue) RegisterKind(kind ApprovalKind, actionName, connec
 		ConnectorFQN: connectorFQN,
 		Args:         args,
 		SessionID:    sessionID,
+		Preview:      preview,
 		RequestedAt:  q.now(),
 		decision:     make(chan ActionDecision, 1),
 	}

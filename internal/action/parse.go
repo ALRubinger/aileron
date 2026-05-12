@@ -52,6 +52,27 @@ func Parse(file string, data []byte) (*Manifest, error) {
 		return nil, newParseErr(file, fmStart, "unknown frontmatter key(s): %s", strings.Join(keys, ", "))
 	}
 
+	// Capture declaration order of `[approval.preview].render` keys so
+	// the approval prompt can render labels in the author's intended
+	// order rather than Go's randomized map iteration order. TOML inline
+	// tables are themselves unordered on the wire, but BurntSushi's
+	// decoder records the key sequence it observed; we replay that here
+	// for the one place order is user-visible.
+	if m.Approval != nil && m.Approval.Preview != nil {
+		const prefix = "approval.preview.render."
+		for _, k := range meta.Keys() {
+			s := k.String()
+			if !strings.HasPrefix(s, prefix) {
+				continue
+			}
+			label := s[len(prefix):]
+			if label == "" {
+				continue
+			}
+			m.Approval.Preview.RenderOrder = append(m.Approval.Preview.RenderOrder, label)
+		}
+	}
+
 	m.Body = body
 	return m, nil
 }

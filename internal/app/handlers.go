@@ -1389,7 +1389,24 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 			connFQN = loaded.Manifest.Execute[0].Connector
 		}
 		sessionID := r.Header.Get("X-Aileron-Session-Id")
-		entry := s.actionApprovals.Register(name, connFQN, sessionID, args)
+
+		// Resolve the manifest's [approval.preview] directive
+		// (ADR-0016) ahead of registering the approval entry so the
+		// webapp's pending card carries an authoritative summary of
+		// what the user is approving rather than agent-supplied (and
+		// forgeable) hints. The preview call is bounded and its
+		// failure modes (HTTP non-2xx, timeout, sandbox denial) all
+		// fall back to a "Preview unavailable: <reason>" surface that
+		// is itself rendered on the approval card — the approval
+		// still proceeds.
+		var preview *approval.ActionApprovalPreview
+		if invoker, ok := s.executor.(action.PreviewInvoker); ok && loaded.Manifest.ApprovalPreview() != nil {
+			pr := invoker.InvokePreview(r.Context(), loaded.Manifest, args)
+			preview = previewFromActionResult(pr)
+		}
+
+		entry := s.actionApprovals.RegisterKindWithPreview(
+			approval.ApprovalKindAction, name, connFQN, sessionID, args, preview)
 
 		// Background executor: lives until the queue resolves the
 		// entry. Uses a detached context (not r.Context()) so a
@@ -1484,6 +1501,59 @@ func (s *apiServer) executeApprovedAction(entry *approval.ActionApproval, name, 
 	_ = s.actionApprovals.SetCompleted(entry.ID, auditID, result.Content)
 }
 
+// previewPolicyToAPI marshals an action manifest's
+// [approval.preview] block to the API surface shape so the listing
+// endpoint (`GET /v1/actions`) carries the directive verbatim.
+// Returns nil for nil input so callers can omit the surrounding nil
+// guard.
+func previewPolicyToAPI(p *action.PreviewPolicy) *api.ActionApprovalPreviewPolicy {
+	if p == nil {
+		return nil
+	}
+	out := api.ActionApprovalPreviewPolicy{Op: p.Op}
+	if len(p.Args) > 0 {
+		argsCopy := make(map[string]any, len(p.Args))
+		for k, v := range p.Args {
+			argsCopy[k] = v
+		}
+		out.Args = &argsCopy
+	}
+	render := make(map[string]string, len(p.Render))
+	for k, v := range p.Render {
+		render[k] = v
+	}
+	out.Render = render
+	return &out
+}
+
+// previewFromActionResult adapts an [action.PreviewResult] (the
+// executor-side shape) into the approval-package shape carried on the
+// pending-approval entry and the wire API. Returns nil when the
+// preview was a no-op (no directive declared / executor lacked the
+// interface); callers in that case omit the preview slot from the
+// queue entry entirely.
+//
+// A non-nil return with Unavailable set is meaningful: the user-facing
+// "Preview unavailable: <reason>" surface still renders on the card
+// per ADR-0016's failure-mode contract.
+func previewFromActionResult(pr action.PreviewResult) *approval.ActionApprovalPreview {
+	if len(pr.Fields) == 0 && pr.Unavailable == "" {
+		return nil
+	}
+	fields := make([]approval.ActionApprovalPreviewField, len(pr.Fields))
+	for i, f := range pr.Fields {
+		fields[i] = approval.ActionApprovalPreviewField{
+			Label:   f.Label,
+			Value:   f.Value,
+			Missing: f.Missing,
+		}
+	}
+	return &approval.ActionApprovalPreview{
+		Fields:      fields,
+		Unavailable: pr.Unavailable,
+	}
+}
+
 // buildPendingApprovalResponse composes the 202 body for an approval-
 // gated RunAction. The `message` is the human-readable instruction the
 // agent's MCP wrapper surfaces to the LLM (and thereby to the user) —
@@ -1563,6 +1633,9 @@ func manifestToAPI(la action.LoadedAction, enabled bool) api.Action {
 	if m.Approval != nil {
 		req := m.Approval.Required
 		out.Approval = &api.ActionApprovalPolicy{Required: &req}
+		if m.Approval.Preview != nil {
+			out.Approval.Preview = previewPolicyToAPI(m.Approval.Preview)
+		}
 	}
 	if len(m.Inputs) > 0 {
 		inputs := make([]api.ActionInput, 0, len(m.Inputs))

@@ -204,3 +204,179 @@ func TestValidate_AcceptsArgsRefAcrossNestedInputs(t *testing.T) {
 	}
 }
 
+// previewManifest returns a manifest declaring a valid
+// [approval.preview] directive plus the matching [[inputs]] block the
+// preview's args reference. Tests mutate one field at a time to assert
+// specific validation failures per ADR-0016.
+func previewManifest() *Manifest {
+	m := goodManifest()
+	m.Inputs = []Input{{Name: "draft_id", Type: "string", Description: "Draft id"}}
+	m.Approval = &ApprovalPolicy{
+		Required: true,
+		Preview: &PreviewPolicy{
+			Op:   "get_draft",
+			Args: map[string]any{"id": "${args.draft_id}"},
+			Render: map[string]string{
+				"To":      "message.payload.headers.To",
+				"Subject": "message.payload.headers.Subject",
+			},
+		},
+	}
+	return m
+}
+
+func TestValidate_PreviewHappyPath(t *testing.T) {
+	if err := Validate(previewManifest(), "preview.md"); err != nil {
+		t.Fatalf("Validate(previewManifest) error = %v, want nil", err)
+	}
+}
+
+func TestValidate_PreviewRejectsBadFields(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Manifest)
+		want   string
+	}{
+		{"empty op", func(m *Manifest) { m.Approval.Preview.Op = "" }, "[approval.preview].op is required"},
+		{"whitespace op", func(m *Manifest) { m.Approval.Preview.Op = "   " }, "[approval.preview].op is required"},
+		{"empty render", func(m *Manifest) { m.Approval.Preview.Render = nil }, "[approval.preview].render must declare at least one field"},
+		{"nil render", func(m *Manifest) { m.Approval.Preview.Render = map[string]string{} }, "[approval.preview].render must declare at least one field"},
+		{"empty render path", func(m *Manifest) {
+			m.Approval.Preview.Render = map[string]string{"To": ""}
+		}, "path is empty"},
+		{"undeclared args ref", func(m *Manifest) {
+			m.Approval.Preview.Args = map[string]any{"id": "${args.unknown}"}
+		}, "no [[inputs]] block declares"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := previewManifest()
+			tc.mutate(m)
+			err := Validate(m, "preview.md")
+			if err == nil {
+				t.Fatalf("Validate() succeeded; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q; want substring %q", err.Error(), tc.want)
+			}
+			var aerr *Error
+			if !errors.As(err, &aerr) || aerr.Class != ClassValidationError {
+				t.Errorf("expected *Error/ClassValidationError, got %v", err)
+			}
+		})
+	}
+}
+
+// TestValidatePreviewBundle_RejectsNonIdempotentPreviewOp covers
+// ADR-0016 rule 2: the preview op must be declared `idempotent = true`
+// in at least one bundled action manifest. Without this rule a preview
+// could trigger side-effects on the upstream service, defeating the
+// "safe to invoke before approval" property.
+func TestValidatePreviewBundle_RejectsNonIdempotentPreviewOp(t *testing.T) {
+	gated := previewManifest()
+	gated.Name = "send-draft"
+	bundle := map[string]LoadedAction{
+		"send-draft": {Manifest: gated, Path: "send-draft.md"},
+	}
+	errs := validatePreviewBundle(bundle)
+	if len(errs) == 0 {
+		t.Fatal("validatePreviewBundle() returned no errors; want one for missing idempotent declaration of preview op")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Message, "not declared `idempotent = true`") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("error messages = %v; want one mentioning idempotent", errs)
+	}
+}
+
+// TestValidatePreviewBundle_AcceptsIdempotentSiblingDeclaration covers
+// the happy path for rule 2: a sibling action manifest that targets
+// the same connector and declares the preview op as
+// `idempotent = true` satisfies the bundle check.
+func TestValidatePreviewBundle_AcceptsIdempotentSiblingDeclaration(t *testing.T) {
+	idempotent := true
+	gated := previewManifest()
+	gated.Name = "send-draft"
+	sibling := &Manifest{
+		Name:    "get-draft",
+		Version: "1.0.0",
+		Source:  "hub://aileron/get-draft@1.0.0",
+		Requires: Requires{Connectors: []RequiresConnector{{
+			Name:         "github://aileron/slack",
+			Version:      "1.0.0",
+			Hash:         "sha256:abc",
+			Capabilities: []string{"get_draft"},
+		}}},
+		Match: Match{Intent: "get a draft"},
+		Execute: []ExecuteStep{{
+			ID:         "fetch",
+			Connector:  "github://aileron/slack",
+			Op:         "get_draft",
+			Idempotent: &idempotent,
+		}},
+	}
+	bundle := map[string]LoadedAction{
+		"send-draft": {Manifest: gated, Path: "send-draft.md"},
+		"get-draft":  {Manifest: sibling, Path: "get-draft.md"},
+	}
+	if errs := validatePreviewBundle(bundle); len(errs) != 0 {
+		t.Errorf("validatePreviewBundle() = %v, want nil with idempotent sibling declaration", errs)
+	}
+}
+
+// TestValidatePreviewBundle_RejectsApprovalGatedPreviewOp covers
+// ADR-0016 rule 3: the preview op must not itself appear in an
+// approval-gated action manifest. Permitting that would let a preview
+// trigger a second approval prompt, recursing the user through nested
+// gates instead of producing the one-shot summary the ADR specifies.
+func TestValidatePreviewBundle_RejectsApprovalGatedPreviewOp(t *testing.T) {
+	idempotent := true
+	gated := previewManifest()
+	gated.Name = "send-draft"
+	approvalGatedSibling := &Manifest{
+		Name:    "get-draft-gated",
+		Version: "1.0.0",
+		Source:  "hub://aileron/get-draft@1.0.0",
+		Requires: Requires{Connectors: []RequiresConnector{{
+			Name:         "github://aileron/slack",
+			Version:      "1.0.0",
+			Hash:         "sha256:abc",
+			Capabilities: []string{"get_draft"},
+		}}},
+		Match: Match{Intent: "get a draft"},
+		Execute: []ExecuteStep{{
+			ID:         "fetch",
+			Connector:  "github://aileron/slack",
+			Op:         "get_draft",
+			Idempotent: &idempotent,
+		}},
+		// The sibling declares the preview op as idempotent (satisfying
+		// rule 2) *and* gates it behind approval — the combination is
+		// what rule 3 prohibits.
+		Approval: &ApprovalPolicy{Required: true},
+	}
+	bundle := map[string]LoadedAction{
+		"send-draft":      {Manifest: gated, Path: "send-draft.md"},
+		"get-draft-gated": {Manifest: approvalGatedSibling, Path: "get-draft-gated.md"},
+	}
+	errs := validatePreviewBundle(bundle)
+	if len(errs) == 0 {
+		t.Fatal("validatePreviewBundle() returned no errors; want one for approval-gated preview op")
+	}
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e.Message, "gated by [approval]") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("error messages = %v; want one mentioning approval-gated preview op", errs)
+	}
+}
+
