@@ -2752,6 +2752,32 @@ func trustAuthoritiesForRefs(refs []cstore.Ref, autoYes bool, trust *trustState,
 	return 0
 }
 
+// daemonErrText extracts a human-readable summary from a daemon error
+// response body. The daemon returns errors as the api.Error envelope
+// (`{"error":{"code":"...","message":"..."}}`); when that parses, we
+// render `code: message` so the operator sees the underlying cause
+// (e.g. `fetch_failed: 404 (tag or release not found)`) instead of a
+// bare HTTP status. Falls back to the raw body for anything that
+// doesn't match the envelope, and to `<no body>` for empty responses.
+func daemonErrText(raw []byte) string {
+	if len(raw) == 0 {
+		return "<no body>"
+	}
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err == nil && env.Error.Code != "" {
+		if env.Error.Message != "" {
+			return env.Error.Code + ": " + env.Error.Message
+		}
+		return env.Error.Code
+	}
+	return string(raw)
+}
+
 // previewSuiteRefs calls /actions/preview for every ref in declaration
 // order. Failures are captured per-entry rather than aborting the
 // loop; the consent screen surfaces them with their error so the
@@ -2769,7 +2795,7 @@ func previewSuiteRefs(refs []cstore.Ref, _ io.Writer) []suiteRefPreview {
 		}
 		if status != http.StatusOK {
 			out = append(out, suiteRefPreview{ref: ref,
-				err: fmt.Errorf("daemon returned %d", status)})
+				err: fmt.Errorf("daemon returned %d: %s", status, daemonErrText(raw))})
 			continue
 		}
 		var preview actionPreviewWire
