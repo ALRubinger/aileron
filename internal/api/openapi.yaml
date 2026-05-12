@@ -1266,8 +1266,13 @@ paths:
             schema:
               $ref: "#/components/schemas/ActionApprovalDecision"
       responses:
-        "200":
-          description: Decision recorded
+        "204":
+          description: |
+            Decision recorded. No body — the webapp client treats 204 as
+            "success, nothing to deserialize". Earlier this endpoint
+            returned 200 with an empty body, which the JSON client
+            choked on (`Unexpected end of JSON input`); 204 is the
+            HTTP-canonical shape for this case.
         "404":
           description: Approval id is unknown or already resolved.
           content:

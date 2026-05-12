@@ -190,8 +190,8 @@ export function watchActionApprovals(sub: ActionApprovalSubscriber): () => void 
  *  `RunAction` unblocks on the next tick; on `approved=true` the action
  *  proceeds normally, on `approved=false` it returns an
  *  `approval_denied` failure envelope to the agent with `reason` in the
- *  message body. Returns null on success (server replies 200 with empty
- *  body); throws on 404 (already resolved) or other non-2xx.
+ *  message body. Returns null on success (server replies 204 No Content);
+ *  throws on 404 (already resolved) or other non-2xx.
  *
  *  `editedPayload` carries kind-specific fields the user changed
  *  before approving — most prominently `{ body: "...new..." }` for

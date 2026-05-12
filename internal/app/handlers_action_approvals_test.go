@@ -149,6 +149,12 @@ func TestListActionApprovals_PopulatedQueueSurfacesAllFields(t *testing.T) {
 // regression for the approve path: a POST with `approved: true`
 // resolves the queue entry; a follow-up List shows it gone. The
 // runtime's Wait would have unblocked on the same channel.
+//
+// The endpoint returns 204 No Content with an empty body — the
+// webapp's JSON client special-cases 204 and returns null. Earlier
+// this was 200 with an empty body, which threw
+// `Unexpected end of JSON input` in the browser when the page tried
+// to deserialize the response.
 func TestDecideActionApproval_ApproveResolves(t *testing.T) {
 	srv, q := newActionApprovalsTestServer(t)
 	entry := q.Register("send-email", "github://x/y", "", nil)
@@ -159,8 +165,11 @@ func TestDecideActionApproval_ApproveResolves(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.DecideActionApproval(rec, req, entry.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.Len(); got != 0 {
+		t.Errorf("body len = %d, want 0 (204 must have empty body); body=%s", got, rec.Body.String())
 	}
 	if got := q.List(); len(got) != 0 {
 		t.Errorf("queue len after decide = %d, want 0", len(got))
@@ -193,8 +202,8 @@ func TestDecideActionApproval_DenyForwardsReason(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.DecideActionApproval(rec, req, entry.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
 	}
 	got := <-resultCh
 	if got.err != nil {
@@ -419,8 +428,8 @@ func TestDecideActionApproval_EditedPayloadFlowsToWaiter(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.DecideActionApproval(rec, req, entry.ID)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
 	}
 	got := <-resultCh
 	if got.err != nil {
