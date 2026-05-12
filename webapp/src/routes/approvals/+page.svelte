@@ -196,6 +196,47 @@
 						</div>
 					</Card.Header>
 					<Card.Content class="flex flex-col gap-3">
+						{#if approval.preview}
+							{@const preview = approval.preview}
+							<div
+								class="rounded border border-border bg-muted/40 p-3 text-sm"
+								data-testid="approval-preview"
+							>
+								<div class="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+									Preview
+								</div>
+								{#if preview.unavailable}
+									<div
+										class="text-xs italic text-muted-foreground"
+										data-testid="approval-preview-unavailable"
+									>
+										{preview.unavailable}
+									</div>
+								{:else if preview.fields && preview.fields.length > 0}
+									<dl
+										class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
+										data-testid="approval-preview-fields"
+									>
+										{#each preview.fields as field (field.label)}
+											<dt class="font-medium text-muted-foreground">{field.label}:</dt>
+											<dd
+												class="break-words"
+												data-testid="approval-preview-field"
+												data-field-label={field.label}
+												data-field-missing={field.missing ? 'true' : 'false'}
+											>
+												{#if field.missing}
+													<span class="italic text-muted-foreground">n/a</span>
+												{:else}
+													{field.value ?? ''}
+												{/if}
+											</dd>
+										{/each}
+									</dl>
+								{/if}
+							</div>
+						{/if}
+
 						{#if kind === 'comms_send'}
 							<div data-testid="comms-send-summary" class="space-y-1 text-sm">
 								<div>

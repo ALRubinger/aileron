@@ -106,6 +106,30 @@ export type PendingActionApproval = {
 	args?: Record<string, unknown>;
 	session_id?: string;
 	requested_at: string;
+	preview?: ActionApprovalPreview;
+};
+
+/** Rendered output of the action manifest's `[approval.preview]`
+ *  directive (ADR-0016). Surfaced on the approval card so the user
+ *  sees an authoritative summary fetched from the connector at
+ *  approval time, rather than agent-supplied hints. */
+export type ActionApprovalPreview = {
+	/** Rendered entries in the manifest's declared order. Omitted on
+	 *  wholesale preview failure. */
+	fields?: ActionApprovalPreviewField[];
+	/** User-facing reason a wholesale preview failure occurred (e.g.
+	 *  "preview unavailable: timeout"). Empty on success even when
+	 *  some individual fields had missing paths. */
+	unavailable?: string;
+};
+
+export type ActionApprovalPreviewField = {
+	/** User-facing key from the manifest's `render` table. */
+	label: string;
+	/** Resolved string. Empty when `missing=true`; UI renders "n/a". */
+	value?: string;
+	/** True when the manifest's render path did not resolve. */
+	missing?: boolean;
 };
 
 export type ActionApprovalListResponse = {

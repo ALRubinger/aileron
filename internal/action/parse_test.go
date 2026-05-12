@@ -297,3 +297,130 @@ op = "post"
 		t.Errorf("Body = %q, want empty", m.Body)
 	}
 }
+
+// TestParse_ApprovalPreviewBlock verifies that a manifest declaring
+// `[approval.preview]` (ADR-0016) parses into a populated PreviewPolicy
+// carrying the op name, the args template, and the render map. The
+// preview is part of the manifest contract; without successful parse,
+// the runtime would fall through to the default "no preview" path
+// even when the author declared one.
+func TestParse_ApprovalPreviewBlock(t *testing.T) {
+	data := `+++
+name = "send-draft"
+version = "1.0.0"
+source = "hub://aileron/send-draft@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["send_draft", "get_draft"]
+
+[match]
+intent = "send a draft"
+
+[[inputs]]
+name = "draft_id"
+type = "string"
+description = "Draft id to send"
+
+[[execute]]
+id = "send"
+connector = "github://aileron/google"
+op = "send_draft"
+
+[approval]
+required = true
+
+[approval.preview]
+op = "get_draft"
+args = { id = "${args.draft_id}" }
+render = { To = "message.payload.headers.To", Subject = "message.payload.headers.Subject", Preview = "message.snippet" }
++++
+`
+	m, err := Parse("send-draft.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	preview := m.ApprovalPreview()
+	if preview == nil {
+		t.Fatal("ApprovalPreview() = nil, want non-nil for manifest declaring [approval.preview]")
+	}
+	if preview.Op != "get_draft" {
+		t.Errorf("preview.Op = %q, want %q", preview.Op, "get_draft")
+	}
+	if got := preview.Args["id"]; got != "${args.draft_id}" {
+		t.Errorf("preview.Args[id] = %v, want ${args.draft_id}", got)
+	}
+	if got := preview.Render["To"]; got != "message.payload.headers.To" {
+		t.Errorf("preview.Render[To] = %q, want %q", got, "message.payload.headers.To")
+	}
+	if got := preview.Render["Subject"]; got != "message.payload.headers.Subject" {
+		t.Errorf("preview.Render[Subject] = %q, want path", got)
+	}
+	if got := preview.Render["Preview"]; got != "message.snippet" {
+		t.Errorf("preview.Render[Preview] = %q, want %q", got, "message.snippet")
+	}
+}
+
+// TestParse_ApprovalPreviewRenderOrderPreservesDeclaration asserts that
+// the parser captures the manifest's declaration order for the render
+// keys via PreviewPolicy.RenderOrder. The approval prompt renders
+// labels in this order; without preservation, Go's randomized map
+// iteration would yield a different field order on every call.
+func TestParse_ApprovalPreviewRenderOrderPreservesDeclaration(t *testing.T) {
+	data := `+++
+name = "send-draft"
+version = "1.0.0"
+source = "hub://aileron/send-draft@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["send_draft", "get_draft"]
+
+[match]
+intent = "send a draft"
+
+[[inputs]]
+name = "draft_id"
+type = "string"
+description = "Draft id"
+
+[[execute]]
+id = "send"
+connector = "github://aileron/google"
+op = "send_draft"
+
+[approval]
+required = true
+
+[approval.preview]
+op = "get_draft"
+args = { id = "${args.draft_id}" }
+
+[approval.preview.render]
+To = "message.payload.headers.To"
+Subject = "message.payload.headers.Subject"
+Preview = "message.snippet"
++++
+`
+	m, err := Parse("send-draft.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	preview := m.ApprovalPreview()
+	if preview == nil {
+		t.Fatal("ApprovalPreview() = nil, want non-nil")
+	}
+	want := []string{"To", "Subject", "Preview"}
+	if got := preview.RenderOrder; len(got) != len(want) {
+		t.Fatalf("RenderOrder length = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, label := range want {
+		if preview.RenderOrder[i] != label {
+			t.Errorf("RenderOrder[%d] = %q, want %q (full order: %v)", i, preview.RenderOrder[i], label, preview.RenderOrder)
+		}
+	}
+}

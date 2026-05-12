@@ -244,6 +244,59 @@ func TestLoadErrorToAPI_OmitsBlankBoundaryAndZeroLine(t *testing.T) {
 	}
 }
 
+// TestManifestToAPI_SurfacesApprovalPreviewPolicy verifies the
+// listing endpoint's wire shape carries the action manifest's
+// [approval.preview] directive (ADR-0016) verbatim. Without this, the
+// /v1/actions catalog would not reflect that an action declares a
+// preview op, so clients (the webapp's action detail page) could not
+// surface the preview-aware behavior to users browsing installed
+// actions.
+func TestManifestToAPI_SurfacesApprovalPreviewPolicy(t *testing.T) {
+	la := action.LoadedAction{
+		Manifest: &action.Manifest{
+			Name:    "send-draft",
+			Version: "1.0.0",
+			Source:  "hub://aileron/send-draft@1.0.0",
+			Match:   action.Match{Intent: "send a draft"},
+			Requires: action.Requires{Connectors: []action.RequiresConnector{
+				{Name: "github://aileron/google", Version: "1.0.0", Hash: "sha256:a", Capabilities: []string{"send_draft"}},
+			}},
+			Inputs:  []action.Input{{Name: "draft_id", Type: "string", Description: "Draft id"}},
+			Execute: []action.ExecuteStep{{ID: "s", Connector: "github://aileron/google", Op: "send_draft"}},
+			Approval: &action.ApprovalPolicy{
+				Required: true,
+				Preview: &action.PreviewPolicy{
+					Op:   "get_draft",
+					Args: map[string]any{"id": "${args.draft_id}"},
+					Render: map[string]string{
+						"To":      "message.payload.headers.To",
+						"Subject": "message.payload.headers.Subject",
+					},
+				},
+			},
+		},
+	}
+	got := manifestToAPI(la, true)
+	if got.Approval == nil || got.Approval.Required == nil || !*got.Approval.Required {
+		t.Fatalf("Approval.Required = %+v, want true", got.Approval)
+	}
+	if got.Approval.Preview == nil {
+		t.Fatal("Approval.Preview = nil, want populated for manifest declaring [approval.preview]")
+	}
+	if got.Approval.Preview.Op != "get_draft" {
+		t.Errorf("Approval.Preview.Op = %q, want %q", got.Approval.Preview.Op, "get_draft")
+	}
+	if got.Approval.Preview.Args == nil {
+		t.Fatal("Approval.Preview.Args = nil, want populated")
+	}
+	if (*got.Approval.Preview.Args)["id"] != "${args.draft_id}" {
+		t.Errorf("Args[id] = %v, want ${args.draft_id}", (*got.Approval.Preview.Args)["id"])
+	}
+	if got.Approval.Preview.Render["To"] != "message.payload.headers.To" {
+		t.Errorf("Render[To] = %q, want path", got.Approval.Preview.Render["To"])
+	}
+}
+
 func TestManifestToAPI_OmitsBlankBodyAndPath(t *testing.T) {
 	la := action.LoadedAction{
 		Manifest: &action.Manifest{
@@ -565,6 +618,197 @@ type countingExecutor struct {
 func (c *countingExecutor) Execute(_ context.Context, _ string, _ map[string]any) (action.Result, error) {
 	c.calls++
 	return action.Result{Content: `{"action":"ship-update"}`}, nil
+}
+
+// previewingExecutor is a counting executor that also implements
+// action.PreviewInvoker so tests can drive the [approval.preview]
+// (ADR-0016) plumbing through RunAction without spinning up a real
+// SandboxExecutor. The script field returns whatever PreviewResult
+// the test wants; the call count exposes whether the handler invoked
+// the preview hook at all.
+type previewingExecutor struct {
+	countingExecutor
+	previewCalls   int
+	previewArgs    map[string]any
+	previewResult  action.PreviewResult
+	previewSkipped bool // when true, InvokePreview is not implemented (tested by NOT embedding this method)
+}
+
+func (p *previewingExecutor) InvokePreview(_ context.Context, _ *action.Manifest, args map[string]any) action.PreviewResult {
+	p.previewCalls++
+	p.previewArgs = args
+	return p.previewResult
+}
+
+// actionsTestManifestApprovalPreview is `send-draft` annotated with
+// `[approval] required = true` AND an `[approval.preview]` directive
+// (ADR-0016). Exercises the runtime's preview plumbing through
+// RunAction: the handler must call InvokePreview before registering
+// the approval entry and attach the rendered output to the queue.
+const actionsTestManifestApprovalPreview = `+++
+name = "send-draft"
+version = "1.0.0"
+source = "hub://aileron/send-draft@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc123"
+capabilities = ["send_draft", "get_draft"]
+
+[match]
+intent = "send a draft"
+
+[[inputs]]
+name = "draft_id"
+type = "string"
+description = "Draft id"
+
+[[execute]]
+id = "send"
+connector = "github://aileron/google"
+op = "send_draft"
+
+[approval]
+required = true
+
+[approval.preview]
+op = "get_draft"
+args = { id = "${args.draft_id}" }
+
+[approval.preview.render]
+To = "message.payload.headers.To"
+Subject = "message.payload.headers.Subject"
+Preview = "message.snippet"
++++
+
+# Send Draft
+`
+
+// TestRunAction_ApprovalPreview_AttachesRenderedFields verifies the
+// load-bearing ADR-0016 wire: when the action manifest declares
+// [approval.preview] and the executor implements PreviewInvoker, the
+// handler invokes the preview ahead of Register and the queue entry
+// surfaces the rendered fields. The 202 response is unchanged; the
+// preview is consumed by the webapp's pending-approval payload.
+func TestRunAction_ApprovalPreview_AttachesRenderedFields(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"send-draft.md": actionsTestManifestApprovalPreview,
+	})
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	tracker := &previewingExecutor{
+		previewResult: action.PreviewResult{
+			Fields: []action.PreviewField{
+				{Label: "To", Value: "alice@example.com"},
+				{Label: "Subject", Value: "Weekly recap"},
+				{Label: "Preview", Value: "Here's the recap..."},
+			},
+		},
+	}
+	srv.executor = tracker
+
+	body := bytes.NewReader([]byte(`{"args":{"draft_id":"r-12345"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/send-draft/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "send-draft")
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	if tracker.previewCalls != 1 {
+		t.Fatalf("InvokePreview calls = %d, want 1", tracker.previewCalls)
+	}
+	if tracker.previewArgs["draft_id"] != "r-12345" {
+		t.Errorf("InvokePreview args[draft_id] = %v, want r-12345", tracker.previewArgs["draft_id"])
+	}
+
+	pending := srv.actionApprovals.List()
+	if len(pending) != 1 {
+		t.Fatalf("pending entries = %d, want 1", len(pending))
+	}
+	entry := pending[0]
+	if entry.Preview == nil {
+		t.Fatal("entry.Preview = nil, want populated preview")
+	}
+	if entry.Preview.Unavailable != "" {
+		t.Errorf("Preview.Unavailable = %q, want empty", entry.Preview.Unavailable)
+	}
+	if len(entry.Preview.Fields) != 3 {
+		t.Fatalf("Preview.Fields length = %d, want 3", len(entry.Preview.Fields))
+	}
+	if entry.Preview.Fields[0].Label != "To" || entry.Preview.Fields[0].Value != "alice@example.com" {
+		t.Errorf("Preview.Fields[0] = %+v, want {To, alice@example.com}", entry.Preview.Fields[0])
+	}
+}
+
+// TestRunAction_ApprovalPreview_UnavailableSurfacedAsFallback covers
+// ADR-0016's failure-mode contract: when the preview op fails
+// wholesale, the runtime attaches an Unavailable reason to the queue
+// entry so the approval prompt renders "Preview unavailable: <reason>"
+// alongside the raw inputs. The approval still proceeds; the user
+// can decline.
+func TestRunAction_ApprovalPreview_UnavailableSurfacedAsFallback(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"send-draft.md": actionsTestManifestApprovalPreview,
+	})
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	tracker := &previewingExecutor{
+		previewResult: action.PreviewResult{Unavailable: "preview unavailable: Gmail API returned 404"},
+	}
+	srv.executor = tracker
+
+	body := bytes.NewReader([]byte(`{"args":{"draft_id":"wrong"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/send-draft/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "send-draft")
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (approval still proceeds on preview failure)", rec.Code)
+	}
+	pending := srv.actionApprovals.List()
+	if len(pending) != 1 {
+		t.Fatalf("pending entries = %d, want 1", len(pending))
+	}
+	entry := pending[0]
+	if entry.Preview == nil {
+		t.Fatal("entry.Preview = nil, want populated with Unavailable reason")
+	}
+	if entry.Preview.Unavailable != "preview unavailable: Gmail API returned 404" {
+		t.Errorf("Preview.Unavailable = %q, want the 404 reason", entry.Preview.Unavailable)
+	}
+	if len(entry.Preview.Fields) != 0 {
+		t.Errorf("Preview.Fields = %+v, want empty on wholesale failure", entry.Preview.Fields)
+	}
+}
+
+// TestRunAction_ApprovalPreview_NotInvokedWhenManifestOmitsBlock
+// verifies the runtime does not invoke InvokePreview when the action
+// manifest carries no [approval.preview] directive. Without this guard,
+// every approval-required action would pay the cost of a preview call
+// even when the author did not declare one.
+func TestRunAction_ApprovalPreview_NotInvokedWhenManifestOmitsBlock(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifestApproval,
+	})
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	tracker := &previewingExecutor{}
+	srv.executor = tracker
+
+	body := bytes.NewReader([]byte(`{"args":{"channel":"#eng"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	if tracker.previewCalls != 0 {
+		t.Errorf("InvokePreview called %d times for manifest without [approval.preview]; want 0", tracker.previewCalls)
+	}
+	pending := srv.actionApprovals.List()
+	if len(pending) != 1 || pending[0].Preview != nil {
+		t.Errorf("entry.Preview should be nil when manifest omits the block; got %+v", pending[0].Preview)
+	}
 }
 
 func TestRunAction_NilExecutor(t *testing.T) {
