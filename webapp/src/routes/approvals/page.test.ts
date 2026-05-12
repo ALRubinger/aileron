@@ -219,6 +219,22 @@ describe('Approvals page — action approvals (#418)', () => {
 		});
 	});
 
+	it('shows the SSE error message instead of the "Connecting…" placeholder when the stream fails', async () => {
+		// Regression: when the SSE handler fails (e.g. 500
+		// streaming_unsupported from a missing Flush in middleware),
+		// the page must surface the error rather than sit on the
+		// "Connecting to the approval stream…" placeholder forever.
+		vi.mocked(watchActionApprovals).mockImplementation((sub) => {
+			queueMicrotask(() => sub.onError?.(new Error('stream closed: 500')));
+			return () => {};
+		});
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('stream closed: 500')).toBeInTheDocument();
+		});
+		expect(screen.queryByText(/Connecting to the approval stream/)).not.toBeInTheDocument();
+	});
+
 	it('surfaces server errors from decideActionApproval', async () => {
 		setupWatcher([
 			{

@@ -71,6 +71,16 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Flush proxies through to the underlying ResponseWriter when it
+// implements http.Flusher. Required for SSE handlers that assert
+// `w.(http.Flusher)` — without this, the type assertion fails on the
+// wrapped writer and the stream never starts.
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // corsMiddleware adds CORS headers, echoing the request Origin so that
 // credentialed (cookie-based) requests work. The wildcard "*" is not
 // allowed when credentials: "include" is used by the browser.
