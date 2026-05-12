@@ -14,6 +14,7 @@ import (
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
+	"github.com/ALRubinger/aileron/internal/observability"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -705,6 +706,55 @@ func TestWatchActionApprovals_ThroughLoggingMiddleware(t *testing.T) {
 	ev, err := readSSEEvent(r)
 	if err != nil {
 		t.Fatalf("read snapshot: %v (handler never flushed through the middleware)", err)
+	}
+	if ev.Event != "snapshot" {
+		t.Errorf("first event = %q, want snapshot", ev.Event)
+	}
+}
+
+// TestWatchActionApprovals_ThroughProductionMiddlewareChain is the
+// second-round regression for the same "Connecting to the approval
+// stream…" stall. The first round only chained loggingMiddleware and
+// missed that observability.HTTPMiddleware sits *between* logging and
+// the handler with its own ResponseWriter wrapper that also didn't
+// proxy Flush. The result: loggingMiddleware's statusWriter.Flush()
+// asserted `(http.Flusher)` against statusRecorder, which failed,
+// Flush became a no-op, bytes piled up in the http response buffer,
+// and the connection sat open with no bytes ever reaching the client
+// (no 500 this time — a silent stall).
+//
+// This test composes the chain in the same order as app.go's
+// `buildHandler`: HTTPMiddleware wrapped inside loggingMiddleware
+// wrapping the handler. Both wrappers must proxy Flush for the
+// snapshot to make it to the client.
+func TestWatchActionApprovals_ThroughProductionMiddlewareChain(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.Register("send-email", "github://x/y", "sess-1", map[string]any{"to": "alice"})
+
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	var handler http.Handler = http.HandlerFunc(srv.WatchActionApprovals)
+	handler = loggingMiddleware(logger, handler)
+	handler = observability.HTTPMiddleware(nil)(handler)
+
+	httpSrv := httptest.NewServer(handler)
+	defer httpSrv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, httpSrv.URL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v (request timed out — handler never flushed bytes through the chain)", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	r := bufio.NewReader(resp.Body)
+	ev, err := readSSEEvent(r)
+	if err != nil {
+		t.Fatalf("read snapshot: %v (snapshot never reached the client — Flush was a no-op somewhere)", err)
 	}
 	if ev.Event != "snapshot" {
 		t.Errorf("first event = %q, want snapshot", ev.Event)
