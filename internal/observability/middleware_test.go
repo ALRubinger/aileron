@@ -202,6 +202,62 @@ func TestHTTPMiddleware_BodyOnlyWriteDefaultsToOK(t *testing.T) {
 	}
 }
 
+// TestHTTPMiddleware_PreservesFlusher is the unit-level regression
+// for the SSE stall on the `/approvals` page. The middleware's
+// statusRecorder wraps http.ResponseWriter; downstream SSE handlers
+// rely on `w.(http.Flusher)` succeeding and Flush actually reaching
+// the underlying writer. Without a Flush method on the wrapper, the
+// type assertion fails (or — if an outer wrapper has its own Flush
+// that delegates by interface assertion — silently no-ops), bytes
+// pile up in the response buffer, and the client sees a connection
+// that stays open with no events.
+//
+// Contract under test:
+//   - The writer the handler receives satisfies http.Flusher.
+//   - Calling Flush on that writer reaches the underlying
+//     ResponseWriter's Flush.
+func TestHTTPMiddleware_PreservesFlusher(t *testing.T) {
+	var sawFlusher bool
+	var flushedThrough bool
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		f, ok := w.(http.Flusher)
+		sawFlusher = ok
+		if ok {
+			f.Flush()
+		}
+	})
+	wrapped := HTTPMiddleware(nil)(handler)
+
+	underlying := &flushTrackingWriter{
+		ResponseWriter: httptest.NewRecorder(),
+		onFlush:        func() { flushedThrough = true },
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/anything", nil)
+	wrapped.ServeHTTP(underlying, req)
+
+	if !sawFlusher {
+		t.Error("handler's w.(http.Flusher) assertion failed — statusRecorder must implement Flush")
+	}
+	if !flushedThrough {
+		t.Error("Flush did not reach the underlying ResponseWriter — statusRecorder.Flush must proxy through")
+	}
+}
+
+// flushTrackingWriter is an http.ResponseWriter that records when its
+// Flush is invoked. Used to assert middleware wrappers proxy Flush
+// down the chain instead of swallowing it.
+type flushTrackingWriter struct {
+	http.ResponseWriter
+	onFlush func()
+}
+
+func (w *flushTrackingWriter) Flush() {
+	if w.onFlush != nil {
+		w.onFlush()
+	}
+}
+
 func TestHTTPMiddleware_DefaultSpanName(t *testing.T) {
 	// Internal helper, but worth a guard: the default name is the
 	// shape downstream operators search by in trace tools.
