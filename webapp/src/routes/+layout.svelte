@@ -49,10 +49,11 @@
 			>
 				{stateLabel}
 			</span>
-			<a href="/hub" class="text-foreground hover:text-primary no-underline">Hub</a>
+			<a href="/actions" class="text-foreground hover:text-primary no-underline">Actions</a>
 			<a href="/approvals" class="text-foreground hover:text-primary no-underline"
 				>Approvals</a
 			>
+			<a href="/hub" class="text-foreground hover:text-primary no-underline">Hub</a>
 		</nav>
 	</div>
 </header>

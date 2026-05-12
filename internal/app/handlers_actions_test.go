@@ -259,7 +259,7 @@ func TestManifestToAPI_OmitsBlankBodyAndPath(t *testing.T) {
 		},
 		// Path intentionally blank.
 	}
-	got := manifestToAPI(la)
+	got := manifestToAPI(la, true)
 	if got.Body != nil {
 		t.Errorf("Body = %v, want nil when blank", got.Body)
 	}

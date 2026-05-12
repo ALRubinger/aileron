@@ -2255,6 +2255,49 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Actions]
+      summary: Update an installed action's user-controlled state
+      description: |
+        Updates the per-user overlay state for an installed action. The
+        action's manifest file is not modified; the overlay lives at
+        `~/.aileron/action-state.json` so the manifest remains the
+        authoritative description of *what* the action is and the overlay
+        records *how the user wants it surfaced right now*.
+
+        Currently the only field is `enabled`. Setting `enabled=false`
+        hides the action from MCP `tools/list` and causes
+        `POST /v1/actions/{name}/run` to refuse the call. Toggle takes
+        effect immediately at the daemon; MCP servers that cached the
+        tool list at boot require a restart to drop the disabled entry.
+      operationId: patchAction
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActionPatchRequest"
+      responses:
+        "200":
+          description: Updated action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Action"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/actions/{name}/run:
     post:
@@ -5003,6 +5046,15 @@ components:
             $ref: "#/components/schemas/ActionExecuteStep"
         approval:
           $ref: "#/components/schemas/ActionApprovalPolicy"
+        enabled:
+          type: boolean
+          description: |
+            Whether the action is currently exposed to the LLM as a callable
+            tool. Sourced from the per-user overlay at
+            `~/.aileron/action-state.json`; absent overlay entries default to
+            `true`. Disabling does not uninstall the action — the manifest
+            file is left untouched. MCP servers must hide disabled actions
+            from `tools/list` and refuse calls against them.
         body:
           type: string
           description: |
@@ -5262,6 +5314,21 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActionLoadError"
+
+    ActionPatchRequest:
+      type: object
+      description: |
+        Partial update to an installed action's user-controlled overlay
+        state. Every field is optional; only fields present in the request
+        body are applied, so callers can update one preference without
+        having to repeat the others.
+      properties:
+        enabled:
+          type: boolean
+          description: |
+            When set, replaces the action's enabled flag in the overlay
+            (see [Action.enabled]). Omit to leave the current value
+            untouched.
 
     ActionRunRequest:
       type: object

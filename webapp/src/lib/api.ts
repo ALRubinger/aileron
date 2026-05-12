@@ -214,6 +214,53 @@ export async function decideActionApproval(
 	});
 }
 
+// --- Installed actions (ADR-0003) ---
+//
+// Mirrors `GET /v1/actions` and `PATCH /v1/actions/{name}`. The daemon
+// merges the per-user overlay at `~/.aileron/action-state.json` into the
+// response so the webapp sees one consistent view of installed actions
+// plus their current enable/disable state.
+
+export type InstalledAction = {
+	name: string;
+	version: string;
+	source: string;
+	/** Absent on older daemons; treat as `true` in that case. */
+	enabled?: boolean;
+};
+
+export type InstalledActionList = {
+	items?: InstalledAction[];
+	load_errors?: Array<{
+		class: string;
+		message: string;
+		file: string;
+		line?: number;
+		boundary?: string;
+	}>;
+};
+
+/** Lists installed actions plus any per-file load errors. The response
+ *  reflects the merged manifest+overlay view; `enabled=false` means the
+ *  action is hidden from MCP `tools/list` until re-enabled. */
+export async function listInstalledActions(): Promise<InstalledActionList> {
+	return apiFetch('/v1/actions');
+}
+
+/** Toggles the `enabled` flag in the action's user-preference overlay.
+ *  The manifest file is left untouched; only the overlay changes.
+ *  Returns the daemon's updated view of the action so callers can
+ *  reconcile their local state without a follow-up GET. */
+export async function setActionEnabled(
+	name: string,
+	enabled: boolean
+): Promise<InstalledAction> {
+	return apiFetch(`/v1/actions/${encodeURIComponent(name)}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ enabled })
+	});
+}
+
 // --- Connector Hub (ADR-0013, #488) ---
 //
 // The daemon shallow-clones the public `aileron-connectors-hub` repo

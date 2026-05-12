@@ -375,6 +375,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		anthropicProxy:     anthropicProxy,
 		newID:              idGen,
 		actions:            action.NewStore(action.DefaultDir()),
+		actionState:        newActionStateStore(log),
 		installer:          newConnectorInstaller(log),
 		versionLister:      cstore.DefaultVersionLister(),
 		hub:                newHubClient(),
@@ -825,6 +826,21 @@ func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
 		Verifier: &cstore.ReloadingKeyring{Path: cstore.DefaultKeyringPath()},
 		Store:    store,
 	}
+}
+
+// newActionStateStore builds the per-action user-preference overlay backed
+// by `~/.aileron/action-state.json`. Returns a nil store on read failure so
+// the daemon keeps serving — disabled callers fall back to the default
+// "all actions enabled" view and the user can recover by deleting the
+// malformed file.
+func newActionStateStore(log *slog.Logger) action.StateStore {
+	s, err := action.NewFileStateStore(action.DefaultStatePath())
+	if err != nil {
+		log.Warn("failed to load action state overlay; treating all actions as enabled",
+			"path", action.DefaultStatePath(), "error", err)
+		return nil
+	}
+	return s
 }
 
 // newHubClient builds the Hub client (ADR-0013) using config from
