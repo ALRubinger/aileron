@@ -61,14 +61,6 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 | `aileron version` | Print the runtime version. | — |
 | `aileron help [<command>]` | Show CLI help. | — |
 
-## In-band commands
-
-A subset of read-only commands can be invoked from inside an active agent conversation by sending `/aileron <command>` as a chat message. Aileron intercepts before the LLM is called and returns a synthetic assistant response.
-
-Eligible: `status`, `binding list`, `version`. Mutating commands (`action add`, `binding rebind`, `connector install`, etc.) are not eligible in-band — they require explicit terminal invocation so the install consent flow can fire on a tamper-resistant surface.
-
-See [ADR-0009: User Channel](/adr/0009-user-channel) for the in-band convention and its trust caveats.
-
 ## Architecture: CLI is an HTTP client
 
 Every command above resolves to one or more HTTP operations against the Aileron server. The server may be:

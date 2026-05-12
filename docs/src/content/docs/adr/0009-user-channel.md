@@ -15,7 +15,7 @@ order: 9
 
 ## Context
 
-[ADR-0008](/adr/0008-intent-matching) establishes that Aileron sits at the LLM endpoint and intercepts agent tool calls to execute deterministic actions. [ADR-0006](/adr/0006-capability-binding-ux) and [ADR-0007](/adr/0007-install-consent) establish that several flows — credential binding, connector install, action update — require explicit user consent.
+[ADR-0008](/adr/0008-intent-matching) establishes that Aileron exposes installed actions to agents over MCP and runs them through a single execution path on the daemon. [ADR-0006](/adr/0006-capability-binding-ux) and [ADR-0007](/adr/0007-install-consent) establish that several flows — credential binding, connector install, action update — require explicit user consent.
 
 Each of those flows assumes the existence of a *user channel*: some surface where Aileron can ask the user a question and receive an authoritative answer. The question this ADR answers is what that channel actually is.
 
@@ -37,7 +37,7 @@ This ADR ratifies both.
 
 The user has two separate communication channels with Aileron:
 
-1. **In-band output channel** — the agent's chat completion stream. Aileron's progress messages, "I'm about to do X" announcements, and pause-for-approval explanations flow through here, alongside the agent's normal output. The user reads everything in one place.
+1. **In-band output channel** — the agent's chat surface, reached via MCP tool result text. Aileron's progress messages, "I'm about to do X" announcements, and pause-for-approval explanations ride back as the result of the tool call the agent just made; the agent host renders the text into the conversation alongside its normal output. The user reads everything in one place.
 
 2. **Out-of-band (OOB) consent channel** — a separate surface, on a separate process, the agent cannot draw over or input to. Approval decisions happen here.
 
@@ -109,7 +109,7 @@ Three categories of operation use the user channel:
 
 The first two are explicit user-initiated commands; the user is at the keyboard and the prompt arrives in the same flow as the command. The third is different: per-invocation approval fires *inside* an active agent conversation, asynchronously to anything the user typed.
 
-### Per-invocation approval: action manifest opt-in (post-MVP)
+### Per-invocation approval: action manifest opt-in
 
 An action's manifest can declare:
 
@@ -118,60 +118,42 @@ An action's manifest can declare:
 required = true
 ```
 
-When such an action is invoked through the runtime (post-MVP):
+When the agent invokes such an action through `aileron-mcp`, the daemon's `POST /v1/actions/{name}/run` handler:
 
-1. The runtime pauses execution.
-2. It emits an in-band message to the chat completion stream: `"This action requires your approval. The action will: …"`. The message includes the action name, the connector(s) it will exercise, and the relevant arguments (e.g., the email recipient, the Slack channel, the dollar amount).
-3. It fires an OOB approval prompt at the highest enabled tier. The prompt summarizes the same information as the in-band message.
-4. The user approves or denies on the OOB surface. The chat stream stays paused.
-5. On approval, execution resumes; the action runs; the result flows back through the stream.
-6. On denial or timeout, the action aborts with a structured error (per [ADR-0010](/adr/0010-failure-handling)); the chat stream emits the error message and continues.
+1. Validates the request and registers a pending approval entry in the action-approval queue.
+2. Returns `202 Accepted` immediately with a structured pending-approval response: `{ approval_id, review_url, message }`. The `message` is the human-readable instruction the LLM is meant to surface verbatim — it names the action, the per-approval review URL, and the `aileron open approval <id>` shell command alternative.
+3. Spawns a background goroutine that waits on the queue's decision channel — no timeout; the user can approve or deny whenever.
 
-The in-band message is *only* informational. The user clicking "approve" inside the chat itself does nothing — the OOB prompt is the gate. This redundancy is by design: a user who reads the in-band message understands what's being asked; the OOB prompt is the surface where they answer.
+`aileron-mcp` translates the 202 into an MCP tool result whose text is the daemon's `message`. The agent's LLM reads the message and surfaces it to the user. The user then opens the per-approval review URL in the Aileron webapp (or runs `aileron open approval <id>` to launch the same surface from any terminal). The webapp shows the action name, the connector(s) it will exercise, the call-time arguments, and **Approve** / **Deny** controls. The agent retrieves the eventual outcome via `GET /v1/action-approvals/{id}/result`, exposed as the `check_action_status` MCP tool.
+
+This is the in-band / OOB split:
+
+- **In-band** is the MCP tool result text. It rides through the agent's normal tool-result path, gets rendered into the chat by the host, and instructs the user where to go. It does not contain decision controls.
+- **OOB** is the Aileron webapp's `/approvals` surface, opened from a per-approval URL (or from `aileron open approval <id>`). It contains the actual Approve / Deny controls. Decisions outside this surface — including the user replying "yes, do it" in the chat — are not honored.
+
+On approve, the daemon's goroutine invokes the action's executor, dispatches through the bound connector, and records the outcome against the approval ID. On deny, the goroutine exits without invoking the executor; no quota is burned; the audit log records the deny with the user's optional reason.
 
 Connector authors and action authors should set `[approval] required = true` for any operation whose impact a user genuinely wants eyes on every time. The Hub may surface a "requires approval" badge on actions that opt in.
 
-**MVP behavior:** the `[approval] required = true` manifest field is recognized but not yet supported. Actions that set it are rejected at install time with a clear error pointing the publisher at the post-MVP timeline. Per-invocation approval lights up when tier 2 (system notifications) or tier 4 (web UI) lands in Phase 2.
-
-### In-band `/aileron <command>` for read-only commands
-
-For low-stakes, read-only commands the user wants to issue mid-conversation, Aileron supports an in-band convention:
-
-```
-> /aileron status
-> /aileron binding list
-> /aileron version
-```
-
-When the user types `/aileron <something>` as a message, Aileron intercepts the chat completion request, runs the command locally, and emits the result as an assistant-style message. The upstream LLM is never called.
-
-This is **best-effort** and limited:
-
-- Only commands marked read-only in the runtime's command set are eligible. Mutating commands (`aileron action add`, `aileron binding revoke`, `aileron connector install`) cannot be issued in-band.
-- The user is sending a message in the chat; the agent's host *will* see what was typed (the chat history is the agent's history). The "best-effort" caveat acknowledges this.
-- Output is informational; no state changes; no consent prompts.
-
-The convention exists because typing `aileron status` in your chat is faster than alt-tabbing to a terminal. Anything more consequential than reading state goes through a terminal command and the OOB consent flow.
-
 ### Channel coordination: in-band describes, OOB decides
 
-When an action requires per-invocation approval (post-MVP), both channels fire:
+When an action requires per-invocation approval, both channels surface the same prompt:
 
-- **In-band**: an assistant-style message describes what's about to happen and points at the OOB surface where the answer lives. "I'm about to send an email to alex@example.com, body: …. Approve in the surface noted above."
-- **OOB**: the highest available approval tier (in MVP: tier 5 CLI; post-MVP: biometric, notification, TUI, web UI, CLI fallback) shows the same summary with **Approve** / **Deny** controls.
+- **In-band**: the MCP tool result text the LLM surfaces to the user. The text identifies what's being asked and names the OOB surface where the answer lives ("Approval needed for send-email on github://ALRubinger/aileron-connector-google. Visit https://&lt;webapp&gt;/approvals?focus=&lt;id&gt; to approve, or run 'aileron open approval &lt;id&gt;' from any terminal.").
+- **OOB**: the Aileron webapp's per-approval review URL shows the action name, arguments, and Approve / Deny controls.
 
 The in-band message points at the OOB surface so the user knows where to look. The OOB surface contains the actual decision controls.
 
-If both channels agree (user approves on the OOB surface), the action proceeds. If only the in-band suggestion appears to be answered ("yes, do it" in the chat) but the OOB surface is unanswered, the action does not proceed. The chat is not the source of truth.
+If only the in-band suggestion appears to be answered ("yes, do it" in the chat) but the OOB surface is unanswered, the action does not proceed. The chat is not the source of truth.
 
 ### Channel selection on agent host integration
 
-When a user runs an agent (Claude Code, Cursor, etc.) connected to Aileron, the integration points are:
+When a user runs an agent (Claude Code, Codex, others) under `aileron launch`, the integration points are:
 
-- **In-band channel** — the chat completion stream, which the host already renders.
-- **OOB channel** — Aileron emits the approval through the configured tier. The host's UI is not used (per "tier 0 out of v1 scope"). The user sees an OS notification or biometric prompt arriving from the Aileron process while looking at their agent UI.
+- **In-band channel** — the MCP tool-result text the agent host renders. The host already speaks MCP and renders tool results into its chat surface; nothing Aileron-specific is needed in the host.
+- **OOB channel** — the Aileron webapp's `/approvals` surface, plus future Phase 2 surfaces (system notifications, biometric prompts, TUI panel, CLI fallback). The host's UI is not used as a decision surface (per "tier 0 out of v1 scope").
 
-The host needs no Aileron-specific code beyond pointing its API base URL at Aileron. The OOB surfaces are owned and rendered by the Aileron process directly.
+The host needs no Aileron-specific code beyond MCP support and (when applicable) pointing its API base URL at the Aileron gateway for vault-locked checks and future request-level mediation. The OOB surfaces are owned and rendered by the Aileron process directly.
 
 ## Alternatives Considered
 
@@ -214,13 +196,12 @@ Rejected because per-invocation approvals during agent runs need to feel snappy 
 - Every consequential prompt fires on a surface that *cannot* be drawn-over or proxied by the agent. Prompt injection cannot approve installs or trigger sends.
 - The default surfaces (biometric + notification) are familiar UI patterns from existing OS interactions. There is no Aileron-specific UI to learn for the common case.
 - The CLI fallback ensures consent works in every environment — headless, remote, restricted — even if richer surfaces are unavailable.
-- In-band `/aileron <command>` lets the user pull state into the conversation without leaving it. Mutations always require leaving the chat.
 
 ### For agent hosts
 
-- Pointing at Aileron's endpoint is the entire integration. No Aileron-aware UI code is required for v1.
-- The host's chat stream renders Aileron's in-band messages naturally — they look like assistant messages, formatted as Markdown.
-- The host does not see, render, or respond to OOB consent prompts. Those happen on system surfaces beside the host's window.
+- Registering `aileron-mcp` and (when applicable) pointing at the Aileron gateway URL is the entire integration. No Aileron-aware UI code is required.
+- The host's chat surface renders Aileron's in-band messages naturally — they arrive as MCP tool result text, the same path any other MCP server's tool results take.
+- The host does not see, render, or respond to OOB consent prompts. Those happen on system surfaces (the Aileron webapp, OS notifications, biometric prompts) beside the host's window.
 
 ### For action authors
 
@@ -282,125 +263,52 @@ Add action: hub://aileron/ship-update@1.0.0
 
 User types `A`, hits Enter. Aileron writes the action file and queues the connector installs (each with its own CLI prompt in the same terminal). No alt-tab needed because the user is already where the prompt fires.
 
-### Phase 2 — per-invocation approval flow (not in MVP)
+### Per-invocation approval flow (MVP)
 
-User chats with their agent:
+User chats with their agent (Claude Code, launched as `aileron launch claude`):
 
 ```
 User: send the deploy summary email to the team
 ```
 
-Agent (via tool augmentation, picks the `send-team-email` action):
-- LLM calls `send_team_email` with `{ recipients: ["team@example.com"], subject: "Deploy summary 2026-04-29", body: "..." }`.
+Claude reads its tool catalog, sees `send_email` from `aileron-mcp`, picks it. Claude Code dispatches the call over MCP. `aileron-mcp` makes a `POST /v1/actions/send-email/run` request to the daemon with `{ recipients: ["team@example.com"], subject: "Deploy summary 2026-04-29", body: "..." }`.
 
-Aileron intercepts. The action manifest has `[approval] required = true`. Runtime pauses, emits in-band message, fires OOB:
+The action manifest declares `[approval] required = true`. The daemon's `RunAction` handler registers a pending approval entry and returns `202 Accepted` immediately:
 
-In the chat stream (in-band):
+```json
+{
+  "status": "pending_approval",
+  "approval_id": "act-20260429T140322-3f9c1a",
+  "review_url": "http://localhost:8721/approvals?focus=act-20260429T140322-3f9c1a",
+  "message": "Approval needed for send-email on github://ALRubinger/aileron-connector-google. Visit http://localhost:8721/approvals?focus=act-20260429T140322-3f9c1a to approve, or run 'aileron open approval act-20260429T140322-3f9c1a' from any terminal."
+}
+```
+
+`aileron-mcp` surfaces the `message` to Claude as the tool result text. Claude renders it for the user:
 
 ```
 Assistant:
-I'm about to send an email:
-
-  To:       team@example.com
-  Subject:  Deploy summary 2026-04-29
-  Body:     ...
-
-Approve this in the surface noted above.
+Approval needed for send-email. Visit
+http://localhost:8721/approvals?focus=act-20260429T140322-3f9c1a
+to approve, or run 'aileron open approval act-20260429T140322-3f9c1a'
+from any terminal.
 ```
 
-On the user's macOS desktop (Phase 2; tier 1 biometric):
+The user opens the URL (or runs the CLI alternative). The webapp's `/approvals` page shows the action name, the connector, the to/subject/body, and Approve / Deny controls. The user reviews, clicks **Approve**.
+
+The daemon's background goroutine wakes, invokes the action's executor, dispatches the email through the bound Gmail connector, records the outcome against the approval ID. The agent (or the user) can poll `GET /v1/action-approvals/{id}/result` — surfaced as the `check_action_status` MCP tool — to learn the outcome:
 
 ```
-[Aileron — Approve email send?]
-
-To:       team@example.com
-Subject:  Deploy summary 2026-04-29
-Body preview: "Today's deploy went out at..."
-
-Touch the sensor to approve.   [Deny]
-```
-
-User taps Touch ID. The biometric verifies. Aileron resumes the action; email sends; result flows back to the chat:
-
-```
-Assistant:
-✓ Email sent to team@example.com.
+status: completed
+audit_id: audit-7c1f...
+result: {"ok": true}
 ```
 
 If the user denied:
 
 ```
-Assistant:
-The email send was declined. No message was sent.
-(Audit log: action 'send-team-email' denied via biometric prompt at 14:03:22.)
+status: denied
+reason: wrong recipient
 ```
 
-### Phase 2 — surface fallback (not in MVP)
-
-User is on Linux without a biometric module configured. Notifications are enabled. Aileron's tier 1 is unavailable; tier 2 fires:
-
-```
-[GNOME Notification — Aileron]
-Approve email send to team@example.com?
-
-  [Approve]  [Deny]                   ← inline notification buttons
-```
-
-Clicked through the notification action buttons; same result as the biometric path.
-
-If notifications also fail (the notification daemon isn't running):
-
-```
-[Aileron CLI prompt — visible in the terminal where Aileron was launched]
-
-────────────────────────────────────────────────────────
-Approval required:
-
-  Action:    send-team-email
-  Recipient: team@example.com
-  Subject:   Deploy summary 2026-04-29
-
-[A]pprove   [D]eny   [V]iew full body
-
->
-```
-
-User types `A`, hits Enter. The action proceeds.
-
-### In-band `/aileron status`
-
-In the middle of an agent conversation:
-
-```
-User: /aileron status
-
-Assistant (synthesized by Aileron, no LLM call):
-Aileron 0.4.0 — running at http://localhost:8721/v1
-
-Project:    ~/code/our-app
-Actions:    5 installed
-Connectors: 4 in store
-Bindings:   3 active, 1 stale (api_key/openai/personal — 47 days old)
-
-For more: `aileron binding list`, `aileron action audit`.
-```
-
-The user types the command in their chat; Aileron intercepts and answers locally. No upstream LLM cost, no tool augmentation, no consent prompt. Just a fast read-only view of state.
-
-### Mutating command refused in-band
-
-```
-User: /aileron action add github://aileron/slack@1.2.0
-
-Assistant (synthesized by Aileron):
-That command would install a connector and requires approval through
-the install consent flow.
-
-Run it from your terminal instead:
-
-  $ aileron action add github://aileron/slack@1.2.0
-
-You'll see the install prompt as a CLI prompt in the Aileron terminal.
-```
-
-Mutating commands are not eligible for in-band shortcut. The user is directed to the terminal where the OOB consent flow can fire.
+The action did not run; no quota burned; the audit log records the deny with the user's reason. Claude continues the conversation: "The email send was declined. (Audit ID: act-20260429T140322-3f9c1a, denied with reason: wrong recipient.)"

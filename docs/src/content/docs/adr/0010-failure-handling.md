@@ -37,7 +37,7 @@ These two failure modes pull in opposite directions. Avoiding the first wants no
 
 When any operation fails — sandbox capability denial, connector runtime error, network failure, external API error, anything — the failure surfaces immediately to the calling agent through a structured error. It is not silently retried, swallowed, fallback-substituted, or smoothed over.
 
-The agent sees the failure. The user sees the failure (through the agent's chat output, since the failure flows through the chat completion stream per [ADR-0008](/adr/0008-intent-matching)). The audit log records the failure. There is no path through the runtime where an action "didn't quite work" but the agent thinks it did.
+The agent sees the failure. The user sees the failure (through the agent's chat output, since the failure rides back as the MCP tool result the agent host renders into the conversation per [ADR-0008](/adr/0008-intent-matching)). The audit log records the failure. There is no path through the runtime where an action "didn't quite work" but the agent thinks it did.
 
 This is the load-bearing rule. Aileron's value proposition is *deterministic execution* — the user can trust that what the agent believes happened is what actually happened. A runtime that masks failures behind silent retries or LLM-generated fallbacks gives that trust away.
 
@@ -165,7 +165,7 @@ Authors who want compensation write it as a separate atomic action that the agen
 
 ### What failures look like to the agent
 
-When an action fails, the runtime synthesizes a tool result for the agent's chat completion stream:
+When an action fails, the daemon's response to `aileron-mcp` carries the failure envelope; `aileron-mcp` returns it to the agent host as the MCP tool result for the original tool call. The agent's chat surface renders it like any other tool result:
 
 ```json
 {

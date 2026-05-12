@@ -47,7 +47,7 @@ The schema is durable. Every payload field uses the OpenTelemetry-namespaced key
 
 ## OpenTelemetry traces (opt-in)
 
-When tracing is enabled, Aileron starts a server-root span on every request and child spans for the work inside. The child spans cover action execution, connector calls, capability checks, approval waits, and the augmentation loop on the LLM gateway. Spans propagate via [W3C TraceContext](https://www.w3.org/TR/trace-context/). An inbound `traceparent` header from the calling agent makes Aileron's spans children of the agent's trace, so your end-to-end view stays coherent. With tracing off (the default), there's zero SDK overhead. The call sites resolve to no-op tracers. The W3C propagator is installed regardless, so an inbound `traceparent` is parsed and forwarded even when this process emits nothing.
+When tracing is enabled, Aileron starts a server-root span on every request and child spans for the work inside. The child spans cover action execution, connector calls, capability checks, and approval waits. Spans propagate via [W3C TraceContext](https://www.w3.org/TR/trace-context/). An inbound `traceparent` header from the calling agent makes Aileron's spans children of the agent's trace, so your end-to-end view stays coherent. With tracing off (the default), there's zero SDK overhead. The call sites resolve to no-op tracers. The W3C propagator is installed regardless, so an inbound `traceparent` is parsed and forwarded even when this process emits nothing.
 
 ### Three ways to consume traces
 
@@ -125,13 +125,11 @@ The full set is in the [OTel exporter spec](https://opentelemetry.io/docs/specs/
 | Span name | Where it's emitted |
 |---|---|
 | `aileron.mcp.tool.call` | `aileron-mcp` outbound to `/v1/actions/{name}/run`. Typically the trace root under `aileron launch`. |
-| `aileron.gateway.openai.chat` / `aileron.gateway.anthropic.messages` | LLM round-trip on the gateway endpoints. |
-| `aileron.intercept.round` | Per round of the augmentation loop when actions are installed. |
 | `aileron.action.execute` | `SandboxExecutor.Execute`. Root for an action invocation. |
 | `aileron.capability.check` | Per-step action-boundary capability enforcement. Defense-in-depth, [ADR-0003](/adr/0003-action-model). |
 | `aileron.connector.call` | Per-step `conn.Invoke` inside the executor. |
 | `aileron.approval.wait` | The approval-queue blocking wait. Covers the entire user-decision interval. |
-| HTTP server-root span | Other API entry points like `/v1/audit` and `/v1/bindings`. Generic "METHOD /path" naming. |
+| HTTP server-root span | Other API entry points like `/v1/audit` and `/v1/bindings`. Generic "METHOD /path" naming. The LLM gateway endpoints (`POST /v1/chat/completions`, `POST /v1/messages`) emit no Aileron-side spans — they are transparent reverse proxies and emit no work spans of their own. |
 
 ### Span attribute schema
 
@@ -159,16 +157,6 @@ Every span carries the OTel-namespaced shape locked in for the audit payload. Wh
 | `aileron.connector.fqn` | Fully-qualified connector identifier (e.g. `github://ALRubinger/aileron-connector-google`). |
 | `aileron.connector.op` | The connector operation name (e.g. `list_recent_emails`). |
 | `aileron.connector.hash` | The content-addressed hash of the connector binary. |
-
-**Intercept round** (`aileron.intercept.round`):
-
-| Attribute | Description |
-|---|---|
-| `aileron.intercept.round_index` | 0-based, monotonic per request. |
-| `aileron.intercept.protocol` | `openai` or `anthropic`. |
-| `aileron.intercept.tool_calls_count` | Number of Aileron tool calls in this round. Set when present. |
-| `aileron.intercept.terminal` | `true` when the round produced the final assistant message. |
-| `aileron.intercept.upstream_status` | HTTP status from the upstream LLM when non-200. |
 
 **Approval wait** (`aileron.approval.wait`):
 

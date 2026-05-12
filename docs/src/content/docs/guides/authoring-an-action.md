@@ -138,7 +138,7 @@ The committed source carries the placeholders; the published tarball carries the
 intent = "list my recent Gmail messages"
 ```
 
-`intent` is a canonical natural-language phrase the runtime uses to surface this action to the agent. The shape will grow as [ADR-0008](/adr/0008-intent-matching/) matures; in v1 it is one required string.
+`intent` is a canonical natural-language phrase that documents what this action does. It does not gate selection — the LLM picks among the MCP tools the agent host advertises (per [ADR-0008](/adr/0008-intent-matching/)) using the action's Markdown body as the description. In v1 it is one required string.
 
 The intent string is *not* the only signal the LLM sees. The Markdown body's "When it fires" section (or whatever shape your prose takes) is what actually drives selection. Treat `intent` as the canonical short form and the body as the elaboration.
 

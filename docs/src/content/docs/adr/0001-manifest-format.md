@@ -54,7 +54,7 @@ intent = "tell team I shipped"
 Posts a "shipped" announcement to a Slack channel with the merged PR link.
 ```
 
-**The body is the LLM-facing description.** When the Runtime augments the agent's tool catalog with installed actions, each function's `description` field is drawn from the action file's Markdown body — typically the first paragraph or a designated section. The author writes one piece of prose and four readers consume it.
+**The body is the LLM-facing description.** When `aileron-mcp` advertises an installed action as an MCP tool, the tool's `description` field is drawn from the action file's Markdown body — typically the first paragraph or a designated section. The author writes one piece of prose and four readers consume it.
 
 **Why Markdown.** Action files have three concurrent audiences and we will not maintain three parallel artifacts. The "structured frontmatter + prose" convention is the established pattern for this shape (Hugo, Jekyll, Zola, Anthropic Skills, AGENTS.md, GitHub issues). It is widely understood, has mature tooling, and renders correctly in every reasonable surface (the Hub, IDE preview, GitHub).
 
