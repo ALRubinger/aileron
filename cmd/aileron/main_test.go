@@ -4989,3 +4989,85 @@ func TestFetchAuditList_BuildsURL(t *testing.T) {
 		}
 	}
 }
+
+// TestDaemonErrText covers the parser for the daemon's api.Error
+// envelope. Contract:
+//   - Empty body → "<no body>".
+//   - Envelope with code + message → "code: message" so the operator
+//     sees the underlying classification (e.g. fetch_failed) and the
+//     human detail rather than a bare HTTP status.
+//   - Envelope with code only → "code" alone.
+//   - Anything that doesn't parse as the envelope (legacy daemons,
+//     proxies, raw 500s) → the raw body verbatim so no detail is lost.
+func TestDaemonErrText(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty", "", "<no body>"},
+		{
+			"envelope_with_code_and_message",
+			`{"error":{"code":"fetch_failed","message":"404 (tag or release not found)"}}`,
+			"fetch_failed: 404 (tag or release not found)",
+		},
+		{
+			"envelope_with_code_only",
+			`{"error":{"code":"invalid_fqn"}}`,
+			"invalid_fqn",
+		},
+		{
+			"non_envelope_passthrough",
+			`<html>504 Gateway Timeout</html>`,
+			`<html>504 Gateway Timeout</html>`,
+		},
+		{
+			"envelope_missing_code_falls_through",
+			`{"error":{"message":"oops"}}`,
+			`{"error":{"message":"oops"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := daemonErrText([]byte(tc.raw)); got != tc.want {
+				t.Errorf("daemonErrText(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPreviewSuiteRefs_NonOKSurfacesDaemonError is the regression test
+// for the friction documented in the daemon-error-passthrough fix: a
+// 422 from /actions/preview used to surface as "daemon returned 422"
+// with no reason, hiding the actual classification (e.g. fetch_failed)
+// from the operator. After the fix, the error message must include
+// the daemon's code + message so the suite consent screen tells the
+// user what actually went wrong.
+func TestPreviewSuiteRefs_NonOKSurfacesDaemonError(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/actions/preview" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"error":{"code":"fetch_failed","message":"404 (tag or release not found)"}}`)
+	})
+
+	ref, err := cstore.ParseRef("github://ALRubinger/aileron-connector-github/actions/list-recent-prs@9.9.9")
+	if err != nil {
+		t.Fatalf("ParseRef: %v", err)
+	}
+	previews := previewSuiteRefs([]cstore.Ref{ref}, io.Discard)
+	if len(previews) != 1 {
+		t.Fatalf("len(previews) = %d, want 1", len(previews))
+	}
+	if previews[0].err == nil {
+		t.Fatalf("previews[0].err = nil, want non-nil")
+	}
+	got := previews[0].err.Error()
+	for _, want := range []string{"422", "fetch_failed", "404 (tag or release not found)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("err = %q, want substring %q", got, want)
+		}
+	}
+}
