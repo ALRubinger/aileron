@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
 
 vi.mock('$lib/api', () => ({
@@ -38,6 +38,10 @@ beforeEach(() => {
 	captured = null;
 	vi.mocked(decideActionApproval).mockResolvedValue(null);
 	setupWatcher();
+	// Clear any ?focus= left over from a prior test — the page reads
+	// window.location.search on mount, so a leak would silently break
+	// unrelated cases.
+	window.history.replaceState({}, '', '/approvals');
 });
 
 describe('Approvals page — empty state', () => {
@@ -391,6 +395,149 @@ describe('Approvals page — comms-MCP kinds (#428)', () => {
 				screen.getByText(/No matching api_key binding/)
 			).toBeInTheDocument();
 		});
+	});
+});
+
+describe('Approvals page — ?focus deep-link highlight', () => {
+	beforeAll(() => {
+		// jsdom doesn't implement scrollIntoView; the production code
+		// calls it whenever a focused card lands in the DOM, so install a
+		// stub at the prototype level so neither the spy nor the effect
+		// itself blow up.
+		if (!('scrollIntoView' in Element.prototype)) {
+			(Element.prototype as unknown as { scrollIntoView: () => void }).scrollIntoView =
+				() => {};
+		}
+	});
+
+	it('highlights and scrolls to the focused approval card', async () => {
+		const scrollSpy = vi
+			.spyOn(Element.prototype, 'scrollIntoView')
+			.mockImplementation(() => {});
+		window.history.replaceState({}, '', '/approvals?focus=act-focus-1');
+		setupWatcher([
+			{
+				id: 'act-other',
+				kind: 'action' as const,
+				action_name: 'noop',
+				requested_at: '2026-05-04T12:00:00Z'
+			},
+			{
+				id: 'act-focus-1',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:01Z'
+			}
+		]);
+
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+
+		const cards = await screen.findAllByTestId('action-approval-card');
+		const focused = cards.find(
+			(c) => c.getAttribute('data-approval-id') === 'act-focus-1'
+		);
+		const other = cards.find(
+			(c) => c.getAttribute('data-approval-id') === 'act-other'
+		);
+		expect(focused).toBeDefined();
+		expect(other).toBeDefined();
+		expect(focused!.getAttribute('data-focused')).toBe('true');
+		expect(other!.getAttribute('data-focused')).toBe('false');
+		expect(focused!.className).toContain('ring-2');
+		expect(other!.className).not.toContain('ring-2 ring-primary');
+		await waitFor(() => {
+			expect(scrollSpy).toHaveBeenCalled();
+		});
+
+		scrollSpy.mockRestore();
+	});
+
+	it('shows a banner when the focused id is not in the pending list', async () => {
+		window.history.replaceState({}, '', '/approvals?focus=act-missing');
+		setupWatcher([
+			{
+				id: 'act-other',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
+
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('focused-missing-banner')).toBeInTheDocument();
+		});
+		expect(screen.getByTestId('focused-missing-banner').textContent).toContain(
+			'act-missing'
+		);
+	});
+
+	it('shows the missing banner alongside the empty-state hint when no approvals are pending', async () => {
+		window.history.replaceState({}, '', '/approvals?focus=act-gone');
+
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('focused-missing-banner')).toBeInTheDocument();
+		});
+		expect(
+			screen.getByText(/No pending approvals\. The agent's blocked tool calls/)
+		).toBeInTheDocument();
+	});
+
+	it('clears the missing banner once the focused approval arrives via SSE', async () => {
+		window.history.replaceState({}, '', '/approvals?focus=act-late');
+
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('focused-missing-banner')).toBeInTheDocument();
+		});
+
+		captured!.onPending({
+			id: 'act-late',
+			kind: 'action' as const,
+			action_name: 'send-email',
+			requested_at: '2026-05-04T12:00:05Z'
+		});
+
+		await waitFor(() => {
+			expect(
+				screen.queryByTestId('focused-missing-banner')
+			).not.toBeInTheDocument();
+		});
+		const card = (await screen.findAllByTestId('action-approval-card')).find(
+			(c) => c.getAttribute('data-approval-id') === 'act-late'
+		);
+		expect(card!.getAttribute('data-focused')).toBe('true');
+	});
+
+	it('does not highlight anything when no ?focus param is set', async () => {
+		setupWatcher([
+			{
+				id: 'act-1',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				requested_at: '2026-05-04T12:00:00Z'
+			}
+		]);
+
+		render(Page);
+
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+
+		const card = screen.getByTestId('action-approval-card');
+		expect(card.getAttribute('data-focused')).toBe('false');
+		expect(
+			screen.queryByTestId('focused-missing-banner')
+		).not.toBeInTheDocument();
 	});
 });
 
