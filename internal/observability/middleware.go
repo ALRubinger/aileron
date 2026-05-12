@@ -99,3 +99,15 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	}
 	return s.ResponseWriter.Write(b)
 }
+
+// Flush proxies through to the underlying ResponseWriter when it
+// implements http.Flusher. Required for SSE handlers downstream of
+// this middleware: without a Flush proxy on every wrapper in the
+// chain, the next-outer wrapper's Flush becomes a no-op against a
+// non-flushing wrapper, leaving bytes buffered and the client hung
+// on a silent connection.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
