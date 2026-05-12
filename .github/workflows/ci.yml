@@ -93,7 +93,7 @@ jobs:
         run: task test:go:ci
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ALRubinger/aileron
@@ -138,7 +138,7 @@ jobs:
           (cd cmd/aileron && go test -race -coverprofile=coverage-windows-aileron.txt -run 'TestSignalDaemonStop' .)
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ALRubinger/aileron
@@ -200,7 +200,7 @@ jobs:
 
       - name: Upload UI coverage to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ALRubinger/aileron
@@ -209,7 +209,7 @@ jobs:
 
       - name: Upload UI E2E coverage to Codecov
         if: ${{ !cancelled() && hashFiles('ui/coverage-e2e/lcov.info') }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ALRubinger/aileron
@@ -315,7 +315,7 @@ jobs:
 
       - name: Upload integration coverage to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ALRubinger/aileron
