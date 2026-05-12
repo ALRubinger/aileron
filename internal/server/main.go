@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/app"
+	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
@@ -42,14 +43,16 @@ var lockInodeWatchInterval = 5 * time.Second
 
 func main() {
 	var bind string
+	var seedApprovalsPath string
 	flag.StringVar(&bind, "bind", "", "TCP bind address (default 127.0.0.1:0 ephemeral; cloud sets e.g. 0.0.0.0:8080)")
+	flag.StringVar(&seedApprovalsPath, "dev-seed-approvals", "", "Dev-only: path to a JSON file of pending action approvals to seed at startup. Refused unless the bind address is loopback.")
 	flag.Parse()
 
 	log := newLogger(os.Getenv("AILERON_LOG_LEVEL"))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := startDaemon(ctx, bind, log); err != nil {
+	if err := startDaemon(ctx, bind, seedApprovalsPath, log); err != nil {
 		log.Error("daemon exited with error", "error", err)
 		os.Exit(1)
 	}
@@ -59,17 +62,18 @@ func main() {
 // drives [run] under the supplied context. Extracted from main so
 // tests can exercise the wiring with a cancellable ctx and a
 // HOME-overridden state directory.
-func startDaemon(ctx context.Context, bind string, log *slog.Logger) error {
+func startDaemon(ctx context.Context, bind, seedApprovalsPath string, log *slog.Logger) error {
 	stateDir, err := defaultStateDir()
 	if err != nil {
 		return err
 	}
 	return run(ctx, log, options{
-		BindAddr:  bind,
-		StateDir:  stateDir,
-		VaultPath: launch.DefaultVaultPath(),
-		IsTTY:     term.IsTerminal(int(os.Stdin.Fd())),
-		Stderr:    os.Stderr,
+		BindAddr:          bind,
+		StateDir:          stateDir,
+		VaultPath:         launch.DefaultVaultPath(),
+		IsTTY:             term.IsTerminal(int(os.Stdin.Fd())),
+		Stderr:            os.Stderr,
+		SeedApprovalsPath: seedApprovalsPath,
 	})
 }
 
@@ -111,6 +115,13 @@ type options struct {
 	// Stderr is the stream selectVault uses for prompts. Set to
 	// os.Stderr in production; bytes.Buffer in tests.
 	Stderr io.Writer
+	// SeedApprovalsPath, when set, points at a JSON file of pending
+	// action approvals to register on the queue at startup. Developer-
+	// only — Playwright integration tests drive this so the approvals
+	// page has something to list/approve/deny without standing up a
+	// real agent. Refused unless BindAddr resolves to a loopback
+	// address.
+	SeedApprovalsPath string
 }
 
 // run owns the daemon lifecycle: acquire the singleton lock, bind,
@@ -231,6 +242,27 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	if bindAddr == "" {
 		bindAddr = "127.0.0.1:0"
 	}
+
+	// --dev-seed-approvals: developer-only path to a JSON fixture of
+	// pending action approvals. Wired in before the handler is built so
+	// the seeded queue is the one cfg.ActionApprovals carries.
+	// Loopback-only: refusing on a non-loopback bind keeps a careless
+	// `aileron --bind 0.0.0.0 --dev-seed-approvals=...` from exposing a
+	// pre-populated approval surface to the network.
+	if opts.SeedApprovalsPath != "" {
+		if !isLoopbackBind(bindAddr) {
+			return fmt.Errorf("--dev-seed-approvals requires a loopback bind address (got %q)", bindAddr)
+		}
+		entries, err := approval.LoadSeedFile(opts.SeedApprovalsPath)
+		if err != nil {
+			return fmt.Errorf("load seed approvals: %w", err)
+		}
+		queue := approval.NewActionApprovalQueue(nil, nil)
+		ids := approval.SeedQueue(queue, entries)
+		cfg.ActionApprovals = queue
+		log.Info("seeded action approvals", "count", len(ids), "ids", ids)
+	}
+
 	listener, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", bindAddr, err)
@@ -369,6 +401,28 @@ func defaultStateDir() (string, error) {
 		return "", fmt.Errorf("user home dir: %w", err)
 	}
 	return filepath.Join(home, ".aileron"), nil
+}
+
+// isLoopbackBind reports whether bindAddr ("host:port" form) resolves
+// to a loopback IP. Used by the --dev-seed-approvals guard so the
+// developer-only seed surface can never accompany a public bind.
+//
+// Conservative on parse failure (returns false): unparseable bind
+// addresses don't get the benefit of the doubt — better to reject the
+// seed than silently expose it on an unintended interface.
+func isLoopbackBind(bindAddr string) bool {
+	host, _, err := net.SplitHostPort(bindAddr)
+	if err != nil {
+		return false
+	}
+	if host == "" || host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 // selectVault decides how the daemon should access the local file vault

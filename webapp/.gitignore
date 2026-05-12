@@ -4,3 +4,5 @@ build/
 .DS_Store
 test-results/
 coverage/
+playwright-report/
+playwright/.cache/

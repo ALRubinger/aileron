@@ -784,7 +784,7 @@ func TestStartDaemonHappyPath(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	runErr := make(chan error, 1)
-	go func() { runErr <- startDaemon(ctx, "127.0.0.1:0", log) }()
+	go func() { runErr <- startDaemon(ctx, "127.0.0.1:0", "", log) }()
 
 	waitForDaemon(t, stateDir, 3*time.Second)
 
@@ -807,7 +807,7 @@ func TestStartDaemonReturnsErrorFromRun(t *testing.T) {
 	seedVault(t, launch.DefaultVaultPath())
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	err := startDaemon(context.Background(), "not-a-valid-address", log)
+	err := startDaemon(context.Background(), "not-a-valid-address", "", log)
 	if err == nil {
 		t.Fatal("startDaemon should propagate the listen error")
 	}
@@ -857,6 +857,170 @@ func refusePrompter(t *testing.T) launch.PassphrasePrompter {
 	return func(_ string, _ io.Writer) (string, error) {
 		t.Errorf("prompter was called; expected to short-circuit before prompting")
 		return "", nil
+	}
+}
+
+// TestIsLoopbackBind covers the bind-address classifier the
+// --dev-seed-approvals guard depends on. Each case is one row in the
+// guard's truth table; rejecting parse failures is the conservative
+// default per the function's contract.
+func TestIsLoopbackBind(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{"127.0.0.1:0", true},
+		{"127.0.0.1:8080", true},
+		{"localhost:8080", true},
+		{":8080", true}, // empty host = bind on all loopback interfaces in tests
+		{"[::1]:0", true},
+		{"0.0.0.0:8080", false},
+		{"192.168.1.5:0", false},
+		{"example.com:80", false}, // hostname; doesn't resolve to loopback
+		{"not-a-valid-address", false},
+	}
+	for _, c := range cases {
+		t.Run(c.addr, func(t *testing.T) {
+			if got := isLoopbackBind(c.addr); got != c.want {
+				t.Errorf("isLoopbackBind(%q) = %v, want %v", c.addr, got, c.want)
+			}
+		})
+	}
+}
+
+// TestRun_SeedApprovals_PopulatesQueue verifies the --dev-seed-approvals
+// path end-to-end against a real daemon: the JSON fixture is loaded,
+// each entry is registered on the action-approval queue, and the
+// queue's pending entries surface via the public list endpoint.
+//
+// This is the contract Playwright's tier-2 integration spec depends
+// on. Without it, the spec would have nothing to list/approve.
+func TestRun_SeedApprovals_PopulatesQueue(t *testing.T) {
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
+	seedFile := filepath.Join(t.TempDir(), "approvals.json")
+	body := `[
+		{"kind":"action","action_name":"send-email","connector_fqn":"github://x/y","args":{"to":"a@b.com"}},
+		{"kind":"comms_send","action_name":"send_message","args":{"service":"slack","channel":"#dev","body":"deploy"}}
+	]`
+	if err := os.WriteFile(seedFile, []byte(body), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	opts := options{
+		BindAddr:          "127.0.0.1:0",
+		StateDir:          stateDir,
+		VaultPath:         vaultPath,
+		IsTTY:             false,
+		Stderr:            io.Discard,
+		SeedApprovalsPath: seedFile,
+	}
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(ctx, log, opts) }()
+	info := waitForDaemon(t, stateDir, 3*time.Second)
+	defer func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(5 * time.Second):
+			t.Fatal("run did not return within timeout")
+		}
+	}()
+
+	resp, err := http.Get(info.URL + "/v1/action-approvals")
+	if err != nil {
+		t.Fatalf("GET /v1/action-approvals: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var listResp struct {
+		Items []struct {
+			ID         string `json:"id"`
+			Kind       string `json:"kind"`
+			ActionName string `json:"action_name"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listResp.Items) != 2 {
+		t.Fatalf("len(items)=%d want 2 — seed entries should be surfaced via /v1/action-approvals", len(listResp.Items))
+	}
+	kinds := map[string]bool{}
+	for _, it := range listResp.Items {
+		kinds[it.Kind] = true
+		if it.ID == "" || it.ActionName == "" {
+			t.Errorf("entry missing id or action_name: %+v", it)
+		}
+	}
+	if !kinds["action"] || !kinds["comms_send"] {
+		t.Errorf("kinds=%v want action and comms_send", kinds)
+	}
+}
+
+// TestRun_SeedApprovals_RejectsNonLoopbackBind verifies the guard
+// short-circuits BEFORE binding when --dev-seed-approvals is paired
+// with a public bind. Failing fast keeps a careless invocation from
+// briefly exposing the seeded queue to the network.
+func TestRun_SeedApprovals_RejectsNonLoopbackBind(t *testing.T) {
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
+	seedFile := filepath.Join(t.TempDir(), "approvals.json")
+	if err := os.WriteFile(seedFile, []byte(`[]`), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := run(context.Background(), log, options{
+		BindAddr:          "0.0.0.0:0",
+		StateDir:          stateDir,
+		VaultPath:         vaultPath,
+		IsTTY:             false,
+		Stderr:            io.Discard,
+		SeedApprovalsPath: seedFile,
+	})
+	if err == nil {
+		t.Fatal("run should reject --dev-seed-approvals on a non-loopback bind")
+	}
+	if !strings.Contains(err.Error(), "loopback") {
+		t.Errorf("err=%v want mention of loopback", err)
+	}
+}
+
+// TestRun_SeedApprovals_PropagatesLoadErrors covers the failure mode
+// where the seed file is malformed. The startup error should be
+// surfaced rather than swallowed — Playwright's job runner needs to
+// fail fast on a broken fixture.
+func TestRun_SeedApprovals_PropagatesLoadErrors(t *testing.T) {
+	stateDir := t.TempDir()
+	vaultPath := filepath.Join(t.TempDir(), "secrets.json")
+	seedVault(t, vaultPath)
+	seedFile := filepath.Join(t.TempDir(), "broken.json")
+	if err := os.WriteFile(seedFile, []byte(`{not json at all`), 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := run(context.Background(), log, options{
+		BindAddr:          "127.0.0.1:0",
+		StateDir:          stateDir,
+		VaultPath:         vaultPath,
+		IsTTY:             false,
+		Stderr:            io.Discard,
+		SeedApprovalsPath: seedFile,
+	})
+	if err == nil {
+		t.Fatal("run should surface seed-load errors")
+	}
+	if !strings.Contains(err.Error(), "load seed approvals") {
+		t.Errorf("err=%v want 'load seed approvals' prefix", err)
 	}
 }
 

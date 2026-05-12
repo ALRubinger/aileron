@@ -223,6 +223,117 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ui/test-results/junit-vitest.xml,ui/test-results/junit-playwright.xml
 
+  test-webapp:
+    name: Webapp Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 11.0.9
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: webapp/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: webapp
+        run: pnpm install --frozen-lockfile
+
+      - name: Run unit and component tests
+        working-directory: webapp
+        run: pnpm test
+
+      - name: Build for E2E
+        working-directory: webapp
+        run: pnpm build
+
+      - name: Install Playwright browsers
+        working-directory: webapp
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run E2E tests (mocked)
+        working-directory: webapp
+        run: pnpm test:e2e
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-playwright-report
+          path: webapp/playwright-report/
+          retention-days: 14
+
+      - name: Upload webapp test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: webapp/test-results/junit-vitest.xml,webapp/test-results/junit-playwright.xml
+
+  test-webapp-integration:
+    name: Webapp Integration E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            internal/go.mod
+            cmd/aileron/go.mod
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 11.0.9
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: webapp/pnpm-lock.yaml
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build daemon and CLI
+        run: |
+          task build:server
+          task build:cli
+
+      - name: Install webapp dependencies
+        working-directory: webapp
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: webapp
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run integration E2E (real daemon + seed fixture)
+        run: webapp/scripts/run-integration-e2e.sh
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-integration-playwright-report
+          path: webapp/playwright-report/
+          retention-days: 14
+
+      - name: Upload integration test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: webapp/test-results/junit-playwright-integration.xml
+
   docs:
     name: Docs
     runs-on: ubuntu-latest

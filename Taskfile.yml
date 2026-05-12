@@ -237,11 +237,39 @@ tasks:
     desc: Run all tests
     cmds:
       - task: test:go
+      - task: test:webapp
       - task: test:ui
       - task: test:docs
 
+  test:webapp:
+    desc: Run local webapp unit tests (Vitest)
+    dir: webapp
+    cmds:
+      - pnpm install
+      - pnpm test
+
+  test:webapp:e2e:
+    desc: Run mocked-API Playwright E2E tests against the local webapp
+    deps:
+      - build:webapp
+    dir: webapp
+    cmds:
+      - pnpm install
+      - pnpm exec playwright install --with-deps chromium
+      - pnpm test:e2e
+
+  test:webapp:e2e:integration:
+    desc: Run Playwright E2E tests against a real daemon seeded with pending approvals
+    deps:
+      - build:server
+      - build:cli
+    cmds:
+      - cd webapp && pnpm install
+      - cd webapp && pnpm exec playwright install --with-deps chromium
+      - webapp/scripts/run-integration-e2e.sh
+
   test:ui:
-    desc: Run UI unit and component tests
+    desc: (Frozen) Run cloud-tier UI unit tests. Local webapp tests live in `test:webapp`.
     dir: ui
     cmds:
       - pnpm install

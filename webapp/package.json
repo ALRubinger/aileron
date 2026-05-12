@@ -10,7 +10,10 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:integration": "playwright test --config=playwright.integration.config.ts",
+    "test:e2e:install": "playwright install --with-deps chromium"
   },
   "dependencies": {
     "@sveltejs/adapter-static": "^3.0.0",
@@ -26,6 +29,7 @@
   },
   "devDependencies": {
     "@lucide/svelte": "^1.7.0",
+    "@playwright/test": "^1.59.1",
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^22.0.0",
     "@testing-library/jest-dom": "^6.9.1",

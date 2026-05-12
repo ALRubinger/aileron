@@ -1,0 +1,31 @@
+[
+  {
+    "kind": "action",
+    "action_name": "send-email",
+    "connector_fqn": "github://aileron/aileron-connector-google",
+    "args": {
+      "to": "alice@example.com",
+      "subject": "release notes",
+      "body": "v0.0.7 is cut"
+    }
+  },
+  {
+    "kind": "comms_send",
+    "action_name": "send_message",
+    "args": {
+      "service": "slack",
+      "channel": "#deploys",
+      "body": "Deploying main to prod"
+    }
+  },
+  {
+    "kind": "http_request",
+    "action_name": "http_request",
+    "args": {
+      "method": "POST",
+      "url": "https://api.example.com/widgets",
+      "body": "{\"name\":\"new\"}",
+      "secret_name": "example_api_key"
+    }
+  }
+]
