@@ -39,6 +39,31 @@
 	let loading = $state(true);
 	let error = $state('');
 
+	// `?focus=<approval-id>` deep-link target, set by `aileron open
+	// approval <id>` (cmd/aileron/open.go) and by the terminal notifier.
+	// When the matching card renders, it's scrolled into view and gets a
+	// distinct ring so the operator can pick it out from sibling cards.
+	let focusedId = $state('');
+	let scrolledToFocused = false;
+
+	let focusedMissing = $derived(
+		!loading &&
+			!error &&
+			focusedId !== '' &&
+			!actionApprovals.some((a) => a.id === focusedId)
+	);
+
+	$effect(() => {
+		if (!focusedId || scrolledToFocused) return;
+		if (!actionApprovals.some((a) => a.id === focusedId)) return;
+		const el = document.querySelector(
+			`[data-approval-id="${CSS.escape(focusedId)}"]`
+		);
+		if (!el) return;
+		el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		scrolledToFocused = true;
+	});
+
 	// Action-level approvals stream live over SSE — no polling. The
 	// stream emits a `snapshot` on connect, then `pending` / `resolved`
 	// events as the queue mutates. The browser's EventSource handles
@@ -121,6 +146,9 @@
 	}
 
 	onMount(() => {
+		const params = new URLSearchParams(window.location.search);
+		focusedId = params.get('focus') ?? '';
+
 		const closeStream = watchActionApprovals({
 			onSnapshot: (items) => {
 				actionApprovals = items;
@@ -161,6 +189,14 @@
 {:else if error}
 	<p class="text-destructive">{error}</p>
 {:else if actionApprovals.length === 0}
+	{#if focusedMissing}
+		<p
+			class="mb-3 rounded border border-border bg-muted/40 p-2 text-sm text-muted-foreground"
+			data-testid="focused-missing-banner"
+		>
+			Approval <code class="rounded bg-muted px-1">{focusedId}</code> is no longer pending.
+		</p>
+	{/if}
 	<p class="text-muted-foreground">
 		No pending approvals. The agent's blocked tool calls (if any) will appear here.
 	</p>
@@ -169,13 +205,24 @@
 		<p class="mb-3 text-sm text-muted-foreground">
 			The agent is blocked on these tool calls until you approve or deny.
 		</p>
+		{#if focusedMissing}
+			<p
+				class="mb-3 rounded border border-border bg-muted/40 p-2 text-sm text-muted-foreground"
+				data-testid="focused-missing-banner"
+			>
+				Approval <code class="rounded bg-muted px-1">{focusedId}</code> is no longer pending.
+			</p>
+		{/if}
 		<div class="flex flex-col gap-3">
 			{#each actionApprovals as approval (approval.id)}
 				{@const kind = entryKind(approval)}
+				{@const isFocused = approval.id === focusedId}
 				<Card.Root
 					data-testid="action-approval-card"
 					data-approval-id={approval.id}
 					data-approval-kind={kind}
+					data-focused={isFocused ? 'true' : 'false'}
+					class={isFocused ? 'ring-2 ring-primary' : ''}
 				>
 					<Card.Header>
 						<div class="flex items-center justify-between">
