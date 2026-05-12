@@ -53,7 +53,7 @@
   },
   "pnpm": {
     "overrides": {
-      "protobufjs": "^7.5.5"
+      "protobufjs": "^8.0.0"
     }
   }
 }
