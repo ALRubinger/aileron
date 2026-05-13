@@ -81,6 +81,13 @@ type PreviewField struct {
 	// user sees that the connector did not return that field, rather
 	// than the field being silently absent.
 	Missing bool
+
+	// Multiline is true when the manifest's `multiline` directive named
+	// this field's label. The approval surface renders these as
+	// scrollable blockquotes below the inline rows rather than as
+	// single-line `key: value` entries. Carries no semantic weight —
+	// purely a presentation hint per ADR-0016.
+	Multiline bool
 }
 
 // InvokePreview implements [PreviewInvoker]. Wraps the call in an
@@ -179,6 +186,10 @@ func extractPreviewFields(preview *PreviewPolicy, response map[string]any) []Pre
 		// ordered path above is the production case.
 		sortStrings(labels)
 	}
+	multiline := make(map[string]bool, len(preview.Multiline))
+	for _, l := range preview.Multiline {
+		multiline[l] = true
+	}
 	out := make([]PreviewField, 0, len(labels))
 	for _, label := range labels {
 		path, ok := preview.Render[label]
@@ -187,10 +198,10 @@ func extractPreviewFields(preview *PreviewPolicy, response map[string]any) []Pre
 		}
 		value, found := ResolveFieldPath(response, path)
 		if !found {
-			out = append(out, PreviewField{Label: label, Missing: true})
+			out = append(out, PreviewField{Label: label, Missing: true, Multiline: multiline[label]})
 			continue
 		}
-		out = append(out, PreviewField{Label: label, Value: value})
+		out = append(out, PreviewField{Label: label, Value: value, Multiline: multiline[label]})
 	}
 	return out
 }

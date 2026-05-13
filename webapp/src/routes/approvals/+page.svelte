@@ -7,6 +7,8 @@
 	import { onMount } from 'svelte';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
+	import * as Collapsible from '$lib/components/ui/collapsible';
+	import * as Tooltip from '$lib/components/ui/tooltip';
 
 	// Action-level approvals (#418): runtime-blocking yes/no for actions
 	// whose manifest declared `[approval] required = true`. Each entry
@@ -184,6 +186,7 @@
 
 <h1 class="mb-4 text-xl font-semibold">Approvals</h1>
 
+<Tooltip.Provider>
 {#if loading}
 	<p class="text-muted-foreground">Connecting to the approval stream…</p>
 {:else if error}
@@ -245,6 +248,8 @@
 					<Card.Content class="flex flex-col gap-3">
 						{#if approval.preview}
 							{@const preview = approval.preview}
+							{@const inlineFields = (preview.fields ?? []).filter((f) => !f.multiline)}
+							{@const blockFields = (preview.fields ?? []).filter((f) => f.multiline)}
 							<div
 								class="rounded border border-border bg-muted/40 p-3 text-sm"
 								data-testid="approval-preview"
@@ -259,27 +264,48 @@
 									>
 										{preview.unavailable}
 									</div>
-								{:else if preview.fields && preview.fields.length > 0}
-									<dl
-										class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
-										data-testid="approval-preview-fields"
-									>
-										{#each preview.fields as field (field.label)}
-											<dt class="font-medium text-muted-foreground">{field.label}:</dt>
-											<dd
-												class="break-words"
-												data-testid="approval-preview-field"
-												data-field-label={field.label}
-												data-field-missing={field.missing ? 'true' : 'false'}
-											>
-												{#if field.missing}
-													<span class="italic text-muted-foreground">n/a</span>
-												{:else}
-													{field.value ?? ''}
-												{/if}
-											</dd>
-										{/each}
-									</dl>
+								{:else}
+									{#if inlineFields.length > 0}
+										<dl
+											class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
+											data-testid="approval-preview-fields"
+										>
+											{#each inlineFields as field (field.label)}
+												<dt class="font-medium text-muted-foreground">{field.label}:</dt>
+												<dd
+													class="break-words"
+													data-testid="approval-preview-field"
+													data-field-label={field.label}
+													data-field-missing={field.missing ? 'true' : 'false'}
+												>
+													{#if field.missing}
+														<span class="italic text-muted-foreground">n/a</span>
+													{:else}
+														{field.value ?? ''}
+													{/if}
+												</dd>
+											{/each}
+										</dl>
+									{/if}
+									{#each blockFields as field (field.label)}
+										<div
+											class="mt-2"
+											data-testid="approval-preview-multiline"
+											data-field-label={field.label}
+											data-field-missing={field.missing ? 'true' : 'false'}
+										>
+											<div class="mb-1 text-xs font-medium text-muted-foreground">
+												{field.label}
+											</div>
+											{#if field.missing}
+												<div class="text-sm italic text-muted-foreground">n/a</div>
+											{:else}
+												<blockquote
+													class="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded border-l-2 border-border bg-background/60 px-3 py-2 text-sm"
+												>{field.value ?? ''}</blockquote>
+											{/if}
+										</div>
+									{/each}
 								{/if}
 							</div>
 						{/if}
@@ -340,9 +366,35 @@
 								{/if}
 							</div>
 						{:else}
-							<pre
-								class="overflow-x-auto rounded bg-muted p-3 text-xs"
-								data-testid="approval-args">{formatArgs(approval.args)}</pre>
+							<Collapsible.Root data-testid="approval-args-accordion">
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<Collapsible.Trigger
+												{...props}
+												class="group flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+												data-testid="approval-args-trigger"
+											>
+												<span
+													class="inline-block transition-transform group-data-[state=open]:rotate-90"
+													aria-hidden="true">▸</span
+												>
+												Action inputs
+											</Collapsible.Trigger>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content>
+										Raw arguments the agent passed to this action. Shown for
+										transparency; the human-readable preview above is the
+										authoritative summary.
+									</Tooltip.Content>
+								</Tooltip.Root>
+								<Collapsible.Content>
+									<pre
+										class="mt-1 overflow-x-auto rounded bg-muted p-3 text-xs"
+										data-testid="approval-args">{formatArgs(approval.args)}</pre>
+								</Collapsible.Content>
+							</Collapsible.Root>
 						{/if}
 
 						<div class="flex flex-wrap items-center gap-2">
@@ -402,3 +454,4 @@
 		</div>
 	</section>
 {/if}
+</Tooltip.Provider>

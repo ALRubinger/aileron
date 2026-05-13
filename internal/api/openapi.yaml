@@ -5120,6 +5120,18 @@ components:
             equals the segment, return its `value`". Paths that fail to
             resolve at runtime surface as per-field "n/a" indicators on the
             approval prompt; the approval still proceeds.
+        multiline:
+          type: array
+          items:
+            type: string
+          description: |
+            Labels in `render` whose values are long-form content (email
+            bodies, commit messages, response payloads). The approval surface
+            renders these as scrollable blockquotes below the inline rows
+            rather than as single-line `key: value` entries. Optional; a
+            manifest that omits it renders all fields inline. Entries must
+            appear as keys in `render`; mismatches are rejected at manifest
+            load time.
 
     PendingActionApproval:
       type: object
@@ -5236,6 +5248,13 @@ components:
             preview op's response. The UI surfaces these as "n/a" so the
             user sees that the connector did not return the field, rather
             than the field being silently absent.
+        multiline:
+          type: boolean
+          description: |
+            True when the manifest's `multiline` list named this field's
+            label. The approval surface renders the value as a scrollable
+            blockquote below the inline rows rather than as a single-line
+            `key: value` entry. Omitted (or false) for short fields.
 
     ActionApprovalListResponse:
       type: object

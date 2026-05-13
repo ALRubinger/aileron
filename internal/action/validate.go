@@ -213,6 +213,13 @@ func validatePreview(m *Manifest, file string, inputNames map[string]bool) error
 				"[approval.preview].render[%q] path is empty", label)
 		}
 	}
+	for _, label := range preview.Multiline {
+		if _, ok := preview.Render[label]; !ok {
+			return newValidationErr(file,
+				"[approval.preview].multiline references %q but no matching key exists in [approval.preview].render",
+				label)
+		}
+	}
 	return nil
 }
 

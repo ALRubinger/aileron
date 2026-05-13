@@ -197,6 +197,43 @@ func TestListActionApprovals_PreviewRoundTripsThroughTheWire(t *testing.T) {
 	}
 }
 
+// TestListActionApprovals_PreviewMultilineRoundTripsThroughTheWire
+// pins the wire contract for the `multiline` render hint (ADR-0016).
+// Fields whose label appeared in the manifest's `multiline` list must
+// surface with Multiline=true on the wire so the webapp renders them
+// as scrollable blockquotes; fields not in the list must omit the flag
+// so the existing inline-row behavior is unchanged. Without this
+// guarantee, the webapp would never receive the hint and the user-
+// visible improvement the ADR motivated would not land.
+func TestListActionApprovals_PreviewMultilineRoundTripsThroughTheWire(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.RegisterKindWithPreview(approval.ApprovalKindAction,
+		"send-draft", "github://aileron/google", "session-42",
+		map[string]any{"draft_id": "r-12345"},
+		&approval.ActionApprovalPreview{
+			Fields: []approval.ActionApprovalPreviewField{
+				{Label: "To", Value: "alice@example.com"},
+				{Label: "Body", Value: "long email body here", Multiline: true},
+			},
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals", nil)
+	rec := httptest.NewRecorder()
+	srv.ListActionApprovals(rec, req)
+
+	var got api.ActionApprovalListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	fields := *got.Items[0].Preview.Fields
+	if fields[0].Multiline != nil && *fields[0].Multiline {
+		t.Errorf("Fields[0] (To).Multiline = true, want false/omitted")
+	}
+	if fields[1].Multiline == nil || !*fields[1].Multiline {
+		t.Errorf("Fields[1] (Body).Multiline = %v, want pointer to true", fields[1].Multiline)
+	}
+}
+
 // TestListActionApprovals_PreviewUnavailableSurfacesAcrossWire asserts
 // the wholesale-failure shape (ADR-0016) reaches the wire intact. The
 // "preview unavailable: <reason>" string is the only signal the user

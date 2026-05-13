@@ -167,6 +167,116 @@ func TestSandboxExecutor_InvokePreview_ConnectorError(t *testing.T) {
 	}
 }
 
+// TestSandboxExecutor_InvokePreview_MultilineFlag asserts that fields
+// named in the manifest's `multiline` list (ADR-0016) carry
+// Multiline=true through to the rendered PreviewResult, so the
+// approval surface can render them as scrollable blockquotes rather
+// than inline `key: value` rows. The flag must propagate regardless
+// of whether the field's path resolved (a missing multiline field is
+// still flagged so the UI renders the empty blockquote position
+// consistently).
+func TestSandboxExecutor_InvokePreview_MultilineFlag(t *testing.T) {
+	cstoreDir := t.TempDir()
+	store := cstore.NewStore(cstoreDir)
+	const fqn = "github://test/google"
+	hash := installFakeConnector(t, store, fqn, "1.0.0")
+
+	dir := t.TempDir()
+	manifest := `+++
+name = "send-draft"
+version = "1.0.0"
+source = "hub://test/send-draft@1.0.0"
+
+[[requires.connectors]]
+name = "` + fqn + `"
+version = "1.0.0"
+hash = "` + hash + `"
+capabilities = ["send_draft", "get_draft"]
+
+[match]
+intent = "send a draft"
+
+[[inputs]]
+name = "draft_id"
+type = "string"
+description = "Draft id"
+
+[[execute]]
+id = "send"
+connector = "` + fqn + `"
+op = "send_draft"
+
+[approval]
+required = true
+
+[approval.preview]
+op = "get_draft"
+args = { id = "${args.draft_id}" }
+multiline = ["Body"]
+
+[approval.preview.render]
+To = "message.payload.headers.To"
+Body = "message.snippet"
++++
+
+# Send Draft
+`
+	if err := os.WriteFile(filepath.Join(dir, "send-draft.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write action: %v", err)
+	}
+	actions := NewStore(dir)
+	if _, err := actions.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	gmailResponse := map[string]any{
+		"message": map[string]any{
+			"payload": map[string]any{
+				"headers": []any{
+					map[string]any{"name": "To", "value": "alice@example.com"},
+				},
+			},
+			"snippet": "Hi Alice — here is the weekly recap. Lots of detail below.",
+		},
+	}
+	rt := &fakeRuntime{}
+	rt.connectors = map[string]*fakeConnector{fqn: {resp: gmailResponse}}
+
+	exec := NewSandboxExecutor(actions, store, rt, nil)
+	t.Cleanup(func() { _ = exec.Close(context.Background()) })
+
+	loaded, err := actions.Get("send-draft")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got := exec.InvokePreview(context.Background(), loaded.Manifest, map[string]any{"draft_id": "r-1"})
+	if got.Unavailable != "" {
+		t.Fatalf("Unavailable = %q, want empty", got.Unavailable)
+	}
+
+	var to, body *PreviewField
+	for i := range got.Fields {
+		switch got.Fields[i].Label {
+		case "To":
+			to = &got.Fields[i]
+		case "Body":
+			body = &got.Fields[i]
+		}
+	}
+	if to == nil || body == nil {
+		t.Fatalf("missing fields in result: got %+v", got.Fields)
+	}
+	if to.Multiline {
+		t.Errorf("To.Multiline = true, want false (not in `multiline` list)")
+	}
+	if !body.Multiline {
+		t.Errorf("Body.Multiline = false, want true (`multiline = [\"Body\"]`)")
+	}
+	if body.Value == "" {
+		t.Errorf("Body.Value empty, want resolved snippet")
+	}
+}
+
 // TestSandboxExecutor_InvokePreview_PathMissPerField asserts that a
 // successful preview call whose response does not contain every
 // declared render path surfaces the missing fields with Missing=true

@@ -424,3 +424,114 @@ Preview = "message.snippet"
 		}
 	}
 }
+
+// TestParse_ApprovalPreviewMultiline asserts that the optional
+// `multiline` list in `[approval.preview]` parses into
+// PreviewPolicy.Multiline as the declared label sequence. The approval
+// surface uses this list to render those labels as scrollable
+// blockquotes rather than single-line key/value entries (ADR-0016).
+func TestParse_ApprovalPreviewMultiline(t *testing.T) {
+	data := `+++
+name = "send-draft"
+version = "1.0.0"
+source = "hub://aileron/send-draft@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["send_draft", "get_draft"]
+
+[match]
+intent = "send a draft"
+
+[[inputs]]
+name = "draft_id"
+type = "string"
+description = "Draft id"
+
+[[execute]]
+id = "send"
+connector = "github://aileron/google"
+op = "send_draft"
+
+[approval]
+required = true
+
+[approval.preview]
+op = "get_draft"
+args = { id = "${args.draft_id}" }
+render = { To = "message.payload.headers.To", Subject = "message.payload.headers.Subject", Body = "message.snippet" }
+multiline = ["Body"]
++++
+`
+	m, err := Parse("send-draft.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	preview := m.ApprovalPreview()
+	if preview == nil {
+		t.Fatal("ApprovalPreview() = nil, want non-nil")
+	}
+	want := []string{"Body"}
+	if got := preview.Multiline; len(got) != len(want) {
+		t.Fatalf("Multiline length = %d, want %d (got %v)", len(got), len(want), got)
+	}
+	for i, label := range want {
+		if preview.Multiline[i] != label {
+			t.Errorf("Multiline[%d] = %q, want %q", i, preview.Multiline[i], label)
+		}
+	}
+}
+
+// TestParse_ApprovalPreviewMultilineOmittedIsEmpty asserts the
+// migration contract from ADR-0016: a manifest that omits `multiline`
+// parses into an empty list, reproducing the prior all-inline render
+// behavior. Without this guarantee, every existing manifest would need
+// an explicit `multiline = []` to keep working.
+func TestParse_ApprovalPreviewMultilineOmittedIsEmpty(t *testing.T) {
+	data := `+++
+name = "send-draft"
+version = "1.0.0"
+source = "hub://aileron/send-draft@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["send_draft", "get_draft"]
+
+[match]
+intent = "send a draft"
+
+[[inputs]]
+name = "draft_id"
+type = "string"
+description = "Draft id"
+
+[[execute]]
+id = "send"
+connector = "github://aileron/google"
+op = "send_draft"
+
+[approval]
+required = true
+
+[approval.preview]
+op = "get_draft"
+args = { id = "${args.draft_id}" }
+render = { To = "message.payload.headers.To" }
++++
+`
+	m, err := Parse("send-draft.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	preview := m.ApprovalPreview()
+	if preview == nil {
+		t.Fatal("ApprovalPreview() = nil, want non-nil")
+	}
+	if len(preview.Multiline) != 0 {
+		t.Errorf("Multiline = %v, want empty (manifest omitted the directive)", preview.Multiline)
+	}
+}
