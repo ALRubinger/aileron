@@ -69,7 +69,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Login to Artifact Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ secrets.GCP_REGION }}-docker.pkg.dev
           username: oauth2accesstoken
