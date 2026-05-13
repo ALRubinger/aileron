@@ -24,7 +24,6 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 | `aileron action add <FQN>@<version>` | Fetch an action template from the named source and copy it into `~/.aileron/actions/`. Walks declared connector dependencies and prompts for each. | [ADR-0003](/adr/0003-action-model), [ADR-0007](/adr/0007-install-consent) |
 | `aileron action update <name>` | Fetch the latest version of an installed action's template; show a diff against the local file; apply on confirmation. | [ADR-0003](/adr/0003-action-model) |
 | `aileron action list` | List every action in `~/.aileron/actions/` with its source FQN, version, and connector dependencies. | [ADR-0003](/adr/0003-action-model) |
-| `aileron action audit` | Show every action and connector currently installed plus declared capabilities and binding identities. | [ADR-0003](/adr/0003-action-model) |
 | `aileron action remove <name>` | Delete an installed action file. Connectors no longer referenced are *not* automatically removed; use `aileron connector gc`. | [ADR-0003](/adr/0003-action-model) |
 
 ## Connectors
