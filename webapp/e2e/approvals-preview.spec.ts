@@ -113,16 +113,87 @@ test.describe('Approvals page — [approval.preview] rendering (ADR-0016)', () =
 		approvalsMock
 	}) => {
 		// Manifests without an `[approval.preview]` block render the
-		// existing args-only card. The preview slot must not appear at
-		// all (no empty header, no "n/a" placeholder for the block
-		// itself).
+		// existing args card. The preview slot must not appear at all
+		// (no empty header, no "n/a" placeholder for the block itself).
+		// The args accordion is still rendered so the user can opt into
+		// seeing the raw agent inputs.
 		await page.goto('/approvals');
 		await approvalsMock.sse.pushSnapshot([fixture.action()]);
 
 		const card = page.locator('[data-approval-id="act-action-1"]');
 		await expect(card.getByTestId('approval-preview')).toHaveCount(0);
-		// Args still render — the page does not regress to "nothing
-		// visible" when preview is absent.
-		await expect(card.getByTestId('approval-args')).toBeVisible();
+		// The accordion's trigger is visible; the args body is hidden
+		// until the user expands it (ADR-0016 IA: human-readable preview
+		// is primary, raw inputs are opt-in detail).
+		await expect(card.getByTestId('approval-args-trigger')).toBeVisible();
+		await expect(card.getByTestId('approval-args')).toBeHidden();
+	});
+
+	test('action args render in a collapsed-by-default "Action inputs" accordion', async ({
+		page,
+		approvalsMock
+	}) => {
+		// IA contract for the action kind: the raw args object is a
+		// noisy fallback for power users, not the primary signal. It
+		// must collapse so the human-readable preview (when present) or
+		// the action header (when absent) is what the user sees first.
+		// Clicking the trigger reveals the raw JSON for transparency.
+		await page.goto('/approvals');
+		await approvalsMock.sse.pushSnapshot([fixture.action()]);
+
+		const card = page.locator('[data-approval-id="act-action-1"]');
+		const trigger = card.getByTestId('approval-args-trigger');
+		const body = card.getByTestId('approval-args');
+
+		await expect(trigger).toContainText('Action inputs');
+		await expect(body).toBeHidden();
+
+		await trigger.click();
+		await expect(body).toBeVisible();
+		// The args themselves still serialize verbatim so the
+		// transparency case is preserved.
+		await expect(body).toContainText('alice@example.com');
+	});
+
+	test('multiline preview fields render as scrollable blockquotes', async ({
+		page,
+		approvalsMock
+	}) => {
+		// ADR-0016 multiline directive: fields the manifest flagged as
+		// `multiline` render as a blockquote below the inline rows so
+		// long-form content (an email body, a commit message) is
+		// readable instead of being truncated to a single line. Non-
+		// multiline fields keep their inline `key: value` shape.
+		await page.goto('/approvals');
+		const longBody =
+			"Hi Alice,\n\nHere's the recap from this week's standup. Lots of things happened. " +
+			'We shipped X, we shipped Y, we deferred Z. Full details below.\n\n— Andrew';
+		await approvalsMock.sse.pushSnapshot([
+			fixture.actionWithPreview(undefined, {
+				fields: [
+					{ label: 'To', value: 'alice@example.com' },
+					{ label: 'Subject', value: 'Weekly recap' },
+					{ label: 'Body', value: longBody, multiline: true }
+				]
+			})
+		]);
+
+		const card = page.locator('[data-approval-id="act-preview-1"]');
+		// Inline fields (To, Subject) stay in the dl.
+		const inlineRows = card.getByTestId('approval-preview-field');
+		await expect(inlineRows).toHaveCount(2);
+		await expect(inlineRows.nth(0)).toHaveAttribute('data-field-label', 'To');
+		await expect(inlineRows.nth(1)).toHaveAttribute('data-field-label', 'Subject');
+
+		// The multiline Body field renders in its own block, not as a
+		// dl row, and is in a blockquote element so the user gets a
+		// visually distinct reading area for the long-form content.
+		const block = card.getByTestId('approval-preview-multiline');
+		await expect(block).toHaveCount(1);
+		await expect(block).toHaveAttribute('data-field-label', 'Body');
+		const quote = block.locator('blockquote');
+		await expect(quote).toBeVisible();
+		await expect(quote).toContainText('Hi Alice');
+		await expect(quote).toContainText('— Andrew');
 	});
 });

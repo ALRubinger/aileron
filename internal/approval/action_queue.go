@@ -163,9 +163,10 @@ type ActionApprovalPreview struct {
 // approval queue does not depend on the action package's preview
 // model.
 type ActionApprovalPreviewField struct {
-	Label   string
-	Value   string
-	Missing bool
+	Label     string
+	Value     string
+	Missing   bool
+	Multiline bool
 }
 
 // ActionDecision is the user's verdict on an [ActionApproval].

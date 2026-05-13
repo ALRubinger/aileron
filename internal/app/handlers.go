@@ -1595,6 +1595,10 @@ func previewPolicyToAPI(p *action.PreviewPolicy) *api.ActionApprovalPreviewPolic
 		render[k] = v
 	}
 	out.Render = render
+	if len(p.Multiline) > 0 {
+		ml := append([]string(nil), p.Multiline...)
+		out.Multiline = &ml
+	}
 	return &out
 }
 
@@ -1615,9 +1619,10 @@ func previewFromActionResult(pr action.PreviewResult) *approval.ActionApprovalPr
 	fields := make([]approval.ActionApprovalPreviewField, len(pr.Fields))
 	for i, f := range pr.Fields {
 		fields[i] = approval.ActionApprovalPreviewField{
-			Label:   f.Label,
-			Value:   f.Value,
-			Missing: f.Missing,
+			Label:     f.Label,
+			Value:     f.Value,
+			Missing:   f.Missing,
+			Multiline: f.Multiline,
 		}
 	}
 	return &approval.ActionApprovalPreview{

@@ -58,7 +58,14 @@ args = { id = "${args.draft_id}" }
 # Missing paths are omitted with a per-field "n/a" indicator.
 render = { To = "message.payload.headers.To",
            Subject = "message.payload.headers.Subject",
-           Preview = "message.snippet" }
+           Body = "message.snippet" }
+
+# Labels in `render` whose values are long-form content. The approval
+# UI surfaces these as scrollable blockquotes below the inline rows
+# rather than as single-line key/value entries, so the user can read
+# the whole body of (e.g.) a draft email before approving. Optional;
+# omit for prompts whose fields are all short.
+multiline = ["Body"]
 ```
 
 The runtime's approval flow becomes:
@@ -78,6 +85,7 @@ The runtime rejects an `[approval.preview]` block at manifest-load time if any o
 - The `op` named appears in any action manifest with `[approval].required = true`. This prevents preview-of-preview recursion.
 - `args` references an `${args.X}` that the gated action does not declare as an input.
 - `render` is empty.
+- An entry in `multiline` does not appear as a key in `render`.
 
 These checks happen at suite load and at release-time signing, so a malformed preview directive fails fast.
 
@@ -98,6 +106,14 @@ These checks happen at suite load and at release-time signing, so a malformed pr
 ### Field-path resolution
 
 The `render` values are dotted JSON paths into the preview response. For Gmail's draft shape, headers live in an array (`message.payload.headers: [{name, value}, ...]`), so the path `message.payload.headers.Subject` is shorthand. It means "find the entry in `message.payload.headers` whose `name` equals `Subject`, return its `value`". The runtime implements this shorthand for header-style arrays. For other shapes the path is a plain object/array walk.
+
+### Multiline fields
+
+A field whose value is long-form content (an email body, a commit message, an HTTP response payload) reads poorly as a single `key: value` row. The optional `multiline` list names labels in `render` that the approval surface should treat as block content rather than inline key/value entries.
+
+The semantic guarantee is purely user-visible: the runtime resolves each label's value the same way regardless of whether the label appears in `multiline`. The flag is a render hint the approval prompt honors. The webapp renders multiline labels as scrollable blockquotes below the inline rows; CLI surfaces are free to render them with a header line and an indented block, or any equivalent affordance.
+
+`multiline` is optional. A manifest that omits it produces the prior all-inline rendering. A label that appears in `multiline` but not in `render` is rejected at manifest-load time, matching the validation discipline applied to `args` interpolation. The flag does not change the failure-mode contract: a multiline label whose path resolves missing surfaces as "n/a" the same as any other field.
 
 ### Failure modes and fallbacks
 
@@ -136,7 +152,8 @@ op = "get_draft"
 args = { id = "${args.draft_id}" }
 render = { To = "message.payload.headers.To",
            Subject = "message.payload.headers.Subject",
-           Preview = "message.snippet" }
+           Body = "message.snippet" }
+multiline = ["Body"]
 ```
 
 When the agent calls `send_draft` with `draft_id = "r-12345"`:
@@ -150,7 +167,10 @@ When the agent calls `send_draft` with `draft_id = "r-12345"`:
      Draft id: r-12345
      To:       alice@example.com
      Subject:  Weekly recap
-     Preview:  Here's the recap from this week's standup...
+     Body:
+       > Here's the recap from this week's standup...
+       > <full body rendered as a scrollable block per the
+       >  manifest's `multiline = ["Body"]` directive>
    [Approve] [Deny]
    ```
 

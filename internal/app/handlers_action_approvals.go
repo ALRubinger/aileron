@@ -407,6 +407,10 @@ func previewToAPI(p *approval.ActionApprovalPreview) *api.ActionApprovalPreview 
 				missing := true
 				af.Missing = &missing
 			}
+			if f.Multiline {
+				multiline := true
+				af.Multiline = &multiline
+			}
 			fields[i] = af
 		}
 		out.Fields = &fields

@@ -130,6 +130,10 @@ export type ActionApprovalPreviewField = {
 	value?: string;
 	/** True when the manifest's render path did not resolve. */
 	missing?: boolean;
+	/** True when the manifest's `multiline` directive named this label.
+	 *  The approval card renders these as scrollable blockquotes below
+	 *  the inline rows rather than as single-line key/value entries. */
+	multiline?: boolean;
 };
 
 export type ActionApprovalListResponse = {

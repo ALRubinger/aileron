@@ -133,6 +133,14 @@ type PreviewPolicy struct {
 	// order. Populated by the parser from the TOML decoder's key list;
 	// not part of the TOML shape itself.
 	RenderOrder []string `toml:"-"`
+
+	// Multiline lists Render labels whose values are long-form content
+	// (email bodies, commit messages, response payloads) the approval
+	// surface should render as scrollable blockquotes rather than inline
+	// `key: value` rows. Optional; an absent or empty list reproduces
+	// the prior all-inline rendering. Entries must appear as keys in
+	// Render; mismatches are rejected at manifest-load time.
+	Multiline []string `toml:"multiline"`
 }
 
 // ApprovalRequired reports whether the action's manifest declares

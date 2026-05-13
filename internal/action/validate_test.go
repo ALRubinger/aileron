@@ -247,6 +247,9 @@ func TestValidate_PreviewRejectsBadFields(t *testing.T) {
 		{"undeclared args ref", func(m *Manifest) {
 			m.Approval.Preview.Args = map[string]any{"id": "${args.unknown}"}
 		}, "no [[inputs]] block declares"},
+		{"multiline references missing render key", func(m *Manifest) {
+			m.Approval.Preview.Multiline = []string{"Body"}
+		}, "multiline references \"Body\" but no matching key exists"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
