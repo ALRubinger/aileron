@@ -126,9 +126,18 @@ func (s *apiServer) GetActionApprovalResult(w http.ResponseWriter, _ *http.Reque
 // toActionApprovalResult shapes an approval Outcome into the API's
 // ActionApprovalResult wire type. Each status maps to its discriminator
 // + the relevant payload fields; transient statuses carry only Status.
+//
+// OutcomeApprovedNotStarted is an internal-only state — production code
+// only sees it for microseconds between Decide and SetRunning, and the
+// agent's surface should treat it the same as "user approved, action
+// will run shortly". Mapped to OutcomeRunning on the wire.
 func toActionApprovalResult(o approval.Outcome) api.ActionApprovalResult {
+	status := o.Status
+	if status == approval.OutcomeApprovedNotStarted {
+		status = approval.OutcomeRunning
+	}
 	out := api.ActionApprovalResult{
-		Status: api.ActionApprovalResultStatus(o.Status),
+		Status: api.ActionApprovalResultStatus(status),
 	}
 	switch o.Status {
 	case approval.OutcomeCompleted:

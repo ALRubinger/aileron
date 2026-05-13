@@ -18,6 +18,33 @@ const (
 	// not yet decided.
 	OutcomePendingApproval OutcomeStatus = "pending_approval"
 
+	// OutcomeApprovedNotStarted — the user approved but the daemon's
+	// background executor has not yet called the action's Execute. The
+	// queue persists this state on every Decide(approved=true) so a
+	// crash between approval and execution is observable on replay
+	// (the entry replays as approved, the executor goroutine is
+	// respawned, and it proceeds to call Execute). Without this state,
+	// a crash in the same window would lose the approval entirely.
+	//
+	// Transient: production callers never see this on /result because
+	// the executor goroutine flips to [OutcomeRunning] before invoking
+	// Execute. Surfaced on the wire as `pending_approval` so external
+	// consumers don't need to special-case it.
+	OutcomeApprovedNotStarted OutcomeStatus = "approved_not_started"
+
+	// OutcomeAwaitingVault — the user approved but the daemon's local
+	// vault is locked, so the executor goroutine is waiting on the
+	// vault-unlock signal before invoking Execute. Only reached on
+	// replay: a daemon restart picks up the entry as approved, finds
+	// the vault locked, and parks the executor until the user unlocks
+	// the vault via the webapp.
+	//
+	// Distinct from [OutcomeApprovedNotStarted] so the agent's poll on
+	// `/v1/action-approvals/{id}/result` can surface "waiting on you
+	// to unlock the vault" rather than the more generic "still
+	// pending". Flips to [OutcomeRunning] when the executor wakes.
+	OutcomeAwaitingVault OutcomeStatus = "awaiting_vault"
+
 	// OutcomeRunning — the user approved; the daemon's background
 	// executor is running the action. Transient.
 	OutcomeRunning OutcomeStatus = "running"
@@ -35,6 +62,12 @@ const (
 	// carries the structured failure when one is available; for
 	// executor-level errors (no envelope) [Outcome.ErrorMessage]
 	// carries the plain-text reason.
+	//
+	// Also reached at replay time when a `running` entry is found on
+	// disk: the daemon crashed mid-execution, so the action may have
+	// produced side-effects (e.g. send-email is not idempotent). The
+	// runtime refuses to auto-rerun and stamps a reconciliation
+	// message in [Outcome.ErrorMessage] for the user to investigate.
 	OutcomeFailed OutcomeStatus = "failed"
 )
 

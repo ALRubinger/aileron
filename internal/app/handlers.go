@@ -86,6 +86,7 @@ type apiServer struct {
 	lockableVault      *vault.LockableVault        // wraps s.vault when the daemon runs with a deferred-unlock local vault (#429); nil otherwise
 	localVaultPath     string                      // path to the local file vault for /v1/vault/unlock (#429); empty when no local vault is managed
 	localVaultMu       sync.Mutex                  // serializes /v1/vault/unlock so concurrent submits don't both call vault.Unlock
+	vaultUnlockedCh    chan struct{}               // closed on the first successful unlock; nil when daemon started already-unlocked. Used by respawned approval executors to park until the user unlocks the vault (#649).
 	newID              func() string
 	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
 	actionState        action.StateStore // per-action user preferences (enabled/disabled overlay); nil means defaults apply
@@ -1454,8 +1455,26 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 //
 // Uses context.Background — the agent's HTTP request has already
 // returned 202 by the time this goroutine starts, so r.Context() is
-// gone. Daemon shutdown drops in-flight approvals (in-memory queue
-// limitation tracked for the persistence follow-up).
+// gone. Daemon shutdown drops the goroutine; the queue's JSONL
+// persistence is what makes the entry resumable across restart (#649).
+//
+// State machine sequence (the persistence-layer invariant from #649):
+//
+//  1. Wait on the queue's decision channel.
+//  2. On approve, park on the vault-unlock signal if the vault is
+//     locked. Marked OutcomeAwaitingVault while parked so the agent's
+//     /result poll surfaces the reason.
+//  3. SetRunning BEFORE Execute. This is the crash-observability
+//     invariant: an entry left in OutcomeRunning on disk means the
+//     daemon crashed mid-Execute, which the replay path refuses to
+//     auto-retry.
+//  4. Execute, then SetCompleted / SetFailed.
+//
+// Spawned both for fresh approvals (the registration path in
+// RunAction) and for replay-loaded non-terminal entries; the
+// behaviour is identical because LoadRecords pre-fills the decision
+// channel for approved-not-started entries so Wait returns
+// immediately.
 func (s *apiServer) executeApprovedAction(entry *approval.ActionApproval, name, connFQN string, args map[string]any, sessionID string) {
 	ctx := context.Background()
 
@@ -1477,12 +1496,29 @@ func (s *apiServer) executeApprovedAction(entry *approval.ActionApproval, name, 
 		return
 	}
 
-	// Approved. Queue's outcome is already at running. Execute and
-	// store whatever comes back. The args passed at Register-time win
-	// over EditedPayload by default — EditedPayload is a comms_draft
-	// feature, not used for action-kind entries. (Comms approvals
-	// follow a different dispatch path that consumes EditedPayload
-	// inline; see internal/app/handlers_comms.go.)
+	// Vault gate. Production daemons reject RunAction outright when
+	// the vault is locked (writeVaultLocked), so this branch only
+	// fires on a replayed entry: the user approved before the previous
+	// daemon shutdown, the new daemon restarted with a locked vault,
+	// and the executor goroutine has to wait for /v1/vault/unlock
+	// before resolving credentials. The user sees
+	// `status = awaiting_vault` from /result during the wait.
+	if !s.waitForVaultUnlocked(ctx, entry.ID) {
+		return
+	}
+
+	// Persist the running transition BEFORE calling Execute. If the
+	// daemon crashes after this line the entry replays at
+	// OutcomeRunning, which the wiring layer maps to OutcomeFailed
+	// with a reconciliation message — non-idempotent actions never
+	// auto-rerun.
+	_ = s.actionApprovals.SetRunning(entry.ID)
+
+	// The args passed at Register-time win over EditedPayload by
+	// default — EditedPayload is a comms_draft feature, not used for
+	// action-kind entries. (Comms approvals follow a different
+	// dispatch path that consumes EditedPayload inline; see
+	// internal/app/handlers_comms.go.)
 	_ = connFQN
 	_ = sessionID
 	result, err := s.executor.Execute(ctx, name, args)
@@ -1499,6 +1535,42 @@ func (s *apiServer) executeApprovedAction(entry *approval.ActionApproval, name, 
 		auditID = s.newID()
 	}
 	_ = s.actionApprovals.SetCompleted(entry.ID, auditID, result.Content)
+}
+
+// waitForVaultUnlocked parks the calling goroutine on the vault-unlock
+// signal channel when the daemon's local vault is currently locked.
+// Returns true once the vault is unlocked (or was never locked);
+// returns false when ctx cancels first (daemon shutdown).
+//
+// While parked the queue entry's outcome is flipped to
+// [approval.OutcomeAwaitingVault] so the agent's poll surfaces the
+// distinct "waiting on you to unlock the vault" signal. After the
+// signal fires the caller is responsible for the SetRunning →
+// Execute → SetCompleted / SetFailed chain.
+//
+// Live-operation paths never reach this branch — RunAction returns
+// 423 outright when the vault is locked, so a fresh approval can't be
+// registered against a locked vault. The wait only fires on replay
+// (the user approved before the previous daemon shutdown).
+func (s *apiServer) waitForVaultUnlocked(ctx context.Context, approvalID string) bool {
+	if s.vaultUnlockedCh == nil {
+		return true
+	}
+	// Fast path: already unlocked. Closed channels return immediately
+	// on receive.
+	select {
+	case <-s.vaultUnlockedCh:
+		return true
+	default:
+	}
+	// Slow path: mark awaiting_vault and block until unlock.
+	_ = s.actionApprovals.SetAwaitingVault(approvalID)
+	select {
+	case <-s.vaultUnlockedCh:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // previewPolicyToAPI marshals an action manifest's
