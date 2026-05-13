@@ -65,7 +65,7 @@ jobs:
         uses: sigstore/cosign-installer@v4.1.2
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: "~> v2"
