@@ -379,7 +379,39 @@ func toPendingActionApproval(a *approval.ActionApproval) api.PendingActionApprov
 	if a.Preview != nil {
 		out.Preview = previewToAPI(a.Preview)
 	}
+	if len(a.InputFields) > 0 {
+		out.InputFields = inputFieldsToAPI(a.InputFields)
+	}
 	return out
+}
+
+// inputFieldsToAPI marshals the queue-side input-fields slice onto
+// the API surface shape. The two types are structurally identical;
+// the per-field per-pointer wrapping mirrors previewToAPI so the API
+// surface omits empty strings and zero booleans rather than emitting
+// them as wire fields the webapp would have to special-case.
+func inputFieldsToAPI(fields []approval.ActionApprovalPreviewField) *[]api.ActionApprovalPreviewField {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]api.ActionApprovalPreviewField, len(fields))
+	for i, f := range fields {
+		af := api.ActionApprovalPreviewField{Label: f.Label}
+		if f.Value != "" {
+			v := f.Value
+			af.Value = &v
+		}
+		if f.Missing {
+			missing := true
+			af.Missing = &missing
+		}
+		if f.Multiline {
+			multiline := true
+			af.Multiline = &multiline
+		}
+		out[i] = af
+	}
+	return &out
 }
 
 // previewToAPI marshals an internal preview record onto the API

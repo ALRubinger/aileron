@@ -9,6 +9,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as Collapsible from '$lib/components/ui/collapsible';
 	import * as Tooltip from '$lib/components/ui/tooltip';
+	import ApprovalFieldsBlock from '$lib/components/ApprovalFieldsBlock.svelte';
 
 	// Action-level approvals (#418): runtime-blocking yes/no for actions
 	// whose manifest declared `[approval] required = true`. Each entry
@@ -248,8 +249,6 @@
 					<Card.Content class="flex flex-col gap-3">
 						{#if approval.preview}
 							{@const preview = approval.preview}
-							{@const inlineFields = (preview.fields ?? []).filter((f) => !f.multiline)}
-							{@const blockFields = (preview.fields ?? []).filter((f) => f.multiline)}
 							<div
 								class="rounded border border-border bg-muted/40 p-3 text-sm"
 								data-testid="approval-preview"
@@ -265,47 +264,10 @@
 										{preview.unavailable}
 									</div>
 								{:else}
-									{#if inlineFields.length > 0}
-										<dl
-											class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
-											data-testid="approval-preview-fields"
-										>
-											{#each inlineFields as field (field.label)}
-												<dt class="font-medium text-muted-foreground">{field.label}:</dt>
-												<dd
-													class="break-words"
-													data-testid="approval-preview-field"
-													data-field-label={field.label}
-													data-field-missing={field.missing ? 'true' : 'false'}
-												>
-													{#if field.missing}
-														<span class="italic text-muted-foreground">n/a</span>
-													{:else}
-														{field.value ?? ''}
-													{/if}
-												</dd>
-											{/each}
-										</dl>
-									{/if}
-									{#each blockFields as field (field.label)}
-										<div
-											class="mt-2"
-											data-testid="approval-preview-multiline"
-											data-field-label={field.label}
-											data-field-missing={field.missing ? 'true' : 'false'}
-										>
-											<div class="mb-1 text-xs font-medium text-muted-foreground">
-												{field.label}
-											</div>
-											{#if field.missing}
-												<div class="text-sm italic text-muted-foreground">n/a</div>
-											{:else}
-												<blockquote
-													class="max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded border-l-2 border-border bg-background/60 px-3 py-2 text-sm"
-												>{field.value ?? ''}</blockquote>
-											{/if}
-										</div>
-									{/each}
+									<ApprovalFieldsBlock
+										fields={preview.fields ?? []}
+										testIdPrefix="approval-preview"
+									/>
 								{/if}
 							</div>
 						{/if}
@@ -366,6 +328,17 @@
 								{/if}
 							</div>
 						{:else}
+							{#if approval.input_fields && approval.input_fields.length > 0}
+								<div
+									class="rounded border border-border bg-muted/40 p-3 text-sm"
+									data-testid="approval-input-fields-block"
+								>
+									<ApprovalFieldsBlock
+										fields={approval.input_fields}
+										testIdPrefix="approval-input"
+									/>
+								</div>
+							{/if}
 							<Collapsible.Root data-testid="approval-args-accordion">
 								<Tooltip.Root>
 									<Tooltip.Trigger>
@@ -379,13 +352,13 @@
 													class="inline-block transition-transform group-data-[state=open]:rotate-90"
 													aria-hidden="true">▸</span
 												>
-												Action inputs
+												Raw inputs (JSON)
 											</Collapsible.Trigger>
 										{/snippet}
 									</Tooltip.Trigger>
 									<Tooltip.Content>
-										Raw arguments the agent passed to this action. Shown for
-										transparency; the human-readable preview above is the
+										The exact JSON the agent passed. Kept available for
+										debugging; the labeled fields above are the
 										authoritative summary.
 									</Tooltip.Content>
 								</Tooltip.Root>

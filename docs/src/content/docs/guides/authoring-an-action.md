@@ -165,6 +165,38 @@ Inputs become the JSON Schema `parameters` object the LLM sees when Aileron expo
 - `required` defaults to `true`. Set `required = false` for optional inputs.
 - `description` is required. This is what the LLM reads — write it accordingly.
 
+#### How inputs appear on approval surfaces
+
+For approval-gated actions, the Aileron approval card renders every input as a labeled row so the user reads `To: alr@example.com / Subject: … / Body: …` instead of a JSON dump. Two optional keys shape that surface:
+
+- `label` — the user-facing label the row uses. Defaults to `name` when omitted. Has no effect on the LLM-visible JSON Schema.
+- `multiline` — when `true`, the value renders as a scrollable blockquote with embedded newlines preserved as real line breaks. Only valid when `type = "string"` (a `multiline = true` on an integer/number/boolean is rejected at manifest-load time). Defaults to `false`.
+
+Concrete example: an approval-gated `send-email` action that wants pretty labels and a scrollable body block declares its inputs like this:
+
+```toml
+[[inputs]]
+name        = "to"
+type        = "string"
+description = "Comma-separated recipient addresses."
+label       = "To"
+
+[[inputs]]
+name        = "subject"
+type        = "string"
+description = "Email subject line."
+label       = "Subject"
+
+[[inputs]]
+name        = "body"
+type        = "string"
+description = "Plain-text body."
+label       = "Body"
+multiline   = true
+```
+
+This composes with the `[approval.preview]` directive from [ADR-0016](/adr/0016-approval-preview/). `[approval.preview]` controls how *external state the runtime fetches before approval* is rendered (e.g. the calendar event being updated); the per-input `label` and `multiline` keys control how *the agent's call-time args* are rendered (e.g. the email the agent wants to send). An action can declare both.
+
 ### Execution chain
 
 ```toml

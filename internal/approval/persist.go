@@ -16,14 +16,15 @@ import (
 type PersistedRecord struct {
 	// --- Registration fields (set on Register, immutable afterwards). ---
 
-	ID           string                 `json:"id"`
-	Kind         ApprovalKind           `json:"kind,omitempty"`
-	ActionName   string                 `json:"action_name"`
-	ConnectorFQN string                 `json:"connector_fqn,omitempty"`
-	SessionID    string                 `json:"session_id,omitempty"`
-	Args         map[string]any         `json:"args,omitempty"`
-	Preview      *ActionApprovalPreview `json:"preview,omitempty"`
-	RequestedAt  time.Time              `json:"requested_at"`
+	ID           string                        `json:"id"`
+	Kind         ApprovalKind                  `json:"kind,omitempty"`
+	ActionName   string                        `json:"action_name"`
+	ConnectorFQN string                        `json:"connector_fqn,omitempty"`
+	SessionID    string                        `json:"session_id,omitempty"`
+	Args         map[string]any                `json:"args,omitempty"`
+	Preview      *ActionApprovalPreview        `json:"preview,omitempty"`
+	InputFields  []ActionApprovalPreviewField  `json:"input_fields,omitempty"`
+	RequestedAt  time.Time                     `json:"requested_at"`
 
 	// --- Outcome fields (mutated on each transition). ---
 
@@ -100,6 +101,7 @@ func (q *ActionApprovalQueue) recordFor(id string) (PersistedRecord, bool) {
 		SessionID:    a.SessionID,
 		Args:         a.Args,
 		Preview:      a.Preview,
+		InputFields:  a.InputFields,
 		RequestedAt:  a.RequestedAt,
 	}
 	if a.DecidedAt != nil {
@@ -163,6 +165,7 @@ func (q *ActionApprovalQueue) LoadRecords(records []PersistedRecord) {
 			SessionID:    rec.SessionID,
 			Args:         rec.Args,
 			Preview:      rec.Preview,
+			InputFields:  rec.InputFields,
 			RequestedAt:  rec.RequestedAt,
 			decision:     make(chan ActionDecision, 1),
 		}

@@ -265,6 +265,164 @@ describe('Approvals page — action approvals (#418)', () => {
 	});
 });
 
+// Input-fields rendering on action-kind approvals: the server
+// projects the gated action's call-time args through its manifest's
+// [[inputs]] declarations (per the ADR-0003 amendment) so the user
+// sees labeled rows instead of a raw JSON dump. These tests pin the
+// contract observable from the wire shape outward — labels render in
+// declared order, multiline fields render as scrollable blockquotes
+// with real newlines, and the JSON accordion stays collapsed as the
+// expert-mode fallback.
+describe('Approvals page — input_fields rendering (ADR-0003 amendment)', () => {
+	it('renders labeled rows for declared inputs in order', async () => {
+		setupWatcher([
+			{
+				id: 'act-input-1',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				connector_fqn: 'github://x/aileron-connector-google',
+				args: { to: 'alr@example.com', subject: 'Daily summary', body: 'Hello' },
+				requested_at: '2026-05-04T12:00:00Z',
+				input_fields: [
+					{ label: 'To', value: 'alr@example.com' },
+					{ label: 'Subject', value: 'Daily summary' },
+					{ label: 'Body', value: 'Hello', multiline: true }
+				]
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+		// Inline rows surface via the approval-input-field test id; the
+		// declaration order should be preserved as the DOM order.
+		const inlineRows = screen.getAllByTestId('approval-input-field');
+		expect(inlineRows.map((el) => el.getAttribute('data-field-label'))).toEqual([
+			'To',
+			'Subject'
+		]);
+		expect(inlineRows[0].textContent).toContain('alr@example.com');
+		expect(inlineRows[1].textContent).toContain('Daily summary');
+		// Multiline body renders as its own block, not as an inline row.
+		const multilineBlock = screen.getByTestId('approval-input-multiline');
+		expect(multilineBlock.getAttribute('data-field-label')).toBe('Body');
+		expect(multilineBlock.textContent).toContain('Hello');
+	});
+
+	it('renders embedded newlines as real line breaks in multiline fields', async () => {
+		// The user's complaint: today a body with \n appears as the
+		// literal escape sequence inside the JSON dump. With the new
+		// rendering path, the value carries actual newlines and the
+		// blockquote's whitespace-pre-wrap CSS draws them as line
+		// breaks. The wire value is a real-newline string; this test
+		// asserts the renderer preserves it.
+		const body = 'Line one\nLine two\n\nLine four';
+		setupWatcher([
+			{
+				id: 'act-input-2',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				args: { body },
+				requested_at: '2026-05-04T12:00:00Z',
+				input_fields: [{ label: 'Body', value: body, multiline: true }]
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+		const multilineBlock = screen.getByTestId('approval-input-multiline');
+		const blockquote = multilineBlock.querySelector('blockquote');
+		expect(blockquote).not.toBeNull();
+		// The literal-newline contract: the rendered textContent
+		// preserves the \n characters verbatim (the whitespace-pre-wrap
+		// CSS class is what paints them as visible line breaks at
+		// rendering time; jsdom doesn't compute styles, so we assert on
+		// the content + the class presence).
+		expect(blockquote!.textContent).toBe(body);
+		expect(blockquote!.className).toContain('whitespace-pre-wrap');
+		// The "\n" escape sequence should never appear literally in the
+		// rendered DOM — that's the user-visible regression we are
+		// guarding against.
+		expect(blockquote!.textContent).not.toContain('\\n');
+	});
+
+	it('renders missing required inputs as "n/a"', async () => {
+		setupWatcher([
+			{
+				id: 'act-input-3',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				args: { to: 'alr@example.com' },
+				requested_at: '2026-05-04T12:00:00Z',
+				input_fields: [
+					{ label: 'To', value: 'alr@example.com' },
+					{ label: 'Subject', missing: true }
+				]
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+		const subjectRow = screen
+			.getAllByTestId('approval-input-field')
+			.find((el) => el.getAttribute('data-field-label') === 'Subject');
+		expect(subjectRow).toBeDefined();
+		expect(subjectRow!.getAttribute('data-field-missing')).toBe('true');
+		expect(subjectRow!.textContent).toContain('n/a');
+	});
+
+	it('keeps the JSON accordion collapsed and reachable as a fallback', async () => {
+		setupWatcher([
+			{
+				id: 'act-input-4',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				args: { to: 'alr@example.com', subject: 'Hi' },
+				requested_at: '2026-05-04T12:00:00Z',
+				input_fields: [
+					{ label: 'To', value: 'alr@example.com' },
+					{ label: 'Subject', value: 'Hi' }
+				]
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+		// Labeled-field rendering is the authoritative summary above
+		// the accordion.
+		expect(screen.getByTestId('approval-input-fields-block')).toBeInTheDocument();
+		// The accordion trigger still exists for debugging; its
+		// content is collapsed by default (Radix renders the pre tag
+		// only after the trigger is clicked, so its absence from the
+		// initial DOM is the correct collapsed signal).
+		expect(screen.getByTestId('approval-args-trigger')).toBeInTheDocument();
+	});
+
+	it('falls back to the raw-JSON accordion when input_fields is absent', async () => {
+		setupWatcher([
+			{
+				id: 'act-input-5',
+				kind: 'action' as const,
+				action_name: 'send-email',
+				args: { to: 'alr@example.com' },
+				requested_at: '2026-05-04T12:00:00Z'
+				// no input_fields — older daemon / manifest with no inputs
+			}
+		]);
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('send-email')).toBeInTheDocument();
+		});
+		// The labeled block should not render.
+		expect(screen.queryByTestId('approval-input-fields-block')).toBeNull();
+		// The historic accordion still surfaces the JSON args.
+		expect(screen.getByTestId('approval-args-trigger')).toBeInTheDocument();
+	});
+});
+
 describe('Approvals page — comms-MCP kinds (#428)', () => {
 	it('renders a comms_send card with service / channel / body', async () => {
 		setupWatcher([

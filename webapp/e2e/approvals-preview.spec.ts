@@ -129,15 +129,18 @@ test.describe('Approvals page — [approval.preview] rendering (ADR-0016)', () =
 		await expect(card.getByTestId('approval-args')).toBeHidden();
 	});
 
-	test('action args render in a collapsed-by-default "Action inputs" accordion', async ({
+	test('action args render in a collapsed-by-default raw-JSON accordion', async ({
 		page,
 		approvalsMock
 	}) => {
 		// IA contract for the action kind: the raw args object is a
 		// noisy fallback for power users, not the primary signal. It
 		// must collapse so the human-readable preview (when present) or
-		// the action header (when absent) is what the user sees first.
-		// Clicking the trigger reveals the raw JSON for transparency.
+		// the labeled input_fields block (when present) is what the
+		// user sees first. Clicking the trigger reveals the raw JSON
+		// for transparency. The trigger label is "Raw inputs (JSON)"
+		// per the ADR-0003 amendment that introduced server-side
+		// projection of args through `[[inputs]]`.
 		await page.goto('/approvals');
 		await approvalsMock.sse.pushSnapshot([fixture.action()]);
 
@@ -145,7 +148,7 @@ test.describe('Approvals page — [approval.preview] rendering (ADR-0016)', () =
 		const trigger = card.getByTestId('approval-args-trigger');
 		const body = card.getByTestId('approval-args');
 
-		await expect(trigger).toContainText('Action inputs');
+		await expect(trigger).toContainText('Raw inputs (JSON)');
 		await expect(body).toBeHidden();
 
 		await trigger.click();

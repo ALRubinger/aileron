@@ -121,6 +121,20 @@ func Validate(m *Manifest, file string) error {
 		if strings.TrimSpace(in.Description) == "" {
 			return newValidationErr(file, "inputs[%d].description is required (this is what the LLM sees)", i)
 		}
+		// Label is optional, but when set must be non-blank — a label
+		// of all whitespace is a footgun the approval surface would
+		// render as an empty header.
+		if in.Label != "" && strings.TrimSpace(in.Label) == "" {
+			return newValidationErr(file, "inputs[%d].label is whitespace-only", i)
+		}
+		// Multiline is a presentation hint for long-form text. Other
+		// JSON-Schema primitives have no scrollable-block surface, so
+		// allowing it on non-string inputs would silently mislead
+		// manifest authors. Reject at load time.
+		if in.Multiline && in.Type != "string" {
+			return newValidationErr(file,
+				"inputs[%d].multiline=true is only allowed when type=\"string\" (got %q)", i, in.Type)
+		}
 	}
 	if len(m.Execute) == 0 {
 		return newValidationErr(file, "[[execute]] is required (at least one step)")

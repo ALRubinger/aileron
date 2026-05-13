@@ -38,6 +38,8 @@ The "agent passes through a recent response" path is forgeable. The agent suppli
 
 Extend the action manifest's `[approval]` block with an optional `preview` directive. The directive names a read-only op the runtime calls **before** showing the approval prompt. The preview op's response is rendered in the prompt. It is never returned to the agent.
 
+The preview directive controls how *external state fetched at approval time* is shown to the user. It composes with the per-input display metadata defined by [ADR-0003](/adr/0003-action-model/) (`label` and `multiline` on `[[inputs]]`), which controls how *the agent's call-time args* are rendered. An action can declare both: the preview block surfaces the remote object being acted on (the calendar event being updated, the email being drafted against), and the input metadata surfaces what the agent is about to write.
+
 ```toml
 [approval]
 required = true

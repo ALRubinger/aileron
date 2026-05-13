@@ -220,6 +220,24 @@ type Input struct {
 	// Description becomes the field-level prose the LLM sees in the
 	// `parameters.properties[name].description` slot. Required.
 	Description string `toml:"description"`
+
+	// Label is the user-facing label the approval surface renders for
+	// this argument's row (e.g. "To" for the `to` input). Optional;
+	// when empty the approval surface uses Name verbatim. Has no effect
+	// on the LLM-visible JSON Schema — purely a presentation hint for
+	// the human approver, mirroring the role PreviewPolicy.Render plays
+	// for [ADR-0016] preview blocks.
+	//
+	// [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
+	Label string `toml:"label"`
+
+	// Multiline is true when the argument's value is long-form content
+	// (email bodies, commit messages, code snippets) the approval
+	// surface should render as a scrollable blockquote rather than a
+	// single-line `key: value` row. Optional; defaults to false. Only
+	// meaningful when Type is "string" — non-string inputs reject
+	// multiline=true at manifest-load time.
+	Multiline bool `toml:"multiline"`
 }
 
 // IsRequired reports whether the input is required, applying the

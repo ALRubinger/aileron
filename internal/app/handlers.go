@@ -1406,8 +1406,17 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 			preview = previewFromActionResult(pr)
 		}
 
-		entry := s.actionApprovals.RegisterKindWithPreview(
-			approval.ApprovalKindAction, name, connFQN, sessionID, args, preview)
+		// Project the agent's args through the manifest's [[inputs]]
+		// declarations so the approval card can render labeled rows
+		// instead of a raw JSON dump. The projection is best-effort:
+		// when the manifest declares no inputs (empty slice), the
+		// webapp falls back to the historic accordion. See the
+		// ADR-0003 amendment introducing per-input `label` and
+		// `multiline` for the projection contract.
+		inputFields := inputFieldsForAPI(action.BuildInputFields(loaded.Manifest, args))
+
+		entry := s.actionApprovals.RegisterKindWithPreviewAndInputs(
+			approval.ApprovalKindAction, name, connFQN, sessionID, args, preview, inputFields)
 
 		// Background executor: lives until the queue resolves the
 		// entry. Uses a detached context (not r.Context()) so a
@@ -1600,6 +1609,31 @@ func previewPolicyToAPI(p *action.PreviewPolicy) *api.ActionApprovalPreviewPolic
 		out.Multiline = &ml
 	}
 	return &out
+}
+
+// inputFieldsForAPI adapts the action-package [action.InputField] slice
+// returned by [action.BuildInputFields] into the approval-package
+// shape stored on the queue entry and serialized on the wire API.
+// Returns nil for an empty projection so the toPendingActionApproval
+// path omits the field entirely — the webapp falls back to the
+// historic raw-JSON accordion in that case.
+//
+// Both types are intentionally structurally identical; the conversion
+// is the package boundary, not a transform.
+func inputFieldsForAPI(fields []action.InputField) []approval.ActionApprovalPreviewField {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]approval.ActionApprovalPreviewField, len(fields))
+	for i, f := range fields {
+		out[i] = approval.ActionApprovalPreviewField{
+			Label:     f.Label,
+			Value:     f.Value,
+			Missing:   f.Missing,
+			Multiline: f.Multiline,
+		}
+	}
+	return out
 }
 
 // previewFromActionResult adapts an [action.PreviewResult] (the
