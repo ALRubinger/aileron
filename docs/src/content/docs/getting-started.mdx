@@ -24,6 +24,7 @@ We're about to take your first flight with Aileron. In under 5 minutes, you'll b
 * Summarize your recent emails
 * See how much time you're planning to spend in meetings next week
 * Draft an email
+* Approve an irreversible action before it lands
 * Review the audit trail of what was done
 
 ...all executed in a sandboxed environment without giving your agent or LLM direct access to your Google Account.
@@ -169,24 +170,42 @@ Routes to `list_upcoming_events`.
 
 Routes to `get_email` (to read context) then `draft_email`, which lands a draft in your Gmail Drafts folder. Drafts are reversible, so this action is not gated; the existing manual "click Send in Gmail" step is the human review.
 
-`send-email` and `create-calendar-event` are gated for per-call approval because their effects are not reversible (see [the connector's README](https://github.com/ALRubinger/aileron-connector-google#what-it-ships) for why). When Claude proposes one of those, the approval lands on the webapp URL printed in the launch banner above, and Claude's tool call blocks until you click Approve or Deny.
+## 5. Approve an irreversible action
 
-## 5. Inspect what happened
+So far every call has been a read or a reversible write. Now do something the agent cannot take back on its own. In Claude Code:
 
-In a separate terminal, see what the runtime knows:
+> Add a 30-minute "Aileron test event" to my calendar tomorrow at 10am.
+
+Claude picks `create_calendar_event`. This one is different. `create_calendar_event` and `send_email` are gated for per-call approval because their effects are not reversible (see [the connector's README](https://github.com/ALRubinger/aileron-connector-google#what-it-ships) for why). Instead of executing immediately, the daemon parks the call, records an `approval.requested` event in the audit log, and Claude's tool call blocks.
+
+Open the webapp URL printed in the launch banner from Section 3 and visit `/approvals`. You'll see a card for the pending call showing:
+
+- The action name and connector
+- A kind badge (here, a generic "ACTION"; for `send_email` it reads "COMMS SEND")
+- The rendered preview from the connector's `[approval.preview]` directive: for the calendar event, the title, start time, duration, and target calendar
+- The raw arguments as JSON, in case the rendered preview hides something you want to verify
+- Two buttons, **Approve** and **Deny**, with an optional reason field for denials
+
+Click **Approve**. The blocked tool call unblocks, the daemon records `approval.approved` and `execution.succeeded`, and the event appears in your Calendar. If you click **Deny** instead, the tool call returns a denial and Claude responds with the failure. Nothing is written.
+
+If you'd rather jump to a specific pending approval from the shell, `aileron open approval <approval-id>` opens the webapp focused on that card. The launch-banner URL is the primary path; this is the shortcut for scripts and for when the banner has scrolled off.
+
+The approval surface is the seam where the agent stops and you start. See [Proof of Control](/concepts/proof-of-control/) for why every approval, including the time-to-decision and outcome, is recorded alongside the execution.
+
+## 6. Inspect what happened
+
+In a separate terminal, ask the runtime for the receipt:
 
 ```sh
-aileron status               # what's configured: action/connector/binding counts, policy, env, vault state
-aileron sessions list        # every aileron launch, with status (running / ended / orphaned) and exit code
-aileron sessions watch <id>  # tail the per-session log live (Ctrl-C to stop; --no-follow for one-shot)
-aileron action audit         # every installed action and the capabilities it can exercise
-aileron binding list         # bound credentials with their last-used timestamp
-aileron audit list           # action-execution audit log: every call, with inputs and outcome
+aileron audit list                 # every event: installs, executions, approvals
+aileron audit show <audit-id>      # full record for one event
 ```
 
-The audit log is the receipt for everything the agent did on your behalf. Each entry names the action, the connector version, the binding identity, the duration, and the disposition, recorded under `~/.aileron/audit/audit-YYYY-MM-DD.jsonl` (daily-rotated, user-scope). Combined with the install consent log, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
+`audit list` walks the events from this Getting Started: the `action.installed`, `connector.installed`, and `binding.created` entries from Section 2; the `execution.started` / `execution.succeeded` pairs for the read calls in Section 4; and the `approval.requested` → `approval.approved` → `execution.succeeded` triple for the calendar event you just approved. Pick the audit-id of that last `execution.succeeded` and pass it to `audit show` to see the full record: action, connector version, binding identity, duration, disposition, payload.
 
-For end-to-end timing or correlation with the rest of your agent stack, Aileron also emits OpenTelemetry traces, opt-in via `AILERON_OTEL_ENABLED=true AILERON_OTEL_EXPORTER=stdout`. See [Observability](/guides/observability/) for what gets emitted, the span attribute schema, and the env vars that control both the audit and tracing surfaces.
+The audit log is the receipt for everything the agent did on your behalf, recorded under `~/.aileron/audit/audit-YYYY-MM-DD.jsonl` (daily-rotated, user-scope). Paired with the install consent and keyring trust records from Section 2, you can answer two questions for any action: "did I authorize this capability?" and "what did the agent actually do with it?"
+
+For end-to-end timing or correlation with the rest of your agent stack, Aileron also emits OpenTelemetry traces. See [Observability](/guides/observability/) for what gets emitted, the span attribute schema, and how to wire it up.
 
 ## What you've built
 
