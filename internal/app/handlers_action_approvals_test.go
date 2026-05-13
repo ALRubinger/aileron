@@ -268,6 +268,101 @@ func TestListActionApprovals_PreviewUnavailableSurfacesAcrossWire(t *testing.T) 
 	}
 }
 
+// TestListActionApprovals_InputFieldsRoundTripsThroughTheWire pins
+// the wire contract for the ADR-0003 amendment introducing per-input
+// display metadata. An entry registered with a pre-rendered input-
+// fields slice must surface every label, value, missing flag, and
+// multiline hint through the listing endpoint so the webapp's pending
+// card renders labeled rows instead of a raw JSON dump. Without this
+// round-trip, the daemon would project the manifest's inputs for no
+// observable effect.
+func TestListActionApprovals_InputFieldsRoundTripsThroughTheWire(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.RegisterKindWithPreviewAndInputs(approval.ApprovalKindAction,
+		"send-email", "github://aileron/google", "session-42",
+		map[string]any{
+			"to":      "alr@example.com",
+			"subject": "hello",
+			"body":    "line one\nline two",
+		},
+		nil,
+		[]approval.ActionApprovalPreviewField{
+			{Label: "To", Value: "alr@example.com"},
+			{Label: "Subject", Missing: true},
+			{Label: "Body", Value: "line one\nline two", Multiline: true},
+		})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals", nil)
+	rec := httptest.NewRecorder()
+	srv.ListActionApprovals(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.ActionApprovalListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("Items len = %d, want 1", len(got.Items))
+	}
+	inputFields := got.Items[0].InputFields
+	if inputFields == nil || len(*inputFields) != 3 {
+		t.Fatalf("InputFields = %v, want 3 fields", inputFields)
+	}
+	fields := *inputFields
+
+	// Field 0: standard inline row with a value.
+	if fields[0].Label != "To" {
+		t.Errorf("Fields[0].Label = %q, want %q", fields[0].Label, "To")
+	}
+	if fields[0].Value == nil || *fields[0].Value != "alr@example.com" {
+		t.Errorf("Fields[0].Value = %v, want pointer to %q", fields[0].Value, "alr@example.com")
+	}
+	if fields[0].Missing != nil && *fields[0].Missing {
+		t.Errorf("Fields[0].Missing = true, want false/omitted")
+	}
+
+	// Field 1: missing-required surfaces with Missing=true and empty value.
+	if fields[1].Missing == nil || !*fields[1].Missing {
+		t.Errorf("Fields[1].Missing = %v, want pointer to true", fields[1].Missing)
+	}
+	if fields[1].Value != nil {
+		t.Errorf("Fields[1].Value = %v, want nil on missing", fields[1].Value)
+	}
+
+	// Field 2: multiline body with newline-bearing value.
+	if fields[2].Multiline == nil || !*fields[2].Multiline {
+		t.Errorf("Fields[2].Multiline = %v, want pointer to true", fields[2].Multiline)
+	}
+	if fields[2].Value == nil || *fields[2].Value != "line one\nline two" {
+		t.Errorf("Fields[2].Value = %v, want literal-newline string", fields[2].Value)
+	}
+}
+
+// TestListActionApprovals_InputFieldsOmittedWhenEmpty asserts the
+// fallback contract: an entry registered without an input-fields
+// projection (older callers, or manifests with no `[[inputs]]`)
+// surfaces with InputFields omitted from the wire response so the
+// webapp falls through to the historic raw-JSON accordion.
+func TestListActionApprovals_InputFieldsOmittedWhenEmpty(t *testing.T) {
+	srv, q := newActionApprovalsTestServer(t)
+	q.Register("send-email", "github://aileron/google", "",
+		map[string]any{"to": "alr@example.com"})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/action-approvals", nil)
+	rec := httptest.NewRecorder()
+	srv.ListActionApprovals(rec, req)
+
+	var got api.ActionApprovalListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Items[0].InputFields != nil {
+		t.Errorf("InputFields = %v, want nil when no projection registered", got.Items[0].InputFields)
+	}
+}
+
 // TestDecideActionApproval_ApproveResolves is the handler-side
 // regression for the approve path: a POST with `approved: true`
 // resolves the queue entry; a follow-up List shows it gone. The
