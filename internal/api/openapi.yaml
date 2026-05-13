@@ -5504,26 +5504,36 @@ components:
         `GET /v1/action-approvals/{id}/result`. The shape is discriminated
         on `status`: terminal statuses (`completed`, `denied`, `failed`)
         carry the relevant outcome fields; transient statuses
-        (`pending_approval`, `running`) carry only `status`.
+        (`pending_approval`, `awaiting_vault`, `running`) carry only
+        `status`.
       required: [status]
       properties:
         status:
           type: string
           enum:
             - pending_approval
+            - awaiting_vault
             - running
             - completed
             - denied
             - failed
           description: |
             - `pending_approval` — the user has not yet decided.
+            - `awaiting_vault` — the user approved before the daemon
+              restarted; the entry is replayed but the local vault is
+              currently locked, so the executor is waiting for the
+              user to unlock the vault before running the action.
             - `running` — the user approved; the daemon is executing
               the action.
             - `completed` — the action ran successfully; see `audit_id`
               and `result`.
             - `denied` — the user denied the approval; see `reason`.
             - `failed` — the action was approved but its execution
-              errored; see `failure`.
+              errored; see `failure`. Also used at replay time when a
+              `running` entry was found on disk (daemon crashed
+              mid-execution; the runtime refuses to auto-rerun
+              non-idempotent actions). In that case `reason` carries
+              an explanatory message.
         audit_id:
           type: string
           description: Audit log id; populated when `status = completed`.

@@ -37,6 +37,29 @@ func ToEnvelope(f *Failure) Envelope {
 	}
 }
 
+// FromEnvelope reconstructs a [Failure] from an envelope. Used when a
+// failure has already been serialized to durable storage (e.g. the
+// action-approval queue's JSONL persistence) and needs to be loaded
+// back to surface via `/result`. The reconstructed Failure has no
+// wrapped cause — that information is not preserved on the envelope
+// wire.
+//
+// Returns nil for the zero-value envelope so callers can pass through
+// "no failure recorded" without a surrounding nil check.
+func FromEnvelope(e Envelope) *Failure {
+	if e.Error.Class == "" && e.Error.Message == "" {
+		return nil
+	}
+	return &Failure{
+		class:     e.Error.Class,
+		boundary:  e.Error.Boundary,
+		message:   e.Error.Message,
+		retriable: e.Error.Retriable,
+		auditID:   e.Error.AuditID,
+		details:   e.Error.Details,
+	}
+}
+
 // HTTPStatus returns the HTTP status code most appropriate for the
 // failure's class, per ADR-0010's mapping. Boundaries don't affect
 // the status; only class does.

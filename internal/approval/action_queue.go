@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -114,6 +115,21 @@ type ActionApproval struct {
 
 	// RequestedAt is when the queue minted this request. Read-only.
 	RequestedAt time.Time
+
+	// DecidedAt records when Decide flipped the entry's outcome to
+	// approved_not_started (or denied). Nil until Decide fires.
+	// Captured on the entry in addition to flowing through the
+	// decision channel so the persistence path can serialize the
+	// decision timestamp into the on-disk record without depending
+	// on goroutine timing.
+	DecidedAt *time.Time
+
+	// EditedPayload preserves the kind-specific fields the user
+	// changed before approving (see [ActionDecision.EditedPayload]).
+	// Nil for the most-common path (action-kind entries don't carry
+	// edits). Stored here so persistence can round-trip the user's
+	// edits across daemon restart for comms-draft / similar kinds.
+	EditedPayload map[string]any
 
 	// decision is closed when Decide resolves the approval; the
 	// caller listening on it receives the user's verdict. Buffered
@@ -344,11 +360,30 @@ type ActionApprovalQueue struct {
 	// the spans wrap these same events with identical attribute
 	// keys — single source of truth.
 	auditRec audit.Recorder
+
+	// persister durably records every state transition so a daemon
+	// restart can replay the queue. Defaults to the no-op persister
+	// (in-memory only); production wiring swaps in a JSONL-backed
+	// implementation via [SetPersister]. Mutex-protected for swap-
+	// during-operation; per-call Append happens outside the lock so
+	// a slow disk does not block other queue operations.
+	persister Persister
+
+	// persistLog is the slog handle the queue uses to surface persist
+	// failures. Set via the constructor's nil fallback or by the
+	// wiring layer. Nil falls back to slog.Default at the call site
+	// (we resolve lazily so test code that doesn't wire logging gets
+	// silent persist failures rather than a panic on a nil deref).
+	persistLog *slog.Logger
 }
 
 // NewActionApprovalQueue returns an empty queue using the supplied
 // id generator and clock. Pass nil for either to use the package
 // defaults — useful in production wiring.
+//
+// The queue starts with a no-op persister; call [SetPersister] from
+// the wiring layer to install a durable backing (production wiring
+// uses a JSONL file at ~/.aileron/approvals.jsonl).
 func NewActionApprovalQueue(idGen func() string, now func() time.Time) *ActionApprovalQueue {
 	if idGen == nil {
 		idGen = defaultActionApprovalID
@@ -362,6 +397,7 @@ func NewActionApprovalQueue(idGen func() string, now func() time.Time) *ActionAp
 		idGen:       idGen,
 		now:         now,
 		subscribers: map[chan ActionApprovalEvent]struct{}{},
+		persister:   noopPersister{},
 	}
 }
 
@@ -501,7 +537,10 @@ func (q *ActionApprovalQueue) RegisterKindWithPreview(kind ApprovalKind, actionN
 	q.outcomes[a.ID] = &Outcome{Status: OutcomePendingApproval}
 	cb := q.onRegister
 	rec := q.auditRec
+	persistRec, _ := q.recordFor(a.ID)
+	persister := q.persister
 	q.mu.Unlock()
+	q.persistLocked(persister, persistRec)
 	if cb != nil {
 		// Defer the panic recover so a misbehaving notifier never
 		// takes down RunAction. Notifications are nice-to-have; the
@@ -514,6 +553,33 @@ func (q *ActionApprovalQueue) RegisterKindWithPreview(kind ApprovalKind, actionN
 	q.recordRequested(rec, a)
 	q.broadcast(ActionApprovalEvent{Type: ActionApprovalEventPending, Pending: a})
 	return a
+}
+
+// persistLocked appends a record via the supplied persister and logs
+// any error. Named "locked" by convention because every call site
+// snapshots the persister + record under q.mu and then releases the
+// lock — the Append itself runs unlocked so a slow disk does not
+// block other queue operations.
+//
+// Errors are logged, never returned: persistence is best-effort
+// relative to in-memory correctness. A failed write means the next
+// daemon restart loses the most recent transition, which is the same
+// failure mode the pre-persistence in-memory queue had at every
+// restart anyway.
+func (q *ActionApprovalQueue) persistLocked(p Persister, rec PersistedRecord) {
+	if p == nil {
+		return
+	}
+	if err := p.Append(rec); err != nil {
+		logger := q.persistLog
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("approval queue persist failed",
+			"approval_id", rec.ID,
+			"status", string(rec.Status),
+			"error", err)
+	}
 }
 
 // RegisterCommsSend creates a [ApprovalKindCommsSend] entry (#428).
@@ -605,12 +671,16 @@ func (q *ActionApprovalQueue) Get(id string) (*ActionApproval, bool) {
 // outcome. A second Decide call on the same id returns
 // ErrActionApprovalNotFound (already resolved or unknown).
 //
-// On approve, the outcome flips to [OutcomeRunning]; the background
-// executor that registered to listen on the entry's decision channel
-// is expected to call [SetRunning]/[SetCompleted]/[SetFailed] as it
-// progresses. On deny, the outcome flips to [OutcomeDenied] and the
-// executor's goroutine is expected to exit cleanly without invoking
-// the action.
+// On approve, the outcome flips to [OutcomeApprovedNotStarted]. The
+// background executor goroutine that listens on the entry's decision
+// channel is expected to call [SetRunning] BEFORE invoking the
+// action's Execute, so a daemon crash between approval and execution
+// is observable on replay (the entry replays in approved_not_started
+// and the executor respawns; the entry would replay in running only
+// if Execute had already been entered, which the runtime refuses to
+// auto-retry). On deny, the outcome flips to [OutcomeDenied] and the
+// executor goroutine is expected to exit cleanly without invoking the
+// action.
 //
 // editedPayload carries kind-specific fields the user changed before
 // approving — e.g. the edited reply body for [ApprovalKindCommsDraft]
@@ -630,14 +700,19 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 	}
 	kind := a.Kind
 	rec := q.auditRec
+	decidedAt := q.now()
 	if approved {
-		outcome.Status = OutcomeRunning
+		outcome.Status = OutcomeApprovedNotStarted
 	} else {
 		outcome.Status = OutcomeDenied
 		outcome.DenyReason = reason
 	}
+	a.DecidedAt = &decidedAt
+	a.EditedPayload = editedPayload
+	persistRec, _ := q.recordFor(id)
+	persister := q.persister
 	q.mu.Unlock()
-	decidedAt := q.now()
+	q.persistLocked(persister, persistRec)
 	a.decision <- ActionDecision{
 		Approved:      approved,
 		Reason:        reason,
@@ -658,6 +733,73 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 	return nil
 }
 
+// SetAwaitingVault flips an approved-but-not-started entry to
+// [OutcomeAwaitingVault]. Called by the executor goroutine when it
+// finds the local vault locked at replay time, so an agent polling
+// `/v1/action-approvals/{id}/result` sees a distinct "waiting on
+// vault unlock" signal rather than the generic
+// [OutcomePendingApproval].
+//
+// Only valid as a transition from [OutcomeApprovedNotStarted]; calls
+// against any other state return without error (the executor may
+// race with a state observer and we don't want to crash on a benign
+// no-op). Returns [ErrActionApprovalNotFound] for unknown ids.
+func (q *ActionApprovalQueue) SetAwaitingVault(id string) error {
+	q.mu.Lock()
+	outcome, ok := q.outcomes[id]
+	if !ok {
+		q.mu.Unlock()
+		return ErrActionApprovalNotFound
+	}
+	if outcome.Status != OutcomeApprovedNotStarted {
+		q.mu.Unlock()
+		return nil
+	}
+	outcome.Status = OutcomeAwaitingVault
+	persistRec, _ := q.recordFor(id)
+	persister := q.persister
+	q.mu.Unlock()
+	q.persistLocked(persister, persistRec)
+	return nil
+}
+
+// SetRunning flips an approved entry (in either
+// [OutcomeApprovedNotStarted] or [OutcomeAwaitingVault]) to
+// [OutcomeRunning]. The executor goroutine MUST call this BEFORE
+// invoking the action's Execute — the persisted running state is
+// what makes a crash-after-start observable, which lets the replay
+// path refuse to auto-rerun a non-idempotent action.
+//
+// Idempotent: a second call from [OutcomeRunning] is a no-op (the
+// caller may retry under benign races). Calls against terminal
+// states are no-ops too. Returns [ErrActionApprovalNotFound] for
+// unknown ids.
+func (q *ActionApprovalQueue) SetRunning(id string) error {
+	q.mu.Lock()
+	outcome, ok := q.outcomes[id]
+	if !ok {
+		q.mu.Unlock()
+		return ErrActionApprovalNotFound
+	}
+	switch outcome.Status {
+	case OutcomeApprovedNotStarted, OutcomeAwaitingVault:
+		outcome.Status = OutcomeRunning
+	case OutcomeRunning:
+		q.mu.Unlock()
+		return nil
+	default:
+		// Terminal state or unexpected — leave alone; the entry's
+		// outcome is single-shot once terminal.
+		q.mu.Unlock()
+		return nil
+	}
+	persistRec, _ := q.recordFor(id)
+	persister := q.persister
+	q.mu.Unlock()
+	q.persistLocked(persister, persistRec)
+	return nil
+}
+
 // SetCompleted records a successful action execution against an
 // approved entry. Called by the background executor after the
 // action's runtime returns a non-failure result. Flips the outcome
@@ -669,17 +811,22 @@ func (q *ActionApprovalQueue) Decide(id string, approved bool, reason string, ed
 // entry). Returns ErrActionApprovalNotFound for unknown ids.
 func (q *ActionApprovalQueue) SetCompleted(id, auditID, result string) error {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	outcome, ok := q.outcomes[id]
 	if !ok {
+		q.mu.Unlock()
 		return ErrActionApprovalNotFound
 	}
 	if outcome.Status == OutcomeCompleted || outcome.Status == OutcomeFailed || outcome.Status == OutcomeDenied {
+		q.mu.Unlock()
 		return nil
 	}
 	outcome.Status = OutcomeCompleted
 	outcome.AuditID = auditID
 	outcome.Result = result
+	persistRec, _ := q.recordFor(id)
+	persister := q.persister
+	q.mu.Unlock()
+	q.persistLocked(persister, persistRec)
 	return nil
 }
 
@@ -695,12 +842,13 @@ func (q *ActionApprovalQueue) SetCompleted(id, auditID, result string) error {
 // terminal entries. Returns ErrActionApprovalNotFound for unknown ids.
 func (q *ActionApprovalQueue) SetFailed(id string, fail *failure.Failure, errorMessage string) error {
 	q.mu.Lock()
-	defer q.mu.Unlock()
 	outcome, ok := q.outcomes[id]
 	if !ok {
+		q.mu.Unlock()
 		return ErrActionApprovalNotFound
 	}
 	if outcome.Status == OutcomeCompleted || outcome.Status == OutcomeFailed || outcome.Status == OutcomeDenied {
+		q.mu.Unlock()
 		return nil
 	}
 	outcome.Status = OutcomeFailed
@@ -709,6 +857,10 @@ func (q *ActionApprovalQueue) SetFailed(id string, fail *failure.Failure, errorM
 	if fail == nil && errorMessage == "" {
 		outcome.ErrorMessage = "execution failed"
 	}
+	persistRec, _ := q.recordFor(id)
+	persister := q.persister
+	q.mu.Unlock()
+	q.persistLocked(persister, persistRec)
 	return nil
 }
 

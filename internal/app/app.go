@@ -109,6 +109,25 @@ type Config struct {
 	// behaviour for callers that don't need cross-component sharing.
 	ActionApprovals *approval.ActionApprovalQueue
 
+	// ActionApprovalPersister is the durable backing for the
+	// action-approval queue (#649). Wired alongside the queue itself;
+	// every state transition is appended so a daemon restart can
+	// resume in-flight approvals. The daemon constructs a JSONL-
+	// backed store pointed at ~/.aileron/approvals.jsonl and passes
+	// it here. Nil keeps the queue purely in-memory (tests / cloud-
+	// shaped daemons).
+	ActionApprovalPersister approval.Persister
+
+	// LoadedActionApprovals seeds the queue from a previously-
+	// persisted snapshot at startup. Records arrive in registration
+	// order; entries left in [approval.OutcomeRunning] at replay
+	// have already been reaped by the wiring layer (mapped to
+	// [approval.OutcomeFailed] with a reconciliation reason) before
+	// they are passed here, so the queue can load them verbatim.
+	// Non-terminal entries get respawned executor goroutines after
+	// the queue is fully wired. Nil / empty disables replay.
+	LoadedActionApprovals []approval.PersistedRecord
+
 	// Sessions is the persistent store for `aileron launch` session
 	// records (ADR-0012). The daemon constructs a JSONL-backed store
 	// pointed at ~/.aileron/sessions.jsonl and passes it here. Nil
@@ -179,6 +198,20 @@ func buildApprovalsReviewURL(cfgURL, envURL, approvalID string) string {
 		out = out + "?focus=" + url.QueryEscape(approvalID)
 	}
 	return out
+}
+
+// newVaultUnlockedCh returns the channel respawned approval executors
+// park on while waiting for the vault to be unlocked (#649). When the
+// daemon starts already-unlocked the channel is returned pre-closed
+// so a receive returns immediately; when it starts locked the channel
+// stays open until [apiServer.UnlockLocalVault] closes it on a
+// successful unlock.
+func newVaultUnlockedCh(startVaultLocked bool) chan struct{} {
+	ch := make(chan struct{})
+	if !startVaultLocked {
+		close(ch)
+	}
+	return ch
 }
 
 // NewHandlerWithConfig is the configurable entry point. The launcher
@@ -351,6 +384,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		lockableVault:      lockableVault,
 		localVaultPath:     cfg.LocalVaultPath,
 		vaultLocked:        startVaultLocked,
+		vaultUnlockedCh:    newVaultUnlockedCh(startVaultLocked),
 		notifier:           notifier,
 		intents:            intentStore,
 		approvals:          approvalStore,
@@ -425,14 +459,27 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	server.executor = executor
 
 	// --- Action-level approval queue (#418) ---
-	// In-memory; per-process. Surfaced to webapp/CLI via
-	// /v1/action-approvals; consumed by RunAction when an action's
-	// manifest declares [approval] required = true. Distinct from the
-	// rich governance orchestrator above; converges with it post-MVP.
+	// Surfaced to webapp/CLI via /v1/action-approvals; consumed by
+	// RunAction when an action's manifest declares
+	// [approval] required = true. Distinct from the rich governance
+	// orchestrator above; converges with it post-MVP.
+	//
+	// Persistence (#649): when the wiring layer supplies a
+	// [Persister] and a [LoadedActionApprovals] slice, the queue is
+	// installed with the JSONL-backed store before any state
+	// transitions can fire, then seeded with the prior process's
+	// records. Non-terminal entries get respawned executor
+	// goroutines further down (after the executor field is set).
 	if cfg.ActionApprovals != nil {
 		server.actionApprovals = cfg.ActionApprovals
 	} else {
 		server.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	}
+	if cfg.ActionApprovalPersister != nil {
+		server.actionApprovals.SetPersister(cfg.ActionApprovalPersister)
+	}
+	if len(cfg.LoadedActionApprovals) > 0 {
+		server.actionApprovals.LoadRecords(cfg.LoadedActionApprovals)
 	}
 
 	// Sessions store (ADR-0012). Optional — nil leaves the
@@ -483,6 +530,51 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 			ReviewURL:  buildApprovalsReviewURL(cfg.WebappURL, envWebappURL, a.ID),
 		})
 	})
+
+	// Respawn executor goroutines for non-terminal entries the JSONL
+	// store loaded into the queue (#649). Run AFTER the executor and
+	// the audit recorder are wired so the goroutines have everything
+	// they need; non-terminal entries listed by [NonTerminalLoaded]
+	// are pending_approval, approved_not_started, or awaiting_vault.
+	//
+	// For each entry: look up the action manifest. If it's missing
+	// (user uninstalled it between restarts), mark the entry failed
+	// — the executor would crash on a Get error anyway, and the
+	// failure path keeps the agent's /result poll honest. Otherwise
+	// spawn the goroutine; for entries past Decide the queue has
+	// pre-filled the decision channel so the goroutine resumes
+	// directly into the vault-unlock wait + SetRunning + Execute.
+	if len(cfg.LoadedActionApprovals) > 0 {
+		for _, id := range server.actionApprovals.NonTerminalLoaded() {
+			entry, ok := server.actionApprovals.Get(id)
+			if !ok {
+				continue
+			}
+			if entry.Kind != "" && entry.Kind != approval.ApprovalKindAction {
+				// Comms-kind respawn is out of scope (#649 Non-goals)
+				// — those entries replay as visible in /list but the
+				// daemon won't auto-execute on the user's decision.
+				log.Warn("approval kind not respawned",
+					"approval_id", entry.ID, "kind", entry.Kind)
+				continue
+			}
+			loaded, err := server.actions.Get(entry.ActionName)
+			if err != nil {
+				log.Warn("respawn: action manifest missing; marking approval failed",
+					"approval_id", entry.ID,
+					"action", entry.ActionName,
+					"error", err)
+				_ = server.actionApprovals.SetFailed(entry.ID, nil,
+					"action manifest no longer exists; cannot resume after daemon restart")
+				continue
+			}
+			connFQN := entry.ConnectorFQN
+			if connFQN == "" && len(loaded.Manifest.Execute) > 0 {
+				connFQN = loaded.Manifest.Execute[0].Connector
+			}
+			go server.executeApprovedAction(entry, entry.ActionName, connFQN, entry.Args, entry.SessionID)
+		}
+	}
 
 	if teeCfg.TEEEnabled() {
 		server.teeState = newTeeState()

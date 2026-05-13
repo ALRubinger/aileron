@@ -29,6 +29,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
+	approvaljsonl "github.com/ALRubinger/aileron/internal/approval/jsonl"
 	"github.com/ALRubinger/aileron/internal/sessions/jsonl"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
@@ -242,6 +243,48 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	if bindAddr == "" {
 		bindAddr = "127.0.0.1:0"
 	}
+
+	// Persistent action-approval queue (#649). The JSONL store lives
+	// alongside sessions.jsonl in stateDir. New() replays the file so
+	// the daemon resumes pending and in-flight approvals on restart;
+	// entries left in OutcomeRunning are reaped as failed with a
+	// reconciliation message because the runtime can't safely
+	// auto-rerun a non-idempotent action whose execution may have
+	// crashed mid-flight.
+	//
+	// The reap pass writes a new "running → failed" record back to
+	// the store before NewHandlerWithConfig loads the snapshot into
+	// the queue, so the queue's in-memory state and the on-disk file
+	// agree from the first instant. Without this ordering a fresh
+	// /result poll could see the stale "running" state before the
+	// queue had a chance to reconcile it.
+	approvalStore, approvalRecords, err := approvaljsonl.New(filepath.Join(opts.StateDir, "approvals.jsonl"))
+	if err != nil {
+		return fmt.Errorf("open approvals store: %w", err)
+	}
+	defer func() {
+		if err := approvalStore.Close(); err != nil {
+			log.Warn("closing approvals store", "error", err)
+		}
+	}()
+	for i, rec := range approvalRecords {
+		if rec.Status != approval.OutcomeRunning {
+			continue
+		}
+		reaped := rec
+		reaped.Status = approval.OutcomeFailed
+		reaped.ErrorMessage = "daemon crashed during execution; manual reconciliation required"
+		if err := approvalStore.Append(reaped); err != nil {
+			log.Warn("persist running-entry reap", "approval_id", rec.ID, "error", err)
+		}
+		approvalRecords[i] = reaped
+		log.Warn("approval reaped after crash",
+			"approval_id", rec.ID,
+			"action", rec.ActionName,
+			"reason", reaped.ErrorMessage)
+	}
+	cfg.ActionApprovalPersister = approvalStore
+	cfg.LoadedActionApprovals = approvalRecords
 
 	// --dev-seed-approvals: developer-only path to a JSON fixture of
 	// pending action approvals. Wired in before the handler is built so

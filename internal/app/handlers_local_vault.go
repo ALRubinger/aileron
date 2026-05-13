@@ -87,6 +87,21 @@ func (s *apiServer) UnlockLocalVault(w http.ResponseWriter, r *http.Request) {
 	s.vaultLocked = false
 	s.log.Info("local vault unlocked via webapp")
 
+	// Wake any approval-executor goroutines parked on the vault-
+	// unlock signal (#649). Closing the channel is idempotent under
+	// the localVaultMu critical section the caller already holds, so
+	// a second UnlockLocalVault that loses the 409 race never closes
+	// twice.
+	if s.vaultUnlockedCh != nil {
+		select {
+		case <-s.vaultUnlockedCh:
+			// Already closed (daemon started already-unlocked or a
+			// previous unlock fired). No-op.
+		default:
+			close(s.vaultUnlockedCh)
+		}
+	}
+
 	// Fire the vault-unlock callback so daemon-wide subsystems that
 	// were waiting on credentials (Slack/Discord listener startup,
 	// per ADR-0012 step 9B-2) can resolve tokens and come online.
