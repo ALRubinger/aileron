@@ -35,7 +35,7 @@ jobs:
           go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen --config api/oapi-codegen.yaml api/openapi.yaml
           git diff --exit-code api/gen/
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.0.9
 
@@ -154,7 +154,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.0.9
 
@@ -229,7 +229,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.0.9
 
@@ -287,7 +287,7 @@ jobs:
             internal/go.mod
             cmd/aileron/go.mod
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.0.9
 
@@ -489,7 +489,7 @@ jobs:
           echo "UI did not become healthy"
           exit 1
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.0.9
 
