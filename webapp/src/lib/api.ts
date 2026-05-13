@@ -107,6 +107,15 @@ export type PendingActionApproval = {
 	session_id?: string;
 	requested_at: string;
 	preview?: ActionApprovalPreview;
+	/** Rendered projection of the gated action's call-time args through
+	 *  the action manifest's `[[inputs]]` declarations (per the ADR-0003
+	 *  amendment introducing per-input `label` and `multiline` keys).
+	 *  The approval card renders these as labeled rows so the user reads
+	 *  "To: alr@…", "Subject: …", multiline "Body: …" rather than a
+	 *  raw JSON args dump. Omitted when the gated action has no
+	 *  resolvable manifest or its manifest declares no inputs; in that
+	 *  case the webapp falls back to the historic raw-JSON accordion. */
+	input_fields?: ActionApprovalPreviewField[];
 };
 
 /** Rendered output of the action manifest's `[approval.preview]`

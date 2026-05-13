@@ -190,6 +190,74 @@ func TestValidate_RejectsBadInputs(t *testing.T) {
 	}
 }
 
+// TestValidate_AcceptsInputDisplayMetadata pins the contract that
+// optional `label` and `multiline` fields on [[inputs]] entries are
+// accepted alongside the LLM-facing fields. Both apply only to the
+// approval surface (per ADR-0003 amendment); the LLM-visible JSON
+// Schema derived from inputs is unaffected.
+func TestValidate_AcceptsInputDisplayMetadata(t *testing.T) {
+	cases := []struct {
+		name  string
+		input Input
+	}{
+		{"label only", Input{Name: "to", Type: "string", Description: "Recipients", Label: "To"}},
+		{"multiline only", Input{Name: "body", Type: "string", Description: "Body", Multiline: true}},
+		{"label and multiline", Input{Name: "body", Type: "string", Description: "Body", Label: "Body", Multiline: true}},
+		{"both unset (default)", Input{Name: "to", Type: "string", Description: "Recipients"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := goodManifest()
+			m.Inputs = []Input{tc.input}
+			if err := Validate(m, "x.md"); err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestValidate_RejectsBadInputDisplayMetadata pins the rejection
+// rules: blank-but-non-empty label, and multiline on a non-string
+// input. Both are footguns the approval surface cannot render
+// meaningfully, so the parser refuses them.
+func TestValidate_RejectsBadInputDisplayMetadata(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Manifest)
+		want   string
+	}{
+		{"whitespace label", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "to", Type: "string", Description: "Recipients", Label: "   "}}
+		}, "label is whitespace-only"},
+		{"multiline on integer", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "n", Type: "integer", Description: "count", Multiline: true}}
+		}, "multiline=true is only allowed when type=\"string\""},
+		{"multiline on boolean", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "b", Type: "boolean", Description: "flag", Multiline: true}}
+		}, "multiline=true is only allowed when type=\"string\""},
+		{"multiline on number", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "r", Type: "number", Description: "ratio", Multiline: true}}
+		}, "multiline=true is only allowed when type=\"string\""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := goodManifest()
+			tc.mutate(m)
+			err := Validate(m, "x.md")
+			if err == nil {
+				t.Fatalf("Validate() succeeded; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q; want substring %q", err.Error(), tc.want)
+			}
+			var aerr *Error
+			if !errors.As(err, &aerr) || aerr.Class != ClassValidationError {
+				t.Errorf("expected *Error/ClassValidationError, got %v", err)
+			}
+		})
+	}
+}
+
 func TestValidate_AcceptsArgsRefAcrossNestedInputs(t *testing.T) {
 	m := goodManifest()
 	m.Inputs = []Input{{Name: "channel", Type: "string", Description: "..."}}

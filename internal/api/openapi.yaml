@@ -5196,6 +5196,35 @@ components:
           description: When the queue minted this request.
         preview:
           $ref: "#/components/schemas/ActionApprovalPreview"
+        input_fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActionApprovalPreviewField"
+          description: |
+            Rendered projection of the gated action's call-time args
+            through the action manifest's `[[inputs]]` declarations
+            (per the ADR-0003 amendment introducing per-input `label`
+            and `multiline` keys). Surfaced on the approval card so
+            the user sees labeled rows ("To: alr@…", "Subject: …",
+            multiline "Body: …") instead of the raw JSON args dump.
+
+            Fields are ordered by `[[inputs]]` declaration order
+            (matching the convention `ActionApprovalPreviewPolicy`
+            uses for previews). An input's `label` from the manifest
+            becomes the row's user-facing key; when no label is
+            declared the input's bare name is used. Required inputs
+            the agent did not supply surface as `missing=true` so the
+            UI can render "n/a". Args the agent supplied that aren't
+            declared on the manifest are appended at the end, sorted
+            by key, so the user always sees everything the agent
+            passed.
+
+            Optional. Omitted when the gated action has no resolvable
+            manifest or its manifest declares no `[[inputs]]` block;
+            in that case the webapp falls back to the historic raw-
+            JSON accordion. The field shape mirrors
+            `ActionApprovalPreviewField` so the webapp can route
+            preview fields and input fields through the same renderer.
 
     ActionApprovalPreview:
       type: object

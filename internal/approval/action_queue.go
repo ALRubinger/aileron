@@ -113,6 +113,22 @@ type ActionApproval struct {
 	// [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
 	Preview *ActionApprovalPreview
 
+	// InputFields is the rendered projection of the gated action's
+	// call-time args through the manifest's [[inputs]] declarations
+	// (per the ADR-0003 amendment introducing per-input `label` and
+	// `multiline` keys). Populated by the runtime ahead of Register
+	// when the action has a resolvable manifest with declared inputs.
+	// Nil otherwise — the webapp falls back to the historic raw-JSON
+	// accordion when this slot is empty.
+	//
+	// Distinct from Preview: Preview summarizes external state the
+	// runtime fetched via the [approval.preview] op (ADR-0016);
+	// InputFields summarizes what the agent is about to write. An
+	// action may carry both.
+	//
+	// Read-only after Register.
+	InputFields []ActionApprovalPreviewField
+
 	// RequestedAt is when the queue minted this request. Read-only.
 	RequestedAt time.Time
 
@@ -519,6 +535,20 @@ func (q *ActionApprovalQueue) RegisterKind(kind ApprovalKind, actionName, connec
 //
 // [ADR-0016]: https://docs.withaileron.ai/adr/0016-approval-preview
 func (q *ActionApprovalQueue) RegisterKindWithPreview(kind ApprovalKind, actionName, connectorFQN, sessionID string, args map[string]any, preview *ActionApprovalPreview) *ActionApproval {
+	return q.RegisterKindWithPreviewAndInputs(kind, actionName, connectorFQN, sessionID, args, preview, nil)
+}
+
+// RegisterKindWithPreviewAndInputs is the kind-aware Register that
+// additionally attaches a pre-rendered set of input fields — the
+// projection of the gated action's call-time args through the
+// manifest's [[inputs]] declarations. The webapp surfaces these as a
+// labeled-fields block so the user reads "To: alr@…", "Subject: …",
+// multiline "Body: …" instead of the raw JSON args dump.
+//
+// Pass inputFields=nil to skip the input-fields slot (equivalent to
+// [RegisterKindWithPreview]); the webapp falls back to the historic
+// raw-JSON accordion in that case.
+func (q *ActionApprovalQueue) RegisterKindWithPreviewAndInputs(kind ApprovalKind, actionName, connectorFQN, sessionID string, args map[string]any, preview *ActionApprovalPreview, inputFields []ActionApprovalPreviewField) *ActionApproval {
 	if kind == "" {
 		kind = ApprovalKindAction
 	}
@@ -531,6 +561,7 @@ func (q *ActionApprovalQueue) RegisterKindWithPreview(kind ApprovalKind, actionN
 		Args:         args,
 		SessionID:    sessionID,
 		Preview:      preview,
+		InputFields:  inputFields,
 		RequestedAt:  q.now(),
 		decision:     make(chan ActionDecision, 1),
 	}

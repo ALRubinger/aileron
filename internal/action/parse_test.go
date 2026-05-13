@@ -87,6 +87,76 @@ func TestParse_ValidFrontmatterAndBody(t *testing.T) {
 	}
 }
 
+// TestParse_InputDisplayMetadata pins the TOML round-trip of the
+// optional per-input `label` and `multiline` keys. They affect only
+// the approval surface (per the ADR-0003 amendment) and have no
+// bearing on the LLM-facing JSON Schema.
+func TestParse_InputDisplayMetadata(t *testing.T) {
+	data := `+++
+name = "send-email"
+version = "1.0.0"
+source = "hub://aileron/send-email@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["gmail:send"]
+
+[match]
+intent = "send an email"
+
+[[inputs]]
+name = "to"
+type = "string"
+description = "Recipient address."
+label = "To"
+
+[[inputs]]
+name = "subject"
+type = "string"
+description = "Subject line."
+label = "Subject"
+
+[[inputs]]
+name = "body"
+type = "string"
+description = "Plain-text body."
+label = "Body"
+multiline = true
+
+[[execute]]
+id = "send"
+connector = "github://aileron/google"
+op = "send_email"
++++
+
+# Send Email
+`
+	m, err := Parse("send-email.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(m.Inputs) != 3 {
+		t.Fatalf("got %d inputs, want 3", len(m.Inputs))
+	}
+	if got, want := m.Inputs[0].Label, "To"; got != want {
+		t.Errorf("Inputs[0].Label = %q, want %q", got, want)
+	}
+	if m.Inputs[0].Multiline {
+		t.Errorf("Inputs[0].Multiline = true, want false (unset)")
+	}
+	if got, want := m.Inputs[2].Label, "Body"; got != want {
+		t.Errorf("Inputs[2].Label = %q, want %q", got, want)
+	}
+	if !m.Inputs[2].Multiline {
+		t.Errorf("Inputs[2].Multiline = false, want true")
+	}
+	if err := Validate(m, "send-email.md"); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestParse_MissingOpeningDelimiter(t *testing.T) {
 	data := `name = "x"
 +++
