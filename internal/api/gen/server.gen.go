@@ -1766,12 +1766,9 @@ type ActionApprovalResult struct {
 	// AuditId Audit log id; populated when `status = completed`.
 	AuditId *string `json:"audit_id,omitempty"`
 
-	// Failure Structured failure envelope ratified by [ADR-0010][adr10] for
-	// errors returned to the calling action and through it to the
-	// agent. Used on the gateway endpoints (`/v1/chat/completions`,
-	// `/v1/messages`) and on action / connector install responses.
-	//
-	// [adr10]: https://docs.withaileron.ai/adr/0010-failure-handling
+	// Failure Action-side failure envelope; populated when
+	// `status = failed`. Same shape the synchronous path would
+	// have returned as a 4xx/5xx body.
 	Failure *FailureEnvelope `json:"failure,omitempty"`
 
 	// Reason User's deny commentary; populated when `status = denied`.
@@ -1947,10 +1944,14 @@ type ActionPreview struct {
 	// manifest, in declaration order.
 	ConnectorDeps []ActionConnectorDep `json:"connector_deps"`
 
-	// Existing Snapshot of an action already on disk at install time. Used in
-	// the preview response to surface the installed version when its
-	// bytes differ from the requested install — the CLI renders this
-	// so the operator can confirm an upgrade.
+	// Existing Set when an action with the same `name` is already
+	// installed but its bytes differ from the previewed
+	// manifest (typically a different version). Mutually
+	// exclusive with `already_installed = true`. The CLI uses
+	// this to render an upgrade prompt instead of treating
+	// the install as fresh — the operator sees the installed
+	// version side-by-side with the requested version and can
+	// choose to overwrite.
 	Existing *InstalledActionRef `json:"existing,omitempty"`
 
 	// Fqn Canonical FQN of the previewed action.
