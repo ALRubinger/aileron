@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/ALRubinger/aileron/internal v0.0.0
-	golang.org/x/term v0.42.0
+	golang.org/x/term v0.43.0
 )
 
 require (
