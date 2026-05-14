@@ -321,6 +321,264 @@ func TestGetHubInstallDecision_KeyFetchFailureReturns502(t *testing.T) {
 	}
 }
 
+func TestListHubActions_ReturnsEntries(t *testing.T) {
+	actions := map[string]string{
+		"draft.yaml": actionYAML("github://alice/conn/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn", "communication", []string{"draft email"}),
+		"list.yaml":  actionYAML("github://alice/conn/actions/list-emails", "List recent emails", "alice", "github://alice/conn", "communication", nil),
+	}
+	url := makeHubFixtureMulti(t, nil, actions, nil)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	srv.ListHubActions(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/actions", nil), api.ListHubActionsParams{})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubActionList
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Actions) != 2 {
+		t.Fatalf("expected 2 actions, got %d", len(got.Actions))
+	}
+	// Sorted by FQN: draft-email comes before list-emails alphabetically
+	if got.Actions[0].Fqn != "github://alice/conn/actions/draft-email" {
+		t.Fatalf("entries not sorted by FQN: %+v", got.Actions)
+	}
+	if got.Actions[0].ConnectorFqn != "github://alice/conn" {
+		t.Fatalf("connector_fqn not propagated: %+v", got.Actions[0])
+	}
+}
+
+func TestListHubActions_FilterAppliesToFQNAndDescription(t *testing.T) {
+	actions := map[string]string{
+		"a.yaml": actionYAML("github://alice/conn/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn", "", nil),
+		"b.yaml": actionYAML("github://bob/conn/actions/post-slack", "Post a Slack message", "bob", "github://bob/conn", "", nil),
+	}
+	url := makeHubFixtureMulti(t, nil, actions, nil)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	q := "gmail"
+	srv.ListHubActions(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/actions?q=gmail", nil), api.ListHubActionsParams{Q: &q})
+
+	var got api.HubActionList
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Actions) != 1 || got.Actions[0].Fqn != "github://alice/conn/actions/draft-email" {
+		t.Fatalf("expected single gmail match, got %+v", got.Actions)
+	}
+}
+
+func TestListHubActions_HubUnreachableReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: "file:///nonexistent/path"}}
+	rec := httptest.NewRecorder()
+	srv.ListHubActions(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/actions", nil), api.ListHubActionsParams{})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListHubActions_HubDisabledReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: nil}
+	rec := httptest.NewRecorder()
+	srv.ListHubActions(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/actions", nil), api.ListHubActionsParams{})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestGetHubAction_ReturnsEntryForKnownFQN(t *testing.T) {
+	actions := map[string]string{
+		"draft.yaml": actionYAML("github://alice/conn/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn", "communication", []string{"draft email", "compose gmail"}),
+	}
+	url := makeHubFixtureMulti(t, nil, actions, nil)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/actions/draft-email"
+	srv.GetHubAction(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action?fqn="+fqn, nil), api.GetHubActionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubActionEntry
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Fqn != fqn || got.ConnectorFqn != "github://alice/conn" {
+		t.Fatalf("unexpected entry: %+v", got)
+	}
+	if got.Intents == nil || len(*got.Intents) != 2 {
+		t.Fatalf("intents not propagated: %+v", got.Intents)
+	}
+}
+
+func TestGetHubAction_EmptyFQNReturns400(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: makeHubFixtureMulti(t, nil, nil, nil)}}
+	rec := httptest.NewRecorder()
+	srv.GetHubAction(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action", nil), api.GetHubActionParams{Fqn: ""})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestGetHubAction_MissingFQNReturns404(t *testing.T) {
+	url := makeHubFixtureMulti(t, nil, map[string]string{
+		"x.yaml": actionYAML("github://alice/conn/actions/x", "X", "alice", "github://alice/conn", "", nil),
+	}, nil)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://nobody/missing/actions/x"
+	srv.GetHubAction(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action?fqn="+fqn, nil), api.GetHubActionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestGetHubAction_HubDisabledReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: nil}
+	rec := httptest.NewRecorder()
+	srv.GetHubAction(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action?fqn=x", nil), api.GetHubActionParams{Fqn: "x"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestListHubSuites_ReturnsEntries(t *testing.T) {
+	suites := map[string]string{
+		"alice.yaml": suiteYAML(
+			"github://alice/conn/suite", "Alice's suite", "alice", "communication",
+			[]string{"github://alice/conn/actions/a", "github://alice/conn/actions/b"},
+			[]string{"github://alice/conn"},
+		),
+	}
+	url := makeHubFixtureMulti(t, nil, nil, suites)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	srv.ListHubSuites(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suites", nil), api.ListHubSuitesParams{})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubSuiteList
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Suites) != 1 {
+		t.Fatalf("expected 1 suite, got %d", len(got.Suites))
+	}
+	if len(got.Suites[0].MemberActions) != 2 {
+		t.Fatalf("member_actions not propagated: %+v", got.Suites[0])
+	}
+	if got.Suites[0].ConnectorsRequired == nil || len(*got.Suites[0].ConnectorsRequired) != 1 {
+		t.Fatalf("connectors_required not propagated: %+v", got.Suites[0])
+	}
+}
+
+func TestListHubSuites_FilterAppliesToFQNAndDescription(t *testing.T) {
+	suites := map[string]string{
+		"a.yaml": suiteYAML("github://alice/conn/suite", "Gmail and Calendar", "alice", "", []string{"github://alice/conn/actions/a"}, nil),
+		"b.yaml": suiteYAML("github://bob/conn/suite", "Slack essentials", "bob", "", []string{"github://bob/conn/actions/b"}, nil),
+	}
+	url := makeHubFixtureMulti(t, nil, nil, suites)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	q := "calendar"
+	srv.ListHubSuites(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suites?q=calendar", nil), api.ListHubSuitesParams{Q: &q})
+
+	var got api.HubSuiteList
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Suites) != 1 || got.Suites[0].Fqn != "github://alice/conn/suite" {
+		t.Fatalf("expected single calendar match, got %+v", got.Suites)
+	}
+}
+
+func TestListHubSuites_HubUnreachableReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: "file:///nonexistent/path"}}
+	rec := httptest.NewRecorder()
+	srv.ListHubSuites(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suites", nil), api.ListHubSuitesParams{})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestListHubSuites_HubDisabledReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: nil}
+	rec := httptest.NewRecorder()
+	srv.ListHubSuites(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suites", nil), api.ListHubSuitesParams{})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestGetHubSuite_ReturnsEntryForKnownFQN(t *testing.T) {
+	suites := map[string]string{
+		"alice.yaml": suiteYAML(
+			"github://alice/conn/suite", "Alice's suite", "alice", "communication",
+			[]string{"github://alice/conn/actions/a"}, nil,
+		),
+	}
+	url := makeHubFixtureMulti(t, nil, nil, suites)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuite(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite?fqn="+fqn, nil), api.GetHubSuiteParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubSuiteEntry
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Fqn != fqn || got.PublisherGithub != "alice" {
+		t.Fatalf("unexpected entry: %+v", got)
+	}
+}
+
+func TestGetHubSuite_EmptyFQNReturns400(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: makeHubFixtureMulti(t, nil, nil, nil)}}
+	rec := httptest.NewRecorder()
+	srv.GetHubSuite(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite", nil), api.GetHubSuiteParams{Fqn: ""})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestGetHubSuite_MissingFQNReturns404(t *testing.T) {
+	url := makeHubFixtureMulti(t, nil, nil, map[string]string{
+		"x.yaml": suiteYAML("github://alice/conn/suite", "x", "alice", "", []string{"github://alice/conn/actions/a"}, nil),
+	})
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://nobody/missing/suite"
+	srv.GetHubSuite(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite?fqn="+fqn, nil), api.GetHubSuiteParams{Fqn: fqn})
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestGetHubSuite_HubDisabledReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: nil}
+	rec := httptest.NewRecorder()
+	srv.GetHubSuite(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite?fqn=x", nil), api.GetHubSuiteParams{Fqn: "x"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
 // --- helpers ---
 
 // twoEntryFixture is the shared Hub fixture used by tests that don't
@@ -339,20 +597,36 @@ func entryYAML(fqn, description, publisher, keyURL string) string {
 }
 
 func makeHubFixture(t *testing.T, entries map[string]string) string {
+	return makeHubFixtureMulti(t, entries, nil, nil)
+}
+
+// makeHubFixtureMulti builds a Hub fixture with optional content in any
+// of the three catalog directories. Pass nil for a directory to leave
+// it absent on disk (mirrors a Hub repo that hasn't been seeded with
+// that entry type yet).
+func makeHubFixtureMulti(t *testing.T, connectors, actions, suites map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	connectors := filepath.Join(dir, "connectors")
-	if err := os.MkdirAll(connectors, 0o755); err != nil {
-		t.Fatalf("mkdir connectors: %v", err)
-	}
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("test\n"), 0o644); err != nil {
 		t.Fatalf("write README: %v", err)
 	}
-	for name, body := range entries {
-		if err := os.WriteFile(filepath.Join(connectors, name), []byte(body), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
+	writeDir := func(sub string, entries map[string]string) {
+		if entries == nil {
+			return
+		}
+		path := filepath.Join(dir, sub)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
+		for name, body := range entries {
+			if err := os.WriteFile(filepath.Join(path, name), []byte(body), 0o644); err != nil {
+				t.Fatalf("write %s/%s: %v", sub, name, err)
+			}
 		}
 	}
+	writeDir("connectors", connectors)
+	writeDir("actions", actions)
+	writeDir("suites", suites)
 	runGit := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -369,6 +643,43 @@ func makeHubFixture(t *testing.T, entries map[string]string) string {
 	runGit("add", "-A")
 	runGit("commit", "-m", "seed")
 	return "file://" + dir
+}
+
+func actionYAML(fqn, description, publisher, connectorFQN, category string, intents []string) string {
+	out := "fqn: " + fqn + "\n" +
+		"description: " + description + "\n" +
+		"publisher_github: " + publisher + "\n" +
+		"connector_fqn: " + connectorFQN + "\n"
+	if len(intents) > 0 {
+		out += "intents:\n"
+		for _, intent := range intents {
+			out += "  - " + intent + "\n"
+		}
+	}
+	if category != "" {
+		out += "category: " + category + "\n"
+	}
+	return out
+}
+
+func suiteYAML(fqn, description, publisher, category string, memberActions, connectorsRequired []string) string {
+	out := "fqn: " + fqn + "\n" +
+		"description: " + description + "\n" +
+		"publisher_github: " + publisher + "\n" +
+		"member_actions:\n"
+	for _, a := range memberActions {
+		out += "  - " + a + "\n"
+	}
+	if len(connectorsRequired) > 0 {
+		out += "connectors_required:\n"
+		for _, c := range connectorsRequired {
+			out += "  - " + c + "\n"
+		}
+	}
+	if category != "" {
+		out += "category: " + category + "\n"
+	}
+	return out
 }
 
 // httpKeyServer returns a test HTTP server that serves the PEM-

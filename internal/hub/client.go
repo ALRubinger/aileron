@@ -1,16 +1,23 @@
-// Package hub is the daemon's client for the public Aileron connector
-// discovery Hub (ADR-0013).
+// Package hub is the daemon's client for the public Aileron discovery
+// Hub (ADR-0013).
 //
 // The Hub is a public GitHub repo at `aileron-connectors-hub` whose
-// `connectors/` directory holds one YAML entry per community-published
-// connector. Each entry points at the connector's canonical
-// `github://OWNER/REPO` FQN — the Hub stores no binaries.
+// catalog holds three entry types, one YAML pointer per published
+// artifact:
+//
+//   - `connectors/*.yaml` — community-published connectors, each
+//     pointing at the connector's canonical `github://OWNER/REPO` FQN.
+//   - `actions/*.yaml` — published action templates, each pointing at
+//     the action's canonical `github://OWNER/REPO/actions/NAME` FQN
+//     and naming the connector it depends on.
+//   - `suites/*.yaml` — published action suites, each enumerating its
+//     member action FQNs plus the derived `connectors_required` list.
 //
 // Per #486, v0.x has no persisted cache and no `api.github.com` calls.
 // Every Hub query shallow-clones the repo into a tmpdir, parses the
-// entries, and discards the clone. A server-side metadata service
-// that would re-introduce caching and popularity signals is tracked
-// in #614.
+// entries for the requested directory, and discards the clone. A
+// server-side metadata service that would re-introduce caching and
+// popularity signals is tracked in #614.
 package hub
 
 import (
@@ -25,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,10 +40,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Entry is one Hub connector listing. Matches the YAML files committed
-// to `aileron-connectors-hub/connectors/*.yaml`. Field tags align with
-// both the YAML files and the OpenAPI `HubConnectorEntry` schema.
-type Entry struct {
+// ConnectorEntry is one Hub connector listing. Matches the YAML files
+// committed to `aileron-connectors-hub/connectors/*.yaml`. Field tags
+// align with both the YAML files and the OpenAPI `HubConnectorEntry`
+// schema.
+type ConnectorEntry struct {
 	FQN             string `yaml:"fqn" json:"fqn"`
 	Description     string `yaml:"description" json:"description"`
 	PublisherGithub string `yaml:"publisher_github" json:"publisher_github"`
@@ -43,12 +52,42 @@ type Entry struct {
 	ReleasePattern  string `yaml:"release_pattern" json:"release_pattern"`
 }
 
-// ErrNotFound signals that a requested FQN has no matching Hub entry.
+// ActionEntry is one Hub action-template listing. Matches the YAML
+// files committed to `aileron-connectors-hub/actions/*.yaml`. Action
+// entries are discovery metadata; the canonical action template (TOML
+// frontmatter + Markdown body per ADR-0003) is fetched from the
+// publisher's repo at install time, not from the Hub.
+type ActionEntry struct {
+	FQN             string   `yaml:"fqn" json:"fqn"`
+	Description     string   `yaml:"description" json:"description"`
+	PublisherGithub string   `yaml:"publisher_github" json:"publisher_github"`
+	ConnectorFQN    string   `yaml:"connector_fqn" json:"connector_fqn"`
+	Intents         []string `yaml:"intents,omitempty" json:"intents,omitempty"`
+	Category        string   `yaml:"category,omitempty" json:"category,omitempty"`
+}
+
+// SuiteEntry is one Hub action-suite listing. Matches the YAML files
+// committed to `aileron-connectors-hub/suites/*.yaml`. A suite entry
+// names its member actions and the connectors those actions transitively
+// require. The authoritative `suite.toml` (per #564) still lives in the
+// publisher's repo; the Hub entry is the discovery pointer.
+type SuiteEntry struct {
+	FQN                string   `yaml:"fqn" json:"fqn"`
+	Description        string   `yaml:"description" json:"description"`
+	PublisherGithub    string   `yaml:"publisher_github" json:"publisher_github"`
+	MemberActions      []string `yaml:"member_actions" json:"member_actions"`
+	ConnectorsRequired []string `yaml:"connectors_required,omitempty" json:"connectors_required,omitempty"`
+	Category           string   `yaml:"category,omitempty" json:"category,omitempty"`
+}
+
+// ErrNotFound signals that a requested FQN has no matching Hub entry
+// in the requested catalog (connectors, actions, or suites).
 var ErrNotFound = errors.New("hub: entry not found")
 
 // Client fetches entries from a configured Hub git URL.
 //
-// Concurrent calls are safe: each FetchAll clones into its own tmpdir.
+// Concurrent calls are safe: each Fetch* shallow-clones into its own
+// tmpdir.
 type Client struct {
 	// URL is a git-clonable Hub URL. file://, https://, and ssh URLs
 	// all work — useful for tests that point at a local fixture repo.
@@ -63,13 +102,50 @@ type Client struct {
 	CloneTimeout time.Duration
 }
 
-// FetchAll shallow-clones the Hub repo, parses every YAML file under
-// `connectors/`, and returns the entries sorted by FQN. The clone
-// directory is deleted before return.
+// FetchAllConnectors shallow-clones the Hub repo, parses every YAML
+// file under `connectors/`, and returns the entries sorted by FQN.
+// The clone directory is deleted before return.
 //
 // A failed clone (network down, URL wrong, repo missing) returns a
 // wrapped error suitable for surfacing as 503 Hub-unreachable.
-func (c *Client) FetchAll(ctx context.Context) ([]Entry, error) {
+func (c *Client) FetchAllConnectors(ctx context.Context) ([]ConnectorEntry, error) {
+	return fetchAll[ConnectorEntry](ctx, c, "connectors")
+}
+
+// FetchAllActions shallow-clones the Hub repo, parses every YAML file
+// under `actions/`, and returns the entries sorted by FQN.
+func (c *Client) FetchAllActions(ctx context.Context) ([]ActionEntry, error) {
+	return fetchAll[ActionEntry](ctx, c, "actions")
+}
+
+// FetchAllSuites shallow-clones the Hub repo, parses every YAML file
+// under `suites/`, and returns the entries sorted by FQN.
+func (c *Client) FetchAllSuites(ctx context.Context) ([]SuiteEntry, error) {
+	return fetchAll[SuiteEntry](ctx, c, "suites")
+}
+
+// FetchConnectorByFQN returns the connector entry whose FQN matches
+// exactly, or ErrNotFound.
+func (c *Client) FetchConnectorByFQN(ctx context.Context, fqn string) (ConnectorEntry, error) {
+	return fetchByFQN(ctx, c.FetchAllConnectors, fqn, func(e ConnectorEntry) string { return e.FQN })
+}
+
+// FetchActionByFQN returns the action entry whose FQN matches exactly,
+// or ErrNotFound.
+func (c *Client) FetchActionByFQN(ctx context.Context, fqn string) (ActionEntry, error) {
+	return fetchByFQN(ctx, c.FetchAllActions, fqn, func(e ActionEntry) string { return e.FQN })
+}
+
+// FetchSuiteByFQN returns the suite entry whose FQN matches exactly,
+// or ErrNotFound.
+func (c *Client) FetchSuiteByFQN(ctx context.Context, fqn string) (SuiteEntry, error) {
+	return fetchByFQN(ctx, c.FetchAllSuites, fqn, func(e SuiteEntry) string { return e.FQN })
+}
+
+// fetchAll is the generic per-directory walker. T is the entry type;
+// subdir is the directory under the Hub repo root to walk
+// ("connectors", "actions", "suites"). Returns entries sorted by FQN.
+func fetchAll[T any](ctx context.Context, c *Client, subdir string) ([]T, error) {
 	dir, err := os.MkdirTemp("", "aileron-hub-*")
 	if err != nil {
 		return nil, fmt.Errorf("hub: tmpdir: %w", err)
@@ -80,19 +156,19 @@ func (c *Client) FetchAll(ctx context.Context) ([]Entry, error) {
 		return nil, err
 	}
 
-	connectorsDir := filepath.Join(dir, "connectors")
-	files, err := os.ReadDir(connectorsDir)
+	target := filepath.Join(dir, subdir)
+	files, err := os.ReadDir(target)
 	if err != nil {
-		// A Hub repo with no connectors/ directory is treated as empty
-		// rather than an error. The list endpoint returns an empty list;
-		// the show/install-decision endpoints return ErrNotFound.
+		// A Hub repo with no subdir is treated as empty rather than an
+		// error. The list endpoints return an empty list; the
+		// show/install-decision endpoints return ErrNotFound.
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("hub: read connectors dir: %w", err)
+		return nil, fmt.Errorf("hub: read %s dir: %w", subdir, err)
 	}
 
-	var entries []Entry
+	var entries []T
 	for _, f := range files {
 		if f.IsDir() {
 			continue
@@ -101,35 +177,62 @@ func (c *Client) FetchAll(ctx context.Context) ([]Entry, error) {
 		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
 			continue
 		}
-		path := filepath.Join(connectorsDir, name)
+		path := filepath.Join(target, name)
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("hub: read %s: %w", name, err)
 		}
-		var e Entry
+		var e T
 		if err := yaml.Unmarshal(b, &e); err != nil {
 			return nil, fmt.Errorf("hub: parse %s: %w", name, err)
 		}
 		entries = append(entries, e)
 	}
 
-	sortEntries(entries)
+	sort.Slice(entries, func(i, j int) bool {
+		return fqnOf(entries[i]) < fqnOf(entries[j])
+	})
 	return entries, nil
 }
 
-// FetchByFQN returns the entry whose FQN matches exactly, or
-// ErrNotFound if no such entry exists in the Hub.
-func (c *Client) FetchByFQN(ctx context.Context, fqn string) (Entry, error) {
-	entries, err := c.FetchAll(ctx)
+// fqnOf extracts the FQN field from any of the entry types. The three
+// entry structs all carry a `FQN string` field; this helper bridges the
+// generic fetchAll/sort without forcing each entry type to implement an
+// interface. Adding a fourth entry type requires extending the switch.
+func fqnOf(e any) string {
+	switch v := e.(type) {
+	case ConnectorEntry:
+		return v.FQN
+	case ActionEntry:
+		return v.FQN
+	case SuiteEntry:
+		return v.FQN
+	default:
+		return ""
+	}
+}
+
+// fetchByFQN runs a list-fetcher and linearly scans for the requested
+// FQN. ErrNotFound when no entry matches. The function-pointer form
+// lets the three public Fetch*ByFQN methods share the same scan loop
+// without a per-type implementation.
+func fetchByFQN[T any](
+	ctx context.Context,
+	fetchAll func(context.Context) ([]T, error),
+	fqn string,
+	getFQN func(T) string,
+) (T, error) {
+	var zero T
+	entries, err := fetchAll(ctx)
 	if err != nil {
-		return Entry{}, err
+		return zero, err
 	}
 	for _, e := range entries {
-		if e.FQN == fqn {
+		if getFQN(e) == fqn {
 			return e, nil
 		}
 	}
-	return Entry{}, ErrNotFound
+	return zero, ErrNotFound
 }
 
 // FetchPublisherKey downloads the PEM-encoded ed25519 public key at
@@ -202,40 +305,54 @@ func (c *Client) shallowClone(ctx context.Context, dir string) error {
 	return nil
 }
 
-func sortEntries(entries []Entry) {
-	// Stable alphabetical by FQN for deterministic list output across
-	// runs. Callers (search filter, footprint computation) rely on
-	// this only weakly, but tests pin it for reproducibility.
-	for i := 1; i < len(entries); i++ {
-		for j := i; j > 0 && entries[j-1].FQN > entries[j].FQN; j-- {
-			entries[j-1], entries[j] = entries[j], entries[j-1]
-		}
-	}
-}
-
-// FilterByKeyword returns the subset of entries whose FQN or
+// FilterConnectorsByKeyword returns the subset of entries whose FQN or
 // description contains q (substring, case-insensitive). An empty q
 // returns all entries.
-func FilterByKeyword(entries []Entry, q string) []Entry {
+func FilterConnectorsByKeyword(entries []ConnectorEntry, q string) []ConnectorEntry {
+	return filterByKeyword(entries, q,
+		func(e ConnectorEntry) string { return e.FQN },
+		func(e ConnectorEntry) string { return e.Description })
+}
+
+// FilterActionsByKeyword returns the subset of action entries whose FQN
+// or description contains q (substring, case-insensitive). Empty q
+// returns all entries.
+func FilterActionsByKeyword(entries []ActionEntry, q string) []ActionEntry {
+	return filterByKeyword(entries, q,
+		func(e ActionEntry) string { return e.FQN },
+		func(e ActionEntry) string { return e.Description })
+}
+
+// FilterSuitesByKeyword returns the subset of suite entries whose FQN
+// or description contains q (substring, case-insensitive). Empty q
+// returns all entries.
+func FilterSuitesByKeyword(entries []SuiteEntry, q string) []SuiteEntry {
+	return filterByKeyword(entries, q,
+		func(e SuiteEntry) string { return e.FQN },
+		func(e SuiteEntry) string { return e.Description })
+}
+
+func filterByKeyword[T any](entries []T, q string, fqn, desc func(T) string) []T {
 	q = strings.ToLower(strings.TrimSpace(q))
 	if q == "" {
 		return entries
 	}
-	var out []Entry
+	var out []T
 	for _, e := range entries {
-		if strings.Contains(strings.ToLower(e.FQN), q) ||
-			strings.Contains(strings.ToLower(e.Description), q) {
+		if strings.Contains(strings.ToLower(fqn(e)), q) ||
+			strings.Contains(strings.ToLower(desc(e)), q) {
 			out = append(out, e)
 		}
 	}
 	return out
 }
 
-// PublisherFootprint returns the FQNs of every entry by the same
-// publisher as the supplied entry, excluding the entry's own FQN.
+// PublisherFootprint returns the FQNs of every connector entry by the
+// same publisher as the supplied entry, excluding the entry's own FQN.
 // Used to surface "publisher's other connectors" context in the
-// install-decision payload (#487).
-func PublisherFootprint(entries []Entry, e Entry) []string {
+// install-decision payload (#487). Trust-state semantics are
+// connector-scoped, so this helper stays connector-typed.
+func PublisherFootprint(entries []ConnectorEntry, e ConnectorEntry) []string {
 	var out []string
 	for _, other := range entries {
 		if other.PublisherGithub == e.PublisherGithub && other.FQN != e.FQN {

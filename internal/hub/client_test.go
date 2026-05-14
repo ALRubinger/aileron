@@ -17,27 +17,44 @@ import (
 	"github.com/ALRubinger/aileron/internal/hub"
 )
 
+// fixtureDirs supplies per-directory entry contents for makeFixtureHub.
+// Keys are filenames (e.g. "github_alice_a.yaml"); values are raw YAML
+// bodies. Pass `nil` for a directory to leave it absent (Hub repo
+// without that subdir at all).
+type fixtureDirs struct {
+	connectors map[string]string
+	actions    map[string]string
+	suites     map[string]string
+}
+
 // makeFixtureHub creates a temporary git repo on disk laid out like
-// `aileron-connectors-hub`, with one entry per supplied map item.
+// `aileron-connectors-hub`, with the supplied entries per directory.
 // Returns a `file://` URL the hub.Client can clone from.
-func makeFixtureHub(t *testing.T, entries map[string]string) string {
+func makeFixtureHub(t *testing.T, dirs fixtureDirs) string {
 	t.Helper()
 	dir := t.TempDir()
-	connectors := filepath.Join(dir, "connectors")
-	if err := os.MkdirAll(connectors, 0o755); err != nil {
-		t.Fatalf("mkdir connectors: %v", err)
-	}
 	// Ensure git always has at least one file to commit, so the empty-
 	// entries case still produces a valid repo.
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("test fixture\n"), 0o644); err != nil {
 		t.Fatalf("write README: %v", err)
 	}
-	for name, body := range entries {
-		path := filepath.Join(connectors, name)
-		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
+	writeDir := func(subdir string, entries map[string]string) {
+		if entries == nil {
+			return
+		}
+		path := filepath.Join(dir, subdir)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", subdir, err)
+		}
+		for name, body := range entries {
+			if err := os.WriteFile(filepath.Join(path, name), []byte(body), 0o644); err != nil {
+				t.Fatalf("write %s/%s: %v", subdir, name, err)
+			}
 		}
 	}
+	writeDir("connectors", dirs.connectors)
+	writeDir("actions", dirs.actions)
+	writeDir("suites", dirs.suites)
 
 	runGit := func(args ...string) {
 		t.Helper()
@@ -58,8 +75,14 @@ func makeFixtureHub(t *testing.T, entries map[string]string) string {
 	return "file://" + dir
 }
 
-func TestFetchAll_ReturnsAllEntriesSortedByFQN(t *testing.T) {
-	url := makeFixtureHub(t, map[string]string{
+// connectorsOnly is a small convenience for tests that only seed the
+// connectors/ directory.
+func connectorsOnly(t *testing.T, entries map[string]string) string {
+	return makeFixtureHub(t, fixtureDirs{connectors: entries})
+}
+
+func TestFetchAllConnectors_ReturnsAllEntriesSortedByFQN(t *testing.T) {
+	url := connectorsOnly(t, map[string]string{
 		"github_bob_z.yaml": `
 fqn: github://bob/z
 description: Z
@@ -77,9 +100,9 @@ release_pattern: v*
 	})
 	c := &hub.Client{URL: url}
 
-	entries, err := c.FetchAll(context.Background())
+	entries, err := c.FetchAllConnectors(context.Background())
 	if err != nil {
-		t.Fatalf("FetchAll: %v", err)
+		t.Fatalf("FetchAllConnectors: %v", err)
 	}
 	if len(entries) != 2 {
 		t.Fatalf("got %d entries, want 2", len(entries))
@@ -92,23 +115,23 @@ release_pattern: v*
 	}
 }
 
-func TestFetchAll_EmptyConnectorsDirReturnsNil(t *testing.T) {
-	url := makeFixtureHub(t, map[string]string{})
+func TestFetchAllConnectors_EmptyConnectorsDirReturnsNil(t *testing.T) {
+	url := connectorsOnly(t, map[string]string{})
 	c := &hub.Client{URL: url}
 
-	entries, err := c.FetchAll(context.Background())
+	entries, err := c.FetchAllConnectors(context.Background())
 	if err != nil {
-		t.Fatalf("FetchAll: %v", err)
+		t.Fatalf("FetchAllConnectors: %v", err)
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected empty list, got %d entries", len(entries))
 	}
 }
 
-func TestFetchAll_UnreachableURLReturnsError(t *testing.T) {
+func TestFetchAllConnectors_UnreachableURLReturnsError(t *testing.T) {
 	c := &hub.Client{URL: "file:///nonexistent/path/that/does/not/exist"}
 
-	_, err := c.FetchAll(context.Background())
+	_, err := c.FetchAllConnectors(context.Background())
 	if err == nil {
 		t.Fatalf("expected error for unreachable URL, got nil")
 	}
@@ -117,8 +140,8 @@ func TestFetchAll_UnreachableURLReturnsError(t *testing.T) {
 	}
 }
 
-func TestFetchByFQN_ReturnsMatchingEntry(t *testing.T) {
-	url := makeFixtureHub(t, map[string]string{
+func TestFetchConnectorByFQN_ReturnsMatchingEntry(t *testing.T) {
+	url := connectorsOnly(t, map[string]string{
 		"github_alice_a.yaml": `
 fqn: github://alice/a
 description: A connector
@@ -129,17 +152,17 @@ release_pattern: v*
 	})
 	c := &hub.Client{URL: url}
 
-	entry, err := c.FetchByFQN(context.Background(), "github://alice/a")
+	entry, err := c.FetchConnectorByFQN(context.Background(), "github://alice/a")
 	if err != nil {
-		t.Fatalf("FetchByFQN: %v", err)
+		t.Fatalf("FetchConnectorByFQN: %v", err)
 	}
 	if entry.FQN != "github://alice/a" || entry.Description != "A connector" {
 		t.Fatalf("unexpected entry: %+v", entry)
 	}
 }
 
-func TestFetchByFQN_ReturnsErrNotFoundWhenMissing(t *testing.T) {
-	url := makeFixtureHub(t, map[string]string{
+func TestFetchConnectorByFQN_ReturnsErrNotFoundWhenMissing(t *testing.T) {
+	url := connectorsOnly(t, map[string]string{
 		"github_alice_a.yaml": `
 fqn: github://alice/a
 description: A
@@ -150,36 +173,209 @@ release_pattern: v*
 	})
 	c := &hub.Client{URL: url}
 
-	_, err := c.FetchByFQN(context.Background(), "github://nobody/missing")
+	_, err := c.FetchConnectorByFQN(context.Background(), "github://nobody/missing")
 	if err != hub.ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 
-func TestFilterByKeyword_MatchesFQNAndDescription(t *testing.T) {
-	entries := []hub.Entry{
+func TestFetchAllActions_ReturnsAllEntriesSortedByFQN(t *testing.T) {
+	url := makeFixtureHub(t, fixtureDirs{
+		actions: map[string]string{
+			"github_alice_b.yaml": `
+fqn: github://alice/conn/actions/b
+description: Action B
+publisher_github: alice
+connector_fqn: github://alice/conn
+intents: ["do b", "perform b"]
+category: communication
+`,
+			"github_alice_a.yaml": `
+fqn: github://alice/conn/actions/a
+description: Action A
+publisher_github: alice
+connector_fqn: github://alice/conn
+intents: ["do a"]
+category: communication
+`,
+		},
+	})
+	c := &hub.Client{URL: url}
+
+	entries, err := c.FetchAllActions(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAllActions: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+	if entries[0].FQN != "github://alice/conn/actions/a" || entries[1].FQN != "github://alice/conn/actions/b" {
+		t.Fatalf("entries not sorted by FQN: %+v", entries)
+	}
+	if entries[0].ConnectorFQN != "github://alice/conn" {
+		t.Fatalf("connector_fqn not parsed: %+v", entries[0])
+	}
+	if len(entries[0].Intents) != 1 || entries[0].Intents[0] != "do a" {
+		t.Fatalf("intents not parsed: %+v", entries[0])
+	}
+	if entries[0].Category != "communication" {
+		t.Fatalf("category not parsed: %+v", entries[0])
+	}
+}
+
+func TestFetchAllActions_MissingDirReturnsEmpty(t *testing.T) {
+	// Hub repo with no actions/ directory at all should return an empty
+	// list, mirroring the connectors-dir-missing contract.
+	url := connectorsOnly(t, map[string]string{})
+	c := &hub.Client{URL: url}
+
+	entries, err := c.FetchAllActions(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAllActions: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected empty list, got %d entries", len(entries))
+	}
+}
+
+func TestFetchActionByFQN_ReturnsMatchingEntryAndErrNotFound(t *testing.T) {
+	url := makeFixtureHub(t, fixtureDirs{
+		actions: map[string]string{
+			"github_alice_a.yaml": `
+fqn: github://alice/conn/actions/a
+description: Action A
+publisher_github: alice
+connector_fqn: github://alice/conn
+`,
+		},
+	})
+	c := &hub.Client{URL: url}
+
+	got, err := c.FetchActionByFQN(context.Background(), "github://alice/conn/actions/a")
+	if err != nil {
+		t.Fatalf("FetchActionByFQN: %v", err)
+	}
+	if got.Description != "Action A" {
+		t.Fatalf("unexpected entry: %+v", got)
+	}
+
+	_, err = c.FetchActionByFQN(context.Background(), "github://nobody/missing")
+	if err != hub.ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestFetchAllSuites_ReturnsAllEntriesSortedByFQN(t *testing.T) {
+	url := makeFixtureHub(t, fixtureDirs{
+		suites: map[string]string{
+			"github_alice_suite.yaml": `
+fqn: github://alice/conn/suite
+description: Alice's suite
+publisher_github: alice
+member_actions:
+  - github://alice/conn/actions/a
+  - github://alice/conn/actions/b
+connectors_required:
+  - github://alice/conn
+category: communication
+`,
+		},
+	})
+	c := &hub.Client{URL: url}
+
+	entries, err := c.FetchAllSuites(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAllSuites: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if len(entries[0].MemberActions) != 2 {
+		t.Fatalf("member_actions not parsed: %+v", entries[0])
+	}
+	if len(entries[0].ConnectorsRequired) != 1 || entries[0].ConnectorsRequired[0] != "github://alice/conn" {
+		t.Fatalf("connectors_required not parsed: %+v", entries[0])
+	}
+}
+
+func TestFetchSuiteByFQN_ReturnsMatchingEntryAndErrNotFound(t *testing.T) {
+	url := makeFixtureHub(t, fixtureDirs{
+		suites: map[string]string{
+			"github_alice_suite.yaml": `
+fqn: github://alice/conn/suite
+description: Alice's suite
+publisher_github: alice
+member_actions:
+  - github://alice/conn/actions/a
+`,
+		},
+	})
+	c := &hub.Client{URL: url}
+
+	got, err := c.FetchSuiteByFQN(context.Background(), "github://alice/conn/suite")
+	if err != nil {
+		t.Fatalf("FetchSuiteByFQN: %v", err)
+	}
+	if got.PublisherGithub != "alice" {
+		t.Fatalf("unexpected entry: %+v", got)
+	}
+
+	_, err = c.FetchSuiteByFQN(context.Background(), "github://nobody/missing")
+	if err != hub.ErrNotFound {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestFilterConnectorsByKeyword_MatchesFQNAndDescription(t *testing.T) {
+	entries := []hub.ConnectorEntry{
 		{FQN: "github://alice/google", Description: "Google Workspace"},
 		{FQN: "github://bob/slack", Description: "Slack messaging"},
 		{FQN: "github://charlie/x", Description: "Random thing about google"},
 	}
-	got := hub.FilterByKeyword(entries, "google")
+	got := hub.FilterConnectorsByKeyword(entries, "google")
 	if len(got) != 2 {
 		t.Fatalf("expected 2 google matches, got %d: %+v", len(got), got)
 	}
 	// Case-insensitive
-	got = hub.FilterByKeyword(entries, "SLACK")
+	got = hub.FilterConnectorsByKeyword(entries, "SLACK")
 	if len(got) != 1 || got[0].FQN != "github://bob/slack" {
 		t.Fatalf("case-insensitive match failed: %+v", got)
 	}
 	// Empty keyword returns all
-	got = hub.FilterByKeyword(entries, "")
+	got = hub.FilterConnectorsByKeyword(entries, "")
 	if len(got) != 3 {
 		t.Fatalf("empty keyword should return all, got %d", len(got))
 	}
 }
 
+func TestFilterActionsByKeyword_MatchesFQNAndDescription(t *testing.T) {
+	entries := []hub.ActionEntry{
+		{FQN: "github://alice/conn/actions/draft-email", Description: "Draft a Gmail"},
+		{FQN: "github://bob/conn/actions/post-slack", Description: "Post a Slack message"},
+	}
+	got := hub.FilterActionsByKeyword(entries, "gmail")
+	if len(got) != 1 || got[0].FQN != "github://alice/conn/actions/draft-email" {
+		t.Fatalf("expected single gmail match, got %+v", got)
+	}
+	got = hub.FilterActionsByKeyword(entries, "")
+	if len(got) != 2 {
+		t.Fatalf("empty keyword should return all, got %d", len(got))
+	}
+}
+
+func TestFilterSuitesByKeyword_MatchesFQNAndDescription(t *testing.T) {
+	entries := []hub.SuiteEntry{
+		{FQN: "github://alice/conn/suite", Description: "Gmail and Calendar"},
+		{FQN: "github://bob/conn/suite", Description: "Slack essentials"},
+	}
+	got := hub.FilterSuitesByKeyword(entries, "calendar")
+	if len(got) != 1 || got[0].FQN != "github://alice/conn/suite" {
+		t.Fatalf("expected single calendar match, got %+v", got)
+	}
+}
+
 func TestPublisherFootprint_ReturnsSiblingFQNsExcludingSelf(t *testing.T) {
-	entries := []hub.Entry{
+	entries := []hub.ConnectorEntry{
 		{FQN: "github://alice/one", PublisherGithub: "alice"},
 		{FQN: "github://alice/two", PublisherGithub: "alice"},
 		{FQN: "github://alice/three", PublisherGithub: "alice"},
@@ -246,13 +442,13 @@ func TestFetchPublisherKey_ReturnsPEMParsedKeyAndFingerprint(t *testing.T) {
 	}
 }
 
-func TestFetchAll_MalformedYAMLReturnsError(t *testing.T) {
-	url := makeFixtureHub(t, map[string]string{
+func TestFetchAllConnectors_MalformedYAMLReturnsError(t *testing.T) {
+	url := connectorsOnly(t, map[string]string{
 		"bad.yaml": "this: is: not: valid: yaml: at: all: [",
 	})
 	c := &hub.Client{URL: url}
 
-	_, err := c.FetchAll(context.Background())
+	_, err := c.FetchAllConnectors(context.Background())
 	if err == nil {
 		t.Fatalf("expected parse error, got nil")
 	}
@@ -261,7 +457,7 @@ func TestFetchAll_MalformedYAMLReturnsError(t *testing.T) {
 	}
 }
 
-func TestFetchAll_NoConnectorsDirReturnsEmpty(t *testing.T) {
+func TestFetchAllConnectors_NoConnectorsDirReturnsEmpty(t *testing.T) {
 	// Build a fixture without the connectors/ subdir at all (e.g. a
 	// freshly-minted Hub repo that hasn't been seeded). The contract
 	// says we serve "no entries" rather than erroring — list endpoints
@@ -287,9 +483,9 @@ func TestFetchAll_NoConnectorsDirReturnsEmpty(t *testing.T) {
 	runGit("commit", "-m", "seed")
 
 	c := &hub.Client{URL: "file://" + dir}
-	entries, err := c.FetchAll(context.Background())
+	entries, err := c.FetchAllConnectors(context.Background())
 	if err != nil {
-		t.Fatalf("FetchAll: %v", err)
+		t.Fatalf("FetchAllConnectors: %v", err)
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected empty list, got %d entries", len(entries))

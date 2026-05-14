@@ -1135,7 +1135,7 @@ func (s *apiServer) confirmHubTrust(ctx context.Context, fqn, confirmed string) 
 			"hub_disabled", "hub client not configured; cannot honor confirmed_fingerprint",
 		}
 	}
-	entry, err := s.hub.FetchByFQN(ctx, fqn)
+	entry, err := s.hub.FetchConnectorByFQN(ctx, fqn)
 	if err != nil {
 		if errors.Is(err, hub.ErrNotFound) {
 			return http.StatusNotFound, struct{ code, message string }{
