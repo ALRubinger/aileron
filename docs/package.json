@@ -14,7 +14,7 @@
   "dependencies": {
     "@astrojs/mdx": "^5.0.4",
     "@astrojs/svelte": "^8.0.5",
-    "@lucide/svelte": "^1.8.0",
+    "@lucide/svelte": "^1.16.0",
     "astro": "^6.1.6",
     "bits-ui": "^2.18.0",
     "clsx": "^2.1.1",
