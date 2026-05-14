@@ -110,9 +110,13 @@ This is a deliberate rule. Fluid scaling (`clamp(min, vw, max)`) shifts wrap poi
 Applies to:
 
 - `h1` page title — three sizes (small/medium/large) at `< sm`, `sm`–`lg`, `lg+`
-- `.prose` max-width — six steps at `360`, `480`, `640`, `1024`, `1280`, `1536`
+- `.prose` max-width — three snap steps at `lg` (1024), `xl` (1280), `2xl` (1536)
 
-The `.prose` width ladder accounts for layout changes at each breakpoint (left sidebar entering the flow at `lg`, right TOC entering at `xl`).
+Below `lg` (mobile, sm, md — anywhere the left sidebar is *not* in the layout) the prose deliberately does *not* snap. Snap widths at those viewports are narrower than the available container, which wastes horizontal space without benefit. The prose uses `max-width: 100%` so it fills the container at whatever the viewport happens to be.
+
+The rule: **snap only when there's other layout chrome competing for horizontal space** (left sidebar from `lg`, right TOC from `xl`). When content is the whole viewport, let it use the whole viewport.
+
+The `.prose` width ladder accounts for layout changes at each snap breakpoint (left sidebar entering at `lg`, right TOC entering at `xl`).
 
 ### Display heading gradient
 
