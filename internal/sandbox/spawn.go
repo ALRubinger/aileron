@@ -27,6 +27,12 @@ import (
 //
 // SpawnPolicy is the gate; the platform sandbox in `spawnExecutor` is
 // the second-line enforcement. Both must agree for a call to proceed.
+//
+// The policy also carries the per-stream output caps the runtime
+// applies to subprocess stdout and stderr (per [cstore.ManifestSpawnLimits]
+// and ADR-0014's output-cap consequences). The caps are derived once
+// from the manifest at policy construction and consulted on every
+// spawn invocation.
 type SpawnPolicy struct {
 	// programs maps an absolute program path to its declared optional
 	// content hash. An empty hash means "any bytes at this path are
@@ -68,7 +74,39 @@ type SpawnPolicy struct {
 	// envelope's cwd must match (or be empty, in which case the
 	// runtime substitutes this value).
 	cwd string
+	// stdoutCap and stderrCap are the resolved byte caps the runtime
+	// applies when capturing subprocess output. Resolved from the
+	// manifest's [capabilities.spawn.limits] block at construction;
+	// fall back to [cstore.DefaultMaxStdoutBytes] and
+	// [cstore.DefaultMaxStderrBytes] when unset.
+	stdoutCap int64
+	stderrCap int64
 }
+
+// SpawnLimits carries the runtime-decided byte caps applied to a
+// single spawn invocation's captured output. The runtime resolves
+// these from the manifest (per [cstore.ManifestSpawnLimits]) and
+// passes them to the [SpawnExecutor]; connectors do not control
+// their own caps.
+type SpawnLimits struct {
+	// MaxStdoutBytes caps the bytes the executor returns in
+	// [SpawnResult.Stdout]. Output past this point is dropped and
+	// a structured truncation marker is appended to the captured
+	// bytes.
+	MaxStdoutBytes int64
+
+	// MaxStderrBytes caps the bytes the executor returns in
+	// [SpawnResult.Stderr]. Same truncation semantics as
+	// MaxStdoutBytes.
+	MaxStderrBytes int64
+}
+
+// StdoutCap returns the resolved stdout byte cap. Always positive
+// when the policy was constructed from a valid manifest.
+func (p *SpawnPolicy) StdoutCap() int64 { return p.stdoutCap }
+
+// StderrCap returns the resolved stderr byte cap.
+func (p *SpawnPolicy) StderrCap() int64 { return p.stderrCap }
 
 // NewSpawnPolicy builds a SpawnPolicy from a connector manifest. A nil
 // or absent `[capabilities.spawn]` block produces a deny-all policy:
@@ -78,6 +116,8 @@ func NewSpawnPolicy(m *cstore.Manifest) *SpawnPolicy {
 		programs:   map[string]string{},
 		envAllowed: map[string]struct{}{},
 		operations: map[string]argvPattern{},
+		stdoutCap:  cstore.DefaultMaxStdoutBytes,
+		stderrCap:  cstore.DefaultMaxStderrBytes,
 	}
 	if m == nil || m.Capabilities.Spawn == nil {
 		return p
@@ -102,6 +142,8 @@ func NewSpawnPolicy(m *cstore.Manifest) *SpawnPolicy {
 	p.fsRead = append(p.fsRead, s.FSRead...)
 	p.fsWrite = append(p.fsWrite, s.FSWrite...)
 	p.cwd = s.Cwd
+	p.stdoutCap = s.StdoutCap()
+	p.stderrCap = s.StderrCap()
 	return p
 }
 
@@ -503,11 +545,13 @@ func pathWithin(p, scope string) bool {
 //
 // The executor is invoked only after CheckSpawn has approved. It is
 // responsible for the second-line enforcement (FS scoping, network
-// denial, process scoping) on the platforms it supports. On
-// unsupported platforms it returns ErrSpawnUnavailable so the host
-// function emits a structured spawn_sandbox_unavailable error.
+// denial, process scoping) on the platforms it supports, and for
+// honoring the runtime-supplied [SpawnLimits] when capturing the
+// subprocess's stdout and stderr. On unsupported platforms it
+// returns ErrSpawnUnavailable so the host function emits a
+// structured spawn_sandbox_unavailable error.
 type SpawnExecutor interface {
-	Spawn(ctx context.Context, env SpawnEnvelope) (SpawnResult, error)
+	Spawn(ctx context.Context, env SpawnEnvelope, limits SpawnLimits) (SpawnResult, error)
 }
 
 // ErrSpawnUnavailable is returned by SpawnExecutor.Spawn when the
@@ -524,7 +568,7 @@ var ErrSpawnUnavailable = errors.New("spawn: sandbox unavailable on this platfor
 type defaultSpawnExecutor struct{}
 
 // Spawn implements SpawnExecutor.
-func (defaultSpawnExecutor) Spawn(ctx context.Context, env SpawnEnvelope) (SpawnResult, error) {
+func (defaultSpawnExecutor) Spawn(ctx context.Context, env SpawnEnvelope, limits SpawnLimits) (SpawnResult, error) {
 	if len(env.Argv) == 0 {
 		return SpawnResult{}, fmt.Errorf("spawn: empty argv")
 	}
@@ -546,7 +590,7 @@ func (defaultSpawnExecutor) Spawn(ctx context.Context, env SpawnEnvelope) (Spawn
 	if err := applyPlatformSandbox(cmd, env); err != nil {
 		return SpawnResult{}, err
 	}
-	stdout, stderr, runErr := runCaptured(cmd)
+	stdout, stderr, runErr := runCaptured(cmd, limits)
 	exitCode := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError
@@ -567,39 +611,89 @@ func (defaultSpawnExecutor) Spawn(ctx context.Context, env SpawnEnvelope) (Spawn
 	}, nil
 }
 
-// runCaptured runs `cmd` with stdout and stderr captured into separate
+// runCaptured runs `cmd` with stdout and stderr captured into capped
 // byte buffers. Returns the captured bytes plus any non-Exit error.
-func runCaptured(cmd *exec.Cmd) ([]byte, []byte, error) {
-	var stdout, stderr captureBuf
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+// Output beyond the configured cap is dropped at the writer; a
+// truncation marker is appended to the returned slice when a stream
+// exceeded its cap.
+func runCaptured(cmd *exec.Cmd, limits SpawnLimits) ([]byte, []byte, error) {
+	stdout := newCaptureBuf(limits.MaxStdoutBytes)
+	stderr := newCaptureBuf(limits.MaxStderrBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	err := cmd.Run()
-	return stdout.Bytes(), stderr.Bytes(), err
+	return stdout.Captured(), stderr.Captured(), err
 }
 
-// captureBuf is a minimal io.Writer with a thread-safe Bytes accessor.
-// os/exec writes from a goroutine in CommandContext; the buffer's
-// pointer is only read after Wait returns, but we still synchronize to
-// satisfy the race detector.
+// captureBuf is a bounded io.Writer with a thread-safe accessor.
+// os/exec writes from a goroutine in CommandContext; the buffer is
+// only read after Wait returns, but we still synchronize to satisfy
+// the race detector.
+//
+// captureBuf caps the bytes it stores at `cap`. Writes past `cap`
+// are accepted (so the subprocess sees no I/O error and continues
+// normally) but the trailing bytes are dropped. When at least one
+// byte was dropped, Captured() appends a structured truncation
+// marker to the returned slice.
+//
+// A cap <= 0 is treated as unbounded for tests; production code
+// constructs the buffer through [newCaptureBuf] which sanitizes the
+// cap to a positive value.
 type captureBuf struct {
-	mu  sync.Mutex
-	buf []byte
+	mu       sync.Mutex
+	buf      []byte
+	cap      int64
+	dropped  int64 // count of bytes received past the cap
+}
+
+// newCaptureBuf returns a capture buffer with the given byte cap. A
+// non-positive cap falls back to [cstore.DefaultMaxStdoutBytes] as a
+// defensive default; callers should pass a sane positive value from
+// the resolved manifest limits.
+func newCaptureBuf(cap int64) *captureBuf {
+	if cap <= 0 {
+		cap = cstore.DefaultMaxStdoutBytes
+	}
+	return &captureBuf{cap: cap}
 }
 
 func (c *captureBuf) Write(p []byte) (int, error) {
 	c.mu.Lock()
-	c.buf = append(c.buf, p...)
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	remaining := c.cap - int64(len(c.buf))
+	if remaining <= 0 {
+		c.dropped += int64(len(p))
+		return len(p), nil
+	}
+	if int64(len(p)) <= remaining {
+		c.buf = append(c.buf, p...)
+		return len(p), nil
+	}
+	c.buf = append(c.buf, p[:remaining]...)
+	c.dropped += int64(len(p)) - remaining
 	return len(p), nil
 }
 
-func (c *captureBuf) Bytes() []byte {
+// Captured returns a copy of the captured bytes with a structured
+// truncation marker appended when at least one byte was dropped past
+// the cap. The marker is part of the returned slice so downstream
+// consumers see truncation even when they cannot inspect the buffer's
+// internal state.
+func (c *captureBuf) Captured() []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]byte, len(c.buf))
-	copy(out, c.buf)
+	out := make([]byte, 0, len(c.buf)+truncationMarkerMaxLen)
+	out = append(out, c.buf...)
+	if c.dropped > 0 {
+		out = append(out, fmt.Sprintf("\n[aileron: output truncated, %d bytes dropped]\n", c.dropped)...)
+	}
 	return out
 }
+
+// truncationMarkerMaxLen is a hint at the marker's worst-case length
+// so the initial allocation in Captured fits without a reallocation
+// for typical drop counts. Not a hard bound.
+const truncationMarkerMaxLen = 64
 
 // expandTilde resolves a leading `~/` or bare `~` against the user's
 // home directory. Absolute paths are returned unchanged.
@@ -816,7 +910,11 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 	if executor == nil {
 		executor = defaultSpawnExecutor{}
 	}
-	res, runErr := executor.Spawn(ctx, env)
+	limits := SpawnLimits{
+		MaxStdoutBytes: s.spawnPolicy.stdoutCap,
+		MaxStderrBytes: s.spawnPolicy.stderrCap,
+	}
+	res, runErr := executor.Spawn(ctx, env, limits)
 	if runErr != nil {
 		if errors.Is(runErr, ErrSpawnUnavailable) {
 			s.mu.Lock()
