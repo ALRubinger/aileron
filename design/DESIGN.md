@@ -111,10 +111,13 @@ Applies to:
 
 - `h1` page title — three sizes (small/medium/large) at `< sm`, `sm`–`lg`, `lg+`
 - `.prose` max-width — three snap steps at `lg` (1024), `xl` (1280), `2xl` (1536)
+- **Brand wordmark in the page header** — one Tailwind step smaller below `lg` than at `lg+` (docs: `text-2xl` → `text-3xl`; webapp: `text-xl` → `text-2xl`)
 
 Below `lg` (mobile, sm, md — anywhere the left sidebar is *not* in the layout) the prose deliberately does *not* snap. Snap widths at those viewports are narrower than the available container, which wastes horizontal space without benefit. The prose uses `max-width: 100%` so it fills the container at whatever the viewport happens to be.
 
-The rule: **snap only when there's other layout chrome competing for horizontal space** (left sidebar from `lg`, right TOC from `xl`). When content is the whole viewport, let it use the whole viewport.
+The brand wordmark steps down for the same reason: at `lg+` the page has chrome (sidebar, TOC) framing the content, and a large wordmark anchors the experience. Below `lg` the viewport is content-only — a smaller wordmark leaves more room for the actual page and feels proportional to the simpler layout.
+
+The rule: **scale display elements with available chrome.** When the viewport has layout chrome competing for space (sidebar from `lg`, TOC from `xl`), display elements are bigger and content is snapped to a stable column. When content owns the viewport, display elements step down and content goes fluid.
 
 The `.prose` width ladder accounts for layout changes at each snap breakpoint (left sidebar entering at `lg`, right TOC entering at `xl`).
 

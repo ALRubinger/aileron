@@ -42,8 +42,8 @@
 			href="/"
 			class="text-foreground no-underline hover:text-foreground"
 		>
-			<span class="font-extrabold text-2xl tracking-tight">Aileron</span><span
-				class="font-normal text-2xl tracking-tight text-muted-foreground"
+			<span class="font-extrabold text-xl lg:text-2xl tracking-tight">Aileron</span><span
+				class="font-normal text-xl lg:text-2xl tracking-tight text-muted-foreground"
 			>ControlPlane</span>
 		</a>
 		<nav class="flex items-center gap-4 text-sm">
