@@ -1,12 +1,13 @@
 services:
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: aileron
       POSTGRES_PASSWORD: aileron
       POSTGRES_DB: aileron
+      PGDATA: /var/lib/postgresql/data
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
