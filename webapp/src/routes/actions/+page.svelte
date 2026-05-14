@@ -66,7 +66,7 @@
 
 <h1 class="mb-4 text-3xl font-extrabold tracking-tight">Installed Actions</h1>
 
-<p class="mb-3 text-sm text-muted-foreground">
+<p class="ink-bleed mb-3 text-sm text-muted-foreground">
 	Toggle which installed actions the agent's LLM can see. Disabling does
 	not uninstall — the action's manifest file stays in place and re-enabling
 	restores it. Restart your MCP server after toggling so the LLM picks up
