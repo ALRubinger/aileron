@@ -20,7 +20,7 @@ func (s *apiServer) ListHubConnectors(w http.ResponseWriter, r *http.Request, pa
 		writeError(w, http.StatusServiceUnavailable, "hub_disabled", "hub client not configured")
 		return
 	}
-	entries, err := s.hub.FetchAll(r.Context())
+	entries, err := s.hub.FetchAllConnectors(r.Context())
 	if err != nil {
 		s.log.Warn("hub: fetch failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
@@ -30,9 +30,9 @@ func (s *apiServer) ListHubConnectors(w http.ResponseWriter, r *http.Request, pa
 	if params.Q != nil {
 		q = *params.Q
 	}
-	filtered := hub.FilterByKeyword(entries, q)
+	filtered := hub.FilterConnectorsByKeyword(entries, q)
 	writeJSON(w, http.StatusOK, api.HubConnectorList{
-		Connectors: toAPIEntries(filtered),
+		Connectors: toAPIConnectorEntries(filtered),
 	})
 }
 
@@ -48,7 +48,7 @@ func (s *apiServer) GetHubConnector(w http.ResponseWriter, r *http.Request, para
 		writeError(w, http.StatusBadRequest, "invalid_request", "fqn is required")
 		return
 	}
-	entry, err := s.hub.FetchByFQN(r.Context(), params.Fqn)
+	entry, err := s.hub.FetchConnectorByFQN(r.Context(), params.Fqn)
 	if err != nil {
 		if errors.Is(err, hub.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "no Hub entry for "+params.Fqn)
@@ -58,7 +58,7 @@ func (s *apiServer) GetHubConnector(w http.ResponseWriter, r *http.Request, para
 		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, toAPIEntry(entry))
+	writeJSON(w, http.StatusOK, toAPIConnectorEntry(entry))
 }
 
 // GetHubInstallDecision returns the payload the install-time prompt
@@ -75,13 +75,13 @@ func (s *apiServer) GetHubInstallDecision(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_request", "fqn is required")
 		return
 	}
-	entries, err := s.hub.FetchAll(r.Context())
+	entries, err := s.hub.FetchAllConnectors(r.Context())
 	if err != nil {
 		s.log.Warn("hub: fetch failed", "error", err)
 		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
 		return
 	}
-	var entry hub.Entry
+	var entry hub.ConnectorEntry
 	found := false
 	for _, e := range entries {
 		if e.FQN == params.Fqn {
@@ -111,7 +111,7 @@ func (s *apiServer) GetHubInstallDecision(w http.ResponseWriter, r *http.Request
 // publisher_footprint, and risk_indicators. Trust granularity in v0.x
 // is strictly per-repo (per-FQN) per ADR-0013; publisher framing here
 // is informational context, not a trust target.
-func (s *apiServer) buildInstallDecision(_ context.Context, entries []hub.Entry, entry hub.Entry, fingerprint string) api.HubInstallDecision {
+func (s *apiServer) buildInstallDecision(_ context.Context, entries []hub.ConnectorEntry, entry hub.ConnectorEntry, fingerprint string) api.HubInstallDecision {
 	footprint := hub.PublisherFootprint(entries, entry)
 
 	kr, _ := cstore.LoadKeyring(s.resolveKeyringPath())
@@ -198,15 +198,15 @@ func (s *apiServer) resolveKeyringPath() string {
 	return cstore.DefaultKeyringPath()
 }
 
-func toAPIEntries(entries []hub.Entry) []api.HubConnectorEntry {
+func toAPIConnectorEntries(entries []hub.ConnectorEntry) []api.HubConnectorEntry {
 	out := make([]api.HubConnectorEntry, len(entries))
 	for i, e := range entries {
-		out[i] = toAPIEntry(e)
+		out[i] = toAPIConnectorEntry(e)
 	}
 	return out
 }
 
-func toAPIEntry(e hub.Entry) api.HubConnectorEntry {
+func toAPIConnectorEntry(e hub.ConnectorEntry) api.HubConnectorEntry {
 	return api.HubConnectorEntry{
 		Fqn:             e.FQN,
 		Description:     e.Description,
@@ -214,4 +214,144 @@ func toAPIEntry(e hub.Entry) api.HubConnectorEntry {
 		KeyUrl:          e.KeyURL,
 		ReleasePattern:  e.ReleasePattern,
 	}
+}
+
+func toAPIActionEntries(entries []hub.ActionEntry) []api.HubActionEntry {
+	out := make([]api.HubActionEntry, len(entries))
+	for i, e := range entries {
+		out[i] = toAPIActionEntry(e)
+	}
+	return out
+}
+
+func toAPIActionEntry(e hub.ActionEntry) api.HubActionEntry {
+	intents := append([]string(nil), e.Intents...)
+	return api.HubActionEntry{
+		Fqn:             e.FQN,
+		Description:     e.Description,
+		PublisherGithub: e.PublisherGithub,
+		ConnectorFqn:    e.ConnectorFQN,
+		Intents:         &intents,
+		Category:        stringPtrOrNil(e.Category),
+	}
+}
+
+func toAPISuiteEntries(entries []hub.SuiteEntry) []api.HubSuiteEntry {
+	out := make([]api.HubSuiteEntry, len(entries))
+	for i, e := range entries {
+		out[i] = toAPISuiteEntry(e)
+	}
+	return out
+}
+
+func toAPISuiteEntry(e hub.SuiteEntry) api.HubSuiteEntry {
+	connectors := append([]string(nil), e.ConnectorsRequired...)
+	return api.HubSuiteEntry{
+		Fqn:                e.FQN,
+		Description:        e.Description,
+		PublisherGithub:    e.PublisherGithub,
+		MemberActions:      append([]string(nil), e.MemberActions...),
+		ConnectorsRequired: &connectors,
+		Category:           stringPtrOrNil(e.Category),
+	}
+}
+
+func stringPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// ListHubActions returns Hub action entries, optionally filtered by a
+// case-insensitive keyword on FQN and description (`?q=`). Mirrors
+// ListHubConnectors but reads the actions/ directory of the Hub repo.
+func (s *apiServer) ListHubActions(w http.ResponseWriter, r *http.Request, params api.ListHubActionsParams) {
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "hub_disabled", "hub client not configured")
+		return
+	}
+	entries, err := s.hub.FetchAllActions(r.Context())
+	if err != nil {
+		s.log.Warn("hub: fetch actions failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+	q := ""
+	if params.Q != nil {
+		q = *params.Q
+	}
+	filtered := hub.FilterActionsByKeyword(entries, q)
+	writeJSON(w, http.StatusOK, api.HubActionList{
+		Actions: toAPIActionEntries(filtered),
+	})
+}
+
+// GetHubAction looks up a single Hub action entry by FQN.
+func (s *apiServer) GetHubAction(w http.ResponseWriter, r *http.Request, params api.GetHubActionParams) {
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "hub_disabled", "hub client not configured")
+		return
+	}
+	if strings.TrimSpace(params.Fqn) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "fqn is required")
+		return
+	}
+	entry, err := s.hub.FetchActionByFQN(r.Context(), params.Fqn)
+	if err != nil {
+		if errors.Is(err, hub.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "no Hub action entry for "+params.Fqn)
+			return
+		}
+		s.log.Warn("hub: fetch action failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toAPIActionEntry(entry))
+}
+
+// ListHubSuites returns Hub suite entries, optionally filtered by a
+// case-insensitive keyword on FQN and description (`?q=`).
+func (s *apiServer) ListHubSuites(w http.ResponseWriter, r *http.Request, params api.ListHubSuitesParams) {
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "hub_disabled", "hub client not configured")
+		return
+	}
+	entries, err := s.hub.FetchAllSuites(r.Context())
+	if err != nil {
+		s.log.Warn("hub: fetch suites failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+	q := ""
+	if params.Q != nil {
+		q = *params.Q
+	}
+	filtered := hub.FilterSuitesByKeyword(entries, q)
+	writeJSON(w, http.StatusOK, api.HubSuiteList{
+		Suites: toAPISuiteEntries(filtered),
+	})
+}
+
+// GetHubSuite looks up a single Hub suite entry by FQN.
+func (s *apiServer) GetHubSuite(w http.ResponseWriter, r *http.Request, params api.GetHubSuiteParams) {
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "hub_disabled", "hub client not configured")
+		return
+	}
+	if strings.TrimSpace(params.Fqn) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "fqn is required")
+		return
+	}
+	entry, err := s.hub.FetchSuiteByFQN(r.Context(), params.Fqn)
+	if err != nil {
+		if errors.Is(err, hub.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "no Hub suite entry for "+params.Fqn)
+			return
+		}
+		s.log.Warn("hub: fetch suite failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, toAPISuiteEntry(entry))
 }

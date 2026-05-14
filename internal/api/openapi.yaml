@@ -2031,6 +2031,141 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/hub/actions:
+    get:
+      tags: [Hub]
+      summary: List Hub action entries
+      description: |
+        Returns all community-published action entries listed in the
+        Hub under `actions/`. Each entry is a pointer to an action
+        template at its canonical FQN and names the connector the
+        action depends on. Optionally filter by keyword: matches
+        against FQN and description (substring, case-insensitive).
+      operationId: listHubActions
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional keyword filter applied to FQN and description.
+      responses:
+        "200":
+          description: Action entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubActionList"
+        "503":
+          description: Hub unreachable (failed to fetch from upstream)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/hub/action:
+    get:
+      tags: [Hub]
+      summary: Look up a single Hub action entry by FQN
+      description: |
+        Returns the Hub action entry for the given FQN. FQN is passed
+        as a query parameter for the same reason as `/v1/hub/connector`:
+        Go ServeMux path patterns can't carry FQN's `://` and `/`.
+      operationId: getHubAction
+      security: []
+      parameters:
+        - name: fqn
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Action FQN, e.g. `github://ALRubinger/aileron-connector-google/actions/draft-email`.
+      responses:
+        "200":
+          description: Hub action entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubActionEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Hub unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/hub/suites:
+    get:
+      tags: [Hub]
+      summary: List Hub suite entries
+      description: |
+        Returns all community-published suite entries listed in the
+        Hub under `suites/`. Each entry names its member actions and
+        the connectors those actions transitively require. Optionally
+        filter by keyword: matches against FQN and description
+        (substring, case-insensitive).
+      operationId: listHubSuites
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Optional keyword filter applied to FQN and description.
+      responses:
+        "200":
+          description: Suite entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubSuiteList"
+        "503":
+          description: Hub unreachable (failed to fetch from upstream)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/hub/suite:
+    get:
+      tags: [Hub]
+      summary: Look up a single Hub suite entry by FQN
+      description: |
+        Returns the Hub suite entry for the given FQN. FQN is passed
+        as a query parameter for the same reason as `/v1/hub/connector`.
+      operationId: getHubSuite
+      security: []
+      parameters:
+        - name: fqn
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Suite FQN, e.g. `github://ALRubinger/aileron-connector-google/suite`.
+      responses:
+        "200":
+          description: Hub suite entry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubSuiteEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Hub unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/hub/install-decision:
     get:
       tags: [Hub]
@@ -6981,6 +7116,97 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/HubConnectorEntry"
+
+    HubActionEntry:
+      type: object
+      required: [fqn, description, publisher_github, connector_fqn]
+      description: |
+        A single Hub action entry. Matches the YAML files committed to
+        the `aileron-connectors-hub` repo under `actions/`. Pointer to
+        a published action template at its canonical FQN; the action
+        template itself (TOML frontmatter + Markdown body per ADR-0003)
+        is fetched from the publisher's repo at install time.
+      properties:
+        fqn:
+          type: string
+          description: Canonical FQN, e.g. `github://OWNER/REPO/actions/NAME`.
+        description:
+          type: string
+          description: One-line description of what the action does.
+        publisher_github:
+          type: string
+          description: GitHub user or org name that owns the action's repo.
+        connector_fqn:
+          type: string
+          description: |
+            FQN of the connector this action depends on. Used by the
+            Hub UI to filter actions by provider and to compute the
+            install-decision dependency closure.
+        intents:
+          type: array
+          description: |
+            Optional informational phrases describing what users would
+            ask their agent to do to trigger this action (e.g.
+            "draft email", "compose gmail").
+          items:
+            type: string
+        category:
+          type: string
+          description: Optional discovery grouping (e.g. `communication`, `productivity`).
+
+    HubActionList:
+      type: object
+      required: [actions]
+      properties:
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/HubActionEntry"
+
+    HubSuiteEntry:
+      type: object
+      required: [fqn, description, publisher_github, member_actions]
+      description: |
+        A single Hub action-suite entry. Matches the YAML files
+        committed to the `aileron-connectors-hub` repo under `suites/`.
+        Pointer to a published suite manifest (the canonical
+        `suite.toml` per #564 lives in the publisher's repo); the Hub
+        entry is the discovery surface.
+      properties:
+        fqn:
+          type: string
+          description: Canonical FQN, e.g. `github://OWNER/REPO/suite`.
+        description:
+          type: string
+          description: One-line description of what the suite bundles.
+        publisher_github:
+          type: string
+          description: GitHub user or org name that owns the suite's repo.
+        member_actions:
+          type: array
+          description: FQNs of the actions bundled in this suite.
+          items:
+            type: string
+        connectors_required:
+          type: array
+          description: |
+            FQNs of the connectors the suite's actions transitively
+            require. Informational metadata for discovery; not part of
+            any trust grant.
+          items:
+            type: string
+        category:
+          type: string
+          description: Optional discovery grouping (e.g. `communication`, `productivity`).
+
+    HubSuiteList:
+      type: object
+      required: [suites]
+      properties:
+        suites:
+          type: array
+          items:
+            $ref: "#/components/schemas/HubSuiteEntry"
 
     HubTrustState:
       type: string
