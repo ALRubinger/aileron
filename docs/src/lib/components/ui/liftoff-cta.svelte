@@ -1,5 +1,5 @@
 <script lang="ts">
-	import * as Card from '$lib/components/ui/card/index.js';
+	import HighlightCard from '$lib/components/ui/highlight-card.svelte';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import Plane from '@lucide/svelte/icons/plane';
 	import ArrowRight from '@lucide/svelte/icons/arrow-right';
@@ -9,8 +9,8 @@
   Large CTA card pointing readers from the homepage intro into the
   Getting Started flow. Static markup; no client hydration needed.
 -->
-<Card.Root class="not-prose my-10 border-primary/40 bg-primary/5 shadow-sm">
-	<Card.Content class="flex flex-col items-start gap-6 p-6 md:flex-row md:items-center md:justify-between md:p-8">
+<HighlightCard variant="muted" class="not-prose">
+	<div class="flex flex-col items-start gap-6 md:flex-row md:items-center md:justify-between">
 		<div class="flex items-start gap-4">
 			<div class="rounded-lg bg-primary/10 p-3 text-primary">
 				<Plane class="size-7" />
@@ -24,10 +24,10 @@
 		</div>
 		<Button
 			href="/getting-started/"
-			class="h-12 self-stretch px-6 text-base md:self-auto"
+			class="h-12 self-stretch px-6 text-base text-primary-foreground no-underline transition-transform duration-150 hover:scale-95 md:self-auto"
 		>
 			Start
 			<ArrowRight class="ml-1" />
 		</Button>
-	</Card.Content>
-</Card.Root>
+	</div>
+</HighlightCard>

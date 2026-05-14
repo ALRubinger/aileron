@@ -15,23 +15,25 @@ const { title, headings = [], slug = '', rawMarkdown = '' } = Astro.props;
 ---
 
 <BaseLayout title={title}>
-  <main class="px-6 pt-8 pb-8 lg:px-10 flex gap-8">
-    <div class="flex-1 min-w-0 flex flex-col">
-      <article class="prose">
-        <h1>{title}</h1>
-        <slot />
-      </article>
+  <main class="px-6 pt-8 pb-8 lg:px-10 flex flex-col">
+    <div class="flex gap-8">
+      <div class="flex-1 min-w-0">
+        <article class="prose">
+          <h1>{title}</h1>
+          <slot />
+        </article>
+      </div>
 
-      <Footer />
+      <aside class="toc-aside">
+        <div class="sticky top-20 max-h-[calc(100vh-5rem)] overflow-y-auto pr-4 -mr-4 pb-4">
+          <div class="mb-3">
+            <MarkdownForAI slug={slug} rawMarkdown={rawMarkdown} client:load />
+          </div>
+          <TableOfContents headings={headings} client:load />
+        </div>
+      </aside>
     </div>
 
-    <aside class="w-0 2xl:w-56 shrink-0 opacity-0 invisible translate-x-12 2xl:opacity-100 2xl:visible 2xl:translate-x-0 transition-[opacity,visibility,translate,width] duration-200 overflow-hidden 2xl:overflow-visible">
-      <div class="sticky top-20 max-h-[calc(100vh-5rem)] overflow-y-auto pb-4">
-        <div class="mb-10">
-          <MarkdownForAI slug={slug} rawMarkdown={rawMarkdown} client:load />
-        </div>
-        <TableOfContents headings={headings} client:load />
-      </div>
-    </aside>
+    <Footer />
   </main>
 </BaseLayout>

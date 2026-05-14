@@ -51,12 +51,12 @@
 
 	const triggerClass = cn(
 		"flex w-full items-center justify-between py-3 text-left text-sm font-medium",
-		"hover:underline focus-visible:outline-1 focus-visible:outline-ring",
+		"cursor-pointer hover:bg-muted/60 transition-colors duration-150 px-3 -mx-3 rounded-md focus-visible:outline-1 focus-visible:outline-ring",
 		"[&[data-state=open]>svg]:rotate-180"
 	);
 	const itemClass = "border-b border-border";
 	const contentClass = cn(
-		"cn-accordion-content overflow-hidden pb-4 text-sm",
+		"cn-accordion-content overflow-hidden text-sm",
 		"[&_pre]:my-2"
 	);
 </script>
@@ -75,7 +75,7 @@
 				<ChevronDown size={16} class="shrink-0 transition-transform" />
 			</AccordionPrimitive.Trigger>
 		</AccordionPrimitive.Header>
-		<AccordionPrimitive.Content class={contentClass}>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>
 				Aileron's modules require it. <code>go version</code> should report at least
 				<code>go1.25.0</code>.
@@ -91,7 +91,7 @@
 				<ChevronDown size={16} class="shrink-0 transition-transform" />
 			</AccordionPrimitive.Trigger>
 		</AccordionPrimitive.Header>
-		<AccordionPrimitive.Content class={contentClass}>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>
 				All build commands go through <code>task</code>. See
 				<a href="https://taskfile.dev/installation/">taskfile.dev</a> for other install options.
@@ -107,7 +107,7 @@
 				<ChevronDown size={16} class="shrink-0 transition-transform" />
 			</AccordionPrimitive.Trigger>
 		</AccordionPrimitive.Header>
-		<AccordionPrimitive.Content class={contentClass}>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>
 				The webapp and docs targets build through <code>pnpm</code>, so <code>task build</code> will
 				fail without them. The simplest setup is <code>corepack enable</code> after installing Node,

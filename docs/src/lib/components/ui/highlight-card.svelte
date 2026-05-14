@@ -31,7 +31,7 @@
 
   const variantClass: Record<Variant, string> = {
     primary: 'border-l-4 border-l-primary',
-    muted: 'bg-muted/50',
+    muted: 'bg-muted',
   };
 </script>
 

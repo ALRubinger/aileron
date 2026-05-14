@@ -108,11 +108,11 @@
 
 <!-- Sidebar -->
 <aside
-  class="fixed top-16 left-0 z-40 h-[calc(100vh-4rem)] w-80 shrink-0 border-r border-border bg-background overflow-y-auto transition-transform duration-200
+  class="fixed top-16 left-0 z-40 h-[calc(100vh-4rem)] w-80 shrink-0 border-r border-border bg-muted shadow-low transition-transform duration-200
     {mobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)]"
 >
-  <div class="p-4">
-    <nav class="flex flex-col gap-4 {mounted ? 'visible' : 'invisible'}">
+  <div class="p-4 flex flex-col h-full">
+    <nav class="flex-1 min-h-0 overflow-y-auto pr-4 -mr-4 flex flex-col gap-4 {mounted ? 'visible' : 'invisible'}" aria-label="Documentation">
       {#each navigation as item}
         {#if isSection(item)}
           {@render section(item, 0)}
@@ -132,25 +132,25 @@
           </a>
         {/if}
       {/each}
+    </nav>
 
-      <!-- External links -->
-      <div class="mt-6 pt-4 border-t border-border">
-        {#each externalLinks as link}
-          {@const active = currentPath === link.href || currentPath === link.href + '/'}
-          {@const Icon = iconMap[link.label]}
-          <a
-            href={link.href}
-            class="group flex items-center gap-2 py-1.5 px-2 rounded text-sm no-underline
-              {active ? 'bg-accent text-accent-foreground font-medium' : 'text-muted-foreground hover:text-accent-foreground hover:bg-accent/70'}"
-            onclick={() => mobileOpen = false}
-          >
-            {#if Icon}
-              <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover:scale-125'}" />
-            {/if}
-            {link.label}
-          </a>
-        {/each}
-      </div>
+    <!-- External links pinned to the bottom of the sidebar. -->
+    <nav class="mt-6 shrink-0 bg-neutral-600 rounded-lg p-2 shadow-low {mounted ? 'visible' : 'invisible'}" aria-label="References">
+      {#each externalLinks as link}
+        {@const active = currentPath === link.href || currentPath === link.href + '/'}
+        {@const Icon = iconMap[link.label]}
+        <a
+          href={link.href}
+          class="group flex items-center gap-2 py-1.5 px-2 rounded text-sm no-underline
+            {active ? 'bg-neutral-500 text-neutral-50 font-medium' : 'text-neutral-100 hover:bg-neutral-500 hover:text-neutral-50'}"
+          onclick={() => mobileOpen = false}
+        >
+          {#if Icon}
+            <Icon size={16} class="shrink-0 transition-transform duration-150 {active ? 'scale-125' : 'group-hover:scale-125'}" />
+          {/if}
+          {link.label}
+        </a>
+      {/each}
     </nav>
   </div>
 </aside>
@@ -159,7 +159,7 @@
   {@const active = sectionContainsActive(item)}
   {@const open = isSectionOpen(item)}
   {@const Icon = iconMap[item.label]}
-  <div class="group {depth > 0 ? 'ml-2' : ''} rounded border border-border {active ? 'bg-accent' : 'bg-muted'}">
+  <div class="group {depth > 0 ? 'ml-2' : ''} rounded border border-border bg-card shadow-low">
     <button
       class="w-full flex items-center justify-between py-1.5 px-2 rounded text-sm font-medium select-none cursor-pointer
         {active ? 'text-accent-foreground' : 'text-foreground'} hover:bg-accent/50"

@@ -1,0 +1,22 @@
+---
+// No-op marker component. The rehype-section-wrapper plugin removes this
+// from the tree before render and uses its position to close the current
+// .prose-section. Subsequent content sits outside any section until the
+// next h2 starts a new one.
+//
+// Usage in MDX:
+//
+//   import SectionBreak from '$lib/components/section-break.astro';
+//
+//   ## A section
+//
+//   Content inside the section card.
+//
+//   <SectionBreak />
+//
+//   Content here renders outside any section card.
+//
+//   ## Next section
+//
+//   Back inside a section card.
+---
