@@ -238,6 +238,45 @@ func TestFetchAllActions_MissingDirReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestFetchAllActions_UnreachableURLReturnsError(t *testing.T) {
+	c := &hub.Client{URL: "file:///nonexistent/path/that/does/not/exist"}
+	_, err := c.FetchAllActions(context.Background())
+	if err == nil {
+		t.Fatalf("expected error for unreachable URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "hub:") {
+		t.Fatalf("expected wrapped error with 'hub:' prefix, got %v", err)
+	}
+}
+
+func TestFetchAllActions_MalformedYAMLReturnsError(t *testing.T) {
+	url := makeFixtureHub(t, fixtureDirs{
+		actions: map[string]string{"bad.yaml": "this: is: not: valid: yaml: [["},
+	})
+	c := &hub.Client{URL: url}
+	_, err := c.FetchAllActions(context.Background())
+	if err == nil {
+		t.Fatalf("expected parse error, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Fatalf("expected error to mention parse failure, got %v", err)
+	}
+}
+
+func TestFetchActionByFQN_PropagatesUnderlyingFetchError(t *testing.T) {
+	// When the Hub repo can't be cloned, FetchActionByFQN should bubble
+	// up the fetch error rather than returning ErrNotFound (which would
+	// mask the connectivity issue as a 404).
+	c := &hub.Client{URL: "file:///nonexistent/path"}
+	_, err := c.FetchActionByFQN(context.Background(), "github://anywhere/anything")
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if err == hub.ErrNotFound {
+		t.Fatalf("expected wrapped fetch error, got ErrNotFound")
+	}
+}
+
 func TestFetchActionByFQN_ReturnsMatchingEntryAndErrNotFound(t *testing.T) {
 	url := makeFixtureHub(t, fixtureDirs{
 		actions: map[string]string{
@@ -295,6 +334,42 @@ category: communication
 	}
 	if len(entries[0].ConnectorsRequired) != 1 || entries[0].ConnectorsRequired[0] != "github://alice/conn" {
 		t.Fatalf("connectors_required not parsed: %+v", entries[0])
+	}
+}
+
+func TestFetchAllSuites_UnreachableURLReturnsError(t *testing.T) {
+	c := &hub.Client{URL: "file:///nonexistent/path/that/does/not/exist"}
+	_, err := c.FetchAllSuites(context.Background())
+	if err == nil {
+		t.Fatalf("expected error for unreachable URL, got nil")
+	}
+	if !strings.Contains(err.Error(), "hub:") {
+		t.Fatalf("expected wrapped error with 'hub:' prefix, got %v", err)
+	}
+}
+
+func TestFetchAllSuites_MalformedYAMLReturnsError(t *testing.T) {
+	url := makeFixtureHub(t, fixtureDirs{
+		suites: map[string]string{"bad.yaml": "this: is: not: valid: yaml: [["},
+	})
+	c := &hub.Client{URL: url}
+	_, err := c.FetchAllSuites(context.Background())
+	if err == nil {
+		t.Fatalf("expected parse error, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse") {
+		t.Fatalf("expected error to mention parse failure, got %v", err)
+	}
+}
+
+func TestFetchSuiteByFQN_PropagatesUnderlyingFetchError(t *testing.T) {
+	c := &hub.Client{URL: "file:///nonexistent/path"}
+	_, err := c.FetchSuiteByFQN(context.Background(), "github://anywhere/anything/suite")
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if err == hub.ErrNotFound {
+		t.Fatalf("expected wrapped fetch error, got ErrNotFound")
 	}
 }
 

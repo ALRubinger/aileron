@@ -439,6 +439,19 @@ func TestGetHubAction_MissingFQNReturns404(t *testing.T) {
 	}
 }
 
+func TestGetHubAction_HubUnreachableReturns503(t *testing.T) {
+	// FetchActionByFQN propagates non-ErrNotFound errors as 503
+	// hub_unreachable rather than 404 — surfaces the connectivity
+	// problem honestly instead of masking it as "missing entry".
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: "file:///nonexistent/path"}}
+	rec := httptest.NewRecorder()
+	srv.GetHubAction(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action?fqn=x", nil), api.GetHubActionParams{Fqn: "github://anywhere/x"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 hub_unreachable, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestGetHubAction_HubDisabledReturns503(t *testing.T) {
 	srv := &apiServer{log: slog.Default(), hub: nil}
 	rec := httptest.NewRecorder()
@@ -566,6 +579,16 @@ func TestGetHubSuite_MissingFQNReturns404(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestGetHubSuite_HubUnreachableReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: "file:///nonexistent/path"}}
+	rec := httptest.NewRecorder()
+	srv.GetHubSuite(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite?fqn=x", nil), api.GetHubSuiteParams{Fqn: "github://anywhere/x/suite"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 hub_unreachable, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 
