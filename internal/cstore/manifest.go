@@ -247,6 +247,79 @@ type ManifestSpawn struct {
 	// within FSRead. When unset, the runtime uses a per-invocation
 	// temporary directory.
 	Cwd string `toml:"cwd,omitempty"`
+
+	// Limits is the optional `[capabilities.spawn.limits]` block. When
+	// absent, the runtime applies [DefaultMaxStdoutBytes] and
+	// [DefaultMaxStderrBytes]. When present, the declared values
+	// override the defaults; either field may be omitted to use the
+	// default for that stream alone. The caps bound the bytes the
+	// runtime captures from the subprocess; output past the cap is
+	// truncated and a structured marker appended.
+	//
+	// Caps are part of the security model: stdout is read back into
+	// the connector and ultimately the agent's LLM context, so an
+	// unbounded subprocess can be coerced into producing an arbitrary
+	// volume of attacker-chosen bytes. A finite cap bounds the side
+	// channel's blast radius.
+	Limits *ManifestSpawnLimits `toml:"limits,omitempty"`
+}
+
+// ManifestSpawnLimits is `[capabilities.spawn.limits]` — per-stream
+// byte caps on the subprocess's captured output. Values are absolute
+// byte counts. A nil pointer means "use the default for both
+// streams"; a partially-set struct (one field nil) means "default
+// for the unset stream."
+type ManifestSpawnLimits struct {
+	// MaxStdoutBytes caps the bytes the runtime captures from the
+	// subprocess's stdout. When the subprocess produces more, the
+	// extra bytes are dropped and a structured truncation marker is
+	// appended to the captured slice. nil means "use [DefaultMaxStdoutBytes]."
+	MaxStdoutBytes *int64 `toml:"max_stdout_bytes,omitempty"`
+
+	// MaxStderrBytes caps the bytes the runtime captures from the
+	// subprocess's stderr. Same truncation semantics as
+	// MaxStdoutBytes. nil means "use [DefaultMaxStderrBytes]."
+	MaxStderrBytes *int64 `toml:"max_stderr_bytes,omitempty"`
+}
+
+// Spawn output cap defaults and upper bound. Per ADR-0014's
+// network-confinement and output-cap consequences, the runtime
+// enforces these even when the manifest omits the limits block.
+const (
+	// DefaultMaxStdoutBytes is 1 MiB — large enough for typical
+	// structured CLI output (JSON dumps, log tails), small enough
+	// to bound the side channel through the agent's LLM context.
+	DefaultMaxStdoutBytes int64 = 1 << 20
+
+	// DefaultMaxStderrBytes is 256 KiB — diagnostic messages on
+	// failure rarely need more.
+	DefaultMaxStderrBytes int64 = 256 << 10
+
+	// MaxSpawnOutputCap is the absolute ceiling the runtime will
+	// honor for either stream's cap. Beyond this, the manifest
+	// should be expressing "write to a file" via `fs_write` rather
+	// than holding bytes in memory.
+	MaxSpawnOutputCap int64 = 64 << 20
+)
+
+// StdoutCap returns the byte cap the runtime applies to subprocess
+// stdout. Resolves the manifest's declared value when present, falls
+// back to [DefaultMaxStdoutBytes] otherwise.
+func (s *ManifestSpawn) StdoutCap() int64 {
+	if s == nil || s.Limits == nil || s.Limits.MaxStdoutBytes == nil {
+		return DefaultMaxStdoutBytes
+	}
+	return *s.Limits.MaxStdoutBytes
+}
+
+// StderrCap returns the byte cap the runtime applies to subprocess
+// stderr. Resolves the manifest's declared value when present, falls
+// back to [DefaultMaxStderrBytes] otherwise.
+func (s *ManifestSpawn) StderrCap() int64 {
+	if s == nil || s.Limits == nil || s.Limits.MaxStderrBytes == nil {
+		return DefaultMaxStderrBytes
+	}
+	return *s.Limits.MaxStderrBytes
 }
 
 // ManifestSpawnOperation is one entry in [capabilities.spawn.operations]:
@@ -557,6 +630,43 @@ func validateSpawn(s *ManifestSpawn, file string) error {
 		return newValidationErr(file,
 			"[capabilities.spawn].cwd %q must be absolute (/...) or ~/-anchored",
 			s.Cwd)
+	}
+	if s.Limits != nil {
+		if err := validateSpawnLimits(s.Limits, file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSpawnLimits enforces the [capabilities.spawn.limits]
+// schema: each declared cap must be positive (zero is reserved for
+// "the default" by omitting the field, not by setting it to zero)
+// and at most [MaxSpawnOutputCap]. The runtime treats unbounded
+// output as a security risk per ADR-0014; the manifest cannot
+// express it.
+func validateSpawnLimits(l *ManifestSpawnLimits, file string) error {
+	if l.MaxStdoutBytes != nil {
+		v := *l.MaxStdoutBytes
+		if v <= 0 {
+			return newValidationErr(file,
+				"[capabilities.spawn.limits].max_stdout_bytes %d must be positive (omit the field to use the default)", v)
+		}
+		if v > MaxSpawnOutputCap {
+			return newValidationErr(file,
+				"[capabilities.spawn.limits].max_stdout_bytes %d exceeds the maximum permitted value %d", v, MaxSpawnOutputCap)
+		}
+	}
+	if l.MaxStderrBytes != nil {
+		v := *l.MaxStderrBytes
+		if v <= 0 {
+			return newValidationErr(file,
+				"[capabilities.spawn.limits].max_stderr_bytes %d must be positive (omit the field to use the default)", v)
+		}
+		if v > MaxSpawnOutputCap {
+			return newValidationErr(file,
+				"[capabilities.spawn.limits].max_stderr_bytes %d exceeds the maximum permitted value %d", v, MaxSpawnOutputCap)
+		}
 	}
 	return nil
 }

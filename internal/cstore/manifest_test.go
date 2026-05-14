@@ -539,6 +539,127 @@ func TestValidateManifest_RejectsBadSpawnFields(t *testing.T) {
 	}
 }
 
+func TestValidateManifest_AcceptsSpawnLimits(t *testing.T) {
+	m := canonicalManifestForTest()
+	sp := goodSpawn()
+	stdoutCap := int64(2 << 20) // 2 MiB
+	stderrCap := int64(64 << 10)
+	sp.Limits = &ManifestSpawnLimits{
+		MaxStdoutBytes: &stdoutCap,
+		MaxStderrBytes: &stderrCap,
+	}
+	m.Capabilities.Spawn = sp
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+	if got := sp.StdoutCap(); got != stdoutCap {
+		t.Errorf("StdoutCap() = %d, want %d", got, stdoutCap)
+	}
+	if got := sp.StderrCap(); got != stderrCap {
+		t.Errorf("StderrCap() = %d, want %d", got, stderrCap)
+	}
+}
+
+func TestSpawnCapsFallBackToDefaultsWhenLimitsAbsent(t *testing.T) {
+	// Contract: when no limits block is declared, the runtime applies
+	// the default caps (per ADR-0014).
+	sp := goodSpawn()
+	if got := sp.StdoutCap(); got != DefaultMaxStdoutBytes {
+		t.Errorf("StdoutCap() = %d, want default %d", got, DefaultMaxStdoutBytes)
+	}
+	if got := sp.StderrCap(); got != DefaultMaxStderrBytes {
+		t.Errorf("StderrCap() = %d, want default %d", got, DefaultMaxStderrBytes)
+	}
+}
+
+func TestSpawnCapsFallBackPerStreamWhenOneOmitted(t *testing.T) {
+	// Contract: declaring one stream's cap does not affect the other,
+	// which falls back to its default.
+	sp := goodSpawn()
+	stdoutCap := int64(4 << 20)
+	sp.Limits = &ManifestSpawnLimits{MaxStdoutBytes: &stdoutCap}
+	if got := sp.StdoutCap(); got != stdoutCap {
+		t.Errorf("StdoutCap() = %d, want %d", got, stdoutCap)
+	}
+	if got := sp.StderrCap(); got != DefaultMaxStderrBytes {
+		t.Errorf("StderrCap() = %d, want default %d", got, DefaultMaxStderrBytes)
+	}
+}
+
+func TestValidateManifest_RejectsBadSpawnLimits(t *testing.T) {
+	zero := int64(0)
+	negative := int64(-1)
+	overCap := MaxSpawnOutputCap + 1
+	cases := []struct {
+		name   string
+		limits ManifestSpawnLimits
+		want   string
+	}{
+		{"stdout zero", ManifestSpawnLimits{MaxStdoutBytes: &zero}, "max_stdout_bytes"},
+		{"stdout negative", ManifestSpawnLimits{MaxStdoutBytes: &negative}, "max_stdout_bytes"},
+		{"stdout over cap", ManifestSpawnLimits{MaxStdoutBytes: &overCap}, "exceeds the maximum"},
+		{"stderr zero", ManifestSpawnLimits{MaxStderrBytes: &zero}, "max_stderr_bytes"},
+		{"stderr negative", ManifestSpawnLimits{MaxStderrBytes: &negative}, "max_stderr_bytes"},
+		{"stderr over cap", ManifestSpawnLimits{MaxStderrBytes: &overCap}, "exceeds the maximum"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			sp := goodSpawn()
+			lim := tc.limits
+			sp.Limits = &lim
+			m.Capabilities.Spawn = sp
+			err := ValidateManifest(m, "x.toml")
+			if err == nil {
+				t.Fatalf("Validate accepted; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %q; want substring %q", err.Error(), tc.want)
+			}
+			var aerr *Error
+			if !errors.As(err, &aerr) || aerr.Class != ClassValidationError {
+				t.Errorf("expected ClassValidationError, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseManifest_AcceptsSpawnLimitsTOML(t *testing.T) {
+	body := []byte(`[connector]
+name = "github://acme/gitcrawl"
+version = "1.0.0"
+
+[capabilities.spawn]
+
+[[capabilities.spawn.programs]]
+path = "/usr/bin/git"
+
+[capabilities.spawn.operations.log]
+argv = "git log"
+
+[capabilities.spawn.limits]
+max_stdout_bytes = 2097152
+max_stderr_bytes = 65536
+`)
+	m, err := ParseManifest("x.toml", body)
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	if err := ValidateManifest(m, "x.toml"); err != nil {
+		t.Fatalf("ValidateManifest: %v", err)
+	}
+	sp := m.Capabilities.Spawn
+	if sp.Limits == nil {
+		t.Fatal("Limits block not parsed")
+	}
+	if sp.StdoutCap() != 2<<20 {
+		t.Errorf("StdoutCap() = %d, want %d", sp.StdoutCap(), 2<<20)
+	}
+	if sp.StderrCap() != 64<<10 {
+		t.Errorf("StderrCap() = %d, want %d", sp.StderrCap(), 64<<10)
+	}
+}
+
 func TestValidateManifest_AcceptsCredentialEnvKeys(t *testing.T) {
 	m := canonicalManifestForTest()
 	sp := goodSpawn()

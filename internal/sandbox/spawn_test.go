@@ -1,11 +1,13 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"testing"
@@ -259,13 +261,15 @@ func TestPathWithin(t *testing.T) {
 // fakeExecutor records the envelope it was given and produces a
 // scripted result. Implements SpawnExecutor.
 type fakeExecutor struct {
-	gotEnv SpawnEnvelope
-	result SpawnResult
-	err    error
+	gotEnv    SpawnEnvelope
+	gotLimits SpawnLimits
+	result    SpawnResult
+	err       error
 }
 
-func (f *fakeExecutor) Spawn(_ context.Context, env SpawnEnvelope) (SpawnResult, error) {
+func (f *fakeExecutor) Spawn(_ context.Context, env SpawnEnvelope, limits SpawnLimits) (SpawnResult, error) {
 	f.gotEnv = env
+	f.gotLimits = limits
 	return f.result, f.err
 }
 
@@ -487,7 +491,7 @@ func TestSpawnExecutor_DefaultRunsRealBinary(t *testing.T) {
 	res, err := defaultSpawnExecutor{}.Spawn(context.Background(), SpawnEnvelope{
 		Program: "/bin/echo",
 		Argv:    []string{"echo", "hello"},
-	})
+	}, defaultTestLimits())
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -639,7 +643,7 @@ func TestSpawnExecutor_DefaultPropagatesNonZeroExit(t *testing.T) {
 	res, err := defaultSpawnExecutor{}.Spawn(context.Background(), SpawnEnvelope{
 		Program: prog,
 		Argv:    []string{"false"},
-	})
+	}, defaultTestLimits())
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -651,7 +655,7 @@ func TestSpawnExecutor_DefaultPropagatesNonZeroExit(t *testing.T) {
 func TestSpawnExecutor_DefaultRejectsEmptyArgv(t *testing.T) {
 	_, err := defaultSpawnExecutor{}.Spawn(context.Background(), SpawnEnvelope{
 		Program: "/bin/echo",
-	})
+	}, defaultTestLimits())
 	if err == nil {
 		t.Error("expected error on empty argv")
 	}
@@ -665,12 +669,109 @@ func TestSpawnExecutor_DefaultRunsWithStdin(t *testing.T) {
 		Program: "/bin/cat",
 		Argv:    []string{"cat"},
 		Stdin:   "echoed-stdin",
-	})
+	}, defaultTestLimits())
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 	if string(res.Stdout) != "echoed-stdin" {
 		t.Errorf("stdout = %q, want echoed input", string(res.Stdout))
+	}
+}
+
+func TestCaptureBuf_CapsAndAppendsTruncationMarker(t *testing.T) {
+	// Contract: writes past the cap are accepted (no I/O error) but the
+	// bytes are dropped; Captured returns at most cap+marker bytes; the
+	// marker is present when at least one byte was dropped.
+	cb := newCaptureBuf(10)
+	n, err := cb.Write([]byte("0123456789"))
+	if err != nil || n != 10 {
+		t.Fatalf("first write: n=%d err=%v", n, err)
+	}
+	n, err = cb.Write([]byte("OVERFLOW"))
+	if err != nil || n != len("OVERFLOW") {
+		t.Fatalf("second write: n=%d err=%v", n, err)
+	}
+	captured := cb.Captured()
+	prefix := []byte("0123456789")
+	if !bytes.HasPrefix(captured, prefix) {
+		t.Fatalf("captured prefix = %q, want %q", captured[:10], prefix)
+	}
+	if !bytes.Contains(captured, []byte("truncated")) {
+		t.Errorf("captured = %q, want truncation marker", string(captured))
+	}
+	if !bytes.Contains(captured, []byte("8 bytes dropped")) {
+		t.Errorf("captured = %q, want dropped-byte count", string(captured))
+	}
+}
+
+func TestCaptureBuf_NoMarkerWhenWithinCap(t *testing.T) {
+	cb := newCaptureBuf(10)
+	cb.Write([]byte("hello"))
+	captured := cb.Captured()
+	if string(captured) != "hello" {
+		t.Errorf("captured = %q, want %q (no marker for under-cap writes)", string(captured), "hello")
+	}
+}
+
+func TestCaptureBuf_PartialFinalWrite(t *testing.T) {
+	// Contract: when a single write straddles the cap, the cap-fitting
+	// prefix is stored and the rest is counted as dropped.
+	cb := newCaptureBuf(5)
+	cb.Write([]byte("hello-world"))
+	captured := cb.Captured()
+	if !bytes.HasPrefix(captured, []byte("hello")) {
+		t.Errorf("captured prefix = %q, want %q", captured, "hello")
+	}
+	if !bytes.Contains(captured, []byte("6 bytes dropped")) {
+		t.Errorf("captured = %q, want '6 bytes dropped'", string(captured))
+	}
+}
+
+func TestRunCaptured_EnforcesLimits(t *testing.T) {
+	// Contract: the executor's runCaptured caps each stream independently
+	// at the supplied SpawnLimits. Output past the cap appears truncated
+	// in the returned slice; counts in the marker are accurate.
+	if !commandExists("/bin/sh") {
+		t.Skip("/bin/sh not present; runCaptured smoke test relies on shell")
+	}
+	cmd := exec.Command("/bin/sh", "-c", `printf 'aaaaaaaaaa' && printf 'eeee' >&2`)
+	stdout, stderr, err := runCaptured(cmd, SpawnLimits{MaxStdoutBytes: 4, MaxStderrBytes: 2})
+	if err != nil {
+		t.Fatalf("runCaptured: %v", err)
+	}
+	if !bytes.HasPrefix(stdout, []byte("aaaa")) {
+		t.Errorf("stdout prefix = %q, want %q", stdout, "aaaa")
+	}
+	if !bytes.Contains(stdout, []byte("truncated")) {
+		t.Errorf("stdout = %q, want truncation marker", string(stdout))
+	}
+	if !bytes.HasPrefix(stderr, []byte("ee")) {
+		t.Errorf("stderr prefix = %q, want %q", stderr, "ee")
+	}
+	if !bytes.Contains(stderr, []byte("truncated")) {
+		t.Errorf("stderr = %q, want truncation marker", string(stderr))
+	}
+}
+
+func TestSpawnPolicy_PassesResolvedLimitsToExecutor(t *testing.T) {
+	// Contract: processSpawn supplies the executor with the limits
+	// derived from the connector's manifest (or defaults when absent).
+	fake := &fakeExecutor{result: SpawnResult{ExitCode: 0}}
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(goodSpawnManifest()),
+		spawnExecutor: fake,
+		connectorFQN:  "github://aileron-test/gitcrawl",
+	}
+	ctx := ctxWithState(context.Background(), state)
+	envBytes := mustJSON(SpawnEnvelope{Program: "/usr/bin/git", Argv: []string{"git", "status"}})
+	if rc := processSpawn(ctx, state, envBytes); rc != 0 {
+		t.Fatalf("processSpawn rc=%d err=%v", rc, state.spawnErr)
+	}
+	if fake.gotLimits.MaxStdoutBytes != cstore.DefaultMaxStdoutBytes {
+		t.Errorf("stdout cap = %d, want default %d", fake.gotLimits.MaxStdoutBytes, cstore.DefaultMaxStdoutBytes)
+	}
+	if fake.gotLimits.MaxStderrBytes != cstore.DefaultMaxStderrBytes {
+		t.Errorf("stderr cap = %d, want default %d", fake.gotLimits.MaxStderrBytes, cstore.DefaultMaxStderrBytes)
 	}
 }
 
@@ -831,10 +932,20 @@ func TestSpawn_HostFunctions_MalformedJSONEnvelope(t *testing.T) {
 	}
 }
 
+// defaultTestLimits returns SpawnLimits populated from the manifest
+// schema defaults; the runtime applies these when no per-connector
+// override exists.
+func defaultTestLimits() SpawnLimits {
+	return SpawnLimits{
+		MaxStdoutBytes: cstore.DefaultMaxStdoutBytes,
+		MaxStderrBytes: cstore.DefaultMaxStderrBytes,
+	}
+}
+
 // fakeExecutorErr returns an arbitrary non-sandbox-unavailable error.
 type fakeExecutorErr struct{ err error }
 
-func (f fakeExecutorErr) Spawn(_ context.Context, _ SpawnEnvelope) (SpawnResult, error) {
+func (f fakeExecutorErr) Spawn(_ context.Context, _ SpawnEnvelope, _ SpawnLimits) (SpawnResult, error) {
 	return SpawnResult{}, f.err
 }
 

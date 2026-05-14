@@ -23,7 +23,7 @@ func TestRecordingExecutor_RecordsEnvelope(t *testing.T) {
 		Program: "/usr/bin/git",
 		Argv:    []string{"git", "status"},
 	}
-	res, err := r.Spawn(context.Background(), env)
+	res, err := r.Spawn(context.Background(), env, sandbox.SpawnLimits{})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -52,8 +52,8 @@ func TestRecordingExecutor_HookOverridesScriptedResult(t *testing.T) {
 			return sandbox.SpawnResult{ExitCode: 0, Stdout: []byte("status")}, nil
 		},
 	}
-	res1, _ := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"git", "log"}})
-	res2, _ := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"git", "status"}})
+	res1, _ := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"git", "log"}}, sandbox.SpawnLimits{})
+	res2, _ := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"git", "status"}}, sandbox.SpawnLimits{})
 	if string(res1.Stdout) != "commits" {
 		t.Errorf("res1 = %q", string(res1.Stdout))
 	}
@@ -64,7 +64,7 @@ func TestRecordingExecutor_HookOverridesScriptedResult(t *testing.T) {
 
 func TestRecordingExecutor_PropagatesError(t *testing.T) {
 	r := &sandboxtest.RecordingExecutor{Err: sandbox.ErrSpawnUnavailable}
-	_, err := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Program: "/usr/bin/git", Argv: []string{"git"}})
+	_, err := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Program: "/usr/bin/git", Argv: []string{"git"}}, sandbox.SpawnLimits{})
 	if !errors.Is(err, sandbox.ErrSpawnUnavailable) {
 		t.Errorf("err = %v, want ErrSpawnUnavailable", err)
 	}
@@ -81,12 +81,12 @@ func TestRecordingExecutor_ResetClearsState(t *testing.T) {
 	r := &sandboxtest.RecordingExecutor{
 		Result: sandbox.SpawnResult{ExitCode: 7},
 	}
-	_, _ = r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"x"}})
+	_, _ = r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"x"}}, sandbox.SpawnLimits{})
 	r.Reset()
 	if r.CallCount() != 0 {
 		t.Errorf("CallCount after Reset = %d", r.CallCount())
 	}
-	res, _ := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"x"}})
+	res, _ := r.Spawn(context.Background(), sandbox.SpawnEnvelope{Argv: []string{"x"}}, sandbox.SpawnLimits{})
 	if res.ExitCode != 0 {
 		t.Errorf("Result was not cleared: %+v", res)
 	}

@@ -30,14 +30,29 @@ type RecordingExecutor struct {
 	Err    error
 	Hook   func(env sandbox.SpawnEnvelope) (sandbox.SpawnResult, error)
 
-	mu    sync.Mutex
-	calls []sandbox.SpawnEnvelope
+	mu     sync.Mutex
+	calls  []sandbox.SpawnEnvelope
+	limits []sandbox.SpawnLimits
+}
+
+// LastLimits returns the [sandbox.SpawnLimits] passed alongside the
+// most recent Spawn call, or the zero value when no Spawn has been
+// invoked. Convenience for tests that need to assert on the resolved
+// caps the runtime supplied.
+func (r *RecordingExecutor) LastLimits() sandbox.SpawnLimits {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.limits) == 0 {
+		return sandbox.SpawnLimits{}
+	}
+	return r.limits[len(r.limits)-1]
 }
 
 // Spawn implements sandbox.SpawnExecutor.
-func (r *RecordingExecutor) Spawn(_ context.Context, env sandbox.SpawnEnvelope) (sandbox.SpawnResult, error) {
+func (r *RecordingExecutor) Spawn(_ context.Context, env sandbox.SpawnEnvelope, limits sandbox.SpawnLimits) (sandbox.SpawnResult, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, env)
+	r.limits = append(r.limits, limits)
 	r.mu.Unlock()
 	if r.Hook != nil {
 		return r.Hook(env)
@@ -80,6 +95,7 @@ func (r *RecordingExecutor) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = nil
+	r.limits = nil
 	r.Result = sandbox.SpawnResult{}
 	r.Err = nil
 	r.Hook = nil
