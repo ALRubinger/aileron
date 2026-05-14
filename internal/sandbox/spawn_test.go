@@ -753,6 +753,65 @@ func TestRunCaptured_EnforcesLimits(t *testing.T) {
 	}
 }
 
+func TestSpawn_HostFunctions_InjectsProxyEnvWhenNetworkDeclared(t *testing.T) {
+	// Contract: when the connector manifest carries
+	// [capabilities.network] hosts, the runtime stands up a per-spawn
+	// proxy on loopback and injects HTTPS_PROXY/HTTP_PROXY on the
+	// subprocess's env before the executor sees it. The proxy is
+	// torn down after Spawn returns.
+	fake := &fakeExecutor{result: SpawnResult{ExitCode: 0}}
+	m := goodSpawnManifest()
+	m.Capabilities.Network = &cstore.ManifestNetwork{
+		Hosts: []string{"api.linear.app:443"},
+	}
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(m),
+		spawnExecutor: fake,
+		connectorFQN:  "github://aileron-test/x",
+		policy:        NewHostPolicy(m),
+	}
+	ctx := ctxWithState(context.Background(), state)
+	envBytes := mustJSON(SpawnEnvelope{Program: "/usr/bin/git", Argv: []string{"git", "status"}})
+	if rc := processSpawn(ctx, state, envBytes); rc != 0 {
+		t.Fatalf("processSpawn rc=%d err=%v", rc, state.spawnErr)
+	}
+	httpsProxy, ok := fake.gotEnv.Env["HTTPS_PROXY"]
+	if !ok {
+		t.Errorf("HTTPS_PROXY missing from injected env; got %v", fake.gotEnv.Env)
+	}
+	if !strings.HasPrefix(httpsProxy, "http://127.0.0.1:") {
+		t.Errorf("HTTPS_PROXY = %q, want http://127.0.0.1:<port>", httpsProxy)
+	}
+	if got := fake.gotEnv.Env["HTTP_PROXY"]; got != httpsProxy {
+		t.Errorf("HTTP_PROXY = %q, want %q", got, httpsProxy)
+	}
+}
+
+func TestSpawn_HostFunctions_NoProxyEnvWhenNetworkAbsent(t *testing.T) {
+	// Contract: a spawn connector that omits [capabilities.network]
+	// gets no HTTPS_PROXY injection. The subprocess will have no
+	// network path at all (the platform sandbox denies all egress).
+	fake := &fakeExecutor{result: SpawnResult{ExitCode: 0}}
+	m := goodSpawnManifest()
+	state := &hostState{
+		spawnPolicy:   NewSpawnPolicy(m),
+		spawnExecutor: fake,
+		connectorFQN:  "github://aileron-test/x",
+		policy:        NewHostPolicy(m), // no [capabilities.network]
+	}
+	ctx := ctxWithState(context.Background(), state)
+	envBytes := mustJSON(SpawnEnvelope{Program: "/usr/bin/git", Argv: []string{"git", "status"}})
+	if rc := processSpawn(ctx, state, envBytes); rc != 0 {
+		t.Fatalf("processSpawn rc=%d err=%v", rc, state.spawnErr)
+	}
+	if _, ok := fake.gotEnv.Env["HTTPS_PROXY"]; ok {
+		t.Errorf("HTTPS_PROXY injected despite no [capabilities.network]")
+	}
+	if _, ok := fake.gotEnv.Env["HTTP_PROXY"]; ok {
+		t.Errorf("HTTP_PROXY injected despite no [capabilities.network]")
+	}
+}
+
 func TestSpawnPolicy_PassesResolvedLimitsToExecutor(t *testing.T) {
 	// Contract: processSpawn supplies the executor with the limits
 	// derived from the connector's manifest (or defaults when absent).
