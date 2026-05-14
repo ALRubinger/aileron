@@ -36,10 +36,15 @@
 	<title>Aileron</title>
 </svelte:head>
 
-<header class="border-b border-border bg-card">
+<header class="border-b border-border bg-card shadow-low">
 	<div class="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
-		<a href="/" class="text-sm font-semibold tracking-tight no-underline">
-			✈️ Aileron
+		<a
+			href="/"
+			class="text-foreground no-underline hover:text-foreground"
+		>
+			<span class="font-extrabold text-2xl tracking-tight">Aileron</span><span
+				class="font-normal text-2xl tracking-tight text-muted-foreground"
+			>ControlPlane</span>
 		</a>
 		<nav class="flex items-center gap-4 text-sm">
 			<span

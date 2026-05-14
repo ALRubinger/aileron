@@ -14,7 +14,7 @@
 </svelte:head>
 
 <div class="space-y-4">
-	<h1 class="text-2xl font-semibold tracking-tight">Aileron</h1>
+	<h1 class="mb-4 text-3xl font-extrabold tracking-tight">Aileron</h1>
 	<p class="text-muted-foreground">
 		The local webapp surfaced under <code>aileron launch</code>. Use it to review and decide on
 		action approvals the agent has paused on.
