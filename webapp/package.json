@@ -28,7 +28,8 @@
     "vite": "^6.0.0"
   },
   "devDependencies": {
-    "@lucide/svelte": "^1.7.0",
+    "@internationalized/date": "^3.12.1",
+    "@lucide/svelte": "^1.14.0",
     "@playwright/test": "^1.59.1",
     "@tailwindcss/vite": "^4.2.2",
     "@testing-library/jest-dom": "^6.9.1",
