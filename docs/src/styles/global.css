@@ -115,9 +115,6 @@
 		line-height: 1.75;
 		max-width: 100%;
 	}
-	@media (min-width: 360px)  { :where(.prose) { max-width: 18rem; } }
-	@media (min-width: 480px)  { :where(.prose) { max-width: 26rem; } }
-	@media (min-width: 640px)  { :where(.prose) { max-width: 32rem; } }
 	@media (min-width: 1024px) { :where(.prose) { max-width: 38rem; } }
 	@media (min-width: 1280px) { :where(.prose) { max-width: 38rem; } }
 	@media (min-width: 1536px) { :where(.prose) { max-width: 46rem; } }
