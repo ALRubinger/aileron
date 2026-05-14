@@ -185,7 +185,7 @@
 	<title>Approvals — Aileron</title>
 </svelte:head>
 
-<h1 class="mb-4 text-xl font-semibold">Approvals</h1>
+<h1 class="mb-4 text-3xl font-extrabold tracking-tight">Approvals</h1>
 
 <Tooltip.Provider>
 {#if loading}

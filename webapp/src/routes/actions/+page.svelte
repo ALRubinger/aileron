@@ -64,7 +64,7 @@
 	<title>Actions — Aileron</title>
 </svelte:head>
 
-<h1 class="mb-4 text-xl font-semibold">Installed Actions</h1>
+<h1 class="mb-4 text-3xl font-extrabold tracking-tight">Installed Actions</h1>
 
 <p class="mb-3 text-sm text-muted-foreground">
 	Toggle which installed actions the agent's LLM can see. Disabling does

@@ -58,7 +58,7 @@
 	<title>Hub — Aileron</title>
 </svelte:head>
 
-<h1 class="mb-4 text-xl font-semibold">Connector Hub</h1>
+<h1 class="mb-4 text-3xl font-extrabold tracking-tight">Connector Hub</h1>
 <p class="mb-4 text-sm text-muted-foreground">
 	Community-published connectors. Browse, search by keyword, and install with
 	one click. The daemon writes publisher trust to your keyring per repo on
