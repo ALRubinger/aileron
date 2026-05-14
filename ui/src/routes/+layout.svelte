@@ -5,17 +5,15 @@
 	import { goto } from '$app/navigation';
 	import { Button } from '$lib/components/ui/button';
 	import { Separator } from '$lib/components/ui/separator';
-	import { initAuth, isAuthenticated, getUser, logout } from '$lib/auth.svelte.js';
+	import { isAuthenticated, getUser, logout } from '$lib/auth.svelte.js';
 	import { initPosthog, posthog } from '$lib/posthog.js';
 	import PassphraseModal from '$lib/components/PassphraseModal.svelte';
 	import { sessionExpiresAt, setSessionExpiresAt } from '$lib/vault.svelte.js';
-	import { lockVault, getVaultStatus } from '$lib/api';
+	import { lockVault } from '$lib/api';
 
 	let { children } = $props();
 	let mounted = $state(false);
 	let menuOpen = $state(false);
-
-	const publicPaths = ['/login', '/signup', '/verify-email', '/auth/callback'];
 
 	let vaultTimeRemaining = $state('');
 
@@ -36,7 +34,6 @@
 	}
 
 	onMount(() => {
-		initAuth();
 		initPosthog();
 		mounted = true;
 
@@ -51,34 +48,6 @@
 		if (mounted) {
 			posthog.capture('$pageview', { $current_url: page.url.href });
 		}
-	});
-
-	$effect(() => {
-		if (!mounted) return;
-		const path = page.url.pathname;
-		const isPublic = publicPaths.some((p) => path.startsWith(p));
-		if (!isPublic && !isAuthenticated()) {
-			const redirect = path === '/' ? '' : `?redirectTo=${encodeURIComponent(path)}`;
-			goto(`/login${redirect}`);
-		}
-	});
-
-	// Redirect to vault setup if authenticated but no passphrase set.
-	let vaultChecked = $state(false);
-	$effect(() => {
-		if (!mounted || !isAuthenticated() || vaultChecked) return;
-		const path = page.url.pathname;
-		if (path === '/vault') return;
-		vaultChecked = true;
-		getVaultStatus()
-			.then((status) => {
-				if (!status.has_passphrase) {
-					goto('/vault');
-				}
-			})
-			.catch(() => {
-				// Vault status unavailable — don't block.
-			});
 	});
 
 	// Close menu when clicking outside.
