@@ -41,7 +41,7 @@
 </script>
 
 {#if tocHeadings.length > 0}
-  <nav class="hidden 2xl:block w-56 shrink-0" aria-label="On this page">
+  <nav class="hidden xl:block w-56 shrink-0 rounded border border-border bg-muted shadow-low px-3 py-3" aria-label="On this page">
     <div class="sticky top-8">
       <p class="text-sm font-medium text-foreground mb-3">On this page</p>
       <ul class="space-y-1 text-sm list-none p-0 m-0">

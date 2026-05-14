@@ -4,6 +4,7 @@ import mdx from '@astrojs/mdx';
 import tailwindcss from '@tailwindcss/vite';
 import rehypeExternalLinks from 'rehype-external-links';
 import rehypeCopyButton from './src/lib/rehype-copy-button.mjs';
+import rehypeSectionWrapper from './src/lib/rehype-section-wrapper.mjs';
 import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
@@ -24,6 +25,9 @@ export default defineConfig({
       // Wrap fenced code blocks with a "Copy" button. Inherited by MDX via
       // @astrojs/mdx's default extendMarkdownConfig.
       rehypeCopyButton,
+      // Wrap each h2 + following siblings in a <section class="prose-section">
+      // so the docs render as card-stacked sections.
+      rehypeSectionWrapper,
     ],
   },
   vite: {

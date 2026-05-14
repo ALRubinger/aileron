@@ -26,7 +26,7 @@
   }
 </script>
 
-<div class="flex items-center gap-3 rounded border border-border px-3 py-2 text-xs text-muted-foreground">
+<div class="flex items-center gap-3 rounded border border-border bg-muted shadow-low px-3 py-2 text-xs text-muted-foreground">
   <div class="flex flex-col items-center gap-0.5 text-muted-foreground">
     <div class="w-[26px] h-[16px]">{@html markdownIcon}</div>
     <span class="font-medium leading-none">Markdown</span>
@@ -34,7 +34,7 @@
   <div class="flex flex-col gap-1 flex-1">
     <button
       onclick={copyToClipboard}
-      class="inline-flex items-center justify-center gap-1 w-full py-0.5 rounded border border-border hover:bg-accent hover:text-accent-foreground cursor-pointer"
+      class="inline-flex items-center justify-center gap-1 w-full py-0.5 rounded border border-border bg-card hover:bg-neutral-200 hover:text-foreground cursor-pointer"
       title="Copy markdown to clipboard"
     >
       {#if copied}
@@ -47,7 +47,7 @@
     </button>
     <a
       href="/raw/{slug}"
-      class="inline-flex items-center justify-center gap-1 w-full py-0.5 rounded border border-border hover:bg-accent hover:text-accent-foreground no-underline text-muted-foreground"
+      class="inline-flex items-center justify-center gap-1 w-full py-0.5 rounded border border-border bg-card hover:bg-neutral-200 hover:text-foreground no-underline text-muted-foreground"
       title="View raw markdown"
     >
       <Eye size={12} />
@@ -55,7 +55,7 @@
     </a>
     <button
       onclick={downloadMarkdown}
-      class="inline-flex items-center justify-center gap-1 w-full py-0.5 rounded border border-border hover:bg-accent hover:text-accent-foreground cursor-pointer"
+      class="inline-flex items-center justify-center gap-1 w-full py-0.5 rounded border border-border bg-card hover:bg-neutral-200 hover:text-foreground cursor-pointer"
       title="Download markdown file"
     >
       <Download size={12} />

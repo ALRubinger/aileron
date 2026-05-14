@@ -3,7 +3,7 @@
   import FileText from '@lucide/svelte/icons/file-text';
 </script>
 
-<footer class="not-prose mt-16 pt-6 border-t border-border text-sm">
+<footer class="not-prose mt-16 bg-neutral-200 rounded-lg p-4 text-sm">
   <nav class="flex flex-col gap-2">
     <a
       href="/privacy"

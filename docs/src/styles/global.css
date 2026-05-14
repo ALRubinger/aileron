@@ -1,51 +1,48 @@
 @import "tailwindcss";
+@import "./tokens.generated.css";
 
 @custom-variant dark (&:is(.dark *));
 
-:root {
-	--background: oklch(1 0 0);
-	--foreground: oklch(0.145 0 0);
-	--muted: oklch(0.97 0 0);
-	--muted-foreground: oklch(0.556 0 0);
-	--border: oklch(0.922 0 0);
-	--primary: oklch(0.205 0 0);
-	--primary-foreground: oklch(0.985 0 0);
-	--accent: oklch(0.97 0 0);
-	--accent-foreground: oklch(0.205 0 0);
-	/* shadcn-svelte additional tokens */
-	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.145 0 0);
-	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.145 0 0);
-	--secondary: oklch(0.97 0 0);
-	--secondary-foreground: oklch(0.205 0 0);
-	--destructive: oklch(0.577 0.245 27.325);
-	--destructive-foreground: oklch(0.985 0 0);
-	--ring: oklch(0.708 0 0);
-	--input: oklch(0.922 0 0);
+/* Ink-bleed effect: four 1px directional drop-shadows around the element
+ * create a soft halo on every glyph (or any visible alpha), reading as
+ * ink bleeding into paper. Opt-in via `class="ink-bleed"`. Applied to a
+ * single text element gives that element the bleed; applied to a
+ * container (e.g. a section wrapper) composites the effect across all
+ * descendants. Doesn't compose with background-clip: text — avoid on
+ * gradient-text headings.
+ *
+ * Defined as a plain CSS class (not @utility) so it's always emitted,
+ * even when applied dynamically at build time by the rehype plugin
+ * (which Tailwind's content scanner can't see). */
+/* Applied to a text element directly OR to a container — when used on a
+ * container, filters each text descendant individually so the halo is
+ * per-glyph rather than around the container's rectangular composite. */
+/* Right-side TOC aside. Transition explicitly via raw CSS rules and a
+ * media query rather than Tailwind responsive variants, because the
+ * variant-based approach was animating only one direction (reveal) and
+ * not the other (hide). With explicit transition: width/opacity/transform
+ * and a media query toggling the values, both directions animate. */
+.toc-aside {
+	width: 0;
+	min-width: 0;
+	opacity: 0;
+	transform: translateX(48px);
+	pointer-events: none;
+	flex-shrink: 0;
+	transition: width 500ms ease, opacity 500ms ease, transform 500ms ease;
+}
+@media (min-width: 1280px) {
+	.toc-aside {
+		width: 14rem;
+		opacity: 1;
+		transform: translateX(0);
+		pointer-events: auto;
+	}
 }
 
-.dark {
-	--background: oklch(0.22 0 0);
-	--foreground: oklch(0.92 0 0);
-	--muted: oklch(0.269 0 0);
-	--muted-foreground: oklch(0.708 0 0);
-	--border: oklch(1 0 0 / 10%);
-	--primary: oklch(0.922 0 0);
-	--primary-foreground: oklch(0.205 0 0);
-	--accent: oklch(0.371 0 0);
-	--accent-foreground: oklch(0.985 0 0);
-	/* shadcn-svelte additional tokens */
-	--card: oklch(0.269 0 0);
-	--card-foreground: oklch(0.92 0 0);
-	--popover: oklch(0.269 0 0);
-	--popover-foreground: oklch(0.92 0 0);
-	--secondary: oklch(0.269 0 0);
-	--secondary-foreground: oklch(0.985 0 0);
-	--destructive: oklch(0.396 0.141 25.723);
-	--destructive-foreground: oklch(0.985 0 0);
-	--ring: oklch(0.439 0 0);
-	--input: oklch(1 0 0 / 15%);
+.ink-bleed,
+.ink-bleed :is(h2, h3, h4, h5, h6, p, li, blockquote) {
+	filter: var(--effect-ink-bleed);
 }
 
 @theme inline {
@@ -68,6 +65,18 @@
 	--color-destructive-foreground: var(--destructive-foreground);
 	--color-ring: var(--ring);
 	--color-input: var(--input);
+
+	--font-sans: var(--font-family-sans);
+	--font-mono: var(--font-family-mono);
+
+	--radius-sm: var(--radius-sm);
+	--radius-md: var(--radius-md);
+	--radius-lg: var(--radius-lg);
+	--radius-xl: var(--radius-xl);
+
+	--shadow-low: var(--shadow-low);
+	--shadow-mid: var(--shadow-mid);
+	--shadow-high: var(--shadow-high);
 }
 
 @layer base {
@@ -75,101 +84,180 @@
 		@apply border-border;
 	}
 	body {
-		@apply bg-background text-foreground;
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+		@apply bg-background text-foreground font-sans;
+		background-image: var(--pattern-page);
+		background-repeat: repeat;
 		margin: 0;
 	}
 }
 
-/* Prose typography for markdown content */
-.prose {
-	line-height: 1.75;
-	max-width: 85ch;
-}
-.prose h1 { font-size: 2.25rem; font-weight: 800; margin-top: 0; margin-bottom: 0.8rem; line-height: 1.1; }
-.prose h2 { font-size: 1.5rem; font-weight: 700; margin-top: 2rem; margin-bottom: 0.75rem; line-height: 1.3; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
-.prose h3 { font-size: 1.25rem; font-weight: 600; margin-top: 1.6rem; margin-bottom: 0.6rem; }
-.prose p { margin-top: 0; margin-bottom: 1.25rem; }
-.prose a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
-.prose a:hover { opacity: 0.8; }
-.prose strong { font-weight: 600; }
-.prose ul, .prose ol { margin-top: 0; margin-bottom: 1.25rem; padding-left: 1.625rem; }
-.prose ul { list-style-type: disc; }
-.prose ol { list-style-type: decimal; }
-.prose li { margin-top: 0.25rem; margin-bottom: 0.25rem; }
-.prose code { font-size: 0.875em; background: var(--muted); padding: 0.2em 0.4em; border-radius: 0.25rem; }
-.prose pre { background: var(--muted); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-top: 0; margin-bottom: 1.25rem; }
-.prose pre code { background: none; padding: 0; font-size: 0.875em; }
-
-/* Code-block copy button injected by rehype-copy-button.mjs.
- * The wrapper is positioned relative so the button can hover over the top-right
- * corner of the <pre>. The <pre>'s own bottom margin moves to the wrapper so
- * the layout stays identical to the un-wrapped version.
+/* Prose typography for markdown content. Width snaps at breakpoints so
+ * wrap points jump between sizes rather than shifting continuously as the
+ * viewport resizes.
  *
- * Wrapped code blocks are commands (the language-fenced ones the
- * plugin opted in). Style them with a left-border accent and a `$`
- * prompt as a ::before pseudo-element so the visual cue says
- * "this is meant to be typed/copy-pasted". The prompt is decorative-
- * only — it lives outside DOM text, so `pre.textContent` (used by
- * the copy handler) reads only the actual command bytes. */
-.prose .code-block-wrapper { position: relative; margin-bottom: 1.25rem; }
-.prose .code-block-wrapper > pre {
-	position: relative;
-	margin-bottom: 0;
-	padding-left: 2.5rem;
+ * Widths are tuned to the actual container width at each breakpoint's
+ * start, accounting for the sidebar (320px, sticky from lg+) and the
+ * TOC aside (256px including gap, visible from 2xl+). Each value sits
+ * just below the narrowest container in that range so prose hits its
+ * max-width and stops changing as the viewport widens within the range.
+ *
+ * Note: the lg max-width is narrower than md because the sidebar enters
+ * the layout flow at lg, shrinking the content container by 320px. This
+ * is intentional. The visual jump matches the sidebar appearing. */
+/* All prose typography lives in @layer base. Combined with :where()
+ * wrapping (which makes each selector zero-specificity), this guarantees
+ * any Tailwind utility on a child element wins over prose defaults
+ * without needing !important or a .not-prose escape. Don't add unlayered
+ * .prose rules outside this block — they'll override utilities and
+ * reintroduce the cascade problem we just solved. */
+@layer base {
+	:where(.prose) {
+		line-height: 1.75;
+		max-width: 100%;
+	}
+	@media (min-width: 360px)  { :where(.prose) { max-width: 18rem; } }
+	@media (min-width: 480px)  { :where(.prose) { max-width: 26rem; } }
+	@media (min-width: 640px)  { :where(.prose) { max-width: 32rem; } }
+	@media (min-width: 1024px) { :where(.prose) { max-width: 38rem; } }
+	@media (min-width: 1280px) { :where(.prose) { max-width: 38rem; } }
+	@media (min-width: 1536px) { :where(.prose) { max-width: 46rem; } }
+
+	:where(.prose) h1 {
+		/* Display role from tokens.json. Discrete sizes at breakpoints (not
+		 * fluid clamp scaling) so wrap points snap at sm and lg rather than
+		 * shifting continuously as the viewport resizes. */
+		font-size: 2.25rem;
+		font-weight: var(--role-display-weight);
+		line-height: var(--role-display-line-height);
+		letter-spacing: var(--role-display-tracking);
+		margin-top: 0;
+		margin-bottom: 1.5rem;
+		background: linear-gradient(to right,
+			var(--foreground) 0%,
+			color-mix(in oklch, var(--foreground) 70%, transparent) 100%);
+		-webkit-background-clip: text;
+		background-clip: text;
+		color: transparent;
+	}
+	@media (min-width: 640px)  { :where(.prose) h1 { font-size: 3rem; } }
+	@media (min-width: 1024px) { :where(.prose) h1 { font-size: var(--role-display-size); } }
+
+	:where(.prose) h2 { font-size: 1.5rem; font-weight: 700; margin-top: 2rem; margin-bottom: 0.75rem; line-height: 1.3; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+	:where(.prose) h3 { font-size: 1.25rem; font-weight: 600; margin-top: 1.6rem; margin-bottom: 0.6rem; }
+	:where(.prose) p { margin-top: 0; margin-bottom: 1.25rem; }
+
+	:where(.prose) a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+	:where(.prose) a:hover { opacity: 0.8; }
+	:where(.prose) strong { font-weight: 600; }
+	:where(.prose) ul, :where(.prose) ol { margin-top: 0; margin-bottom: 1.25rem; padding-left: 1.625rem; }
+	:where(.prose) ul { list-style-type: disc; }
+	:where(.prose) ol { list-style-type: decimal; }
+	:where(.prose) li { margin-top: 0.25rem; margin-bottom: 0.25rem; }
+	:where(.prose) code { font-size: 0.875em; background: var(--muted); padding: 0.2em 0.4em; border-radius: 0.25rem; }
+	:where(.prose) pre { background: var(--muted); padding: 1rem; border-radius: 0.5rem; overflow-x: auto; margin-top: 0; margin-bottom: 1.25rem; }
+	:where(.prose) pre code { background: none; padding: 0; font-size: 0.875em; }
+
+	:where(.prose) blockquote { border-left: 4px solid var(--border); padding-left: 1rem; margin-left: 0; margin-right: 0; color: var(--muted-foreground); }
+	:where(.prose) hr { border-color: var(--border); margin: 2rem 0; }
+	:where(.prose) table { width: 100%; border-collapse: collapse; margin-bottom: 1.25rem; }
+	:where(.prose) th, :where(.prose) td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+	:where(.prose) th { font-weight: 600; background: var(--muted); }
+	:where(.prose) .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
+	:where(.prose) .meta table { width: auto; }
+	:where(.prose) .meta th { font-weight: 500; background: none; white-space: nowrap; }
+	:where(.prose) .meta td { color: var(--foreground); }
+
+	/* Sections wrap each h2 and its following content (via the
+	 * rehype-section-wrapper plugin) in a white-background card so the
+	 * docs read as a stack of content blocks against the textured page.
+	 *
+	 * Notched top-right corner (24px diagonal cut) gives Aileron a
+	 * distinctive aviation/instrument-panel feel without using color.
+	 * Other corners are sharp because clip-path doesn't compose with
+	 * border-radius. The shadow uses filter: drop-shadow rather than
+	 * box-shadow so it follows the clipped polygon shape — box-shadow
+	 * would render a rectangular shadow and break the illusion. */
+	:where(.prose-section) {
+		background: var(--card);
+		color: var(--card-foreground);
+		border-radius: var(--radius-lg);
+		box-shadow: var(--shadow-low);
+		padding: 2rem;
+		margin: 2rem 0;
+	}
+	:where(.prose-section) > :first-child { margin-top: 0; }
+	:where(.prose-section) > :last-child { margin-bottom: 0; }
+	:where(.prose-section) > h2:first-child {
+		/* h2 has top margin to space it from prior siblings outside a section.
+		 * Inside a section it's the first child so the section's own padding
+		 * handles spacing. Also strip the bottom border since the section
+		 * itself separates blocks visually. */
+		margin-top: 0;
+		border-bottom: none;
+		padding-bottom: 0;
+	}
+
+	/* Code-block copy button injected by rehype-copy-button.mjs.
+	 * The wrapper is positioned relative so the button can hover over the top-right
+	 * corner of the <pre>. The <pre>'s own bottom margin moves to the wrapper so
+	 * the layout stays identical to the un-wrapped version.
+	 *
+	 * Wrapped code blocks are commands (the language-fenced ones the
+	 * plugin opted in). Style them with a left-border accent and a `$`
+	 * prompt as a ::before pseudo-element so the visual cue says
+	 * "this is meant to be typed/copy-pasted". The prompt is decorative-
+	 * only — it lives outside DOM text, so `pre.textContent` (used by
+	 * the copy handler) reads only the actual command bytes. */
+	:where(.prose) .code-block-wrapper { position: relative; margin-bottom: 1.25rem; }
+	:where(.prose) .code-block-wrapper > pre {
+		position: relative;
+		margin-bottom: 0;
+		padding-left: 2.5rem;
+	}
+	:where(.prose) .code-block-wrapper > pre::before {
+		content: "$";
+		position: absolute;
+		top: 1rem;          /* match the <pre>'s padding-top */
+		left: 0.75rem;
+		color: var(--muted-foreground);
+		/* font-family / font-size / line-height intentionally omitted —
+		 * they inherit from <pre> so the `$` baseline lines up with the
+		 * first line of code text. */
+		user-select: none;
+		pointer-events: none;
+	}
+	:where(.prose) .code-copy-button {
+		position: absolute;
+		top: 0.5rem;
+		right: 0.5rem;
+		/* `<pre>` is now position: relative (for the $ prompt), which puts
+		 * it in the positioned-elements paint layer alongside this button.
+		 * Without z-index, the <pre> paints on top because it comes after
+		 * the button in document order. */
+		z-index: 1;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.375rem;
+		line-height: 0;
+		color: var(--muted-foreground);
+		background: var(--background);
+		border: 1px solid var(--border);
+		border-radius: 0.25rem;
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 0.15s ease, color 0.15s ease;
+	}
+	:where(.prose) .code-block-wrapper:hover .code-copy-button,
+	:where(.prose) .code-block-wrapper:focus-within .code-copy-button,
+	:where(.prose) .code-copy-button:focus-visible { opacity: 1; }
+	:where(.prose) .code-copy-button:hover { color: var(--foreground); }
+	:where(.prose) .code-copy-button.is-copied { color: var(--foreground); opacity: 1; }
+	/* Toggle clipboard ↔ check icons via the .is-copied class. */
+	:where(.prose) .code-copy-button .icon-check { display: none; }
+	:where(.prose) .code-copy-button.is-copied .icon-clipboard { display: none; }
+	:where(.prose) .code-copy-button.is-copied .icon-check { display: inline-block; }
 }
-.prose .code-block-wrapper > pre::before {
-	content: "$";
-	position: absolute;
-	top: 1rem;          /* match the <pre>'s padding-top */
-	left: 0.75rem;
-	color: var(--muted-foreground);
-	/* font-family / font-size / line-height intentionally omitted —
-	 * they inherit from <pre> so the `$` baseline lines up with the
-	 * first line of code text. */
-	user-select: none;
-	pointer-events: none;
-}
-.prose .code-copy-button {
-	position: absolute;
-	top: 0.5rem;
-	right: 0.5rem;
-	/* `<pre>` is now position: relative (for the $ prompt), which puts
-	 * it in the positioned-elements paint layer alongside this button.
-	 * Without z-index, the <pre> paints on top because it comes after
-	 * the button in document order. */
-	z-index: 1;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	padding: 0.375rem;
-	line-height: 0;
-	color: var(--muted-foreground);
-	background: var(--background);
-	border: 1px solid var(--border);
-	border-radius: 0.25rem;
-	cursor: pointer;
-	opacity: 0;
-	transition: opacity 0.15s ease, color 0.15s ease;
-}
-.prose .code-block-wrapper:hover .code-copy-button,
-.prose .code-block-wrapper:focus-within .code-copy-button,
-.prose .code-copy-button:focus-visible { opacity: 1; }
-.prose .code-copy-button:hover { color: var(--foreground); }
-.prose .code-copy-button.is-copied { color: var(--foreground); opacity: 1; }
-/* Toggle clipboard ↔ check icons via the .is-copied class. */
-.prose .code-copy-button .icon-check { display: none; }
-.prose .code-copy-button.is-copied .icon-clipboard { display: none; }
-.prose .code-copy-button.is-copied .icon-check { display: inline-block; }
-.prose blockquote { border-left: 4px solid var(--border); padding-left: 1rem; margin-left: 0; margin-right: 0; color: var(--muted-foreground); }
-.prose hr { border-color: var(--border); margin: 2rem 0; }
-.prose table { width: 100%; border-collapse: collapse; margin-bottom: 1.25rem; }
-.prose th, .prose td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
-.prose th { font-weight: 600; background: var(--muted); }
-.prose .meta { font-size: 0.8125rem; color: var(--muted-foreground); }
-.prose .meta table { width: auto; }
-.prose .meta th { font-weight: 500; background: none; white-space: nowrap; }
-.prose .meta td { color: var(--foreground); }
 
 /* Accordion open/close animation. bits-ui Accordion sets
  * `--bits-accordion-content-height` on the Content element to its
@@ -178,16 +266,36 @@
  * `overflow: hidden` so clipping works while height is below the
  * natural value — that's set on the component via Tailwind. */
 @keyframes accordion-down {
-	from { height: 0; }
-	to { height: var(--bits-accordion-content-height); }
+	from { height: 0; opacity: 0; }
+	to { height: var(--bits-accordion-content-height); opacity: 1; }
 }
 @keyframes accordion-up {
-	from { height: var(--bits-accordion-content-height); }
-	to { height: 0; }
+	from { height: var(--bits-accordion-content-height); opacity: 1; }
+	to { height: 0; opacity: 0; }
 }
+/* GitHub icon shake animation (ported from itshover's animated GitHub icon).
+ * On hover of the link wrapper, the inner <g> shakes with a combined
+ * scale-pulse and rotation wiggle over 500ms. transform-box: fill-box
+ * pins the rotation origin to the group's bounding box center so the
+ * icon rotates around itself rather than the SVG origin. */
+@keyframes github-icon-shake {
+	0%   { transform: scale(1)    rotate(0deg); }
+	25%  { transform: scale(1.08) rotate(-5deg); }
+	50%  { transform: scale(1.1)  rotate(0deg); }
+	75%  { transform: scale(1.08) rotate(5deg); }
+	100% { transform: scale(1)    rotate(0deg); }
+}
+.github-icon-link .github-icon-inner {
+	transform-box: fill-box;
+	transform-origin: center;
+}
+.github-icon-link:hover .github-icon-inner {
+	animation: github-icon-shake 500ms ease-in-out;
+}
+
 .cn-accordion-content[data-state="open"] {
 	animation: accordion-down 250ms ease-out forwards;
 }
 .cn-accordion-content[data-state="closed"] {
-	animation: accordion-up 250ms ease-in forwards;
+	animation: accordion-up 250ms ease-out forwards;
 }

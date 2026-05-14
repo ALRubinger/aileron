@@ -57,12 +57,12 @@
 
 	const triggerClass = cn(
 		"flex w-full items-center justify-between py-3 text-left text-sm font-medium",
-		"hover:underline focus-visible:outline-1 focus-visible:outline-ring",
+		"cursor-pointer hover:bg-muted/60 transition-colors duration-150 px-3 -mx-3 rounded-md focus-visible:outline-1 focus-visible:outline-ring",
 		"[&[data-state=open]>svg]:rotate-180"
 	);
 	const itemClass = "border-b border-border";
 	const contentClass = cn(
-		"cn-accordion-content overflow-hidden pb-4 text-sm",
+		"cn-accordion-content overflow-hidden text-sm",
 		"[&_pre]:my-2"
 	);
 </script>
@@ -81,7 +81,7 @@
 				<ChevronDown size={16} class="shrink-0 transition-transform" />
 			</AccordionPrimitive.Trigger>
 		</AccordionPrimitive.Header>
-		<AccordionPrimitive.Content class={contentClass}>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>Get lint feedback locally ahead of CI.</p>
 			<PlatformTabs items={golangciLintInstall} />
 		</AccordionPrimitive.Content>
@@ -94,7 +94,7 @@
 				<ChevronDown size={16} class="shrink-0 transition-transform" />
 			</AccordionPrimitive.Trigger>
 		</AccordionPrimitive.Header>
-		<AccordionPrimitive.Content class={contentClass}>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>GitHub's CLI, used by the PR workflow.</p>
 			<PlatformTabs items={ghInstall} />
 		</AccordionPrimitive.Content>
@@ -107,7 +107,7 @@
 				<ChevronDown size={16} class="shrink-0 transition-transform" />
 			</AccordionPrimitive.Trigger>
 		</AccordionPrimitive.Header>
-		<AccordionPrimitive.Content class={contentClass}>
+		<AccordionPrimitive.Content forceMount class={contentClass}>
 			<p>
 				Only required if you're touching the Docker images under <code>deploy/</code>.
 			</p>
