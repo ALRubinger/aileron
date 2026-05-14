@@ -1,6 +1,6 @@
 ---
 title: "ADR-0013: Connector Hub and Trust Distribution"
-description: "The Hub points to connectors at their canonical github://owner/repo FQNs without hosting artifacts or vetting publishers. Trust granularity is per-repo for v0.x with per-publisher (Microsoft model) as the v2 direction. Daemon-fronted, multi-client. Sigstore deferred."
+description: "The Hub points to actions, suites, and connectors at their canonical github://owner/repo FQNs without hosting artifacts or vetting publishers. Trust granularity is per-repo for v0.x with per-publisher (Microsoft model) as the v2 direction. Daemon-fronted, multi-client. Sigstore deferred."
 order: 13
 ---
 
@@ -9,7 +9,7 @@ order: 13
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-05-06</td></tr>
-  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/488">#488</a> (umbrella), <a href="https://github.com/ALRubinger/aileron/issues/408">#408</a> (trust granularity)</td></tr>
+  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/488">#488</a> (umbrella), <a href="https://github.com/ALRubinger/aileron/issues/408">#408</a> (trust granularity), <a href="https://github.com/ALRubinger/aileron/issues/709">#709</a> (action-first IA)</td></tr>
 </table>
 </div>
 
@@ -31,11 +31,31 @@ This ADR ratifies the resolved set of decisions. It supersedes the Hub-related p
 
 ### The Hub points; it does not host
 
-The Hub is a public GitHub repository at `aileron-connectors-hub`. Each connector entry is a YAML file recording the FQN of an existing repo, its publisher, the URL of the publisher's signing key, and metadata for discovery. The Hub stores no binaries, no manifests, no signed artifacts.
+The Hub is a public GitHub repository at `aileron-connectors-hub`. Each catalog entry is a YAML file recording the FQN of an existing artifact, the publisher, and metadata for discovery; connector entries additionally record the URL of the publisher's signing key. The Hub stores no binaries, no manifests, no signed artifacts.
 
 When a user discovers a connector via the Hub and runs `aileron connector install <fqn>`, the install pipeline fetches the binary from `<fqn>` (typically a GitHub release artifact) exactly as it does today. The Hub is not a fetch dependency for installs; it is a discovery and metadata source. A connector installable by FQN today remains installable when the Hub is offline.
 
 There is no `hub://` FQN scheme. Connectors carry their canonical `github://owner/repo` (or `gitlab://owner/repo`) FQN whether they are listed in the Hub or not.
+
+### What the Hub catalogs: actions, suites, and connectors
+
+When this ADR first shipped, the Hub held a single entry type: one YAML per connector under `connectors/`. That framing treats the *provider* as the unit of discovery. The trust model is built on it and remains correct. The connector is the unit of install, sandbox, capability policy, and OAuth grant.
+
+The unit of *discovery* is something else. Users come to the Hub asking what they can do. "Draft a Gmail." "Post a ship update." "Read my upcoming events." [ADR-0003](/adr/0003-action-model/) shipped actions as the right primitive for that intent. [#564](https://github.com/ALRubinger/aileron/issues/564) shipped action suites as bundles of related actions for one-command install. Neither is indexed in the Hub today, so a user has to already know an action's FQN before `aileron action add` is reachable. Discovery and the model of work do not line up.
+
+The Hub catalog now holds three entry types, each a YAML pointer to canonical artifacts:
+
+- `actions/*.yaml` — one entry per published action template.
+- `suites/*.yaml` — one entry per published action suite.
+- `connectors/*.yaml` — one entry per published connector. Unchanged.
+
+All three are pointers and metadata. The Hub still hosts nothing. The install pipeline ([ADR-0004](/adr/0004-dependency-resolution/)) is unchanged. An action install fetches the action template from its canonical FQN and walks declared connector dependencies exactly as it does today.
+
+Default browse leads with intent, not provider. The webapp `/hub` tab order is Suites, Actions, Providers (connectors). The CLI gains `aileron hub list actions` and `aileron hub list suites` alongside the unchanged `aileron hub list connectors`. `aileron hub search` queries all three indices and groups results by entry type.
+
+Action and suite entries decorate the existing trust gates; they do not replace them. An action install or a suite install produces a *composite* install-decision payload that walks the dependency closure and groups by unique connector authority. One trust panel per authority, however many actions are being installed. The per-authority contents (fingerprint, publisher footprint, risk indicators) are exactly what the connector-level install-decision payload returns today.
+
+Trust granularity is unaffected. Per-repo for v0.x and per-publisher v2 are the answers from "Trust is per-repo for v0.x" and "Per-publisher trust is the v2 direction" below. The progress of the IA shift is tracked in [#709](https://github.com/ALRubinger/aileron/issues/709).
 
 ### Anyone publishes; Aileron does not vet
 
@@ -142,13 +162,15 @@ The Hub-related portions of [ADR-0002](/adr/0002-connector-model) are superseded
 
 The install-time prompt becomes the moderation moment. With no Aileron vetting, the user's decision at first-install is the only trust gate. The prompt design is in #487.
 
-### For connector publishers
+### For publishers
 
-A publisher who wants to be discoverable opens a PR to `aileron-connectors-hub` with a YAML entry pointing at their `github://owner/repo` FQN. Aileron does not host the binary. The publisher continues to sign their releases with the key at `keys/publisher.pub` in their repo. Sigstore-style signing is not required for v0.x.
+A publisher who wants their connector to be discoverable opens a PR to `aileron-connectors-hub` with a YAML entry under `connectors/` pointing at their `github://owner/repo` FQN. Aileron does not host the binary. The publisher continues to sign their releases with the key at `keys/publisher.pub` in their repo. Sigstore-style signing is not required for v0.x.
+
+A publisher who wants their action template or suite to be discoverable opens a PR adding a YAML entry under `actions/` or `suites/` pointing at the canonical FQN of the artifact in their repo. These entries carry description, intents, and category metadata for discovery. They do not affect the install pipeline, which still walks the action's declared connector dependencies through the resolver in [ADR-0004](/adr/0004-dependency-resolution/).
 
 ### For consumers
 
-Discovery is via the Hub: `aileron hub search`, the webapp's Hub page, or organic browsing of the `aileron-connectors-hub` repo. Trust is a separate decision: `aileron keyring trust` ahead of time, or accept the install-time prompt. The Hub does not bypass the trust step.
+Discovery is via the Hub. The default browse leads with intent: the webapp's Suites tab, the Actions tab, then Providers. CLI users reach the same indices through `aileron hub list actions`, `aileron hub list suites`, and `aileron hub list connectors`; `aileron hub search` queries all three and groups results by type. Trust is a separate decision: `aileron keyring trust` ahead of time, or accept the install-time prompt. The Hub does not bypass the trust step.
 
 ### For the daemon
 
@@ -156,7 +178,9 @@ The daemon gains responsibility for Hub data: shallow-clone-per-query of the Hub
 
 ## Examples
 
-### Hub entry
+### Hub entries
+
+**Connector entry** (`connectors/*.yaml`):
 
 ```yaml
 fqn: github://ALRubinger/aileron-connector-google
@@ -166,18 +190,59 @@ key_url: https://raw.githubusercontent.com/ALRubinger/aileron-connector-google/m
 release_pattern: v*
 ```
 
+**Action entry** (`actions/*.yaml`):
+
+```yaml
+fqn: github://ALRubinger/aileron-connector-google/actions/draft-email
+description: Draft a Gmail message with subject, recipients, and body
+publisher_github: ALRubinger
+connector_fqn: github://ALRubinger/aileron-connector-google
+intents: ["draft email", "compose gmail"]
+category: communication
+```
+
+**Suite entry** (`suites/*.yaml`):
+
+```yaml
+fqn: github://ALRubinger/aileron-connector-google/suite
+description: Read and draft Gmail; read and create calendar events
+publisher_github: ALRubinger
+member_actions:
+  - github://ALRubinger/aileron-connector-google/actions/list-recent-emails
+  - github://ALRubinger/aileron-connector-google/actions/draft-email
+  - github://ALRubinger/aileron-connector-google/actions/list-upcoming-events
+  - github://ALRubinger/aileron-connector-google/actions/create-event
+connectors_required:
+  - github://ALRubinger/aileron-connector-google
+category: communication
+```
+
+`connectors_required` on a suite entry is the union of its member actions' connector dependencies. It is informational metadata for discovery and not part of any trust grant.
+
 ### Daemon HTTP API
 
 ```
-GET  /v1/hub/connectors                  # list all entries
-GET  /v1/hub/connectors?q=<query>        # keyword search
-GET  /v1/hub/connectors/{fqn}            # single entry
-GET  /v1/hub/install-decision/{fqn}      # pre-computed install-decision payload
+GET  /v1/hub/connectors                          # list all connector entries
+GET  /v1/hub/connectors?q=<query>                # keyword search across connectors
+GET  /v1/hub/connector?fqn=<fqn>                 # single connector entry
+GET  /v1/hub/install-decision?fqn=<fqn>          # connector-level install-decision payload
+
+GET  /v1/hub/actions                             # list all action entries
+GET  /v1/hub/actions?q=<query>                   # keyword search across actions
+GET  /v1/hub/action?fqn=<fqn>                    # single action entry
+GET  /v1/hub/install-decision?action_fqn=<fqn>   # composite install-decision payload for action install
+
+GET  /v1/hub/suites                              # list all suite entries
+GET  /v1/hub/suites?q=<query>                    # keyword search across suites
+GET  /v1/hub/suite?fqn=<fqn>                     # single suite entry
+GET  /v1/hub/install-decision?suite_fqn=<fqn>    # composite install-decision payload for suite install
 ```
+
+FQN-bearing endpoints take `fqn` (or `action_fqn` / `suite_fqn`) as a query parameter rather than a path parameter. Go's `http.ServeMux` `{name}` pattern matches single path segments only, and FQNs carry `://` and `/`. Clients pass FQNs URL-encoded in standard query-string form.
 
 ### Install-decision payload (sketch)
 
-The payload shape is finalized in #487. At minimum:
+The connector-level payload shape is finalized in [#487](https://github.com/ALRubinger/aileron/issues/487). At minimum:
 
 ```json
 {
@@ -194,3 +259,34 @@ The payload shape is finalized in #487. At minimum:
 ```
 
 The CLI renders this in a terminal y/N prompt; the webapp renders it in a modal. Both surfaces consume the same payload.
+
+### Composite install-decision payload (sketch)
+
+An action or suite install walks the dependency closure and groups by unique connector authority. Each `authorities[]` entry carries the same fields the connector-level payload returns. The top level adds metadata for the action or suite being installed. Concrete shape finalized in an [#487](https://github.com/ALRubinger/aileron/issues/487) sibling tracked under [#709](https://github.com/ALRubinger/aileron/issues/709).
+
+```json
+{
+  "kind": "suite",
+  "fqn": "github://ALRubinger/aileron-connector-google/suite",
+  "description": "Read and draft Gmail; read and create calendar events",
+  "publisher_github": "ALRubinger",
+  "member_actions": [
+    "github://ALRubinger/aileron-connector-google/actions/list-recent-emails",
+    "github://ALRubinger/aileron-connector-google/actions/draft-email"
+  ],
+  "authorities": [
+    {
+      "fqn": "github://ALRubinger/aileron-connector-google",
+      "publisher_github": "ALRubinger",
+      "fingerprint": "sha256:i4l2kuD8q++d5b9v8/LLI1",
+      "trust_state": "unknown",
+      "publisher_footprint": ["github://ALRubinger/aileron-connector-slack"],
+      "risk_indicators": [
+        "First connector by this publisher you've installed"
+      ]
+    }
+  ]
+}
+```
+
+The CLI renders one terminal y/N prompt per authority and aborts the install if any are declined. The webapp renders one modal with grouped trust panels and a single confirm action that fans out per-authority confirmations.
