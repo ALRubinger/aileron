@@ -105,6 +105,46 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  test-macos:
+    # Targeted macOS job: exercises the platform-specific spawn
+    # sandbox added in #721. The darwin-tagged code in
+    # internal/sandbox/spawn_sandbox_darwin.go generates the SBPL
+    # profile and shells out to /usr/bin/sandbox-exec, which only
+    # exists on macOS. The full test suite still runs on
+    # ubuntu-latest above; this job adds CI coverage for the
+    # //go:build darwin files that ubuntu-latest skips entirely.
+    #
+    # Scope is intentionally narrow to internal/sandbox/...: the
+    # darwin-tagged surface lives there, and broadening would
+    # double Codecov upload time without catching anything the
+    # ubuntu job doesn't already see.
+    name: Unit Tests (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: internal/go.mod
+
+      - name: Run platform-specific sandbox tests
+        shell: bash
+        run: |
+          set -e
+          (cd internal && go test -race -coverprofile=coverage-darwin-internal.txt ./sandbox/...)
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: ALRubinger/aileron
+          files: internal/coverage-darwin-internal.txt
+          # Merge with the Linux unit-test flag so codecov reports a
+          # single, combined "unit" coverage; macOS uploads add the
+          # *_darwin.go files that Linux runs cannot measure.
+          flags: unit
+
   test-windows:
     # Targeted Windows job: exercises the platform-specific lock and
     # process-detach primitives added for Windows support (#574) —
