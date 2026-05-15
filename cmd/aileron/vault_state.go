@@ -252,6 +252,13 @@ var commandsBypassingVaultPair = map[string]bool{
 	"daemon stop":   true,
 	"daemon start":  true,
 	"policy test":   true,
+	// BYOCLI commands (#749/#750) operate on local connector
+	// manifests and write credentials directly to the vault file
+	// — same shape as `secret set`. The state machine would
+	// double-prompt for the passphrase if it fired on top of the
+	// credential prompt inside `cli add`.
+	"cli add":     true,
+	"cli refresh": true,
 	"policy save":   true,
 }
 
