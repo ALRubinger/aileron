@@ -357,6 +357,8 @@ func runBinding(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runBindingSetup(args[1:], br, stdout, stderr)
 	case "rebind":
 		return runBindingRebind(args[1:], br, stdout, stderr)
+	case "reauthorize":
+		return runBindingReauthorize(args[1:], stdout, stderr)
 	case "revoke":
 		return runBindingRevoke(args[1:], br, stdout, stderr)
 	default:
@@ -373,11 +375,12 @@ func runBinding(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 var bindingBrowser oauth.Opener = oauth.SystemBrowser{}
 
 const bindingUsage = `usage:
-  aileron binding list   [--connector FQN] [--kind KIND] [--json]
-  aileron binding inspect <name>
-  aileron binding setup  <connector-FQN>
-  aileron binding rebind <name>
-  aileron binding revoke <name>`
+  aileron binding list        [--connector FQN] [--kind KIND] [--json]
+  aileron binding inspect     <name>
+  aileron binding setup       <connector-FQN>
+  aileron binding rebind      <name>
+  aileron binding reauthorize <name>
+  aileron binding revoke      <name>`
 
 // bindingAPIBaseURL returns the daemon's API base URL with the /v1
 // suffix.
@@ -581,6 +584,11 @@ func runBindingList(args []string, stdout, stderr io.Writer) int {
 		if st == "" {
 			st = "active"
 		}
+		// Append the stale reason inline so a stale binding's status
+		// is actionable at a glance — e.g. `stale (scope_drift)`.
+		if st == "stale" && b.StaleReason != "" {
+			st = st + " (" + b.StaleReason + ")"
+		}
 		fmt.Fprintf(stdout, "%-40s  %-10s  %-30s  %s\n", b.Name, b.Kind, b.ConnectorFQN, st)
 	}
 	return 0
@@ -624,6 +632,13 @@ func runBindingInspect(args []string, stdout, stderr io.Writer) int {
 	}
 	if !b.CreatedAt.IsZero() {
 		fmt.Fprintf(stdout, "Created:    %s\n", b.CreatedAt.Format("2006-01-02 15:04:05 UTC"))
+	}
+	if b.Status == "stale" && b.StaleReason != "" {
+		fmt.Fprintf(stdout, "Stale:      %s\n", b.StaleReason)
+		if len(b.MissingScopes) > 0 {
+			fmt.Fprintf(stdout, "Missing:    %s\n", strings.Join(b.MissingScopes, " "))
+		}
+		fmt.Fprintf(stdout, "Resolve:    aileron binding reauthorize %s\n", b.Name)
 	}
 	return 0
 }
@@ -846,6 +861,133 @@ func runBindingRebind(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 	return 0
 }
 
+// runBindingReauthorize refreshes the credential on an existing
+// binding. For OAuth bindings, drives the same loopback dance as
+// `binding setup` but with `purpose=reauthorize` so the server upserts
+// (preserving CreatedAt + Account + history) and builds the authorize
+// URL with `prompt=consent` — which Google requires to re-issue a
+// token against the manifest's current scope set rather than silently
+// reusing the user's prior consent. For api_key bindings, falls
+// through to the same prompt-and-PUT path as `rebind`.
+//
+// Use after a connector upgrade that adds OAuth scopes and the
+// webapp/CLI shows the binding as `stale`: this is the dedicated
+// "fix the drift" command.
+func runBindingReauthorize(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: aileron binding reauthorize <name>")
+		return 1
+	}
+	name := args[0]
+
+	// Fetch the existing binding so we know its kind, identity, etc.
+	status, body, err := bindingDoRequest(http.MethodGet, "/bindings/"+name, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if status == http.StatusNotFound {
+		fmt.Fprintf(stderr, "binding not found: %s\n", name)
+		return 1
+	}
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(body))
+		return 1
+	}
+	var existing bindingRow
+	if err := json.Unmarshal(body, &existing); err != nil {
+		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
+		return 1
+	}
+
+	if existing.Kind != "oauth2" {
+		fmt.Fprintf(stderr, "binding kind %q is not OAuth; use `aileron binding rebind %s` instead\n",
+			existing.Kind, name)
+		return 1
+	}
+
+	initBody, _ := json.Marshal(map[string]any{
+		"connector_fqn": existing.ConnectorFQN,
+		"identity":      existing.Identity,
+		"service":       existing.Service,
+		"account":       existing.Account,
+		"purpose":       "reauthorize",
+	})
+	initStatus, initRespBody, err := bindingDoRequest(http.MethodPost,
+		"/bindings/setup/oauth2/init", strings.NewReader(string(initBody)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if initStatus != http.StatusOK {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", initStatus, string(initRespBody))
+		return 1
+	}
+	return runBindingReauthorizeFinish(initRespBody, name, stdout, stderr)
+}
+
+// runBindingReauthorizeFinish drives the OAuth finish leg of a
+// reauthorize. Mirrors runBindingSetupOAuth2Finish but expects an
+// HTTP 200 (the server returns 201 on first-time create, 200 on
+// reauthorize upsert).
+func runBindingReauthorizeFinish(initRespBody []byte, name string, stdout, stderr io.Writer) int {
+	var initResp struct {
+		SessionID    string `json:"session_id"`
+		AuthorizeURL string `json:"authorize_url"`
+		RedirectURI  string `json:"redirect_uri"`
+	}
+	if err := json.Unmarshal(initRespBody, &initResp); err != nil {
+		fmt.Fprintf(stderr, "error parsing init response: %v\n", err)
+		return 1
+	}
+	port := portFromRedirectURI(initResp.RedirectURI)
+	if port == 0 {
+		fmt.Fprintf(stderr, "could not parse port from redirect_uri %q\n", initResp.RedirectURI)
+		return 1
+	}
+	listener, err := oauth.NewListener(port)
+	if err != nil {
+		fmt.Fprintf(stderr, "could not bind callback listener on port %d: %v\n", port, err)
+		return 1
+	}
+	defer listener.Close()
+
+	fmt.Fprintln(stdout, "Opening your browser to reauthorize. If it does not open, visit:")
+	fmt.Fprintln(stdout, "  "+initResp.AuthorizeURL)
+	if err := bindingBrowser.Open(initResp.AuthorizeURL); err != nil {
+		fmt.Fprintf(stderr, "(browser open failed; paste the URL above): %v\n", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cb, err := listener.Await(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "OAuth callback error: %v\n", err)
+		return 1
+	}
+
+	finishBody, _ := json.Marshal(map[string]any{
+		"session_id": initResp.SessionID,
+		"code":       cb.Code,
+		"state":      cb.State,
+	})
+	status, respBody, err := bindingDoRequest(http.MethodPost,
+		"/bindings/setup/oauth2/finish", strings.NewReader(string(finishBody)))
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	// Reauthorize returns 200; first-time setup returns 201. Accept
+	// either so a stray race (e.g. binding revoked between the init
+	// check and finish) reuses the same exit path.
+	if status != http.StatusOK && status != http.StatusCreated {
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return 1
+	}
+	fmt.Fprintf(stdout, "Reauthorized: %s\n", name)
+	return 0
+}
+
 // runBindingRevoke confirms with the user and DELETEs the binding.
 func runBindingRevoke(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
@@ -879,15 +1021,18 @@ func runBindingRevoke(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 // Defined here so the cmd/aileron module doesn't pull in the full
 // internal/api/gen package as a dependency.
 type bindingRow struct {
-	Name         string    `json:"name"`
-	Kind         string    `json:"kind"`
-	Service      string    `json:"service"`
-	Identity     string    `json:"identity"`
-	Scope        string    `json:"scope"`
-	ConnectorFQN string    `json:"connector_fqn"`
-	Account      string    `json:"account"`
-	CreatedAt    time.Time `json:"created_at"`
-	Status       string    `json:"status"`
+	Name          string    `json:"name"`
+	Kind          string    `json:"kind"`
+	Service       string    `json:"service"`
+	Identity      string    `json:"identity"`
+	Scope         string    `json:"scope"`
+	ConnectorFQN  string    `json:"connector_fqn"`
+	Account       string    `json:"account"`
+	CreatedAt     time.Time `json:"created_at"`
+	Status        string    `json:"status"`
+	GrantedScopes []string  `json:"granted_scopes,omitempty"`
+	StaleReason   string    `json:"stale_reason,omitempty"`
+	MissingScopes []string  `json:"missing_scopes,omitempty"`
 }
 
 // promptLine writes prompt to stdout and reads one line from stdin

@@ -114,6 +114,38 @@ func (s *VaultStore) Put(ctx context.Context, b Binding, value []byte, mode PutM
 	return nil
 }
 
+// UpdateMetadata implements [Store]. Reads the existing entry's
+// secret bytes from the vault, then re-puts with the same bytes plus
+// the binding's current metadata fields. The round-trip requires an
+// unlocked vault when the underlying vault encrypts at rest (the
+// EncryptedVault decorator) — callers that need lock-tolerant updates
+// must adapt the underlying vault, not this method.
+func (s *VaultStore) UpdateMetadata(ctx context.Context, b Binding) error {
+	if s == nil || s.Vault == nil {
+		return fmt.Errorf("binding: vault is not configured")
+	}
+	if b.Name == "" {
+		return fmt.Errorf("binding: name is required")
+	}
+	if _, _, _, _, err := Parse(string(b.Name)); err != nil {
+		return err
+	}
+	// Confirm existence with a metadata-only List read so the error
+	// shape is the stable ErrNotFound rather than a vault-specific
+	// surprise.
+	if _, err := s.Get(ctx, b.Name); err != nil {
+		return err
+	}
+	secret, err := s.Vault.Get(ctx, string(b.Name))
+	if err != nil {
+		return fmt.Errorf("binding: read vault entry %q: %w", b.Name, err)
+	}
+	if err := s.Vault.Put(ctx, string(b.Name), secret.Value, b.toMetadata()); err != nil {
+		return fmt.Errorf("binding: vault put: %w", err)
+	}
+	return nil
+}
+
 // Delete implements [Store].
 func (s *VaultStore) Delete(ctx context.Context, name Name) error {
 	if s == nil || s.Vault == nil {

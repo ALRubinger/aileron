@@ -84,6 +84,16 @@ type Store interface {
 	// when the binding does not exist.
 	Delete(ctx context.Context, name Name) error
 
+	// UpdateMetadata replaces the binding's metadata labels in place,
+	// preserving the credential bytes. Used by scope-drift detection to
+	// stamp Status / StaleReason / GrantedScopes / MissingScopes after
+	// an install reveals an existing binding no longer satisfies the
+	// connector's manifest. Returns ErrNotFound when the binding does
+	// not exist. The implementation may need the vault to be unlocked
+	// (round-tripping the encrypted value) and propagates whatever
+	// lock-state error the underlying vault returns.
+	UpdateMetadata(ctx context.Context, b Binding) error
+
 	// Resolve returns the single binding matching the given
 	// (connector FQN, kind) tuple. Returns ErrNotFound when none
 	// match and *AmbiguousError (wrapping ErrAmbiguous) when more

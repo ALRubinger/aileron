@@ -2829,6 +2829,14 @@ paths:
             schema:
               $ref: "#/components/schemas/OAuth2FinishRequest"
       responses:
+        "200":
+          description: |
+            Reauthorize succeeded. The binding's tokens, granted_scopes,
+            and stale-state labels have been refreshed in place.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Binding"
         "201":
           description: Binding created
           content:
@@ -5902,7 +5910,37 @@ components:
         status:
           type: string
           enum: [active, stale, revoked]
-          description: Coarse health flag. v1 always reports `active` for present bindings.
+          description: |
+            Coarse health flag. `stale` is set by drift detection at
+            connector-install time when the manifest's OAuth scope set
+            demands a scope the binding's recorded grant does not have,
+            or when a pre-existing binding has no recorded grant.
+        granted_scopes:
+          type: array
+          items: { type: string }
+          description: |
+            OAuth scope strings the provider confirmed on the most
+            recent successful handshake. Empty for non-OAuth kinds and
+            for OAuth bindings created before scope tracking landed
+            (those are migration-marked `stale` on first
+            install-after-upgrade).
+        stale_reason:
+          type: string
+          enum: [scope_drift, no_grant_record]
+          description: |
+            Populated when `status == "stale"`. `scope_drift` means the
+            connector manifest declares a scope this binding lacks;
+            `no_grant_record` means the binding predates scope tracking
+            and was migration-marked on the first install-after-upgrade.
+        missing_scopes:
+          type: array
+          items: { type: string }
+          description: |
+            Scope strings the current connector manifest demands but
+            this binding's recorded grant lacks. Populated when
+            `stale_reason == "scope_drift"` and empty otherwise. The
+            webapp/CLI render this so the user can see what
+            reauthorization will unlock.
 
     BindingListResponse:
       type: object
@@ -6017,6 +6055,18 @@ components:
         account:
           type: string
           description: Optional human-readable account label.
+        purpose:
+          type: string
+          enum: [setup, reauthorize]
+          default: setup
+          description: |
+            Distinguishes a first-time setup (default) from a scope-drift
+            reauthorize. `reauthorize` requires the named binding to
+            already exist; finish then upserts that binding (preserving
+            CreatedAt / Account) rather than creating a new one, and the
+            authorize URL is built with `prompt=consent` so the provider
+            re-prompts for the upgraded scope set instead of silently
+            reissuing from prior consent.
 
     OAuth2InitResponse:
       type: object

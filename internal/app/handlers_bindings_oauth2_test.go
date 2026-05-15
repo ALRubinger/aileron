@@ -350,6 +350,204 @@ func TestFinishOAuth2Binding_VaultLockedReturns423(t *testing.T) {
 	}
 }
 
+// TestFinishOAuth2Binding_CapturesGrantedScopesFromResponse: the
+// provider's token response carries a `scope` field listing the
+// scopes actually granted (which may be a subset of what we asked
+// for if the user de-selected some on the consent screen). Finish
+// must record that list — not the requested list — so subsequent
+// drift checks compare against truth.
+func TestFinishOAuth2Binding_CapturesGrantedScopesFromResponse(t *testing.T) {
+	const fqn = "github://acme/g"
+	fp := newFakeOAuthProvider(t)
+	// Provider grants only `read`, even though we asked for `read write`.
+	fp.tokenResponse = `{"access_token":"at","refresh_token":"rt","expires_in":3600,"scope":"read"}`
+	srv := oauth2TestServer(t, fp, fqn)
+
+	initRec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(initRec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init",
+		strings.NewReader(`{"connector_fqn":"`+fqn+`","identity":"work"}`)))
+	var initResp api.OAuth2InitResponse
+	_ = json.NewDecoder(initRec.Body).Decode(&initResp)
+	parsedURL, _ := url.Parse(initResp.AuthorizeUrl)
+	state := parsedURL.Query().Get("state")
+
+	body := `{"session_id":"` + initResp.SessionId + `","code":"c","state":"` + state + `"}`
+	rec := httptest.NewRecorder()
+	srv.FinishOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/finish", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got api.Binding
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got.GrantedScopes == nil || len(*got.GrantedScopes) != 1 || (*got.GrantedScopes)[0] != "read" {
+		t.Errorf("GrantedScopes = %v, want [read]", got.GrantedScopes)
+	}
+}
+
+// TestFinishOAuth2Binding_FallsBackToRequestedScopes: when the
+// provider omits `scope` from a successful token response, the
+// requested set is recorded — RFC 6749 §5.1 lets providers omit
+// `scope` when the granted set equals the requested set.
+func TestFinishOAuth2Binding_FallsBackToRequestedScopes(t *testing.T) {
+	const fqn = "github://acme/g"
+	fp := newFakeOAuthProvider(t)
+	// No `scope` field — implicit "granted = requested".
+	fp.tokenResponse = `{"access_token":"at","refresh_token":"rt","expires_in":3600}`
+	srv := oauth2TestServer(t, fp, fqn)
+
+	initRec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(initRec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init",
+		strings.NewReader(`{"connector_fqn":"`+fqn+`","identity":"work"}`)))
+	var initResp api.OAuth2InitResponse
+	_ = json.NewDecoder(initRec.Body).Decode(&initResp)
+	parsedURL, _ := url.Parse(initResp.AuthorizeUrl)
+	state := parsedURL.Query().Get("state")
+
+	body := `{"session_id":"` + initResp.SessionId + `","code":"c","state":"` + state + `"}`
+	rec := httptest.NewRecorder()
+	srv.FinishOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/finish", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got api.Binding
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	// Connector manifest's requested scopes are ["read","write"] (see
+	// installOAuth2Connector). Both should round-trip.
+	if got.GrantedScopes == nil || len(*got.GrantedScopes) != 2 {
+		t.Errorf("GrantedScopes = %v, want fallback to [read write]", got.GrantedScopes)
+	}
+}
+
+// TestInitOAuth2Binding_ReauthorizeRejectsWhenBindingMissing: init
+// with `purpose: reauthorize` requires the binding to already exist
+// — otherwise finish has nothing to upsert. Catching it at init
+// avoids walking the user through an OAuth consent screen for a flow
+// that's going to fail at the back end anyway.
+func TestInitOAuth2Binding_ReauthorizeRejectsWhenBindingMissing(t *testing.T) {
+	const fqn = "github://acme/g"
+	fp := newFakeOAuthProvider(t)
+	srv := oauth2TestServer(t, fp, fqn)
+
+	body := `{"connector_fqn":"` + fqn + `","identity":"work","purpose":"reauthorize"}`
+	rec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init", strings.NewReader(body)))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "binding_not_found") {
+		t.Errorf("body = %s", rec.Body.String())
+	}
+}
+
+// TestFinishOAuth2Binding_ReauthorizeUpsertsClearsStale: a reauthorize
+// of an existing binding marked `stale (scope_drift)` must (a)
+// preserve CreatedAt, (b) refresh GrantedScopes from the token
+// response, (c) clear StaleReason and MissingScopes, (d) return 200
+// (not 201). This is the load-bearing path from issue #726.
+func TestFinishOAuth2Binding_ReauthorizeUpsertsClearsStale(t *testing.T) {
+	const fqn = "github://acme/g"
+	fp := newFakeOAuthProvider(t)
+	// Provider now grants the upgraded scope set.
+	fp.tokenResponse = `{"access_token":"at2","refresh_token":"rt2","expires_in":3600,"scope":"read write"}`
+	srv := oauth2TestServer(t, fp, fqn)
+
+	// Seed a pre-existing stale binding for the same connector +
+	// service + identity.
+	ctx := context.Background()
+	bn, _ := binding.MakeName("oauth2", "g", "work")
+	seed := binding.Binding{
+		Name: bn, Kind: "oauth2", Service: "g", Identity: "work",
+		ConnectorFQN: fqn, Account: "alr@example.com",
+		Status: binding.StatusStale, StaleReason: binding.StaleReasonScopeDrift,
+		MissingScopes: []string{"write"},
+		GrantedScopes: []string{"read"},
+	}
+	if err := srv.bindings.Put(ctx, seed, []byte(`{"access_token":"old"}`), binding.PutCreate); err != nil {
+		t.Fatalf("seed Put: %v", err)
+	}
+	// Capture CreatedAt as the store stamped it.
+	stored, err := srv.bindings.Get(ctx, bn)
+	if err != nil {
+		t.Fatalf("Get seed: %v", err)
+	}
+	originalCreatedAt := stored.CreatedAt
+
+	// Drive init with purpose=reauthorize.
+	body := `{"connector_fqn":"` + fqn + `","identity":"work","purpose":"reauthorize"}`
+	initRec := httptest.NewRecorder()
+	srv.InitOAuth2Binding(initRec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init", strings.NewReader(body)))
+	if initRec.Code != http.StatusOK {
+		t.Fatalf("init status = %d: %s", initRec.Code, initRec.Body.String())
+	}
+	var initResp api.OAuth2InitResponse
+	_ = json.NewDecoder(initRec.Body).Decode(&initResp)
+
+	parsedURL, _ := url.Parse(initResp.AuthorizeUrl)
+	state := parsedURL.Query().Get("state")
+	// Reauthorize MUST set prompt=consent (so Google re-prompts for
+	// the upgraded scope set rather than silently reissuing).
+	if parsedURL.Query().Get("prompt") != "consent" {
+		t.Errorf("reauthorize authorize URL missing prompt=consent: %s", initResp.AuthorizeUrl)
+	}
+
+	finishBody := `{"session_id":"` + initResp.SessionId + `","code":"x","state":"` + state + `"}`
+	rec := httptest.NewRecorder()
+	srv.FinishOAuth2Binding(rec, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/finish", strings.NewReader(finishBody)))
+	if rec.Code != http.StatusOK {
+		t.Errorf("finish status = %d, want 200 (reauthorize upsert); body = %s",
+			rec.Code, rec.Body.String())
+	}
+
+	// Re-read the binding: stale state cleared, GrantedScopes
+	// refreshed, CreatedAt preserved, Account preserved.
+	got, err := srv.bindings.Get(ctx, bn)
+	if err != nil {
+		t.Fatalf("Get post-finish: %v", err)
+	}
+	if got.Status != binding.StatusActive {
+		t.Errorf("Status = %q, want active", got.Status)
+	}
+	if got.StaleReason != "" {
+		t.Errorf("StaleReason = %q, want empty", got.StaleReason)
+	}
+	if len(got.MissingScopes) != 0 {
+		t.Errorf("MissingScopes = %v, want empty", got.MissingScopes)
+	}
+	if len(got.GrantedScopes) != 2 || got.GrantedScopes[0] != "read" || got.GrantedScopes[1] != "write" {
+		t.Errorf("GrantedScopes = %v, want [read write]", got.GrantedScopes)
+	}
+	if !got.CreatedAt.Equal(originalCreatedAt) {
+		t.Errorf("CreatedAt = %v, want preserved %v", got.CreatedAt, originalCreatedAt)
+	}
+	if got.Account != "alr@example.com" {
+		t.Errorf("Account = %q, want preserved", got.Account)
+	}
+
+	// First-time setup MUST NOT include prompt=consent (user picked
+	// "reauthorize only" semantics). Re-run init with default purpose
+	// against an unbound identity and verify.
+	body2 := `{"connector_fqn":"` + fqn + `","identity":"second"}`
+	initRec2 := httptest.NewRecorder()
+	srv.InitOAuth2Binding(initRec2, httptest.NewRequest(http.MethodPost,
+		"/v1/bindings/setup/oauth2/init", strings.NewReader(body2)))
+	if initRec2.Code != http.StatusOK {
+		t.Fatalf("second init status = %d", initRec2.Code)
+	}
+	var initResp2 api.OAuth2InitResponse
+	_ = json.NewDecoder(initRec2.Body).Decode(&initResp2)
+	parsedURL2, _ := url.Parse(initResp2.AuthorizeUrl)
+	if parsedURL2.Query().Get("prompt") != "" {
+		t.Errorf("first-time setup must NOT force prompt=consent: %s", initResp2.AuthorizeUrl)
+	}
+}
+
 func TestOAuth2Sessions_TakeIsOneShot(t *testing.T) {
 	m := newOAuth2Sessions()
 	m.put("id1", &oauth2Session{})
@@ -543,7 +741,7 @@ func TestBuildAuthorizeURL_ComposesQueryString(t *testing.T) {
 		ClientID:     "abc",
 		Scopes:       []string{"read", "write"},
 	}
-	got := buildAuthorizeURL(o, "http://127.0.0.1:1234/callback", "state-x", "challenge-y")
+	got := buildAuthorizeURL(o, "http://127.0.0.1:1234/callback", "state-x", "challenge-y", false)
 	for _, want := range []string{
 		"https://provider.test/auth?",
 		"client_id=abc",
@@ -554,11 +752,30 @@ func TestBuildAuthorizeURL_ComposesQueryString(t *testing.T) {
 		"state=state-x",
 		"scope=read+write",
 		"access_type=offline",
-		"prompt=consent",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("authorize URL missing %q:\n%s", want, got)
 		}
+	}
+	// First-time setup must NOT force consent — that's reserved for
+	// reauthorize so the provider re-prompts for upgraded scopes.
+	if strings.Contains(got, "prompt=consent") {
+		t.Errorf("first-time setup URL contains prompt=consent: %s", got)
+	}
+}
+
+func TestBuildAuthorizeURL_ForceConsentSetsPromptParam(t *testing.T) {
+	// Reauthorize flow needs prompt=consent so Google re-prompts for
+	// the upgraded scope set instead of silently reissuing a token
+	// bound to the user's prior consent.
+	o := &cstore.ManifestOAuth2{
+		AuthorizeURL: "https://provider.test/auth",
+		ClientID:     "abc",
+		Scopes:       []string{"read"},
+	}
+	got := buildAuthorizeURL(o, "http://127.0.0.1/cb", "s", "c", true)
+	if !strings.Contains(got, "prompt=consent") {
+		t.Errorf("reauthorize URL missing prompt=consent: %s", got)
 	}
 }
 
@@ -570,7 +787,7 @@ func TestBuildAuthorizeURL_AppendsToURLWithExistingQuery(t *testing.T) {
 		ClientID:     "abc",
 		Scopes:       []string{"read"},
 	}
-	got := buildAuthorizeURL(o, "http://127.0.0.1/callback", "s", "c")
+	got := buildAuthorizeURL(o, "http://127.0.0.1/callback", "s", "c", false)
 	if !strings.Contains(got, "?prompt=login&") {
 		t.Errorf("URL with existing query not joined with `&`: %s", got)
 	}
@@ -582,7 +799,7 @@ func TestExchangeOAuth2Code_ProviderResponseMissingAccessToken(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	api := &apiServer{oauth2HTTPClient: srv.Client()}
-	_, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+	_, _, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
 		clientID:    "cid",
 		tokenURL:    srv.URL,
 		redirectURI: "http://127.0.0.1:0/callback",
@@ -600,7 +817,7 @@ func TestExchangeOAuth2Code_NetworkErrorIsBadGateway(t *testing.T) {
 	api := &apiServer{
 		oauth2HTTPClient: &http.Client{Transport: errTransport{}},
 	}
-	_, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+	_, _, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
 		clientID: "cid", tokenURL: "https://wont.respond.test",
 		redirectURI: "http://127.0.0.1:0/cb", verifier: "v",
 	}, "code")
@@ -615,7 +832,7 @@ func TestExchangeOAuth2Code_MalformedResponseIs422(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	api := &apiServer{oauth2HTTPClient: srv.Client()}
-	_, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+	_, _, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
 		clientID: "cid", tokenURL: srv.URL, redirectURI: "http://127.0.0.1:0/cb", verifier: "v",
 	}, "code")
 	if herr == nil || herr.status != http.StatusUnprocessableEntity {
@@ -646,7 +863,7 @@ func TestExchangeOAuth2Code_ForwardsClientSecretWhenSet(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	api := &apiServer{oauth2HTTPClient: srv.Client()}
-	tok, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+	tok, _, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
 		clientID:     "cid",
 		clientSecret: "csecret",
 		tokenURL:     srv.URL,
@@ -680,7 +897,7 @@ func TestExchangeOAuth2Code_OmitsClientSecretWhenUnset(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	api := &apiServer{oauth2HTTPClient: srv.Client()}
-	if _, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
+	if _, _, herr := api.exchangeOAuth2Code(context.Background(), &oauth2Session{
 		clientID: "cid", tokenURL: srv.URL,
 		redirectURI: "http://127.0.0.1:0/cb", verifier: "v",
 	}, "code"); herr != nil {

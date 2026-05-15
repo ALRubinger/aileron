@@ -71,7 +71,27 @@ type Installer struct {
 	Fetcher  Fetcher
 	Verifier Verifier
 	Store    *Store
+
+	// ScopeDriftHook, when non-nil, is invoked at the tail of every
+	// successful Install with the installed connector's FQN and the
+	// OAuth scope set its manifest declares (or nil when the connector
+	// does not declare OAuth2). The hook lets a layer above cstore
+	// (the daemon) iterate bindings against this connector and mark
+	// the ones whose recorded grant no longer satisfies the manifest
+	// as `stale`, surfacing a reauthorization prompt in the
+	// webapp/CLI. The hook is non-blocking from cstore's perspective —
+	// errors inside the hook are the daemon's responsibility, not the
+	// installer's, so the install result is unaffected.
+	//
+	// Defined here rather than in package binding so cstore stays free
+	// of binding/vault imports.
+	ScopeDriftHook ScopeDriftHook
 }
+
+// ScopeDriftHook is invoked after a successful install with the
+// installed connector's FQN and OAuth scope set. See
+// [Installer.ScopeDriftHook] for the contract.
+type ScopeDriftHook func(ctx context.Context, fqn string, requiredScopes []string)
 
 // InstallRequest is the input to Install. ExpectedHash is optional: when
 // supplied (typical for installs driven by an action file's declared
@@ -306,6 +326,7 @@ func (i *Installer) Install(ctx context.Context, req InstallRequest) (*InstallRe
 			if err := i.Store.recordIndex(req.Ref, req.ExpectedHash); err != nil {
 				return nil, err
 			}
+			i.runScopeDriftHook(ctx, req.Ref.FQN.String(), dir)
 			return &InstallResult{
 				Hash:             req.ExpectedHash,
 				EntryDir:         dir,
@@ -388,8 +409,49 @@ func (i *Installer) Install(ctx context.Context, req InstallRequest) (*InstallRe
 	}
 
 	dir, _ := i.Store.EntryDir(computed)
+	i.runScopeDriftHookWithManifest(ctx, req.Ref.FQN.String(), parsedManifest)
 	return &InstallResult{
 		Hash:     computed,
 		EntryDir: dir,
 	}, nil
+}
+
+// runScopeDriftHook reads the installed manifest from disk and invokes
+// the configured ScopeDriftHook. Used on the already-installed
+// short-circuit path where the parsed manifest isn't in hand. A
+// missing/unreadable manifest is treated as "no OAuth scopes" — the
+// hook still fires with a nil scope list so the migration-mark case
+// (binding has no recorded grant) can run.
+func (i *Installer) runScopeDriftHook(ctx context.Context, fqn, entryDir string) {
+	if i.ScopeDriftHook == nil {
+		return
+	}
+	mfBytes, err := readInstalledManifest(entryDir)
+	if err != nil {
+		i.ScopeDriftHook(ctx, fqn, nil)
+		return
+	}
+	parsed, err := ParseManifest("", mfBytes)
+	if err != nil {
+		i.ScopeDriftHook(ctx, fqn, nil)
+		return
+	}
+	i.runScopeDriftHookWithManifest(ctx, fqn, parsed)
+}
+
+// runScopeDriftHookWithManifest invokes ScopeDriftHook with the OAuth
+// scope set declared by parsed (or nil when the connector does not
+// declare OAuth2). Split from runScopeDriftHook so the full install
+// path (where the parsed manifest is already in hand) does not pay
+// for a re-read + re-parse.
+func (i *Installer) runScopeDriftHookWithManifest(ctx context.Context, fqn string, parsed *Manifest) {
+	if i.ScopeDriftHook == nil {
+		return
+	}
+	var scopes []string
+	if parsed != nil && parsed.Capabilities.Credential != nil &&
+		parsed.Capabilities.Credential.OAuth2 != nil {
+		scopes = parsed.Capabilities.Credential.OAuth2.Scopes
+	}
+	i.ScopeDriftHook(ctx, fqn, scopes)
 }
