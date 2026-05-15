@@ -1,27 +1,120 @@
 ---
 title: "Wrapping a CLI"
-description: "Turn a local CLI into an Aileron action surface with one command. No WASM build, no signing key, no publish cycle."
+description: "Turn an installed CLI into a sandboxed, audited action surface your agent can call. Two commands, no WASM, no signing key."
 ---
 
-If you have a CLI installed on your machine, you can give your agent access to it under Aileron's capability bounds without writing or building a connector. The `aileron action wrap` command does the work: it generates a manifest, lands it in the daemon's connector store, writes action files under `~/.aileron/actions/`, and the wrapped subcommands become tool calls the agent can invoke.
+If you have a CLI on your machine, BYOCLI gives your agent access to it under Aileron's capability bounds without writing or building a connector. Two install paths cover the common cases:
 
-This is the spawn primitive's payoff (per [ADR-0002](/adr/0002-connector-model)'s spawn-primitive section). Where [Authoring a Connector](/guides/authoring-a-connector/) is the path for new services that need their own WASM, this guide is the path for the long tail of existing CLIs (`git`, `gh`, `slackdump`, anything POSIX) that already do the work you want the agent to compose with.
+- `aileron pp add <name>` — for CLIs in the [PrintingPress](https://printingpress.dev/) catalog. One command resolves the entry, runs `go install`, introspects, and prompts for credentials.
+- `aileron cli add <path>` — for any installed CLI binary, including ones nobody has catalogued. You supply the path; the introspector does the rest.
+
+Both paths produce the same shape: a connector manifest at `~/.aileron/connectors/local/<name>/`, action files under `~/.aileron/actions/`, and a vault binding for any credential the CLI needs. The agent picks up the new tool calls the next time it queries.
+
+This is the spawn primitive's payoff (per [ADR-0002](/adr/0002-connector-model)'s spawn-primitive section). Where [Authoring a Connector](/guides/authoring-a-connector/) is the path for new services that need their own WASM, this is the path for the long tail of existing CLIs (`gh`, `slackdump`, anything that already does the work you want the agent to compose with).
 
 > **Not for iMessage.** Apple's data model is locked down enough that there is no usable CLI to wrap. The iMessage connector takes a different path: it talks over HTTP to a local [BlueBubbles](https://bluebubbles.app/) bridge that holds the platform permissions instead. See [Setting up BlueBubbles for Aileron](/guides/setting-up-bluebubbles/).
 
+## Quick start: PrintingPress
+
+```sh
+aileron pp add linear
+```
+
+That one command:
+
+1. Fetches PrintingPress's live `registry.json` and resolves `linear` to a Go module path.
+2. Surfaces the install plan — module path, source URL, binary name — and waits for your confirmation.
+3. Runs `go install github.com/mvanhorn/printing-press-library/library/project-management/linear@latest`. The `linear-pp-cli` binary lands in `$GOBIN`.
+4. Introspects `--help` inside the platform spawn sandbox, generates the manifest with default scopes (`$XDG_CONFIG_HOME/linear` for filesystem, the env vars the heuristic detects for credentials).
+5. Prompts once for the value of any detected credential (e.g. `LINEAR_API_KEY`) and stashes it in the local vault.
+6. Writes the manifest and one action file per declared operation.
+
+Requirements:
+
+- `go` on `$PATH`. PrintingPress entries are Go modules; the v1 install path is `go install`.
+- A platform Aileron's spawn sandbox supports (Linux, macOS, Windows). BSD/illumos are deny-spawn.
+
+Useful flags:
+
+- `--dry-run` — print the install plan and exit without `go install`. Useful for auditing what an entry would do.
+- `--edit` — open the inferred manifest in `$EDITOR` before confirming, so you can narrow scopes or trim operations.
+- `--no-credentials` — skip the credential heuristic and prompt entirely.
+- `-y, --yes` — non-interactive confirm (for scripts).
+
+## Quick start: any installed CLI
+
+When the CLI isn't in PrintingPress (or you've built your own), point `aileron cli add` at the binary directly:
+
+```sh
+aileron cli add /opt/homebrew/bin/gh
+```
+
+The flow is the same minus the catalog fetch and `go install`:
+
+1. Verifies the sandbox is available on the host.
+2. Runs `<binary> --help` inside the spawn sandbox (`fs_read=cwd` only, no network, 5s timeout, default output caps).
+3. Parses the help output for subcommands and credential env vars.
+4. Renders the inferred manifest and waits for confirmation.
+5. Writes the manifest + action files + vault binding.
+
+Same flags as `pp add`, plus:
+
+- `--name <name>` — override the on-disk connector name (default: binary basename).
+- `--credential <ENV>` — repeatable override for env vars the heuristic didn't pick up.
+- `--passphrase-file <path>` — non-interactive vault unlock for automated installs.
+
 ## What you get
 
-A connector that the daemon recognizes and the agent can call. Behind the scenes:
+The two installers produce the same connector shape. Both run under the same runtime path; the difference is how the binary got onto your machine.
 
 - The **manifest** describes which subcommands the agent may invoke, which arguments they take, which env vars get forwarded, and which filesystem scopes the CLI may touch.
 - The **embedded forwarder** is a tiny WASM binary that ships inside the Aileron daemon. It reads the agent's tool call, looks up the matching subcommand in your manifest, substitutes placeholders, and invokes `aileron_host.spawn_op`. You never write WASM.
 - The **runtime** enforces the manifest on every invocation. An argv shape the manifest does not declare is denied with a structured `capability_denied` error; the sandbox confines the subprocess (per [ADR-0014](/adr/0014-spawn-sandbox-technology)) to the declared filesystem and env scopes.
+- Every invocation emits an **audit event** with connector identity, argv shape, exit code, and content hashes. Local connectors carry an `origin: local` marker that distinguishes them in `aileron action list`'s ORIGIN column from hub-installed connectors.
 
-The result: a wrapped CLI is a manifest, signed and trusted by you locally. No third-party publisher, no WASM toolchain.
+## Trust trade-off: local vs publisher-signed
 
-## The 30-second path
+BYOCLI manifests are **user-trusted**, not publisher-signed. The trust anchor is "you installed this binary yourself" — same anchor `brew install` and `go install` rely on. There is no third-party publisher you're trusting beyond whoever shipped the binary.
 
-You have `gh` installed. You want the agent to use it.
+Hub-installed connectors via `aileron action add <FQN>` are different: they ship with a publisher signature the keyring verifies. The runtime refuses to install one without a trusted signature.
+
+For BYOCLI, the runtime's defense is enforcement: regardless of who shipped the wrapped binary, the kernel-level sandbox bounds what it can read, write, and reach. See the [Threat model](#threat-model) section for what wrapping does and doesn't defend against.
+
+Local connectors:
+
+- Aren't exportable across machines. Move to a new laptop, you re-run `aileron pp add` / `aileron cli add`.
+- Aren't shareable. To share, author + sign + publish via the [authored-connector path](/guides/authoring-a-connector/).
+- Carry an `origin: local` marker visible in `aileron action list`'s ORIGIN column.
+
+## Managing local connectors
+
+`aileron cli list` shows everything you've wrapped, with the binary path and operation count:
+
+```sh
+$ aileron cli list
+NAME      VERSION  PROGRAM                            OPERATIONS
+gh        0.0.1    /opt/homebrew/bin/gh               4
+linear    0.0.1    /Users/you/go/bin/linear-pp-cli    7
+sentry    0.0.1    /Users/you/go/bin/sentry-pp-cli    12
+```
+
+`aileron cli refresh <name>` re-introspects after a CLI upgrade. If the new `--help` exposes new subcommands or credential env vars, the refreshed manifest picks them up. Credentials already in the vault stay bound; refresh does not re-prompt.
+
+`aileron cli remove <name>` unregisters the connector and cleans up the action files. The vault binding stays around in case you want to reinstall later — remove it explicitly with `aileron binding remove` if you don't want the value sitting in the vault.
+
+## Manual wrap — when the BYOCLI flow doesn't fit
+
+Most CLIs work fine through `aileron cli add` or `aileron pp add`. The introspector handles the common case (subcommand-style CLIs with `--help` that lists what they do). For CLIs whose `--help` is unusual, or when you want full control over which subcommands and flags the agent sees, write a YAML spec and install it via `aileron action wrap --config=<file> --install`.
+
+When to reach for the manual path:
+
+- The CLI's `--help` doesn't list subcommands in a parseable form (custom output, no help command at all, bespoke flags).
+- You want to narrow what the agent can call below what the heuristic produces — only specific subcommands, specific flag patterns, tighter filesystem scopes.
+- You're packaging a wrap to commit to a repo or share with teammates. (Real sharing still belongs to the [authored-connector path](/guides/authoring-a-connector/), but the YAML is a useful intermediate.)
+
+### The 30-second YAML mode
+
+You have `gh` installed. You want the agent to use just the two PR subcommands.
 
 ```sh
 aileron action wrap --config=gh.yaml --install
@@ -64,24 +157,7 @@ subcommands:
 
 That's the whole connector. The agent now has two new tool calls (`pr-view`, `pr-list`); invoking either runs `gh` under the manifest's bounds.
 
-## Looking ahead: v3 will make this one command
-
-[Milestone v3](https://github.com/ALRubinger/aileron/issues/584) introduces a one-command flow for catalog-listed CLIs ([#580](https://github.com/ALRubinger/aileron/issues/580)). The shape:
-
-```sh
-aileron cli add linear
-# resolves through a registered tap, runs `go install`, introspects --help,
-# generates the manifest, prompts for credentials. Done.
-```
-
-A **tap** is a catalog (`registry.json`) of installable CLIs. [PrintingPress](https://printingpress.dev/) ships as the bundled default tap, covering its ~55 Go-installable CLIs out of the box. Other taps can be added with `aileron tap add <name> <url>`. The catalog pins by commit hash for reviewable provenance.
-
-The manual YAML path on this page stays useful in v3 for two cases:
-
-1. **CLIs not covered by any tap.** The `slackdump` and `gitcrawl` examples below are this case — they're not in PrintingPress, and they may never be.
-2. **Customizing a tap-generated manifest.** The `--help` introspection in v3 produces a scaffold. If you want narrower argv patterns, filesystem scopes, or non-default credential injection, you edit the YAML.
-
-Read the rest of this page as the underlying mechanism. v3's BYOCLI flow is a one-command wrapper around it for catalog CLIs.
+The rest of this page covers manual-wrap specifics: full worked examples, the YAML schema, argv patterns, filesystem and env scopes, and the threat model that applies to every wrap regardless of which path created it.
 
 ## Worked example: `slackdump`
 
@@ -391,37 +467,53 @@ limits:
 
 The caps cannot be disabled. Unbounded output is a load-bearing problem rather than a convenience one: a wrapped CLI's stdout flows back into the connector and ultimately into the agent's LLM context, and the agent treats it as data to consider. A subprocess that emits an arbitrary volume of attacker-chosen bytes is an attempt to overwhelm the agent's prompt. The cap bounds that side channel's blast radius. The schema rejects values past 64 MiB or values of zero (omit the field to use the default).
 
-## What `aileron cli add` shows you
+## What the installer shows you
 
-When [Milestone v3](https://github.com/ALRubinger/aileron/issues/584) ships the BYOCLI flow ([#580](https://github.com/ALRubinger/aileron/issues/580)), the install command will show the full inferred capability block before fetching the binary. The user makes two trust decisions at once: that the catalog and the upstream module are OK to install, and that the binary should have access to the listed scopes.
+Both `aileron pp add` and `aileron cli add` print the full inferred capability block before any binary lands. For `pp add`, the user makes two trust decisions at once: that the catalog and the upstream module are OK to install, and that the binary should have access to the listed scopes. For `cli add`, the binary is already on disk; the trust decision is just about scopes.
 
-The shape the runtime presents at install time:
+The shape the runtime presents at install time, using `pp add`:
 
 ```sh
-$ aileron cli add linear
+$ aileron pp add linear
 
-Tap:          printingpress (registry pinned at sha256:b3d4e2…)
-Module:       github.com/printing-press/linear-cli@v1.4.0
-Install:      go install github.com/printing-press/linear-cli@v1.4.0
+Install plan for linear:
+  Module:   github.com/mvanhorn/printing-press-library/library/project-management/linear@latest
+  Source:   https://github.com/mvanhorn/printing-press-library/tree/main/library/project-management/linear
+  Binary:   linear-pp-cli (installed to $GOBIN)
+  Wrap as:  local://user/linear
+  About:    Query Linear issues.
 
-This connector will be granted:
-  Filesystem read:   ~/.config/linear/                  [scope-default]
-  Filesystem write:  ~/.cache/linear/                   [scope-default]
-  Network hosts:     api.linear.app:443                 [from --help]
-  Environment vars:  LINEAR_API_TOKEN                   [credential-injected]
-  Output caps:       1 MiB stdout, 256 KiB stderr        [defaults]
-
-Proceed?  [y] yes  [e] edit  [n] no  [d] dry-run
+Run `go install` and wrap as a local connector? [y/N]:
 ```
 
-The display surfaces every grant the runtime will give the wrapped CLI. Two flags refine the flow:
+After `go install` runs and the introspector inspects `--help`, the inferred manifest preview follows:
 
-- `aileron cli add --dry-run <cli>` prints the manifest the introspector would emit and exits without fetching the binary. Useful for reviewing what the introspector inferred from `--help` before any install side effects occur.
-- `aileron cli add --edit <cli>` opens the inferred manifest in `$EDITOR` so you can narrow scopes or tweak operations before confirming. The runtime re-validates the edited manifest before continuing.
+```sh
+Inferred manifest:
+  Name:        local://user/linear
+  Version:     0.0.1
+  Origin:      local
+  Program:     /Users/you/go/bin/linear-pp-cli
+  Operations:  7
+    - issues   (argv: linear-pp-cli issues)
+    - create   (argv: linear-pp-cli create)
+    ...
+  FS read:
+    - /Users/you/.config/linear
+  FS write:
+    - /Users/you/.config/linear
+  Env passthrough: LINEAR_API_KEY
 
-Broad scopes (filesystem scope of `$HOME`, unrestricted network) are highlighted in the install-time display. The introspector defaults to the narrowest possible scope (`$XDG_CONFIG_HOME/<cli>` for FS, the hosts mentioned in `--help` for network); when the heuristic can't infer a narrow scope, it prompts rather than expanding silently.
+Install this local connector? [y/N]:
+```
 
-This UX spec is the contract; the implementation lands with [#580](https://github.com/ALRubinger/aileron/issues/580).
+Broad scopes (e.g. bare `$HOME`, an unrestricted top-level path) are highlighted with `[broad]` so the user sees them at a glance. The introspector defaults to the narrowest sensible scope (`$XDG_CONFIG_HOME/<cli>` per [#619](https://github.com/ALRubinger/aileron/issues/619)); paths the heuristic finds in `--help` get added as reads. Anything wider requires explicit confirmation via `--edit`.
+
+Three flags refine the flow:
+
+- `--dry-run` prints the manifest the introspector would emit and exits without `go install` (`pp add`) or writing anything (`cli add`).
+- `--edit` opens the inferred manifest in `$EDITOR` so you can narrow scopes or trim operations before confirming. The runtime re-validates the edited manifest before continuing.
+- `--no-credentials` skips the credential heuristic + prompt entirely, useful when the heuristic produces false positives.
 
 ## Threat model
 

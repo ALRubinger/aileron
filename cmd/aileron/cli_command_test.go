@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -371,6 +373,210 @@ func TestConfirm_EmptyRejects(t *testing.T) {
 	if confirm(strings.NewReader("\n"), &w, "ok?") {
 		t.Error("empty should reject (default no)")
 	}
+}
+
+func TestHashBinary_StableSHA256Prefix(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "small")
+	if err := os.WriteFile(path, []byte("aileron-byocli"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := hashBinary(path)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Errorf("hash missing sha256: prefix: %q", got)
+	}
+	if len(got) != len("sha256:")+64 {
+		t.Errorf("hash hex length unexpected: %d", len(got))
+	}
+	// Hash is deterministic; recompute and compare.
+	again, err := hashBinary(path)
+	if err != nil {
+		t.Fatalf("hash 2: %v", err)
+	}
+	if again != got {
+		t.Errorf("hash not deterministic: %q vs %q", got, again)
+	}
+}
+
+func TestHashBinary_RejectsMissingFile(t *testing.T) {
+	if _, err := hashBinary("/nonexistent/aileron-byocli-binary"); err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestRunCliAdd_PopulatesBinaryHash(t *testing.T) {
+	// `aileron cli add` must pin the binary's SHA-256 in the
+	// manifest's `programs[].hash` so the runtime's per-spawn
+	// integrity check fires per #619's decision. Verify the
+	// pinned hash matches a fresh sha256 of the binary's bytes.
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+	dir := t.TempDir()
+	fake := sandboxtest.FakeBinary{
+		Stdout: "Usage: hashme [command]\n\nCommands:\n  do  do thing\n",
+	}
+	binPath, err := fake.Write(dir, "hashme")
+	if err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runCliAdd(
+		[]string{"--yes", "--no-credentials", binPath},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "hashme", "manifest.toml")
+	body, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	m, err := cstore.ParseManifest(manifestPath, body)
+	if err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if len(m.Capabilities.Spawn.Programs) != 1 {
+		t.Fatalf("expected one program entry, got %d", len(m.Capabilities.Spawn.Programs))
+	}
+	pinned := m.Capabilities.Spawn.Programs[0].Hash
+	expected, err := hashBinary(binPath)
+	if err != nil {
+		t.Fatalf("compute expected: %v", err)
+	}
+	if pinned != expected {
+		t.Errorf("pinned=%q expected=%q", pinned, expected)
+	}
+}
+
+func TestRunCliAdd_EmitsActionFiles(t *testing.T) {
+	// Local-mode connectors are invisible to `aileron action
+	// list` if no action.md files exist for their operations.
+	// Verify cli add writes at least one action.md under
+	// ~/.aileron/actions/<name>-<op>.md.
+	//
+	// The exact `<op>` names emitted depend on the wrap
+	// introspector's `--help` parsing heuristic, which produces
+	// platform-dependent results (dash on Linux vs bash on
+	// macOS handle the FakeBinary's shell-script wrapper
+	// slightly differently). Assert structure rather than
+	// specific operation names so the contract under test is
+	// "action files are emitted with the right name prefix",
+	// not "the introspector finds these specific subcommands."
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+	dir := t.TempDir()
+	fake := sandboxtest.FakeBinary{
+		Stdout: "Usage: actcli [command]\n\nCommands:\n  list   List things\n  show   Show one\n",
+	}
+	binPath, err := fake.Write(dir, "actcli")
+	if err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runCliAdd(
+		[]string{"--yes", "--no-credentials", binPath},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	entries, err := os.ReadDir(actionsDir)
+	if err != nil {
+		t.Fatalf("read actions dir %s: %v", actionsDir, err)
+	}
+	emitted := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "actcli-") && strings.HasSuffix(e.Name(), ".md") {
+			emitted++
+		}
+	}
+	if emitted == 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("expected at least one actcli-*.md action file under %s, got entries: %v", actionsDir, names)
+	}
+}
+
+func TestRunCliRemove_DeletesActionFiles(t *testing.T) {
+	// cli remove must clean up the action.md files alongside the
+	// connector manifest, otherwise `aileron action list` shows
+	// stale entries that fail at execution time.
+	//
+	// The introspector's heuristic produces platform-dependent
+	// op names (see TestRunCliAdd_EmitsActionFiles); capture
+	// the actual set after add and assert that set is gone
+	// after remove, rather than hard-coding an op name.
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+	dir := t.TempDir()
+	fake := sandboxtest.FakeBinary{
+		Stdout: "Usage: rmcli\n\nCommands:\n  do   do thing\n",
+	}
+	binPath, err := fake.Write(dir, "rmcli")
+	if err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runCliAdd(
+		[]string{"--yes", "--no-credentials", binPath},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	); code != 0 {
+		t.Fatalf("add: exit=%d stderr=%s", code, stderr.String())
+	}
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	preEntries, err := os.ReadDir(actionsDir)
+	if err != nil {
+		t.Fatalf("read actions dir: %v", err)
+	}
+	preNames := matchingActionFiles(preEntries, "rmcli-")
+	if len(preNames) == 0 {
+		t.Fatal("no rmcli-*.md action files were emitted by cli add; nothing for remove to delete")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCliRemove([]string{"rmcli"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove: exit=%d stderr=%s", code, stderr.String())
+	}
+	postEntries, err := os.ReadDir(actionsDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("read actions dir post-remove: %v", err)
+	}
+	postNames := matchingActionFiles(postEntries, "rmcli-")
+	if len(postNames) != 0 {
+		t.Errorf("action files survived remove: %v", postNames)
+	}
+}
+
+// matchingActionFiles returns the entries whose name starts
+// with prefix and ends with `.md`. Test-local helper used by
+// the action-emit/remove tests to assert structural
+// invariants without pinning specific op names.
+func matchingActionFiles(entries []os.DirEntry, prefix string) []string {
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".md") {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func TestValidateConnectorName_RejectsBadShape(t *testing.T) {

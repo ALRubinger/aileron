@@ -154,6 +154,103 @@ func TestLooksLikeCredentialEnvName_RejectsShortTokens(t *testing.T) {
 	}
 }
 
+func TestActionFileName_DelegatesToInternal(t *testing.T) {
+	// Exported wrapper for callers outside the wrap package
+	// (notably `aileron cli add`). Verify the exported wrapper
+	// produces the same result as the internal helper for a
+	// representative input, so the wrapper isn't accidentally
+	// dropped or diverged.
+	spec := &Spec{Connector: ConnectorSpec{Name: "local://user/linear"}}
+	sub := SubcommandSpec{Name: "issues"}
+	if got, want := ActionFileName(spec, sub), "linear-issues.md"; got != want {
+		t.Errorf("ActionFileName=%q want %q", got, want)
+	}
+}
+
+func TestActionFileName_HandlesUnscopedConnector(t *testing.T) {
+	spec := &Spec{Connector: ConnectorSpec{Name: "barename"}}
+	sub := SubcommandSpec{Name: "do"}
+	if got, want := ActionFileName(spec, sub), "do.md"; got != want {
+		t.Errorf("ActionFileName=%q want %q (no scope → no prefix)", got, want)
+	}
+}
+
+func TestRenderActionMD_EmitsValidFrontmatter(t *testing.T) {
+	// Exported wrapper used by `aileron cli add` to write
+	// action.md files for local connectors. Verify the wrapper
+	// produces text the daemon's action loader will accept by
+	// asserting the front-matter delimiter and the canonical
+	// fields are present.
+	spec := &Spec{
+		Connector:   ConnectorSpec{Name: "local://user/linear", Version: "0.0.1"},
+		Subcommands: []SubcommandSpec{{Name: "issues", Description: "List issues"}},
+	}
+	sub := spec.Subcommands[0]
+	body := RenderActionMD(spec, sub, nil, "")
+	for _, want := range []string{
+		"+++",
+		`name = "issues"`,
+		`version = "0.0.1"`,
+		`[[requires.connectors]]`,
+		`name = "local://user/linear"`,
+		`hash = "sha256:bound-at-install"`,
+		`[[execute]]`,
+		`op = "issues"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("RenderActionMD output missing %q; got:\n%s", want, body)
+		}
+	}
+}
+
+func TestRenderActionMD_HonorsExplicitHash(t *testing.T) {
+	// When a concrete hash is supplied (publisher-signed
+	// install path), it replaces the placeholder.
+	spec := &Spec{
+		Connector:   ConnectorSpec{Name: "hub://aileron/foo", Version: "1.0.0"},
+		Subcommands: []SubcommandSpec{{Name: "do"}},
+	}
+	body := RenderActionMD(spec, spec.Subcommands[0], nil, "sha256:abcd")
+	if !strings.Contains(body, `hash = "sha256:abcd"`) {
+		t.Errorf("explicit hash not honored: %s", body)
+	}
+	if strings.Contains(body, "bound-at-install") {
+		t.Errorf("placeholder should not appear when explicit hash supplied: %s", body)
+	}
+}
+
+func TestActionSource_LocalFQNNoDoublePrefix(t *testing.T) {
+	// Regression test for #753: BYOCLI connectors use FQNs that
+	// already carry a `local://` scheme, so the legacy `local:`
+	// prefix actionSource added previously produced a confusing
+	// `local:local://...` double prefix. The fix returns
+	// `<FQN>/<op>@<version>` for any scheme-bearing FQN and
+	// preserves the `local:` prefix only for schemeless names.
+	scoped := &Spec{
+		Connector:   ConnectorSpec{Name: "local://user/linear", Version: "0.0.1"},
+		Subcommands: []SubcommandSpec{{Name: "issues"}},
+	}
+	if got := actionSource(scoped, scoped.Subcommands[0]); got != "local://user/linear/issues@0.0.1" {
+		t.Errorf("scoped local source=%q (should not double-prefix)", got)
+	}
+
+	hub := &Spec{
+		Connector:   ConnectorSpec{Name: "hub://aileron/foo", Version: "1.0.0"},
+		Subcommands: []SubcommandSpec{{Name: "do"}},
+	}
+	if got := actionSource(hub, hub.Subcommands[0]); got != "hub://aileron/foo/do@1.0.0" {
+		t.Errorf("hub source=%q", got)
+	}
+
+	bare := &Spec{
+		Connector:   ConnectorSpec{Name: "barename", Version: "0.0.1"},
+		Subcommands: []SubcommandSpec{{Name: "do"}},
+	}
+	if got := actionSource(bare, bare.Subcommands[0]); got != "local:barename/do@0.0.1" {
+		t.Errorf("schemeless source=%q (legacy local: prefix should apply)", got)
+	}
+}
+
 // wantContains asserts the slice contains all expected values.
 func wantContains(t *testing.T, got []string, want string) {
 	t.Helper()

@@ -141,11 +141,19 @@ func refForSpec(s *Spec) (cstore.Ref, error) {
 	return cstore.Ref{FQN: fqn, Version: s.Connector.Version}, nil
 }
 
-// actionFileName returns the local filename the action.md gets when
-// installed under ~/.aileron/actions/. The connector's leaf segment
-// (last path component of the FQN) is the prefix so wraps with
-// colliding op names (e.g. two CLIs both with a "list" op) do not
-// stomp each other.
+// ActionFileName returns the local filename the action.md gets
+// when installed under ~/.aileron/actions/. The connector's leaf
+// segment (last path component of the FQN) is the prefix so
+// wraps with colliding op names (e.g. two CLIs both with a
+// "list" op) do not stomp each other.
+//
+// Exported so callers outside this package — notably
+// `aileron cli add` (#749) — can write action files using the
+// same naming convention without re-implementing the rule.
+func ActionFileName(s *Spec, sub SubcommandSpec) string {
+	return actionFileName(s, sub)
+}
+
 func actionFileName(s *Spec, sub SubcommandSpec) string {
 	prefix := connectorLeaf(s.Connector.Name)
 	if prefix == "" {
@@ -236,6 +244,20 @@ func buildFiles(s *Spec, m *cstore.Manifest, manifestBytes []byte) map[string]st
 	return files
 }
 
+// RenderActionMD is the exported entry point for callers outside
+// this package (e.g. `aileron cli add` in #749). Equivalent to
+// the internal renderActionMD; kept as a small wrapper so the
+// internal signature can evolve without breaking callers.
+//
+// `connectorHash` may be empty for local-mode connectors
+// (LocalStore is name-addressed, not content-addressed); the
+// placeholder `sha256:bound-at-install` lands in the action's
+// `[[requires.connectors]].hash` field, and the action executor's
+// local-FQN router (#749) bypasses the hash lookup entirely.
+func RenderActionMD(s *Spec, sub SubcommandSpec, m *cstore.Manifest, connectorHash string) string {
+	return renderActionMD(s, sub, m, connectorHash)
+}
+
 // renderActionMD produces the action.md body the agent's tool
 // surface consumes for one subcommand. The format matches the
 // [action.Manifest] schema: TOML frontmatter delimited by `+++` and a
@@ -311,12 +333,28 @@ func renderActionMD(s *Spec, sub SubcommandSpec, _ *cstore.Manifest, connectorHa
 // expects `+++` lines on either side of TOML frontmatter.
 const frontmatterDelim = "+++"
 
-// actionSource produces the action's provenance source URL. For
-// locally-wrapped connectors there is no remote URL; use a local:
-// scheme so the field is non-empty (the action loader carries it as
-// metadata only).
+// actionSource produces the action's provenance source URL.
+// Three shapes:
+//
+//   - `<scheme>://<owner>/<repo>/<op>@<version>` — when the
+//     connector FQN already carries a URI scheme. Used by both
+//     hub-installed (`hub://...`) and BYOCLI (`local://user/...`)
+//     connectors. The action-list path uses the leading scheme
+//     to render the ORIGIN badge.
+//
+//   - `local:<FQN>/<op>@<version>` — fallback for the legacy
+//     `aileron action wrap --install` path, which can produce
+//     schemeless connector names. Carried as a single `local:`
+//     prefix so the action-list path classifies it as a WRAP.
 func actionSource(s *Spec, sub SubcommandSpec) string {
-	return "local:" + s.Connector.Name + "/" + sub.Name + "@" + s.Connector.Version
+	tail := "/" + sub.Name + "@" + s.Connector.Version
+	// FQNs with a scheme (`<scheme>://owner/repo`) round-trip as
+	// `<source>/<op>@<version>`; the action-list path derives
+	// the origin badge from the leading scheme.
+	if strings.Contains(s.Connector.Name, "://") {
+		return s.Connector.Name + tail
+	}
+	return "local:" + s.Connector.Name + tail
 }
 
 // actionIntent returns the agent-facing intent phrase for a subcommand.
