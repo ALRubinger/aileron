@@ -5,7 +5,8 @@ import userEvent from '@testing-library/user-event';
 vi.mock('$lib/api', () => ({
 	getHubActionInstallDecision: vi.fn(),
 	getHubSuiteInstallDecision: vi.fn(),
-	installAction: vi.fn()
+	installAction: vi.fn(),
+	startReauthorize: vi.fn()
 }));
 
 import Modal from './HubCompositeInstallModal.svelte';
@@ -13,6 +14,7 @@ import {
 	getHubActionInstallDecision,
 	getHubSuiteInstallDecision,
 	installAction,
+	startReauthorize,
 	type HubActionInstallDecision,
 	type HubSuiteInstallDecision,
 	type InstalledActionResult
@@ -71,6 +73,7 @@ beforeEach(() => {
 	vi.mocked(getHubActionInstallDecision).mockReset();
 	vi.mocked(getHubSuiteInstallDecision).mockReset();
 	vi.mocked(installAction).mockReset();
+	vi.mocked(startReauthorize).mockReset();
 });
 
 describe('HubCompositeInstallModal — action', () => {
@@ -423,5 +426,193 @@ describe('HubCompositeInstallModal — install (suite)', () => {
 		});
 		const btn = await screen.findByTestId('hub-composite-install-button');
 		expect(btn).toHaveTextContent(`Install suite (${suiteDecision.member_actions.length})`);
+	});
+});
+
+// --- #743 PR 3: in-browser reauthorize for stale bindings ---
+
+// reauthorizeFlow installs the action then surfaces a stale binding
+// the user can click Reauthorize on. Shared setup across the
+// reauthorize tests so each test only encodes its own assertion.
+async function reauthorizeFlow(staleName = 'oauth2/google/work') {
+	vi.mocked(getHubActionInstallDecision).mockResolvedValue(actionDecision);
+	vi.mocked(installAction).mockResolvedValue(
+		actionResult('draft-email', {
+			newly_stale_bindings: [
+				{
+					name: staleName,
+					connector_fqn: 'github://alice/conn-google',
+					stale_reason: 'scope_drift',
+					missing_scopes: ['drive'],
+					service: 'google'
+				}
+			]
+		})
+	);
+	const user = userEvent.setup();
+	render(Modal, {
+		props: { fqn: actionDecision.fqn, kind: 'action', onClose: () => {} }
+	});
+	await user.click(await screen.findByTestId('hub-composite-install-button'));
+	await waitFor(() => {
+		expect(screen.getByTestId('hub-composite-stale')).toBeInTheDocument();
+	});
+	return user;
+}
+
+describe('HubCompositeInstallModal — reauthorize (PR 3)', () => {
+	it('clicking Reauthorize calls startReauthorize with the binding tuple + caller=daemon implied', async () => {
+		const fakePopup = { focus: vi.fn(), closed: false } as unknown as Window;
+		vi.spyOn(window, 'open').mockReturnValue(fakePopup);
+		vi.mocked(startReauthorize).mockResolvedValue({
+			session_id: 's',
+			authorize_url: 'https://provider.test/authorize?state=abc',
+			redirect_uri: 'http://127.0.0.1:9999/v1/bindings/setup/oauth2/callback'
+		});
+		const user = await reauthorizeFlow();
+
+		await user.click(screen.getByTestId('hub-composite-reauthorize-button'));
+
+		await waitFor(() => expect(startReauthorize).toHaveBeenCalledTimes(1));
+		expect(startReauthorize).toHaveBeenCalledWith({
+			connector_fqn: 'github://alice/conn-google',
+			identity: 'work',
+			service: 'google',
+			return_to: window.location.origin + '/oauth-callback-relay'
+		});
+		// Popup opened with the daemon-supplied authorize URL.
+		expect(window.open).toHaveBeenCalledWith(
+			'https://provider.test/authorize?state=abc',
+			expect.stringContaining('aileron-oauth-'),
+			expect.any(String)
+		);
+	});
+
+	it('renders the awaiting state after the popup opens', async () => {
+		const fakePopup = { focus: vi.fn(), closed: false } as unknown as Window;
+		vi.spyOn(window, 'open').mockReturnValue(fakePopup);
+		vi.mocked(startReauthorize).mockResolvedValue({
+			session_id: 's',
+			authorize_url: 'https://provider.test/authorize',
+			redirect_uri: 'x'
+		});
+		const user = await reauthorizeFlow();
+		await user.click(screen.getByTestId('hub-composite-reauthorize-button'));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('hub-composite-reauthorize-button')).toHaveTextContent(
+				'Waiting for browser…'
+			);
+		});
+	});
+
+	it('flips the row to Reauthorized when the relay posts ok', async () => {
+		const fakePopup = { focus: vi.fn(), closed: false } as unknown as Window;
+		vi.spyOn(window, 'open').mockReturnValue(fakePopup);
+		vi.mocked(startReauthorize).mockResolvedValue({
+			session_id: 's',
+			authorize_url: 'https://provider.test/authorize',
+			redirect_uri: 'x'
+		});
+		const user = await reauthorizeFlow();
+		await user.click(screen.getByTestId('hub-composite-reauthorize-button'));
+		await waitFor(() => expect(startReauthorize).toHaveBeenCalled());
+
+		// Simulate the relay popup posting back the success message.
+		window.dispatchEvent(
+			new MessageEvent('message', {
+				data: {
+					type: 'aileron-oauth-callback',
+					status: 'ok',
+					binding: 'oauth2/google/work'
+				},
+				origin: window.location.origin
+			})
+		);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('hub-composite-stale-status')).toHaveTextContent('Reauthorized');
+		});
+	});
+
+	it('surfaces a popup-blocked failure when window.open returns null', async () => {
+		vi.spyOn(window, 'open').mockReturnValue(null);
+		vi.mocked(startReauthorize).mockResolvedValue({
+			session_id: 's',
+			authorize_url: 'https://provider.test/authorize',
+			redirect_uri: 'x'
+		});
+		const user = await reauthorizeFlow();
+		await user.click(screen.getByTestId('hub-composite-reauthorize-button'));
+
+		await waitFor(() => {
+			expect(screen.getByTestId('hub-composite-reauthorize-error')).toHaveTextContent(
+				'Popup blocked'
+			);
+		});
+		expect(screen.getByTestId('hub-composite-reauthorize-button')).toHaveTextContent(
+			'Retry reauthorize'
+		);
+	});
+
+	it('ignores postMessage from a foreign origin', async () => {
+		const fakePopup = { focus: vi.fn(), closed: false } as unknown as Window;
+		vi.spyOn(window, 'open').mockReturnValue(fakePopup);
+		vi.mocked(startReauthorize).mockResolvedValue({
+			session_id: 's',
+			authorize_url: 'https://provider.test/authorize',
+			redirect_uri: 'x'
+		});
+		const user = await reauthorizeFlow();
+		await user.click(screen.getByTestId('hub-composite-reauthorize-button'));
+		await waitFor(() => expect(startReauthorize).toHaveBeenCalled());
+
+		// Hostile message from another origin — modal must ignore it.
+		window.dispatchEvent(
+			new MessageEvent('message', {
+				data: {
+					type: 'aileron-oauth-callback',
+					status: 'ok',
+					binding: 'oauth2/google/work'
+				},
+				origin: 'https://attacker.example'
+			})
+		);
+
+		// Give the event loop a tick so a buggy handler would have run.
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(screen.queryByTestId('hub-composite-stale-status')).not.toBeInTheDocument();
+	});
+
+	it('reports a status=error postMessage as a retryable failure', async () => {
+		const fakePopup = { focus: vi.fn(), closed: false } as unknown as Window;
+		vi.spyOn(window, 'open').mockReturnValue(fakePopup);
+		vi.mocked(startReauthorize).mockResolvedValue({
+			session_id: 's',
+			authorize_url: 'https://provider.test/authorize',
+			redirect_uri: 'x'
+		});
+		const user = await reauthorizeFlow();
+		await user.click(screen.getByTestId('hub-composite-reauthorize-button'));
+		await waitFor(() => expect(startReauthorize).toHaveBeenCalled());
+
+		window.dispatchEvent(
+			new MessageEvent('message', {
+				data: {
+					type: 'aileron-oauth-callback',
+					status: 'error',
+					binding: 'oauth2/google/work'
+				},
+				origin: window.location.origin
+			})
+		);
+
+		await waitFor(() => {
+			expect(screen.getByTestId('hub-composite-reauthorize-error')).toHaveTextContent(
+				'Reauthorize was not completed'
+			);
+		});
+		// And the row's NOT marked done.
+		expect(screen.queryByTestId('hub-composite-stale-status')).not.toBeInTheDocument();
 	});
 });
