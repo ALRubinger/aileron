@@ -392,6 +392,136 @@ func TestRunCli_DispatchUnknown(t *testing.T) {
 	}
 }
 
+func TestRunCli_AliasesDispatch(t *testing.T) {
+	// `ls` is the conventional alias for `list`; `rm` for `remove`.
+	// Verify the dispatcher honors both shapes so users don't have
+	// to learn whether the CLI uses Unix or git-style command names.
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	if code := runCli([]string{"ls"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Errorf("`cli ls` exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No local connectors") {
+		t.Errorf("`ls` should render the list output, got %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	// `rm` on a missing entry should produce the same error
+	// shape as `remove`.
+	code := runCli([]string{"rm", "never-existed"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("`rm` on missing entry should exit nonzero")
+	}
+}
+
+func TestRunCliAdd_VersionOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+	dir := t.TempDir()
+	fake := sandboxtest.FakeBinary{
+		Stdout: "Usage: vercli [command]\n\nCommands:\n  do  do a thing\n",
+	}
+	binPath, err := fake.Write(dir, "vercli")
+	if err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCliAdd(
+		[]string{"--yes", "--version", "1.2.3", binPath},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "vercli", "manifest.toml")
+	body, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("manifest not written: %v", err)
+	}
+	m, err := cstore.ParseManifest(manifestPath, body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if m.Connector.Version != "1.2.3" {
+		t.Errorf("version override not honored: got %q want 1.2.3", m.Connector.Version)
+	}
+}
+
+func TestRunCliRefresh_RejectsMissingEntry(t *testing.T) {
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runCliRefresh(
+		[]string{"--yes", "never-installed"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Error("expected nonzero exit for missing entry")
+	}
+	if !strings.Contains(stderr.String(), "no local connector") {
+		t.Errorf("stderr should explain the missing entry: %q", stderr.String())
+	}
+}
+
+func TestRunCliRefresh_RequiresName(t *testing.T) {
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runCliRefresh(nil, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit without name arg")
+	}
+}
+
+func TestRunCliRemove_RequiresName(t *testing.T) {
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runCliRemove(nil, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit without name arg")
+	}
+}
+
+func TestRunCliRefresh_RejectsManifestWithoutSpawn(t *testing.T) {
+	// Defensive path: a local manifest with no [capabilities.spawn]
+	// can't be refreshed (no program to re-introspect). Seed one
+	// by writing the bytes directly so the unusual shape lands on
+	// disk; refresh must surface the missing-spawn condition with
+	// a clear error rather than panicking later.
+	home := fakeHome(t)
+	dir := filepath.Join(home, ".aileron", "connectors", "local", "no-spawn")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Hand-write a minimally-valid manifest that the parser
+	// will accept but that has no [capabilities.spawn] block.
+	// Use a non-forwarder connector since the forwarder-without-
+	// spawn shape is rejected by ValidateManifest.
+	fqn, _ := cstore.LocalFQN("no-spawn")
+	toml := `[connector]
+name = "` + fqn + `"
+version = "0.0.1"
+origin = "local"
+`
+	if err := os.WriteFile(filepath.Join(dir, "manifest.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCliRefresh(
+		[]string{"--yes", "no-spawn"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Error("expected nonzero exit for manifest without spawn block")
+	}
+}
+
 func TestRunCli_HelpFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runCli([]string{"--help"}, strings.NewReader(""), &stdout, &stderr)
