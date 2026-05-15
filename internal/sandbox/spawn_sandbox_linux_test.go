@@ -25,7 +25,7 @@ func TestApplyPlatformSandbox_Linux_NoOpWhenNoParamsDeclared(t *testing.T) {
 	// preserves the executor's pre-sandbox behavior for tests that
 	// don't exercise the sandbox.
 	cmd := exec.CommandContext(context.Background(), "/bin/echo", "hello")
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, SpawnLimits{}); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, SpawnLimits{}); err != nil {
 		t.Fatalf("expected nil with empty limits, got %v", err)
 	}
 	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Cloneflags != 0 {
@@ -40,7 +40,7 @@ func TestApplyPlatformSandbox_Linux_SetsCloneflagsAndIDMappings(t *testing.T) {
 	// 0 inside.
 	cmd := exec.CommandContext(context.Background(), "/bin/echo", "hello")
 	limits := SpawnLimits{FSRead: []string{"~/code/"}}
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits); err != nil {
 		// Sandbox-available probe may fail on hardened runners; the
 		// gate test below covers that path.
 		if strings.Contains(err.Error(), "spawn_sandbox_unavailable") || strings.Contains(err.Error(), "unprivileged_userns") {
@@ -91,7 +91,7 @@ func TestApplyPlatformSandbox_Linux_RunsRealBinaryUnderSandbox(t *testing.T) {
 
 	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "echo PID=$$")
 	limits := SpawnLimits{FSRead: []string{"~/code/"}}
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/sh"}, limits); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/sh"}, limits); err != nil {
 		t.Fatalf("applyPlatformSandbox: %v", err)
 	}
 	var stdout bytes.Buffer
@@ -188,7 +188,7 @@ func TestApplyPlatformSandbox_Linux_ReturnsUnavailableWhenSysctlDisabled(t *test
 	defer swapped()
 	cmd := exec.CommandContext(context.Background(), "/bin/echo")
 	limits := SpawnLimits{FSRead: []string{"~/code/"}}
-	err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits)
+	_, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits)
 	if !errors.Is(err, ErrSpawnUnavailable) {
 		t.Fatalf("expected wrapped ErrSpawnUnavailable, got %v", err)
 	}

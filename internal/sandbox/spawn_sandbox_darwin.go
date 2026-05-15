@@ -37,12 +37,12 @@ const sandboxExecPath = "/usr/bin/sandbox-exec"
 // modification to `cmd` when no manifest sandbox parameters were
 // declared (legacy path; pre-BYOCLI connectors continue to run
 // unchanged).
-func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) error {
+func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) (platformSandboxHooks, error) {
 	if !limits.PlatformSandboxRequested() {
-		return nil
+		return platformSandboxHooks{}, nil
 	}
 	if _, err := os.Stat(sandboxExecPath); err != nil {
-		return fmt.Errorf("%w: sandbox-exec not present at %s", ErrSpawnUnavailable, sandboxExecPath)
+		return platformSandboxHooks{}, fmt.Errorf("%w: sandbox-exec not present at %s", ErrSpawnUnavailable, sandboxExecPath)
 	}
 
 	profile := buildSBPLProfile(env, limits)
@@ -55,7 +55,7 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 	origArgs := cmd.Args
 	cmd.Path = sandboxExecPath
 	cmd.Args = append([]string{"sandbox-exec", "-p", profile, origPath}, origArgs[1:]...)
-	return nil
+	return platformSandboxHooks{}, nil
 }
 
 // buildSBPLProfile renders the SBPL profile for a single spawn

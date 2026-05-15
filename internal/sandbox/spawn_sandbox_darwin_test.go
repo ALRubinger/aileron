@@ -26,7 +26,7 @@ func TestApplyPlatformSandbox_Darwin_NoOpWhenNoParamsDeclared(t *testing.T) {
 	origPath := cmd.Path
 	origArgs := append([]string(nil), cmd.Args...)
 
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, SpawnLimits{}); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, SpawnLimits{}); err != nil {
 		t.Fatalf("expected nil with empty limits, got %v", err)
 	}
 	if cmd.Path != origPath {
@@ -43,7 +43,7 @@ func TestApplyPlatformSandbox_Darwin_WrapsCmdWhenParamsDeclared(t *testing.T) {
 	// and exec's the wrapped program.
 	cmd := exec.CommandContext(context.Background(), "/bin/echo", "hello")
 	limits := SpawnLimits{FSRead: []string{"~/code/"}}
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits); err != nil {
 		t.Fatalf("applyPlatformSandbox: %v", err)
 	}
 	if cmd.Path != sandboxExecPath {
@@ -151,7 +151,7 @@ func TestApplyPlatformSandbox_Darwin_RunsRealBinaryUnderSandbox(t *testing.T) {
 	// trivial Mach-O binary.
 	cmd := exec.CommandContext(context.Background(), "/bin/echo", "sandboxed")
 	limits := SpawnLimits{FSRead: []string{"~/code/"}}
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits); err != nil {
 		t.Fatalf("applyPlatformSandbox: %v", err)
 	}
 	out, err := cmd.Output()
@@ -195,7 +195,7 @@ func TestApplyPlatformSandbox_Darwin_BlocksUserHomeReadOutsideScope(t *testing.T
 
 	cmd := exec.CommandContext(context.Background(), "/bin/cat", sentinel)
 	limits := SpawnLimits{FSRead: []string{allowedDir + "/"}}
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/cat"}, limits); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/cat"}, limits); err != nil {
 		t.Fatalf("applyPlatformSandbox: %v", err)
 	}
 	out, runErr := cmd.CombinedOutput()
@@ -236,7 +236,7 @@ func TestApplyPlatformSandbox_Darwin_AllowsUserHomeReadInsideScope(t *testing.T)
 
 	cmd := exec.CommandContext(context.Background(), "/bin/cat", sentinel)
 	limits := SpawnLimits{FSRead: []string{allowedDir + "/"}}
-	if err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/cat"}, limits); err != nil {
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/cat"}, limits); err != nil {
 		t.Fatalf("applyPlatformSandbox: %v", err)
 	}
 	out, err := cmd.Output()

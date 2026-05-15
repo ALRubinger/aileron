@@ -622,10 +622,11 @@ func (defaultSpawnExecutor) Spawn(ctx context.Context, env SpawnEnvelope, limits
 	if env.Stdin != "" {
 		cmd.Stdin = strings.NewReader(env.Stdin)
 	}
-	if err := applyPlatformSandbox(cmd, env, limits); err != nil {
+	hooks, err := applyPlatformSandbox(cmd, env, limits)
+	if err != nil {
 		return SpawnResult{}, err
 	}
-	stdout, stderr, runErr := runCaptured(cmd, limits)
+	stdout, stderr, runErr := runCaptured(cmd, limits, hooks)
 	exitCode := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError
@@ -646,18 +647,67 @@ func (defaultSpawnExecutor) Spawn(ctx context.Context, env SpawnEnvelope, limits
 	}, nil
 }
 
+// platformSandboxHooks carries the optional per-spawn callbacks a
+// platform sandbox needs to thread through the executor's
+// Start/Wait sequence. Most platform impls return a zero-value
+// struct (no hooks); Windows uses [PostStart] to assign the
+// spawned process to a job object now that its PID is known, and
+// [Cleanup] to release the job-object handle after the subprocess
+// exits. macOS rewrites cmd.Args in-place and needs neither.
+//
+// PostStart is invoked after [exec.Cmd.Start] returns successfully
+// and before [exec.Cmd.Wait]. Returning an error causes the
+// executor to kill the suspended/started subprocess, reap it,
+// and surface the error.
+//
+// Cleanup is invoked unconditionally after [exec.Cmd.Wait] (or
+// after the PostStart failure path). Use it to release handles
+// whose lifetime is tied to the subprocess; do not log or block.
+type platformSandboxHooks struct {
+	PostStart func(*os.Process) error
+	Cleanup   func()
+}
+
 // runCaptured runs `cmd` with stdout and stderr captured into capped
 // byte buffers. Returns the captured bytes plus any non-Exit error.
 // Output beyond the configured cap is dropped at the writer; a
 // truncation marker is appended to the returned slice when a stream
 // exceeded its cap.
-func runCaptured(cmd *exec.Cmd, limits SpawnLimits) ([]byte, []byte, error) {
+//
+// hooks may carry optional post-Start and cleanup callbacks the
+// platform sandbox needs to attach handles whose timing depends on
+// the spawned process being live. PostStart runs after Start, before
+// Wait; Cleanup runs after Wait regardless of outcome. Both fields
+// are nil on platforms that don't need them.
+func runCaptured(cmd *exec.Cmd, limits SpawnLimits, hooks platformSandboxHooks) ([]byte, []byte, error) {
 	stdout := newCaptureBuf(limits.MaxStdoutBytes)
 	stderr := newCaptureBuf(limits.MaxStderrBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	err := cmd.Run()
-	return stdout.Captured(), stderr.Captured(), err
+
+	if err := cmd.Start(); err != nil {
+		if hooks.Cleanup != nil {
+			hooks.Cleanup()
+		}
+		return stdout.Captured(), stderr.Captured(), err
+	}
+	if hooks.PostStart != nil {
+		if err := hooks.PostStart(cmd.Process); err != nil {
+			// Kill the subprocess we just started; reap to release
+			// the process-table slot; surface the post-start failure.
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			if hooks.Cleanup != nil {
+				hooks.Cleanup()
+			}
+			return stdout.Captured(), stderr.Captured(), err
+		}
+	}
+	waitErr := cmd.Wait()
+	if hooks.Cleanup != nil {
+		hooks.Cleanup()
+	}
+	return stdout.Captured(), stderr.Captured(), waitErr
 }
 
 // captureBuf is a bounded io.Writer with a thread-safe accessor.

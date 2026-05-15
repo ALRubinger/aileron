@@ -1,3 +1,5 @@
+//go:build !windows
+
 package sandbox
 
 import (
@@ -10,6 +12,22 @@ import (
 	"testing"
 	"time"
 )
+
+// The spawn shim is a Linux-specific facility (per ADR-0014 and
+// #718): a TCP-loopback to Unix-domain-socket bridge that lives
+// inside the spawn namespace and forwards bytes between the
+// wrapped CLI and the daemon's UDS proxy.
+//
+// spawn_shim.go itself uses only portable net primitives so tests
+// run on macOS dev machines without a real Linux namespace.
+// Windows is excluded from the test build because:
+//   1. The shim is never invoked on Windows (no namespace-based
+//      sandboxing; Windows uses job objects + restricted tokens).
+//   2. The fixtures use `/tmp` Unix-domain socket paths, and
+//      Windows's AF_UNIX support plus path semantics differ enough
+//      that the same fixtures don't translate cleanly.
+// A Windows equivalent forwarder, if ever needed, gets its own
+// test file rather than retrofitting these.
 
 // shortSockPath returns a UDS path short enough to fit in sockaddr_un
 // (sun_path is 104 chars on macOS, 108 on Linux). t.TempDir() under
