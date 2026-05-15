@@ -444,6 +444,15 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	server.bindings = bindingStore
 	server.oauth2Sessions = newOAuth2Sessions()
 
+	// --- Scope-drift detection (#726) ---
+	// Hook fires after every successful connector install. If the
+	// installed manifest demands an OAuth scope the binding's recorded
+	// grant doesn't have, the binding is marked stale so the webapp /
+	// CLI prompts the user to reauthorize.
+	if server.installer != nil {
+		server.installer.ScopeDriftHook = makeScopeDriftHook(bindingStore, log)
+	}
+
 	// --- Sandbox runtime (ADR-0005) ---
 	// Per-call WASM instantiation. Falls back to the stub executor
 	// when the sandbox runtime fails to come up — startup must not
@@ -918,6 +927,128 @@ func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
 		Verifier: &cstore.ReloadingKeyring{Path: cstore.DefaultKeyringPath()},
 		Store:    store,
 	}
+}
+
+// makeScopeDriftHook builds the closure the installer fires after a
+// successful connector install (#726). The hook compares each affected
+// binding's recorded GrantedScopes against the manifest's current scope
+// set and marks bindings stale when they're missing a required scope.
+//
+// Two flavors of "stale" are stamped:
+//
+//   - Bindings with no recorded grant (created before scope tracking
+//     landed) are marked `no_grant_record` — we can't prove they
+//     satisfy any scope set, so the user reauthorizes once to teach us.
+//   - Bindings whose recorded grant lacks a required scope are marked
+//     `scope_drift` with the missing scope list, so the webapp/CLI can
+//     show the user exactly what reauthorization will unlock.
+//
+// Drift semantics are strict-superset on required: a manifest that
+// drops a previously-required scope does NOT trigger stale, because the
+// extra granted scope is benign. The reverse — manifest demands a
+// scope the binding lacks — does.
+//
+// When the manifest declares no OAuth scopes (kind != "oauth2"), the
+// hook still fires with a nil scope list so migration-marking can run
+// on bindings whose connector now exposes OAuth where it didn't before.
+// In that case bindings with no recorded grant are still marked.
+//
+// Errors inside the hook (vault locked, vault store unavailable) are
+// logged at warn level and the install completes successfully —
+// drift detection is best-effort and a locked vault legitimately has
+// nothing to enumerate.
+func makeScopeDriftHook(store binding.Store, log *slog.Logger) cstore.ScopeDriftHook {
+	return func(ctx context.Context, fqn string, required []string) {
+		if store == nil {
+			return
+		}
+		all, err := store.List(ctx)
+		if err != nil {
+			log.Warn("scope-drift detection: list bindings failed",
+				"connector_fqn", fqn, "error", err)
+			return
+		}
+		for _, b := range all {
+			if b.ConnectorFQN != fqn {
+				continue
+			}
+			// Only OAuth bindings carry scope grants; api_key /
+			// other kinds are nothing to check.
+			if b.Kind != "oauth2" {
+				continue
+			}
+			next := evaluateScopeDrift(b, required)
+			if next == nil {
+				continue
+			}
+			if err := store.UpdateMetadata(ctx, *next); err != nil {
+				log.Warn("scope-drift detection: update binding failed",
+					"binding", string(b.Name), "error", err)
+				continue
+			}
+		}
+	}
+}
+
+// evaluateScopeDrift returns the binding (with updated Status /
+// StaleReason / MissingScopes) when the binding's drift state should
+// change, or nil when the binding is already in the desired state.
+// Split from makeScopeDriftHook so the policy decision is pure and
+// independently testable.
+func evaluateScopeDrift(b binding.Binding, required []string) *binding.Binding {
+	if len(b.GrantedScopes) == 0 {
+		// Migration: bindings predating scope tracking. Already stale?
+		// Leave alone. Otherwise flip to stale with no_grant_record so
+		// the user reauthorizes once.
+		if b.Status == binding.StatusStale && b.StaleReason == binding.StaleReasonNoGrantRecord {
+			return nil
+		}
+		updated := b
+		updated.Status = binding.StatusStale
+		updated.StaleReason = binding.StaleReasonNoGrantRecord
+		updated.MissingScopes = nil
+		return &updated
+	}
+	missing := binding.MissingScopes(required, b.GrantedScopes)
+	if len(missing) > 0 {
+		// No-op when the recorded stale state already matches.
+		if b.Status == binding.StatusStale &&
+			b.StaleReason == binding.StaleReasonScopeDrift &&
+			stringSliceEqual(b.MissingScopes, missing) {
+			return nil
+		}
+		updated := b
+		updated.Status = binding.StatusStale
+		updated.StaleReason = binding.StaleReasonScopeDrift
+		updated.MissingScopes = missing
+		return &updated
+	}
+	// Manifest scopes are a subset of granted scopes — binding
+	// satisfies the current manifest. Clear any stale state we set
+	// earlier (e.g. a subsequent install dropped the scope demands).
+	if b.Status == binding.StatusStale {
+		updated := b
+		updated.Status = binding.StatusActive
+		updated.StaleReason = ""
+		updated.MissingScopes = nil
+		return &updated
+	}
+	return nil
+}
+
+// stringSliceEqual reports whether a and b have the same elements in
+// the same order. Used by evaluateScopeDrift to short-circuit
+// no-op metadata updates that would still cost a vault round-trip.
+func stringSliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // newActionStateStore builds the per-action user-preference overlay backed

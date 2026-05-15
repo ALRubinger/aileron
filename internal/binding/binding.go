@@ -88,22 +88,59 @@ type Binding struct {
 	LastRefreshedAt     time.Time
 	RefreshTokenPresent bool
 	Status              Status
+
+	// GrantedScopes is the list of OAuth scope strings the provider
+	// confirmed on the most recent successful handshake. Empty for
+	// non-OAuth kinds. Used by Installer.Install to detect drift
+	// against an upgraded connector manifest's scope set.
+	GrantedScopes []string
+
+	// StaleReason is set when Status is StatusStale and describes why.
+	// Stable values: `scope_drift` (manifest demands a scope the
+	// binding doesn't have), `no_grant_record` (binding predates
+	// GrantedScopes tracking and was migration-marked on first
+	// install-after-upgrade).
+	StaleReason string
+
+	// MissingScopes is the set of scope strings the current connector
+	// manifest demands but GrantedScopes does not contain. Populated
+	// alongside Status=StatusStale and StaleReason=`scope_drift` so
+	// the UI/CLI can render an actionable reauthorize prompt without
+	// re-reading the manifest.
+	MissingScopes []string
 }
 
 // Label keys used to encode binding metadata into vault.Metadata.Labels.
 // These are stable wire identifiers — changing them invalidates
 // existing on-disk bindings.
 const (
-	labelService           = "service"
-	labelIdentity          = "identity"
-	labelScope             = "scope"
-	labelConnectorFQN      = "connector_fqn"
-	labelAccount           = "account"
-	labelCreatedAt         = "created_at"
-	labelLastUsedAt        = "last_used_at"
-	labelLastRefreshedAt   = "last_refreshed_at"
-	labelRefreshTokenFlag  = "refresh_token_present"
-	labelStatus            = "status"
+	labelService          = "service"
+	labelIdentity         = "identity"
+	labelScope            = "scope"
+	labelConnectorFQN     = "connector_fqn"
+	labelAccount          = "account"
+	labelCreatedAt        = "created_at"
+	labelLastUsedAt       = "last_used_at"
+	labelLastRefreshedAt  = "last_refreshed_at"
+	labelRefreshTokenFlag = "refresh_token_present"
+	labelStatus           = "status"
+	labelGrantedScopes    = "granted_scopes"
+	labelStaleReason      = "stale_reason"
+	labelMissingScopes    = "missing_scopes"
+)
+
+// Stable values for [Binding.StaleReason]. Wire identifiers — changing
+// them invalidates stale markers persisted on existing bindings.
+const (
+	// StaleReasonScopeDrift indicates the connector manifest demands at
+	// least one OAuth scope the binding's recorded grant does not have.
+	StaleReasonScopeDrift = "scope_drift"
+
+	// StaleReasonNoGrantRecord indicates the binding predates
+	// GrantedScopes tracking; the next install-after-upgrade marked it
+	// stale because we can no longer prove it satisfies any scope set.
+	// One-time migration state.
+	StaleReasonNoGrantRecord = "no_grant_record"
 )
 
 // toMetadata encodes the binding's non-secret fields into vault
@@ -131,6 +168,15 @@ func (b Binding) toMetadata() vault.Metadata {
 	}
 	if b.RefreshTokenPresent {
 		labels[labelRefreshTokenFlag] = "true"
+	}
+	if len(b.GrantedScopes) > 0 {
+		labels[labelGrantedScopes] = encodeScopes(b.GrantedScopes)
+	}
+	if b.StaleReason != "" {
+		labels[labelStaleReason] = b.StaleReason
+	}
+	if len(b.MissingScopes) > 0 {
+		labels[labelMissingScopes] = encodeScopes(b.MissingScopes)
 	}
 	return vault.Metadata{Type: b.Kind, Labels: labels}
 }
@@ -178,7 +224,36 @@ func fromEntry(e vault.Entry) (Binding, error) {
 		LastRefreshedAt:     parseTime(labels[labelLastRefreshedAt]),
 		RefreshTokenPresent: labels[labelRefreshTokenFlag] == "true",
 		Status:              status,
+		GrantedScopes:       decodeScopes(labels[labelGrantedScopes]),
+		StaleReason:         labels[labelStaleReason],
+		MissingScopes:       decodeScopes(labels[labelMissingScopes]),
 	}, nil
+}
+
+// encodeScopes serialises a scope list for storage in a vault label.
+// OAuth scope tokens (RFC 6749 §3.3) exclude space, so space is a safe
+// separator. Empty slices encode to "" so toMetadata can omit the
+// label entirely.
+func encodeScopes(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return strings.Join(s, " ")
+}
+
+// decodeScopes is the inverse of encodeScopes. Returns nil (not empty
+// slice) for empty input so a Binding with no recorded grant
+// distinguishes from one with an empty grant in toMetadata's
+// len(b.GrantedScopes) > 0 check.
+func decodeScopes(s string) []string {
+	if s == "" {
+		return nil
+	}
+	out := strings.Fields(s)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func formatTime(t time.Time) string {

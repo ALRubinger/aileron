@@ -6,7 +6,8 @@ import userEvent from '@testing-library/user-event';
 vi.mock('$lib/api', () => ({
 	listConnectedAccounts: vi.fn(),
 	deleteConnectedAccount: vi.fn(),
-	getVaultStatus: vi.fn()
+	getVaultStatus: vi.fn(),
+	listBindings: vi.fn()
 }));
 
 // Mock $lib/crypto/vault.svelte.js
@@ -26,7 +27,12 @@ vi.mock('$lib/colors', async () => {
 });
 
 import Page from './+page.svelte';
-import { listConnectedAccounts, deleteConnectedAccount, getVaultStatus } from '$lib/api';
+import {
+	listConnectedAccounts,
+	deleteConnectedAccount,
+	getVaultStatus,
+	listBindings
+} from '$lib/api';
 
 const mockAccounts = [
 	{
@@ -53,6 +59,7 @@ beforeEach(() => {
 	vi.mocked(listConnectedAccounts).mockResolvedValue({ items: mockAccounts });
 	vi.mocked(deleteConnectedAccount).mockResolvedValue(null);
 	vi.mocked(getVaultStatus).mockResolvedValue({ locked: false, has_passphrase: true });
+	vi.mocked(listBindings).mockResolvedValue({ items: [] });
 });
 
 describe('Connected Accounts Page', () => {
@@ -241,6 +248,94 @@ describe('Connected Accounts Page', () => {
 		for (const btn of connectButtons) {
 			expect(btn).not.toBeDisabled();
 		}
+	});
+
+	// --- Scope-drift banner (#726) ---
+
+	it('shows the stale-bindings banner with missing scopes and CLI command', async () => {
+		vi.mocked(listBindings).mockResolvedValue({
+			items: [
+				{
+					name: 'oauth2/google/work',
+					kind: 'oauth2',
+					service: 'google',
+					identity: 'work',
+					connector_fqn: 'github://acme/aileron-connector-google',
+					status: 'stale',
+					stale_reason: 'scope_drift',
+					missing_scopes: [
+						'https://www.googleapis.com/auth/drive',
+						'https://www.googleapis.com/auth/documents'
+					]
+				}
+			]
+		});
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Reauthorize stale bindings')).toBeInTheDocument();
+		});
+		expect(screen.getByText('oauth2/google/work')).toBeInTheDocument();
+		expect(
+			screen.getByText('https://www.googleapis.com/auth/drive')
+		).toBeInTheDocument();
+		expect(
+			screen.getByText('https://www.googleapis.com/auth/documents')
+		).toBeInTheDocument();
+		const cmd = screen.getByTestId('reauthorize-command');
+		expect(cmd.textContent).toBe('aileron binding reauthorize oauth2/google/work');
+	});
+
+	it('hides the banner when no bindings are stale', async () => {
+		vi.mocked(listBindings).mockResolvedValue({
+			items: [
+				{
+					name: 'oauth2/google/work',
+					kind: 'oauth2',
+					service: 'google',
+					identity: 'work',
+					connector_fqn: 'github://acme/aileron-connector-google',
+					status: 'active'
+				}
+			]
+		});
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Connected Accounts')).toBeInTheDocument();
+		});
+		expect(screen.queryByText('Reauthorize stale bindings')).toBeNull();
+	});
+
+	it('degrades gracefully when listBindings fails (e.g. vault store unwired)', async () => {
+		vi.mocked(listBindings).mockRejectedValue(new Error('vault_unavailable'));
+		render(Page);
+		await waitFor(() => {
+			expect(screen.getByText('Connected Accounts')).toBeInTheDocument();
+		});
+		// No banner, no top-level error — the rest of the page works.
+		expect(screen.queryByText('Reauthorize stale bindings')).toBeNull();
+		expect(screen.queryByText('vault_unavailable')).toBeNull();
+	});
+
+	it('shows the no_grant_record headline for migration-marked bindings', async () => {
+		vi.mocked(listBindings).mockResolvedValue({
+			items: [
+				{
+					name: 'oauth2/slack/work',
+					kind: 'oauth2',
+					service: 'slack',
+					identity: 'work',
+					connector_fqn: 'github://acme/aileron-connector-slack',
+					status: 'stale',
+					stale_reason: 'no_grant_record'
+				}
+			]
+		});
+		render(Page);
+		await waitFor(() => {
+			expect(
+				screen.getByText(/recorded grant predates scope tracking/)
+			).toBeInTheDocument();
+		});
 	});
 
 	it('shows guidance text when vault not ready', async () => {

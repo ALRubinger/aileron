@@ -204,6 +204,21 @@ export async function listConnectedAccounts() {
 	return apiFetch('/v1/connected-accounts');
 }
 
+// --- Bindings (#726 scope-drift surfacing) ---
+
+/**
+ * Fetches the user's credential bindings (ADR-0006). Metadata-only;
+ * the encrypted credential bytes are never returned. Listing does not
+ * require an unlocked vault.
+ *
+ * Used by the Connected Accounts page to surface bindings flipped to
+ * `stale` by the connector-install scope-drift detector (#726) so the
+ * user knows to run `aileron binding reauthorize <name>`.
+ */
+export async function listBindings() {
+	return apiFetch('/v1/bindings');
+}
+
 export async function getConnectedAccount(id: string) {
 	return apiFetch(`/v1/connected-accounts/${id}`);
 }

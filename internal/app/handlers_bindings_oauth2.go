@@ -57,6 +57,15 @@ type oauth2Session struct {
 	clientSecret string
 	tokenURL     string
 	expiresAt    time.Time
+
+	// reauthorize is true when this session was opened to refresh the
+	// scopes on an existing binding rather than create a new one.
+	// Finish then upserts (preserving created_at, account, etc.) and
+	// clears any stale-state labels on success. The init endpoint also
+	// builds the authorize URL with prompt=consent so the provider
+	// re-prompts for the upgraded scope set rather than silently
+	// reissuing a token bound to the prior consent.
+	reauthorize bool
 }
 
 // oauth2Sessions is the apiServer's in-memory session store. Each
@@ -103,6 +112,15 @@ func (m *oauth2Sessions) take(sessionID string) (*oauth2Session, bool) {
 
 // InitOAuth2Binding implements the OpenAPI operation. Generates PKCE,
 // allocates a session, and returns the authorize URL.
+//
+// When the request body sets `purpose: "reauthorize"`, the session is
+// pinned to an existing binding (identified by the connector + service
+// + identity tuple). Finish upserts that binding rather than creating
+// a new one, preserving CreatedAt / Account / other history, and the
+// authorize URL is built with `prompt=consent` so the provider
+// re-prompts for the upgraded scope set instead of silently reissuing
+// from the user's prior consent. First-time setup omits
+// `prompt=consent` for a smoother first-flow UX.
 func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 	if s.installer == nil {
 		writeError(w, http.StatusServiceUnavailable, "installer_disabled",
@@ -129,6 +147,11 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 	if req.Identity == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "identity is required")
 		return
+	}
+
+	reauthorize := false
+	if req.Purpose != nil && *req.Purpose == api.Reauthorize {
+		reauthorize = true
 	}
 
 	connFQN, manifest, err := s.lookupConnector(req.ConnectorFqn)
@@ -164,7 +187,7 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 	}
 	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
-	authURL := buildAuthorizeURL(cred.OAuth2, redirectURI, state, pkce.Challenge)
+	authURL := buildAuthorizeURL(cred.OAuth2, redirectURI, state, pkce.Challenge, reauthorize)
 
 	sessionID, err := newSessionID()
 	if err != nil {
@@ -179,6 +202,35 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 	if req.Account != nil {
 		account = *req.Account
 	}
+
+	// Reauthorize requires the named binding to already exist so finish
+	// has something to upsert. Return 404 here instead of letting finish
+	// fail later — the caller hasn't run the user through the browser
+	// yet, so the cost of catching it is one round-trip rather than a
+	// wasted consent screen.
+	if reauthorize {
+		bn, mkErr := binding.MakeName(cstore.CredentialKindOAuth2, service, req.Identity)
+		if mkErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_identity", mkErr.Error())
+			return
+		}
+		existing, getErr := s.bindings.Get(r.Context(), bn)
+		if errors.Is(getErr, binding.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "binding_not_found",
+				"reauthorize requested for "+string(bn)+" but no such binding exists")
+			return
+		}
+		if getErr != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", getErr.Error())
+			return
+		}
+		// Inherit the existing binding's account label so finish doesn't
+		// silently strip it when the caller omits the account override.
+		if account == "" {
+			account = existing.Account
+		}
+	}
+
 	s.oauth2Sessions.put(sessionID, &oauth2Session{
 		connectorFQN: connFQN,
 		identity:     req.Identity,
@@ -191,6 +243,7 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 		clientID:     cred.OAuth2.ClientID,
 		clientSecret: cred.OAuth2.ClientSecret,
 		tokenURL:     cred.OAuth2.TokenURL,
+		reauthorize:  reauthorize,
 	})
 
 	writeJSON(w, http.StatusOK, api.OAuth2InitResponse{
@@ -234,7 +287,7 @@ func (s *apiServer) FinishOAuth2Binding(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	tok, herr := s.exchangeOAuth2Code(r.Context(), session, req.Code)
+	tok, grantedScopes, herr := s.exchangeOAuth2Code(r.Context(), session, req.Code)
 	if herr != nil {
 		writeError(w, herr.status, herr.code, herr.message)
 		return
@@ -257,8 +310,28 @@ func (s *apiServer) FinishOAuth2Binding(w http.ResponseWriter, r *http.Request) 
 		Scope:               strings.Join(session.scopes, " "),
 		Status:              binding.StatusActive,
 		RefreshTokenPresent: tok.RefreshToken != "",
+		GrantedScopes:       grantedScopes,
+		// On a successful reauthorize, stale-state labels must be
+		// cleared. Defaults here are zero-value, so toMetadata omits
+		// the labels — equivalent to clearing them on the next read.
+		StaleReason:   "",
+		MissingScopes: nil,
 	}
-	if err := s.bindings.Put(r.Context(), b, envelope, binding.PutCreate); err != nil {
+
+	mode := binding.PutCreate
+	evt := model.EventTypeBindingCreated
+	if session.reauthorize {
+		// Preserve the original CreatedAt so the binding's history
+		// survives a scope refresh; VaultStore.Put only stamps it when
+		// zero, so an explicit value here pins it.
+		existing, getErr := s.bindings.Get(r.Context(), bn)
+		if getErr == nil {
+			b.CreatedAt = existing.CreatedAt
+		}
+		mode = binding.PutUpsert
+		evt = model.EventTypeBindingRebound
+	}
+	if err := s.bindings.Put(r.Context(), b, envelope, mode); err != nil {
 		if errors.Is(err, binding.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "binding_exists",
 				"binding "+string(bn)+" already exists")
@@ -271,14 +344,28 @@ func (s *apiServer) FinishOAuth2Binding(w http.ResponseWriter, r *http.Request) 
 	if getErr != nil {
 		stored = b
 	}
-	s.recordBindingEvent(r.Context(), model.EventTypeBindingCreated, string(bn),
+	s.recordBindingEvent(r.Context(), evt, string(bn),
 		session.connectorFQN, cstore.CredentialKindOAuth2)
-	writeJSON(w, http.StatusCreated, toAPIBinding(stored))
+	status := http.StatusCreated
+	if session.reauthorize {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, toAPIBinding(stored))
 }
 
 // exchangeOAuth2Code POSTs the authorization code to the provider's
-// token endpoint with PKCE and returns the parsed token envelope.
-func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Session, code string) (credential.OAuth2Token, *installActionError) {
+// token endpoint with PKCE and returns the parsed token envelope plus
+// the granted scope list.
+//
+// The granted scopes come from the provider's token response's
+// `scope` field (space-separated, per RFC 6749 §3.3) when present.
+// Some providers omit it on successful grants where the granted set
+// matches the requested set; in that case we fall back to the
+// requested scopes since the provider implicitly confirmed them.
+// Returning a separate value rather than stuffing scopes onto the
+// token envelope keeps the credential envelope shape stable (it's
+// JSON-encoded into the vault and parsed by OAuth2VaultResolver).
+func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Session, code string) (credential.OAuth2Token, []string, *installActionError) {
 	body := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -296,7 +383,7 @@ func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Sessi
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, session.tokenURL,
 		strings.NewReader(body.Encode()))
 	if err != nil {
-		return credential.OAuth2Token{}, &installActionError{
+		return credential.OAuth2Token{}, nil, &installActionError{
 			status: http.StatusInternalServerError, code: "internal_error", message: err.Error(),
 		}
 	}
@@ -309,14 +396,14 @@ func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Sessi
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return credential.OAuth2Token{}, &installActionError{
+		return credential.OAuth2Token{}, nil, &installActionError{
 			status: http.StatusBadGateway, code: "token_exchange_failed", message: err.Error(),
 		}
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return credential.OAuth2Token{}, &installActionError{
+		return credential.OAuth2Token{}, nil, &installActionError{
 			status: http.StatusUnprocessableEntity, code: "token_exchange_failed",
 			message: fmt.Sprintf("provider returned %d: %s", resp.StatusCode, string(respBody)),
 		}
@@ -326,15 +413,16 @@ func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Sessi
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
 		TokenType    string `json:"token_type"`
+		Scope        string `json:"scope"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return credential.OAuth2Token{}, &installActionError{
+		return credential.OAuth2Token{}, nil, &installActionError{
 			status: http.StatusUnprocessableEntity, code: "token_exchange_failed",
 			message: "parse token response: " + err.Error(),
 		}
 	}
 	if parsed.AccessToken == "" {
-		return credential.OAuth2Token{}, &installActionError{
+		return credential.OAuth2Token{}, nil, &installActionError{
 			status: http.StatusUnprocessableEntity, code: "token_exchange_failed",
 			message: "provider response missing access_token",
 		}
@@ -342,6 +430,13 @@ func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Sessi
 	expiresAt := time.Time{}
 	if parsed.ExpiresIn > 0 {
 		expiresAt = time.Now().Add(time.Duration(parsed.ExpiresIn) * time.Second)
+	}
+	granted := strings.Fields(parsed.Scope)
+	if len(granted) == 0 {
+		// Provider omitted `scope` from the response — RFC 6749 §5.1
+		// permits this when the granted set matches the requested set.
+		// Use what we asked for as the recorded grant.
+		granted = append([]string(nil), session.scopes...)
 	}
 	return credential.OAuth2Token{
 		AccessToken:  parsed.AccessToken,
@@ -352,14 +447,23 @@ func (s *apiServer) exchangeOAuth2Code(ctx context.Context, session *oauth2Sessi
 		ClientSecret: session.clientSecret,
 		TokenURL:     session.tokenURL,
 		Scopes:       session.scopes,
-	}, nil
+	}, granted, nil
 }
 
 // buildAuthorizeURL composes the provider's authorize URL with all
-// required query parameters per RFC 7636 + the provider's `offline`
-// + `prompt=consent` extras (Google insists on the latter to issue a
-// refresh token reliably; harmless on others).
-func buildAuthorizeURL(o *cstore.ManifestOAuth2, redirectURI, state, challenge string) string {
+// required query parameters per RFC 7636 + Google's `access_type=offline`
+// extra (harmless on other providers).
+//
+// `forceConsent` adds `prompt=consent` for the reauthorize path. Google
+// will otherwise silently reissue a token under the user's prior
+// consent — so when the connector's manifest demands new scopes, the
+// new scopes never get granted. `prompt=consent` forces the provider
+// to re-prompt and re-issue against the current scope set. First-time
+// setup omits it so the user's initial flow is one fewer click; the
+// trade-off is that a user who happens to have granted these scopes
+// to this OAuth client before may not receive a refresh token without
+// `prompt=consent`, but that's vanishingly rare for first connect.
+func buildAuthorizeURL(o *cstore.ManifestOAuth2, redirectURI, state, challenge string, forceConsent bool) string {
 	q := url.Values{
 		"client_id":             {o.ClientID},
 		"redirect_uri":          {redirectURI},
@@ -369,7 +473,9 @@ func buildAuthorizeURL(o *cstore.ManifestOAuth2, redirectURI, state, challenge s
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 		"access_type":           {"offline"},
-		"prompt":                {"consent"},
+	}
+	if forceConsent {
+		q.Set("prompt", "consent")
 	}
 	sep := "?"
 	if strings.Contains(o.AuthorizeURL, "?") {

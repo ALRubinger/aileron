@@ -1,7 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { PUBLIC_API_BASE } from '$env/static/public';
-	import { listConnectedAccounts, deleteConnectedAccount, getVaultStatus } from '$lib/api';
+	import {
+		listConnectedAccounts,
+		deleteConnectedAccount,
+		getVaultStatus,
+		listBindings
+	} from '$lib/api';
 	import { setupPassphrase, unlockVault, type UnlockProgress } from '$lib/crypto/vault.svelte.js';
 	import { setSessionExpiresAt } from '$lib/vault.svelte.js';
 	import * as Card from '$lib/components/ui/card';
@@ -20,6 +25,20 @@
 		updated_at: string;
 	}
 
+	// Surface of /v1/bindings used by the scope-drift banner. Mirrors
+	// the `Binding` schema in openapi.yaml.
+	interface Binding {
+		name: string;
+		kind: string;
+		service: string;
+		identity: string;
+		connector_fqn: string;
+		account?: string;
+		status?: string;
+		stale_reason?: string;
+		missing_scopes?: string[];
+	}
+
 	const providerMeta: Record<string, { name: string; description: string }> = {
 		slack: { name: 'Slack', description: 'Channels, messages, and search' },
 		github_repos: { name: 'GitHub', description: 'Repositories, PRs, and code search' },
@@ -28,6 +47,7 @@
 	};
 
 	let accounts = $state<ConnectedAccount[]>([]);
+	let staleBindings = $state<Binding[]>([]);
 	let loading = $state(true);
 	let error = $state('');
 	let success = $state('');
@@ -70,17 +90,35 @@
 
 	async function load() {
 		try {
-			const [accountData, status] = await Promise.all([
+			// listBindings can 503 when the vault store isn't wired (e.g.
+			// pure-cloud daemons). The page degrades gracefully — no
+			// stale banner appears, but the rest of Connected Accounts
+			// continues to work.
+			const [accountData, status, bindingData] = await Promise.all([
 				listConnectedAccounts(),
-				getVaultStatus().catch(() => null)
+				getVaultStatus().catch(() => null),
+				listBindings().catch(() => null)
 			]);
 			accounts = accountData.items ?? accountData ?? [];
 			vaultStatus = status;
+			const all: Binding[] = bindingData?.items ?? [];
+			staleBindings = all.filter((b) => b.status === 'stale');
 		} catch (e: any) {
 			error = e.message;
 		} finally {
 			loading = false;
 		}
+	}
+
+	function staleHeadline(b: Binding): string {
+		if (b.stale_reason === 'scope_drift') {
+			const n = b.missing_scopes?.length ?? 0;
+			return `Reauthorization required — ${n} new scope${n === 1 ? '' : 's'} need${n === 1 ? 's' : ''} consent`;
+		}
+		if (b.stale_reason === 'no_grant_record') {
+			return 'Reauthorization required — recorded grant predates scope tracking';
+		}
+		return 'Reauthorization required';
 	}
 
 	function handleConnect(provider: string) {
@@ -296,6 +334,48 @@
 							</Button>
 						</div>
 					</form>
+				</Card.Content>
+			</Card.Root>
+		{/if}
+
+		{#if staleBindings.length > 0}
+			<Card.Root class="border-yellow-500/50" data-testid="stale-bindings-card">
+				<Card.Header>
+					<Card.Title>Reauthorize stale bindings</Card.Title>
+					<Card.Description>
+						A connector upgrade added OAuth scopes that aren't covered by your
+						current grant. Run the command below in your terminal to refresh
+						each binding; Aileron will open your browser to the provider's
+						consent screen.
+					</Card.Description>
+				</Card.Header>
+				<Card.Content>
+					<div class="flex flex-col gap-4">
+						{#each staleBindings as b}
+							<div class="flex flex-col gap-1 rounded-lg border border-yellow-500/30 p-3">
+								<div class="flex items-center gap-2">
+									<span class="text-sm font-medium">{b.name}</span>
+									<Badge variant="outline" class="border-yellow-500/50 text-yellow-600">
+										stale
+									</Badge>
+								</div>
+								<span class="text-xs text-muted-foreground">
+									{staleHeadline(b)}
+								</span>
+								{#if b.missing_scopes && b.missing_scopes.length > 0}
+									<ul class="ml-4 list-disc text-xs text-muted-foreground">
+										{#each b.missing_scopes as scope}
+											<li><code class="break-all">{scope}</code></li>
+										{/each}
+									</ul>
+								{/if}
+								<code
+									class="mt-1 rounded bg-muted px-2 py-1 text-xs"
+									data-testid="reauthorize-command"
+								>aileron binding reauthorize {b.name}</code>
+							</div>
+						{/each}
+					</div>
 				</Card.Content>
 			</Card.Root>
 		{/if}

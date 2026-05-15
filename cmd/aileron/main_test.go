@@ -2822,6 +2822,186 @@ func TestRunBinding_SetupOAuth2_PortBindFailsWhenSamePortInUse(t *testing.T) {
 	}
 }
 
+// --- runBindingReauthorize: refresh OAuth scopes after drift (#726) ---
+
+// TestRunBinding_ReauthorizeDrivesOAuthDance walks the full flow:
+//  1. GET the existing binding to discover kind=oauth2 + identity +
+//     connector_fqn + service + account.
+//  2. POST init with purpose=reauthorize.
+//  3. Simulated browser callback.
+//  4. POST finish; server returns 200 (reauthorize upsert).
+//  5. CLI prints "Reauthorized: <name>".
+func TestRunBinding_ReauthorizeDrivesOAuthDance(t *testing.T) {
+	withFakeBrowser(t)
+	var seenInitBody []byte
+	var seenFinishBody []byte
+	state := "rstate-1"
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/oauth2/google/work":
+			_, _ = io.WriteString(w, `{
+				"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/aileron-connector-google","account":"alr@x.com",
+				"status":"stale","stale_reason":"scope_drift",
+				"missing_scopes":["https://www.googleapis.com/auth/drive"],
+				"created_at":"2024-01-01T00:00:00Z"
+			}`)
+		case "/bindings/setup/oauth2/init":
+			seenInitBody, _ = io.ReadAll(r.Body)
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("port pick: %v", err)
+			}
+			port := ln.Addr().(*net.TCPAddr).Port
+			_ = ln.Close()
+			redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+			authorizeURL := fmt.Sprintf("http://provider.test/auth?state=%s&redirect_uri=%s",
+				state, redirectURI)
+			_, _ = io.WriteString(w, fmt.Sprintf(
+				`{"session_id":"sess-1","authorize_url":%q,"redirect_uri":%q}`,
+				authorizeURL, redirectURI))
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				_, _ = http.Get(redirectURI + "?code=fresh-code&state=" + state)
+			}()
+		case "/bindings/setup/oauth2/finish":
+			seenFinishBody, _ = io.ReadAll(r.Body)
+			// Reauthorize returns 200, not 201.
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/aileron-connector-google","status":"active",
+				"created_at":"2024-01-01T00:00:00Z"
+			}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/google/work"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	// Init body must declare purpose=reauthorize so the server upserts.
+	for _, want := range []string{
+		`"purpose":"reauthorize"`,
+		`"identity":"work"`,
+		`"service":"google"`,
+		`"account":"alr@x.com"`,
+		`"connector_fqn":"github://acme/aileron-connector-google"`,
+	} {
+		if !strings.Contains(string(seenInitBody), want) {
+			t.Errorf("init body missing %s: %s", want, seenInitBody)
+		}
+	}
+	if !strings.Contains(string(seenFinishBody), `"code":"fresh-code"`) {
+		t.Errorf("finish body missing code: %s", seenFinishBody)
+	}
+	if !strings.Contains(stdout.String(), "Reauthorized: oauth2/google/work") {
+		t.Errorf("stdout missing reauthorized line: %s", stdout.String())
+	}
+}
+
+// TestRunBinding_ReauthorizeRejectsAPIKey: the OAuth dance only makes
+// sense for OAuth bindings. For api_key, the CLI surfaces a pointer to
+// `rebind` rather than silently rebroadcasting a non-OAuth init that
+// would 422.
+func TestRunBinding_ReauthorizeRejectsAPIKey(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team",
+			"connector_fqn":"github://aileron/linear","status":"active",
+			"created_at":"2024-01-01T00:00:00Z"
+		}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "api_key/linear/team"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when reauthorizing an api_key binding")
+	}
+	if !strings.Contains(stderr.String(), "binding rebind") {
+		t.Errorf("stderr should point at `binding rebind`: %s", stderr.String())
+	}
+}
+
+func TestRunBinding_ReauthorizeNotFound(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"code":"not_found"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/missing/x"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when binding not found")
+	}
+}
+
+func TestRunBinding_ReauthorizeRequiresExactlyOneArg(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when name argument is missing")
+	}
+}
+
+// TestRunBinding_ListSurfacesStaleReason: when a binding is `stale`,
+// the list view appends its reason inline so the user sees what to do
+// without needing `--json`.
+func TestRunBinding_ListSurfacesStaleReason(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"items":[
+			{"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+			 "connector_fqn":"github://acme/aileron-connector-google",
+			 "status":"stale","stale_reason":"scope_drift",
+			 "missing_scopes":["https://www.googleapis.com/auth/drive"],
+			 "created_at":"2024-01-01T00:00:00Z"}
+		]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "list"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "stale (scope_drift)") {
+		t.Errorf("list output should show stale reason inline; got:\n%s", stdout.String())
+	}
+}
+
+// TestRunBinding_InspectSurfacesStaleDetails: the inspect view shows
+// the missing scopes and a copy-paste reauthorize command so the user
+// fixes the drift without paging through docs.
+func TestRunBinding_InspectSurfacesStaleDetails(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+			"connector_fqn":"github://acme/aileron-connector-google",
+			"status":"stale","stale_reason":"scope_drift",
+			"missing_scopes":["https://www.googleapis.com/auth/drive","https://www.googleapis.com/auth/documents"],
+			"created_at":"2024-01-01T00:00:00Z"
+		}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"binding", "inspect", "oauth2/google/work"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"Stale:      scope_drift",
+		"Missing:",
+		"https://www.googleapis.com/auth/drive",
+		"Resolve:    aileron binding reauthorize oauth2/google/work",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("inspect output missing %q:\n%s", want, stdout.String())
+		}
+	}
+}
+
 // --- runActionAdd: auto-install missing connectors (issue #413) ---
 
 // withSeededKeyring isolates $HOME to a temp dir and pre-populates

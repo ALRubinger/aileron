@@ -3,6 +3,7 @@ package binding_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -516,6 +517,103 @@ func TestVaultStore_ResolverFor_BranchesByKind(t *testing.T) {
 	}
 	if _, ok := r2.(*credential.OAuth2VaultResolver); !ok {
 		t.Errorf("oauth2 resolver type = %T, want *credential.OAuth2VaultResolver", r2)
+	}
+}
+
+// TestBinding_ScopeDriftLabelsRoundTrip: GrantedScopes, StaleReason,
+// and MissingScopes must survive the vault's plaintext-label
+// round-trip so listing surfaces them without unlocking.
+func TestBinding_ScopeDriftLabelsRoundTrip(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	b := binding.Binding{
+		Name:         "oauth2/google/work",
+		Kind:         "oauth2",
+		Service:      "google",
+		Identity:     "work",
+		ConnectorFQN: "github://acme/aileron-connector-google",
+		GrantedScopes: []string{
+			"https://www.googleapis.com/auth/gmail.readonly",
+			"https://www.googleapis.com/auth/calendar.events",
+		},
+		StaleReason: binding.StaleReasonScopeDrift,
+		MissingScopes: []string{
+			"https://www.googleapis.com/auth/drive",
+		},
+		Status: binding.StatusStale,
+	}
+	if err := s.Put(ctx, b, []byte("envelope"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, err := s.Get(ctx, b.Name)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !reflect.DeepEqual(got.GrantedScopes, b.GrantedScopes) {
+		t.Errorf("GrantedScopes = %v, want %v", got.GrantedScopes, b.GrantedScopes)
+	}
+	if got.StaleReason != b.StaleReason {
+		t.Errorf("StaleReason = %q, want %q", got.StaleReason, b.StaleReason)
+	}
+	if !reflect.DeepEqual(got.MissingScopes, b.MissingScopes) {
+		t.Errorf("MissingScopes = %v, want %v", got.MissingScopes, b.MissingScopes)
+	}
+	if got.Status != binding.StatusStale {
+		t.Errorf("Status = %q, want stale", got.Status)
+	}
+}
+
+// TestVaultStore_UpdateMetadata_PreservesValue: scope-drift detection
+// updates only the metadata labels; the encrypted credential bytes
+// must round-trip unchanged so a refresh-token-holding OAuth envelope
+// is not clobbered when we mark it stale.
+func TestVaultStore_UpdateMetadata_PreservesValue(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	original := []byte(`{"access_token":"at","refresh_token":"rt"}`)
+	b := binding.Binding{
+		Name: "oauth2/google/work", Kind: "oauth2", Service: "google",
+		Identity: "work", ConnectorFQN: "github://acme/g",
+		GrantedScopes: []string{"https://www.googleapis.com/auth/gmail.readonly"},
+	}
+	if err := s.Put(ctx, b, original, binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	// Flip to stale via UpdateMetadata.
+	b.Status = binding.StatusStale
+	b.StaleReason = binding.StaleReasonScopeDrift
+	b.MissingScopes = []string{"https://www.googleapis.com/auth/drive"}
+	if err := s.UpdateMetadata(ctx, b); err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
+	}
+	// Metadata reflects the update.
+	got, err := s.Get(ctx, b.Name)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != binding.StatusStale {
+		t.Errorf("Status = %q, want stale", got.Status)
+	}
+	// Value round-trips: read directly from the vault.
+	secret, err := s.Vault.Get(ctx, string(b.Name))
+	if err != nil {
+		t.Fatalf("Vault.Get: %v", err)
+	}
+	if !reflect.DeepEqual(secret.Value, original) {
+		t.Errorf("UpdateMetadata clobbered the credential bytes: got %q, want %q",
+			secret.Value, original)
+	}
+}
+
+// TestVaultStore_UpdateMetadata_NotFound: missing bindings return the
+// stable sentinel so callers can branch on errors.Is.
+func TestVaultStore_UpdateMetadata_NotFound(t *testing.T) {
+	s := newStore(t)
+	err := s.UpdateMetadata(context.Background(), binding.Binding{
+		Name: "oauth2/google/missing", Kind: "oauth2",
+	})
+	if !errors.Is(err, binding.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }
 

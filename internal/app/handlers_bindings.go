@@ -335,6 +335,18 @@ func toAPIBinding(b binding.Binding) api.Binding {
 		s := api.BindingStatus(b.Status)
 		out.Status = &s
 	}
+	if len(b.GrantedScopes) > 0 {
+		gs := append([]string(nil), b.GrantedScopes...)
+		out.GrantedScopes = &gs
+	}
+	if b.StaleReason != "" {
+		sr := api.BindingStaleReason(b.StaleReason)
+		out.StaleReason = &sr
+	}
+	if len(b.MissingScopes) > 0 {
+		ms := append([]string(nil), b.MissingScopes...)
+		out.MissingScopes = &ms
+	}
 	return out
 }
 

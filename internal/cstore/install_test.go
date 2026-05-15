@@ -64,6 +64,104 @@ func happyPathInstaller(t *testing.T, ref Ref) (*Installer, string, *fakeFetcher
 	return inst, "sha256:" + tb.CanonicalHashHex(), fetcher
 }
 
+// TestInstall_ScopeDriftHookFiresWithManifestScopes: after a
+// successful first install, the hook receives the connector's FQN
+// and OAuth scope set. This is the seam #726 layers binding-drift
+// detection on top of without dragging the binding package into
+// cstore.
+func TestInstall_ScopeDriftHookFiresWithManifestScopes(t *testing.T) {
+	ref := mustRef(t, "github://acme/g@1.0.0")
+	// Override the canonical manifest with one that declares OAuth2 scopes.
+	manifest := []byte(`[connector]
+name = "github://acme/g"
+version = "1.0.0"
+publisher = "test"
+
+[capabilities.credential]
+kind = "oauth2"
+scope = "Read"
+
+[capabilities.credential.oauth2]
+authorize_url = "https://provider.test/auth"
+token_url = "https://provider.test/token"
+client_id = "cid"
+scopes = ["read", "write"]
+`)
+	binary := []byte("BINARY")
+	sig, pub := signedManifest(t, binary, manifest)
+	tarBytes := buildTarball(t, tarBinaryWASM, binary, manifest, sig)
+	resolver := DefaultResolver()
+	url, err := resolver.ResolveTarball(ref)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	fetcher := &fakeFetcher{bytesAt: map[string][]byte{url: tarBytes}}
+	keyring := NewEd25519Keyring()
+	keyring.Add(ref.FQN.Authority(), pub)
+
+	var hookFQN string
+	var hookScopes []string
+	inst := &Installer{
+		Resolver: resolver,
+		Fetcher:  fetcher,
+		Verifier: keyring,
+		Store:    NewStore(t.TempDir()),
+		ScopeDriftHook: func(_ context.Context, fqn string, required []string) {
+			hookFQN = fqn
+			hookScopes = required
+		},
+	}
+	if _, err := inst.Install(context.Background(), InstallRequest{Ref: ref}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if hookFQN != "github://acme/g" {
+		t.Errorf("hook FQN = %q", hookFQN)
+	}
+	if len(hookScopes) != 2 || hookScopes[0] != "read" || hookScopes[1] != "write" {
+		t.Errorf("hook scopes = %v, want [read write]", hookScopes)
+	}
+}
+
+// TestInstall_ScopeDriftHookFiresOnAlreadyInstalled: the short-circuit
+// "this hash is already in the store" path must still fire the hook,
+// otherwise the migration case (binding has no recorded grant) can
+// never run if the user never installs a fresh hash.
+func TestInstall_ScopeDriftHookFiresOnAlreadyInstalled(t *testing.T) {
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, hash, _ := happyPathInstaller(t, ref)
+	// First install populates the store.
+	if _, err := inst.Install(context.Background(), InstallRequest{Ref: ref}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	hookCalls := 0
+	inst.ScopeDriftHook = func(_ context.Context, fqn string, _ []string) {
+		hookCalls++
+		if fqn != "github://aileron/slack" {
+			t.Errorf("hook fqn = %q on short-circuit", fqn)
+		}
+	}
+	// Second install with the recorded ExpectedHash hits the
+	// already-installed short-circuit.
+	if _, err := inst.Install(context.Background(),
+		InstallRequest{Ref: ref, ExpectedHash: hash}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	if hookCalls != 1 {
+		t.Errorf("hook fired %d times on short-circuit, want 1", hookCalls)
+	}
+}
+
+// TestInstall_ScopeDriftHookNilSafe: not all daemons wire a hook;
+// installer must tolerate the unset field.
+func TestInstall_ScopeDriftHookNilSafe(t *testing.T) {
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, _, _ := happyPathInstaller(t, ref)
+	inst.ScopeDriftHook = nil
+	if _, err := inst.Install(context.Background(), InstallRequest{Ref: ref}); err != nil {
+		t.Errorf("Install with nil hook should not error: %v", err)
+	}
+}
+
 func TestInstall_HappyPath_RecordsHashAndStoresFiles(t *testing.T) {
 	ref := mustRef(t, "github://aileron/slack@1.2.0")
 	inst, expectedHash, fetcher := happyPathInstaller(t, ref)
