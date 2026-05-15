@@ -12,7 +12,23 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/ALRubinger/aileron/internal/sandbox/spawnhelper"
 )
+
+// TestMain intercepts the spawn-helper re-exec on Linux test runs.
+// The runtime calls os.Executable() to discover the daemon binary
+// for the helper re-exec; in tests that returns the test binary
+// itself. Without this dispatch, the helper invocation would
+// re-run the entire test suite recursively. With it, the test
+// binary acts as both the test driver and the helper.
+func TestMain(m *testing.M) {
+	if len(os.Args) >= 3 && os.Args[1] == spawnhelper.HelperArgvMarker {
+		spawnhelper.Run(os.Args[2])
+		return // unreachable in practice; Run never returns on success
+	}
+	os.Exit(m.Run())
+}
 
 // Each test below cites the ADR-0014 clause or the Linux namespace
 // property it enforces so refactors that preserve the contract
@@ -77,6 +93,189 @@ func TestApplyPlatformSandbox_Linux_SetsCloneflagsAndIDMappings(t *testing.T) {
 	}
 }
 
+func TestApplyPlatformSandbox_Linux_RewiresIntoHelperWhenFSScopesDeclared(t *testing.T) {
+	// Contract: when fs_read or fs_write is declared, the runtime
+	// rewires cmd to re-exec the daemon binary in helper mode.
+	// cmd.Path becomes the daemon path; cmd.Args[1] is the
+	// __spawn-helper marker; cmd.Args[2] is the encoded request
+	// that decodes to the original Program/Argv.
+	origExec := osExecutable
+	defer func() { osExecutable = origExec }()
+	osExecutable = func() (string, error) { return "/usr/local/bin/aileron-fake", nil }
+
+	cmd := exec.CommandContext(context.Background(), "/usr/bin/git", "log", "--since=2026-01-01")
+	limits := SpawnLimits{FSRead: []string{"/Users/alr/code/"}}
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/usr/bin/git"}, limits); err != nil {
+		if strings.Contains(err.Error(), "spawn_sandbox_unavailable") {
+			t.Skip("sandbox unavailable on this runner")
+		}
+		t.Fatalf("applyPlatformSandbox: %v", err)
+	}
+	if cmd.Path != "/usr/local/bin/aileron-fake" {
+		t.Errorf("cmd.Path = %q, want daemon binary path", cmd.Path)
+	}
+	if len(cmd.Args) != 3 {
+		t.Fatalf("cmd.Args = %v, want [aileron, __spawn-helper, <encoded>]", cmd.Args)
+	}
+	if cmd.Args[1] != spawnhelper.HelperArgvMarker {
+		t.Errorf("cmd.Args[1] = %q, want %q", cmd.Args[1], spawnhelper.HelperArgvMarker)
+	}
+	req, err := spawnhelper.DecodeRequest(cmd.Args[2])
+	if err != nil {
+		t.Fatalf("decode rewired request: %v", err)
+	}
+	if req.Program != "/usr/bin/git" {
+		t.Errorf("req.Program = %q, want /usr/bin/git", req.Program)
+	}
+	if !equalSlice(req.Argv, []string{"/usr/bin/git", "log", "--since=2026-01-01"}) {
+		t.Errorf("req.Argv = %v, want wrapped git argv", req.Argv)
+	}
+	if !equalSlice(req.FSRead, []string{"/Users/alr/code/"}) {
+		t.Errorf("req.FSRead = %v, want manifest scope", req.FSRead)
+	}
+}
+
+func TestApplyPlatformSandbox_Linux_NoRewireWhenOnlyProxyAddrDeclared(t *testing.T) {
+	// Contract: when only network is declared (no fs_read/fs_write),
+	// the wrapped CLI execs directly. Landlock doesn't govern
+	// network, so re-execing through the helper would add a
+	// process layer for no gain. v3's CLONE_NEWNET + shim work
+	// changes this; until then the wrapped CLI is the direct
+	// exec target.
+	cmd := exec.CommandContext(context.Background(), "/bin/echo", "hi")
+	origPath := cmd.Path
+	limits := SpawnLimits{ProxyAddr: "127.0.0.1:54321"}
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits); err != nil {
+		if strings.Contains(err.Error(), "spawn_sandbox_unavailable") {
+			t.Skip("sandbox unavailable on this runner")
+		}
+		t.Fatalf("applyPlatformSandbox: %v", err)
+	}
+	if cmd.Path != origPath {
+		t.Errorf("cmd.Path = %q; want unchanged %q (no helper rewire when only network declared)", cmd.Path, origPath)
+	}
+}
+
+func TestApplyPlatformSandbox_Linux_HelperEnforcesLandlockReadScope(t *testing.T) {
+	// End-to-end (BYOCLI threat model): a wrapped CLI cannot read
+	// outside its declared fs_read scope. The test binary acts as
+	// the daemon: when the runtime re-execs into the helper marker
+	// (via TestMain dispatch), Landlock is applied and cat is
+	// exec'd; cat reading a sentinel outside the scope fails with
+	// EPERM/EACCES at the kernel boundary.
+	if _, err := os.Stat("/bin/cat"); err != nil {
+		t.Skip("/bin/cat not present")
+	}
+	if err := checkLinuxSandboxAvailable(); err != nil {
+		t.Skipf("sandbox unavailable: %v", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	allowedDir := filepath.Join(home, "aileron-linux-v2-test-allowed")
+	deniedDir := filepath.Join(home, "aileron-linux-v2-test-denied")
+	if err := os.MkdirAll(allowedDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(deniedDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	defer os.RemoveAll(allowedDir)
+	defer os.RemoveAll(deniedDir)
+	sentinel := filepath.Join(deniedDir, "secret.txt")
+	if err := os.WriteFile(sentinel, []byte("don't read me"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), "/bin/cat", sentinel)
+	limits := SpawnLimits{
+		FSRead: []string{allowedDir},
+		// Also allow read of /lib, /lib64, /usr (dyld needs them
+		// to start /bin/cat). On the helper Landlock is the only
+		// FS constraint, so these system paths must be in fs_read.
+		// In production this widening is handled by the introspector
+		// at `aileron cli add` time.
+	}
+	// Append system-essentials so /bin/cat can dynamic-link.
+	for _, sys := range []string{"/lib", "/lib64", "/usr", "/etc", "/bin"} {
+		if _, err := os.Stat(sys); err == nil {
+			limits.FSRead = append(limits.FSRead, sys)
+		}
+	}
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/cat"}, limits); err != nil {
+		t.Fatalf("applyPlatformSandbox: %v", err)
+	}
+	out, runErr := cmd.CombinedOutput()
+	if runErr == nil {
+		t.Fatalf("expected /bin/cat to fail reading sentinel under Landlock; got success with output %q", string(out))
+	}
+	// The exact exit shape varies but a non-zero exit is the
+	// contract. Cat reports "Permission denied" when it hits
+	// EACCES from the kernel.
+	if !strings.Contains(string(out), "Permission denied") &&
+		!strings.Contains(string(out), "permission denied") {
+		t.Logf("note: cat output did not contain 'Permission denied' but exited non-zero: %q", string(out))
+	}
+}
+
+func TestApplyPlatformSandbox_Linux_HelperAllowsReadInsideScope(t *testing.T) {
+	// Complement: a read INSIDE the declared scope succeeds. Proves
+	// Landlock's allow rule for the manifest scope is actually
+	// applied (not just denying everything wholesale).
+	if _, err := os.Stat("/bin/cat"); err != nil {
+		t.Skip("/bin/cat not present")
+	}
+	if err := checkLinuxSandboxAvailable(); err != nil {
+		t.Skipf("sandbox unavailable: %v", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	allowedDir := filepath.Join(home, "aileron-linux-v2-test-allow-read")
+	if err := os.MkdirAll(allowedDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	defer os.RemoveAll(allowedDir)
+	sentinel := filepath.Join(allowedDir, "data.txt")
+	if err := os.WriteFile(sentinel, []byte("hello-from-landlock"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	cmd := exec.CommandContext(context.Background(), "/bin/cat", sentinel)
+	limits := SpawnLimits{FSRead: []string{allowedDir}}
+	for _, sys := range []string{"/lib", "/lib64", "/usr", "/etc", "/bin"} {
+		if _, err := os.Stat(sys); err == nil {
+			limits.FSRead = append(limits.FSRead, sys)
+		}
+	}
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/cat"}, limits); err != nil {
+		t.Fatalf("applyPlatformSandbox: %v", err)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sandboxed cat failed inside declared scope: %v", err)
+	}
+	if !strings.Contains(string(out), "hello-from-landlock") {
+		t.Errorf("output = %q, want sentinel content", string(out))
+	}
+}
+
+func equalSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestApplyPlatformSandbox_Linux_RunsRealBinaryUnderSandbox(t *testing.T) {
 	// End-to-end: a wrapped binary boots inside the namespace, sees
 	// its own PID 1 (itself), and exits cleanly. /bin/sh is widely
@@ -90,7 +289,17 @@ func TestApplyPlatformSandbox_Linux_RunsRealBinaryUnderSandbox(t *testing.T) {
 	}
 
 	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "echo PID=$$")
-	limits := SpawnLimits{FSRead: []string{"~/code/"}}
+	// Declare /tmp as the read scope so Landlock's path-open
+	// succeeds; the test only cares about the PID-namespace
+	// boundary, not the FS confinement. /tmp exists on every
+	// POSIX host. The system-essentials (/lib, /lib64, /usr,
+	// /bin, /etc) are needed for /bin/sh's dyld to start.
+	limits := SpawnLimits{FSRead: []string{"/tmp"}}
+	for _, sys := range []string{"/lib", "/lib64", "/usr", "/etc", "/bin"} {
+		if _, err := os.Stat(sys); err == nil {
+			limits.FSRead = append(limits.FSRead, sys)
+		}
+	}
 	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/sh"}, limits); err != nil {
 		t.Fatalf("applyPlatformSandbox: %v", err)
 	}
