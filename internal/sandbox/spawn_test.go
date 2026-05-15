@@ -834,6 +834,90 @@ func TestSpawnPolicy_PassesResolvedLimitsToExecutor(t *testing.T) {
 	}
 }
 
+func TestRunCaptured_InvokesPostStartAndCleanup(t *testing.T) {
+	// Contract: hooks.PostStart runs after Start, before Wait; hooks.Cleanup
+	// runs after Wait. The process must be live when PostStart is called
+	// (proven by the hook seeing a real PID) and the cleanup must observe
+	// a completed process.
+	if !commandExists("/bin/echo") {
+		t.Skip("/bin/echo not present")
+	}
+	var postStartPID int
+	var cleanupCalled bool
+	hooks := platformSandboxHooks{
+		PostStart: func(p *os.Process) error {
+			postStartPID = p.Pid
+			return nil
+		},
+		Cleanup: func() {
+			cleanupCalled = true
+		},
+	}
+	cmd := exec.Command("/bin/echo", "hello")
+	stdout, _, err := runCaptured(cmd, SpawnLimits{MaxStdoutBytes: 1024, MaxStderrBytes: 1024}, hooks)
+	if err != nil {
+		t.Fatalf("runCaptured: %v", err)
+	}
+	if !strings.Contains(string(stdout), "hello") {
+		t.Errorf("stdout = %q, want to contain 'hello'", string(stdout))
+	}
+	if postStartPID <= 0 {
+		t.Errorf("PostStart did not receive a valid PID (got %d)", postStartPID)
+	}
+	if !cleanupCalled {
+		t.Error("Cleanup was not called after Wait returned")
+	}
+}
+
+func TestRunCaptured_PostStartErrorKillsSubprocessAndCleansUp(t *testing.T) {
+	// Contract: when PostStart returns an error, runCaptured kills the
+	// subprocess (so it doesn't run unconfined), reaps it via Wait,
+	// invokes Cleanup, and returns the PostStart error rather than the
+	// Wait error.
+	if !commandExists("/bin/sh") {
+		t.Skip("/bin/sh not present")
+	}
+	postStartErr := errors.New("simulated post-start failure")
+	var cleanupCalled bool
+	hooks := platformSandboxHooks{
+		PostStart: func(p *os.Process) error {
+			return postStartErr
+		},
+		Cleanup: func() {
+			cleanupCalled = true
+		},
+	}
+	// Sleep for longer than the test would otherwise take so we can
+	// be sure the kill is what ends the subprocess, not a natural exit.
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
+	_, _, err := runCaptured(cmd, SpawnLimits{MaxStdoutBytes: 1024, MaxStderrBytes: 1024}, hooks)
+	if !errors.Is(err, postStartErr) {
+		t.Errorf("expected PostStart error, got %v", err)
+	}
+	if !cleanupCalled {
+		t.Error("Cleanup not invoked after PostStart failure")
+	}
+}
+
+func TestRunCaptured_CleanupRunsEvenOnStartFailure(t *testing.T) {
+	// Contract: if cmd.Start itself fails (e.g., binary absent),
+	// hooks.Cleanup still runs so platform-sandbox handles release.
+	var cleanupCalled bool
+	hooks := platformSandboxHooks{
+		Cleanup: func() {
+			cleanupCalled = true
+		},
+	}
+	cmd := exec.Command("/this/binary/does/not/exist/anywhere")
+	_, _, err := runCaptured(cmd, SpawnLimits{MaxStdoutBytes: 1024, MaxStderrBytes: 1024}, hooks)
+	if err == nil {
+		t.Fatal("expected Start to fail for nonexistent binary")
+	}
+	if !cleanupCalled {
+		t.Error("Cleanup not invoked after Start failure")
+	}
+}
+
 func TestSplitTokenSegments_UnmatchedBraceTreatedAsLiteral(t *testing.T) {
 	segs := splitTokenSegments("--since={oops")
 	// Unmatched `{` falls back to a single literal segment.
