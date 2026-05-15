@@ -616,6 +616,32 @@ func TestEmitSpawnAudit_AllowDecisionEmitsExpectedAttributes(t *testing.T) {
 	}
 }
 
+func TestEmitSpawnAudit_PlatformFieldCarriesGOOS(t *testing.T) {
+	// Contract (#719 cross-platform finishing): every spawn
+	// audit row carries the runtime.GOOS value so post-hoc
+	// analysis of a multi-platform deployment can distinguish
+	// per-OS behavior without relying on derived signals like
+	// argv0's path style.
+	h := &recordingHandler{}
+	state := &hostState{
+		connectorFQN: "github://aileron-test/gitcrawl",
+		logger:       slog.New(h),
+	}
+	emitSpawnAudit(context.Background(), state,
+		SpawnEnvelope{Program: "/usr/bin/git", Argv: []string{"git", "status"}},
+		"allow", 0, nil, nil, "")
+	if len(h.records) != 1 {
+		t.Fatalf("expected one record, got %d", len(h.records))
+	}
+	got, ok := h.records[0]["platform"].(string)
+	if !ok || got == "" {
+		t.Errorf("platform field missing or empty: %v", h.records[0]["platform"])
+	}
+	if got != runtime.GOOS {
+		t.Errorf("platform = %q, want %q", got, runtime.GOOS)
+	}
+}
+
 func TestEmitSpawnAudit_DenyClassPropagated(t *testing.T) {
 	h := &recordingHandler{}
 	state := &hostState{
