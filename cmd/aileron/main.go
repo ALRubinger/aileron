@@ -126,6 +126,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runConnector(args[1:], os.Stdin, stdout, stderr)
 	case "action":
 		return runAction(args[1:], os.Stdin, stdout, stderr)
+	case "cli":
+		return runCli(args[1:], os.Stdin, stdout, stderr)
 	case "keyring":
 		return runKeyring(args[1:], stdout, stderr)
 	case "hub":
@@ -172,6 +174,8 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron connector check            Check installed connectors for newer versions")
 	fmt.Fprintln(w, "  aileron action add <FQN>           Install an action template from its FQN")
 	fmt.Fprintln(w, "  aileron action wrap <CLI>          Scaffold a spawn-primitive connector around a local CLI")
+	fmt.Fprintln(w, "  aileron cli add <path>             Wrap an installed CLI binary as a local connector (BYOCLI)")
+	fmt.Fprintln(w, "  aileron cli list                   List installed local-mode connectors")
 	fmt.Fprintln(w, "  aileron keyring trust <auth> <key> Authorize a publisher's signing key for installs")
 	fmt.Fprintln(w, "  aileron keyring list               List trusted publishers and key fingerprints")
 	fmt.Fprintln(w, "  aileron keyring revoke <auth>      Remove a publisher's keys from the trust list")

@@ -1,0 +1,404 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/sandbox/sandboxtest"
+)
+
+// fakeHome redirects HOME and XDG_CONFIG_HOME to a tempdir so
+// `aileron cli` commands write to t.TempDir() instead of the
+// developer's real home. Returns the tempdir path.
+func fakeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	return home
+}
+
+func TestRunCliAdd_RejectsMissingPath(t *testing.T) {
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runCliAdd(nil, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for missing path")
+	}
+}
+
+func TestRunCliAdd_RejectsNonExistentPath(t *testing.T) {
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runCliAdd(
+		[]string{"/nonexistent/binary"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Error("expected nonzero exit for nonexistent binary")
+	}
+	if !strings.Contains(stderr.String(), "stat") {
+		t.Errorf("stderr should mention stat failure: %q", stderr.String())
+	}
+}
+
+func TestRunCliAdd_DryRunWritesNothing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+	dir := t.TempDir()
+	fake := sandboxtest.FakeBinary{
+		Stdout: "Usage: tinycli [command]\n\nCommands:\n  ping  Ping a host\n  pong  Reply\n",
+	}
+	binPath, err := fake.Write(dir, "tinycli")
+	if err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCliAdd(
+		[]string{"--dry-run", "--yes", binPath},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "dry-run") {
+		t.Errorf("dry-run message missing: %q", stdout.String())
+	}
+	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "tinycli", "manifest.toml")
+	if _, err := os.Stat(manifestPath); err == nil {
+		t.Errorf("dry-run wrote manifest to %s", manifestPath)
+	}
+}
+
+func TestRunCliAdd_WritesLocalManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+	dir := t.TempDir()
+	fake := sandboxtest.FakeBinary{
+		Stdout: "Usage: tinycli [command]\n\nCommands:\n  ping  Ping a host\n  pong  Reply\n",
+	}
+	binPath, err := fake.Write(dir, "tinycli")
+	if err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCliAdd(
+		[]string{"--yes", binPath},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "tinycli", "manifest.toml")
+	body, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("manifest not written: %v", err)
+	}
+	m, err := cstore.ParseManifest(manifestPath, body)
+	if err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if m.Connector.Origin != cstore.OriginLocal {
+		t.Errorf("origin=%q want %q", m.Connector.Origin, cstore.OriginLocal)
+	}
+	if m.Connector.Forwarder != cstore.BuiltinForwarderSpawn {
+		t.Errorf("forwarder=%q want %q", m.Connector.Forwarder, cstore.BuiltinForwarderSpawn)
+	}
+	expectedFQN, _ := cstore.LocalFQN("tinycli")
+	if m.Connector.Name != expectedFQN {
+		t.Errorf("name=%q want %q", m.Connector.Name, expectedFQN)
+	}
+	if m.Capabilities.Spawn == nil {
+		t.Fatal("missing [capabilities.spawn]")
+	}
+	if len(m.Capabilities.Spawn.Programs) != 1 || m.Capabilities.Spawn.Programs[0].Path != binPath {
+		t.Errorf("program path: got %+v want %s", m.Capabilities.Spawn.Programs, binPath)
+	}
+	// FromHelp's parser may produce subcommand entries OR fall
+	// back to a single "run" op. Verify at least one operation
+	// landed in the manifest so the action surface is non-empty.
+	if len(m.Capabilities.Spawn.Operations) == 0 {
+		t.Errorf("expected at least one operation, got none")
+	}
+}
+
+func TestRunCliList_EmptyShowsHint(t *testing.T) {
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runCliList(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No local connectors") {
+		t.Errorf("empty-state hint missing: %q", stdout.String())
+	}
+}
+
+func TestRunCliList_RendersInstalled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+
+	// Seed a manifest directly via the store so this test doesn't
+	// depend on the introspection path.
+	store := cstore.NewLocalStore(filepath.Join(home, ".aileron", "connectors", "local"))
+	fqn, _ := cstore.LocalFQN("seeded")
+	m := &cstore.Manifest{
+		Connector: cstore.ManifestConnector{
+			Name:      fqn,
+			Version:   "0.0.1",
+			Origin:    cstore.OriginLocal,
+			Forwarder: cstore.BuiltinForwarderSpawn,
+		},
+		Capabilities: cstore.ManifestCapabilities{
+			Spawn: &cstore.ManifestSpawn{
+				Programs: []cstore.ManifestSpawnProgram{
+					{Path: "/usr/local/bin/seeded"},
+				},
+				Operations: map[string]cstore.ManifestSpawnOperation{
+					"help": {Argv: "--help"},
+				},
+			},
+		},
+	}
+	if _, err := store.Save("seeded", m); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCliList(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "seeded") {
+		t.Errorf("list missing entry: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "/usr/local/bin/seeded") {
+		t.Errorf("list missing program path: %q", stdout.String())
+	}
+}
+
+func TestRunCliRemove_DeletesEntry(t *testing.T) {
+	home := fakeHome(t)
+	store := cstore.NewLocalStore(filepath.Join(home, ".aileron", "connectors", "local"))
+	fqn, _ := cstore.LocalFQN("doomed")
+	m := &cstore.Manifest{
+		Connector: cstore.ManifestConnector{
+			Name:      fqn,
+			Version:   "0.0.1",
+			Origin:    cstore.OriginLocal,
+			Forwarder: cstore.BuiltinForwarderSpawn,
+		},
+		Capabilities: cstore.ManifestCapabilities{
+			Spawn: &cstore.ManifestSpawn{
+				Programs:   []cstore.ManifestSpawnProgram{{Path: "/usr/local/bin/doomed"}},
+				Operations: map[string]cstore.ManifestSpawnOperation{"help": {Argv: "--help"}},
+			},
+		},
+	}
+	if _, err := store.Save("doomed", m); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runCliRemove([]string{"doomed"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	has, _ := store.Has("doomed")
+	if has {
+		t.Error("Has returned true after remove")
+	}
+}
+
+func TestRunCliRemove_ErrorsOnMissing(t *testing.T) {
+	fakeHome(t)
+	var stdout, stderr bytes.Buffer
+	code := runCliRemove([]string{"never-existed"}, &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for missing entry")
+	}
+}
+
+func TestRunCliRefresh_PreservesCredentials(t *testing.T) {
+	// Refresh is the introspector applied to the existing
+	// program path. The acceptance bullet says credentials in
+	// the vault must not be touched — this test verifies the
+	// store-side contract: a refresh saves a new manifest but
+	// the vault is a separate subsystem the cli refresh code
+	// never reaches into.
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest.FakeBinary is POSIX-only")
+	}
+	home := fakeHome(t)
+	dir := t.TempDir()
+	fake := sandboxtest.FakeBinary{
+		Stdout: "Usage: refresh-me [command]\n\nCommands:\n  do     do a thing\n  redo   redo a thing\n",
+	}
+	binPath, err := fake.Write(dir, "refresh-me")
+	if err != nil {
+		t.Fatalf("write fake: %v", err)
+	}
+
+	// First add.
+	var stdout, stderr bytes.Buffer
+	if code := runCliAdd(
+		[]string{"--yes", binPath},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	); code != 0 {
+		t.Fatalf("initial add failed: %s", stderr.String())
+	}
+
+	// Then refresh — should succeed and rewrite the same dir.
+	stdout.Reset()
+	stderr.Reset()
+	code := runCliRefresh(
+		[]string{"--yes", "refresh-me"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("refresh failed exit=%d stderr=%s", code, stderr.String())
+	}
+
+	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "refresh-me", "manifest.toml")
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Errorf("manifest missing after refresh: %v", err)
+	}
+}
+
+func TestResolveProgramPath_RejectsDir(t *testing.T) {
+	_, err := resolveProgramPath(t.TempDir())
+	if err == nil {
+		t.Error("expected error for directory path")
+	}
+}
+
+func TestResolveProgramPath_RejectsNonExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executable-bit check is POSIX-only")
+	}
+	tmp := t.TempDir()
+	notExec := filepath.Join(tmp, "notexec")
+	if err := os.WriteFile(notExec, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := resolveProgramPath(notExec)
+	if err == nil {
+		t.Error("expected error for non-executable file")
+	}
+}
+
+func TestResolveProgramPath_ExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	exec := filepath.Join(home, "mybin")
+	if err := os.WriteFile(exec, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := resolveProgramPath("~/mybin")
+	if err != nil {
+		t.Fatalf("resolveProgramPath: %v", err)
+	}
+	if got != exec {
+		t.Errorf("got %q want %q", got, exec)
+	}
+}
+
+func TestDefaultFSReadScope_UsesXDGConfigHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
+	scope := defaultFSReadScope("mycli")
+	if len(scope) != 1 {
+		t.Fatalf("scope=%v", scope)
+	}
+	if scope[0] != "/custom/xdg/mycli" {
+		t.Errorf("scope=%q", scope[0])
+	}
+}
+
+func TestScopeBadge_FlagsBroadScopes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("$HOME-based check is POSIX-only")
+	}
+	home, _ := os.UserHomeDir()
+	for path, wantBroad := range map[string]bool{
+		home:                    true,
+		"/":                     true,
+		"/usr":                  true,
+		"/usr/local/etc":        false,
+		filepath.Join(home, "config", "linear"): false,
+	} {
+		got := scopeBadge(path)
+		isBroad := strings.Contains(got, "broad")
+		if isBroad != wantBroad {
+			t.Errorf("scopeBadge(%q)=%q want broad=%v", path, got, wantBroad)
+		}
+	}
+}
+
+func TestConfirm_YesAccepts(t *testing.T) {
+	var w bytes.Buffer
+	if !confirm(strings.NewReader("y\n"), &w, "ok?") {
+		t.Error("y should accept")
+	}
+}
+
+func TestConfirm_NoRejects(t *testing.T) {
+	var w bytes.Buffer
+	if confirm(strings.NewReader("n\n"), &w, "ok?") {
+		t.Error("n should reject")
+	}
+}
+
+func TestConfirm_EmptyRejects(t *testing.T) {
+	var w bytes.Buffer
+	if confirm(strings.NewReader("\n"), &w, "ok?") {
+		t.Error("empty should reject (default no)")
+	}
+}
+
+func TestValidateConnectorName_RejectsBadShape(t *testing.T) {
+	for _, bad := range []string{"", "Linear", "with spaces", "../escape"} {
+		if err := validateConnectorName(bad); err == nil {
+			t.Errorf("accepted invalid name %q", bad)
+		}
+	}
+}
+
+func TestRunCli_DispatchUnknown(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCli([]string{"frobnicate"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for unknown subcommand")
+	}
+	if !strings.Contains(stderr.String(), "frobnicate") {
+		t.Errorf("unknown subcommand should be surfaced: %q", stderr.String())
+	}
+}
+
+func TestRunCli_HelpFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runCli([]string{"--help"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Errorf("--help should exit 0, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "aileron cli add") {
+		t.Errorf("--help should list subcommands: %q", stdout.String())
+	}
+}

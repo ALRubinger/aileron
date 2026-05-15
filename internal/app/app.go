@@ -462,7 +462,14 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	if sandboxErr != nil {
 		log.Warn("sandbox runtime unavailable; using stub executor", "error", sandboxErr)
 	} else {
-		executor = action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT, bindingStore)
+		sandboxExec := action.NewSandboxExecutor(server.actions, server.installer.Store, sandboxRT, bindingStore)
+		// BYOCLI (#749): local-mode connectors live at
+		// ~/.aileron/connectors/local. Set unconditionally; the
+		// executor tolerates a missing root and just resolves no
+		// local connectors for hosts that have never run
+		// `aileron cli add`.
+		sandboxExec.LocalStore = cstore.NewLocalStore(cstore.DefaultLocalRoot())
+		executor = sandboxExec
 		server.sandboxRuntime = sandboxRT
 	}
 	server.executor = executor
