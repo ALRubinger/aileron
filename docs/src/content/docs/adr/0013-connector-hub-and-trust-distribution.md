@@ -31,7 +31,7 @@ This ADR ratifies the resolved set of decisions. It supersedes the Hub-related p
 
 ### The Hub points; it does not host
 
-The Hub is a public GitHub repository at `aileron-connectors-hub`. Each catalog entry is a YAML file recording the FQN of an existing artifact, the publisher, and metadata for discovery; connector entries additionally record the URL of the publisher's signing key. The Hub stores no binaries, no manifests, no signed artifacts.
+The Hub is a public GitHub repository at `aileron-hub`. Each catalog entry is a YAML file recording the FQN of an existing artifact, the publisher, and metadata for discovery; connector entries additionally record the URL of the publisher's signing key. The Hub stores no binaries, no manifests, no signed artifacts.
 
 When a user discovers a connector via the Hub and runs `aileron connector install <fqn>`, the install pipeline fetches the binary from `<fqn>` (typically a GitHub release artifact) exactly as it does today. The Hub is not a fetch dependency for installs; it is a discovery and metadata source. A connector installable by FQN today remains installable when the Hub is offline.
 
@@ -59,7 +59,7 @@ Trust granularity is unaffected. Per-repo for v0.x and per-publisher v2 are the 
 
 ### Anyone publishes; Aileron does not vet
 
-A publisher gets listed in the Hub by opening a PR to `aileron-connectors-hub` with their entry YAML. The Hub repo's CI validates the entry against a JSON schema. Maintainers merge per the repo's own contribution rules. Aileron does not perform editorial review of the connector itself, does not verify that the publisher controls the FQN they claim, and does not audit the connector binary.
+A publisher gets listed in the Hub by opening a PR to `aileron-hub` with their entry YAML. The Hub repo's CI validates the entry against a JSON schema. Maintainers merge per the repo's own contribution rules. Aileron does not perform editorial review of the connector itself, does not verify that the publisher controls the FQN they claim, and does not audit the connector binary.
 
 The reasoning is twofold. First, Aileron is not yet mature enough to operate a vetting program responsibly: defining "approved" without arbitrary or politicized criteria, scaling review to community submissions, handling appeals. Second, vetting raises the contribution threshold and inhibits the early connector-author community Aileron needs to grow.
 
@@ -164,7 +164,7 @@ The install-time prompt becomes the moderation moment. With no Aileron vetting, 
 
 ### For publishers
 
-A publisher who wants their connector to be discoverable opens a PR to `aileron-connectors-hub` with a YAML entry under `connectors/` pointing at their `github://owner/repo` FQN. Aileron does not host the binary. The publisher continues to sign their releases with the key at `keys/publisher.pub` in their repo. Sigstore-style signing is not required for v0.x.
+A publisher who wants their connector to be discoverable opens a PR to `aileron-hub` with a YAML entry under `connectors/` pointing at their `github://owner/repo` FQN. Aileron does not host the binary. The publisher continues to sign their releases with the key at `keys/publisher.pub` in their repo. Sigstore-style signing is not required for v0.x.
 
 A publisher who wants their action template or suite to be discoverable opens a PR adding a YAML entry under `actions/` or `suites/` pointing at the canonical FQN of the artifact in their repo. These entries carry description, intents, and category metadata for discovery. They do not affect the install pipeline, which still walks the action's declared connector dependencies through the resolver in [ADR-0004](/adr/0004-dependency-resolution/).
 

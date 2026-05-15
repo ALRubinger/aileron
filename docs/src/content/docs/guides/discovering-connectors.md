@@ -1,72 +1,96 @@
 ---
-title: "Discovering Connectors"
-description: "Browse and install community-published connectors via the Aileron Connector Hub. Covers aileron hub search/show, the webapp Hub page, and the install-decision trust prompt."
+title: "Discovering on the Hub"
+description: "Browse and install community-published suites, actions, and connectors via the Aileron Hub. Covers aileron hub search/show, the webapp Hub page, the composite trust panel, and the install-decision prompt."
 ---
 
-This guide is for users who want to find and install community-published connectors. The Aileron Connector Hub is a public discovery index: a list of connectors that publishers have opted into making findable. Discovery is decoupled from trust. Appearing in the Hub is not an Aileron endorsement. You still confirm the publisher's signing key fingerprint before installing.
+This guide is for users who want to find and install community-published suites, actions, and connectors. The Aileron Hub is a public discovery index — a catalog that publishers opt into so users can find them. Discovery is decoupled from trust. Appearing in the Hub is not an Aileron endorsement. You still confirm the publisher's signing key fingerprint before installing.
 
-The Hub itself is the GitHub repo [`aileron-connectors-hub`](https://github.com/ALRubinger/aileron-connectors-hub). Each entry is one YAML file pointing at a connector's canonical `github://owner/repo` FQN. The Hub holds no binaries. Install artifacts still come from the publisher's source repository.
+The Hub itself is the GitHub repo [`aileron-hub`](https://github.com/ALRubinger/aileron-hub). It catalogs three entry types, each one YAML pointer to a canonical FQN:
 
-For the install pipeline that runs under all this, see [Installing a Connector](/guides/installing-a-connector/). The Hub layers discovery and a per-FQN trust prompt on top of that pipeline.
+- `suites/*.yaml` — bundles of related actions (e.g. "Gmail + Calendar").
+- `actions/*.yaml` — individual action templates (e.g. "draft a Gmail").
+- `connectors/*.yaml` — the binaries those actions and suites depend on.
+
+The Hub holds no binaries. Install artifacts still come from the publisher's source repository. The intent-first default browse leads with **Suites**, then **Actions**, then **Providers** (connectors) — see [ADR-0013](/adr/0013-connector-hub-and-trust-distribution/).
+
+For the install pipeline that runs under all this, see [Installing a Connector](/guides/installing-a-connector/) or [Installing an Action](/guides/installing-an-action/). The Hub layers discovery and a per-FQN trust prompt on top of those pipelines.
 
 ## Quick tour
 
 ```sh
-# List every connector in the Hub.
+# Default browse: all three catalogs grouped by type, Suites first.
 aileron hub list
 
-# Search by keyword (matches FQN and description).
+# Per-catalog browse.
+aileron hub list suites
+aileron hub list actions
+aileron hub list connectors
+
+# Cross-catalog search (matches FQN and description in all three).
 aileron hub search calendar
 
-# Show a single entry's metadata.
-aileron hub show github://ALRubinger/aileron-connector-google
+# Restrict search to one catalog.
+aileron hub search calendar --type suites
+
+# Show a single entry (dispatches by entry type).
+aileron hub show github://ALRubinger/aileron-connector-google/actions/draft-email
 ```
 
-The same data is browseable in the webapp: under `aileron launch`, visit `/hub` for a searchable list with one-click install.
+The same data is browseable in the webapp: under `aileron launch`, visit `/hub` for a tabbed shell (Suites / Actions / Providers) with per-card detail pages and a composite install modal.
 
 ## How the daemon talks to the Hub
 
-The daemon shallow-clones `aileron-connectors-hub` on every query and parses the entries on the fly. There is no persisted cache and no GitHub API call (per [ADR-0013](/adr/0013-connector-hub-and-trust-distribution/) and the resolution of issue #486). Each `aileron hub` invocation pays one shallow git clone of a small repo. The CLI is the same shape as any other Aileron subcommand: it talks to the local daemon over `/v1/hub/*`, the daemon does the work.
+The daemon shallow-clones `aileron-hub` on every query and parses the entries on the fly. There is no persisted cache and no GitHub API call (per [ADR-0013](/adr/0013-connector-hub-and-trust-distribution/) and the resolution of issue #486). Each `aileron hub` invocation pays one shallow git clone of a small repo. The CLI is the same shape as any other Aileron subcommand: it talks to the local daemon over `/v1/hub/*`, the daemon does the work.
 
 The webapp's `/hub` page reads the same endpoints. CLI and webapp render the same data in different shapes.
 
 ## `aileron hub` CLI
 
-### `list`
+### `list [<catalog>]`
 
-Prints every Hub entry as a fixed-width table:
+With no argument, prints all three catalogs grouped by type:
 
 ```
+── SUITES ──
+FQN                                                 PUBLISHER             ACTIONS  DESCRIPTION
+github://ALRubinger/aileron-connector-google/suite  ALRubinger            5        Read and draft Gmail; read and create calendar events
+
+── ACTIONS ──
+FQN                                                              PUBLISHER             DESCRIPTION
+github://ALRubinger/aileron-connector-google/actions/draft-email ALRubinger            Draft a Gmail message with subject, recipients, and body
+...
+
+── PROVIDERS ──
 FQN                                                 PUBLISHER             DESCRIPTION
 github://ALRubinger/aileron-connector-google        ALRubinger            Google Workspace connector (Calendar, Drive, Gmail)
-github://alice/aileron-connector-slack              alice                 Slack messaging connector
 ```
 
-Pass `--json` for NDJSON output (one JSON-encoded entry per line) when scripting.
+With an explicit catalog (`suites` / `actions` / `connectors`), prints just that one. Pass `--json` for NDJSON (single-catalog) or a single grouped JSON object (default mode) when scripting.
 
-### `search <query>`
+### `search <query> [--type <catalog>]`
 
-Case-insensitive substring match on FQN and description. Server-side filter, so the daemon handles the matching rules.
+Case-insensitive substring match on FQN and description across all three catalogs by default. `--type` narrows to one catalog when you already know what you want. Server-side filter, so the daemon handles the matching rules.
 
 ```sh
 aileron hub search slack
+aileron hub search draft --type actions
 ```
 
-### `show <fqn>`
+### `show <fqn> [--type <catalog>]`
 
-Prints the full record for one entry:
+Tries each catalog in order (connector → action → suite) and prints the first match. `--type` skips dispatch and queries the named catalog directly. The rendering shape depends on entry type — connector entries show key URL + release pattern, actions show the required connector + intents, suites show member actions + the closure of connectors they depend on.
 
 ```
-FQN:             github://ALRubinger/aileron-connector-google
-Description:     Google Workspace connector (Calendar, Drive, Gmail)
-Publisher:       ALRubinger
-Key URL:         https://raw.githubusercontent.com/ALRubinger/aileron-connector-google/main/keys/publisher.pub
-Release pattern: v*
+Kind:           action
+FQN:            github://ALRubinger/aileron-connector-google/actions/draft-email
+Description:    Draft a Gmail message with subject, recipients, and body
+Publisher:      ALRubinger
+Connector:      github://ALRubinger/aileron-connector-google
+Intents:        draft email, compose gmail
+Category:       communication
 ```
 
-The `Key URL` is where the daemon will fetch the publisher's signing key during install. The `Release pattern` is a glob the publisher commits to (e.g. `v*` means versioned releases at tags starting with `v`).
-
-## The install-decision prompt
+## The install-decision prompt (connectors)
 
 When you run `aileron connector install <FQN>` on a Hub-listed connector, the CLI does not jump straight to the preview flow. It first fetches an install-decision payload from the daemon, which:
 
@@ -110,13 +134,53 @@ The `Trust:` line picks one of three labels, color-coded so the unusual states s
 
 The `conflict` state is rare and intentional. v0.x trust is strictly per-repo (per FQN), so one publisher with two connectors can carry two different keys without anything being wrong. The conflict surface flags the case so you notice. Run `aileron keyring list` to see what's currently trusted, compare fingerprints with the publisher's release notes or commits to `keys/publisher.pub` in their repo, then make a call.
 
+## The composite install-decision (actions and suites)
+
+When you run `aileron action add <ACTION-FQN>` or `aileron action add-suite <SUITE-URL>` on a Hub-listed action or suite, the CLI fetches a *composite* install-decision payload. It walks the dependency closure and groups by unique connector authority, surfacing one trust panel per authority — even if a suite bundles five actions that all depend on the same connector, you see one trust gate, not five.
+
+```
+Hub install-decision (suite)
+
+  Suite:     github://ALRubinger/aileron-connector-google/suite
+  Summary:   Read and draft Gmail; read and create calendar events
+  Publisher: ALRubinger
+  Actions:   5
+    - github://ALRubinger/aileron-connector-google/actions/list-recent-emails
+    - github://ALRubinger/aileron-connector-google/actions/draft-email
+    ...
+
+  Trust gate(s): 1 connector authority
+
+  ● github://ALRubinger/aileron-connector-google
+      Publisher:   ALRubinger
+      Fingerprint: sha256:i4l2kuD8q++d5b9v8/LLI1
+      Trust:       unknown (first install)
+      Risk:        • First connector by this publisher you've installed
+
+Trust these publishers and continue? [y/N/d=details]:
+```
+
+A single `y` covers every authority surfaced in the panel. The daemon writes per-FQN trust to your keyring for each before the install pipeline runs. Per-authority y/N prompts that the legacy flow would have fired are suppressed — `trustState` records them as already accepted.
+
+For a cross-publisher suite (one whose member actions depend on connectors from multiple publishers), the panel renders one section per unique authority and the same single confirm covers them all.
+
+Fall-through: if the action or suite isn't Hub-listed (404), the composite endpoint returns nothing useful and the CLI falls through to the legacy per-authority trust prompts unchanged. Local-file suite installs (`aileron action add-suite ./my-suite.toml`) never carry a Hub FQN and always use the legacy flow.
+
 ## The webapp's Hub page
 
-Under `aileron launch`, the daemon serves a static webapp at `http://127.0.0.1:<port>/`. The `/hub` page renders the same entries the CLI lists, with a debounced search box and a per-card **Install** button.
+Under `aileron launch`, the daemon serves a static webapp at `http://127.0.0.1:<port>/`. The `/hub` page renders a tabbed shell with the three catalogs:
 
-Clicking **Install** opens a modal showing the same install-decision payload the CLI renders: FQN, publisher, fingerprint, trust-state badge, risk indicators, the publisher's other Hub entries. A version input (required) and an optional expected-hash input let you pin the install. On confirm, the modal POSTs to the same `/v1/connectors/install` endpoint the CLI uses, with the same `confirmed_fingerprint` payload. Daemon-side behavior is identical to the CLI flow.
+- **Suites** (default tab) — bundled action sets, grouped by intent.
+- **Actions** — atomic action templates, with the required connector visible per card.
+- **Providers** — connector entries; the same view as the pre-amendment page.
 
-The modal renders the publisher footprint as informational context. There is no "Trust this publisher" button. v0.x trust is per-repo, and the design is deliberately careful not to invite users into a wider trust grant.
+Each card has a per-entry **Install** button and a clickable FQN linking to a detail page at `/hub/suites/[fqn]` or `/hub/actions/[fqn]`. The detail page renders the full entry record (publisher, dependencies, member actions, intents, category) and its own Install button.
+
+Clicking **Install** on a connector opens the connector-level install modal — same install-decision payload the CLI renders (FQN, publisher, fingerprint, trust-state badge, risk indicators, publisher footprint). A version input (required) and an optional expected-hash input let you pin the install. On confirm, the modal POSTs to `/v1/connectors/install` with the `confirmed_fingerprint` payload. Daemon-side behavior is identical to the CLI flow.
+
+Clicking **Install** on an action or suite opens the composite install modal — the per-authority trust panel grouped exactly like the CLI's `Trust these publishers and continue?` prompt. The modal surfaces the CLI command (`aileron action add ...@latest` or `aileron action add-suite ...@latest`) for completing the install today; webapp-driven install execution for actions and suites is a follow-up (tracked in [#739](https://github.com/ALRubinger/aileron/issues/739)).
+
+Neither modal exposes a "Trust this publisher" button. v0.x trust is per-repo, and the design is deliberately careful not to invite users into a wider trust grant.
 
 ## What the Hub does not do
 

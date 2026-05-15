@@ -73,7 +73,7 @@ tags:
     description: |
       Discovery layer for community-published connectors, ratified by
       ADR-0013. The daemon shallow-clones the public
-      `aileron-connectors-hub` repo on each query (no persisted cache, no
+      `aileron-hub` repo on each query (no persisted cache, no
       `api.github.com` calls per #486), parses entry YAML files, and
       serves them to CLI and webapp clients. Hub entries are pointers
       to connectors at canonical `github://OWNER/REPO` FQNs — the Hub
@@ -7258,7 +7258,7 @@ components:
       required: [fqn, description, publisher_github, key_url, release_pattern]
       description: |
         A single Hub entry. Matches the YAML files committed to the
-        `aileron-connectors-hub` repo under `connectors/`. Pointer to a
+        `aileron-hub` repo under `connectors/`. Pointer to a
         connector hosted at the canonical FQN; the Hub does not host the
         binary.
       properties:
@@ -7294,7 +7294,7 @@ components:
       required: [fqn, description, publisher_github, connector_fqn]
       description: |
         A single Hub action entry. Matches the YAML files committed to
-        the `aileron-connectors-hub` repo under `actions/`. Pointer to
+        the `aileron-hub` repo under `actions/`. Pointer to
         a published action template at its canonical FQN; the action
         template itself (TOML frontmatter + Markdown body per ADR-0003)
         is fetched from the publisher's repo at install time.
@@ -7340,7 +7340,7 @@ components:
       required: [fqn, description, publisher_github, member_actions]
       description: |
         A single Hub action-suite entry. Matches the YAML files
-        committed to the `aileron-connectors-hub` repo under `suites/`.
+        committed to the `aileron-hub` repo under `suites/`.
         Pointer to a published suite manifest (the canonical
         `suite.toml` per #564 lives in the publisher's repo); the Hub
         entry is the discovery surface.

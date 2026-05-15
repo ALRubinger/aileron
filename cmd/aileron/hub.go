@@ -58,7 +58,7 @@ type hubSuiteList struct {
 
 // runHub dispatches `aileron hub <subcommand>`. The Hub is the
 // community discovery catalog (ADR-0013, action-first amendment): the
-// daemon shallow-clones aileron-connectors-hub per query and serves
+// daemon shallow-clones aileron-hub per query and serves
 // discovery via /v1/hub/*. This CLI is a thin client over those
 // endpoints; the catalog holds three entry types (suites, actions,
 // connectors) and the CLI surfaces all three.
