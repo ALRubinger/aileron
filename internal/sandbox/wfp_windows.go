@@ -200,10 +200,18 @@ const (
 	fwpV4AddrMask   uint32 = 256
 )
 
-// FWP_ACTION_TYPE values.
+// FWP_ACTION_TYPE values. Each is a low-byte action ID OR-ed
+// with FWP_ACTION_FLAG_TERMINATING (0x1000); the kernel rejects
+// the bare flag without an action ID as FWP_E_INVALID_ACTION_TYPE
+// (0x80320024), which is how the runtime caught the original
+// value for PERMIT in CI.
+//
+//	FWP_ACTION_FLAG_TERMINATING = 0x00001000
+//	FWP_ACTION_BLOCK  = 0x1 | TERMINATING = 0x00001001
+//	FWP_ACTION_PERMIT = 0x2 | TERMINATING = 0x00001002
 const (
 	fwpActionBlock  uint32 = 0x00001001
-	fwpActionPermit uint32 = 0x00001000
+	fwpActionPermit uint32 = 0x00001002
 )
 
 // FWP_MATCH_TYPE values used by the runtime.
