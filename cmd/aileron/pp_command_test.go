@@ -176,6 +176,41 @@ func TestPPModulePath_StripsLeadingSlash(t *testing.T) {
 	}
 }
 
+func TestPPPackagePath_AppendsCmdSubdirAndPpCliSuffix(t *testing.T) {
+	// The actual binary lives at `<modulePath>/cmd/<name>-pp-cli`
+	// in every PrintingPress entry (their authoring tooling
+	// emits that layout). Pin the convention here so a future
+	// `go install` regression doesn't ship a path that resolves
+	// to the module root and fails with "found, but does not
+	// contain package."
+	cases := []struct {
+		entry string
+		name  string
+		want  string
+	}{
+		{
+			entry: "library/project-management/linear",
+			name:  "linear",
+			want:  "github.com/mvanhorn/printing-press-library/library/project-management/linear/cmd/linear-pp-cli",
+		},
+		{
+			entry: "library/marketing/ahrefs",
+			name:  "ahrefs",
+			want:  "github.com/mvanhorn/printing-press-library/library/marketing/ahrefs/cmd/ahrefs-pp-cli",
+		},
+		{
+			entry: "/library/social/linkedin",
+			name:  "linkedin",
+			want:  "github.com/mvanhorn/printing-press-library/library/social/linkedin/cmd/linkedin-pp-cli",
+		},
+	}
+	for _, c := range cases {
+		if got := ppPackagePath(c.entry, c.name); got != c.want {
+			t.Errorf("ppPackagePath(%q, %q)=%q want %q", c.entry, c.name, got, c.want)
+		}
+	}
+}
+
 func TestPPSourceURL_StripsLeadingSlash(t *testing.T) {
 	if got := ppSourceURL("/library/x/y"); got != "https://github.com/mvanhorn/printing-press-library/tree/main/library/x/y" {
 		t.Errorf("ppSourceURL=%q", got)
@@ -263,8 +298,8 @@ func TestRunPpAdd_DryRunDoesNotInstall(t *testing.T) {
 		t.Error("--dry-run should not invoke go install")
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "github.com/mvanhorn/printing-press-library/library/project-management/linear") {
-		t.Errorf("install plan should show module path: %q", out)
+	if !strings.Contains(out, "github.com/mvanhorn/printing-press-library/library/project-management/linear/cmd/linear-pp-cli") {
+		t.Errorf("install plan should show the cmd/-pp-cli package path: %q", out)
 	}
 	if !strings.Contains(out, "dry-run") {
 		t.Errorf("dry-run notice missing: %q", out)
