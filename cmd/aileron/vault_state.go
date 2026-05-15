@@ -259,6 +259,7 @@ var commandsBypassingVaultPair = map[string]bool{
 	// credential prompt inside `cli add`.
 	"cli add":     true,
 	"cli refresh": true,
+	"pp add":      true, // delegates to `cli add` and writes credentials directly
 	"policy save":   true,
 }
 
