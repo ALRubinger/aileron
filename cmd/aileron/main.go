@@ -1577,6 +1577,28 @@ type hubInstallDecisionWire struct {
 	RiskIndicators     []string `json:"risk_indicators"`
 }
 
+// hubInstallAuthorityWire mirrors api.HubInstallAuthority — the
+// per-connector trust-panel element inside a composite install-decision.
+type hubInstallAuthorityWire struct {
+	Fqn                string   `json:"fqn"`
+	PublisherGithub    string   `json:"publisher_github"`
+	Fingerprint        string   `json:"fingerprint"`
+	TrustState         string   `json:"trust_state"`
+	PublisherFootprint []string `json:"publisher_footprint"`
+	RiskIndicators     []string `json:"risk_indicators"`
+}
+
+// hubActionInstallDecisionWire mirrors api.HubActionInstallDecision —
+// the composite payload returned by /v1/hub/action-install-decision.
+type hubActionInstallDecisionWire struct {
+	Kind            string                    `json:"kind"`
+	Fqn             string                    `json:"fqn"`
+	Description     string                    `json:"description"`
+	PublisherGithub string                    `json:"publisher_github"`
+	ConnectorFqn    string                    `json:"connector_fqn"`
+	Authorities     []hubInstallAuthorityWire `json:"authorities"`
+}
+
 // runConnectorInstall implements the consent flow per ADR-0007 with
 // the Hub install-decision layer added on top per ADR-0013 / #487:
 //
@@ -1826,6 +1848,142 @@ func renderHubInstallDecision(w io.Writer, d *hubInstallDecisionWire, verbose bo
 		fmt.Fprintln(w, "  \033[1mOther connectors by this publisher:\033[0m")
 		for _, fqn := range d.PublisherFootprint {
 			fmt.Fprintf(w, "    - %s\n", fqn)
+		}
+	}
+	fmt.Fprintln(w)
+}
+
+// tryHubActionInstallDecisionFlow asks the daemon for the composite
+// install-decision payload for an action FQN. Returns:
+//
+//   - (true,  false, true)  → operator confirmed. Caller programmatically
+//     trusts each composite authority (`trust.ensure` with autoYes=true)
+//     so the existing per-authority prompt loop later in installOneAction
+//     becomes a no-op.
+//   - (false, true,  true)  → operator declined. Caller stops.
+//   - (false, false, false) → no Hub entry for the action (404), composite
+//     can't be precomputed (422 missing connector), or any other Hub
+//     error. Caller falls back to the existing per-authority trust flow.
+//
+// 404 and 422 fall through silently (these are legitimate non-Hub cases).
+// Other failure modes (5xx, parse errors) emit a one-line stderr note so
+// daemon-side Hub config issues are visible but don't block users with
+// pre-established trust from installing.
+//
+// `--yes` short-circuits the prompt and auto-confirms.
+//
+// The returned payload is non-nil whenever hubPath is true (whether
+// accepted or declined). Callers should walk payload.Authorities to
+// pre-trust each before running the install.
+func tryHubActionInstallDecisionFlow(actionFQN string, autoYes bool, stdin io.Reader, stdout, stderr io.Writer) (accepted, declined, hubPath bool, payload *hubActionInstallDecisionWire) {
+	q := url.Values{"fqn": []string{actionFQN}}.Encode()
+	status, body, err := bindingDoRequest(http.MethodGet, "/hub/action-install-decision?"+q, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "note: hub install-decision unavailable (%v); using local trust\n", err)
+		return false, false, false, nil
+	}
+	// 404: action not in the Hub catalog; legitimate non-Hub install.
+	// 422: action's declared connector_fqn isn't Hub-listed; install can
+	// still proceed via direct FQN resolution, but the Hub can't
+	// precompute the trust panel.
+	if status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
+		return false, false, false, nil
+	}
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "note: hub install-decision returned %d; using local trust\n", status)
+		return false, false, false, nil
+	}
+	var d hubActionInstallDecisionWire
+	if err := json.Unmarshal(body, &d); err != nil {
+		fmt.Fprintf(stderr, "note: could not parse hub install-decision (%v); using local trust\n", err)
+		return false, false, false, nil
+	}
+	// Empty payload (no FQN, no authorities) is a no-op. Treat it as a
+	// non-Hub case rather than rendering an empty trust panel — the
+	// composite endpoint should never legitimately return this, but
+	// downstream tests and mock daemons sometimes echo `{}` for catch-
+	// all 200 responses, and we don't want a blank panel to follow.
+	if d.Fqn == "" || len(d.Authorities) == 0 {
+		return false, false, false, nil
+	}
+
+	if autoYes {
+		return true, false, true, &d
+	}
+
+	// Wrap stdin once so the `d`-then-`y` two-line flow doesn't lose
+	// buffered bytes between iterations. promptLine builds its own
+	// bufio.Reader when handed a raw reader.
+	br, ok := stdin.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(stdin)
+	}
+
+	showDetails := false
+	for {
+		renderHubActionCompositeDecision(stdout, &d, showDetails)
+		var ans string
+		if showDetails {
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and install? [y/N]: ")))
+		} else {
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and install? [y/N/d=details]: ")))
+		}
+		switch ans {
+		case "y", "yes":
+			return true, false, true, &d
+		case "d", "details":
+			if showDetails {
+				fmt.Fprintln(stdout, "Cancelled.")
+				return false, true, true, &d
+			}
+			showDetails = true
+			continue
+		default:
+			fmt.Fprintln(stdout, "Cancelled.")
+			return false, true, true, &d
+		}
+	}
+}
+
+// renderHubActionCompositeDecision prints the composite trust panel for
+// an action install. Action-level metadata at the top, one panel per
+// connector authority below. Per-authority trust state and risks use
+// the same colorization as the connector-level install-decision render.
+//
+// `verbose` expands risk indicators (one per line; compact mode shows
+// the first only) and adds the per-authority publisher footprint.
+func renderHubActionCompositeDecision(w io.Writer, d *hubActionInstallDecisionWire, verbose bool) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "\033[1mHub install-decision (action)\033[0m")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Action:    %s\n", d.Fqn)
+	if d.Description != "" {
+		fmt.Fprintf(w, "  Summary:   %s\n", d.Description)
+	}
+	fmt.Fprintf(w, "  Publisher: %s\n", d.PublisherGithub)
+	fmt.Fprintf(w, "  Connector: %s\n", d.ConnectorFqn)
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  \033[1mTrust gate(s): %d connector authority\033[0m\n", len(d.Authorities))
+	for _, auth := range d.Authorities {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  ● %s\n", auth.Fqn)
+		fmt.Fprintf(w, "      Publisher:   %s\n", auth.PublisherGithub)
+		fmt.Fprintf(w, "      Fingerprint: %s\n", auth.Fingerprint)
+		fmt.Fprintf(w, "      Trust:       %s\n", colorizeTrustState(auth.TrustState))
+		if len(auth.RiskIndicators) > 0 {
+			risks := auth.RiskIndicators
+			if !verbose && len(risks) > 1 {
+				risks = risks[:1]
+			}
+			for _, r := range risks {
+				fmt.Fprintf(w, "      Risk:        %s\n", colorizeRisk(auth.TrustState, r))
+			}
+		}
+		if verbose && len(auth.PublisherFootprint) > 0 {
+			fmt.Fprintln(w, "      Other connectors by this publisher:")
+			for _, fqn := range auth.PublisherFootprint {
+				fmt.Fprintf(w, "        - %s\n", fqn)
+			}
 		}
 	}
 	fmt.Fprintln(w)
@@ -2184,6 +2342,50 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		setOutcome(actionInstallStatusFailed)
 		return 1
 	}
+
+	// Step 0a (ADR-0013 action-first amendment / #709): try the Hub
+	// composite install-decision flow. If the action is Hub-listed (200),
+	// render one trust panel grouping the action plus every connector
+	// authority it transitively depends on, and collapse trust consent
+	// into a single y/N. Suite-consented installs skip this — the suite-
+	// level composite (or the suite preflight) already covered consent.
+	if !opts.suiteConsented {
+		accepted, hubDeclined, hubPath, payload := tryHubActionInstallDecisionFlow(
+			resolvedFQN, opts.yes, stdin, stdout, stderr)
+		if hubDeclined {
+			setOutcome(actionInstallStatusCancelled)
+			return 0
+		}
+		if hubPath && accepted && payload != nil {
+			// Operator consented to the composite. Programmatically
+			// trust the action's own authority plus each connector
+			// authority surfaced by the composite. fetchPublisherKey
+			// re-fetches and re-fingerprints; a publisher who rotates
+			// between the composite call and this fetch is caught by
+			// the existing fingerprint check in keyring add — same code
+			// path as `aileron keyring trust`. Marking trustState
+			// suppresses the per-authority prompts that fire later in
+			// installOneAction.
+			if err := trust.ensure(actionFQN.Authority(), true, stdin, stdout, stderr); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				setOutcome(actionInstallStatusFailed)
+				return 1
+			}
+			for _, auth := range payload.Authorities {
+				authFQN, parseErr := cstore.ParseFQN(auth.Fqn)
+				if parseErr != nil {
+					// Defensive: the daemon validated this already.
+					continue
+				}
+				if err := trust.ensure(authFQN.Authority(), true, stdin, stdout, stderr); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					setOutcome(actionInstallStatusFailed)
+					return 1
+				}
+			}
+		}
+	}
+
 	if err := trust.ensure(actionFQN.Authority(), opts.yes, stdin, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		setOutcome(actionInstallStatusFailed)
