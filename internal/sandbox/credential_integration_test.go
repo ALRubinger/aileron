@@ -36,6 +36,7 @@ func oauthEchoManifest(host string) *cstore.Manifest {
 // Bearer test-token` on the actual outbound request. The connector
 // never touches the bytes.
 func TestCredentialMediation_EndToEnd_InjectsBearerHeader(t *testing.T) {
+	t.Parallel()
 	var seenAuth string
 	var seenURL string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +110,7 @@ func TestCredentialMediation_EndToEnd_InjectsBearerHeader(t *testing.T) {
 // reference time; the connector receives a binding_required
 // structured error.
 func TestCredentialMediation_BindingMissing_ReturnsBindingRequired(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("upstream should not have been dialed")
 		w.WriteHeader(http.StatusOK)
@@ -154,6 +156,7 @@ func TestCredentialMediation_BindingMissing_ReturnsBindingRequired(t *testing.T)
 // disagrees with its own manifest's declared kind. Refused at the
 // connector-manifest boundary.
 func TestCredentialMediation_KindMismatch_ReturnsCapabilityDenied(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("upstream should not have been dialed")
 		w.WriteHeader(http.StatusOK)
