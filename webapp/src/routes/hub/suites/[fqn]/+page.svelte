@@ -5,7 +5,7 @@
 	import { getHubSuite, type HubSuiteEntry } from '$lib/api';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import HubInstallModal from '$lib/components/HubInstallModal.svelte';
+	import HubCompositeInstallModal from '$lib/components/HubCompositeInstallModal.svelte';
 
 	// Detail page for a single Hub suite entry (#709). Same routing
 	// pattern as the action detail page: `[fqn]` is URL-encoded in the
@@ -121,5 +121,9 @@
 		Install suite
 	</Button>
 
-	<HubInstallModal fqn={installFqn} onClose={() => (installFqn = null)} />
+	<HubCompositeInstallModal
+		fqn={installFqn}
+		kind={installFqn ? 'suite' : null}
+		onClose={() => (installFqn = null)}
+	/>
 {/if}

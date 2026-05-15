@@ -5,7 +5,7 @@
 	import { getHubAction, type HubActionEntry } from '$lib/api';
 	import * as Card from '$lib/components/ui/card';
 	import { Button } from '$lib/components/ui/button';
-	import HubInstallModal from '$lib/components/HubInstallModal.svelte';
+	import HubCompositeInstallModal from '$lib/components/HubCompositeInstallModal.svelte';
 
 	// Detail page for a single Hub action entry (#709). The route param
 	// `[fqn]` carries the action FQN URL-encoded; SvelteKit decodes once
@@ -108,5 +108,9 @@
 		Install action
 	</Button>
 
-	<HubInstallModal fqn={installFqn} onClose={() => (installFqn = null)} />
+	<HubCompositeInstallModal
+		fqn={installFqn}
+		kind={installFqn ? 'action' : null}
+		onClose={() => (installFqn = null)}
+	/>
 {/if}

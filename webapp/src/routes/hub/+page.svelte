@@ -12,6 +12,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import HubInstallModal from '$lib/components/HubInstallModal.svelte';
+	import HubCompositeInstallModal from '$lib/components/HubCompositeInstallModal.svelte';
 
 	// Hub browsing page (ADR-0013, action-first amendment / #709). The
 	// catalog has three entry types — Suites, Actions, Connectors — and
@@ -35,7 +36,21 @@
 	let connectors = $state<HubConnectorEntry[]>([]);
 	let loading = $state(true);
 	let error = $state('');
-	let selectedFQN = $state<string | null>(null);
+	// Connector install modal is the single-authority connector flow.
+	// Composite modal is action/suite installs (one trust panel per
+	// authority in the closure).
+	let connectorInstallFQN = $state<string | null>(null);
+	let compositeFQN = $state<string | null>(null);
+	let compositeKind = $state<'action' | 'suite' | null>(null);
+
+	function openCompositeInstall(fqn: string, kind: 'action' | 'suite') {
+		compositeFQN = fqn;
+		compositeKind = kind;
+	}
+	function closeCompositeInstall() {
+		compositeFQN = null;
+		compositeKind = null;
+	}
 
 	async function refresh() {
 		loading = true;
@@ -186,7 +201,7 @@
 							</div>
 							<Button
 								variant="default"
-								onclick={() => (selectedFQN = entry.fqn)}
+								onclick={() => openCompositeInstall(entry.fqn, 'suite')}
 								data-testid="hub-install-cta"
 							>
 								Install suite
@@ -231,7 +246,7 @@
 							</div>
 							<Button
 								variant="default"
-								onclick={() => (selectedFQN = entry.fqn)}
+								onclick={() => openCompositeInstall(entry.fqn, 'action')}
 								data-testid="hub-install-cta"
 							>
 								Install action
@@ -278,7 +293,7 @@
 							</div>
 							<Button
 								variant="default"
-								onclick={() => (selectedFQN = entry.fqn)}
+								onclick={() => (connectorInstallFQN = entry.fqn)}
 								data-testid="hub-install-cta"
 							>
 								Install
@@ -295,4 +310,12 @@
 	{/if}
 {/if}
 
-<HubInstallModal fqn={selectedFQN} onClose={() => (selectedFQN = null)} />
+<HubInstallModal
+	fqn={connectorInstallFQN}
+	onClose={() => (connectorInstallFQN = null)}
+/>
+<HubCompositeInstallModal
+	fqn={compositeFQN}
+	kind={compositeKind}
+	onClose={closeCompositeInstall}
+/>
