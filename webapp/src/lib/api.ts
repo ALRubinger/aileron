@@ -431,7 +431,12 @@ export type HubInstallAuthority = {
  *  `authorities[]` always carries exactly one entry — the action's
  *  declared connector dependency. The `kind` discriminator lets the
  *  install modal render the action's own metadata alongside the
- *  underlying connector trust gate. */
+ *  underlying connector trust gate.
+ *
+ *  `latest_version` is the daemon-resolved SemVer tag the webapp uses
+ *  as the install's `version` argument. Empty/omitted when the source
+ *  has no published releases — in that case the modal disables the
+ *  Install button and the operator falls back to the CLI. */
 export type HubActionInstallDecision = {
 	kind: 'action';
 	fqn: string;
@@ -439,11 +444,13 @@ export type HubActionInstallDecision = {
 	publisher_github: string;
 	connector_fqn: string;
 	authorities: HubInstallAuthority[];
+	latest_version?: string;
 };
 
 /** Composite install-decision payload for a suite install.
  *  `authorities[]` carries one entry per unique connector authority in
- *  the suite's dependency closure. */
+ *  the suite's dependency closure. `latest_version` covers every
+ *  member action — they all ship from the same source repo. */
 export type HubSuiteInstallDecision = {
 	kind: 'suite';
 	fqn: string;
@@ -451,6 +458,7 @@ export type HubSuiteInstallDecision = {
 	publisher_github: string;
 	member_actions: string[];
 	authorities: HubInstallAuthority[];
+	latest_version?: string;
 };
 
 /** Composite install-decision for an action FQN. */
@@ -463,15 +471,64 @@ export async function getHubSuiteInstallDecision(fqn: string): Promise<HubSuiteI
 	return apiFetch(`/v1/hub/suite-install-decision?fqn=${encodeURIComponent(fqn)}`);
 }
 
+/** One unbound credential capability surfaced on an install
+ *  response. Mirrors api.UnboundCapability. */
+export type UnboundCapability = {
+	connector_fqn: string;
+	kind: string;
+	scope?: string;
+};
+
+/** One stale-binding transition surfaced on an install response per
+ *  #741. The webapp's stale-binding panel renders these and offers an
+ *  in-browser "Reauthorize" button per entry. */
+export type StaleBinding = {
+	name: string;
+	connector_fqn: string;
+	stale_reason: 'scope_drift' | 'no_grant_record';
+	missing_scopes?: string[];
+	service?: string;
+};
+
 /** Installed-connector envelope returned by POST /v1/connectors/install
  *  on success. `already_installed` is set when an offline-cached hash
- *  short-circuits the install pipeline (ADR-0004 §"Offline behavior"). */
+ *  short-circuits the install pipeline (ADR-0004 §"Offline behavior").
+ *  `newly_stale_bindings` carries bindings the scope-drift hook flipped
+ *  to `stale` during this install (#741). */
 export type InstalledConnector = {
 	fqn: string;
 	version: string;
 	hash: string;
 	entry_dir: string;
 	already_installed?: boolean;
+	newly_stale_bindings?: StaleBinding[];
+};
+
+/** Installed-action envelope returned by POST /v1/actions/install on
+ *  success. Mirrors api.InstalledAction (the install-response shape —
+ *  not the `/v1/actions` list shape, which is `ActionListEntry` in
+ *  this file). `unbound_capabilities` and `newly_stale_bindings` are
+ *  the install-time UX signals (#741) the webapp install modal
+ *  surfaces on the success panel. */
+export type InstalledActionResult = {
+	name: string;
+	fqn: string;
+	version: string;
+	source: string;
+	path: string;
+	already_installed?: boolean;
+	unbound_capabilities?: UnboundCapability[];
+	newly_stale_bindings?: StaleBinding[];
+};
+
+/** Per-authority trust confirmation supplied alongside an action
+ *  install (#743). One entry per connector authority in the action's
+ *  dependency closure — for a suite install, this is the suite's full
+ *  set on every per-action call. The daemon iterates and writes trust
+ *  to the keyring before running the install pipeline. */
+export type ConfirmedFingerprint = {
+	fqn: string;
+	fingerprint: string;
 };
 
 /** Runs the connector install pipeline. `confirmed_fingerprint` (per
@@ -487,6 +544,26 @@ export async function installConnector(args: {
 	expected_hash?: string;
 }): Promise<InstalledConnector> {
 	return apiFetch('/v1/connectors/install', {
+		method: 'POST',
+		body: JSON.stringify(args)
+	});
+}
+
+/** Runs the action install pipeline (#743 webapp execution).
+ *  `confirmed_fingerprints` carries one entry per connector authority
+ *  in the action's dependency closure — the daemon verifies and writes
+ *  trust to the keyring for each before running the install. The
+ *  pipeline auto-installs connector dependencies when
+ *  `auto_install_connectors: true` is set (typical for webapp installs;
+ *  the webapp can't realistically run two preflight rounds). */
+export async function installAction(args: {
+	fqn: string;
+	version: string;
+	auto_install_connectors?: boolean;
+	confirmed_fingerprints?: ConfirmedFingerprint[];
+	force?: boolean;
+}): Promise<InstalledActionResult> {
+	return apiFetch('/v1/actions/install', {
 		method: 'POST',
 		body: JSON.stringify(args)
 	});

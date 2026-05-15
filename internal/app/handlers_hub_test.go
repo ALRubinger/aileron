@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -655,6 +656,162 @@ func TestGetHubActionInstallDecision_HappyPath(t *testing.T) {
 	}
 	if auth.TrustState != api.HubTrustStateUnknown {
 		t.Fatalf("trust_state = %s, want unknown", auth.TrustState)
+	}
+}
+
+// TestGetHubActionInstallDecision_PopulatesLatestVersion: the webapp
+// install modal needs a concrete version to call /v1/actions/install
+// (the endpoint requires strict SemVer). The composite install-decision
+// resolves it server-side via the same VersionLister the connector-check
+// handler uses. #743 PR 2.
+func TestGetHubActionInstallDecision_PopulatesLatestVersion(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, pub)
+	defer keyServer.Close()
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"google.yaml": entryYAML("github://alice/conn-google", "Google connector", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		map[string]string{
+			"draft.yaml": actionYAML("github://alice/conn-google/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn-google", "communication", []string{"draft email"}),
+		},
+		nil,
+	)
+	srv := &apiServer{
+		log:         slog.Default(),
+		hub:         &hub.Client{URL: url, HTTP: keyServer.Client()},
+		keyringPath: filepath.Join(t.TempDir(), "keyring.json"),
+		versionLister: &fakeLister{byFQN: map[string]fakeListerEntry{
+			"github://alice/conn-google": {versions: []string{"2.0.0", "1.2.0-rc.1", "1.1.0"}},
+		}},
+	}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn-google/actions/draft-email"
+	srv.GetHubActionInstallDecision(rec,
+		httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil),
+		api.GetHubActionInstallDecisionParams{Fqn: fqn})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.HubActionInstallDecision
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.LatestVersion == nil {
+		t.Fatalf("LatestVersion = nil; want resolved to 2.0.0")
+	}
+	if *got.LatestVersion != "2.0.0" {
+		t.Errorf("LatestVersion = %q, want 2.0.0 (prereleases skipped)", *got.LatestVersion)
+	}
+}
+
+// TestGetHubSuiteInstallDecision_PopulatesLatestVersion: same
+// version-resolution contract as the action variant, exercised from
+// the suite path. Important because the webapp's suite install loop
+// passes one version to every per-member call — the source repo's
+// latest tag is the single version the whole bundle ships under.
+func TestGetHubSuiteInstallDecision_PopulatesLatestVersion(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, pub)
+	defer keyServer.Close()
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"google.yaml": entryYAML("github://alice/conn-google", "Google connector", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		map[string]string{
+			"draft.yaml": actionYAML("github://alice/conn-google/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn-google", "communication", []string{"draft email"}),
+		},
+		map[string]string{
+			"google.yaml": suiteYAML("github://alice/conn-google/suite", "Google bundle", "alice", "communication",
+				[]string{"github://alice/conn-google/actions/draft-email"}, nil),
+		},
+	)
+	srv := &apiServer{
+		log:         slog.Default(),
+		hub:         &hub.Client{URL: url, HTTP: keyServer.Client()},
+		keyringPath: filepath.Join(t.TempDir(), "keyring.json"),
+		versionLister: &fakeLister{byFQN: map[string]fakeListerEntry{
+			"github://alice/conn-google": {versions: []string{"3.0.0", "2.5.0"}},
+		}},
+	}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn-google/suite"
+	srv.GetHubSuiteInstallDecision(rec,
+		httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil),
+		api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.HubSuiteInstallDecision
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.LatestVersion == nil || *got.LatestVersion != "3.0.0" {
+		t.Errorf("LatestVersion = %v, want 3.0.0", got.LatestVersion)
+	}
+}
+
+// TestLatestStableVersionFor_AllPrereleasesReturnsEmpty: when every
+// published tag is a prerelease (the publisher is mid-cut or only
+// publishes RCs), latestStableVersionFor must return empty rather
+// than picking a prerelease. The webapp surfaces "no version" and
+// disables Install; auto-publishing a prerelease as the resolved
+// version would silently push users onto unstable code.
+func TestLatestStableVersionFor_AllPrereleasesReturnsEmpty(t *testing.T) {
+	srv := &apiServer{
+		log: slog.Default(),
+		versionLister: &fakeLister{byFQN: map[string]fakeListerEntry{
+			"github://alice/conn-google": {versions: []string{"2.0.0-rc.2", "2.0.0-rc.1", "1.0.0-beta"}},
+		}},
+	}
+	got := srv.latestStableVersionFor(context.Background(),
+		"github://alice/conn-google/actions/draft-email")
+	if got != "" {
+		t.Errorf("got %q, want empty (only prereleases available)", got)
+	}
+}
+
+// TestGetHubActionInstallDecision_OmitsLatestOnListerFailure: a
+// version-listing failure must not break the install-decision render.
+// The webapp modal can still surface the trust panel; it just can't
+// offer the "Install" button until the version's resolved. The CLI
+// always works as a fallback.
+func TestGetHubActionInstallDecision_OmitsLatestOnListerFailure(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, pub)
+	defer keyServer.Close()
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"google.yaml": entryYAML("github://alice/conn-google", "Google connector", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		map[string]string{
+			"draft.yaml": actionYAML("github://alice/conn-google/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn-google", "communication", []string{"draft email"}),
+		},
+		nil,
+	)
+	srv := &apiServer{
+		log:         slog.Default(),
+		hub:         &hub.Client{URL: url, HTTP: keyServer.Client()},
+		keyringPath: filepath.Join(t.TempDir(), "keyring.json"),
+		versionLister: &fakeLister{byFQN: map[string]fakeListerEntry{
+			"github://alice/conn-google": {err: errors.New("rate limited")},
+		}},
+	}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn-google/actions/draft-email"
+	srv.GetHubActionInstallDecision(rec,
+		httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil),
+		api.GetHubActionInstallDecisionParams{Fqn: fqn})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.HubActionInstallDecision
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.LatestVersion != nil {
+		t.Errorf("LatestVersion = %q, want nil (graceful degrade on lister failure)",
+			*got.LatestVersion)
 	}
 }
 
