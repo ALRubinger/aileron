@@ -735,7 +735,7 @@ func TestRunCaptured_EnforcesLimits(t *testing.T) {
 		t.Skip("/bin/sh not present; runCaptured smoke test relies on shell")
 	}
 	cmd := exec.Command("/bin/sh", "-c", `printf 'aaaaaaaaaa' && printf 'eeee' >&2`)
-	stdout, stderr, err := runCaptured(cmd, SpawnLimits{MaxStdoutBytes: 4, MaxStderrBytes: 2})
+	stdout, stderr, err := runCaptured(cmd, SpawnLimits{MaxStdoutBytes: 4, MaxStderrBytes: 2}, platformSandboxHooks{})
 	if err != nil {
 		t.Fatalf("runCaptured: %v", err)
 	}

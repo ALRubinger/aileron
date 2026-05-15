@@ -57,13 +57,13 @@ var unprivilegedUserNSSysctl = "/proc/sys/kernel/unprivileged_userns_clone"
 // modification to `cmd` when no manifest sandbox parameters were
 // declared (legacy path; pre-BYOCLI connectors continue to run
 // unchanged).
-func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) error {
+func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) (platformSandboxHooks, error) {
 	_ = env
 	if !limits.PlatformSandboxRequested() {
-		return nil
+		return platformSandboxHooks{}, nil
 	}
 	if err := checkLinuxSandboxAvailable(); err != nil {
-		return err
+		return platformSandboxHooks{}, err
 	}
 
 	if cmd.SysProcAttr == nil {
@@ -81,7 +81,7 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 	// the gid_map is the kernel's required permission gate, and
 	// Go's exec package handles this when this flag is false.
 	cmd.SysProcAttr.GidMappingsEnableSetgroups = false
-	return nil
+	return platformSandboxHooks{}, nil
 }
 
 // checkLinuxSandboxAvailable returns ErrSpawnUnavailable when the

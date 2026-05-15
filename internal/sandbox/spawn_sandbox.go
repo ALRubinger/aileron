@@ -23,11 +23,11 @@ import "os/exec"
 // internal smoke checks. Production BYOCLI connectors always
 // declare at least an FS scope and therefore land in the
 // unavailable path on these OSes.
-func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) error {
+func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) (platformSandboxHooks, error) {
 	_ = cmd
 	_ = env
 	if limits.PlatformSandboxRequested() {
-		return ErrSpawnUnavailable
+		return platformSandboxHooks{}, ErrSpawnUnavailable
 	}
-	return nil
+	return platformSandboxHooks{}, nil
 }

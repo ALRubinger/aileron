@@ -182,11 +182,25 @@ jobs:
             internal/go.mod
             cmd/aileron/go.mod
 
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build forwarder WASM
+        # internal/sandbox/forwarder tests load the embedded
+        # spawn-forwarder WASM bytes; without this build step those
+        # tests fail with "invalid magic number". The ubuntu job
+        # gets this via `task test:go:ci`'s deps; the targeted
+        # platform jobs build it explicitly.
+        run: task build:forwarder
+
       - name: Run platform-specific tests
         shell: bash
         run: |
           set -e
-          (cd internal && go test -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/...)
+          (cd internal && go test -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/... ./sandbox/...)
           # cmd/aileron's full suite is gated behind #577 on Windows.
           # Run only the helpers with a Windows-specific implementation.
           (cd cmd/aileron && go test -race -coverprofile=coverage-windows-aileron.txt -run 'TestSignalDaemonStop' .)
