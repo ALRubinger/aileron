@@ -194,6 +194,14 @@ func buildRiskIndicators(kr *cstore.Ed25519Keyring, footprint []string, trustSta
 	switch {
 	case trustState == api.HubTrustStateConflict:
 		risks = append(risks, "Key fingerprint differs from one you trust for a sibling repo ("+conflictFQN+")")
+	case trustState == api.HubTrustStateAlreadyTrusted:
+		// Already trusted at this FQN: the "first install" framing would
+		// be a lie (the user has this exact connector). Surface sibling
+		// trust as informational context, otherwise emit nothing — the
+		// already_trusted state itself carries the reassurance.
+		if trustedSiblings > 0 {
+			risks = append(risks, pluralizeTrustedSiblings(trustedSiblings))
+		}
 	case trustedSiblings == 0:
 		risks = append(risks, "First connector by this publisher you've installed")
 	default:
