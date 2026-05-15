@@ -83,11 +83,17 @@ type SpawnPolicy struct {
 	stderrCap int64
 }
 
-// SpawnLimits carries the runtime-decided byte caps applied to a
-// single spawn invocation's captured output. The runtime resolves
-// these from the manifest (per [cstore.ManifestSpawnLimits]) and
-// passes them to the [SpawnExecutor]; connectors do not control
-// their own caps.
+// SpawnLimits carries the runtime-decided per-invocation parameters
+// the executor needs in addition to the connector-supplied envelope.
+// Originally just byte caps for captured output, the struct now
+// carries the resolved filesystem scopes and proxy endpoint the
+// platform sandbox uses to construct its per-OS confinement
+// (per ADR-0014's "Network confinement: daemon-mediated proxy" and
+// the per-platform sandbox sections).
+//
+// The runtime resolves every field from the manifest plus
+// per-spawn state (proxy port) before calling the executor.
+// Connectors never set these directly.
 type SpawnLimits struct {
 	// MaxStdoutBytes caps the bytes the executor returns in
 	// [SpawnResult.Stdout]. Output past this point is dropped and
@@ -99,6 +105,35 @@ type SpawnLimits struct {
 	// [SpawnResult.Stderr]. Same truncation semantics as
 	// MaxStdoutBytes.
 	MaxStderrBytes int64
+
+	// FSRead is the manifest's declared read-scope (per
+	// [cstore.ManifestSpawn.FSRead]). The platform sandbox
+	// translates these into kernel-enforced filesystem confinement
+	// (Linux Landlock + mount namespace, macOS SBPL `file-read*`
+	// rules, Windows ACL adjustments).
+	FSRead []string
+
+	// FSWrite is the manifest's declared write-scope (per
+	// [cstore.ManifestSpawn.FSWrite]). Same role as FSRead but
+	// for writes.
+	FSWrite []string
+
+	// ProxyAddr is the per-invocation proxy endpoint the platform
+	// sandbox permits loopback access to. Empty when the connector
+	// did not declare `[capabilities.network]`; in that case the
+	// platform sandbox denies all network. Format is `host:port`,
+	// typically `127.0.0.1:<ephemeral>`.
+	ProxyAddr string
+}
+
+// PlatformSandboxRequested reports whether the manifest carried any
+// platform-sandbox-relevant declaration (FS scope, network proxy).
+// Used by each platform's [applyPlatformSandbox] to decide whether
+// to engage the OS-level confinement. A zero-value SpawnLimits
+// (legacy spawn with no manifest scopes) returns false so tests and
+// pre-sandbox callers keep running unchanged.
+func (l SpawnLimits) PlatformSandboxRequested() bool {
+	return len(l.FSRead) > 0 || len(l.FSWrite) > 0 || l.ProxyAddr != ""
 }
 
 // StdoutCap returns the resolved stdout byte cap. Always positive
@@ -587,7 +622,7 @@ func (defaultSpawnExecutor) Spawn(ctx context.Context, env SpawnEnvelope, limits
 	if env.Stdin != "" {
 		cmd.Stdin = strings.NewReader(env.Stdin)
 	}
-	if err := applyPlatformSandbox(cmd, env); err != nil {
+	if err := applyPlatformSandbox(cmd, env, limits); err != nil {
 		return SpawnResult{}, err
 	}
 	stdout, stderr, runErr := runCaptured(cmd, limits)
@@ -912,8 +947,9 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 	// returns. Connectors that omit [capabilities.network] get no
 	// proxy and no HTTPS_PROXY env; the platform sandbox denies all
 	// outbound at the kernel boundary.
+	var proxyAddr string
 	if s.policy != nil && len(s.policy.AllowedHosts()) > 0 {
-		proxy, proxyAddr, proxyClose, err := startSpawnProxy(ctx, s.policy, s.logger, s.connectorFQN)
+		proxy, addr, proxyClose, err := startSpawnProxy(ctx, s.policy, s.logger, s.connectorFQN)
 		if err != nil {
 			s.mu.Lock()
 			s.spawnErr = newConnectorRuntimeError(fmt.Sprintf("spawn: start network proxy: %s", err.Error()))
@@ -926,8 +962,9 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 		if env.Env == nil {
 			env.Env = map[string]string{}
 		}
-		env.Env["HTTPS_PROXY"] = "http://" + proxyAddr
-		env.Env["HTTP_PROXY"] = "http://" + proxyAddr
+		env.Env["HTTPS_PROXY"] = "http://" + addr
+		env.Env["HTTP_PROXY"] = "http://" + addr
+		proxyAddr = addr
 	}
 
 	// Hand to the platform executor. Sandbox unavailability is
@@ -940,6 +977,9 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 	limits := SpawnLimits{
 		MaxStdoutBytes: s.spawnPolicy.stdoutCap,
 		MaxStderrBytes: s.spawnPolicy.stderrCap,
+		FSRead:         append([]string(nil), s.spawnPolicy.fsRead...),
+		FSWrite:        append([]string(nil), s.spawnPolicy.fsWrite...),
+		ProxyAddr:      proxyAddr,
 	}
 	res, runErr := executor.Spawn(ctx, env, limits)
 	if runErr != nil {
