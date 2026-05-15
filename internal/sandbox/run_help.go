@@ -74,10 +74,19 @@ func RunHelp(ctx context.Context, programPath, cwd string) (RunHelpResult, error
 		Argv:    []string{filepath.Base(programPath), "--help"},
 		Cwd:     cwd,
 	}
+	// fs_read scope: the user's cwd (so the introspector can
+	// see config the user is pointing at), plus the platform's
+	// system-essentials (libc, ld.so, /bin/sh, etc.) that
+	// Landlock would otherwise deny on Linux — shebang-style
+	// CLIs and any libc-linked binary fail to start without
+	// these. Non-Linux platforms get nil from systemReadScopes
+	// since their sandbox profiles include system paths in
+	// their permissive baselines.
+	fsRead := append([]string{cwd}, systemReadScopes()...)
 	limits := SpawnLimits{
 		MaxStdoutBytes: cstore.DefaultMaxStdoutBytes,
 		MaxStderrBytes: cstore.DefaultMaxStderrBytes,
-		FSRead:         []string{cwd},
+		FSRead:         fsRead,
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, HelpTimeout)
