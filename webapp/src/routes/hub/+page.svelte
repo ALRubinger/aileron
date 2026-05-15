@@ -174,7 +174,13 @@
 						<div class="flex flex-wrap items-start justify-between gap-2">
 							<div class="space-y-1">
 								<Card.Title class="font-mono text-sm break-all">
-									{entry.fqn}
+									<a
+										href="/hub/suites/{encodeURIComponent(entry.fqn)}"
+										class="underline-offset-2 hover:underline"
+										data-testid="hub-entry-link"
+									>
+										{entry.fqn}
+									</a>
 								</Card.Title>
 								<Card.Description>{entry.description}</Card.Description>
 							</div>
@@ -213,7 +219,13 @@
 						<div class="flex flex-wrap items-start justify-between gap-2">
 							<div class="space-y-1">
 								<Card.Title class="font-mono text-sm break-all">
-									{entry.fqn}
+									<a
+										href="/hub/actions/{encodeURIComponent(entry.fqn)}"
+										class="underline-offset-2 hover:underline"
+										data-testid="hub-entry-link"
+									>
+										{entry.fqn}
+									</a>
 								</Card.Title>
 								<Card.Description>{entry.description}</Card.Description>
 							</div>
