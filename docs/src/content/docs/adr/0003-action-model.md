@@ -142,7 +142,8 @@ description = "Maximum lines of context to include in the post."
 Fields:
 
 - `name` — the argument's identifier. Must match `^[a-z][a-z0-9_]*$`. Referenced in `[[execute]]` step inputs as `${args.<name>}`.
-- `type` — one of `string`, `integer`, `number`, `boolean`, `array`, `object`. Scalar types map directly to the corresponding JSON Schema primitive. Structured types (`array`, `object`) are passed through to the LLM-facing tool schema as bare `{"type":"array"}` / `{"type":"object"}` with no per-item or per-property constraints in v1; the connector validates semantic shape at op time, and authors are expected to document the expected payload shape in the input `description` so the LLM produces well-formed values.
+- `type` — one of `string`, `integer`, `number`, `boolean`, `array`, `object`. Scalar types map directly to the corresponding JSON Schema primitive. Structured types (`array`, `object`) are passed through to the LLM-facing tool schema; `array` carries an optional element-shape hint via `items_type` (below), `object` is passed through with no per-property constraint in v1. The connector validates semantic shape at op time, and authors are expected to document the expected payload shape in the input `description` so the LLM produces well-formed values.
+- `items_type` — optional, valid only when `type = "array"`. One of `string`, `integer`, `number`, `boolean`, `object`. When set, the LLM-facing tool schema emits `"items": {"type": <items_type>}` so the LLM (and any MCP client projecting the schema into its own typed wrapper) knows the element shape. When unset on an array input, the schema emits `"items": {}` (any-element); this is strictly more permissive than omitting the `items` field, and is the v1 default for arrays whose elements are heterogeneous or whose shape the connector validates at op time. The empty-`items` default fixes a class of bugs where strict MCP clients (e.g. Codex) projected a missing `items` clause into `string[]` and rejected object-element calls client-side.
 - `required` — optional, defaults to `true`. Set to `false` to make the argument optional.
 - `description` — required. Becomes the field-level description the LLM sees when the action is exposed as a tool.
 - `label` — optional. User-facing label the approval surface renders for this argument's row (e.g. `"To"` for a `to` input). Falls back to `name` when omitted. Has no effect on the LLM-visible JSON Schema.
@@ -167,11 +168,31 @@ The `[[inputs]]` block is the contract between the action and the LLM (per [ADR-
 
 The shape is what the LLM uses to choose arguments at tool-call time. Authors who want the LLM to pick the right values write tight `description` prose and pick the narrowest type that fits; the LLM does the rest.
 
+For an array input declaring `items_type = "object"` (e.g. a `requests` parameter that takes a list of Google Docs API `Request` objects), the derived parameter schema is:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "requests": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "Array of Docs API Request objects."
+    }
+  },
+  "required": ["requests"]
+}
+```
+
+An array input without `items_type` derives to `"items": {}` rather than omitting the field. Manifests authored before this addition do not need to change; their array inputs continue to parse, and the only wire-level delta is the new `"items": {}` clause appearing on arrays that previously had no `items` field. This is strictly more permissive: a client that previously inferred `string[]` from a missing `items` field now correctly sees an unconstrained-element array.
+
 Validation runs at parse time:
 
 - Every `[[execute]]` step's `${args.<name>}` reference must resolve to a declared input.
 - An action with no `[[inputs]]` and no `${args.*}` references is valid; its `parameters` schema is the empty object `{ "type": "object" }`.
 - Duplicate input names are rejected.
+- `items_type` on a non-array input is rejected.
+- `items_type` values outside `string|integer|number|boolean|object` are rejected (in particular, nested arrays are rejected — v1 has no syntax for declaring the inner element shape).
 
 ### Credential binding lives outside the action file
 

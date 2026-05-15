@@ -264,6 +264,79 @@ func TestValidate_RejectsBadInputDisplayMetadata(t *testing.T) {
 	}
 }
 
+// TestValidate_AcceptsArrayItemsType pins the contract that
+// `items_type` is optional on array inputs and accepts each v1
+// primitive that the schema deriver can express. Per the ADR-0003
+// amendment, `items_type` declares the element shape so the LLM-facing
+// `items` clause carries it through.
+func TestValidate_AcceptsArrayItemsType(t *testing.T) {
+	cases := []struct {
+		name  string
+		input Input
+	}{
+		{"array without items_type", Input{Name: "tags", Type: "array", Description: "tag list"}},
+		{"array items_type string", Input{Name: "tags", Type: "array", ItemsType: "string", Description: "tag list"}},
+		{"array items_type integer", Input{Name: "ids", Type: "array", ItemsType: "integer", Description: "id list"}},
+		{"array items_type number", Input{Name: "ratios", Type: "array", ItemsType: "number", Description: "ratios"}},
+		{"array items_type boolean", Input{Name: "flags", Type: "array", ItemsType: "boolean", Description: "flags"}},
+		{"array items_type object", Input{Name: "requests", Type: "array", ItemsType: "object", Description: "Docs API Request objects"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := goodManifest()
+			m.Inputs = []Input{tc.input}
+			if err := Validate(m, "x.md"); err != nil {
+				t.Errorf("Validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestValidate_RejectsBadArrayItemsType pins the rejection rules for
+// items_type: nonsense element types, items_type on non-array inputs.
+// Nested arrays are also rejected because the schema deriver cannot
+// express the inner element shape in v1.
+func TestValidate_RejectsBadArrayItemsType(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Manifest)
+		want   string
+	}{
+		{"items_type on string input", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "name", Type: "string", ItemsType: "object", Description: "x"}}
+		}, "items_type is only allowed when type=\"array\""},
+		{"items_type on object input", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "cfg", Type: "object", ItemsType: "string", Description: "x"}}
+		}, "items_type is only allowed when type=\"array\""},
+		{"items_type on integer input", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "n", Type: "integer", ItemsType: "string", Description: "x"}}
+		}, "items_type is only allowed when type=\"array\""},
+		{"unknown items_type", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "tags", Type: "array", ItemsType: "decimal", Description: "x"}}
+		}, "items_type \"decimal\" must be one of"},
+		{"nested array items_type", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "matrix", Type: "array", ItemsType: "array", Description: "x"}}
+		}, "items_type \"array\" must be one of"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := goodManifest()
+			tc.mutate(m)
+			err := Validate(m, "x.md")
+			if err == nil {
+				t.Fatalf("Validate() succeeded; want error containing %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q; want substring %q", err.Error(), tc.want)
+			}
+			var aerr *Error
+			if !errors.As(err, &aerr) || aerr.Class != ClassValidationError {
+				t.Errorf("expected *Error/ClassValidationError, got %v", err)
+			}
+		})
+	}
+}
+
 func TestValidate_AcceptsArgsRefAcrossNestedInputs(t *testing.T) {
 	m := goodManifest()
 	m.Inputs = []Input{{Name: "channel", Type: "string", Description: "..."}}

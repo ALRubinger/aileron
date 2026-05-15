@@ -157,6 +157,67 @@ op = "send_email"
 	}
 }
 
+// TestParse_InputItemsType pins the TOML round-trip of the optional
+// per-input `items_type` key on array inputs. The field declares the
+// LLM-facing element shape so MCP clients project array elements
+// correctly rather than defaulting to `string[]`.
+func TestParse_InputItemsType(t *testing.T) {
+	data := `+++
+name = "update-doc"
+version = "1.0.0"
+source = "hub://aileron/update-doc@1.0.0"
+
+[[requires.connectors]]
+name = "github://aileron/google"
+version = "1.0.0"
+hash = "sha256:abc"
+capabilities = ["docs:write"]
+
+[match]
+intent = "update a doc"
+
+[[inputs]]
+name = "document_id"
+type = "string"
+description = "The Doc id."
+
+[[inputs]]
+name = "requests"
+type = "array"
+items_type = "object"
+description = "Array of Docs API Request objects."
+
+[[inputs]]
+name = "tags"
+type = "array"
+description = "Optional plain-string tag list (no items_type)."
+
+[[execute]]
+id = "patch"
+connector = "github://aileron/google"
+op = "batch_update"
++++
+
+# Update Doc
+`
+	m, err := Parse("update-doc.md", []byte(data))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(m.Inputs) != 3 {
+		t.Fatalf("got %d inputs, want 3", len(m.Inputs))
+	}
+	if got := m.Inputs[1].ItemsType; got != "object" {
+		t.Errorf("Inputs[1].ItemsType = %q, want %q", got, "object")
+	}
+	if got := m.Inputs[2].ItemsType; got != "" {
+		t.Errorf("Inputs[2].ItemsType = %q, want empty (omitted)", got)
+	}
+	if err := Validate(m, "update-doc.md"); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestParse_MissingOpeningDelimiter(t *testing.T) {
 	data := `name = "x"
 +++

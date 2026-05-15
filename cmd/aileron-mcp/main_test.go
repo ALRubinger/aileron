@@ -287,11 +287,11 @@ func TestDeriveInputSchema_WithRequiredAndOptional(t *testing.T) {
 }
 
 // TestDeriveInputSchema_StructuredTypes pins the LLM-facing schema for
-// `array` and `object` input types. Per ADR-0003 v1, structured types
-// pass through to the tool-use schema as bare `{"type":"array"}` /
-// `{"type":"object"}` — no `items`, no `properties`. Authors who want
-// item-level typing document it in the input description (which the
-// LLM sees) and the connector validates semantic shape at op time.
+// `array` and `object` input types. Per the ADR-0003 amendment, `array`
+// inputs always emit an `items` clause: when the manifest declares
+// `items_type` the clause carries the element type, otherwise the
+// clause is an empty object (any-element). `object` continues to pass
+// through with no `properties` constraint.
 func TestDeriveInputSchema_StructuredTypes(t *testing.T) {
 	a := actionMeta{
 		Inputs: []actionInput{
@@ -303,8 +303,86 @@ func TestDeriveInputSchema_StructuredTypes(t *testing.T) {
 	if got.Properties["requests"].Type != "array" {
 		t.Errorf("requests type = %q, want array", got.Properties["requests"].Type)
 	}
+	// Bare array (no items_type) — items must be present but empty so
+	// strict MCP clients (Codex) don't default the projection to
+	// string[]. The empty-object clause is "any element."
+	if got.Properties["requests"].Items == nil {
+		t.Fatalf("requests.items = nil, want non-nil empty clause")
+	}
+	if got.Properties["requests"].Items.Type != "" {
+		t.Errorf("requests.items.type = %q, want empty", got.Properties["requests"].Items.Type)
+	}
 	if got.Properties["options"].Type != "object" {
 		t.Errorf("options type = %q, want object", got.Properties["options"].Type)
+	}
+	// Object inputs do not get an items clause; that field is
+	// array-only on the JSON Schema side.
+	if got.Properties["options"].Items != nil {
+		t.Errorf("options.items = %+v, want nil", got.Properties["options"].Items)
+	}
+}
+
+// TestDeriveInputSchema_ArrayItemsType pins that the schema deriver
+// projects each accepted `items_type` value through to the
+// LLM-facing `items.type` clause verbatim. Concrete motivating case:
+// `update-doc` with `items_type = "object"` ensures Codex projects the
+// `requests` parameter as `object[]` rather than defaulting to
+// `string[]`.
+func TestDeriveInputSchema_ArrayItemsType(t *testing.T) {
+	cases := []struct {
+		name  string
+		items string
+	}{
+		{"string", "string"},
+		{"integer", "integer"},
+		{"number", "number"},
+		{"boolean", "boolean"},
+		{"object", "object"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := actionMeta{
+				Inputs: []actionInput{
+					{Name: "vals", Type: "array", ItemsType: tc.items, Description: "values"},
+				},
+			}
+			got := deriveInputSchema(a)
+			prop := got.Properties["vals"]
+			if prop.Type != "array" {
+				t.Errorf("vals.type = %q, want array", prop.Type)
+			}
+			if prop.Items == nil {
+				t.Fatalf("vals.items = nil, want non-nil")
+			}
+			if prop.Items.Type != tc.items {
+				t.Errorf("vals.items.type = %q, want %q", prop.Items.Type, tc.items)
+			}
+		})
+	}
+}
+
+// TestDeriveInputSchema_ArrayItemsJSONShape pins the wire-level JSON
+// for both forms of array emission: arrays with `items_type` serialize
+// as `"items": {"type": "<T>"}`, arrays without it serialize as
+// `"items": {}` (any-element). The bare-`{}` form is the load-bearing
+// fix for hosts that default missing `items` to string[].
+func TestDeriveInputSchema_ArrayItemsJSONShape(t *testing.T) {
+	a := actionMeta{
+		Inputs: []actionInput{
+			{Name: "requests", Type: "array", ItemsType: "object", Description: "Docs API Request objects"},
+			{Name: "tags", Type: "array", Description: "free-form list"},
+		},
+	}
+	got := deriveInputSchema(a)
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal error = %v", err)
+	}
+	if !strings.Contains(string(raw), `"items":{"type":"object"}`) {
+		t.Errorf("typed array missing %q in: %s", `"items":{"type":"object"}`, raw)
+	}
+	if !strings.Contains(string(raw), `"items":{}`) {
+		t.Errorf("bare array missing %q in: %s", `"items":{}`, raw)
 	}
 }
 

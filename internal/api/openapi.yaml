@@ -5906,9 +5906,19 @@ components:
             JSON Schema type. Scalar types (`string`, `integer`, `number`,
             `boolean`) and structured types (`array`, `object`) are accepted.
             Structured types are passed through to the LLM-facing tool-use
-            schema as `{"type": "array"}` / `{"type": "object"}` with no
-            per-item or per-property constraints; the connector is
-            responsible for validating semantic shape at op time.
+            schema with optional shape constraints declared on adjacent
+            fields (`items_type` for arrays); the connector is responsible
+            for validating semantic shape at op time.
+        items_type:
+          type: string
+          enum: [string, integer, number, boolean, object]
+          description: |
+            JSON Schema type of an array input's elements. Only meaningful
+            when `type` is `array`. When set, the LLM-facing tool schema
+            emits `"items": {"type": <items_type>}`. When unset on an array
+            input, the schema emits `"items": {}` (any) so MCP clients that
+            default missing-`items` to `string[]` projection do not silently
+            coerce object elements to strings.
         required:
           type: boolean
           description: |

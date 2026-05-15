@@ -1791,6 +1791,10 @@ func manifestToAPI(la action.LoadedAction, enabled bool) api.Action {
 				Type:        api.ActionInputType(in.Type),
 				Description: in.Description,
 			}
+			if in.ItemsType != "" {
+				it := api.ActionInputItemsType(in.ItemsType)
+				ai.ItemsType = &it
+			}
 			if in.Required != nil {
 				r := *in.Required
 				ai.Required = &r

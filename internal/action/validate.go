@@ -25,14 +25,28 @@ var inputNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 // inputTypes is the closed set of JSON Schema types accepted in an
 // `[[inputs]]` block. Scalar types map directly to the LLM-facing tool
 // schema. Structured types (`array`, `object`) are passed through with
-// no per-item or per-property constraints in v1; the connector is
-// responsible for validating semantic shape at op time.
+// no per-property constraints in v1; the connector is responsible for
+// validating semantic shape at op time. Arrays may declare an element
+// shape via `items_type` (see inputItemsTypes).
 var inputTypes = map[string]bool{
 	"string":  true,
 	"integer": true,
 	"number":  true,
 	"boolean": true,
 	"array":   true,
+	"object":  true,
+}
+
+// inputItemsTypes is the closed set of element types accepted in an
+// `[[inputs]]` block's `items_type`. Same v1 primitives the top-level
+// `type` accepts, with one exception: `array` is omitted so the
+// schema deriver doesn't have to reason about nested arrays without a
+// way to express their own element shape.
+var inputItemsTypes = map[string]bool{
+	"string":  true,
+	"integer": true,
+	"number":  true,
+	"boolean": true,
 	"object":  true,
 }
 
@@ -139,6 +153,19 @@ func Validate(m *Manifest, file string) error {
 		if in.Multiline && in.Type != "string" {
 			return newValidationErr(file,
 				"inputs[%d].multiline=true is only allowed when type=\"string\" (got %q)", i, in.Type)
+		}
+		// ItemsType declares an array's element shape. It is only
+		// meaningful on array inputs; rejecting on non-arrays catches
+		// manifest typos rather than silently ignoring the field.
+		if in.ItemsType != "" {
+			if in.Type != "array" {
+				return newValidationErr(file,
+					"inputs[%d].items_type is only allowed when type=\"array\" (got %q)", i, in.Type)
+			}
+			if !inputItemsTypes[in.ItemsType] {
+				return newValidationErr(file,
+					"inputs[%d].items_type %q must be one of string|integer|number|boolean|object", i, in.ItemsType)
+			}
 		}
 	}
 	if len(m.Execute) == 0 {
