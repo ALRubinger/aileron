@@ -201,11 +201,12 @@ func BuildManifest(s *Spec) *cstore.Manifest {
 		Programs: []cstore.ManifestSpawnProgram{
 			{Path: s.Program.Path, Hash: s.Program.Hash},
 		},
-		EnvPassthrough: append([]string(nil), s.EnvPassthrough...),
-		FSRead:         append([]string(nil), s.FSRead...),
-		FSWrite:        append([]string(nil), s.FSWrite...),
-		Cwd:            s.Cwd,
-		Operations:     map[string]cstore.ManifestSpawnOperation{},
+		EnvPassthrough:    append([]string(nil), s.EnvPassthrough...),
+		CredentialEnvKeys: append([]string(nil), s.CredentialEnvKeys...),
+		FSRead:            append([]string(nil), s.FSRead...),
+		FSWrite:           append([]string(nil), s.FSWrite...),
+		Cwd:               s.Cwd,
+		Operations:        map[string]cstore.ManifestSpawnOperation{},
 	}
 	for _, sub := range s.Subcommands {
 		spawn.Operations[sub.Name] = cstore.ManifestSpawnOperation{

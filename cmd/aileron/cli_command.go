@@ -13,11 +13,15 @@ import (
 	"runtime"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/sandbox"
+	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/wrap"
 )
 
@@ -81,6 +85,10 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	editFlag := flags.Bool("edit", false, "open the inferred manifest in $EDITOR before confirmation")
 	yes := flags.Bool("yes", false, "skip the confirmation prompt")
 	flags.BoolVar(yes, "y", false, "skip the confirmation prompt (alias for --yes)")
+	noCredentials := flags.Bool("no-credentials", false, "skip the credential-env-var heuristic + prompt; manifest stays credential-free")
+	passphraseFile := flags.String("passphrase-file", "", "read the vault passphrase from the named file (newline-terminated); only consulted when credentials are stashed")
+	var credentialOverrides stringList
+	flags.Var(&credentialOverrides, "credential", "explicit credential env-var name to stash (repeatable; supplements the heuristic)")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
@@ -132,6 +140,9 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	credKeys := resolveCredentialKeys(helpText, credentialOverrides, *noCredentials)
+	applyCredentialsToSpec(spec, credKeys)
+
 	manifest := buildLocalManifest(spec, resolvedName)
 	if err := cstore.ValidateManifest(manifest, "manifest.toml"); err != nil {
 		fmt.Fprintf(stderr, "error: emitted manifest does not validate: %v\n", err)
@@ -171,9 +182,25 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: save local manifest: %v\n", err)
 		return 1
 	}
+
+	stashedCount := 0
+	if len(credKeys) > 0 {
+		var stashErr error
+		stashedCount, stashErr = stashCredentialBindings(
+			manifest.Connector.Name, resolvedName, credKeys,
+			*passphraseFile, stdin, stdout, stderr,
+		)
+		if stashErr != nil {
+			fmt.Fprintf(stderr, "warning: credential stash incomplete (%v); manifest is installed but bindings need `aileron cli refresh` or manual setup\n", stashErr)
+		}
+	}
+
 	fmt.Fprintf(stdout, "\nInstalled local connector %s\n", manifest.Connector.Name)
-	fmt.Fprintf(stdout, "  Store dir:  %s\n", dir)
-	fmt.Fprintf(stdout, "  Operations: %d\n", len(manifest.Capabilities.Spawn.Operations))
+	fmt.Fprintf(stdout, "  Store dir:   %s\n", dir)
+	fmt.Fprintf(stdout, "  Operations:  %d\n", len(manifest.Capabilities.Spawn.Operations))
+	if len(credKeys) > 0 {
+		fmt.Fprintf(stdout, "  Credentials: %d declared, %d stashed in vault\n", len(credKeys), stashedCount)
+	}
 	return 0
 }
 
@@ -298,6 +325,19 @@ func runCliRefresh(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+
+	// Preserve credential capability from the existing manifest:
+	// `cli refresh` must not silently demote a connector from
+	// credential-bearing to credential-less because the new
+	// `--help` happened to omit the env var mention. Re-run
+	// detection on the new help text and union the result with
+	// the existing keys, then keep the existing credential kind
+	// declaration when one exists.
+	preservedKeys := existing.Capabilities.Spawn.CredentialEnvKeys
+	newKeys := wrap.DetectCredentialEnvKeys(helpText)
+	credKeys := mergeStringSets(preservedKeys, newKeys)
+	applyCredentialsToSpec(spec, credKeys)
+
 	manifest := buildLocalManifest(spec, name)
 	if err := cstore.ValidateManifest(manifest, "manifest.toml"); err != nil {
 		fmt.Fprintf(stderr, "error: refreshed manifest does not validate: %v\n", err)
@@ -554,3 +594,191 @@ func editManifestInEditor(m *cstore.Manifest) (*cstore.Manifest, error) {
 	return edited, nil
 }
 
+// stringList is the repeatable-flag value type for `--credential`.
+// Implements flag.Value; each invocation appends to the slice.
+type stringList []string
+
+// String renders the list as a comma-separated string for flag
+// usage; the empty-string default matches flag.Var's contract.
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+// Set appends the value, deduplicated. Caller controls
+// ordering by argument order.
+func (s *stringList) Set(v string) error {
+	for _, existing := range *s {
+		if existing == v {
+			return nil
+		}
+	}
+	*s = append(*s, v)
+	return nil
+}
+
+// resolveCredentialKeys combines the env-var heuristic on the
+// captured --help text with any user-supplied `--credential` flag
+// overrides. Returns nil when `--no-credentials` is set so the
+// caller skips both manifest mutation and the vault stash. The
+// merge is sorted + deduplicated so the manifest's
+// EnvPassthrough order is stable across runs.
+func resolveCredentialKeys(helpText string, overrides stringList, skip bool) []string {
+	if skip {
+		return nil
+	}
+	detected := wrap.DetectCredentialEnvKeys(helpText)
+	return mergeStringSets(detected, []string(overrides))
+}
+
+// mergeStringSets returns the sorted union of two slices,
+// deduplicated. The helper takes []string rather than a typed
+// set because the call sites here all carry plain string lists.
+func mergeStringSets(a, b []string) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for _, v := range a {
+		seen[v] = struct{}{}
+	}
+	for _, v := range b {
+		seen[v] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	// Reuse sort.Strings via the wrap package's idiom — keep
+	// the manifest stable across re-runs of `cli add` against
+	// the same binary.
+	sortStrings(out)
+	return out
+}
+
+// sortStrings is a thin wrapper around sort.Strings, declared
+// here so the import list stays focused on the call sites that
+// need real sort behavior (one site so far).
+func sortStrings(s []string) {
+	if len(s) < 2 {
+		return
+	}
+	// Inline bubble for very small lists; the typical case is
+	// 1-3 credential env vars, well under the threshold where a
+	// real sort beats N^2.
+	for i := 0; i < len(s); i++ {
+		for j := i + 1; j < len(s); j++ {
+			if s[j] < s[i] {
+				s[i], s[j] = s[j], s[i]
+			}
+		}
+	}
+}
+
+// applyCredentialsToSpec sets the wrap.Spec fields that drive
+// the manifest's [capabilities.credential] block and the
+// [capabilities.spawn].credential_env_keys list. Idempotent: an
+// empty keys slice leaves the spec untouched. The credential
+// kind is hardcoded to api_key — v1 of the wrap heuristic only
+// catches API-key-shaped env vars; OAuth2 still goes through
+// the manifest-author path.
+func applyCredentialsToSpec(spec *wrap.Spec, keys []string) {
+	if spec == nil || len(keys) == 0 {
+		return
+	}
+	spec.EnvPassthrough = mergeStringSets(spec.EnvPassthrough, keys)
+	spec.CredentialEnvKeys = mergeStringSets(spec.CredentialEnvKeys, keys)
+	if spec.Credential == nil {
+		spec.Credential = &wrap.CredentialSpec{Kind: cstore.CredentialKindAPIKey}
+	}
+}
+
+// stashCredentialBindings prompts the user once for a credential
+// value, opens the local vault, and creates a single
+// `api_key/<connector-name>/default` binding holding that value.
+// The runtime injects the same credential into every env key
+// the manifest's [capabilities.spawn].credential_env_keys lists,
+// matching the existing publisher-signed forwarder behavior
+// (one credential, N alias env-var names).
+//
+// Empty input skips the stash entirely — the manifest still
+// declares the env keys, but the runtime surfaces
+// `binding_required` until the user runs `aileron cli refresh`
+// or creates the binding through another path. Returns 1 when a
+// binding was written, 0 otherwise.
+//
+// v1 limitation: a connector that genuinely has multiple
+// distinct credentials (e.g. an API token and a separate webhook
+// secret) gets only one binding. The other env keys are still
+// declared in EnvPassthrough so the user can set them in the
+// surrounding shell, but the vault doesn't hold them. Multi-
+// credential connectors fall back to the manual wrap path.
+func stashCredentialBindings(connectorFQN, connectorName string, keys []string, passphraseFile string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+	fmt.Fprintf(stdout, "\nCredential capture:\n")
+	if len(keys) == 1 {
+		fmt.Fprintf(stdout, "  Detected env var: %s\n", keys[0])
+	} else {
+		fmt.Fprintf(stdout, "  Detected env vars: %s\n", strings.Join(keys, ", "))
+		fmt.Fprintln(stdout, "  Note: v1 binds one credential per connector; the same value is injected into every detected key.")
+	}
+	fmt.Fprint(stdout, "  Credential value (leave blank to skip): ")
+	value, err := promptPassphrase("", nil)
+	if err != nil {
+		fmt.Fprintln(stdout)
+		return 0, fmt.Errorf("read credential value: %w", err)
+	}
+	fmt.Fprintln(stdout)
+	if value == "" {
+		fmt.Fprintln(stdout, "  (no credential stashed; manifest declares the env keys but no binding is set)")
+		return 0, nil
+	}
+
+	vaultPath := launch.DefaultVaultPath()
+	passphrase, _, err := readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
+	if err != nil {
+		return 0, fmt.Errorf("read vault passphrase: %w", err)
+	}
+	if passphrase == "" {
+		return 0, errors.New("vault passphrase is required to stash credentials")
+	}
+	v, err := launch.OpenLocalVault(vaultPath, passphrase)
+	if err != nil {
+		return 0, fmt.Errorf("open vault: %w", err)
+	}
+
+	bindingName, err := binding.MakeName(
+		cstore.CredentialKindAPIKey,
+		connectorName,
+		"default",
+	)
+	if err != nil {
+		return 0, fmt.Errorf("make binding name for %s: %w", connectorName, err)
+	}
+	b := binding.Binding{
+		Name:         bindingName,
+		Kind:         cstore.CredentialKindAPIKey,
+		Service:      connectorName,
+		Identity:     "default",
+		ConnectorFQN: connectorFQN,
+		Status:       binding.StatusActive,
+		CreatedAt:    timeNow(),
+	}
+	store := &binding.VaultStore{Vault: v}
+	if err := store.Put(context.Background(), b, []byte(value), binding.PutUpsert); err != nil {
+		return 0, fmt.Errorf("put binding %s: %w", bindingName, err)
+	}
+	fmt.Fprintf(stdout, "  Stashed credential under binding %s\n", bindingName)
+	return 1, nil
+}
+
+// Type-system gate: vault is used via the launch package's
+// OpenLocalVault helper; the explicit import keeps the linter
+// from suggesting deletion when the helper is the only call
+// site referenced here.
+var _ vault.Vault = (vault.Vault)(nil)
+
+// timeNow is the wall clock the credential binding writes use
+// for CreatedAt stamps. Indirected as a package-level seam so
+// the few tests that assert on the timestamp can swap in a
+// fixed value without monkey-patching time.
+var timeNow = func() time.Time { return time.Now() }
