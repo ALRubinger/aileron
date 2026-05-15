@@ -195,6 +195,7 @@ const (
 	fwpEmpty        uint32 = 0
 	fwpUint16       uint32 = 2
 	fwpUint32       uint32 = 3
+	fwpUint64       uint32 = 4
 	fwpByteBlobType uint32 = 12
 	fwpV4AddrMask   uint32 = 256
 )
@@ -409,14 +410,16 @@ func addPermitLoopbackForApp(engine windows.Handle, appID *fwpByteBlob, port uin
 		},
 	}
 	// Higher weight ensures the permit wins arbitration against
-	// the auto-weighted deny. FWP weights are arbitrary 64-bit
-	// values; the runtime uses 0xFFFFFFFFFFFFFFFE so user-added
-	// rules (if any) at MAX can still preempt.
+	// the auto-weighted deny. FWP filter weights MUST be tagged
+	// as FWP_UINT64 (not UINT32); the kernel rejects other
+	// numeric types with FWP_E_INVALID_WEIGHT (0x80320025).
+	// The runtime uses 0xFFFFFFFFFFFFFFFE so user-added rules
+	// (if any) at MAX can still preempt.
 	weight := uint64(0xFFFFFFFFFFFFFFFE)
 	f := fwpmFilter0{
 		DisplayData:         fwpmDisplayData0{Name: nameUTF16, Description: descUTF16},
 		LayerKey:            fwpmLayerALEAuthConnectV4,
-		Weight:              fwpValue0{Type: fwpUint32, Value: uintptr(weight)},
+		Weight:              fwpValue0{Type: fwpUint64, Value: uintptr(unsafe.Pointer(&weight))},
 		Action:              fwpmAction0{Type: fwpActionPermit},
 		NumFilterConditions: 3,
 		FilterCondition:     &conds[0],
