@@ -49,6 +49,7 @@ func newTestRuntime(t *testing.T, doer HTTPDoer) Runtime {
 }
 
 func TestWazeroRuntime_PerCallInstantiation_HappyPathRoundTrip(t *testing.T) {
+	t.Parallel()
 	// ADR-0005 acceptance #1: per-call connector instantiation works.
 	// AC #8: connector instances are scoped to a single invocation
 	// and torn down on completion. Two invocations produce independent
@@ -85,6 +86,7 @@ func TestWazeroRuntime_PerCallInstantiation_HappyPathRoundTrip(t *testing.T) {
 }
 
 func TestWazeroRuntime_AileronLog_CapturedAsLogLines(t *testing.T) {
+	t.Parallel()
 	// The connector calls aileron_host.log to emit a log line; the
 	// runtime captures those into Result.Logs. This is the seam
 	// audit emission will use post-MVP (#365).
@@ -105,6 +107,7 @@ func TestWazeroRuntime_AileronLog_CapturedAsLogLines(t *testing.T) {
 }
 
 func TestWazeroRuntime_HTTPRequestAllowedHostSucceeds(t *testing.T) {
+	t.Parallel()
 	// ADR-0005 acceptance #3: network access is gated by
 	// [capabilities.network]. A URL whose host:port is in the grant
 	// reaches the host's HTTP doer and the response flows back to
@@ -138,6 +141,7 @@ func TestWazeroRuntime_HTTPRequestAllowedHostSucceeds(t *testing.T) {
 }
 
 func TestWazeroRuntime_HTTPRequestDeniedHostReturnsCapabilityDenied(t *testing.T) {
+	t.Parallel()
 	// ADR-0005 example "Capability denial at the WASM sandbox boundary":
 	// the runtime refuses outbound calls to hosts not in the grant.
 	// The error class is capability_denied with boundary=sandbox; the
@@ -173,6 +177,7 @@ func TestWazeroRuntime_HTTPRequestDeniedHostReturnsCapabilityDenied(t *testing.T
 }
 
 func TestWazeroRuntime_WallTimeLimitTerminatesAndNamesLimit(t *testing.T) {
+	t.Parallel()
 	// ADR-0005 §"Resource limits": hitting a limit terminates the
 	// instance and surfaces a structured error to the calling action.
 	// AC #6: terminations produce class=resource_limit_exceeded with
@@ -211,6 +216,7 @@ func TestWazeroRuntime_WallTimeLimitTerminatesAndNamesLimit(t *testing.T) {
 }
 
 func TestWazeroRuntime_ConnectorPanicSurfacesAsRuntimeError(t *testing.T) {
+	t.Parallel()
 	// A connector that exits non-zero produces a connector_runtime_error.
 	// The class lets the LLM (and audit log) reason about the failure
 	// without parsing prose; the message is bounded so an enormous
@@ -236,6 +242,7 @@ func TestWazeroRuntime_ConnectorPanicSurfacesAsRuntimeError(t *testing.T) {
 }
 
 func TestWazeroRuntime_MalformedBinaryFailsCompile(t *testing.T) {
+	t.Parallel()
 	// ADR-0005 acceptance #2: out-of-grant imports refuse at
 	// instantiation. Malformed binaries fail at compile, which is
 	// the earlier failure mode. Both produce connector_load_failed.
@@ -251,6 +258,7 @@ func TestWazeroRuntime_MalformedBinaryFailsCompile(t *testing.T) {
 }
 
 func TestWazeroRuntime_NilManifestRejected(t *testing.T) {
+	t.Parallel()
 	rt := newTestRuntime(t, http.DefaultClient)
 	if _, err := rt.Compile(context.Background(), nil, echoWASM); err == nil {
 		t.Fatal("expected error for nil manifest")

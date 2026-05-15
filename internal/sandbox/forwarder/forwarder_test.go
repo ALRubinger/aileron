@@ -54,6 +54,7 @@ func TestWASM_Embedded(t *testing.T) {
 }
 
 func TestForwarder_DispatchesToSpawnOp(t *testing.T) {
+	t.Parallel()
 	// End-to-end: compile the embedded forwarder, invoke it with a
 	// {op, args} envelope on stdin, verify the runtime's spawn host
 	// function received the manifest-derived spawn envelope.
@@ -101,6 +102,7 @@ func TestForwarder_DispatchesToSpawnOp(t *testing.T) {
 }
 
 func TestForwarder_UndeclaredOpDenied(t *testing.T) {
+	t.Parallel()
 	exec := &sandboxtest.RecordingExecutor{}
 	rt, err := sandbox.NewWazeroRuntime(context.Background(), sandbox.WithSpawnExecutor(exec))
 	if err != nil {
@@ -131,6 +133,7 @@ func TestForwarder_UndeclaredOpDenied(t *testing.T) {
 }
 
 func TestForwarder_MissingPlaceholderDenied(t *testing.T) {
+	t.Parallel()
 	exec := &sandboxtest.RecordingExecutor{}
 	rt, _ := sandbox.NewWazeroRuntime(context.Background(), sandbox.WithSpawnExecutor(exec))
 	t.Cleanup(func() { _ = rt.Close(context.Background()) })
@@ -154,6 +157,7 @@ func TestForwarder_MissingPlaceholderDenied(t *testing.T) {
 }
 
 func TestForwarder_StableOperationsAcrossInvocations(t *testing.T) {
+	t.Parallel()
 	// One forwarder instance, two invocations of different operations.
 	// Each invocation must independently lookup its op against the
 	// manifest; state from the first call must not leak into the

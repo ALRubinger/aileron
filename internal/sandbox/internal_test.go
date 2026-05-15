@@ -10,6 +10,7 @@ import (
 )
 
 func TestSandboxExecutor_ActionBoundary_DeniesURLOutsideSubset(t *testing.T) {
+	t.Parallel()
 	// Issue #359 acceptance #7: the action's declared capability
 	// subset is enforced *in addition to* the connector manifest's
 	// grant. Even when the connector manifest grants two hosts, an
@@ -54,6 +55,7 @@ func TestSandboxExecutor_ActionBoundary_DeniesURLOutsideSubset(t *testing.T) {
 }
 
 func TestSandboxExecutor_ActionBoundary_AllowsURLInSubset(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
