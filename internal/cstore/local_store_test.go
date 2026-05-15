@@ -243,6 +243,39 @@ func TestLocalFQN_Roundtrip(t *testing.T) {
 	}
 }
 
+func TestNewLocalStore_RoundtripsRootArg(t *testing.T) {
+	// Trivial smoke-test so the constructor's Root() accessor
+	// is exercised at the cstore package level (the cmd/aileron
+	// tests can call it too, but go test attributes coverage to
+	// the package the test lives in).
+	root := t.TempDir()
+	s := NewLocalStore(root)
+	if got := s.Root(); got != root {
+		t.Errorf("Root()=%q want %q", got, root)
+	}
+}
+
+func TestDefaultLocalRoot_IncludesAileronSubdir(t *testing.T) {
+	got := DefaultLocalRoot()
+	if !strings.Contains(got, ".aileron") {
+		t.Errorf("DefaultLocalRoot()=%q should contain .aileron", got)
+	}
+	if !strings.Contains(got, "connectors") {
+		t.Errorf("DefaultLocalRoot()=%q should contain connectors", got)
+	}
+	if !strings.Contains(got, "local") {
+		t.Errorf("DefaultLocalRoot()=%q should contain local", got)
+	}
+}
+
+func TestLocalFQN_RejectsInvalidName(t *testing.T) {
+	for _, bad := range []string{"", "Bad-Caps", "with space", "../escape", ".hidden"} {
+		if _, err := LocalFQN(bad); err == nil {
+			t.Errorf("LocalFQN(%q) accepted invalid name", bad)
+		}
+	}
+}
+
 func TestLocalNameForFQN_RejectsWrongScheme(t *testing.T) {
 	for _, fqn := range []string{
 		"github://acme/linear",
