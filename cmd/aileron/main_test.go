@@ -2651,6 +2651,11 @@ func TestRunAction_AddAutoPromptsForUnboundCapabilities(t *testing.T) {
 			setupHits++
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"created":[{"name":"api_key/conn-a/work","kind":"api_key","service":"conn-a","identity":"work","connector_fqn":"github://x/conn-a","created_at":"2024-01-01T00:00:00Z"}]}`)
+		case "/hub/action-install-decision":
+			// Action isn't Hub-listed in this fixture; force the
+			// composite flow to fall through to the legacy path so this
+			// test continues to exercise its intended surface.
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -2690,6 +2695,8 @@ func TestRunAction_AddDeclineDoesNotBindButPrintsHint(t *testing.T) {
 				"name":"echo","fqn":"x","version":"1.0.0","source":"x","path":"/p",
 				"unbound_capabilities":[{"connector_fqn":"github://x/conn-a","kind":"oauth2"}]
 			}`)
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -2722,6 +2729,8 @@ func TestRunAction_AddNoBindFlagSkipsPrompt(t *testing.T) {
 				"name":"echo","fqn":"x","version":"1.0.0","source":"x","path":"/p",
 				"unbound_capabilities":[{"connector_fqn":"github://x/conn-a","kind":"api_key"}]
 			}`)
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			t.Errorf("unexpected path with --no-bind: %s", r.URL.Path)
 		}
@@ -3316,6 +3325,462 @@ func TestRunActionAdd_AutoTrustPromptsAndInstalls(t *testing.T) {
 	}
 	if !kr.HasKey("github://acme/conn", pub) {
 		t.Error("keyring should contain trusted key after auto-trust")
+	}
+}
+
+// TestRunActionAdd_HubCompositeAcceptTrustsAuthoritiesAndInstalls is
+// the headline #709 acceptance test: when the action is Hub-listed,
+// the CLI renders a single composite trust panel covering the action
+// plus every connector authority it depends on. One "y" trusts every
+// surfaced authority and proceeds to preview + install. Per-authority
+// trust prompts are suppressed.
+func TestRunActionAdd_HubCompositeAcceptTrustsAuthoritiesAndInstalls(t *testing.T) {
+	home := withTempHome(t)
+	pub, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	var hubCalled, previewCalled, installCalled bool
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			hubCalled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"action",
+				"fqn":"github://acme/conn/actions/run",
+				"description":"do the thing",
+				"publisher_github":"acme",
+				"connector_fqn":"github://acme/conn",
+				"authorities":[{
+					"fqn":"github://acme/conn",
+					"publisher_github":"acme",
+					"fingerprint":"sha256:i4l2kuD8q++d5b9v8/LLI1",
+					"trust_state":"unknown",
+					"publisher_footprint":[],
+					"risk_indicators":["First connector by this publisher you've installed"]
+				}]
+			}`)
+		case "/actions/preview":
+			previewCalled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"fqn":"github://acme/conn/actions/run","version":"0.1.0",
+				"hash":"sha256:abc","name":"my-action","signature_status":"verified",
+				"connector_deps":[]
+			}`)
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// One y at the composite prompt; one y at the per-action install
+	// prompt. The per-authority trust prompts that the legacy flow
+	// would fire are suppressed because trustState records every
+	// composite authority as already trusted.
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %s", code, stderr.String())
+	}
+	if !hubCalled || !previewCalled || !installCalled {
+		t.Errorf("expected all three endpoints to fire; hub=%v preview=%v install=%v", hubCalled, previewCalled, installCalled)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Hub install-decision (action)",
+		"Action:    github://acme/conn/actions/run",
+		"Summary:   do the thing",
+		"Connector: github://acme/conn",
+		"sha256:i4l2kuD8q++d5b9v8/LLI1",
+		"Trust these publishers and install?",
+		"First connector by this publisher",
+		"Added: my-action",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// Per-authority "Publisher X is not yet trusted" lines MUST NOT
+	// fire — the composite consent already covered them. Their absence
+	// is the load-bearing UX promise of the composite flow.
+	if strings.Contains(out, "Publisher github://acme/conn is not yet trusted.\nAileron will fetch") {
+		t.Errorf("per-authority trust prompt fired after composite accept:\n%s", out)
+	}
+	// Trust persists post-install — composite y also wrote the keyring.
+	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !kr.HasKey("github://acme/conn", pub) {
+		t.Error("keyring should contain trusted key after composite accept")
+	}
+}
+
+// TestRunActionAdd_HubCompositeDeclineAbortsBeforePreview: declining at
+// the composite prompt aborts cleanly (exit 0, no preview/install
+// calls, keyring stays empty). Mirrors the legacy decline path but at
+// the new consent surface.
+func TestRunActionAdd_HubCompositeDeclineAbortsBeforePreview(t *testing.T) {
+	home := withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	previewCalled := false
+	installCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"action","fqn":"github://acme/conn/actions/run",
+				"description":"x","publisher_github":"acme",
+				"connector_fqn":"github://acme/conn",
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":[],"risk_indicators":["x"]
+				}]
+			}`)
+		case "/actions/preview":
+			previewCalled = true
+		case "/actions/install":
+			installCalled = true
+		}
+	})
+
+	stdin := strings.NewReader("n\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	// Composite decline is a clean cancel: exit 0, no install pipeline
+	// runs. The legacy decline-at-trust path historically exited
+	// nonzero; the action-first amendment treats decline as the
+	// operator's normal "no thanks" interaction.
+	if code != 0 {
+		t.Errorf("expected clean cancel exit 0, got %d; stderr=%s", code, stderr.String())
+	}
+	if previewCalled || installCalled {
+		t.Errorf("preview/install should not fire on decline; preview=%v install=%v", previewCalled, installCalled)
+	}
+	if !strings.Contains(stdout.String(), "Cancelled.") {
+		t.Errorf("expected 'Cancelled.' in output:\n%s", stdout.String())
+	}
+	kr, _ := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if kr != nil && len(kr.Keys("github://acme/conn")) != 0 {
+		t.Error("keyring should remain empty when composite declined")
+	}
+}
+
+// TestRunActionAdd_HubCompositeYesFlagAutoAccepts: --yes short-circuits
+// the composite prompt the same way it short-circuits the legacy
+// trust + install prompts. CI scripts and agent-driven installs stay
+// non-interactive.
+func TestRunActionAdd_HubCompositeYesFlagAutoAccepts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	hubCalled := 0
+	installCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			hubCalled++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"action","fqn":"github://acme/conn/actions/run",
+				"description":"x","publisher_github":"acme",
+				"connector_fqn":"github://acme/conn",
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":[],"risk_indicators":["x"]
+				}]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	// No stdin reads — --yes must skip every prompt.
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0", "--yes"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubCalled != 1 || !installCalled {
+		t.Errorf("expected hub composite to fire once and install to run; hub=%d install=%v", hubCalled, installCalled)
+	}
+	// Composite panel must NOT be rendered when --yes is in effect —
+	// that would surface a wall of trust info before silent install,
+	// confusing for the script consumer.
+	if strings.Contains(stdout.String(), "Trust these publishers and install?") {
+		t.Errorf("composite prompt fired despite --yes:\n%s", stdout.String())
+	}
+}
+
+// TestRunActionAdd_HubComposite422FallsThroughToLegacy: when the
+// composite endpoint can't precompute the trust panel (e.g. action's
+// connector_fqn isn't Hub-listed), the CLI falls through to the
+// legacy per-authority trust + preview flow. Operators with Hub
+// configuration gaps still get their installs done.
+func TestRunActionAdd_HubComposite422FallsThroughToLegacy(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	hubCalled, previewCalled, installCalled := false, false, false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			hubCalled = true
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"missing_connector"}}`)
+		case "/actions/preview":
+			previewCalled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !hubCalled || !previewCalled || !installCalled {
+		t.Errorf("expected fall-through to legacy flow; hub=%v preview=%v install=%v", hubCalled, previewCalled, installCalled)
+	}
+	// Composite panel must NOT render when the endpoint 422s.
+	if strings.Contains(stdout.String(), "Hub install-decision (action)") {
+		t.Errorf("composite panel rendered on 422 fall-through:\n%s", stdout.String())
+	}
+	// Legacy per-authority trust prompt MUST render (operator typed y
+	// to accept it).
+	if !strings.Contains(stdout.String(), "Publisher github://acme/conn is not yet trusted") {
+		t.Errorf("legacy trust prompt should fire on fall-through:\n%s", stdout.String())
+	}
+}
+
+// TestRunActionAdd_HubCompositeDetailsExpandsAndAccepts: typing "d"
+// at the composite prompt expands the per-authority publisher_footprint
+// view; a subsequent "y" accepts. Validates the d=details → y two-step.
+func TestRunActionAdd_HubCompositeDetailsExpandsAndAccepts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"action","fqn":"github://acme/conn/actions/run",
+				"description":"x","publisher_github":"acme",
+				"connector_fqn":"github://acme/conn",
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":["github://acme/other-conn","github://acme/third-conn"],
+					"risk_indicators":["First connector by this publisher you've installed"]
+				}]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	// d → details, y → accept composite, y → accept the action install
+	stdin := bufio.NewReader(strings.NewReader("d\ny\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	// Details expansion surfaces the publisher_footprint.
+	for _, want := range []string{
+		"Other connectors by this publisher",
+		"github://acme/other-conn",
+		"github://acme/third-conn",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("details mode missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAdd_HubComposite503FallsThroughToLegacyWithNote: 503
+// from the daemon's composite endpoint surfaces a one-line stderr
+// note and falls through to the legacy trust flow. Operators with
+// broken daemon-side Hub config still install actions they've pre-
+// trusted.
+func TestRunActionAdd_HubComposite503FallsThroughToLegacyWithNote(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"code":"hub_unreachable"}}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "hub install-decision returned 503") {
+		t.Errorf("expected one-line stderr note on 503; got:\n%s", stderr.String())
+	}
+	// Legacy flow must still produce its trust prompt.
+	if !strings.Contains(stdout.String(), "Publisher github://acme/conn is not yet trusted") {
+		t.Errorf("legacy trust prompt should still fire after 503 fall-through:\n%s", stdout.String())
+	}
+}
+
+// TestRunActionAdd_HubCompositeMalformedJSONFallsThroughWithNote: 200
+// with un-parseable body surfaces a note and falls through. Guards
+// against a daemon shipping a wire-incompatible payload silently
+// blocking installs that the legacy path can complete.
+func TestRunActionAdd_HubCompositeMalformedJSONFallsThroughWithNote(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `not valid json`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		}
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "could not parse hub install-decision") {
+		t.Errorf("expected parse-failure note; got:\n%s", stderr.String())
+	}
+}
+
+// TestRunActionAdd_HubCompositeDetailsTwiceTreatsAsDecline: typing `d`
+// twice expands the panel then declines (since the panel was already
+// in details mode, a second `d` is meaningless and counts as cancel).
+// Mirrors the connector-install composite contract.
+func TestRunActionAdd_HubCompositeDetailsTwiceTreatsAsDecline(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	previewCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"action","fqn":"github://acme/conn/actions/run",
+				"description":"x","publisher_github":"acme",
+				"connector_fqn":"github://acme/conn",
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":[],"risk_indicators":["x"]
+				}]
+			}`)
+		case "/actions/preview":
+			previewCalled = true
+		}
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("d\nd\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Errorf("expected clean cancel exit 0, got %d", code)
+	}
+	if previewCalled {
+		t.Error("preview should not fire after second `d` treated as decline")
+	}
+	if !strings.Contains(stdout.String(), "Cancelled.") {
+		t.Errorf("expected 'Cancelled.' in output:\n%s", stdout.String())
 	}
 }
 
