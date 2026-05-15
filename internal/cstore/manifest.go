@@ -79,7 +79,31 @@ type ManifestConnector struct {
 	// reads this via [Manifest.IsIdempotent] to decide whether to
 	// retry a failed call.
 	Idempotency *ManifestIdempotency `toml:"idempotency"`
+
+	// Origin distinguishes how this connector entered the user's
+	// installation. Empty (the default) means "hub-published":
+	// the connector arrived through the content-addressed store
+	// under `~/.aileron/store/connectors/sha256/` after a publisher
+	// signed it and the operator installed via `aileron action add`.
+	// Non-empty values flag connectors that bypassed that path:
+	//
+	//   - [OriginLocal]: BYOCLI connector authored at install time
+	//     via `aileron cli add` (issue #749). Stored under
+	//     `~/.aileron/connectors/local/<name>/manifest.toml` rather
+	//     than the content-addressed store; not signed by a publisher
+	//     and not shareable.
+	//
+	// Future tap-driven installs (issue #752) will land here as a
+	// `tap://...` value. The action-list path renders the column;
+	// callers should treat an unknown non-empty value as a tap
+	// origin rather than failing closed.
+	Origin string `toml:"origin,omitempty"`
 }
+
+// OriginLocal is the [ManifestConnector.Origin] value for BYOCLI
+// connectors registered via `aileron cli add`. See the field
+// documentation for the full origin taxonomy.
+const OriginLocal = "local"
 
 // BuiltinForwarderSpawn is the reserved FQN for the daemon-embedded
 // spawn-forwarder. The only allowed value of ManifestConnector.Forwarder

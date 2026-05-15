@@ -127,6 +127,14 @@ type SandboxExecutor struct {
 	// `binding_required` from the sandbox boundary.
 	Bindings binding.Store
 
+	// LocalStore resolves BYOCLI connectors (issue #749) whose FQN
+	// uses the `local://` scheme. Nil disables local resolution —
+	// any action that references a `local://...` connector fails
+	// with the usual "connector not found" shape. Set by the
+	// daemon's startup wiring; tests that don't need local
+	// connectors leave it nil.
+	LocalStore *cstore.LocalStore
+
 	mu    sync.Mutex
 	cache map[string]cachedConnector // keyed by canonical hash "sha256:<hex>"
 }
@@ -374,6 +382,10 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 		return nil, nil, "", fmt.Errorf("action does not declare connector %q in [[requires.connectors]]", connectorFQN)
 	}
 
+	if isLocalConnectorFQN(connectorFQN) {
+		return e.connectorForLocal(ctx, connectorFQN)
+	}
+
 	e.mu.Lock()
 	if cached, ok := e.cache[dep.Hash]; ok {
 		e.mu.Unlock()
@@ -405,6 +417,59 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 	e.cache[dep.Hash] = cachedConnector{conn: conn, manifest: cmf}
 	e.mu.Unlock()
 	return conn, cmf, dep.Hash, nil
+}
+
+// isLocalConnectorFQN reports whether `connectorFQN` names a
+// BYOCLI connector that lives in the [cstore.LocalStore] rather
+// than the content-addressed hub store. Used by [connectorFor] to
+// route resolution. Cheap string prefix check; the canonical
+// shape is validated downstream by [cstore.LocalNameForFQN].
+func isLocalConnectorFQN(connectorFQN string) bool {
+	const localScheme = "local://"
+	return len(connectorFQN) > len(localScheme) && connectorFQN[:len(localScheme)] == localScheme
+}
+
+// connectorForLocal resolves a `local://...` connector through
+// the [cstore.LocalStore]. Distinct enough from the hub path
+// (no hash, no content addressing, no on-disk binary) that it
+// gets its own helper rather than branching inside the main
+// connectorFor loop.
+//
+// Local connectors are always forwarder-shaped — they wrap a
+// CLI binary via the spawn primitive (ADR-0002), and the
+// forwarder bytes come from the daemon binary at runtime. The
+// `aileron cli refresh` UX rewrites the manifest in place
+// without a content-hash change, so this helper deliberately
+// does not cache compiled connectors by hash. The compile cost
+// is small relative to the spawn cost and the alternative
+// (caching by FQN) hides refresh changes from the runtime.
+func (e *SandboxExecutor) connectorForLocal(ctx context.Context, connectorFQN string) (sandbox.Connector, *cstore.Manifest, string, error) {
+	if e.LocalStore == nil {
+		return nil, nil, "", fmt.Errorf("connector %s: daemon is not configured with a local connector store", connectorFQN)
+	}
+	name, err := cstore.LocalNameForFQN(connectorFQN)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("connector %s: %w", connectorFQN, err)
+	}
+	cmf, err := e.LocalStore.Load(name)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("load local connector %s: %w", connectorFQN, err)
+	}
+	binBytes, err := loadConnectorBytes(cmf, "")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	conn, err := e.Runtime.Compile(ctx, cmf, binBytes)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	// Synthetic identifier for observability — local connectors
+	// have no content hash, but spans/audit rows expect a
+	// non-empty connector identity. Use the FQN+version pair so
+	// `aileron cli refresh` produces a new identifier the same
+	// way a hub re-install would.
+	syntheticID := connectorFQN + "@" + cmf.Connector.Version
+	return conn, cmf, syntheticID, nil
 }
 
 // loadConnectorBytes returns the WASM bytes the runtime should compile

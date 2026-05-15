@@ -60,13 +60,22 @@ func (f FQN) Authority() string {
 	return f.Scheme + "://" + f.Owner + "/" + f.Repo
 }
 
-// fqnSchemes is the closed v1 set per ADR-0004. Adding a scheme requires
-// implementing the resolver's four operations (resolve URL, fetch, verify
-// signature, list versions) and an ADR amendment.
+// fqnSchemes is the closed v1 set per ADR-0004. Adding a remote
+// resolver scheme requires implementing the resolver's four
+// operations (resolve URL, fetch, verify signature, list
+// versions) and an ADR amendment.
+//
+// The `local` scheme is the exception: it names BYOCLI connectors
+// authored by `aileron cli add` (issue #749) that live in the
+// on-disk [LocalStore] rather than a remote resolver. None of the
+// resolver operations apply — the connector is the manifest
+// itself — but the scheme is recognized here so manifest names
+// like `local://linear` parse cleanly via [ParseFQN].
 var fqnSchemes = map[string]bool{
 	"github": true,
 	"gitlab": true,
 	"hub":    true,
+	"local":  true,
 }
 
 // semverRe matches strict SemVer 2.0.0 per ADR-0002.
