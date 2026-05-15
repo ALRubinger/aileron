@@ -81,9 +81,11 @@ func openWFPEngine() (windows.Handle, error) {
 }
 
 // closeWFPEngine releases a handle returned by [openWFPEngine].
-// Idempotent in the sense that a double-close yields a non-fatal
-// error code the caller can ignore; production code should still
-// call it exactly once.
+// Must be called exactly once per opened handle: the Win32 API
+// does not validate that the handle is still live, and a
+// double-close typically crashes the host process with an
+// access violation rather than returning an error. Production
+// callers pair Open/Close in a defer.
 func closeWFPEngine(engine windows.Handle) error {
 	r1, _, _ := procFwpmEngineClose0.Call(uintptr(engine))
 	if r1 != 0 {

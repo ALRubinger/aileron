@@ -34,28 +34,6 @@ func TestWFPEngine_OpenClose(t *testing.T) {
 	}
 }
 
-// TestWFPEngine_DoubleClose pins the contract that close on an
-// already-closed handle returns an error rather than panicking.
-// The runtime calls close exactly once in production, but tests
-// and defensive cleanup paths benefit from the assertion that
-// double-close is observable, not catastrophic.
-func TestWFPEngine_DoubleClose(t *testing.T) {
-	engine, err := openWFPEngine()
-	if err != nil {
-		t.Fatalf("openWFPEngine: %v", err)
-	}
-	if err := closeWFPEngine(engine); err != nil {
-		t.Fatalf("first close: %v", err)
-	}
-	// Second close: the kernel returns an error code for an
-	// invalid handle. We assert non-nil error rather than a
-	// specific code because the exact code (ERROR_INVALID_HANDLE
-	// vs ERROR_NOT_FOUND) varies by Windows build.
-	if err := closeWFPEngine(engine); err == nil {
-		t.Error("expected error on double-close, got nil")
-	}
-}
-
 // Compile-time check that windows.Handle is the type
 // [openWFPEngine] returns. Keeps the function's signature
 // stable across x/sys/windows upgrades; if the package ever
