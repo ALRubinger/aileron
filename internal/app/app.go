@@ -958,16 +958,17 @@ func newConnectorInstaller(log *slog.Logger) *cstore.Installer {
 // drift detection is best-effort and a locked vault legitimately has
 // nothing to enumerate.
 func makeScopeDriftHook(store binding.Store, log *slog.Logger) cstore.ScopeDriftHook {
-	return func(ctx context.Context, fqn string, required []string) {
+	return func(ctx context.Context, fqn string, required []string) []cstore.StaleBindingTransition {
 		if store == nil {
-			return
+			return nil
 		}
 		all, err := store.List(ctx)
 		if err != nil {
 			log.Warn("scope-drift detection: list bindings failed",
 				"connector_fqn", fqn, "error", err)
-			return
+			return nil
 		}
+		var transitions []cstore.StaleBindingTransition
 		for _, b := range all {
 			if b.ConnectorFQN != fqn {
 				continue
@@ -986,7 +987,21 @@ func makeScopeDriftHook(store binding.Store, log *slog.Logger) cstore.ScopeDrift
 					"binding", string(b.Name), "error", err)
 				continue
 			}
+			// Only surface transitions *to* stale; a clear-stale flip
+			// (manifest dropped a scope, binding is now satisfied) is
+			// not something the operator needs to act on.
+			if next.Status != binding.StatusStale {
+				continue
+			}
+			transitions = append(transitions, cstore.StaleBindingTransition{
+				Name:          string(next.Name),
+				ConnectorFQN:  next.ConnectorFQN,
+				StaleReason:   next.StaleReason,
+				MissingScopes: next.MissingScopes,
+				Service:       next.Service,
+			})
 		}
+		return transitions
 	}
 }
 

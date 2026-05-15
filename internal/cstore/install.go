@@ -83,15 +83,51 @@ type Installer struct {
 	// errors inside the hook are the daemon's responsibility, not the
 	// installer's, so the install result is unaffected.
 	//
+	// The hook returns the set of bindings whose status transitioned
+	// to `stale` on this invocation. The installer surfaces these on
+	// [InstallResult.NewlyStale] so the handler can include them in
+	// the API response and the CLI can offer to drop into the
+	// reauthorize flow inline (issue #741).
+	//
 	// Defined here rather than in package binding so cstore stays free
 	// of binding/vault imports.
 	ScopeDriftHook ScopeDriftHook
 }
 
 // ScopeDriftHook is invoked after a successful install with the
-// installed connector's FQN and OAuth scope set. See
+// installed connector's FQN and OAuth scope set. Returns the bindings
+// that newly transitioned to `stale` as a result of this install — the
+// installer surfaces these on [InstallResult.NewlyStale]. See
 // [Installer.ScopeDriftHook] for the contract.
-type ScopeDriftHook func(ctx context.Context, fqn string, requiredScopes []string)
+type ScopeDriftHook func(ctx context.Context, fqn string, requiredScopes []string) []StaleBindingTransition
+
+// StaleBindingTransition describes one binding the scope-drift hook
+// flipped to `stale` on a given install. The handler exposes these on
+// the install API response (#741) so the CLI can prompt the user to
+// reauthorize inline rather than discovering the stale state on the
+// next action invocation.
+//
+// Field semantics:
+//
+//   - Name: the binding's canonical name (kind/service/identity).
+//   - ConnectorFQN: the connector the binding is anchored to.
+//   - StaleReason: matches binding.StaleReason values — `scope_drift`
+//     (granted scopes lack one the new manifest requires) or
+//     `no_grant_record` (binding predates scope tracking and needs a
+//     one-time reauthorize so we record what was granted).
+//   - MissingScopes: the scope strings the binding lacks. Populated
+//     only for `scope_drift`; empty for `no_grant_record` since there
+//     is no recorded grant to diff against.
+//   - Service: human-readable service label from the binding for the
+//     reauthorize prompt ("Google", "Slack"). Optional; the CLI falls
+//     back to the FQN when empty.
+type StaleBindingTransition struct {
+	Name          string
+	ConnectorFQN  string
+	StaleReason   string
+	MissingScopes []string
+	Service       string
+}
 
 // InstallRequest is the input to Install. ExpectedHash is optional: when
 // supplied (typical for installs driven by an action file's declared
@@ -119,6 +155,21 @@ type InstallResult struct {
 	// this case unless the entry was present *before* fetch — see
 	// "Reinstall of an already-stored hash is offline" in ADR-0004.
 	AlreadyInstalled bool
+
+	// NewlyStale lists bindings whose status flipped to `stale` as a
+	// direct result of this install — either because the new manifest
+	// requires scopes the recorded grant lacks (`scope_drift`) or
+	// because the binding predates scope tracking and needs a one-time
+	// reauthorize so the daemon can record what was granted
+	// (`no_grant_record`). Populated by the configured ScopeDriftHook;
+	// nil when no hook is configured or no transitions occurred.
+	//
+	// The handler propagates this list onto the install API response
+	// (#741) so the CLI can prompt the operator to drop into
+	// `aileron binding reauthorize <name>` inline. Without this signal
+	// the install reports success and the next action invocation that
+	// needs a new scope fails with a 403 from the upstream provider.
+	NewlyStale []StaleBindingTransition
 }
 
 // PreviewResult is what Preview returns: enough information for the
@@ -326,11 +377,12 @@ func (i *Installer) Install(ctx context.Context, req InstallRequest) (*InstallRe
 			if err := i.Store.recordIndex(req.Ref, req.ExpectedHash); err != nil {
 				return nil, err
 			}
-			i.runScopeDriftHook(ctx, req.Ref.FQN.String(), dir)
+			newlyStale := i.runScopeDriftHook(ctx, req.Ref.FQN.String(), dir)
 			return &InstallResult{
 				Hash:             req.ExpectedHash,
 				EntryDir:         dir,
 				AlreadyInstalled: true,
+				NewlyStale:       newlyStale,
 			}, nil
 		}
 	}
@@ -409,10 +461,11 @@ func (i *Installer) Install(ctx context.Context, req InstallRequest) (*InstallRe
 	}
 
 	dir, _ := i.Store.EntryDir(computed)
-	i.runScopeDriftHookWithManifest(ctx, req.Ref.FQN.String(), parsedManifest)
+	newlyStale := i.runScopeDriftHookWithManifest(ctx, req.Ref.FQN.String(), parsedManifest)
 	return &InstallResult{
-		Hash:     computed,
-		EntryDir: dir,
+		Hash:       computed,
+		EntryDir:   dir,
+		NewlyStale: newlyStale,
 	}, nil
 }
 
@@ -422,21 +475,19 @@ func (i *Installer) Install(ctx context.Context, req InstallRequest) (*InstallRe
 // missing/unreadable manifest is treated as "no OAuth scopes" — the
 // hook still fires with a nil scope list so the migration-mark case
 // (binding has no recorded grant) can run.
-func (i *Installer) runScopeDriftHook(ctx context.Context, fqn, entryDir string) {
+func (i *Installer) runScopeDriftHook(ctx context.Context, fqn, entryDir string) []StaleBindingTransition {
 	if i.ScopeDriftHook == nil {
-		return
+		return nil
 	}
 	mfBytes, err := readInstalledManifest(entryDir)
 	if err != nil {
-		i.ScopeDriftHook(ctx, fqn, nil)
-		return
+		return i.ScopeDriftHook(ctx, fqn, nil)
 	}
 	parsed, err := ParseManifest("", mfBytes)
 	if err != nil {
-		i.ScopeDriftHook(ctx, fqn, nil)
-		return
+		return i.ScopeDriftHook(ctx, fqn, nil)
 	}
-	i.runScopeDriftHookWithManifest(ctx, fqn, parsed)
+	return i.runScopeDriftHookWithManifest(ctx, fqn, parsed)
 }
 
 // runScopeDriftHookWithManifest invokes ScopeDriftHook with the OAuth
@@ -444,14 +495,14 @@ func (i *Installer) runScopeDriftHook(ctx context.Context, fqn, entryDir string)
 // declare OAuth2). Split from runScopeDriftHook so the full install
 // path (where the parsed manifest is already in hand) does not pay
 // for a re-read + re-parse.
-func (i *Installer) runScopeDriftHookWithManifest(ctx context.Context, fqn string, parsed *Manifest) {
+func (i *Installer) runScopeDriftHookWithManifest(ctx context.Context, fqn string, parsed *Manifest) []StaleBindingTransition {
 	if i.ScopeDriftHook == nil {
-		return
+		return nil
 	}
 	var scopes []string
 	if parsed != nil && parsed.Capabilities.Credential != nil &&
 		parsed.Capabilities.Credential.OAuth2 != nil {
 		scopes = parsed.Capabilities.Credential.OAuth2.Scopes
 	}
-	i.ScopeDriftHook(ctx, fqn, scopes)
+	return i.ScopeDriftHook(ctx, fqn, scopes)
 }

@@ -236,6 +236,73 @@ func TestInstallConnector_AuditOnOfflineReinstall(t *testing.T) {
 	}
 }
 
+// TestInstallConnector_NewlyStaleBindingsPropagated: when the
+// scope-drift hook flips bindings to `stale` during install, the
+// handler must surface them on the response so the CLI can prompt
+// the operator to reauthorize inline (#741). Without this signal
+// the install reports success and the next action invocation
+// needing the new scope fails 403 with no install-time indication.
+func TestInstallConnector_NewlyStaleBindingsPropagated(t *testing.T) {
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+	srv, _ := installTestServer(t, ref)
+	srv.installer.ScopeDriftHook = func(_ context.Context, fqn string, _ []string) []cstore.StaleBindingTransition {
+		return []cstore.StaleBindingTransition{
+			{
+				Name:          "oauth2/slack/work",
+				ConnectorFQN:  fqn,
+				StaleReason:   "scope_drift",
+				MissingScopes: []string{"chat:write"},
+				Service:       "slack",
+			},
+		}
+	}
+
+	rec := postInstall(srv, `{"fqn":"github://aileron/slack","version":"1.2.0"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var got api.InstalledConnector
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.NewlyStaleBindings == nil || len(*got.NewlyStaleBindings) != 1 {
+		t.Fatalf("NewlyStaleBindings = %+v, want one entry", got.NewlyStaleBindings)
+	}
+	entry := (*got.NewlyStaleBindings)[0]
+	if entry.Name != "oauth2/slack/work" {
+		t.Errorf("Name = %q", entry.Name)
+	}
+	if entry.StaleReason != api.StaleBindingStaleReasonScopeDrift {
+		t.Errorf("StaleReason = %q", entry.StaleReason)
+	}
+	if entry.MissingScopes == nil || (*entry.MissingScopes)[0] != "chat:write" {
+		t.Errorf("MissingScopes = %v", entry.MissingScopes)
+	}
+	if entry.Service == nil || *entry.Service != "slack" {
+		t.Errorf("Service = %v, want \"slack\"", entry.Service)
+	}
+}
+
+// TestInstallConnector_NoStaleBindingsOmitsField: when the hook
+// returns nothing, the response must omit the optional field rather
+// than emit an empty array — clients distinguish "no transitions"
+// from "the daemon doesn't speak this field yet" by the field's
+// presence.
+func TestInstallConnector_NoStaleBindingsOmitsField(t *testing.T) {
+	ref, _ := cstore.ParseRef("github://aileron/slack@1.2.0")
+	srv, _ := installTestServer(t, ref)
+	// No ScopeDriftHook wired — hook returns nil; field should be omitted.
+
+	rec := postInstall(srv, `{"fqn":"github://aileron/slack","version":"1.2.0"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "newly_stale_bindings") {
+		t.Errorf("body %q includes newly_stale_bindings; field should be omitted when empty",
+			rec.Body.String())
+	}
+}
+
 func TestInstallConnector_HashMismatchReturns422(t *testing.T) {
 	// ADR-0004's failure-modes table: hash mismatch is a hard fail. The
 	// handler maps cstore.ClassHashMismatch to 422 because the request was
