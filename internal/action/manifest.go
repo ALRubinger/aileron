@@ -207,9 +207,24 @@ type Input struct {
 	// `[[execute]]` step `inputs` blocks as `${args.<name>}`.
 	Name string `toml:"name"`
 
-	// Type is the JSON Schema primitive: "string", "integer",
-	// "number", or "boolean". Object/array types are post-MVP.
+	// Type is the JSON Schema type: "string", "integer", "number",
+	// "boolean", "array", or "object". Scalar types map directly to the
+	// LLM-facing tool schema; structured types are passed through with
+	// per-item / per-property constraints declared on adjacent fields
+	// (e.g. ItemsType for arrays). The connector is responsible for
+	// semantic-shape validation at op time.
 	Type string `toml:"type"`
+
+	// ItemsType declares the JSON Schema type of an array input's
+	// elements. Valid only when Type == "array"; must be one of the v1
+	// primitives ("string", "integer", "number", "boolean", "object").
+	// Optional: arrays without ItemsType emit `"items": {}` (any) to the
+	// LLM-facing tool schema, which is strictly more permissive than
+	// omitting the `items` field entirely. Some MCP-using LLM hosts
+	// default a missing `items` field to `string[]`, which silently
+	// breaks actions whose array elements are objects — this field lets
+	// the manifest tell the host the correct element shape.
+	ItemsType string `toml:"items_type"`
 
 	// Required defaults to true when nil. Set to a non-nil pointer
 	// (`required = false` in TOML) to mark the argument optional.

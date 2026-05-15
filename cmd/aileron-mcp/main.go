@@ -98,8 +98,18 @@ type schema struct {
 }
 
 type schemaProp struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
+	Type        string      `json:"type"`
+	Description string      `json:"description"`
+	Items       *schemaItem `json:"items,omitempty"`
+}
+
+// schemaItem is the JSON Schema `items` clause emitted for array
+// properties. Empty struct serializes as `{}` (any-element), which is
+// strictly more permissive than omitting the `items` field — some MCP
+// hosts (Codex) project a missing `items` to `string[]`, and that
+// breaks actions whose elements are objects.
+type schemaItem struct {
+	Type string `json:"type,omitempty"`
 }
 
 type callToolParams struct {
@@ -155,6 +165,7 @@ func (a actionMeta) requiresApproval() bool {
 type actionInput struct {
 	Name        string `json:"name"`
 	Type        string `json:"type"`
+	ItemsType   string `json:"items_type,omitempty"`
 	Required    *bool  `json:"required"`
 	Description string `json:"description"`
 }
@@ -1008,10 +1019,24 @@ func deriveInputSchema(a actionMeta) schema {
 	}
 	s.Properties = make(map[string]schemaProp, len(a.Inputs))
 	for _, in := range a.Inputs {
-		s.Properties[in.Name] = schemaProp{
+		prop := schemaProp{
 			Type:        in.Type,
 			Description: in.Description,
 		}
+		// Array inputs always emit an `items` clause. When the manifest
+		// declares `items_type`, the clause carries the element type;
+		// otherwise it is an empty object (any-element). The empty
+		// object is strictly more permissive than omitting `items`
+		// entirely — strict-defaulting MCP hosts (Codex) treat a
+		// missing `items` as `string[]`, which silently breaks
+		// object-element arrays.
+		if in.Type == "array" {
+			prop.Items = &schemaItem{}
+			if in.ItemsType != "" {
+				prop.Items.Type = in.ItemsType
+			}
+		}
+		s.Properties[in.Name] = prop
 		required := true
 		if in.Required != nil {
 			required = *in.Required
