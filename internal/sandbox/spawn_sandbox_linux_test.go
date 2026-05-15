@@ -5,8 +5,10 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -114,47 +116,105 @@ func TestApplyPlatformSandbox_Linux_RunsRealBinaryUnderSandbox(t *testing.T) {
 	}
 }
 
-func TestApplyPlatformSandbox_Linux_NoSandboxSetupWhenUnavailable(t *testing.T) {
-	// Contract: when the sysctl reports namespaces are unavailable,
-	// applyPlatformSandbox returns ErrSpawnUnavailable and does not
-	// modify cmd. The host function translates the error class into
-	// `spawn_sandbox_unavailable` so the user sees an actionable
-	// message instead of a cryptic clone() failure at runtime.
-	//
-	// We can't toggle the sysctl from a test, so this test only
-	// exercises the path when the sysctl reports `0`. In CI the
-	// sysctl is typically `1`, so the test skips.
-	raw, err := os.ReadFile(unprivilegedUserNSSysctl)
-	if err != nil {
-		t.Skip("sysctl file absent; cannot test unavailable path on this runner")
-	}
-	if strings.TrimSpace(string(raw)) == "1" {
-		t.Skip("unprivileged user namespaces enabled on this runner; cannot test unavailable path")
-	}
-	cmd := exec.CommandContext(context.Background(), "/bin/echo")
-	limits := SpawnLimits{FSRead: []string{"~/code/"}}
-	err = applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits)
-	if err == nil {
-		t.Fatal("expected ErrSpawnUnavailable on locked-down runner")
-	}
-	if !strings.Contains(err.Error(), "spawn_sandbox_unavailable") &&
-		!strings.Contains(err.Error(), "sandbox unavailable") {
-		t.Errorf("error %v does not mention sandbox unavailability", err)
+func TestCheckLinuxSandboxAvailable_AcceptsEnabled(t *testing.T) {
+	// Contract: sysctl reports "1" → namespaces available, return nil.
+	swapped := withSysctlContent(t, "1\n")
+	defer swapped()
+	if err := checkLinuxSandboxAvailable(); err != nil {
+		t.Errorf("expected nil with sysctl=1, got %v", err)
 	}
 }
 
-func TestCheckLinuxSandboxAvailable_AcceptsEnabled(t *testing.T) {
-	// On the CI ubuntu runner the sysctl is enabled (=1) by default.
-	// When absent or 1, the check returns nil.
-	err := checkLinuxSandboxAvailable()
-	// Either nil (sysctl enabled or absent) or a sandbox-unavailable
-	// error is acceptable — we can't control the runner's sysctl
-	// state. We just assert the return shape: either nil or
-	// wraps ErrSpawnUnavailable.
-	if err != nil {
-		if !strings.Contains(err.Error(), "spawn_sandbox_unavailable") &&
-			!strings.Contains(err.Error(), "sandbox unavailable") {
-			t.Errorf("non-nil error does not mention sandbox unavailability: %v", err)
-		}
+func TestCheckLinuxSandboxAvailable_AcceptsAbsent(t *testing.T) {
+	// Contract: sysctl absent → kernel doesn't expose the knob, assume
+	// permissive. Older kernels predate the knob; the namespace API
+	// has been GA since 3.8.
+	defer swapSysctl(t, "/nonexistent/never-exists-aileron-test")()
+	if err := checkLinuxSandboxAvailable(); err != nil {
+		t.Errorf("expected nil when sysctl absent, got %v", err)
 	}
+}
+
+func TestCheckLinuxSandboxAvailable_RejectsDisabled(t *testing.T) {
+	// Contract: sysctl reports "0" → return ErrSpawnUnavailable with
+	// an actionable remediation hint. The host function translates
+	// the wrapped error into a structured `spawn_sandbox_unavailable`
+	// class so operators see the sysctl name and the fix command.
+	swapped := withSysctlContent(t, "0\n")
+	defer swapped()
+	err := checkLinuxSandboxAvailable()
+	if err == nil {
+		t.Fatal("expected ErrSpawnUnavailable with sysctl=0")
+	}
+	if !errors.Is(err, ErrSpawnUnavailable) {
+		t.Errorf("error does not wrap ErrSpawnUnavailable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unprivileged_userns_clone") {
+		t.Errorf("error %v does not name the sysctl", err)
+	}
+	if !strings.Contains(err.Error(), "sysctl") {
+		t.Errorf("error %v does not include remediation hint", err)
+	}
+}
+
+func TestCheckLinuxSandboxAvailable_RejectsUnreadable(t *testing.T) {
+	// Contract: any read error other than ErrNotExist (e.g., a
+	// permissions-restricted /proc) is treated as unavailable since
+	// the runtime cannot determine the state. Fail closed.
+	dir := t.TempDir()
+	unreadable := filepath.Join(dir, "unreadable")
+	if err := os.WriteFile(unreadable, []byte("1"), 0o000); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if os.Getuid() == 0 {
+		t.Skip("running as root; can't simulate read-permission failure")
+	}
+	defer swapSysctl(t, unreadable)()
+	err := checkLinuxSandboxAvailable()
+	if err == nil {
+		t.Fatal("expected ErrSpawnUnavailable for unreadable sysctl")
+	}
+	if !errors.Is(err, ErrSpawnUnavailable) {
+		t.Errorf("error does not wrap ErrSpawnUnavailable: %v", err)
+	}
+}
+
+func TestApplyPlatformSandbox_Linux_ReturnsUnavailableWhenSysctlDisabled(t *testing.T) {
+	// Contract: when the sandbox-available probe rejects, the
+	// function does not touch cmd.SysProcAttr and surfaces the
+	// wrapped ErrSpawnUnavailable. The host function turns this
+	// into `spawn_sandbox_unavailable` for the caller.
+	swapped := withSysctlContent(t, "0\n")
+	defer swapped()
+	cmd := exec.CommandContext(context.Background(), "/bin/echo")
+	limits := SpawnLimits{FSRead: []string{"~/code/"}}
+	err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/echo"}, limits)
+	if !errors.Is(err, ErrSpawnUnavailable) {
+		t.Fatalf("expected wrapped ErrSpawnUnavailable, got %v", err)
+	}
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Cloneflags != 0 {
+		t.Errorf("cmd.SysProcAttr.Cloneflags should be untouched, got %#x", cmd.SysProcAttr.Cloneflags)
+	}
+}
+
+// withSysctlContent writes `content` to a tempfile and points
+// unprivilegedUserNSSysctl at it for the duration of the returned
+// cleanup. Use with `defer`.
+func withSysctlContent(t *testing.T, content string) func() {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sysctl")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return swapSysctl(t, path)
+}
+
+// swapSysctl points unprivilegedUserNSSysctl at `path` and returns
+// a function that restores the original. Use with `defer`.
+func swapSysctl(t *testing.T, path string) func() {
+	t.Helper()
+	orig := unprivilegedUserNSSysctl
+	unprivilegedUserNSSysctl = path
+	return func() { unprivilegedUserNSSysctl = orig }
 }

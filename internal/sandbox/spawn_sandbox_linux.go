@@ -19,8 +19,13 @@ import (
 // `unshare(CLONE_NEWUSER)`, which makes [ADR-0014]'s Linux spawn
 // sandbox unavailable.
 //
+// Declared as a var (not const) so tests can swap it to a tempfile
+// with controlled contents and exercise the disabled-sysctl and
+// IO-error paths that the production kernel won't reproduce on a
+// healthy CI runner.
+//
 // [ADR-0014]: https://docs.withaileron.ai/adr/0014-spawn-sandbox-technology
-const unprivilegedUserNSSysctl = "/proc/sys/kernel/unprivileged_userns_clone"
+var unprivilegedUserNSSysctl = "/proc/sys/kernel/unprivileged_userns_clone"
 
 // applyPlatformSandbox wires the wrapped subprocess to launch in a
 // fresh user + mount + PID namespace, providing process-level
