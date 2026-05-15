@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -1260,7 +1261,9 @@ func newSpawnSandboxUnavailable(program, reason string) *Error {
 // emitSpawnAudit logs a structured audit event for one spawn
 // invocation. Captures connector identity, program, argv pattern (not
 // interpolated arguments, which may be sensitive), exit code, decision,
-// and content hashes of stdout and stderr.
+// content hashes of stdout and stderr, and the platform identifier so
+// multi-platform deployments can distinguish per-OS behavior in
+// post-hoc analysis.
 //
 // Uses audit.AttrPolicyDecision per the reservation in #480.
 func emitSpawnAudit(ctx context.Context, s *hostState, env SpawnEnvelope, decision string, exit int, stdout, stderr []byte, denyClass string) {
@@ -1271,6 +1274,7 @@ func emitSpawnAudit(ctx context.Context, s *hostState, env SpawnEnvelope, decisi
 		slog.String("connector", s.connectorFQN),
 		slog.String("program", env.Program),
 		slog.String("argv_shape", argvShape(env.Argv)),
+		slog.String("platform", runtime.GOOS),
 		slog.String(audit.AttrPolicyDecision, decision),
 		slog.Int("exit_code", exit),
 	}
