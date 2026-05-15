@@ -605,7 +605,7 @@ func runBindingInspect(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	name := args[0]
-	status, body, err := bindingDoRequest(http.MethodGet, "/bindings/"+name, nil)
+	status, body, err := bindingDoRequest(http.MethodGet, "/bindings/"+url.PathEscape(name), nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -847,7 +847,7 @@ func runBindingRebind(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 	body, _ := json.Marshal(map[string]any{
 		"source": map[string]any{"kind": "api_key", "value": value},
 	})
-	status, respBody, err := bindingDoRequest(http.MethodPost, "/bindings/"+name+"/rebind",
+	status, respBody, err := bindingDoRequest(http.MethodPost, "/bindings/"+url.PathEscape(name)+"/rebind",
 		strings.NewReader(string(body)))
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -885,7 +885,7 @@ func runBindingReauthorize(args []string, stdout, stderr io.Writer) int {
 	name := args[0]
 
 	// Fetch the existing binding so we know its kind, identity, etc.
-	status, body, err := bindingDoRequest(http.MethodGet, "/bindings/"+name, nil)
+	status, body, err := bindingDoRequest(http.MethodGet, "/bindings/"+url.PathEscape(name), nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -1004,7 +1004,7 @@ func runBindingRevoke(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 		fmt.Fprintln(stdout, "cancelled")
 		return 0
 	}
-	status, respBody, err := bindingDoRequest(http.MethodDelete, "/bindings/"+name, nil)
+	status, respBody, err := bindingDoRequest(http.MethodDelete, "/bindings/"+url.PathEscape(name), nil)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1

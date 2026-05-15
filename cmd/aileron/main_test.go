@@ -3100,6 +3100,110 @@ func TestRunBinding_ReauthorizeFinishErrorIsExit1(t *testing.T) {
 	}
 }
 
+// TestRunBinding_NameWithSlashesRoutesThroughParameterizedPath is a
+// regression test for the reauthorize "error parsing response: invalid
+// character '<' looking for beginning of value" bug: binding names are
+// `<kind>/<service>/<identity>` and contain literal slashes, so the
+// CLI must percent-encode them when building `/v1/bindings/{name}`
+// URLs. Without encoding, Go's net/http ServeMux treats each slash as
+// a new path segment, `/v1/bindings/{name}` (which matches one
+// segment) does not match, and the request falls through to the
+// webapp's catch-all handler — which returns HTML the CLI then fails
+// to decode as JSON.
+//
+// The fakeBindingServer fixture matches on `r.URL.Path` (which Go
+// percent-decodes), so it cannot detect this — the test must mount a
+// real ServeMux with the `{name}` pattern AND a catch-all that
+// returns HTML, then assert the catch-all is never reached.
+func TestRunBinding_NameWithSlashesRoutesThroughParameterizedPath(t *testing.T) {
+	withFakeBrowser(t)
+	cases := []struct {
+		verb       string
+		args       []string
+		method     string
+		path       string // path the {name} route serves
+		respStatus int
+		respBody   string
+		stdin      string
+	}{
+		{
+			verb:       "inspect",
+			args:       []string{"inspect", "oauth2/google/work"},
+			method:     http.MethodGet,
+			path:       "GET /v1/bindings/{name}",
+			respStatus: http.StatusOK,
+			respBody: `{"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/g","created_at":"2024-01-01T00:00:00Z"}`,
+		},
+		{
+			verb:       "reauthorize-get",
+			args:       []string{"reauthorize", "oauth2/google/work"},
+			method:     http.MethodGet,
+			path:       "GET /v1/bindings/{name}",
+			respStatus: http.StatusNotFound, // 404 short-circuits before init.
+			respBody:   `{"error":{"code":"not_found"}}`,
+		},
+		{
+			verb:       "revoke",
+			args:       []string{"revoke", "oauth2/google/work"},
+			method:     http.MethodDelete,
+			path:       "DELETE /v1/bindings/{name}",
+			respStatus: http.StatusNoContent,
+			respBody:   "",
+			stdin:      "y\n",
+		},
+		{
+			verb:       "rebind",
+			args:       []string{"rebind", "api_key/linear/team"},
+			method:     http.MethodPost,
+			path:       "POST /v1/bindings/{name}/rebind",
+			respStatus: http.StatusOK,
+			respBody: `{"name":"api_key/linear/team","kind":"api_key","service":"linear","identity":"team",
+				"connector_fqn":"github://acme/l","created_at":"2024-01-01T00:00:00Z"}`,
+			stdin: "new-key\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.verb, func(t *testing.T) {
+			var matchedName string
+			var fallbackHit bool
+			mux := http.NewServeMux()
+			mux.HandleFunc(tc.path, func(w http.ResponseWriter, r *http.Request) {
+				matchedName = r.PathValue("name")
+				if tc.respStatus != 0 && tc.respStatus != http.StatusOK {
+					w.WriteHeader(tc.respStatus)
+				}
+				if tc.respBody != "" {
+					_, _ = io.WriteString(w, tc.respBody)
+				}
+			})
+			// Mirrors the daemon's `mux.Handle("/", webappHandler())`:
+			// any unmatched path serves HTML, which is exactly what
+			// blows up the JSON decoder in the bug being regressed.
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				fallbackHit = true
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, "<!DOCTYPE html><html><body>webapp</body></html>")
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+			var stdout, stderr bytes.Buffer
+			_ = runBinding(tc.args, strings.NewReader(tc.stdin), &stdout, &stderr)
+			if fallbackHit {
+				t.Fatalf("request fell through to webapp catch-all; "+
+					"binding name was not percent-encoded. stderr=%s", stderr.String())
+			}
+			wantName := tc.args[1]
+			if matchedName != wantName {
+				t.Errorf("PathValue(name) = %q, want %q (raw path: not encoded)",
+					matchedName, wantName)
+			}
+		})
+	}
+}
+
 // TestRunBinding_ListSurfacesStaleReason: when a binding is `stale`,
 // the list view appends its reason inline so the user sees what to do
 // without needing `--json`.
