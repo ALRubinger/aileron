@@ -935,6 +935,121 @@ func TestRunHub_ListTableTruncatesLongDescription(t *testing.T) {
 	}
 }
 
+// TestRunHub_List*MalformedJSONReturnsError: the daemon serves a
+// status-200 body that doesn't decode as the expected list shape. The
+// CLI must surface a parse error rather than render an empty table
+// (which would look like "no entries" instead of "you have a bug").
+func TestRunHub_ListConnectorsMalformedJSONReturnsError(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `not valid json`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "list", "connectors"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for malformed JSON")
+	}
+	if !strings.Contains(stderr.String(), "parsing response") {
+		t.Errorf("stderr should mention parse failure:\n%s", stderr.String())
+	}
+}
+
+func TestRunHub_ListActionsMalformedJSONReturnsError(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{not valid json`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "list", "actions"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for malformed JSON")
+	}
+}
+
+func TestRunHub_ListSuitesMalformedJSONReturnsError(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `garbage`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "list", "suites"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit for malformed JSON")
+	}
+}
+
+// TestRunHub_Show*MalformedJSONReturnsError: same contract on the
+// single-entry endpoint — a parse failure has to surface as an error
+// instead of a degenerate empty render.
+func TestRunHub_ShowConnectorMalformedJSONReturnsError(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `not json`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "show", "github://alice/a", "--type", "connectors"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on malformed response body")
+	}
+}
+
+func TestRunHub_ShowActionMalformedJSONReturnsError(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "show", "github://alice/a/actions/x", "--type", "actions"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on malformed response body")
+	}
+}
+
+func TestRunHub_ShowSuiteMalformedJSONReturnsError(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `]`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "show", "github://alice/a/suite", "--type", "suites"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on malformed response body")
+	}
+}
+
+// TestRunHub_List*ServerError: the per-catalog list helpers all need to
+// surface non-200 status from the daemon. Actions and suites variants
+// (connectors is already covered).
+func TestRunHub_ShowConnectorServerErrorReturnsNonZero(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"code":"boom"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "show", "github://alice/a", "--type", "connectors"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on 500")
+	}
+}
+
+func TestRunHub_ShowActionServerErrorReturnsNonZero(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"code":"boom"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "show", "github://alice/a/actions/x", "--type", "actions"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on 500")
+	}
+}
+
+func TestRunHub_ShowSuiteServerErrorReturnsNonZero(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":{"code":"boom"}}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "show", "github://alice/a/suite", "--type", "suites"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on 500")
+	}
+}
+
 // TestRunHub_ShowDispatchAbortsOnConnectorFetchError: when the
 // connector endpoint errors with a non-404 status during dispatch, the
 // command surfaces it rather than falling through. Falling through
