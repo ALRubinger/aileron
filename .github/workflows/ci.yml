@@ -422,8 +422,22 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build docs image
-        run: docker build -t aileron-docs -f docs/Dockerfile .
+        # GHA layer cache for the docs image. The same pattern was
+        # tried for the integration jobs but did not produce a wall-
+        # time win there: `load: true` + multi-stage Go builds add
+        # ~90s of image-load overhead that swamps the cache savings,
+        # and those jobs aren't on the critical path anyway.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docs/Dockerfile
+          tags: aileron-docs
+          load: true
+          cache-from: type=gha,scope=docs
+          cache-to: type=gha,mode=max,scope=docs
 
       - name: Start docs container
         run: docker run -d --name docs -p 3001:3000 aileron-docs
