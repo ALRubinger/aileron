@@ -215,7 +215,12 @@ Publisher-owned apps fix that. Aileron-the-runtime is just machinery (PKCE, call
   Inside the released tarball the value is recoverable by anyone who installs — that's the same exposure that `gcloud`, `gh`, and every distributed installed-app client accepts; per the providers' own installed-app guidance the value is not cryptographically secret in this flow. PKCE remains what binds an authorization code to the session that started it; the `client_secret` (when required) is provider plumbing.
 
   Providers that genuinely treat `client_secret` as a server-only credential (web-app flows behind a hosted backend) MUST NOT have it set in a connector manifest at all.
-- **Loopback redirect only.** The runtime serves the OAuth callback at `http://localhost:<random-port>/callback`. The publisher MUST register `http://localhost` as a valid redirect URI on their OAuth app. Niche providers without loopback support are post-MVP.
+- **Loopback redirect only.** The OAuth callback is served on the local loopback interface. Two callers serve it; both stay on loopback, they just differ in who binds the port:
+
+  - **CLI** (default). The daemon picks an ephemeral free port on init and embeds `http://127.0.0.1:<random-port>/callback` in the authorize URL. The CLI binds that port in its own process and posts the captured code + state back to `/v1/bindings/setup/oauth2/finish`. This is the original v1 shape.
+  - **Daemon** (added [#743](https://github.com/ALRubinger/aileron/issues/743) for browser-driven flows). The daemon's own listen address is the redirect target; the callback path is `/v1/bindings/setup/oauth2/callback`. The OAuth provider redirects directly to the daemon, which validates state, exchanges the code, persists the binding, and redirects the user's browser to a loopback-only `return_to` URL the caller supplied at init. The browser-based webapp can't `bind()` a TCP port, so the daemon — already on loopback — is the natural listener for that flow.
+
+  In both modes the publisher registers `http://localhost` (any port; RFC 8252 §7.3 + Google's "Desktop app" rule) as a valid redirect URI on their OAuth app. Niche providers without loopback support are post-MVP.
 - **Token storage.** The runtime persists the resulting `{access_token, refresh_token, expires_at, ...}` envelope in the user's vault. The connector never sees the token bytes — the runtime injects `Authorization: Bearer <access_token>` host-side, refreshing transparently before injection when the token is near expiry.
 
 ### Spawn primitive: bounded subprocess execution

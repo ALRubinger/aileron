@@ -66,14 +66,35 @@ type oauth2Session struct {
 	// re-prompts for the upgraded scope set rather than silently
 	// reissuing a token bound to the prior consent.
 	reauthorize bool
+
+	// caller is "cli" or "daemon"; the latter triggers the
+	// daemon-hosted callback flow where the OAuth provider redirects
+	// directly to /v1/bindings/setup/oauth2/callback and the daemon
+	// completes the dance internally before redirecting the browser
+	// to returnTo.
+	caller string
+
+	// returnTo is the URL the daemon redirects the user's browser to
+	// after a successful daemon-hosted callback. Validated as
+	// loopback-only at init time. Empty for caller=cli (CLI doesn't
+	// need it; the CLI process owns the post-finish UX itself).
+	returnTo string
 }
 
 // oauth2Sessions is the apiServer's in-memory session store. Each
 // session_id maps to one oauth2Session; expired sessions are pruned
 // lazily on access.
+//
+// Two index maps are maintained: the primary `sessions` keyed by
+// session_id (used by oauth2/finish where the caller supplies the id
+// explicitly), and `byState` keyed by the OAuth state value (used by
+// the daemon-hosted callback where the redirect URL carries `state`
+// but not `session_id`). Both maps reference the same underlying
+// session object; both are cleared atomically on take().
 type oauth2Sessions struct {
 	mu       sync.Mutex
 	sessions map[string]*oauth2Session
+	byState  map[string]string // state → session_id
 	now      func() time.Time
 }
 
@@ -82,16 +103,22 @@ type oauth2Sessions struct {
 func newOAuth2Sessions() *oauth2Sessions {
 	return &oauth2Sessions{
 		sessions: map[string]*oauth2Session{},
+		byState:  map[string]string{},
 		now:      time.Now,
 	}
 }
 
-// put stores s under sessionID with a fresh expiry.
+// put stores s under sessionID with a fresh expiry. Also indexes the
+// session by its state value so the daemon-hosted callback can find
+// it from the redirect URL alone.
 func (m *oauth2Sessions) put(sessionID string, s *oauth2Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s.expiresAt = m.now().Add(oauth2SessionTTL)
 	m.sessions[sessionID] = s
+	if s.state != "" {
+		m.byState[s.state] = sessionID
+	}
 }
 
 // take returns and removes the session for sessionID, or returns
@@ -104,6 +131,41 @@ func (m *oauth2Sessions) take(sessionID string) (*oauth2Session, bool) {
 		return nil, false
 	}
 	delete(m.sessions, sessionID)
+	if s.state != "" {
+		delete(m.byState, s.state)
+	}
+	if m.now().After(s.expiresAt) {
+		return nil, false
+	}
+	return s, true
+}
+
+// takeByState returns and removes the session indexed under the
+// supplied state value, or returns (nil, false) when no session matches
+// or the matched session has expired. Used by the daemon-hosted OAuth
+// callback (#743) — the OAuth provider's redirect carries `state` but
+// not `session_id`, so the daemon resolves the session via the reverse
+// index. Identical semantics to take(): the session is consumed on the
+// first lookup, so a duplicate callback (e.g. browser back-button)
+// surfaces as 404 rather than racing two finishes.
+func (m *oauth2Sessions) takeByState(state string) (*oauth2Session, bool) {
+	if state == "" {
+		return nil, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sessionID, ok := m.byState[state]
+	if !ok {
+		return nil, false
+	}
+	s, ok := m.sessions[sessionID]
+	if !ok {
+		// byState carries a stale entry — keep the maps in sync.
+		delete(m.byState, state)
+		return nil, false
+	}
+	delete(m.sessions, sessionID)
+	delete(m.byState, state)
 	if m.now().After(s.expiresAt) {
 		return nil, false
 	}
@@ -154,6 +216,28 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 		reauthorize = true
 	}
 
+	caller := callerCLI
+	if req.Caller != nil && *req.Caller == api.Daemon {
+		caller = callerDaemon
+	}
+
+	// Validate return_to up front (before any side effects). Required
+	// when caller=daemon since the callback's whole job is to redirect
+	// the browser somewhere on success; ignored for caller=cli.
+	returnTo := ""
+	if caller == callerDaemon {
+		if req.ReturnTo == nil || *req.ReturnTo == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request",
+				"return_to is required when caller=daemon")
+			return
+		}
+		if err := validateLoopbackReturnTo(*req.ReturnTo); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_return_to", err.Error())
+			return
+		}
+		returnTo = *req.ReturnTo
+	}
+
 	connFQN, manifest, err := s.lookupConnector(req.ConnectorFqn)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "connector_not_installed", err.Error())
@@ -177,15 +261,34 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Allocate a loopback listener port up front so the redirect_uri
-	// in the authorize URL matches what the CLI will serve. The
-	// listener is held open by the caller (CLI), not the server.
-	port, err := pickFreePort()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "port_error", err.Error())
-		return
+	// Compute the redirect_uri the OAuth provider will redirect to.
+	// Both branches stay on loopback per ADR-0002 §"v1 OAuth
+	// requirements"; they differ only in who binds the port.
+	//
+	//   caller=cli    — ephemeral port the CLI will bind on its own
+	//                   process; oauth2/finish runs after the CLI
+	//                   captures code+state from the loopback request.
+	//   caller=daemon — daemon's own listen address (webappURL), with
+	//                   a stable path /v1/bindings/setup/oauth2/callback.
+	//                   The daemon completes the flow internally and
+	//                   redirects the browser to session.returnTo.
+	var redirectURI string
+	switch caller {
+	case callerDaemon:
+		du, derr := s.daemonCallbackRedirectURI()
+		if derr != nil {
+			writeError(w, http.StatusServiceUnavailable, "daemon_callback_unavailable", derr.Error())
+			return
+		}
+		redirectURI = du
+	default:
+		port, err := pickFreePort()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "port_error", err.Error())
+			return
+		}
+		redirectURI = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 	}
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
 	authURL := buildAuthorizeURL(cred.OAuth2, redirectURI, state, pkce.Challenge, reauthorize)
 
@@ -244,6 +347,8 @@ func (s *apiServer) InitOAuth2Binding(w http.ResponseWriter, r *http.Request) {
 		clientSecret: cred.OAuth2.ClientSecret,
 		tokenURL:     cred.OAuth2.TokenURL,
 		reauthorize:  reauthorize,
+		caller:       caller,
+		returnTo:     returnTo,
 	})
 
 	writeJSON(w, http.StatusOK, api.OAuth2InitResponse{
@@ -506,4 +611,269 @@ func newSessionID() (string, error) {
 		return "", fmt.Errorf("session id: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// Caller selects who serves the OAuth redirect; mirrors the OpenAPI
+// enum (`cli` / `daemon`) but kept as plain strings inside the package
+// because no behavior elsewhere needs the generated type.
+const (
+	callerCLI    = "cli"
+	callerDaemon = "daemon"
+)
+
+// daemonCallbackPath is the URL path the daemon listens at for
+// browser-driven OAuth callbacks (#743). Kept as a constant so the
+// init handler (constructs the redirect_uri), the callback handler
+// (validates incoming requests), and the OpenAPI route registration
+// all reference one source of truth.
+const daemonCallbackPath = "/v1/bindings/setup/oauth2/callback"
+
+// daemonCallbackRedirectURI builds the redirect_uri for a
+// caller=daemon flow. Falls back to the apiServer's webappURL (set by
+// internal/server/main.go to the daemon's own listen address when no
+// override is configured) because the daemon serves the webapp on the
+// same listener it accepts API requests on — webappURL IS the daemon
+// URL on loopback installs. Returns an error when neither is set;
+// the init handler surfaces that as 503 so the operator knows the
+// caller=daemon flow isn't reachable until webappURL is wired.
+func (s *apiServer) daemonCallbackRedirectURI() (string, error) {
+	base := strings.TrimRight(s.webappURL, "/")
+	if base == "" {
+		return "", fmt.Errorf("caller=daemon requires the daemon to know its own URL; set AILERON_WEBAPP_URL or run under launch")
+	}
+	return base + daemonCallbackPath, nil
+}
+
+// validateLoopbackReturnTo rejects a return_to URL that points
+// anywhere outside the local loopback. ADR-0002's loopback boundary
+// applies here: a caller=daemon callback's whole purpose is to
+// shepherd a user from the daemon back to the webapp, and the webapp
+// is loopback-only in v1. Permitting non-loopback redirects would
+// turn this endpoint into an open redirector the daemon can be
+// trick-shot through.
+func validateLoopbackReturnTo(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse: %s", err.Error())
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("scheme must be http or https (got %q)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("host required")
+	}
+	if !isLoopbackHost(host) {
+		return fmt.Errorf("host must be loopback (127.0.0.1, localhost, or [::1]); got %q", host)
+	}
+	return nil
+}
+
+// isLoopbackHost is a host-only loopback check: name-resolution
+// alternatives ("localhost") plus the literal v4/v6 loopback IPs.
+// IP-only (no DNS) because the daemon shouldn't honor a redirect to
+// a name that *currently* resolves to a loopback IP but might not
+// later — that would be a TOCTOU footgun.
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
+// Oauth2BindingCallback implements the daemon-hosted OAuth callback
+// (#743). The OAuth provider redirects the user's browser here after
+// consent; the handler looks up the session by `state`, completes the
+// token exchange, persists the binding, and redirects the user to
+// session.returnTo. Errors are rendered as HTML — a 401 JSON envelope
+// in a browser tab is unhelpful UX — but they still carry the
+// structured `code` so support escalation can pattern-match.
+//
+// The endpoint deliberately requires no auth and no CSRF token; CSRF
+// protection is the OAuth `state` value (cryptographically random,
+// pinned to the session at init, validated here). An attacker without
+// the state value cannot construct a redirect that resolves to a
+// session.
+func (s *apiServer) Oauth2BindingCallback(w http.ResponseWriter, r *http.Request, params api.Oauth2BindingCallbackParams) {
+	if s.bindings == nil {
+		s.renderCallbackError(w, http.StatusServiceUnavailable,
+			"vault_unavailable", "binding store not configured", "")
+		return
+	}
+	if s.vaultLocked {
+		s.renderCallbackError(w, http.StatusLocked,
+			"vault_locked", "Unlock the vault before completing OAuth.", "")
+		return
+	}
+	if s.oauth2Sessions == nil {
+		s.oauth2Sessions = newOAuth2Sessions()
+	}
+
+	// Provider-reported error short-circuits the exchange. The session
+	// is still consumed so a duplicate retry doesn't replay against a
+	// session that's already invalidated client-side.
+	if params.Error != nil && *params.Error != "" {
+		desc := ""
+		if params.ErrorDescription != nil {
+			desc = *params.ErrorDescription
+		}
+		returnTo := ""
+		if sess, ok := s.oauth2Sessions.takeByState(params.State); ok {
+			returnTo = sess.returnTo
+		}
+		s.renderCallbackError(w, http.StatusBadRequest,
+			"provider_error", "OAuth provider declined: "+*params.Error+
+				ifEmpty(desc, "", " — "+desc), returnTo)
+		return
+	}
+
+	session, ok := s.oauth2Sessions.takeByState(params.State)
+	if !ok {
+		s.renderCallbackError(w, http.StatusNotFound,
+			"session_not_found",
+			"This OAuth callback can't be matched to an in-flight session. Sessions expire after 10 minutes and clear on first use; if you opened this link twice, the second open lands here.",
+			"")
+		return
+	}
+	// Daemon callbacks are only valid for sessions opened in
+	// caller=daemon mode; a CLI session reaching this endpoint means
+	// either a misconfigured client or a forged callback. Refuse and
+	// surface the mismatch.
+	if session.caller != callerDaemon {
+		s.renderCallbackError(w, http.StatusBadRequest,
+			"wrong_caller_mode",
+			"Session was opened for caller=cli; complete it via the CLI rather than the browser.",
+			"")
+		return
+	}
+
+	tok, grantedScopes, herr := s.exchangeOAuth2Code(r.Context(), session, params.Code)
+	if herr != nil {
+		s.renderCallbackError(w, herr.status, herr.code, herr.message, session.returnTo)
+		return
+	}
+
+	bn, err := binding.MakeName(cstore.CredentialKindOAuth2, session.service, session.identity)
+	if err != nil {
+		s.renderCallbackError(w, http.StatusBadRequest, "invalid_identity", err.Error(), session.returnTo)
+		return
+	}
+	envelope, _ := json.Marshal(tok)
+	b := binding.Binding{
+		Name:                bn,
+		Kind:                cstore.CredentialKindOAuth2,
+		Service:             session.service,
+		Identity:            session.identity,
+		ConnectorFQN:        session.connectorFQN,
+		Account:             session.account,
+		Scope:               strings.Join(session.scopes, " "),
+		Status:              binding.StatusActive,
+		RefreshTokenPresent: tok.RefreshToken != "",
+		GrantedScopes:       grantedScopes,
+		StaleReason:         "",
+		MissingScopes:       nil,
+	}
+	mode := binding.PutCreate
+	evt := model.EventTypeBindingCreated
+	if session.reauthorize {
+		existing, getErr := s.bindings.Get(r.Context(), bn)
+		if getErr == nil {
+			b.CreatedAt = existing.CreatedAt
+		}
+		mode = binding.PutUpsert
+		evt = model.EventTypeBindingRebound
+	}
+	if err := s.bindings.Put(r.Context(), b, envelope, mode); err != nil {
+		if errors.Is(err, binding.ErrAlreadyExists) {
+			s.renderCallbackError(w, http.StatusConflict, "binding_exists",
+				"Binding "+string(bn)+" already exists.", session.returnTo)
+			return
+		}
+		s.renderCallbackError(w, http.StatusInternalServerError, "store_error",
+			err.Error(), session.returnTo)
+		return
+	}
+	s.recordBindingEvent(r.Context(), evt, string(bn),
+		session.connectorFQN, cstore.CredentialKindOAuth2)
+
+	// Success → bounce back to the webapp's return URL with a hint that
+	// reads cleanly server-side (logs) and client-side (URL fragment).
+	dest := appendCallbackResult(session.returnTo, "ok", string(bn))
+	http.Redirect(w, r, dest, http.StatusSeeOther)
+}
+
+// ifEmpty returns alt when v is empty, otherwise v. Tiny helper so
+// the callback's error rendering can collapse "no description"
+// branches inline.
+func ifEmpty[T comparable](v T, zero T, alt string) string {
+	if v == zero {
+		return ""
+	}
+	return alt
+}
+
+// appendCallbackResult appends a fragment-form result hint to the
+// return URL so the webapp can react without polling. Fragment is
+// preferred over a query parameter because (a) it never reaches the
+// server, keeping the daemon's HTTP logs free of binding names, and
+// (b) it survives a SPA hash-router intercept naturally. Existing
+// fragments on return_to are preserved.
+func appendCallbackResult(returnTo, status, name string) string {
+	if returnTo == "" {
+		return returnTo
+	}
+	frag := "aileron_oauth=" + url.QueryEscape(status)
+	if name != "" {
+		frag += "&binding=" + url.QueryEscape(name)
+	}
+	if strings.Contains(returnTo, "#") {
+		return returnTo + "&" + frag
+	}
+	return returnTo + "#" + frag
+}
+
+// renderCallbackError writes an HTML failure page to the user's
+// browser tab. We don't have a templating engine wired up here — the
+// page is plain HTML built inline. Keep the rendered surface
+// deliberately small; a stack trace or full daemon error message in a
+// browser is more noise than signal for the user. The structured
+// `code` is included for support paths.
+//
+// returnTo, when non-empty, becomes a "Return to webapp" link so the
+// user has a way back even on a hard failure. Empty when no session
+// matched (we don't know where the user came from).
+func (s *apiServer) renderCallbackError(w http.ResponseWriter, status int, code, message, returnTo string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	var ret string
+	if returnTo != "" {
+		ret = `<p><a href="` + htmlEscape(appendCallbackResult(returnTo, "error", "")) + `">Return to webapp</a></p>`
+	}
+	body := `<!doctype html>
+<html><head><title>OAuth callback — Aileron</title>
+<style>body{font:14px/1.5 system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;color:#222}h1{font-size:1.25rem}.code{font-family:ui-monospace,monospace;background:#f6f6f6;padding:0.1rem 0.3rem;border-radius:4px}</style>
+</head><body>
+<h1>OAuth callback failed</h1>
+<p>` + htmlEscape(message) + `</p>
+<p>Error code: <span class="code">` + htmlEscape(code) + `</span></p>
+` + ret + `
+</body></html>`
+	_, _ = io.WriteString(w, body)
+}
+
+// htmlEscape replaces the four characters that need escaping in HTML
+// text content. We don't ship template/html here because the rendered
+// surface is tiny and importing the package for two tags is overkill.
+func htmlEscape(s string) string {
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+	)
+	return r.Replace(s)
 }
