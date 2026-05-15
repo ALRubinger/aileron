@@ -78,6 +78,32 @@ func (s *apiServer) InstallAction(w http.ResponseWriter, r *http.Request) {
 	force := req.Force != nil && *req.Force
 	autoInstall := req.AutoInstallConnectors != nil && *req.AutoInstallConnectors
 
+	// Hub-confirmed trust writes (#743): walk every authority the
+	// operator confirmed at the webapp install modal and persist its
+	// trust to the keyring before running the install pipeline.
+	// Mirrors the singular `confirmed_fingerprint` field on
+	// connector install — webapp-driven action installs need trust
+	// for every connector authority in the dependency closure, and
+	// there's no path to write it without a per-connector install
+	// that the webapp can't issue (no version in the composite
+	// install-decision). Each entry runs the same `confirmHubTrust`
+	// helper the connector install endpoint uses, so the persistence
+	// semantics (#487 Q4) are identical: trust lands even if the
+	// install pipeline later fails.
+	if req.ConfirmedFingerprints != nil {
+		for _, entry := range *req.ConfirmedFingerprints {
+			if entry.Fqn == "" || entry.Fingerprint == "" {
+				writeError(w, http.StatusBadRequest, "invalid_request",
+					"confirmed_fingerprints entries require fqn and fingerprint")
+				return
+			}
+			if code, msg := s.confirmHubTrust(r.Context(), entry.Fqn, entry.Fingerprint); code != 0 {
+				writeError(w, code, msg.code, msg.message)
+				return
+			}
+		}
+	}
+
 	res, herr := s.runInstallAction(r.Context(), ref, force, autoInstall)
 	if herr != nil {
 		writeInstallActionErr(w, herr)

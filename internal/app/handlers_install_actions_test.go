@@ -382,6 +382,73 @@ func TestInstallAction_BadFQNReturns400(t *testing.T) {
 	}
 }
 
+// TestInstallAction_ConfirmedFingerprintsRequiresHub: when the
+// request carries confirmed_fingerprints[] but no hub is wired, the
+// daemon refuses with 503. Mirrors the singular-confirmed_fingerprint
+// path on connector install — there's no way to resolve a publisher
+// key from the FQN alone without the Hub client. #743 webapp-driven
+// install lands here when the daemon was started without Hub access.
+func TestInstallAction_ConfirmedFingerprintsRequiresHub(t *testing.T) {
+	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
+	srv := &apiServer{
+		log: slog.Default(),
+		installer: &cstore.Installer{
+			Resolver: cstore.DefaultResolver(),
+			Fetcher:  &fakeFetcher{},
+			Verifier: cstore.NewEd25519Keyring(),
+			Store:    cstore.NewStore(t.TempDir()),
+		},
+		actions: action.NewStore(t.TempDir()),
+		// hub deliberately nil
+	}
+	body := `{
+		"fqn": "` + ref.FQN.String() + `",
+		"version": "0.1.0",
+		"confirmed_fingerprints": [
+			{"fqn":"github://acme/aileron-connector-x","fingerprint":"sha256:any22charsworthwhatever"}
+		]
+	}`
+	rec := postInstallAction(srv, body)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestInstallAction_ConfirmedFingerprintsRejectsEmptyEntries: a malformed
+// entry (empty fqn or fingerprint) is a contract violation, not a hint
+// to skip. Refuse the install before any side effect runs.
+func TestInstallAction_ConfirmedFingerprintsRejectsEmptyEntries(t *testing.T) {
+	ref, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
+	srv := &apiServer{
+		log: slog.Default(),
+		installer: &cstore.Installer{
+			Resolver: cstore.DefaultResolver(),
+			Fetcher:  &fakeFetcher{},
+			Verifier: cstore.NewEd25519Keyring(),
+			Store:    cstore.NewStore(t.TempDir()),
+		},
+		actions: action.NewStore(t.TempDir()),
+	}
+	cases := []string{
+		`{"fqn":"","fingerprint":"sha256:abc"}`,
+		`{"fqn":"github://acme/x","fingerprint":""}`,
+	}
+	for _, entry := range cases {
+		t.Run(entry, func(t *testing.T) {
+			body := `{
+				"fqn": "` + ref.FQN.String() + `",
+				"version": "0.1.0",
+				"confirmed_fingerprints": [` + entry + `]
+			}`
+			rec := postInstallAction(srv, body)
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("entry %q: status = %d, want 400; body=%s",
+					entry, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestInstallAction_MissingVersionReturns400(t *testing.T) {
 	srv := &apiServer{
 		log: slog.Default(),

@@ -421,14 +421,18 @@ func (s *apiServer) GetHubActionInstallDecision(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	writeJSON(w, http.StatusOK, api.HubActionInstallDecision{
+	out := api.HubActionInstallDecision{
 		Kind:            api.HubActionInstallDecisionKindAction,
 		Fqn:             action.FQN,
 		Description:     action.Description,
 		PublisherGithub: action.PublisherGithub,
 		ConnectorFqn:    action.ConnectorFQN,
 		Authorities:     []api.HubInstallAuthority{authority},
-	})
+	}
+	if v := s.latestStableVersionFor(ctx, action.FQN); v != "" {
+		out.LatestVersion = &v
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // GetHubSuiteInstallDecision returns a composite install-decision
@@ -486,14 +490,55 @@ func (s *apiServer) GetHubSuiteInstallDecision(w http.ResponseWriter, r *http.Re
 		authorities = append(authorities, auth)
 	}
 
-	writeJSON(w, http.StatusOK, api.HubSuiteInstallDecision{
+	out := api.HubSuiteInstallDecision{
 		Kind:            "suite",
 		Fqn:             suite.FQN,
 		Description:     suite.Description,
 		PublisherGithub: suite.PublisherGithub,
 		MemberActions:   append([]string(nil), suite.MemberActions...),
 		Authorities:     authorities,
-	})
+	}
+	if v := s.latestStableVersionFor(ctx, suite.FQN); v != "" {
+		out.LatestVersion = &v
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// latestStableVersionFor resolves the latest non-prerelease SemVer
+// tag from the source repo backing the supplied FQN. Returns "" on
+// any resolution failure (no published releases, network hiccup,
+// scheme without a wired version lister) — the webapp install modal
+// gracefully degrades to "no version available" rather than failing
+// the entire install-decision render. Mirrors the prerelease filter
+// the connector-check handler applies at handlers_connectors_check.go.
+//
+// The supplied FQN may be a full action FQN (with `/actions/<name>`
+// subpath) or a suite FQN (`/suite` or `/suites/<x>`). The version
+// lister keys on the repo, which lives at `Authority()`, so the
+// helper re-parses Authority() to get a clean FQN for the lister.
+func (s *apiServer) latestStableVersionFor(ctx context.Context, rawFQN string) string {
+	lister := s.versionLister
+	if lister == nil {
+		lister = cstore.DefaultVersionLister()
+	}
+	parsed, err := cstore.ParseFQN(rawFQN)
+	if err != nil {
+		return ""
+	}
+	repoFQN, err := cstore.ParseFQN(parsed.Authority())
+	if err != nil {
+		return ""
+	}
+	versions, err := lister.ListVersions(ctx, repoFQN)
+	if err != nil {
+		return ""
+	}
+	for _, v := range versions {
+		if !cstore.IsPrerelease(v) {
+			return v
+		}
+	}
+	return ""
 }
 
 // resolveSuiteConnectorClosure returns the deduplicated, order-preserving

@@ -5223,6 +5223,52 @@ components:
             and `error.details[]` listing each missing connector's
             `name`, `version`, and `hash` so the CLI can prompt the user
             for confirmation before retrying with the flag set.
+        confirmed_fingerprints:
+          type: array
+          description: |
+            Publisher-key fingerprints the operator confirmed at the
+            webapp install modal — one entry per connector authority in
+            the action's dependency closure (suite installs supply the
+            full set on every per-action install; the CLI omits this
+            field entirely since it pre-trusts via `aileron keyring
+            trust`). Mirrors `confirmed_fingerprint` on
+            `InstallConnectorRequest` (#487 / #628) but applies it
+            across every authority the install needs trust for —
+            without this the webapp can't reach the action install
+            endpoint without first running N standalone connector
+            installs to write trust as a side effect.
+
+            For each entry the daemon looks up `fqn` in the Hub,
+            fetches the publisher's current key, verifies its
+            fingerprint matches the supplied value (anti-tampering
+            check between what the operator saw and what the install
+            endpoint uses), then writes the key to the keyring under
+            the FQN before running the install pipeline. Trust
+            persists even if the install later fails (matches #487 Q4
+            resolution for the singular case). Entries whose FQN is
+            already trusted under the same key short-circuit; mismatch
+            aborts with `fingerprint_mismatch`.
+          items:
+            $ref: "#/components/schemas/ConfirmedFingerprint"
+
+    ConfirmedFingerprint:
+      type: object
+      required: [fqn, fingerprint]
+      description: |
+        One entry in `InstallActionRequest.confirmed_fingerprints`. The
+        `fqn` is the connector-authority FQN (e.g.
+        `github://alice/conn-google`) rather than the action FQN — trust
+        in the keyring is keyed by authority, and one authority covers
+        every action/connector that ships from the same publisher repo.
+      properties:
+        fqn:
+          type: string
+          description: Connector authority FQN (e.g. `github://alice/conn-x`).
+        fingerprint:
+          type: string
+          description: |
+            Publisher-key fingerprint the operator confirmed
+            (`sha256:<22 base64-no-padding chars>`).
 
     ActionPreview:
       type: object
@@ -7679,6 +7725,17 @@ components:
           maxItems: 1
           items:
             $ref: "#/components/schemas/HubInstallAuthority"
+        latest_version:
+          type: string
+          description: |
+            Latest non-prerelease SemVer tag the action's source repo
+            has published, resolved via the connector version lister at
+            decision time. Empty when the source has no published
+            releases (the operator can still install via the CLI by
+            pinning `@<sha>` or `@<tag>`, but the webapp modal needs a
+            concrete version to call `/v1/actions/install`). The webapp
+            uses this directly as the install's `version` argument so
+            the install endpoint sees strict SemVer, not `latest`.
 
     HubSuiteInstallDecision:
       type: object
@@ -7714,6 +7771,15 @@ components:
           minItems: 1
           items:
             $ref: "#/components/schemas/HubInstallAuthority"
+        latest_version:
+          type: string
+          description: |
+            Latest non-prerelease SemVer tag from the suite's source
+            repo, resolved at decision time. The webapp passes this as
+            the `version` argument to each per-member install call —
+            every action in a Hub-published suite ships from the same
+            repo, so one tag covers them all. Empty when the source has
+            no published releases.
 
     HubTrustState:
       type: string
