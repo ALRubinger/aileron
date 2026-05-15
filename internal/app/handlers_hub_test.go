@@ -602,6 +602,477 @@ func TestGetHubSuite_HubDisabledReturns503(t *testing.T) {
 	}
 }
 
+// --- composite install-decision: action ---
+
+func TestGetHubActionInstallDecision_HappyPath(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, pub)
+	defer keyServer.Close()
+
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"google.yaml": entryYAML("github://alice/conn-google", "Google connector", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		map[string]string{
+			"draft.yaml": actionYAML("github://alice/conn-google/actions/draft-email", "Draft a Gmail", "alice", "github://alice/conn-google", "communication", []string{"draft email"}),
+		},
+		nil,
+	)
+	srv := &apiServer{
+		log:         slog.Default(),
+		hub:         &hub.Client{URL: url, HTTP: keyServer.Client()},
+		keyringPath: filepath.Join(t.TempDir(), "keyring.json"),
+	}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn-google/actions/draft-email"
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil), api.GetHubActionInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubActionInstallDecision
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Kind != api.HubActionInstallDecisionKindAction {
+		t.Fatalf("kind = %s, want action", got.Kind)
+	}
+	if got.Fqn != fqn {
+		t.Fatalf("fqn = %s", got.Fqn)
+	}
+	if got.ConnectorFqn != "github://alice/conn-google" {
+		t.Fatalf("connector_fqn = %s", got.ConnectorFqn)
+	}
+	if len(got.Authorities) != 1 {
+		t.Fatalf("expected exactly 1 authority, got %d", len(got.Authorities))
+	}
+	auth := got.Authorities[0]
+	if auth.Fqn != "github://alice/conn-google" {
+		t.Fatalf("authority fqn = %s", auth.Fqn)
+	}
+	if auth.Fingerprint != hub.Fingerprint(pub) {
+		t.Fatalf("authority fingerprint mismatch")
+	}
+	if auth.TrustState != api.HubTrustStateUnknown {
+		t.Fatalf("trust_state = %s, want unknown", auth.TrustState)
+	}
+}
+
+func TestGetHubActionInstallDecision_HubDisabledReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: nil}
+	rec := httptest.NewRecorder()
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn=x", nil), api.GetHubActionInstallDecisionParams{Fqn: "x"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestGetHubActionInstallDecision_EmptyFQNReturns400(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: makeHubFixtureMulti(t, nil, nil, nil)}}
+	rec := httptest.NewRecorder()
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision", nil), api.GetHubActionInstallDecisionParams{Fqn: ""})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestGetHubActionInstallDecision_MissingActionReturns404(t *testing.T) {
+	url := makeHubFixtureMulti(t, nil, map[string]string{
+		"a.yaml": actionYAML("github://alice/conn/actions/a", "A", "alice", "github://alice/conn", "", nil),
+	}, nil)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://nobody/missing/actions/x"
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil), api.GetHubActionInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestGetHubActionInstallDecision_MissingConnectorReturns422(t *testing.T) {
+	// Action exists in the catalog but its declared connector_fqn has
+	// no matching connector entry. The install pipeline could still
+	// proceed via direct FQN resolution, but the Hub can't pre-compute
+	// the trust panel — surface as 422 with a clear code.
+	url := makeHubFixtureMulti(t, nil, map[string]string{
+		"a.yaml": actionYAML("github://alice/conn/actions/a", "A", "alice", "github://alice/missing-conn", "", nil),
+	}, nil)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/actions/a"
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil), api.GetHubActionInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing_connector") {
+		t.Fatalf("expected missing_connector error code, got %s", rec.Body.String())
+	}
+}
+
+func TestGetHubActionInstallDecision_ActionWithoutConnectorFQNReturns422(t *testing.T) {
+	url := makeHubFixtureMulti(t, nil, map[string]string{
+		// Bare YAML without connector_fqn — `actionYAML` always emits it,
+		// so build the body inline to test the validation path.
+		"a.yaml": "fqn: github://alice/conn/actions/a\ndescription: A\npublisher_github: alice\n",
+	}, nil)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/actions/a"
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil), api.GetHubActionInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetHubActionInstallDecision_HubUnreachableReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: "file:///nonexistent/path"}}
+	rec := httptest.NewRecorder()
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn=x", nil), api.GetHubActionInstallDecisionParams{Fqn: "github://anywhere/x/actions/x"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestGetHubActionInstallDecision_KeyFetchFailureReturns502(t *testing.T) {
+	// key_url points at an HTTP server that returns 404 — verify the
+	// composite endpoint surfaces it as 502 key_fetch_failed, same
+	// shape as the connector-level install-decision endpoint.
+	keyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer keyServer.Close()
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"c.yaml": entryYAML("github://alice/conn", "C", "alice", keyServer.URL+"/missing.pub"),
+		},
+		map[string]string{
+			"a.yaml": actionYAML("github://alice/conn/actions/a", "A", "alice", "github://alice/conn", "", nil),
+		},
+		nil,
+	)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url, HTTP: keyServer.Client()}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/actions/a"
+	srv.GetHubActionInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/action-install-decision?fqn="+fqn, nil), api.GetHubActionInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// --- composite install-decision: suite ---
+
+func TestGetHubSuiteInstallDecision_HappyPathWithConnectorsRequired(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, pub)
+	defer keyServer.Close()
+
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"c.yaml": entryYAML("github://alice/conn", "C", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		nil,
+		map[string]string{
+			"s.yaml": suiteYAML(
+				"github://alice/conn/suite", "Alice's suite", "alice", "communication",
+				[]string{"github://alice/conn/actions/a", "github://alice/conn/actions/b"},
+				[]string{"github://alice/conn"},
+			),
+		},
+	)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url, HTTP: keyServer.Client()}, keyringPath: filepath.Join(t.TempDir(), "keyring.json")}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubSuiteInstallDecision
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Kind != "suite" {
+		t.Fatalf("kind = %s, want suite", got.Kind)
+	}
+	if got.Fqn != fqn {
+		t.Fatalf("fqn = %s", got.Fqn)
+	}
+	if len(got.MemberActions) != 2 {
+		t.Fatalf("expected 2 member_actions, got %d", len(got.MemberActions))
+	}
+	if len(got.Authorities) != 1 {
+		t.Fatalf("expected 1 authority, got %d", len(got.Authorities))
+	}
+	if got.Authorities[0].Fingerprint != hub.Fingerprint(pub) {
+		t.Fatalf("authority fingerprint mismatch")
+	}
+}
+
+func TestGetHubSuiteInstallDecision_HappyPathDerivedFromMemberActions(t *testing.T) {
+	// Suite has no connectors_required; closure must come from walking
+	// each member action's connector_fqn.
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, pub)
+	defer keyServer.Close()
+
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"c.yaml": entryYAML("github://alice/conn", "C", "alice", keyServer.URL+"/publisher.pub"),
+		},
+		map[string]string{
+			"a.yaml": actionYAML("github://alice/conn/actions/a", "A", "alice", "github://alice/conn", "", nil),
+			"b.yaml": actionYAML("github://alice/conn/actions/b", "B", "alice", "github://alice/conn", "", nil),
+		},
+		map[string]string{
+			"s.yaml": suiteYAML(
+				"github://alice/conn/suite", "Alice's suite", "alice", "",
+				[]string{"github://alice/conn/actions/a", "github://alice/conn/actions/b"},
+				nil,
+			),
+		},
+	)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url, HTTP: keyServer.Client()}, keyringPath: filepath.Join(t.TempDir(), "keyring.json")}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubSuiteInstallDecision
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if len(got.Authorities) != 1 {
+		t.Fatalf("expected 1 authority deduped from two member actions sharing a connector, got %d", len(got.Authorities))
+	}
+	if got.Authorities[0].Fqn != "github://alice/conn" {
+		t.Fatalf("authority fqn = %s", got.Authorities[0].Fqn)
+	}
+}
+
+func TestGetHubSuiteInstallDecision_MultipleAuthoritiesAcrossPublishers(t *testing.T) {
+	// Suite spans two publishers' connectors. Expect two authorities
+	// in the order declared by connectors_required.
+	alicePub, _, _ := ed25519.GenerateKey(rand.Reader)
+	bobPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	aliceKey := httpKeyServer(t, alicePub)
+	bobKey := httpKeyServer(t, bobPub)
+	defer aliceKey.Close()
+	defer bobKey.Close()
+
+	// Single HTTP client; both keyservers use the default test client.
+	// Use a multiplexing HTTP client that hits whichever URL is requested.
+	httpClient := aliceKey.Client()
+
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"alice.yaml": entryYAML("github://alice/conn", "Alice conn", "alice", aliceKey.URL+"/publisher.pub"),
+			"bob.yaml":   entryYAML("github://bob/conn", "Bob conn", "bob", bobKey.URL+"/publisher.pub"),
+		},
+		nil,
+		map[string]string{
+			"s.yaml": suiteYAML(
+				"github://alice/conn/suite", "Cross-publisher suite", "alice", "",
+				[]string{"github://alice/conn/actions/a", "github://bob/conn/actions/b"},
+				[]string{"github://alice/conn", "github://bob/conn"},
+			),
+		},
+	)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url, HTTP: httpClient}, keyringPath: filepath.Join(t.TempDir(), "keyring.json")}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubSuiteInstallDecision
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if len(got.Authorities) != 2 {
+		t.Fatalf("expected 2 authorities, got %d", len(got.Authorities))
+	}
+	if got.Authorities[0].Fqn != "github://alice/conn" || got.Authorities[1].Fqn != "github://bob/conn" {
+		t.Fatalf("authority order/identity wrong: %+v", got.Authorities)
+	}
+	if got.Authorities[0].Fingerprint != hub.Fingerprint(alicePub) {
+		t.Fatalf("alice authority fingerprint mismatch")
+	}
+	if got.Authorities[1].Fingerprint != hub.Fingerprint(bobPub) {
+		t.Fatalf("bob authority fingerprint mismatch")
+	}
+}
+
+func TestGetHubSuiteInstallDecision_HubDisabledReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: nil}
+	rec := httptest.NewRecorder()
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn=x", nil), api.GetHubSuiteInstallDecisionParams{Fqn: "x"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestGetHubSuiteInstallDecision_EmptyFQNReturns400(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: makeHubFixtureMulti(t, nil, nil, nil)}}
+	rec := httptest.NewRecorder()
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision", nil), api.GetHubSuiteInstallDecisionParams{Fqn: ""})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestGetHubSuiteInstallDecision_MissingSuiteReturns404(t *testing.T) {
+	url := makeHubFixtureMulti(t, nil, nil, map[string]string{
+		"s.yaml": suiteYAML("github://alice/conn/suite", "S", "alice", "", []string{"github://alice/conn/actions/a"}, nil),
+	})
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://nobody/missing/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestGetHubSuiteInstallDecision_MissingMemberActionReturns422(t *testing.T) {
+	// Suite has no connectors_required, so closure derivation walks
+	// member_actions. The member action isn't in the catalog — surface
+	// the gap honestly rather than masking it.
+	url := makeHubFixtureMulti(t, nil, nil, map[string]string{
+		"s.yaml": suiteYAML("github://alice/conn/suite", "S", "alice", "", []string{"github://alice/conn/actions/missing"}, nil),
+	})
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing_member_action") {
+		t.Fatalf("expected missing_member_action code, got %s", rec.Body.String())
+	}
+}
+
+func TestGetHubSuiteInstallDecision_MissingConnectorReturns422(t *testing.T) {
+	url := makeHubFixtureMulti(t,
+		nil,
+		nil,
+		map[string]string{
+			"s.yaml": suiteYAML(
+				"github://alice/conn/suite", "S", "alice", "",
+				[]string{"github://alice/conn/actions/a"},
+				[]string{"github://alice/missing-conn"},
+			),
+		},
+	)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "missing_connector") {
+		t.Fatalf("expected missing_connector code, got %s", rec.Body.String())
+	}
+}
+
+func TestGetHubSuiteInstallDecision_NoMembersAndNoConnectorsReturns422(t *testing.T) {
+	// Suite YAML with no connectors_required AND no member_actions is
+	// degenerate — we have no closure to compute. Inline-author the
+	// YAML since suiteYAML insists on at least one member.
+	url := makeHubFixtureMulti(t, nil, nil, map[string]string{
+		"s.yaml": "fqn: github://alice/conn/suite\ndescription: empty\npublisher_github: alice\nmember_actions: []\n",
+	})
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetHubSuiteInstallDecision_MemberActionWithoutConnectorFQNReturns422(t *testing.T) {
+	// Suite without connectors_required walks member_actions; one of
+	// the member actions is missing connector_fqn. Surface the gap
+	// rather than producing an empty authority list.
+	url := makeHubFixtureMulti(t,
+		nil,
+		map[string]string{
+			"a.yaml": "fqn: github://alice/conn/actions/a\ndescription: A\npublisher_github: alice\n",
+		},
+		map[string]string{
+			"s.yaml": suiteYAML(
+				"github://alice/conn/suite", "S", "alice", "",
+				[]string{"github://alice/conn/actions/a"},
+				nil,
+			),
+		},
+	)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_action_entry") {
+		t.Fatalf("expected invalid_action_entry code, got %s", rec.Body.String())
+	}
+}
+
+func TestGetHubSuiteInstallDecision_KeyFetchFailureReturns502(t *testing.T) {
+	keyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer keyServer.Close()
+
+	url := makeHubFixtureMulti(t,
+		map[string]string{
+			"c.yaml": entryYAML("github://alice/conn", "C", "alice", keyServer.URL+"/missing.pub"),
+		},
+		nil,
+		map[string]string{
+			"s.yaml": suiteYAML(
+				"github://alice/conn/suite", "S", "alice", "",
+				[]string{"github://alice/conn/actions/a"},
+				[]string{"github://alice/conn"},
+			),
+		},
+	)
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: url, HTTP: keyServer.Client()}}
+	rec := httptest.NewRecorder()
+	fqn := "github://alice/conn/suite"
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn="+fqn, nil), api.GetHubSuiteInstallDecisionParams{Fqn: fqn})
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGetHubSuiteInstallDecision_HubUnreachableReturns503(t *testing.T) {
+	srv := &apiServer{log: slog.Default(), hub: &hub.Client{URL: "file:///nonexistent/path"}}
+	rec := httptest.NewRecorder()
+	srv.GetHubSuiteInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/suite-install-decision?fqn=x", nil), api.GetHubSuiteInstallDecisionParams{Fqn: "github://anywhere/x/suite"})
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
+	}
+}
+
 // --- helpers ---
 
 // twoEntryFixture is the shared Hub fixture used by tests that don't

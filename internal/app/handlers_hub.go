@@ -106,12 +106,31 @@ func (s *apiServer) GetHubInstallDecision(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, decision)
 }
 
-// buildInstallDecision combines the Hub entry + fingerprint with the
+// buildInstallDecision projects a per-authority trust panel into the
+// flat connector-level HubInstallDecision shape. The per-authority
+// computation lives in buildAuthority so the composite action/suite
+// endpoints can share it.
+func (s *apiServer) buildInstallDecision(_ context.Context, entries []hub.ConnectorEntry, entry hub.ConnectorEntry, fingerprint string) api.HubInstallDecision {
+	auth := s.buildAuthority(entries, entry, fingerprint)
+	return api.HubInstallDecision{
+		Fqn:                auth.Fqn,
+		Description:        entry.Description,
+		PublisherGithub:    auth.PublisherGithub,
+		Fingerprint:        auth.Fingerprint,
+		TrustState:         auth.TrustState,
+		PublisherFootprint: auth.PublisherFootprint,
+		RiskIndicators:     auth.RiskIndicators,
+	}
+}
+
+// buildAuthority combines the connector entry + fingerprint with the
 // local keyring's view of the publisher to produce trust_state,
 // publisher_footprint, and risk_indicators. Trust granularity in v0.x
 // is strictly per-repo (per-FQN) per ADR-0013; publisher framing here
-// is informational context, not a trust target.
-func (s *apiServer) buildInstallDecision(_ context.Context, entries []hub.ConnectorEntry, entry hub.ConnectorEntry, fingerprint string) api.HubInstallDecision {
+// is informational context, not a trust target. Used by both the
+// connector-level install-decision and the composite action/suite
+// install-decision endpoints.
+func (s *apiServer) buildAuthority(entries []hub.ConnectorEntry, entry hub.ConnectorEntry, fingerprint string) api.HubInstallAuthority {
 	footprint := hub.PublisherFootprint(entries, entry)
 
 	kr, _ := cstore.LoadKeyring(s.resolveKeyringPath())
@@ -152,9 +171,8 @@ func (s *apiServer) buildInstallDecision(_ context.Context, entries []hub.Connec
 
 	risks := buildRiskIndicators(kr, footprint, trustState, conflictFQN)
 
-	return api.HubInstallDecision{
+	return api.HubInstallAuthority{
 		Fqn:                entry.FQN,
-		Description:        entry.Description,
 		PublisherGithub:    entry.PublisherGithub,
 		Fingerprint:        fingerprint,
 		TrustState:         trustState,
@@ -355,3 +373,203 @@ func (s *apiServer) GetHubSuite(w http.ResponseWriter, r *http.Request, params a
 	}
 	writeJSON(w, http.StatusOK, toAPISuiteEntry(entry))
 }
+
+// GetHubActionInstallDecision returns a composite install-decision
+// payload for an action install. The action's declared connector_fqn
+// becomes the single `authorities[]` entry. Composite payloads were
+// ratified in ADR-0013's action-first amendment; tracked in #709.
+func (s *apiServer) GetHubActionInstallDecision(w http.ResponseWriter, r *http.Request, params api.GetHubActionInstallDecisionParams) {
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "hub_disabled", "hub client not configured")
+		return
+	}
+	if strings.TrimSpace(params.Fqn) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "fqn is required")
+		return
+	}
+
+	ctx := r.Context()
+	action, err := s.hub.FetchActionByFQN(ctx, params.Fqn)
+	if err != nil {
+		if errors.Is(err, hub.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "no Hub action entry for "+params.Fqn)
+			return
+		}
+		s.log.Warn("hub: fetch action failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+	if strings.TrimSpace(action.ConnectorFQN) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_action_entry", "action entry has no connector_fqn")
+		return
+	}
+
+	connectors, err := s.hub.FetchAllConnectors(ctx)
+	if err != nil {
+		s.log.Warn("hub: fetch connectors failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+	connectorEntry, ok := findConnector(connectors, action.ConnectorFQN)
+	if !ok {
+		writeError(w, http.StatusUnprocessableEntity, "missing_connector", "action depends on "+action.ConnectorFQN+", which is not listed in the Hub")
+		return
+	}
+	authority, status, errInfo := s.buildAuthorityForConnector(ctx, connectors, connectorEntry)
+	if errInfo.code != "" {
+		writeError(w, status, errInfo.code, errInfo.message)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, api.HubActionInstallDecision{
+		Kind:            api.HubActionInstallDecisionKindAction,
+		Fqn:             action.FQN,
+		Description:     action.Description,
+		PublisherGithub: action.PublisherGithub,
+		ConnectorFqn:    action.ConnectorFQN,
+		Authorities:     []api.HubInstallAuthority{authority},
+	})
+}
+
+// GetHubSuiteInstallDecision returns a composite install-decision
+// payload for a suite install. Walks the suite's dependency closure
+// (preferring its declared `connectors_required`; otherwise deriving
+// from each member action's `connector_fqn`) and returns one
+// authority per unique connector.
+func (s *apiServer) GetHubSuiteInstallDecision(w http.ResponseWriter, r *http.Request, params api.GetHubSuiteInstallDecisionParams) {
+	if s.hub == nil {
+		writeError(w, http.StatusServiceUnavailable, "hub_disabled", "hub client not configured")
+		return
+	}
+	if strings.TrimSpace(params.Fqn) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "fqn is required")
+		return
+	}
+
+	ctx := r.Context()
+	suite, err := s.hub.FetchSuiteByFQN(ctx, params.Fqn)
+	if err != nil {
+		if errors.Is(err, hub.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "no Hub suite entry for "+params.Fqn)
+			return
+		}
+		s.log.Warn("hub: fetch suite failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+
+	connectorFQNs, status, errInfo := s.resolveSuiteConnectorClosure(ctx, suite)
+	if errInfo.code != "" {
+		writeError(w, status, errInfo.code, errInfo.message)
+		return
+	}
+
+	connectors, err := s.hub.FetchAllConnectors(ctx)
+	if err != nil {
+		s.log.Warn("hub: fetch connectors failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "hub_unreachable", err.Error())
+		return
+	}
+
+	authorities := make([]api.HubInstallAuthority, 0, len(connectorFQNs))
+	for _, cfqn := range connectorFQNs {
+		entry, ok := findConnector(connectors, cfqn)
+		if !ok {
+			writeError(w, http.StatusUnprocessableEntity, "missing_connector", "suite depends on "+cfqn+", which is not listed in the Hub")
+			return
+		}
+		auth, status, errInfo := s.buildAuthorityForConnector(ctx, connectors, entry)
+		if errInfo.code != "" {
+			writeError(w, status, errInfo.code, errInfo.message)
+			return
+		}
+		authorities = append(authorities, auth)
+	}
+
+	writeJSON(w, http.StatusOK, api.HubSuiteInstallDecision{
+		Kind:            "suite",
+		Fqn:             suite.FQN,
+		Description:     suite.Description,
+		PublisherGithub: suite.PublisherGithub,
+		MemberActions:   append([]string(nil), suite.MemberActions...),
+		Authorities:     authorities,
+	})
+}
+
+// resolveSuiteConnectorClosure returns the deduplicated, order-preserving
+// list of connector FQNs the suite depends on. Prefers the suite's
+// declared `connectors_required`; otherwise walks `member_actions` and
+// collects each action's `connector_fqn`.
+func (s *apiServer) resolveSuiteConnectorClosure(ctx context.Context, suite hub.SuiteEntry) ([]string, int, errInfo) {
+	if len(suite.ConnectorsRequired) > 0 {
+		return uniqueStrings(suite.ConnectorsRequired), 0, errInfo{}
+	}
+	if len(suite.MemberActions) == 0 {
+		return nil, http.StatusUnprocessableEntity, errInfo{"invalid_suite_entry", "suite has no member_actions and no connectors_required"}
+	}
+	actions, err := s.hub.FetchAllActions(ctx)
+	if err != nil {
+		s.log.Warn("hub: fetch actions failed", "error", err)
+		return nil, http.StatusServiceUnavailable, errInfo{"hub_unreachable", err.Error()}
+	}
+	byFQN := make(map[string]hub.ActionEntry, len(actions))
+	for _, a := range actions {
+		byFQN[a.FQN] = a
+	}
+	var fqns []string
+	for _, memberFQN := range suite.MemberActions {
+		action, ok := byFQN[memberFQN]
+		if !ok {
+			return nil, http.StatusUnprocessableEntity, errInfo{"missing_member_action", "suite member action " + memberFQN + " is not listed in the Hub"}
+		}
+		if strings.TrimSpace(action.ConnectorFQN) == "" {
+			return nil, http.StatusUnprocessableEntity, errInfo{"invalid_action_entry", "member action " + memberFQN + " has no connector_fqn"}
+		}
+		fqns = append(fqns, action.ConnectorFQN)
+	}
+	return uniqueStrings(fqns), 0, errInfo{}
+}
+
+// buildAuthorityForConnector fetches the publisher key for the given
+// connector entry and assembles the per-authority trust panel. Returns
+// an errInfo with a non-empty code on failure; the HTTP status code
+// follows the same shape as the connector-level install-decision
+// endpoint (502 for key-fetch failures, 503 if the Hub is unreachable
+// when fetching).
+func (s *apiServer) buildAuthorityForConnector(ctx context.Context, connectors []hub.ConnectorEntry, entry hub.ConnectorEntry) (api.HubInstallAuthority, int, errInfo) {
+	_, fingerprint, err := s.hub.FetchPublisherKey(ctx, entry.KeyURL)
+	if err != nil {
+		s.log.Warn("hub: fetch publisher key failed", "key_url", entry.KeyURL, "error", err)
+		return api.HubInstallAuthority{}, http.StatusBadGateway, errInfo{"key_fetch_failed", err.Error()}
+	}
+	return s.buildAuthority(connectors, entry, fingerprint), 0, errInfo{}
+}
+
+// findConnector returns the connector entry whose FQN matches fqn,
+// and false if no match exists.
+func findConnector(entries []hub.ConnectorEntry, fqn string) (hub.ConnectorEntry, bool) {
+	for _, e := range entries {
+		if e.FQN == fqn {
+			return e, true
+		}
+	}
+	return hub.ConnectorEntry{}, false
+}
+
+// uniqueStrings returns the deduplicated input in original order.
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// errInfo carries the code and human-readable message for an HTTP
+// error response. An empty code signals "no error".
+type errInfo struct{ code, message string }

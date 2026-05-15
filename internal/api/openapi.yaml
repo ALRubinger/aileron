@@ -2211,6 +2211,122 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/hub/action-install-decision:
+    get:
+      tags: [Hub]
+      summary: Composite install-decision payload for an action install
+      description: |
+        Returns the composite payload the CLI and webapp install flow
+        render when installing an action template from the Hub. The
+        action declares a connector dependency via `connector_fqn`;
+        the daemon walks that connector and surfaces it as a single
+        `authorities[]` entry carrying the same fingerprint /
+        trust_state / publisher_footprint / risk_indicators a
+        connector-level install-decision returns.
+
+        Composite payloads were ratified in ADR-0013 (action-first
+        catalog amendment); tracked in #709.
+      operationId: getHubActionInstallDecision
+      security: []
+      parameters:
+        - name: fqn
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Action FQN, e.g. `github://ALRubinger/aileron-connector-google/actions/draft-email`.
+      responses:
+        "200":
+          description: Composite install-decision payload (action)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubActionInstallDecision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            Action's declared `connector_fqn` is not listed in the Hub.
+            The install pipeline can still proceed via direct FQN
+            resolution, but the Hub cannot pre-compute the trust panel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Failed to fetch a publisher's key from `key_url`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Hub unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/hub/suite-install-decision:
+    get:
+      tags: [Hub]
+      summary: Composite install-decision payload for a suite install
+      description: |
+        Returns the composite payload the CLI and webapp install flow
+        render when installing an action suite from the Hub. The daemon
+        walks the suite's dependency closure (preferring its declared
+        `connectors_required`; otherwise deriving the closure from each
+        member action's `connector_fqn`) and surfaces one
+        `authorities[]` entry per unique connector authority. One
+        trust panel per authority, however many member actions are
+        being installed.
+
+        Composite payloads were ratified in ADR-0013 (action-first
+        catalog amendment); tracked in #709.
+      operationId: getHubSuiteInstallDecision
+      security: []
+      parameters:
+        - name: fqn
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Suite FQN, e.g. `github://ALRubinger/aileron-connector-google/suite`.
+      responses:
+        "200":
+          description: Composite install-decision payload (suite)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubSuiteInstallDecision"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: |
+            One or more connectors in the suite's dependency closure are
+            not listed in the Hub. The install pipeline can still
+            proceed via direct FQN resolution, but the Hub cannot
+            pre-compute the trust panel for those connectors.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Failed to fetch a publisher's key from `key_url`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: Hub unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/actions/preview:
     post:
       tags: [Actions]
@@ -7207,6 +7323,113 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/HubSuiteEntry"
+
+    HubInstallAuthority:
+      type: object
+      required:
+        - fqn
+        - publisher_github
+        - fingerprint
+        - trust_state
+        - publisher_footprint
+        - risk_indicators
+      description: |
+        Per-connector trust-panel data inside a composite install-decision.
+        Shape mirrors the connector-level `HubInstallDecision` minus
+        the top-level description (which belongs to the action or suite
+        being installed, not the underlying connector authority).
+      properties:
+        fqn:
+          type: string
+          description: Connector FQN this authority refers to.
+        publisher_github:
+          type: string
+        fingerprint:
+          type: string
+          description: |
+            SHA-256 fingerprint of the publisher's signing key, formatted
+            as `sha256:<base64-without-padding>` to match
+            `aileron keyring trust` output.
+        trust_state:
+          $ref: "#/components/schemas/HubTrustState"
+        publisher_footprint:
+          type: array
+          items:
+            type: string
+        risk_indicators:
+          type: array
+          items:
+            type: string
+
+    HubActionInstallDecision:
+      type: object
+      required:
+        - kind
+        - fqn
+        - description
+        - publisher_github
+        - connector_fqn
+        - authorities
+      description: |
+        Composite install-decision payload for an action install. The
+        `authorities[]` list always carries one entry for actions
+        (single connector dependency); the kind discriminator lets
+        clients render a single combined modal with both action-level
+        metadata and the underlying connector trust gate.
+      properties:
+        kind:
+          type: string
+          enum: [action]
+        fqn:
+          type: string
+        description:
+          type: string
+        publisher_github:
+          type: string
+        connector_fqn:
+          type: string
+          description: FQN of the connector this action depends on.
+        authorities:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            $ref: "#/components/schemas/HubInstallAuthority"
+
+    HubSuiteInstallDecision:
+      type: object
+      required:
+        - kind
+        - fqn
+        - description
+        - publisher_github
+        - member_actions
+        - authorities
+      description: |
+        Composite install-decision payload for a suite install. The
+        `authorities[]` list carries one entry per unique connector
+        authority in the suite's dependency closure (one trust panel
+        per authority, however many member actions are being
+        installed).
+      properties:
+        kind:
+          type: string
+          enum: [suite]
+        fqn:
+          type: string
+        description:
+          type: string
+        publisher_github:
+          type: string
+        member_actions:
+          type: array
+          items:
+            type: string
+        authorities:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/HubInstallAuthority"
 
     HubTrustState:
       type: string
