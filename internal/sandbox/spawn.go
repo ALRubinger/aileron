@@ -120,10 +120,22 @@ type SpawnLimits struct {
 
 	// ProxyAddr is the per-invocation proxy endpoint the platform
 	// sandbox permits loopback access to. Empty when the connector
-	// did not declare `[capabilities.network]`; in that case the
-	// platform sandbox denies all network. Format is `host:port`,
-	// typically `127.0.0.1:<ephemeral>`.
+	// did not declare `[capabilities.network]` or when the proxy
+	// is reachable only via [ProxyUDSPath] (Linux + helper bridge).
+	// Format is `host:port`, typically `127.0.0.1:<ephemeral>`.
+	// macOS reads this for the SBPL `(allow network*)` rule;
+	// Windows for the WFP filter.
 	ProxyAddr string
+
+	// ProxyUDSPath is the host-filesystem path of a Unix-domain
+	// socket the per-invocation CONNECT proxy is listening on.
+	// Linux populates this when the wrapped CLI runs inside a
+	// `CLONE_NEWNET` namespace where the host's TCP loopback is
+	// unreachable; the in-namespace spawn helper bridges from a
+	// namespace-local TCP loopback to this socket via
+	// [RunSpawnShim]. Empty on macOS, Windows, and on Linux for
+	// connectors that don't trigger the helper rewire.
+	ProxyUDSPath string
 }
 
 // PlatformSandboxRequested reports whether the manifest carried any
@@ -133,7 +145,7 @@ type SpawnLimits struct {
 // (legacy spawn with no manifest scopes) returns false so tests and
 // pre-sandbox callers keep running unchanged.
 func (l SpawnLimits) PlatformSandboxRequested() bool {
-	return len(l.FSRead) > 0 || len(l.FSWrite) > 0 || l.ProxyAddr != ""
+	return len(l.FSRead) > 0 || len(l.FSWrite) > 0 || l.ProxyAddr != "" || l.ProxyUDSPath != ""
 }
 
 // StdoutCap returns the resolved stdout byte cap. Always positive
@@ -997,9 +1009,10 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 	// returns. Connectors that omit [capabilities.network] get no
 	// proxy and no HTTPS_PROXY env; the platform sandbox denies all
 	// outbound at the kernel boundary.
-	var proxyAddr string
+	var proxyTCPAddr string
+	var proxyUDSPath string
 	if s.policy != nil && len(s.policy.AllowedHosts()) > 0 {
-		proxy, addr, proxyClose, err := startSpawnProxy(ctx, s.policy, s.logger, s.connectorFQN)
+		proxy, endpoint, proxyClose, err := startSpawnProxy(ctx, s.policy, s.logger, s.connectorFQN)
 		if err != nil {
 			s.mu.Lock()
 			s.spawnErr = newConnectorRuntimeError(fmt.Sprintf("spawn: start network proxy: %s", err.Error()))
@@ -1009,12 +1022,27 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 		}
 		_ = proxy // retain for future per-spawn audit context attach
 		defer proxyClose()
-		if env.Env == nil {
-			env.Env = map[string]string{}
+
+		if endpoint.TCPAddr != "" {
+			// macOS / Windows path: the wrapped CLI dials the
+			// proxy directly via host loopback (the platform
+			// sandbox permits exactly this address).
+			if env.Env == nil {
+				env.Env = map[string]string{}
+			}
+			env.Env["HTTPS_PROXY"] = "http://" + endpoint.TCPAddr
+			env.Env["HTTP_PROXY"] = "http://" + endpoint.TCPAddr
+			proxyTCPAddr = endpoint.TCPAddr
 		}
-		env.Env["HTTPS_PROXY"] = "http://" + addr
-		env.Env["HTTP_PROXY"] = "http://" + addr
-		proxyAddr = addr
+		if endpoint.UDSPath != "" {
+			// Linux path: the wrapped CLI runs inside a
+			// CLONE_NEWNET namespace where the host's TCP
+			// loopback is unreachable. The in-namespace helper
+			// bridges from a namespace-local TCP loopback to
+			// this UDS via RunSpawnShim and injects HTTPS_PROXY
+			// itself before exec'ing the wrapped CLI.
+			proxyUDSPath = endpoint.UDSPath
+		}
 	}
 
 	// Hand to the platform executor. Sandbox unavailability is
@@ -1029,7 +1057,8 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 		MaxStderrBytes: s.spawnPolicy.stderrCap,
 		FSRead:         append([]string(nil), s.spawnPolicy.fsRead...),
 		FSWrite:        append([]string(nil), s.spawnPolicy.fsWrite...),
-		ProxyAddr:      proxyAddr,
+		ProxyAddr:      proxyTCPAddr,
+		ProxyUDSPath:   proxyUDSPath,
 	}
 	res, runErr := executor.Spawn(ctx, env, limits)
 	if runErr != nil {

@@ -243,39 +243,47 @@ func writeStatus(w io.Writer, code int, reason string) {
 	_ = reason // reserved for future structured response body
 }
 
-// startSpawnProxy stands up a per-spawn CONNECT proxy on host
-// loopback and returns the listener address callers should set as
-// `HTTPS_PROXY` on the subprocess. The returned `closeFn` tears the
-// proxy down (closes the listener, drains in-flight tunnels). Tests
-// substitute via WithSpawnProxyFactory.
+// ProxyEndpoint describes where a per-spawn CONNECT proxy is
+// listening. macOS and Windows ([SBPL] / [WFP]) permit the wrapped
+// CLI to reach a TCP loopback port directly, so [TCPAddr] is the
+// `HTTPS_PROXY` value the runtime sets on the subprocess. Linux
+// puts the wrapped CLI in a new network namespace under
+// `CLONE_NEWNET`, where the host's TCP loopback is unreachable;
+// the proxy binds on a Unix-domain socket whose path is in
+// [UDSPath], and the in-namespace spawn helper bridges TCP from
+// inside the namespace to that socket.
 //
-// Errors construct-time setup only: a listener bind failure or an
-// invalid host policy. Per-CONNECT errors do not propagate here;
-// they emit audit rows and the subprocess sees an HTTP status.
-//
-// v1 binds on TCP loopback. The Linux UDS+shim path lives behind a
-// follow-up to ADR-0014's "Network confinement" section.
-var startSpawnProxy = defaultStartSpawnProxy
+// Exactly one of TCPAddr or UDSPath is populated for a given
+// platform. The runtime's [processSpawn] selects which to set
+// on the wrapped CLI's environment vs. on the helper request
+// based on which field is non-empty.
+type ProxyEndpoint struct {
+	// TCPAddr is the host:port the proxy is listening on for
+	// non-Linux platforms. Empty on Linux.
+	TCPAddr string
 
-func defaultStartSpawnProxy(ctx context.Context, policy *HostPolicy, logger *slog.Logger, fqn string) (*SpawnProxy, string, func(), error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, "", nil, err
-	}
-	proxy := NewSpawnProxy(policy, logger, fqn)
-	go func() {
-		// Serve blocks until Close is called or the listener errors.
-		// Per-connection errors are surfaced via audit emission inside
-		// serveConn; this goroutine's return value is intentionally
-		// dropped because Close is the normal termination path.
-		_ = proxy.Serve(ctx, ln)
-	}()
-	addr := ln.Addr().String()
-	closeFn := func() {
-		_ = proxy.Close()
-	}
-	return proxy, addr, closeFn, nil
+	// UDSPath is the host filesystem path of the Unix-domain
+	// socket the proxy is listening on for Linux. Empty on
+	// non-Linux platforms.
+	UDSPath string
 }
+
+// startSpawnProxy stands up a per-spawn CONNECT proxy on the
+// platform-appropriate listener and returns a [ProxyEndpoint]
+// describing where the subprocess (or helper bridge) should
+// reach it. The returned `closeFn` tears the proxy down (closes
+// the listener, drains in-flight tunnels, removes the UDS file
+// when applicable). Tests substitute via overriding this var.
+//
+// Errors are construct-time setup only: a listener bind failure
+// or an invalid host policy. Per-CONNECT errors do not propagate
+// here; they emit audit rows and the subprocess sees an HTTP
+// status.
+//
+// Per-platform implementation lives in proxy_linux.go (UDS)
+// and proxy_other.go (TCP loopback). The var indirection is for
+// test injection.
+var startSpawnProxy = defaultStartSpawnProxy
 
 // itoa avoids strconv just to keep the proxy's import surface small.
 // Status codes are always three ASCII digits in the supported range.

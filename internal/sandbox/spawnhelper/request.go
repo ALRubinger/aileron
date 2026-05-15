@@ -64,6 +64,17 @@ type Request struct {
 	// rules apply to subtrees regardless.
 	FSRead  []string `json:"fs_read,omitempty"`
 	FSWrite []string `json:"fs_write,omitempty"`
+
+	// ProxyUDSPath, when non-empty, is the host-filesystem path
+	// of the daemon's per-spawn CONNECT proxy. The helper runs
+	// [internal/sandbox.RunSpawnShim] on the namespace-local TCP
+	// loopback and bridges accepted connections to this socket;
+	// it injects `HTTPS_PROXY` / `HTTP_PROXY` on the wrapped
+	// CLI's env to point at the in-namespace TCP listener. Empty
+	// when the connector did not declare `[capabilities.network]`
+	// or when the platform's network confinement does not need
+	// the helper bridge (macOS / Windows).
+	ProxyUDSPath string `json:"proxy_uds_path,omitempty"`
 }
 
 // HelperArgvMarker is the first argv element the runtime passes

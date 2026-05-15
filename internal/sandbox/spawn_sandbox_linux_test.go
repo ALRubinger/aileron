@@ -135,6 +135,45 @@ func TestApplyPlatformSandbox_Linux_RewiresIntoHelperWhenFSScopesDeclared(t *tes
 	}
 }
 
+func TestApplyPlatformSandbox_Linux_RewiresAndActivatesNetNSWhenProxyUDSDeclared(t *testing.T) {
+	// Contract (v3): when network is declared on Linux, the proxy
+	// binds on UDS and the runtime sets ProxyUDSPath. The platform
+	// sandbox responds by activating CLONE_NEWNET (so direct egress
+	// is kernel-blocked) and rewiring cmd into the helper (which
+	// bridges via RunSpawnShim).
+	origExec := osExecutable
+	defer func() { osExecutable = origExec }()
+	osExecutable = func() (string, error) { return "/usr/local/bin/aileron-fake", nil }
+
+	cmd := exec.CommandContext(context.Background(), "/usr/bin/git", "log")
+	limits := SpawnLimits{ProxyUDSPath: "/tmp/aileron-proxy-12345.sock"}
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/usr/bin/git"}, limits); err != nil {
+		if strings.Contains(err.Error(), "spawn_sandbox_unavailable") {
+			t.Skip("sandbox unavailable on this runner")
+		}
+		t.Fatalf("applyPlatformSandbox: %v", err)
+	}
+	if cmd.SysProcAttr == nil {
+		t.Fatal("SysProcAttr nil")
+	}
+	if cmd.SysProcAttr.Cloneflags&syscall.CLONE_NEWNET == 0 {
+		t.Error("CLONE_NEWNET should be set when ProxyUDSPath declared")
+	}
+	if cmd.Path != "/usr/local/bin/aileron-fake" {
+		t.Errorf("cmd.Path = %q, want helper rewire to daemon binary", cmd.Path)
+	}
+	if len(cmd.Args) < 3 || cmd.Args[1] != spawnhelper.HelperArgvMarker {
+		t.Errorf("cmd.Args = %v, want helper-marker rewire", cmd.Args)
+	}
+	req, err := spawnhelper.DecodeRequest(cmd.Args[2])
+	if err != nil {
+		t.Fatalf("decode rewired request: %v", err)
+	}
+	if req.ProxyUDSPath != "/tmp/aileron-proxy-12345.sock" {
+		t.Errorf("req.ProxyUDSPath = %q, want manifest UDS path", req.ProxyUDSPath)
+	}
+}
+
 func TestApplyPlatformSandbox_Linux_NoRewireWhenOnlyProxyAddrDeclared(t *testing.T) {
 	// Contract: when only network is declared (no fs_read/fs_write),
 	// the wrapped CLI execs directly. Landlock doesn't govern
