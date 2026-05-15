@@ -1478,7 +1478,7 @@ func TestRunConnector_InstallPromptYesProceeds(t *testing.T) {
 	if !installCalled {
 		t.Error("install endpoint not called after 'y' confirmation")
 	}
-	if !strings.Contains(stdout.String(), "Install? [y/N]:") {
+	if !strings.Contains(stdout.String(), "Install? [y/n]:") {
 		t.Errorf("expected prompt in stdout; got: %s", stdout.String())
 	}
 	_ = r // silence unused if compiler complains
@@ -3389,7 +3389,7 @@ func TestRunActionAdd_PreviewThenInstallOnYes(t *testing.T) {
 		"Connectors that will be installed",
 		"github://acme/conn@1.0.0",
 		"op_a",
-		"Install? [y/N]:",
+		"Install? [y/n]:",
 		"Added: my-action",
 	} {
 		if !strings.Contains(out, want) {
@@ -3737,7 +3737,7 @@ func TestRunActionAdd_AutoTrustPromptsAndInstalls(t *testing.T) {
 		"Trust publisher github://acme/conn?",
 		"✓ Trusted publisher github://acme/conn",
 		"Action install preview",
-		"Install? [y/N]:",
+		"Install? [y/n]:",
 		"Added: my-action",
 	} {
 		if !strings.Contains(out, want) {
@@ -4840,7 +4840,7 @@ actions = [
 	}
 	out := stdout.String()
 	// Exactly one consent prompt, regardless of fresh + upgrade mix.
-	if got := strings.Count(out, "Install? [y/N]: "); got != 1 {
+	if got := strings.Count(out, "Install? [y/n]: "); got != 1 {
 		t.Errorf("expected exactly 1 suite-level prompt, got %d:\n%s", got, out)
 	}
 	for _, want := range []string{
@@ -4895,7 +4895,7 @@ actions = [
 		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
 	}
 	out := stdout.String()
-	if got := strings.Count(out, "Install? [y/N]: "); got != 1 {
+	if got := strings.Count(out, "Install? [y/n]: "); got != 1 {
 		t.Errorf("expected exactly 1 suite-level prompt for 6 actions, got %d:\n%s", got, out)
 	}
 	if len(installCalls) != 6 {
@@ -5067,7 +5067,7 @@ actions = [
 	if code != 0 {
 		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
 	}
-	if got := strings.Count(stdout.String(), "Install? [y/N]: "); got != 0 {
+	if got := strings.Count(stdout.String(), "Install? [y/n]: "); got != 0 {
 		t.Errorf("--yes must suppress every consent prompt, got %d:\n%s", got, stdout.String())
 	}
 	if got := strings.Count(stdout.String(), "Suite install preview"); got != 0 {

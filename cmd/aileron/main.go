@@ -1780,7 +1780,7 @@ type hubSuiteInstallDecisionWire struct {
 //
 //  1. GET /v1/hub/install-decision?fqn=<fqn>. If the FQN is in the Hub
 //     (200), render the publisher / fingerprint / trust-state / risks
-//     and prompt y/N/d=details. On confirm, call install with
+//     and prompt y/n/d=details. On confirm, call install with
 //     `confirmed_fingerprint`; the daemon writes per-FQN trust to the
 //     keyring before running the install pipeline (#487 Q4).
 //
@@ -1879,7 +1879,7 @@ func runConnectorInstall(args []string, stdin io.Reader, stdout, stderr io.Write
 
 	// Step 3: prompt unless --yes.
 	if !*yes {
-		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/N]: ")))
+		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/n]: ")))
 		if answer != "y" && answer != "yes" {
 			fmt.Fprintln(stdout, "Cancelled.")
 			return 0
@@ -1965,9 +1965,9 @@ func tryHubInstallDecisionFlow(fqn string, autoYes bool, stdin io.Reader, stdout
 		renderHubInstallDecision(stdout, &d, showDetails)
 		var ans string
 		if showDetails {
-			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Install? [y/N]: ")))
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Install? [y/n]: ")))
 		} else {
-			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Install? [y/N/d=details]: ")))
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Install? [y/n/d=details]: ")))
 		}
 		switch ans {
 		case "y", "yes":
@@ -2100,9 +2100,9 @@ func tryHubActionInstallDecisionFlow(actionFQN string, autoYes bool, stdin io.Re
 		renderHubActionCompositeDecision(stdout, &d, showDetails)
 		var ans string
 		if showDetails {
-			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and install? [y/N]: ")))
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and install? [y/n]: ")))
 		} else {
-			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and install? [y/N/d=details]: ")))
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and install? [y/n/d=details]: ")))
 		}
 		switch ans {
 		case "y", "yes":
@@ -2138,8 +2138,6 @@ func renderHubActionCompositeDecision(w io.Writer, d *hubActionInstallDecisionWi
 	}
 	fmt.Fprintf(w, "  Publisher: %s\n", d.PublisherGithub)
 	fmt.Fprintf(w, "  Connector: %s\n", d.ConnectorFqn)
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  \033[1mTrust gate(s): %d connector authority\033[0m\n", len(d.Authorities))
 	for _, auth := range d.Authorities {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  ● %s\n", auth.Fqn)
@@ -2170,7 +2168,7 @@ func renderHubActionCompositeDecision(w io.Writer, d *hubActionInstallDecisionWi
 // /v1/hub/suite-install-decision and, when the suite is Hub-listed,
 // renders the composite trust panel (suite metadata + member actions
 // + per-authority trust gates) and collapses every per-authority
-// consent into a single y/N/d=details prompt.
+// consent into a single y/n/d=details prompt.
 //
 // Fall-through, error-note, and empty-payload semantics match the
 // action variant.
@@ -2211,9 +2209,9 @@ func tryHubSuiteInstallDecisionFlow(suiteFQN string, autoYes bool, stdin io.Read
 		renderHubSuiteCompositeDecision(stdout, &d, showDetails)
 		var ans string
 		if showDetails {
-			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and continue? [y/N]: ")))
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and continue? [y/n]: ")))
 		} else {
-			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and continue? [y/N/d=details]: ")))
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and continue? [y/n/d=details]: ")))
 		}
 		switch ans {
 		case "y", "yes":
@@ -2255,8 +2253,6 @@ func renderHubSuiteCompositeDecision(w io.Writer, d *hubSuiteInstallDecisionWire
 			fmt.Fprintf(w, "    - %s\n", a)
 		}
 	}
-	fmt.Fprintln(w)
-	fmt.Fprintf(w, "  \033[1mTrust gate(s): %d connector authorit(y|ies)\033[0m\n", len(d.Authorities))
 	for _, auth := range d.Authorities {
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  ● %s\n", auth.Fqn)
@@ -2830,10 +2826,10 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 		var prompt string
 		if upgrade {
 			renderActionUpgradeBanner(stdout, &preview)
-			prompt = fmt.Sprintf("Replace v%s with v%s? [y/N]: ",
+			prompt = fmt.Sprintf("Replace v%s with v%s? [y/n]: ",
 				preview.Existing.Version, preview.Version)
 		} else {
-			prompt = "Install? [y/N]: "
+			prompt = "Install? [y/n]: "
 		}
 		answer := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, prompt)))
 		if answer != "y" && answer != "yes" {
@@ -3287,7 +3283,7 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, hubSuiteFQ
 	cancelled := false
 	if !opts.yes {
 		renderSuitePreview(stdout, manifest, plan)
-		ans := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/N]: ")))
+		ans := strings.ToLower(strings.TrimSpace(promptLine(stdin, stdout, "Install? [y/n]: ")))
 		if ans != "y" && ans != "yes" {
 			cancelled = true
 		}

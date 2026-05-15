@@ -177,6 +177,62 @@ func TestGetHubInstallDecision_AlreadyTrustedWhenKeyringMatches(t *testing.T) {
 	if got.TrustState != api.HubTrustStateAlreadyTrusted {
 		t.Fatalf("trust_state = %s, want already_trusted", got.TrustState)
 	}
+	// Already-trusted with no sibling footprint must not surface the
+	// "First connector by this publisher you've installed" line — the
+	// user has this exact connector trusted, so that framing is wrong.
+	for _, r := range got.RiskIndicators {
+		if strings.Contains(r, "First connector by this publisher") {
+			t.Errorf("already_trusted should not emit first-connector risk; got %q", r)
+		}
+	}
+}
+
+// TestGetHubInstallDecision_AlreadyTrustedWithTrustedSibling: when the
+// keyring already trusts this FQN AND a sibling repo by the same
+// publisher, surface the sibling-trust line as informational context.
+// Reupgrade flow: don't claim "First connector"; do say "Publisher has
+// N other connectors you already trust" when truthy.
+func TestGetHubInstallDecision_AlreadyTrustedWithTrustedSibling(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	keyServer := httpKeyServer(t, pub)
+	defer keyServer.Close()
+
+	url := makeHubFixture(t, map[string]string{
+		"alice_a.yaml": entryYAML("github://alice/a", "A", "alice", keyServer.URL+"/publisher.pub"),
+		"alice_b.yaml": entryYAML("github://alice/b", "B", "alice", "https://example.com/b.pub"),
+	})
+	keyringPath := writeKeyring(t, map[string][]ed25519.PublicKey{
+		"github://alice/a": {pub},
+		"github://alice/b": {pub},
+	})
+	srv := &apiServer{
+		log:         slog.Default(),
+		hub:         &hub.Client{URL: url, HTTP: keyServer.Client()},
+		keyringPath: keyringPath,
+	}
+	rec := httptest.NewRecorder()
+	srv.GetHubInstallDecision(rec, httptest.NewRequest(http.MethodGet, "/v1/hub/install-decision?fqn=github://alice/a", nil), api.GetHubInstallDecisionParams{Fqn: "github://alice/a"})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.HubInstallDecision
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got.TrustState != api.HubTrustStateAlreadyTrusted {
+		t.Fatalf("trust_state = %s, want already_trusted", got.TrustState)
+	}
+	foundSiblingIndicator := false
+	for _, r := range got.RiskIndicators {
+		if strings.Contains(r, "First connector by this publisher") {
+			t.Errorf("already_trusted should not emit first-connector risk; got %q", r)
+		}
+		if strings.Contains(r, "other connector") {
+			foundSiblingIndicator = true
+		}
+	}
+	if !foundSiblingIndicator {
+		t.Errorf("expected trusted-sibling indicator, got %v", got.RiskIndicators)
+	}
 }
 
 func TestGetHubInstallDecision_ConflictWhenSiblingHasDifferentKey(t *testing.T) {
