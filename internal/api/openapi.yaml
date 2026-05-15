@@ -5651,8 +5651,14 @@ components:
           description: Argument identifier matching `^[a-z][a-z0-9_]*$`.
         type:
           type: string
-          enum: [string, integer, number, boolean]
-          description: JSON Schema primitive type.
+          enum: [string, integer, number, boolean, array, object]
+          description: |
+            JSON Schema type. Scalar types (`string`, `integer`, `number`,
+            `boolean`) and structured types (`array`, `object`) are accepted.
+            Structured types are passed through to the LLM-facing tool-use
+            schema as `{"type": "array"}` / `{"type": "object"}` with no
+            per-item or per-property constraints; the connector is
+            responsible for validating semantic shape at op time.
         required:
           type: boolean
           description: |

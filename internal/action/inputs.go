@@ -1,6 +1,7 @@
 package action
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -87,10 +88,21 @@ func BuildInputFields(m *Manifest, args map[string]any) []InputField {
 			// pass this optional field".
 			continue
 		}
+		// Structured input types (array, object) render their value as
+		// a pretty-printed JSON block. They are forced multiline so the
+		// approval surface routes them through the scrollable affordance
+		// rather than truncating to a single row. The validator forbids
+		// `multiline = true` on non-string declarations, so authors
+		// cannot have set this themselves — the projection layer makes
+		// the rendering decision based on the declared type.
+		multiline := in.Multiline
+		if in.Type == "array" || in.Type == "object" {
+			multiline = true
+		}
 		out = append(out, InputField{
 			Label:     label,
-			Value:     stringifyScalar(raw),
-			Multiline: in.Multiline,
+			Value:     stringifyValue(raw),
+			Multiline: multiline,
 		})
 	}
 	// Append any extras the agent passed that aren't declared on the
@@ -111,22 +123,31 @@ func BuildInputFields(m *Manifest, args map[string]any) []InputField {
 		if args[k] == nil {
 			continue
 		}
+		// Detect structured values on undeclared extras: a stray map
+		// or slice the agent passed off-manifest still wants the
+		// multi-line affordance so the user can read the payload.
+		multiline := false
+		switch args[k].(type) {
+		case map[string]any, []any:
+			multiline = true
+		}
 		out = append(out, InputField{
-			Label: k,
-			Value: stringifyScalar(args[k]),
+			Label:     k,
+			Value:     stringifyValue(args[k]),
+			Multiline: multiline,
 		})
 	}
 	return out
 }
 
-// stringifyScalar renders a scalar arg value as a string for the
-// approval surface. v1 input types are string|integer|number|boolean
-// (per ADR-0003), all of which round-trip cleanly through fmt-style
-// formatting. Anything else (a stray map or slice from a malformed
-// agent payload) renders via Go's default %v so the user sees
-// something rather than a blank cell — those values are off-spec
-// and the renderer is the wrong place to enforce schema purity.
-func stringifyScalar(v any) string {
+// stringifyValue renders an arg value as a string for the approval
+// surface. v1 declared input types are string|integer|number|boolean
+// |array|object (per ADR-0003): scalars round-trip through fmt-style
+// formatting, structured values (decoded as map[string]any or []any)
+// render as pretty-printed JSON so the user sees the full payload they
+// are about to approve. Anything else (unexpected types from a
+// malformed agent payload) falls through to Go's default %v.
+func stringifyValue(v any) string {
 	switch x := v.(type) {
 	case string:
 		return x
@@ -144,6 +165,12 @@ func stringifyScalar(v any) string {
 			return strconv.FormatInt(int64(x), 10)
 		}
 		return strconv.FormatFloat(x, 'g', -1, 64)
+	case map[string]any, []any:
+		b, err := json.MarshalIndent(x, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", x)
+		}
+		return string(b)
 	default:
 		if v == nil {
 			return ""

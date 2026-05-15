@@ -143,6 +143,73 @@ func TestBuildInputFields_StringifyScalars(t *testing.T) {
 	}
 }
 
+// TestBuildInputFields_StructuredValuesRenderAsJSONMultiline pins the
+// contract for `array` and `object` input types: the agent's payload
+// (decoded into Go native []any / map[string]any) renders as a
+// pretty-printed JSON block, and the projected field is marked
+// Multiline so the approval surface routes it through the scrollable
+// affordance rather than a single-line row. The user must be able to
+// read the structured payload they are about to approve.
+func TestBuildInputFields_StructuredValuesRenderAsJSONMultiline(t *testing.T) {
+	m := &Manifest{
+		Inputs: []Input{
+			{Name: "requests", Type: "array", Description: "batchUpdate requests"},
+			{Name: "options", Type: "object", Description: "config options"},
+		},
+	}
+	args := map[string]any{
+		"requests": []any{
+			map[string]any{"insertText": map[string]any{"text": "hello"}},
+		},
+		"options": map[string]any{"dryRun": true},
+	}
+	got := BuildInputFields(m, args)
+	if len(got) != 2 {
+		t.Fatalf("got %d fields, want 2", len(got))
+	}
+	if !got[0].Multiline {
+		t.Errorf("requests Multiline = false, want true for array type")
+	}
+	if !got[1].Multiline {
+		t.Errorf("options Multiline = false, want true for object type")
+	}
+	// Spot-check that the rendered value is valid JSON, not Go's default
+	// map[...]interface{}{} formatting.
+	if got[0].Value == "" || got[0].Value[0] != '[' {
+		t.Errorf("requests Value = %q, want a JSON array literal", got[0].Value)
+	}
+	if got[1].Value == "" || got[1].Value[0] != '{' {
+		t.Errorf("options Value = %q, want a JSON object literal", got[1].Value)
+	}
+}
+
+// TestBuildInputFields_UndeclaredStructuredExtra confirms that when an
+// agent passes a structured value for an off-manifest arg, the extras
+// path also routes it through the multiline affordance and JSON
+// rendering — there's no second path that would render a stray map as
+// Go's default fmt-style garbage.
+func TestBuildInputFields_UndeclaredStructuredExtra(t *testing.T) {
+	m := &Manifest{
+		Inputs: []Input{{Name: "to", Type: "string", Description: "Recipients"}},
+	}
+	got := BuildInputFields(m, map[string]any{
+		"to":    "alr@example.com",
+		"extra": map[string]any{"a": 1, "b": 2},
+	})
+	if len(got) != 2 {
+		t.Fatalf("got %d fields, want 2", len(got))
+	}
+	if got[1].Label != "extra" {
+		t.Fatalf("got label %q, want extra", got[1].Label)
+	}
+	if !got[1].Multiline {
+		t.Errorf("extra Multiline = false, want true for structured value")
+	}
+	if got[1].Value == "" || got[1].Value[0] != '{' {
+		t.Errorf("extra Value = %q, want a JSON object literal", got[1].Value)
+	}
+}
+
 // TestBuildInputFields_NilManifest documents the graceful-degradation
 // path: a nil manifest returns nil so callers can pass straight
 // through without a surrounding guard.

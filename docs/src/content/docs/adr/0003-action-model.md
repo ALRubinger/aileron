@@ -142,13 +142,15 @@ description = "Maximum lines of context to include in the post."
 Fields:
 
 - `name` — the argument's identifier. Must match `^[a-z][a-z0-9_]*$`. Referenced in `[[execute]]` step inputs as `${args.<name>}`.
-- `type` — one of `string`, `integer`, `number`, `boolean`. Maps directly to the corresponding JSON Schema primitive.
+- `type` — one of `string`, `integer`, `number`, `boolean`, `array`, `object`. Scalar types map directly to the corresponding JSON Schema primitive. Structured types (`array`, `object`) are passed through to the LLM-facing tool schema as bare `{"type":"array"}` / `{"type":"object"}` with no per-item or per-property constraints in v1; the connector validates semantic shape at op time, and authors are expected to document the expected payload shape in the input `description` so the LLM produces well-formed values.
 - `required` — optional, defaults to `true`. Set to `false` to make the argument optional.
 - `description` — required. Becomes the field-level description the LLM sees when the action is exposed as a tool.
 - `label` — optional. User-facing label the approval surface renders for this argument's row (e.g. `"To"` for a `to` input). Falls back to `name` when omitted. Has no effect on the LLM-visible JSON Schema.
 - `multiline` — optional, defaults to `false`. When `true`, the approval surface renders the argument's value as a scrollable blockquote (preserving embedded newlines) instead of a single-line `key: value` row. Only valid when `type = "string"` — non-string inputs reject `multiline = true` at manifest-load time. Has no effect on the LLM-visible JSON Schema.
 
 `label` and `multiline` are presentation hints for the human approver, not the LLM. The Aileron approval card always renders every action's inputs as labeled rows (using `name` when no `label` is declared), so the user never has to read a raw JSON dump to know what they are approving. Authors declare these fields when they want prettier labels or scrollable bodies; otherwise the bare input names are used. This is symmetric with the approval-time preview surface defined by [ADR-0016](/adr/0016-approval-preview/): `[approval.preview]` controls how *external state fetched at approval time* is rendered, while per-input `label` and `multiline` controls how *the agent's call-time args* are rendered. The two compose — an action can declare both.
+
+Structured input types (`array`, `object`) render on the approval card as a pretty-printed JSON block under the input's label, routed through the same scrollable affordance as `multiline` strings. The runtime sets this implicitly based on the declared type — authors do not set (and cannot set) `multiline = true` on non-string declarations. A richer tree renderer for structured values is a follow-up; the JSON-block default keeps the user-facing surface honest until that ships.
 
 The `[[inputs]]` block is the contract between the action and the LLM (per [ADR-0008](/adr/0008-intent-matching)). When `aileron-mcp` exposes an installed action as an MCP tool, it derives a JSON Schema `parameters` object directly from the inputs:
 

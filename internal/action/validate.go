@@ -22,13 +22,18 @@ var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
 // letter.
 var inputNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
-// inputTypes is the closed set of JSON Schema primitive types accepted
-// in an `[[inputs]]` block. Object/array types are post-MVP.
+// inputTypes is the closed set of JSON Schema types accepted in an
+// `[[inputs]]` block. Scalar types map directly to the LLM-facing tool
+// schema. Structured types (`array`, `object`) are passed through with
+// no per-item or per-property constraints in v1; the connector is
+// responsible for validating semantic shape at op time.
 var inputTypes = map[string]bool{
 	"string":  true,
 	"integer": true,
 	"number":  true,
 	"boolean": true,
+	"array":   true,
+	"object":  true,
 }
 
 // fqnSchemes is the closed set of FQN schemes recognized in v1, per ADR-0002.
@@ -116,7 +121,7 @@ func Validate(m *Manifest, file string) error {
 			return newValidationErr(file, "inputs[%d].type is required", i)
 		}
 		if !inputTypes[in.Type] {
-			return newValidationErr(file, "inputs[%d].type %q must be one of string|integer|number|boolean", i, in.Type)
+			return newValidationErr(file, "inputs[%d].type %q must be one of string|integer|number|boolean|array|object", i, in.Type)
 		}
 		if strings.TrimSpace(in.Description) == "" {
 			return newValidationErr(file, "inputs[%d].description is required (this is what the LLM sees)", i)
