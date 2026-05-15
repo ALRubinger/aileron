@@ -807,6 +807,160 @@ func TestRunHub_ShowRequiresFQN(t *testing.T) {
 	}
 }
 
+// TestRunHub_SearchTypeFilterConnectors / Suites: the `--type X`
+// variants of search dispatch to the right single-catalog handler. The
+// actions filter is covered separately; connectors and suites round
+// out the three-way switch.
+func TestRunHub_SearchTypeFilterConnectors(t *testing.T) {
+	hits := 0
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path != "/hub/connectors" {
+			t.Errorf("expected /hub/connectors only, got %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, twoHubConnectorsJSON)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "search", "google", "--type", "connectors"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hits != 1 {
+		t.Errorf("expected exactly 1 endpoint hit, got %d", hits)
+	}
+}
+
+func TestRunHub_SearchTypeFilterSuites(t *testing.T) {
+	hits := 0
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path != "/hub/suites" {
+			t.Errorf("expected /hub/suites only, got %q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, twoHubSuitesJSON)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "search", "calendar", "--type", "suites"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hits != 1 {
+		t.Errorf("expected exactly 1 endpoint hit, got %d", hits)
+	}
+}
+
+// TestRunHub_SearchCrossTypeJSON: cross-type `--json` emits one
+// indented JSON object with the three catalog arrays.
+func TestRunHub_SearchCrossTypeJSON(t *testing.T) {
+	fakeBindingServer(t, hubMultiFixture(t, twoHubConnectorsJSON, twoHubActionsJSON, twoHubSuitesJSON))
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "search", "anything", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	var got struct {
+		Suites     []hubSuiteEntry     `json:"suites"`
+		Actions    []hubActionEntry    `json:"actions"`
+		Connectors []hubConnectorEntry `json:"connectors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("stdout not JSON-decodable: %v\n%s", err, stdout.String())
+	}
+	if len(got.Suites) != 2 || len(got.Actions) != 2 || len(got.Connectors) != 2 {
+		t.Errorf("expected 2 of each, got suites=%d actions=%d connectors=%d", len(got.Suites), len(got.Actions), len(got.Connectors))
+	}
+}
+
+// TestRunHub_List*EmptyJSON: the JSON path of the empty-state emits
+// `[]` for each catalog so scripts pipe through `jq` without parsing
+// prose.
+func TestRunHub_ListConnectorsEmptyJSON(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, emptyHubConnectorsJSON)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "list", "connectors", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+		t.Errorf("stdout = %q, want %q", got, "[]")
+	}
+}
+
+func TestRunHub_ListActionsEmptyJSON(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, emptyHubActionsJSON)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "list", "actions", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+		t.Errorf("stdout = %q, want %q", got, "[]")
+	}
+}
+
+func TestRunHub_ListSuitesEmptyJSON(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, emptyHubSuitesJSON)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "list", "suites", "--json"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimRight(stdout.String(), "\n"); got != "[]" {
+		t.Errorf("stdout = %q, want %q", got, "[]")
+	}
+}
+
+// TestRunHub_ListTableTruncatesLongDescription: the table renderer
+// caps description at 60 chars to keep rows on one screen. The show
+// commands print descriptions in full.
+func TestRunHub_ListTableTruncatesLongDescription(t *testing.T) {
+	long := strings.Repeat("x", 200)
+	body := `{"connectors":[{"fqn":"github://alice/a","description":"` + long + `","publisher_github":"alice","key_url":"https://example.com/alice.pub","release_pattern":"v*"}]}`
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, body)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "list", "connectors"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "…") {
+		t.Errorf("expected truncation ellipsis, got:\n%s", stdout.String())
+	}
+}
+
+// TestRunHub_ShowDispatchAbortsOnConnectorFetchError: when the
+// connector endpoint errors with a non-404 status during dispatch, the
+// command surfaces it rather than falling through. Falling through
+// would mask infrastructure failures as "no entry found" — actively
+// worse than reporting honestly.
+func TestRunHub_ShowDispatchAbortsOnConnectorFetchError(t *testing.T) {
+	hits := 0
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path == "/hub/connector" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"code":"daemon_busted","message":"oops"}}`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"hub", "show", "github://alice/a"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on fetch error during dispatch")
+	}
+	if hits != 1 {
+		t.Errorf("expected dispatch to stop after first error, got %d hits", hits)
+	}
+}
+
 // TestRunHub_ShowUnknownTypeReturnsError: a typo'd --type value fails
 // before any network call.
 func TestRunHub_ShowUnknownTypeReturnsError(t *testing.T) {
