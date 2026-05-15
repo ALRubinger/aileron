@@ -5085,6 +5085,618 @@ actions = [
 	}
 }
 
+// suiteAndKeyRawServer is a combined stand-in for raw.githubusercontent.com
+// that serves BOTH the suite manifest (at the convention path) AND the
+// publisher key (at /<owner>/<repo>/HEAD/keys/publisher.pub). The two
+// existing helpers (`remoteSuiteServer` + `withMockGitHubRaw`) each
+// rewrite `rawGitHubBase`, so combining them in the same test would
+// race; the last one wins and the other endpoint 404s. This helper
+// avoids that by routing both paths through one server.
+//
+// Also stands up the releases API mock at `/repos/<owner>/<repo>/releases/latest`
+// returning the given tagName, so @latest resolves cleanly.
+func suiteAndKeyRawServer(t *testing.T, owner, repo, filePath, tagName, suiteTOML string, publisherPEM []byte) {
+	t.Helper()
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := "/repos/" + owner + "/" + repo + "/releases/latest"
+		if r.URL.Path != want {
+			t.Errorf("unexpected api path: %s, want %s", r.URL.Path, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"tag_name":%q}`, tagName)
+	}))
+	t.Cleanup(apiSrv.Close)
+
+	keyPath := "/" + owner + "/" + repo + "/HEAD/keys/publisher.pub"
+	rawSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == keyPath {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(publisherPEM)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/"+filePath) {
+			_, _ = w.Write([]byte(suiteTOML))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(rawSrv.Close)
+
+	prevAPI := githubAPIBase
+	githubAPIBase = apiSrv.URL
+	t.Cleanup(func() { githubAPIBase = prevAPI })
+
+	prevRaw := rawGitHubBase
+	rawGitHubBase = rawSrv.URL
+	t.Cleanup(func() { rawGitHubBase = prevRaw })
+}
+
+// --- suite composite install-decision (#709 / #725 sibling) ---
+
+// TestRunActionAddSuiteRemote_HubCompositeAcceptSeedsTrust is the
+// headline #709 suite test: when the suite's source maps to a Hub-
+// listed suite FQN, the CLI renders one composite trust panel covering
+// every connector authority in the dependency closure and one y/N. On
+// accept, trust is seeded for every surfaced authority plus every
+// member-action authority. The legacy per-authority preflight prompts
+// in installSuiteEntries short-circuit because trustState already
+// has them.
+func TestRunActionAddSuiteRemote_HubCompositeAcceptSeedsTrust(t *testing.T) {
+	home := withTempHome(t)
+	pub, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "hub-suite"
+description = "Three actions"
+
+actions = [
+  "actions/foo",
+  "actions/bar",
+]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	hubCalled := 0
+	installed := map[string]int{}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			hubCalled++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"suite",
+				"fqn":"github://acme/conn/suite",
+				"description":"Three actions",
+				"publisher_github":"acme",
+				"member_actions":["github://acme/conn/actions/foo","github://acme/conn/actions/bar"],
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":[],"risk_indicators":["First connector by this publisher you've installed"]
+				}]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			installed[req.FQN]++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// One y at the composite prompt, one y at the suite-install consent.
+	// Legacy per-authority "Publisher is not yet trusted" prompts MUST
+	// NOT fire — the composite covered them.
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubCalled != 1 {
+		t.Errorf("composite endpoint should fire exactly once, got %d", hubCalled)
+	}
+	if installed["github://acme/conn/actions/foo"] != 1 || installed["github://acme/conn/actions/bar"] != 1 {
+		t.Errorf("expected both actions installed; got %v", installed)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Hub install-decision (suite)",
+		"Suite:     github://acme/conn/suite",
+		"Actions:   2",
+		"github://acme/conn/actions/foo",
+		"Trust these publishers and continue?",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	// Per-authority y/N trust prompts MUST NOT fire — the composite
+	// covered them. The "Publisher X is not yet trusted" informational
+	// line still prints (ensureAuthorityTrusted always announces what
+	// it's about to do), but no interactive prompt follows because the
+	// composite-accept seeds trust with autoYes=true.
+	if strings.Contains(out, "Trust publisher github://acme/conn?") {
+		t.Errorf("legacy per-authority y/N prompt fired after composite accept:\n%s", out)
+	}
+	// Trust must persist to the keyring — both the connector authority
+	// and the action authorities (same authority in this same-publisher
+	// suite) are now trusted via the composite-accept seed.
+	kr, err := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if err != nil {
+		t.Fatalf("LoadKeyring: %v", err)
+	}
+	if !kr.HasKey("github://acme/conn", pub) {
+		t.Error("keyring should contain trusted key after composite accept")
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubCompositeDeclineAborts: declining the
+// composite trust prompt aborts the suite install cleanly (exit 0,
+// no preview/install calls, keyring stays empty).
+func TestRunActionAddSuiteRemote_HubCompositeDeclineAborts(t *testing.T) {
+	home := withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "hub-suite"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	previewCalled, installCalled := false, false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"suite","fqn":"github://acme/conn/suite",
+				"description":"x","publisher_github":"acme",
+				"member_actions":["github://acme/conn/actions/foo"],
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":[],"risk_indicators":["x"]
+				}]
+			}`)
+		case "/actions/preview":
+			previewCalled = true
+		case "/actions/install":
+			installCalled = true
+		}
+	})
+
+	stdin := strings.NewReader("n\n")
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Errorf("expected clean cancel exit 0, got %d; stderr=%s", code, stderr.String())
+	}
+	if previewCalled || installCalled {
+		t.Errorf("decline should short-circuit; preview=%v install=%v", previewCalled, installCalled)
+	}
+	if !strings.Contains(stdout.String(), "Cancelled.") {
+		t.Errorf("expected 'Cancelled.':\n%s", stdout.String())
+	}
+	kr, _ := cstore.LoadKeyring(filepath.Join(home, ".aileron", "keyring.json"))
+	if kr != nil && len(kr.Keys("github://acme/conn")) != 0 {
+		t.Error("keyring should remain empty when composite declined")
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubComposite404FallsThroughToLegacy:
+// when the suite isn't Hub-listed, the composite endpoint 404s and
+// the legacy per-authority preflight runs as before.
+func TestRunActionAddSuiteRemote_HubComposite404FallsThroughToLegacy(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "legacy-suite"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	hubCalled, previewCalled, installCalled := false, false, false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			hubCalled = true
+			w.WriteHeader(http.StatusNotFound)
+		case "/actions/preview":
+			previewCalled = true
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// One y to legacy trust prompt, one y to suite consent.
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !hubCalled || !previewCalled || !installCalled {
+		t.Errorf("expected fall-through to legacy; hub=%v preview=%v install=%v", hubCalled, previewCalled, installCalled)
+	}
+	if strings.Contains(stdout.String(), "Hub install-decision (suite)") {
+		t.Errorf("composite panel rendered on 404 fall-through:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Publisher github://acme/conn is not yet trusted") {
+		t.Errorf("legacy trust prompt should fire on fall-through:\n%s", stdout.String())
+	}
+}
+
+// TestRunActionAddSuite_LocalSourceSkipsHubComposite: local file
+// sources never carry a Hub suite FQN, so the composite endpoint is
+// not consulted. The legacy preflight runs unchanged.
+func TestRunActionAddSuite_LocalSourceSkipsHubComposite(t *testing.T) {
+	manifestPath := writeSuiteManifest(t, `
+name = "local-suite"
+description = "x"
+
+actions = [
+  "github://acme/conn/actions/foo@0.1.0",
+]
+`)
+	hubCalled := false
+	suiteInstallServer(t, []string{"github://acme/conn"}, nil, nil)
+	// Wrap the binding server with a sniffer that fails if the composite
+	// endpoint fires. suiteInstallServer already attached a handler;
+	// re-attach by replacing the AILERON_API_URL with a wrapper proxy
+	// is too invasive — instead, assert through path-tracking on the
+	// existing server by registering a custom handler.
+	prevURL := os.Getenv("AILERON_API_URL")
+	t.Setenv("AILERON_API_URL", prevURL) // no-op, just records intent
+	// Replace the existing handler: re-create one that tracks hub calls.
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision", "/hub/action-install-decision":
+			hubCalled = true
+			w.WriteHeader(http.StatusNotFound)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.1.0","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.1.0","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite([]string{"--yes", manifestPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubCalled {
+		t.Error("local-source install should NOT consult the Hub suite-install-decision endpoint")
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubCompositeYesFlagAutoAccepts: --yes
+// short-circuits the composite prompt, just like its action sibling.
+func TestRunActionAddSuiteRemote_HubCompositeYesFlagAutoAccepts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "hub-suite"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	hubHits := 0
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			hubHits++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"suite","fqn":"github://acme/conn/suite",
+				"description":"x","publisher_github":"acme",
+				"member_actions":["github://acme/conn/actions/foo"],
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":[],"risk_indicators":["x"]
+				}]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"--yes", "github://acme/conn/suite.toml@v0.0.6"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubHits != 1 {
+		t.Errorf("composite should fire exactly once, got %d", hubHits)
+	}
+	// Composite prompt MUST NOT render when --yes is in effect.
+	if strings.Contains(stdout.String(), "Trust these publishers and continue?") {
+		t.Errorf("composite prompt fired despite --yes:\n%s", stdout.String())
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubCompositeMalformedJSONFallsThrough:
+// malformed payload from the composite endpoint surfaces a one-line
+// stderr note and proceeds with the legacy preflight.
+func TestRunActionAddSuiteRemote_HubCompositeMalformedJSONFallsThrough(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "legacy"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `not json`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "could not parse hub install-decision") {
+		t.Errorf("expected parse-failure note; stderr=%s", stderr.String())
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubComposite503FallsThrough: 503 from
+// the composite endpoint surfaces a one-line stderr note and falls
+// through to the legacy preflight.
+func TestRunActionAddSuiteRemote_HubComposite503FallsThrough(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "legacy"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	stdin := bufio.NewReader(strings.NewReader("y\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "hub install-decision returned 503") {
+		t.Errorf("expected 503 note; stderr=%s", stderr.String())
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubCompositeDetailsExpandsAndAccepts:
+// d→details, then y accepts. Validates the d=details two-step on the
+// suite-composite prompt.
+func TestRunActionAddSuiteRemote_HubCompositeDetailsExpandsAndAccepts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "hub-suite"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"suite","fqn":"github://acme/conn/suite",
+				"description":"x","publisher_github":"acme",
+				"member_actions":["github://acme/conn/actions/foo"],
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"unknown",
+					"publisher_footprint":["github://acme/other-conn"],
+					"risk_indicators":["First connector by this publisher"]
+				}]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// d → details, y → accept composite, y → accept the suite install.
+	stdin := bufio.NewReader(strings.NewReader("d\ny\ny\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Other connectors by this publisher") {
+		t.Errorf("expected publisher_footprint in details mode:\n%s", stdout.String())
+	}
+}
+
+// --- deriveHubSuiteFQN unit ---
+
+func TestDeriveHubSuiteFQN(t *testing.T) {
+	cases := []struct {
+		name string
+		in   cstore.FQN
+		want string
+	}{
+		{
+			name: "github single-suite repo",
+			in:   cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn", Subpath: "suite.toml"},
+			want: "github://acme/conn/suite",
+		},
+		{
+			name: "github nested suite",
+			in:   cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn", Subpath: "suites/gmail.toml"},
+			want: "github://acme/conn/suites/gmail",
+		},
+		{
+			name: "gitlab same shape",
+			in:   cstore.FQN{Scheme: "gitlab", Owner: "acme", Repo: "conn", Subpath: "suite.toml"},
+			want: "gitlab://acme/conn/suite",
+		},
+		{
+			name: "hub scheme skipped (no .toml suffix story here)",
+			in:   cstore.FQN{Scheme: "hub", Owner: "acme", Repo: "conn", Subpath: "suite.toml"},
+			want: "",
+		},
+		{
+			name: "missing subpath",
+			in:   cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn"},
+			want: "",
+		},
+		{
+			name: "non-toml subpath",
+			in:   cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn", Subpath: "config.yaml"},
+			want: "",
+		},
+		{
+			name: "bare .toml (would resolve to empty after strip)",
+			in:   cstore.FQN{Scheme: "github", Owner: "acme", Repo: "conn", Subpath: ".toml"},
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deriveHubSuiteFQN(tc.in); got != tc.want {
+				t.Errorf("deriveHubSuiteFQN(%+v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- aileron audit ---
 
 // TestRunAudit_EmptyPrintsNoEntries: with no events the CLI prints a

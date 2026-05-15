@@ -1615,6 +1615,17 @@ type hubActionInstallDecisionWire struct {
 	Authorities     []hubInstallAuthorityWire `json:"authorities"`
 }
 
+// hubSuiteInstallDecisionWire mirrors api.HubSuiteInstallDecision —
+// the composite payload returned by /v1/hub/suite-install-decision.
+type hubSuiteInstallDecisionWire struct {
+	Kind            string                    `json:"kind"`
+	Fqn             string                    `json:"fqn"`
+	Description     string                    `json:"description"`
+	PublisherGithub string                    `json:"publisher_github"`
+	MemberActions   []string                  `json:"member_actions"`
+	Authorities     []hubInstallAuthorityWire `json:"authorities"`
+}
+
 // runConnectorInstall implements the consent flow per ADR-0007 with
 // the Hub install-decision layer added on top per ADR-0013 / #487:
 //
@@ -2003,6 +2014,150 @@ func renderHubActionCompositeDecision(w io.Writer, d *hubActionInstallDecisionWi
 		}
 	}
 	fmt.Fprintln(w)
+}
+
+// tryHubSuiteInstallDecisionFlow is the suite-level counterpart to
+// tryHubActionInstallDecisionFlow. Asks the daemon for
+// /v1/hub/suite-install-decision and, when the suite is Hub-listed,
+// renders the composite trust panel (suite metadata + member actions
+// + per-authority trust gates) and collapses every per-authority
+// consent into a single y/N/d=details prompt.
+//
+// Fall-through, error-note, and empty-payload semantics match the
+// action variant.
+func tryHubSuiteInstallDecisionFlow(suiteFQN string, autoYes bool, stdin io.Reader, stdout, stderr io.Writer) (accepted, declined, hubPath bool, payload *hubSuiteInstallDecisionWire) {
+	q := url.Values{"fqn": []string{suiteFQN}}.Encode()
+	status, body, err := bindingDoRequest(http.MethodGet, "/hub/suite-install-decision?"+q, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "note: hub install-decision unavailable (%v); using local trust\n", err)
+		return false, false, false, nil
+	}
+	if status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
+		return false, false, false, nil
+	}
+	if status != http.StatusOK {
+		fmt.Fprintf(stderr, "note: hub install-decision returned %d; using local trust\n", status)
+		return false, false, false, nil
+	}
+	var d hubSuiteInstallDecisionWire
+	if err := json.Unmarshal(body, &d); err != nil {
+		fmt.Fprintf(stderr, "note: could not parse hub install-decision (%v); using local trust\n", err)
+		return false, false, false, nil
+	}
+	if d.Fqn == "" || len(d.Authorities) == 0 {
+		return false, false, false, nil
+	}
+
+	if autoYes {
+		return true, false, true, &d
+	}
+
+	br, ok := stdin.(*bufio.Reader)
+	if !ok {
+		br = bufio.NewReader(stdin)
+	}
+
+	showDetails := false
+	for {
+		renderHubSuiteCompositeDecision(stdout, &d, showDetails)
+		var ans string
+		if showDetails {
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and continue? [y/N]: ")))
+		} else {
+			ans = strings.ToLower(strings.TrimSpace(promptLine(br, stdout, "Trust these publishers and continue? [y/N/d=details]: ")))
+		}
+		switch ans {
+		case "y", "yes":
+			return true, false, true, &d
+		case "d", "details":
+			if showDetails {
+				fmt.Fprintln(stdout, "Cancelled.")
+				return false, true, true, &d
+			}
+			showDetails = true
+			continue
+		default:
+			fmt.Fprintln(stdout, "Cancelled.")
+			return false, true, true, &d
+		}
+	}
+}
+
+// renderHubSuiteCompositeDecision prints the composite trust panel for
+// a suite install. Suite-level metadata at the top, member actions in
+// the middle, one panel per connector authority below. Per-authority
+// trust state and risks use the same colorization as the connector and
+// action variants.
+//
+// `verbose` expands risk indicators (one per line; compact mode shows
+// the first only) and adds the per-authority publisher footprint.
+func renderHubSuiteCompositeDecision(w io.Writer, d *hubSuiteInstallDecisionWire, verbose bool) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "\033[1mHub install-decision (suite)\033[0m")
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  Suite:     %s\n", d.Fqn)
+	if d.Description != "" {
+		fmt.Fprintf(w, "  Summary:   %s\n", d.Description)
+	}
+	fmt.Fprintf(w, "  Publisher: %s\n", d.PublisherGithub)
+	if len(d.MemberActions) > 0 {
+		fmt.Fprintf(w, "  Actions:   %d\n", len(d.MemberActions))
+		for _, a := range d.MemberActions {
+			fmt.Fprintf(w, "    - %s\n", a)
+		}
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  \033[1mTrust gate(s): %d connector authorit(y|ies)\033[0m\n", len(d.Authorities))
+	for _, auth := range d.Authorities {
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  ● %s\n", auth.Fqn)
+		fmt.Fprintf(w, "      Publisher:   %s\n", auth.PublisherGithub)
+		fmt.Fprintf(w, "      Fingerprint: %s\n", auth.Fingerprint)
+		fmt.Fprintf(w, "      Trust:       %s\n", colorizeTrustState(auth.TrustState))
+		if len(auth.RiskIndicators) > 0 {
+			risks := auth.RiskIndicators
+			if !verbose && len(risks) > 1 {
+				risks = risks[:1]
+			}
+			for _, r := range risks {
+				fmt.Fprintf(w, "      Risk:        %s\n", colorizeRisk(auth.TrustState, r))
+			}
+		}
+		if verbose && len(auth.PublisherFootprint) > 0 {
+			fmt.Fprintln(w, "      Other connectors by this publisher:")
+			for _, fqn := range auth.PublisherFootprint {
+				fmt.Fprintf(w, "        - %s\n", fqn)
+			}
+		}
+	}
+	fmt.Fprintln(w)
+}
+
+// deriveHubSuiteFQN translates a remote suite source's parsed FQN into
+// the canonical Hub suite FQN. The Hub catalogs suites by
+// `<scheme>://<owner>/<repo>/<subpath-without-.toml>` while CLI users
+// type `<scheme>://<owner>/<repo>/<subpath>.toml@<ref>`.
+//
+// Returns an empty string when the source isn't shaped like a TOML
+// path under a git-host scheme — local sources and non-`.toml`
+// subpaths skip the Hub composite flow.
+func deriveHubSuiteFQN(parsed cstore.FQN) string {
+	if parsed.Scheme != "github" && parsed.Scheme != "gitlab" {
+		return ""
+	}
+	if parsed.Owner == "" || parsed.Repo == "" || parsed.Subpath == "" {
+		return ""
+	}
+	subpath := parsed.Subpath
+	const tomlExt = ".toml"
+	if !strings.HasSuffix(subpath, tomlExt) {
+		return ""
+	}
+	subpath = strings.TrimSuffix(subpath, tomlExt)
+	if subpath == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Owner + "/" + parsed.Repo + "/" + subpath
 }
 
 // colorizeTrustState renders a trust-state label with ANSI color:
@@ -2668,6 +2823,9 @@ func runActionAddSuite(args []string, stdin io.Reader, stdout, stderr io.Writer)
 // runActionAddSuiteLocal handles a filesystem-path source: read,
 // parse, resolve with no inheritance context (path-form entries
 // in a local manifest are an error), then drive the shared loop.
+// Local sources never carry a Hub suite FQN, so the composite flow
+// is skipped — the install runs through the legacy per-authority
+// preflight unchanged.
 func runActionAddSuiteLocal(path string, opts actionAddOptions, stdin *bufio.Reader, stdout, stderr io.Writer) int {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -2684,7 +2842,7 @@ func runActionAddSuiteLocal(path string, opts actionAddOptions, stdin *bufio.Rea
 		fmt.Fprintf(stderr, "error: %s: %v\n", path, err)
 		return 1
 	}
-	return installSuiteEntries(manifest, refs, opts, stdin, stdout, stderr)
+	return installSuiteEntries(manifest, refs, "", opts, stdin, stdout, stderr)
 }
 
 // runActionAddSuiteRemote handles an FQN-style source: parse the
@@ -2735,7 +2893,11 @@ func runActionAddSuiteRemote(source string, opts actionAddOptions, stdin *bufio.
 		fmt.Fprintf(stderr, "error: %s: %v\n", display, err)
 		return 1
 	}
-	return installSuiteEntries(manifest, refs, opts, stdin, stdout, stderr)
+	// Heuristic: a remote source ending in `.toml` maps to a Hub suite
+	// FQN by stripping the extension. The composite flow no-ops when
+	// the Hub doesn't list it (404 fall-through).
+	hubFQN := deriveHubSuiteFQN(suiteFQN)
+	return installSuiteEntries(manifest, refs, hubFQN, opts, stdin, stdout, stderr)
 }
 
 // installSuiteEntries drives a suite install in three phases (#640):
@@ -2753,7 +2915,7 @@ func runActionAddSuiteRemote(source string, opts actionAddOptions, stdin *bufio.
 //     (already shown in phase 2); no Y/N prompts fire. Per-action
 //     failures stay failure-soft; the summary at the end reports
 //     counts and a nonzero exit if anything failed.
-func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actionAddOptions, stdin *bufio.Reader, stdout, stderr io.Writer) int {
+func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, hubSuiteFQN string, opts actionAddOptions, stdin *bufio.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Suite: %s\n", manifest.Name)
 	if manifest.Description != "" {
 		fmt.Fprintf(stdout, "  %s\n", manifest.Description)
@@ -2761,6 +2923,46 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, opts actio
 	fmt.Fprintf(stdout, "  %d action(s) to install\n", len(refs))
 
 	trust := newTrustState()
+
+	// Phase 0 (#709): when the suite is Hub-listed, render the composite
+	// trust panel covering every connector authority in the dependency
+	// closure and collapse per-authority consent into a single y/N.
+	// On accept, seed trustState so the legacy preflight prompts in
+	// phases 1a and 1c short-circuit; the operator sees one trust
+	// gate, not N.
+	if hubSuiteFQN != "" {
+		accepted, hubDeclined, hubPath, payload := tryHubSuiteInstallDecisionFlow(
+			hubSuiteFQN, opts.yes, stdin, stdout, stderr)
+		if hubDeclined {
+			return 0
+		}
+		if hubPath && accepted && payload != nil {
+			for _, auth := range payload.Authorities {
+				authFQN, parseErr := cstore.ParseFQN(auth.Fqn)
+				if parseErr != nil {
+					continue
+				}
+				if err := trust.ensure(authFQN.Authority(), true, stdin, stdout, stderr); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+			}
+			// Each member action's signing authority is what `aileron
+			// connector install` would sign against; phase 1a re-checks
+			// these so we pre-seed them here too. A typical same-
+			// publisher suite collapses to one trust.ensure call.
+			for _, a := range payload.MemberActions {
+				memberFQN, parseErr := cstore.ParseFQN(a)
+				if parseErr != nil {
+					continue
+				}
+				if err := trust.ensure(memberFQN.Authority(), true, stdin, stdout, stderr); err != nil {
+					fmt.Fprintf(stderr, "error: %v\n", err)
+					return 1
+				}
+			}
+		}
+	}
 
 	// Phase 1a: trust action authorities up front so preview can
 	// verify signatures. Any decline here aborts the suite before
