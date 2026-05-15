@@ -357,6 +357,112 @@ export async function getHubInstallDecision(fqn: string): Promise<HubInstallDeci
 	return apiFetch(`/v1/hub/install-decision?fqn=${encodeURIComponent(fqn)}`);
 }
 
+// --- Hub action and suite catalogs (#709, action-first amendment) ---
+//
+// The Hub catalog holds three entry types: connectors (above), actions
+// (template pointers), and suites (bundles of actions). The webapp
+// browses all three through the daemon's `/v1/hub/*` endpoints.
+
+/** Single Hub action entry. Mirrors api.HubActionEntry. */
+export type HubActionEntry = {
+	fqn: string;
+	description: string;
+	publisher_github: string;
+	connector_fqn: string;
+	intents?: string[];
+	category?: string;
+};
+
+export type HubActionList = {
+	actions: HubActionEntry[];
+};
+
+/** Single Hub suite entry. Mirrors api.HubSuiteEntry. */
+export type HubSuiteEntry = {
+	fqn: string;
+	description: string;
+	publisher_github: string;
+	member_actions: string[];
+	connectors_required?: string[];
+	category?: string;
+};
+
+export type HubSuiteList = {
+	suites: HubSuiteEntry[];
+};
+
+/** Lists every action published to the Hub. Pass `q` to filter
+ *  server-side. */
+export async function listHubActions(q?: string): Promise<HubActionList> {
+	const qs = q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : '';
+	return apiFetch(`/v1/hub/actions${qs}`);
+}
+
+/** Lists every suite published to the Hub. Pass `q` to filter
+ *  server-side. */
+export async function listHubSuites(q?: string): Promise<HubSuiteList> {
+	const qs = q && q.trim() ? `?q=${encodeURIComponent(q.trim())}` : '';
+	return apiFetch(`/v1/hub/suites${qs}`);
+}
+
+/** Single action entry by FQN. */
+export async function getHubAction(fqn: string): Promise<HubActionEntry> {
+	return apiFetch(`/v1/hub/action?fqn=${encodeURIComponent(fqn)}`);
+}
+
+/** Single suite entry by FQN. */
+export async function getHubSuite(fqn: string): Promise<HubSuiteEntry> {
+	return apiFetch(`/v1/hub/suite?fqn=${encodeURIComponent(fqn)}`);
+}
+
+/** Per-connector trust panel inside a composite install-decision.
+ *  Shape mirrors api.HubInstallAuthority — same fields as the
+ *  connector-level HubInstallDecision minus the top-level description. */
+export type HubInstallAuthority = {
+	fqn: string;
+	publisher_github: string;
+	fingerprint: string;
+	trust_state: HubTrustState;
+	publisher_footprint: string[];
+	risk_indicators: string[];
+};
+
+/** Composite install-decision payload for an action install.
+ *  `authorities[]` always carries exactly one entry — the action's
+ *  declared connector dependency. The `kind` discriminator lets the
+ *  install modal render the action's own metadata alongside the
+ *  underlying connector trust gate. */
+export type HubActionInstallDecision = {
+	kind: 'action';
+	fqn: string;
+	description: string;
+	publisher_github: string;
+	connector_fqn: string;
+	authorities: HubInstallAuthority[];
+};
+
+/** Composite install-decision payload for a suite install.
+ *  `authorities[]` carries one entry per unique connector authority in
+ *  the suite's dependency closure. */
+export type HubSuiteInstallDecision = {
+	kind: 'suite';
+	fqn: string;
+	description: string;
+	publisher_github: string;
+	member_actions: string[];
+	authorities: HubInstallAuthority[];
+};
+
+/** Composite install-decision for an action FQN. */
+export async function getHubActionInstallDecision(fqn: string): Promise<HubActionInstallDecision> {
+	return apiFetch(`/v1/hub/action-install-decision?fqn=${encodeURIComponent(fqn)}`);
+}
+
+/** Composite install-decision for a suite FQN. */
+export async function getHubSuiteInstallDecision(fqn: string): Promise<HubSuiteInstallDecision> {
+	return apiFetch(`/v1/hub/suite-install-decision?fqn=${encodeURIComponent(fqn)}`);
+}
+
 /** Installed-connector envelope returned by POST /v1/connectors/install
  *  on success. `already_installed` is set when an offline-cached hash
  *  short-circuits the install pipeline (ADR-0004 §"Offline behavior"). */
