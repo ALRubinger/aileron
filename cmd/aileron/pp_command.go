@@ -106,12 +106,14 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	modulePath := ppModulePath(entry.Path)
+	packagePath := ppPackagePath(entry.Path, name)
 	sourceURL := ppSourceURL(entry.Path)
 	binaryName := name + "-pp-cli"
 
 	fmt.Fprintln(stdout)
 	fmt.Fprintf(stdout, "Install plan for %s:\n", name)
-	fmt.Fprintf(stdout, "  Module:   %s@latest\n", modulePath)
+	fmt.Fprintf(stdout, "  Module:   %s\n", modulePath)
+	fmt.Fprintf(stdout, "  Package:  %s@latest\n", packagePath)
 	fmt.Fprintf(stdout, "  Source:   %s\n", sourceURL)
 	fmt.Fprintf(stdout, "  Binary:   %s (installed to $GOBIN)\n", binaryName)
 	fmt.Fprintf(stdout, "  Wrap as:  local://user/%s\n", name)
@@ -130,8 +132,8 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	fmt.Fprintf(stdout, "\nRunning `go install %s@latest`…\n", modulePath)
-	if err := runGoInstall(modulePath, stdout, stderr); err != nil {
+	fmt.Fprintf(stdout, "\nRunning `go install %s@latest`…\n", packagePath)
+	if err := runGoInstall(packagePath, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "error: go install: %v\n", err)
 		return 1
 	}
@@ -265,12 +267,30 @@ func ppUnknownEntryError(name string, entries []ppEntry) error {
 }
 
 // ppModulePath derives the Go module path from a catalog entry's
-// `path` field. The convention is fixed: the library repo's own
-// path layout IS the module path. This function exists to
-// centralize the convention so a future catalog re-layout
-// touches one place.
+// `path` field. The convention is fixed: each catalog entry has
+// its own `go.mod` at `library/<category>/<name>/go.mod`, and
+// the module path declared there is the repo root plus the
+// entry's `path` field.
+//
+// Note: this is the *module* path, not the runnable *package*
+// path. The CLI binary lives at `<modulePath>/cmd/<name>-pp-cli`;
+// use [ppPackagePath] for the value passed to `go install`.
 func ppModulePath(entryPath string) string {
 	return "github.com/mvanhorn/printing-press-library/" + strings.TrimPrefix(entryPath, "/")
+}
+
+// ppPackagePath returns the import path of the CLI variant's
+// main package — the value passed to `go install`. Every
+// PrintingPress entry follows the `cmd/<name>-pp-cli` /
+// `cmd/<name>-pp-mcp` layout per their authoring convention;
+// BYOCLI wraps the `-pp-cli` variant (the agent calls it
+// through subcommands), not the `-pp-mcp` variant (which Aileron
+// would speak MCP to, a separate integration point).
+//
+// Centralizing the `cmd/<name>-pp-cli` suffix here keeps the
+// PrintingPress directory-layout assumption in one place.
+func ppPackagePath(entryPath, name string) string {
+	return ppModulePath(entryPath) + "/cmd/" + name + "-pp-cli"
 }
 
 // ppSourceURL renders a browser-friendly URL pointing at the
