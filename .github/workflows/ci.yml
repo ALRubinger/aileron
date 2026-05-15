@@ -200,7 +200,11 @@ jobs:
         shell: bash
         run: |
           set -e
-          (cd internal && go test -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/... ./sandbox/...)
+          # -v surfaces individual test names so a failure shows which
+          # test broke. Without it, `go test` only reports `FAIL pkg`
+          # at the package level when no test prints anything, which
+          # hides syscall-level hangs that don't produce stdout.
+          (cd internal && go test -v -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/... ./sandbox/...)
           # cmd/aileron's full suite is gated behind #577 on Windows.
           # Run only the helpers with a Windows-specific implementation.
           (cd cmd/aileron && go test -race -coverprofile=coverage-windows-aileron.txt -run 'TestSignalDaemonStop' .)
