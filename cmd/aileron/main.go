@@ -23,6 +23,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 	"github.com/ALRubinger/aileron/internal/oauth"
+	"github.com/ALRubinger/aileron/internal/sandbox/spawnhelper"
 	"github.com/ALRubinger/aileron/internal/suite"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
@@ -30,6 +31,21 @@ import (
 )
 
 func main() {
+	// Spawn-helper dispatch (ADR-0014, Linux platform sandbox).
+	// When the runtime re-execs into this binary with the hidden
+	// __spawn-helper marker, this process is acting as the in-namespace
+	// helper for a wrapped CLI: it applies Landlock restrictions and
+	// then `syscall.Exec`s into the wrapped program. Must run BEFORE
+	// any normal-CLI setup so the helper does not touch the vault,
+	// launcher registry, or any other host state that would leak
+	// across the namespace boundary.
+	if len(os.Args) >= 3 && os.Args[1] == spawnhelper.HelperArgvMarker {
+		spawnhelper.Run(os.Args[2])
+		// spawnhelper.Run never returns on success; if we reach
+		// here it has already exited with a structured error code.
+		return
+	}
+
 	registry := launch.NewRegistry()
 	registry.Register(agents.Claude{})
 	registry.Register(agents.Pi{})

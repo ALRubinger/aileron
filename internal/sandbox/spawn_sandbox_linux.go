@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"github.com/ALRubinger/aileron/internal/sandbox/spawnhelper"
 )
 
 // unprivilegedUserNSSysctl is the kernel knob distros sometimes
@@ -27,36 +29,51 @@ import (
 // [ADR-0014]: https://docs.withaileron.ai/adr/0014-spawn-sandbox-technology
 var unprivilegedUserNSSysctl = "/proc/sys/kernel/unprivileged_userns_clone"
 
+// osExecutable is the function the runtime calls to discover the
+// path of the daemon binary it should re-exec into for the
+// post-namespace helper. Declared as a var so tests can swap it
+// without needing to actually rename the test binary.
+var osExecutable = os.Executable
+
 // applyPlatformSandbox wires the wrapped subprocess to launch in a
 // fresh user + mount + PID namespace, providing process-level
-// isolation per ADR-0014's Linux section.
+// isolation per ADR-0014's Linux section. When the manifest
+// declares `fs_read` or `fs_write` scopes, the runtime also
+// re-execs into the daemon binary's [spawnhelper.Run] entry point
+// so Landlock LSM rules apply inside the namespace before the
+// wrapped CLI exec's.
 //
-// Scope of this implementation (Linux v1):
+// Scope of this implementation:
 //
-//   - **User namespace** maps the runtime's UID to UID 0 inside the
-//     namespace; the subprocess cannot escalate to host-root or
-//     affect any other UID's resources.
+//   - **User namespace** maps the runtime's UID to UID 0 inside
+//     the namespace; the subprocess cannot escalate to host-root
+//     or affect any other UID's resources.
 //   - **Mount namespace** is created (CLONE_NEWNS) so the
-//     subprocess's future mount operations cannot leak to the host.
-//     The mount tree itself is not rewritten in v1; a follow-up PR
-//     adds pivot_root + bind-mounted fs_read/fs_write scopes for
-//     real kernel-enforced FS confinement (paired with Landlock LSM
-//     on kernels that support it).
+//     subprocess's future mount operations cannot leak to the
+//     host. The mount tree itself is not rewritten yet; a future
+//     PR adds pivot_root + bind-mounted fs scopes if Landlock
+//     coverage proves insufficient.
 //   - **PID namespace** makes the subprocess PID 1 inside its
 //     namespace; it cannot see or signal host processes.
-//   - **Network namespace is NOT activated in v1** so the
-//     subprocess shares the host's network. The CONNECT proxy
-//     [#716] runs on host loopback, so HTTPS_PROXY injection
-//     works without additional shim plumbing. The trade-off: direct
-//     egress to non-allowlisted hosts is not kernel-enforced. A
-//     follow-up PR adds CLONE_NEWNET plus the in-namespace TCP-to-UDS
-//     shim ([#718]) for kernel-enforced egress confinement.
+//   - **Landlock LSM** is applied inside the helper (when
+//     `fs_read` or `fs_write` is declared) so the wrapped CLI
+//     cannot read or write outside the declared paths. This is
+//     the load-bearing kernel-enforced FS confinement; without
+//     it the namespace alone leaves the host filesystem
+//     reachable.
+//   - **Network namespace is NOT activated** so the subprocess
+//     shares the host's network. The CONNECT proxy runs on host
+//     loopback; the wrapped CLI honors `HTTPS_PROXY`. The
+//     trade-off: direct egress to non-allowlisted hosts is not
+//     kernel-enforced. A future PR adds `CLONE_NEWNET` +
+//     in-namespace TCP-to-UDS shim wiring ([#718]) for kernel-
+//     enforced egress.
 //
 // Returns [ErrSpawnUnavailable] when unprivileged user namespaces
-// are disabled at the sysctl level. Returns nil with no
-// modification to `cmd` when no manifest sandbox parameters were
-// declared (legacy path; pre-BYOCLI connectors continue to run
-// unchanged).
+// are disabled at the sysctl level or when the daemon binary
+// path cannot be discovered. Returns nil with no modification to
+// `cmd` when no manifest sandbox parameters were declared
+// (legacy path; pre-BYOCLI connectors continue to run unchanged).
 func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) (platformSandboxHooks, error) {
 	_ = env
 	if !limits.PlatformSandboxRequested() {
@@ -81,7 +98,53 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 	// the gid_map is the kernel's required permission gate, and
 	// Go's exec package handles this when this flag is false.
 	cmd.SysProcAttr.GidMappingsEnableSetgroups = false
+
+	// When the manifest declares FS scopes, re-exec into the
+	// daemon binary's spawn-helper entry point so Landlock applies
+	// inside the namespace before the wrapped CLI starts. Network-
+	// only scoping (no fs_read / fs_write) keeps the v1 behavior
+	// where the wrapped CLI exec's directly.
+	if len(limits.FSRead) > 0 || len(limits.FSWrite) > 0 {
+		if err := rewireForHelper(cmd, limits); err != nil {
+			return platformSandboxHooks{}, err
+		}
+	}
+
 	return platformSandboxHooks{}, nil
+}
+
+// rewireForHelper captures the wrapped program from `cmd`,
+// encodes a [spawnhelper.Request] carrying it along with the
+// manifest's FS scopes, and rewires `cmd` so the kernel exec's
+// the daemon binary in helper mode instead. The helper applies
+// Landlock then `syscall.Exec`s the wrapped program — replacing
+// itself with the CLI under the configured confinement.
+func rewireForHelper(cmd *exec.Cmd, limits SpawnLimits) error {
+	helperPath, err := osExecutable()
+	if err != nil {
+		return fmt.Errorf("%w: locate daemon binary for spawn helper: %v", ErrSpawnUnavailable, err)
+	}
+
+	// Snapshot the wrapped invocation before reassigning cmd.Path
+	// and cmd.Args; the helper will use these for syscall.Exec.
+	req := spawnhelper.Request{
+		Program: cmd.Path,
+		Argv:    append([]string(nil), cmd.Args...),
+		Env:     append([]string(nil), cmd.Env...),
+		Cwd:     cmd.Dir,
+		FSRead:  append([]string(nil), limits.FSRead...),
+		FSWrite: append([]string(nil), limits.FSWrite...),
+	}
+	encoded, err := spawnhelper.EncodeRequest(req)
+	if err != nil {
+		return fmt.Errorf("%w: encode helper request: %v", ErrSpawnUnavailable, err)
+	}
+
+	cmd.Path = helperPath
+	cmd.Args = []string{"aileron", spawnhelper.HelperArgvMarker, encoded}
+	// cmd.Env and cmd.Dir carry through to the helper unchanged;
+	// the helper uses req.Env / req.Cwd for the wrapped exec.
+	return nil
 }
 
 // checkLinuxSandboxAvailable returns ErrSpawnUnavailable when the
