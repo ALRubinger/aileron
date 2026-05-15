@@ -617,6 +617,42 @@ func TestVaultStore_UpdateMetadata_NotFound(t *testing.T) {
 	}
 }
 
+// TestVaultStore_UpdateMetadata_RejectsEmptyName: defensive — the
+// hook composes Binding values from List output and feeds them back
+// to UpdateMetadata; an empty name shouldn't reach the vault.
+func TestVaultStore_UpdateMetadata_RejectsEmptyName(t *testing.T) {
+	s := newStore(t)
+	if err := s.UpdateMetadata(context.Background(), binding.Binding{}); err == nil {
+		t.Error("empty Name accepted")
+	}
+}
+
+// TestVaultStore_UpdateMetadata_RejectsInvalidName: a malformed name
+// (e.g. uppercase or path-traversal-like) gets rejected before any
+// vault I/O.
+func TestVaultStore_UpdateMetadata_RejectsInvalidName(t *testing.T) {
+	s := newStore(t)
+	err := s.UpdateMetadata(context.Background(), binding.Binding{Name: "BAD"})
+	if err == nil {
+		t.Error("invalid Name accepted")
+	}
+}
+
+// TestVaultStore_UpdateMetadata_NilVault: parity with the other
+// VaultStore methods' nil-vault guards.
+func TestVaultStore_UpdateMetadata_NilVault(t *testing.T) {
+	var s *binding.VaultStore
+	if err := s.UpdateMetadata(context.Background(),
+		binding.Binding{Name: "api_key/x/y"}); err == nil {
+		t.Error("nil receiver UpdateMetadata = nil err")
+	}
+	s2 := &binding.VaultStore{}
+	if err := s2.UpdateMetadata(context.Background(),
+		binding.Binding{Name: "api_key/x/y"}); err == nil {
+		t.Error("nil Vault UpdateMetadata = nil err")
+	}
+}
+
 func TestVaultStore_ResolverFor_UnknownKindReturnsNil(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

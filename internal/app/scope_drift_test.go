@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"reflect"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/binding"
+	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -230,4 +232,95 @@ func TestMakeScopeDriftHook_NilStoreNoPanic(t *testing.T) {
 	hook := makeScopeDriftHook(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hook(context.Background(), "github://acme/x", []string{"a"})
 	// No panic = pass.
+}
+
+// fakeBindingStore is a minimal binding.Store that lets tests drive
+// the hook's error branches. listErr / updateErr override the
+// corresponding methods to return errors; bindings is the seed for
+// List. updateCalls counts UpdateMetadata invocations so tests can
+// assert the hook didn't bail after the first failure.
+type fakeBindingStore struct {
+	bindings    []binding.Binding
+	listErr     error
+	updateErr   error
+	updateCalls int
+}
+
+func (f *fakeBindingStore) List(context.Context) ([]binding.Binding, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.bindings, nil
+}
+func (f *fakeBindingStore) Get(context.Context, binding.Name) (binding.Binding, error) {
+	return binding.Binding{}, binding.ErrNotFound
+}
+func (f *fakeBindingStore) Put(context.Context, binding.Binding, []byte, binding.PutMode) error {
+	return nil
+}
+func (f *fakeBindingStore) Delete(context.Context, binding.Name) error { return nil }
+func (f *fakeBindingStore) UpdateMetadata(_ context.Context, _ binding.Binding) error {
+	f.updateCalls++
+	return f.updateErr
+}
+func (f *fakeBindingStore) Resolve(context.Context, string, string) (binding.Binding, error) {
+	return binding.Binding{}, binding.ErrNotFound
+}
+func (f *fakeBindingStore) ResolverFor(context.Context, string, string) credential.Resolver {
+	return nil
+}
+
+// TestMakeScopeDriftHook_ListErrorLogsAndContinues: if the binding
+// store can't enumerate (vault unwired, transient error), the hook
+// logs warn and exits cleanly — the install must NOT fail because
+// drift detection couldn't run.
+func TestMakeScopeDriftHook_ListErrorLogsAndContinues(t *testing.T) {
+	store := &fakeBindingStore{listErr: errors.New("vault unavailable")}
+	hook := makeScopeDriftHook(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hook(context.Background(), "github://acme/x", []string{"a"})
+	if store.updateCalls != 0 {
+		t.Errorf("hook attempted updates after List error: %d", store.updateCalls)
+	}
+}
+
+// TestMakeScopeDriftHook_UpdateMetadataErrorIsBestEffort: if updating
+// one binding fails, the hook logs and continues with the remaining
+// bindings rather than aborting — a transient vault hiccup mustn't
+// block drift detection on every other binding.
+func TestMakeScopeDriftHook_UpdateMetadataErrorIsBestEffort(t *testing.T) {
+	store := &fakeBindingStore{
+		updateErr: errors.New("update failed"),
+		bindings: []binding.Binding{
+			{Name: "oauth2/google/work", Kind: "oauth2",
+				ConnectorFQN:  "github://acme/g",
+				GrantedScopes: []string{"a"}},
+			{Name: "oauth2/google/personal", Kind: "oauth2",
+				ConnectorFQN:  "github://acme/g",
+				GrantedScopes: []string{"a"}},
+		},
+	}
+	hook := makeScopeDriftHook(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hook(context.Background(), "github://acme/g", []string{"a", "b"})
+	if store.updateCalls != 2 {
+		t.Errorf("updateCalls = %d, want 2 (hook bailed after first error)", store.updateCalls)
+	}
+}
+
+// TestStringSliceEqual exercises the equality helper directly. The
+// evaluateScopeDrift tests cover the equal+different-content paths
+// implicitly; this is the differing-length path which evaluator tests
+// don't hit head-on.
+func TestStringSliceEqual(t *testing.T) {
+	if !stringSliceEqual(nil, nil) {
+		t.Error("nil == nil should be true")
+	}
+	if !stringSliceEqual([]string{"a"}, []string{"a"}) {
+		t.Error("[a] == [a] should be true")
+	}
+	if stringSliceEqual([]string{"a"}, []string{"a", "b"}) {
+		t.Error("[a] == [a b] should be false")
+	}
+	if stringSliceEqual([]string{"a"}, []string{"b"}) {
+		t.Error("[a] == [b] should be false")
+	}
 }

@@ -2949,6 +2949,148 @@ func TestRunBinding_ReauthorizeRequiresExactlyOneArg(t *testing.T) {
 	}
 }
 
+// TestRunBinding_ReauthorizeServerErrorOnGetIsExit1: when the GET of
+// the existing binding returns a non-404 server error, the CLI must
+// surface it as a nonzero exit so scripts notice rather than
+// proceeding to a useless init.
+func TestRunBinding_ReauthorizeServerErrorOnGetIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"error":"boom"}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/google/work"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when GET binding returns 500")
+	}
+}
+
+// TestRunBinding_ReauthorizeMalformedBindingResponseIsExit1: a
+// successful GET with a body that doesn't parse as a binding must
+// fail rather than panic.
+func TestRunBinding_ReauthorizeMalformedBindingResponseIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{not json`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/google/work"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on malformed binding JSON")
+	}
+}
+
+// TestRunBinding_ReauthorizeInitErrorIsExit1: server returns a non-200
+// on init (e.g. session quota / 500). CLI propagates as nonzero exit.
+func TestRunBinding_ReauthorizeInitErrorIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/oauth2/google/work":
+			_, _ = io.WriteString(w, `{
+				"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/g","created_at":"2024-01-01T00:00:00Z"
+			}`)
+		case "/bindings/setup/oauth2/init":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"boom"}`)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/google/work"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when init returns 500")
+	}
+}
+
+// TestRunBinding_ReauthorizeMalformedInitResponseIsExit1: init returns
+// 200 but with a body that doesn't parse as the expected envelope.
+func TestRunBinding_ReauthorizeMalformedInitResponseIsExit1(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/oauth2/google/work":
+			_, _ = io.WriteString(w, `{
+				"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/g","created_at":"2024-01-01T00:00:00Z"
+			}`)
+		case "/bindings/setup/oauth2/init":
+			_, _ = io.WriteString(w, `{not json`)
+		}
+	})
+	withFakeBrowser(t)
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/google/work"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit on malformed init response")
+	}
+}
+
+// TestRunBinding_ReauthorizeBadRedirectURIRejected: defensive — if
+// the server sends an init response with a redirect_uri lacking a
+// port, the CLI can't bind a listener and must fail loudly.
+func TestRunBinding_ReauthorizeBadRedirectURIRejected(t *testing.T) {
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/oauth2/google/work":
+			_, _ = io.WriteString(w, `{
+				"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/g","created_at":"2024-01-01T00:00:00Z"
+			}`)
+		case "/bindings/setup/oauth2/init":
+			_, _ = io.WriteString(w,
+				`{"session_id":"s","authorize_url":"http://x/auth","redirect_uri":"not-a-url"}`)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/google/work"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when redirect_uri has no port")
+	}
+}
+
+// TestRunBinding_ReauthorizeFinishErrorIsExit1: finish returns a
+// non-2xx (e.g. token exchange failed at the provider). Exit 1.
+func TestRunBinding_ReauthorizeFinishErrorIsExit1(t *testing.T) {
+	withFakeBrowser(t)
+	var redirectURI string
+	state := "rstate"
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/bindings/oauth2/google/work":
+			_, _ = io.WriteString(w, `{
+				"name":"oauth2/google/work","kind":"oauth2","service":"google","identity":"work",
+				"connector_fqn":"github://acme/g","created_at":"2024-01-01T00:00:00Z"
+			}`)
+		case "/bindings/setup/oauth2/init":
+			ln, _ := net.Listen("tcp", "127.0.0.1:0")
+			port := ln.Addr().(*net.TCPAddr).Port
+			_ = ln.Close()
+			redirectURI = fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+			authorizeURL := fmt.Sprintf("http://provider.test/auth?state=%s&redirect_uri=%s",
+				state, redirectURI)
+			_, _ = io.WriteString(w, fmt.Sprintf(
+				`{"session_id":"s","authorize_url":%q,"redirect_uri":%q}`,
+				authorizeURL, redirectURI))
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				_, _ = http.Get(redirectURI + "?code=c&state=" + state)
+			}()
+		case "/bindings/setup/oauth2/finish":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":{"code":"token_exchange_failed"}}`)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := runBinding([]string{"reauthorize", "oauth2/google/work"}, strings.NewReader(""),
+		&stdout, &stderr)
+	if code == 0 {
+		t.Error("expected nonzero exit when finish returns 422")
+	}
+}
+
 // TestRunBinding_ListSurfacesStaleReason: when a binding is `stale`,
 // the list view appends its reason inline so the user sees what to do
 // without needing `--json`.

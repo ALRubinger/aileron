@@ -151,6 +151,41 @@ func TestInstall_ScopeDriftHookFiresOnAlreadyInstalled(t *testing.T) {
 	}
 }
 
+// TestInstall_ScopeDriftHookHandlesUnreadableManifest: the
+// short-circuit path reads the installed manifest from disk to
+// extract the scope set. A corrupt or unreadable manifest must not
+// block the install — the hook fires with a nil scope list so the
+// migration-mark case (binding has no recorded grant) can still run.
+func TestInstall_ScopeDriftHookHandlesUnreadableManifest(t *testing.T) {
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, hash, _ := happyPathInstaller(t, ref)
+	if _, err := inst.Install(context.Background(), InstallRequest{Ref: ref}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	// Corrupt the installed manifest so the hook's read-and-parse fails.
+	dir, _ := inst.Store.EntryDir(hash)
+	if err := os.WriteFile(filepath.Join(dir, "manifest.toml"),
+		[]byte("not valid toml ====="), 0o644); err != nil {
+		t.Fatalf("corrupt manifest: %v", err)
+	}
+	var hookFired bool
+	var hookScopes []string
+	inst.ScopeDriftHook = func(_ context.Context, _ string, required []string) {
+		hookFired = true
+		hookScopes = required
+	}
+	if _, err := inst.Install(context.Background(),
+		InstallRequest{Ref: ref, ExpectedHash: hash}); err != nil {
+		t.Fatalf("short-circuit Install: %v", err)
+	}
+	if !hookFired {
+		t.Error("hook didn't fire when manifest was corrupt")
+	}
+	if hookScopes != nil {
+		t.Errorf("hook got non-nil scopes from corrupt manifest: %v", hookScopes)
+	}
+}
+
 // TestInstall_ScopeDriftHookNilSafe: not all daemons wire a hook;
 // installer must tolerate the unset field.
 func TestInstall_ScopeDriftHookNilSafe(t *testing.T) {
