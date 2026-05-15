@@ -37,7 +37,7 @@ saas/             SaaS-specific code paths. Off the default critical
 | `internal/action` | Action manifest parsing and the action executor. Loads `~/.aileron/actions/`, validates capability subsets, drives the sandbox per step. |
 | `internal/sandbox` | The WASM runtime. `SpawnPolicy`, `HostPolicy`, host-function ABI, audit emission. Contains the embedded spawn-forwarder under `forwarder/`. |
 | `internal/sandbox/sandboxtest` | Reusable test helpers for spawn-primitive integration tests. Connector repos consume this. |
-| `internal/wrap` | The `aileron action wrap` authoring tool's library. `LoadYAML`, `FromHelp`, `BuildManifest`, `Emit`, `Install`. |
+| `internal/wrap` | CLI-wrapping helpers shared by `aileron action wrap` (authoring), `aileron cli add` (BYOCLI introspector), and `aileron pp add` (PrintingPress installer). `LoadYAML`, `FromHelp`, `BuildManifest`, `Emit`, `Install`, `DetectCredentialEnvKeys`, `RenderActionMD`, `ActionFileName`. |
 | `internal/binding` | Capability bindings between connectors and vault entries. The user-visible link from "this connector wants OAuth2" to "this Google account." |
 | `internal/credential` | Credential resolution at runtime. Sealed between the daemon and the connector; never leaves the daemon's address space. |
 | `internal/vault` | The encrypted credential vault (per [ADR-0011](/adr/0011-local-credential-vault)). Argon2id + AES-256-GCM envelope. |
