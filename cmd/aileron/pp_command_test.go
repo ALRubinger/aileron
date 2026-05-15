@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -394,6 +395,85 @@ func TestRunPpAdd_HappyPathHandsOffToCliAdd(t *testing.T) {
 	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "linear", "manifest.toml")
 	if _, err := os.Stat(manifestPath); err != nil {
 		t.Fatalf("local manifest missing: %v", err)
+	}
+}
+
+func TestRunPpAdd_GoInstallFailureSurfacesError(t *testing.T) {
+	// Mock runGoInstall to simulate a build/network failure. The
+	// installer must surface the error with a nonzero exit and a
+	// stderr message explaining the toolchain failed — without
+	// touching the local connector store.
+	startFixtureCatalog(t)
+	fakeHome(t)
+	t.Setenv("GOBIN", t.TempDir())
+
+	prev := runGoInstall
+	t.Cleanup(func() { runGoInstall = prev })
+	runGoInstall = func(modulePath string, stdout, stderr io.Writer) error {
+		return errors.New("simulated build failure")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runPpAdd(
+		[]string{"--yes", "--no-credentials", "linear"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Fatal("expected nonzero exit when go install fails")
+	}
+	if !strings.Contains(stderr.String(), "simulated build failure") {
+		t.Errorf("stderr should surface the underlying error: %q", stderr.String())
+	}
+}
+
+func TestRunPpAdd_PassphraseFileFlagFlowsThrough(t *testing.T) {
+	// The --passphrase-file flag must reach the cli-add handoff so
+	// users can do non-interactive installs (CI / config-as-code).
+	// Verify by setting up the full happy path and confirming the
+	// install succeeds with the flag — its presence on the
+	// generated cli-add args is what makes this path testable.
+	if runtime.GOOS == "windows" {
+		t.Skip("sandboxtest fake binary is POSIX-only")
+	}
+	startFixtureCatalog(t)
+	home := fakeHome(t)
+	gobin := filepath.Join(t.TempDir(), "gobin")
+	if err := os.MkdirAll(gobin, 0o755); err != nil {
+		t.Fatalf("mkdir gobin: %v", err)
+	}
+	t.Setenv("GOBIN", gobin)
+
+	prev := runGoInstall
+	t.Cleanup(func() { runGoInstall = prev })
+	runGoInstall = func(modulePath string, stdout, stderr io.Writer) error {
+		// Drop a non-trivial fake at the expected path.
+		const helpText = "Commands:\n  do  do thing\n"
+		body := "#!/bin/sh\nprintf '%s' '" + helpText + "'\n"
+		return os.WriteFile(filepath.Join(gobin, "linear-pp-cli"), []byte(body), 0o755)
+	}
+
+	// Even though we pass --no-credentials, the flag-parsing path
+	// for --passphrase-file still has to recognize the flag and
+	// thread it through.
+	passFile := filepath.Join(t.TempDir(), "phrase")
+	if err := os.WriteFile(passFile, []byte("ignored-by-no-credentials\n"), 0o600); err != nil {
+		t.Fatalf("write passfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runPpAdd(
+		[]string{"--yes", "--no-credentials", "--passphrase-file", passFile, "linear"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	// Manifest must exist under short name — proves cli add ran.
+	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "linear", "manifest.toml")
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Errorf("manifest missing after happy install: %v", err)
 	}
 }
 
