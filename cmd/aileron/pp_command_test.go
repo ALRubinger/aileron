@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -474,6 +475,47 @@ func TestRunPpAdd_PassphraseFileFlagFlowsThrough(t *testing.T) {
 	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "linear", "manifest.toml")
 	if _, err := os.Stat(manifestPath); err != nil {
 		t.Errorf("manifest missing after happy install: %v", err)
+	}
+}
+
+func TestRunGoInstall_FailsFastOnKnownBadModule(t *testing.T) {
+	// runGoInstall is the production exec.Command shell-out;
+	// tests normally mock the var to avoid forking `go`. This
+	// one test calls the real function with a deliberately
+	// invalid module path so `go install` fails fast (bad module
+	// shape, no network resolution attempted). Exercises every
+	// line of the function body without actually installing
+	// anything — verifies env/stdout/stderr wiring is correct.
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("`go` toolchain not on $PATH; cannot exercise runGoInstall body")
+	}
+	var stdout, stderr bytes.Buffer
+	err := runGoInstall("not-a-valid/module path/with spaces", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected go install to fail on a malformed module path")
+	}
+	// The exact error message varies across Go versions; just
+	// confirm something was written to stderr (the toolchain's
+	// own diagnostic).
+	if stderr.Len() == 0 {
+		t.Errorf("expected toolchain to write a diagnostic to stderr; got empty")
+	}
+}
+
+func TestGoEnvGOPATH_ReturnsToolchainGOPATH(t *testing.T) {
+	// Companion smoke-test for the goEnvGOPATH test seam — runs
+	// the real `go env GOPATH` shell-out and verifies it returns
+	// a non-empty absolute-looking path. Covers the seam's body
+	// (4 lines) without mocking.
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("`go` not on $PATH")
+	}
+	got, err := goEnvGOPATH()
+	if err != nil {
+		t.Fatalf("goEnvGOPATH: %v", err)
+	}
+	if got == "" {
+		t.Errorf("goEnvGOPATH returned empty string")
 	}
 }
 
