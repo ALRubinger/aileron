@@ -83,6 +83,28 @@ func (p *HostPolicy) CheckURL(rawURL string) error {
 	return nil
 }
 
+// CheckHostPort verifies a `host:port` string is in the allowed
+// set. Mirrors [HostPolicy.CheckURL]'s contract for the spawn-proxy
+// path, where the proxy receives a host:port directly from the
+// CONNECT request and does not have a full URL to parse.
+//
+// Returns a structured `*Error` of class `capability_denied` and
+// boundary `sandbox` when the call is refused.
+func (p *HostPolicy) CheckHostPort(hostPort string) error {
+	candidate := normalizeHostPort(hostPort)
+	if _, ok := p.allowed[candidate]; !ok {
+		granted := make([]string, 0, len(p.allowed))
+		for h := range p.allowed {
+			granted = append(granted, h)
+		}
+		return newCapabilityDenied("host:port not in declared grant", map[string]any{
+			"requested": "network:" + candidate,
+			"granted":   prefixed(granted, "network:"),
+		})
+	}
+	return nil
+}
+
 // AllowedHosts returns a sorted-stable copy of the policy's grant for
 // auditing/error-detail purposes.
 func (p *HostPolicy) AllowedHosts() []string {

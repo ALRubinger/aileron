@@ -903,6 +903,33 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 		}
 	}
 
+	// Network proxy: when the connector declares [capabilities.network],
+	// the runtime stands up a per-spawn CONNECT proxy on host loopback
+	// and injects HTTPS_PROXY/HTTP_PROXY into the subprocess's env
+	// (per ADR-0014's "Network confinement: daemon-mediated proxy").
+	// The allowlist match logic lives in s.policy, reused from the WASM
+	// HTTP gate. The proxy goroutine is torn down when this function
+	// returns. Connectors that omit [capabilities.network] get no
+	// proxy and no HTTPS_PROXY env; the platform sandbox denies all
+	// outbound at the kernel boundary.
+	if s.policy != nil && len(s.policy.AllowedHosts()) > 0 {
+		proxy, proxyAddr, proxyClose, err := startSpawnProxy(ctx, s.policy, s.logger, s.connectorFQN)
+		if err != nil {
+			s.mu.Lock()
+			s.spawnErr = newConnectorRuntimeError(fmt.Sprintf("spawn: start network proxy: %s", err.Error()))
+			s.mu.Unlock()
+			emitSpawnAudit(ctx, s, env, "error", -1, nil, nil, "connector_runtime_error")
+			return -1
+		}
+		_ = proxy // retain for future per-spawn audit context attach
+		defer proxyClose()
+		if env.Env == nil {
+			env.Env = map[string]string{}
+		}
+		env.Env["HTTPS_PROXY"] = "http://" + proxyAddr
+		env.Env["HTTP_PROXY"] = "http://" + proxyAddr
+	}
+
 	// Hand to the platform executor. Sandbox unavailability is
 	// translated into a distinct error class so operators can tell
 	// "rules were broken" from "platform cannot enforce rules".
