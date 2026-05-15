@@ -119,10 +119,23 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 // the daemon binary in helper mode instead. The helper applies
 // Landlock then `syscall.Exec`s the wrapped program — replacing
 // itself with the CLI under the configured confinement.
+//
+// Tilde-anchored manifest paths (`~/code/`) are expanded to
+// absolute paths before encoding; the helper opens them via
+// `unix.Open` which has no shell-style expansion.
 func rewireForHelper(cmd *exec.Cmd, limits SpawnLimits) error {
 	helperPath, err := osExecutable()
 	if err != nil {
 		return fmt.Errorf("%w: locate daemon binary for spawn helper: %v", ErrSpawnUnavailable, err)
+	}
+
+	fsRead, err := expandPaths(limits.FSRead)
+	if err != nil {
+		return fmt.Errorf("%w: expand fs_read: %v", ErrSpawnUnavailable, err)
+	}
+	fsWrite, err := expandPaths(limits.FSWrite)
+	if err != nil {
+		return fmt.Errorf("%w: expand fs_write: %v", ErrSpawnUnavailable, err)
 	}
 
 	// Snapshot the wrapped invocation before reassigning cmd.Path
@@ -132,8 +145,8 @@ func rewireForHelper(cmd *exec.Cmd, limits SpawnLimits) error {
 		Argv:    append([]string(nil), cmd.Args...),
 		Env:     append([]string(nil), cmd.Env...),
 		Cwd:     cmd.Dir,
-		FSRead:  append([]string(nil), limits.FSRead...),
-		FSWrite: append([]string(nil), limits.FSWrite...),
+		FSRead:  fsRead,
+		FSWrite: fsWrite,
 	}
 	encoded, err := spawnhelper.EncodeRequest(req)
 	if err != nil {
@@ -145,6 +158,22 @@ func rewireForHelper(cmd *exec.Cmd, limits SpawnLimits) error {
 	// cmd.Env and cmd.Dir carry through to the helper unchanged;
 	// the helper uses req.Env / req.Cwd for the wrapped exec.
 	return nil
+}
+
+// expandPaths resolves any `~/`-anchored manifest paths to
+// absolute host paths via [expandTilde]. The helper's Landlock
+// setup opens each scope via `unix.Open` which has no shell-
+// style expansion, so the runtime expands here.
+func expandPaths(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, p := range in {
+		expanded, err := expandTilde(p)
+		if err != nil {
+			return nil, fmt.Errorf("expand %q: %w", p, err)
+		}
+		out = append(out, expanded)
+	}
+	return out, nil
 }
 
 // checkLinuxSandboxAvailable returns ErrSpawnUnavailable when the

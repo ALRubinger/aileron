@@ -289,7 +289,17 @@ func TestApplyPlatformSandbox_Linux_RunsRealBinaryUnderSandbox(t *testing.T) {
 	}
 
 	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "echo PID=$$")
-	limits := SpawnLimits{FSRead: []string{"~/code/"}}
+	// Declare /tmp as the read scope so Landlock's path-open
+	// succeeds; the test only cares about the PID-namespace
+	// boundary, not the FS confinement. /tmp exists on every
+	// POSIX host. The system-essentials (/lib, /lib64, /usr,
+	// /bin, /etc) are needed for /bin/sh's dyld to start.
+	limits := SpawnLimits{FSRead: []string{"/tmp"}}
+	for _, sys := range []string{"/lib", "/lib64", "/usr", "/etc", "/bin"} {
+		if _, err := os.Stat(sys); err == nil {
+			limits.FSRead = append(limits.FSRead, sys)
+		}
+	}
 	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: "/bin/sh"}, limits); err != nil {
 		t.Fatalf("applyPlatformSandbox: %v", err)
 	}
