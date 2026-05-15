@@ -230,8 +230,111 @@ func TestMakeScopeDriftHook_MigratesUntrackedBinding(t *testing.T) {
 // binding store is wired.
 func TestMakeScopeDriftHook_NilStoreNoPanic(t *testing.T) {
 	hook := makeScopeDriftHook(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	hook(context.Background(), "github://acme/x", []string{"a"})
-	// No panic = pass.
+	got := hook(context.Background(), "github://acme/x", []string{"a"})
+	if got != nil {
+		t.Errorf("nil store should return nil transitions, got %+v", got)
+	}
+}
+
+// TestMakeScopeDriftHook_ReturnsTransitionsForDriftedBinding: a
+// binding flipped to stale by the hook must surface as a
+// StaleBindingTransition so the install handler can plumb it back
+// out on the API response (#741). The CLI uses that signal to
+// prompt the operator to reauthorize inline; without it the
+// install reports success and the next action invocation needing
+// the new scope fails 403 with nothing in the install output to
+// explain why.
+func TestMakeScopeDriftHook_ReturnsTransitionsForDriftedBinding(t *testing.T) {
+	store := &binding.VaultStore{Vault: vault.NewMemVault()}
+	ctx := context.Background()
+	if err := store.Put(ctx, binding.Binding{
+		Name: "oauth2/google/work", Kind: "oauth2", Service: "google",
+		Identity: "work", ConnectorFQN: "github://acme/google",
+		GrantedScopes: []string{"https://www.googleapis.com/auth/gmail.readonly"},
+	}, []byte("envelope"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	hook := makeScopeDriftHook(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got := hook(ctx, "github://acme/google", []string{
+		"https://www.googleapis.com/auth/gmail.readonly",
+		"https://www.googleapis.com/auth/drive",
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d transitions, want 1: %+v", len(got), got)
+	}
+	tr := got[0]
+	if tr.Name != "oauth2/google/work" {
+		t.Errorf("Name = %q, want oauth2/google/work", tr.Name)
+	}
+	if tr.ConnectorFQN != "github://acme/google" {
+		t.Errorf("ConnectorFQN = %q", tr.ConnectorFQN)
+	}
+	if tr.StaleReason != binding.StaleReasonScopeDrift {
+		t.Errorf("StaleReason = %q, want scope_drift", tr.StaleReason)
+	}
+	if !reflect.DeepEqual(tr.MissingScopes, []string{"https://www.googleapis.com/auth/drive"}) {
+		t.Errorf("MissingScopes = %v", tr.MissingScopes)
+	}
+	if tr.Service != "google" {
+		t.Errorf("Service = %q, want google (carried from the binding)", tr.Service)
+	}
+}
+
+// TestMakeScopeDriftHook_ReturnsMigrationTransition: a binding with
+// no recorded grant migrates to stale `no_grant_record` and must
+// also surface as a transition with empty MissingScopes (there is
+// no recorded grant to diff against, so the CLI prompt phrases the
+// reason without naming specific scopes).
+func TestMakeScopeDriftHook_ReturnsMigrationTransition(t *testing.T) {
+	store := &binding.VaultStore{Vault: vault.NewMemVault()}
+	ctx := context.Background()
+	if err := store.Put(ctx, binding.Binding{
+		Name: "oauth2/google/work", Kind: "oauth2", Service: "google",
+		Identity: "work", ConnectorFQN: "github://acme/google",
+	}, []byte("envelope"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	hook := makeScopeDriftHook(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got := hook(ctx, "github://acme/google", []string{"any"})
+	if len(got) != 1 {
+		t.Fatalf("got %d transitions, want 1", len(got))
+	}
+	if got[0].StaleReason != binding.StaleReasonNoGrantRecord {
+		t.Errorf("StaleReason = %q, want no_grant_record", got[0].StaleReason)
+	}
+	if len(got[0].MissingScopes) != 0 {
+		t.Errorf("MissingScopes = %v, want empty for no_grant_record", got[0].MissingScopes)
+	}
+}
+
+// TestMakeScopeDriftHook_ClearStaleNotReturned: when an install
+// dropped scopes the manifest used to require and the binding's
+// grant now satisfies the new set, the evaluator flips the binding
+// back to active. That's a clear-stale transition; the hook must
+// NOT surface it as a "newly stale" entry because the operator has
+// nothing to do.
+func TestMakeScopeDriftHook_ClearStaleNotReturned(t *testing.T) {
+	store := &binding.VaultStore{Vault: vault.NewMemVault()}
+	ctx := context.Background()
+	if err := store.Put(ctx, binding.Binding{
+		Name: "oauth2/google/work", Kind: "oauth2", Service: "google",
+		Identity: "work", ConnectorFQN: "github://acme/google",
+		Status: binding.StatusStale, StaleReason: binding.StaleReasonScopeDrift,
+		GrantedScopes: []string{"a", "b"},
+		MissingScopes: []string{"c"},
+	}, []byte("envelope"), binding.PutCreate); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	hook := makeScopeDriftHook(store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got := hook(ctx, "github://acme/google", []string{"a"})
+	if got != nil {
+		t.Errorf("clear-stale must not surface as a newly-stale transition, got %+v", got)
+	}
+	// And the binding itself should be active again.
+	after, _ := store.Get(ctx, "oauth2/google/work")
+	if after.Status != binding.StatusActive {
+		t.Errorf("binding not cleared: status=%q", after.Status)
+	}
 }
 
 // fakeBindingStore is a minimal binding.Store that lets tests drive

@@ -93,6 +93,9 @@ func (s *apiServer) InstallAction(w http.ResponseWriter, r *http.Request) {
 	if unbound := s.unboundCapabilitiesFor(r.Context(), res.ConnectorFQNs); len(unbound) > 0 {
 		out.UnboundCapabilities = &unbound
 	}
+	if stale := newlyStaleBindings(res.NewlyStale); len(stale) > 0 {
+		out.NewlyStaleBindings = &stale
+	}
 	if res.AlreadyInstalled {
 		already := true
 		out.AlreadyInstalled = &already
@@ -161,6 +164,14 @@ type installActionResult struct {
 	// declares as dependencies, in declaration order. The handler
 	// uses these to scan for unbound credential capabilities.
 	ConnectorFQNs []string
+	// NewlyStale aggregates the stale-binding transitions emitted by
+	// the scope-drift hook across every implicit connector install
+	// auto_install_connectors triggered. The handler exposes this on
+	// the install response so the CLI can prompt the operator to
+	// reauthorize inline (#741); without aggregation a stale
+	// transition fired by an auto-installed connector dep would be
+	// silently lost.
+	NewlyStale []cstore.StaleBindingTransition
 }
 
 // installActionError carries an HTTP-renderable failure. When details
@@ -262,6 +273,7 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force,
 		version string
 		hash    string
 	}
+	var newlyStale []cstore.StaleBindingTransition
 	var missing []missingConnector
 	var missingNames []string
 	for _, c := range manifest.Requires.Connectors {
@@ -338,11 +350,15 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force,
 				}
 			}
 			depRef := cstore.Ref{FQN: depFQN, Version: m.version}
-			if _, iErr := s.installer.Install(ctx, cstore.InstallRequest{
+			depRes, iErr := s.installer.Install(ctx, cstore.InstallRequest{
 				Ref:          depRef,
 				ExpectedHash: m.hash,
-			}); iErr != nil {
+			})
+			if iErr != nil {
 				return nil, classifyInstallActionErr(iErr)
+			}
+			if depRes != nil && len(depRes.NewlyStale) > 0 {
+				newlyStale = append(newlyStale, depRes.NewlyStale...)
 			}
 		}
 	}
@@ -429,6 +445,7 @@ func (s *apiServer) runInstallAction(ctx context.Context, ref cstore.Ref, force,
 		Source:           manifest.Source,
 		AlreadyInstalled: already,
 		ConnectorFQNs:    connectorFQNs,
+		NewlyStale:       newlyStale,
 	}, nil
 }
 

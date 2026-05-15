@@ -648,6 +648,53 @@ func TestInstallAction_AutoInstallConnectorsSucceeds(t *testing.T) {
 	}
 }
 
+// TestInstallAction_NewlyStaleBindingsFromAutoInstall: when
+// auto_install_connectors=true triggers an implicit connector
+// install whose scope-drift hook flips bindings to `stale`, those
+// transitions must surface on the action install response's
+// newly_stale_bindings field (#741). Without this aggregation a
+// stale-marking caused by an upgraded connector dep would be
+// silently lost — the operator would see `Added: <action>` and
+// never learn that an existing binding now needs reauthorize.
+func TestInstallAction_NewlyStaleBindingsFromAutoInstall(t *testing.T) {
+	depFQN := "github://acme/aileron-connector-x"
+	depVersion := "1.0.0"
+	connectorRef, _ := cstore.ParseRef(depFQN + "@" + depVersion)
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	connectorTarball, depHash := signedConnectorTarball(t, depFQN, depVersion, priv)
+
+	actionRef, _ := cstore.ParseRef("github://acme/aileron-connector-x/actions/run@0.1.0")
+	md := goodActionMD(depFQN, depHash)
+	actionTarball := buildActionTarball(t, md, priv)
+
+	srv := buildAutoInstallServer(t, actionRef, actionTarball, connectorRef, connectorTarball, pub)
+	srv.installer.ScopeDriftHook = func(_ context.Context, fqn string, _ []string) []cstore.StaleBindingTransition {
+		return []cstore.StaleBindingTransition{
+			{Name: "oauth2/x/work", ConnectorFQN: fqn,
+				StaleReason: "scope_drift", MissingScopes: []string{"read"}},
+		}
+	}
+
+	rec := postInstallAction(srv, `{
+		"fqn": "github://acme/aileron-connector-x/actions/run",
+		"version": "0.1.0",
+		"auto_install_connectors": true
+	}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.InstalledAction
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.NewlyStaleBindings == nil || len(*got.NewlyStaleBindings) != 1 {
+		t.Fatalf("NewlyStaleBindings = %+v, want one entry", got.NewlyStaleBindings)
+	}
+	if (*got.NewlyStaleBindings)[0].Name != "oauth2/x/work" {
+		t.Errorf("Name = %q", (*got.NewlyStaleBindings)[0].Name)
+	}
+}
+
 func TestInstallAction_AutoInstallHashMismatchAborts(t *testing.T) {
 	// The action manifest pins a hash that does NOT match what the
 	// connector tarball produces. Auto-install runs the connector

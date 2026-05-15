@@ -5032,6 +5032,22 @@ components:
             True when the install was a no-op because an entry with the
             matching hash already existed (offline reinstall path per
             ADR-0004).
+        newly_stale_bindings:
+          type: array
+          description: |
+            Bindings whose status flipped to `stale` as a result of this
+            install — either because the new manifest demands an OAuth
+            scope the recorded grant lacks (`scope_drift`) or because
+            the binding predates scope tracking (`no_grant_record`) and
+            needs a one-time reauthorize so the daemon can record what
+            was granted. Emitted by the scope-drift hook (#726/#729).
+            The CLI uses this list to prompt the operator to drop into
+            `aileron binding reauthorize` inline (#741); without this
+            signal the install reports success and the next action
+            invocation that needs the new scope fails with a 403 from
+            the upstream provider.
+          items:
+            $ref: "#/components/schemas/StaleBinding"
 
     InstallActionRequest:
       type: object
@@ -5223,6 +5239,59 @@ components:
             and avoids hitting `binding_required` later.
           items:
             $ref: "#/components/schemas/UnboundCapability"
+        newly_stale_bindings:
+          type: array
+          description: |
+            Existing bindings whose status flipped to `stale` because
+            this install upgraded a connector whose manifest now demands
+            an OAuth scope the recorded grant lacks (`scope_drift`), or
+            because the binding predates scope tracking and needs a
+            one-time reauthorize (`no_grant_record`). The CLI uses this
+            list to prompt the operator to drop into
+            `aileron binding reauthorize` inline (#741); without this
+            signal the install reports success and the next action
+            invocation that needs the new scope fails with a 403.
+            Aggregated across implicit connector installs the action
+            triggers (`auto_install_connectors=true`).
+          items:
+            $ref: "#/components/schemas/StaleBinding"
+
+    StaleBinding:
+      type: object
+      required: [name, connector_fqn, stale_reason]
+      description: |
+        Describes one binding the scope-drift hook (#726/#729) marked
+        `stale` on an install. Returned on install API responses (#741)
+        so the CLI/webapp can offer to reauthorize inline.
+      properties:
+        name:
+          type: string
+          description: Canonical binding name (`kind/service/identity`).
+        connector_fqn:
+          type: string
+          description: FQN of the connector this binding is anchored to.
+        stale_reason:
+          type: string
+          enum: [scope_drift, no_grant_record]
+          description: |
+            Why the binding is stale. `scope_drift` — manifest demands a
+            scope the recorded grant lacks; the prompt names the missing
+            scopes. `no_grant_record` — binding predates scope tracking
+            and needs one reauthorize so the daemon can record what was
+            granted; no specific scopes to list.
+        missing_scopes:
+          type: array
+          items:
+            type: string
+          description: |
+            Scopes the binding lacks (for `scope_drift` only). Empty
+            for `no_grant_record`.
+        service:
+          type: string
+          description: |
+            Human-readable service label from the binding ("Google",
+            "Slack"). The CLI uses this in the prompt; clients fall
+            back to `connector_fqn` when empty.
 
     UnboundCapability:
       type: object

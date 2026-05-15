@@ -2443,6 +2443,21 @@ type installedActionRefWire struct {
 	Path    string `json:"path"`
 }
 
+// staleBindingWire mirrors api.StaleBinding. Populated on the
+// install response when this install caused one or more existing
+// bindings to transition to `stale` — either because the new manifest
+// demands a scope the recorded grant lacks (`scope_drift`) or because
+// the binding predates scope tracking and needs a one-time
+// reauthorize (`no_grant_record`). The CLI prompts the operator to
+// drop into `aileron binding reauthorize <name>` inline (#741).
+type staleBindingWire struct {
+	Name          string   `json:"name"`
+	ConnectorFQN  string   `json:"connector_fqn"`
+	StaleReason   string   `json:"stale_reason"`
+	MissingScopes []string `json:"missing_scopes,omitempty"`
+	Service       string   `json:"service,omitempty"`
+}
+
 // renderActionPreview prints the consent-prompt summary for an
 // action add. Sections: action metadata (name, version, hash,
 // intent, signature status), then the connector deps split into
@@ -2577,8 +2592,16 @@ type actionAddOptions struct {
 // each entry. The integer return code from installOneAction tells the
 // caller success vs. failure; this struct adds the texture needed to
 // render "Upgraded" vs. "Added" vs. "Skipped" in the summary.
+//
+// staleBindings collects bindings the install transitioned to `stale`
+// so the suite-install path can present a single batch reauthorize
+// prompt at the end of the loop (#741) — per-action prompts would
+// fragment the OAuth dances across each install, which is the very
+// disruption ADR-0006 / #726 was avoiding when it chose against a
+// mid-install reauthorize prompt.
 type actionInstallOutcome struct {
-	status actionInstallStatus
+	status        actionInstallStatus
+	staleBindings []staleBindingWire
 }
 
 type actionInstallStatus string
@@ -2861,6 +2884,7 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 			Kind         string  `json:"kind"`
 			Scope        *string `json:"scope,omitempty"`
 		} `json:"unbound_capabilities,omitempty"`
+		NewlyStaleBindings []staleBindingWire `json:"newly_stale_bindings,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
 		fmt.Fprintf(stderr, "error parsing response: %v\n", err)
@@ -2881,6 +2905,15 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 	fmt.Fprintf(stdout, "%s: %s\n  source: %s\n  path: %s\n",
 		verb, resp.Name, resp.Source, resp.Path)
 
+	// Hand stale-binding transitions back to the suite path through
+	// the per-entry outcome so the loop can offer one batch prompt at
+	// the end — installOneAction itself only prompts in the
+	// non-suite-consented path so a single-action install still gets
+	// the inline prompt.
+	if opts.outcome != nil {
+		opts.outcome.staleBindings = resp.NewlyStaleBindings
+	}
+
 	if opts.noBind || len(resp.UnboundCapabilities) == 0 {
 		if len(resp.UnboundCapabilities) > 0 {
 			fmt.Fprintln(stdout, "")
@@ -2889,6 +2922,13 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 				fmt.Fprintf(stdout, "  - %s (%s)\n", u.ConnectorFQN, u.Kind)
 			}
 			fmt.Fprintln(stdout, "Run `aileron binding setup <connector-FQN>` for each before invoking the action.")
+		}
+		// Even when --no-bind suppresses the prompt, surface the
+		// stale-binding list so a scripted install path doesn't
+		// silently drop the signal. Skipped under suite-consented
+		// installs because the suite loop owns the batch prompt.
+		if !opts.suiteConsented {
+			promptReauthorizeStaleBindings(resp.NewlyStaleBindings, opts.yes, opts.noBind, stdin, stdout, stderr)
 		}
 		return 0
 	}
@@ -2913,7 +2953,112 @@ func installOneAction(opts actionAddOptions, stdin io.Reader, stdout, stderr io.
 			// one later.
 		}
 	}
+
+	// Suite-consented installs defer the stale-binding prompt to the
+	// suite loop, which dedupes across all entries and presents one
+	// batch prompt at the tail; a per-action prompt here would
+	// fragment the OAuth dances and undo that batching.
+	if !opts.suiteConsented {
+		promptReauthorizeStaleBindings(resp.NewlyStaleBindings, opts.yes, opts.noBind, stdin, stdout, stderr)
+	}
 	return 0
+}
+
+// promptReauthorizeStaleBindings walks a stale-binding list emitted
+// by an install endpoint and, for each entry, offers to drop into
+// `aileron binding reauthorize <name>` inline. Mirrors the existing
+// unbound-capability prompt loop at the tail of installOneAction —
+// the operator stays in the CLI surface, doesn't have to navigate to
+// `aileron binding list` or the webapp to discover the stale state,
+// and the install does not silently complete with a credential the
+// next action invocation will fail against.
+//
+// Behavior:
+//
+//   - noBind suppresses the prompt entirely but still prints the list
+//     so a scripted install retains the signal in stdout (parity with
+//     the existing unbound-capability `--no-bind` branch above).
+//   - autoYes prints the list but does NOT auto-reauthorize. The
+//     reauthorize flow opens a browser tab; doing that without an
+//     explicit Y is a foot-gun. Operators scripting installs see the
+//     list and decide; "skip the prompt" defaults to "skip the
+//     credential operation," not "do it without confirmation."
+//   - Otherwise, each binding gets its own Y/n. "n" prints a hint
+//     pointing at the standalone `aileron binding reauthorize` verb
+//     and the loop continues — partial reauthorize is better than
+//     aborting the rest of the list on one decline.
+func promptReauthorizeStaleBindings(stale []staleBindingWire, autoYes, noBind bool, stdin io.Reader, stdout, stderr io.Writer) {
+	if len(stale) == 0 {
+		return
+	}
+	if noBind {
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "This install requires reauthorization on existing bindings:")
+		for _, b := range stale {
+			fmt.Fprintf(stdout, "  - %s\n", staleBindingHeader(b))
+		}
+		fmt.Fprintln(stdout, "Run `aileron binding reauthorize <name>` for each before invoking the action.")
+		return
+	}
+	if autoYes {
+		// --yes signals "no interactive prompts" but the credential
+		// operation requires its own browser hand-off and explicit
+		// confirmation; we surface the work to do instead of doing it.
+		fmt.Fprintln(stdout, "")
+		fmt.Fprintln(stdout, "This install requires reauthorization on existing bindings:")
+		for _, b := range stale {
+			renderStaleBindingDetail(stdout, b)
+			fmt.Fprintf(stdout, "    Run `aileron binding reauthorize %s` when ready.\n", b.Name)
+		}
+		return
+	}
+	for _, b := range stale {
+		fmt.Fprintln(stdout, "")
+		renderStaleBindingDetail(stdout, b)
+		answer := promptLine(stdin, stdout, "    Reauthorize now? [Y/n]: ")
+		if strings.EqualFold(answer, "n") || strings.EqualFold(answer, "no") {
+			fmt.Fprintf(stdout, "    Skipped. Run `aileron binding reauthorize %s` when ready.\n", b.Name)
+			continue
+		}
+		if rc := runBindingReauthorize([]string{b.Name}, stdout, stderr); rc != 0 {
+			fmt.Fprintf(stderr, "    binding reauthorize for %s exited %d\n", b.Name, rc)
+		}
+	}
+}
+
+// staleBindingHeader formats the "name (label)" line used in
+// non-interactive paths (--no-bind list). Service is preferred for
+// human readability; FQN is the fallback for older daemons that
+// don't populate the optional Service field.
+func staleBindingHeader(b staleBindingWire) string {
+	label := b.Service
+	if label == "" {
+		label = b.ConnectorFQN
+	}
+	return fmt.Sprintf("%s (%s)", b.Name, label)
+}
+
+// renderStaleBindingDetail prints the multi-line prompt header for
+// one stale binding: name, service/connector, reason-specific
+// phrasing (migration vs. drift), and — for drift — the missing
+// scope list. The two reason phrasings stay distinct so the operator
+// understands a no_grant_record migration is a one-time event rather
+// than a sign their manifest is churning; collapsing them into a
+// generic "needs reauthorize" line hides that distinction.
+func renderStaleBindingDetail(w io.Writer, b staleBindingWire) {
+	fmt.Fprintf(w, "  - %s\n", staleBindingHeader(b))
+	switch b.StaleReason {
+	case "scope_drift":
+		fmt.Fprintln(w, "    This upgrade requires additional OAuth scopes the existing binding doesn't grant.")
+		if len(b.MissingScopes) > 0 {
+			fmt.Fprintf(w, "    Missing: %s\n", strings.Join(b.MissingScopes, ", "))
+		}
+	case "no_grant_record":
+		fmt.Fprintln(w, "    This connector now tracks granted OAuth scopes; the existing binding predates")
+		fmt.Fprintln(w, "    that and needs a one-time reauthorize to record what was granted.")
+	default:
+		fmt.Fprintln(w, "    Binding marked stale and needs reauthorize.")
+	}
 }
 
 // runActionAddSuite implements `aileron action add-suite <SOURCE>`
@@ -3148,7 +3293,15 @@ func installSuiteEntries(manifest *suite.Manifest, refs []cstore.Ref, hubSuiteFQ
 	// pending ref into actionInstallStatusCancelled; preview-failed
 	// refs stay failed regardless. The trustState carries the
 	// authorities resolved in phase 1.
-	results := runSuiteInstallLoop(refs, previews, opts, trust, cancelled, stdin, stdout, stderr)
+	results, staleBindings := runSuiteInstallLoop(refs, previews, opts, trust, cancelled, stdin, stdout, stderr)
+	// Phase 4 (#741): one batch reauthorize prompt for the
+	// deduplicated set of bindings the install loop transitioned to
+	// `stale`. Cancellation skips this — no install ran, so no
+	// transitions to surface. opts.yes / opts.noBind are respected
+	// the same way as in the single-action path.
+	if !cancelled {
+		promptReauthorizeStaleBindings(staleBindings, opts.yes, opts.noBind, stdin, stdout, stderr)
+	}
 	return renderSuiteSummary(stdout, results)
 }
 
@@ -3417,8 +3570,17 @@ type suiteInstallResult struct {
 // Preview-failed refs (from phase 1b) are reported as failed without
 // re-running installOneAction — the underlying preview call would
 // just fail again.
-func runSuiteInstallLoop(refs []cstore.Ref, previews []suiteRefPreview, opts actionAddOptions, trust *trustState, cancelled bool, stdin *bufio.Reader, stdout, stderr io.Writer) []suiteInstallResult {
+//
+// Returns the per-ref result list plus the deduplicated set of
+// bindings the loop flipped to `stale` across every install (#741).
+// Suite-consented entries defer their per-install reauthorize prompt
+// to the caller, which presents a single batch prompt at the tail
+// instead of N fragmented browser hand-offs — the disruption #726
+// flagged when it chose against a mid-install reauthorize prompt.
+func runSuiteInstallLoop(refs []cstore.Ref, previews []suiteRefPreview, opts actionAddOptions, trust *trustState, cancelled bool, stdin *bufio.Reader, stdout, stderr io.Writer) ([]suiteInstallResult, []staleBindingWire) {
 	results := make([]suiteInstallResult, 0, len(refs))
+	var aggregate []staleBindingWire
+	seen := make(map[string]struct{})
 	for i, ref := range refs {
 		fmt.Fprintln(stdout)
 		fmt.Fprintf(stdout, "── [%d/%d] %s\n", i+1, len(refs), ref.String())
@@ -3438,8 +3600,18 @@ func runSuiteInstallLoop(refs []cstore.Ref, previews []suiteRefPreview, opts act
 		entryOpts.outcome = &outcome
 		rc := installOneAction(entryOpts, stdin, stdout, stderr, trust)
 		results = append(results, suiteInstallResult{ref: ref.String(), rc: rc, outcome: outcome.status})
+		for _, sb := range outcome.staleBindings {
+			// Dedupe by binding name: two actions that share the same
+			// connector both fire the hook against the same binding,
+			// and we want to prompt for it exactly once at the tail.
+			if _, ok := seen[sb.Name]; ok {
+				continue
+			}
+			seen[sb.Name] = struct{}{}
+			aggregate = append(aggregate, sb)
+		}
 	}
-	return results
+	return results, aggregate
 }
 
 // renderSuiteSummary prints the per-ref outcome list + the rolled-up

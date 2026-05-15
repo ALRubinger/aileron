@@ -1085,6 +1085,9 @@ func (s *apiServer) InstallConnector(w http.ResponseWriter, r *http.Request) {
 		Hash:     res.Hash,
 		EntryDir: res.EntryDir,
 	}
+	if stale := newlyStaleBindings(res.NewlyStale); len(stale) > 0 {
+		out.NewlyStaleBindings = &stale
+	}
 	s.recordConnectorInstalled(r.Context(), ref, res)
 	if res.AlreadyInstalled {
 		already := true
@@ -1093,6 +1096,38 @@ func (s *apiServer) InstallConnector(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
+}
+
+// newlyStaleBindings maps the cstore-shaped transition list onto the
+// generated API type. Returns a fresh slice (or nil when empty) so
+// callers can plug the value straight into the optional pointer field
+// on the install response without aliasing the installer's slice.
+//
+// Stays in this file because both the connector and action install
+// handlers consume it; the action handler also aggregates across
+// implicit connector installs (issue #741) and reuses this helper.
+func newlyStaleBindings(transitions []cstore.StaleBindingTransition) []api.StaleBinding {
+	if len(transitions) == 0 {
+		return nil
+	}
+	out := make([]api.StaleBinding, 0, len(transitions))
+	for _, t := range transitions {
+		entry := api.StaleBinding{
+			Name:         t.Name,
+			ConnectorFqn: t.ConnectorFQN,
+			StaleReason:  api.StaleBindingStaleReason(t.StaleReason),
+		}
+		if len(t.MissingScopes) > 0 {
+			scopes := append([]string(nil), t.MissingScopes...)
+			entry.MissingScopes = &scopes
+		}
+		if t.Service != "" {
+			service := t.Service
+			entry.Service = &service
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // recordConnectorInstalled emits the install-consent audit event

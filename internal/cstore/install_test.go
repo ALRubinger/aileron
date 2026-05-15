@@ -106,9 +106,10 @@ scopes = ["read", "write"]
 		Fetcher:  fetcher,
 		Verifier: keyring,
 		Store:    NewStore(t.TempDir()),
-		ScopeDriftHook: func(_ context.Context, fqn string, required []string) {
+		ScopeDriftHook: func(_ context.Context, fqn string, required []string) []StaleBindingTransition {
 			hookFQN = fqn
 			hookScopes = required
+			return nil
 		},
 	}
 	if _, err := inst.Install(context.Background(), InstallRequest{Ref: ref}); err != nil {
@@ -134,11 +135,12 @@ func TestInstall_ScopeDriftHookFiresOnAlreadyInstalled(t *testing.T) {
 		t.Fatalf("first Install: %v", err)
 	}
 	hookCalls := 0
-	inst.ScopeDriftHook = func(_ context.Context, fqn string, _ []string) {
+	inst.ScopeDriftHook = func(_ context.Context, fqn string, _ []string) []StaleBindingTransition {
 		hookCalls++
 		if fqn != "github://aileron/slack" {
 			t.Errorf("hook fqn = %q on short-circuit", fqn)
 		}
+		return nil
 	}
 	// Second install with the recorded ExpectedHash hits the
 	// already-installed short-circuit.
@@ -170,9 +172,10 @@ func TestInstall_ScopeDriftHookHandlesUnreadableManifest(t *testing.T) {
 	}
 	var hookFired bool
 	var hookScopes []string
-	inst.ScopeDriftHook = func(_ context.Context, _ string, required []string) {
+	inst.ScopeDriftHook = func(_ context.Context, _ string, required []string) []StaleBindingTransition {
 		hookFired = true
 		hookScopes = required
+		return nil
 	}
 	if _, err := inst.Install(context.Background(),
 		InstallRequest{Ref: ref, ExpectedHash: hash}); err != nil {
@@ -183,6 +186,72 @@ func TestInstall_ScopeDriftHookHandlesUnreadableManifest(t *testing.T) {
 	}
 	if hookScopes != nil {
 		t.Errorf("hook got non-nil scopes from corrupt manifest: %v", hookScopes)
+	}
+}
+
+// TestInstall_NewlyStaleTransitionsSurfacedOnFreshInstall: the
+// installer surfaces the hook's stale-binding transitions on
+// InstallResult.NewlyStale so the handler can include them in the
+// API response (#741). Without this plumbing the install reports
+// success and the next action invocation needing the new scope
+// fails 403 against the upstream provider with no signal at install
+// time. Covers the fresh-install path (steps through Verify+Commit).
+func TestInstall_NewlyStaleTransitionsSurfacedOnFreshInstall(t *testing.T) {
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, _, _ := happyPathInstaller(t, ref)
+	stale := []StaleBindingTransition{
+		{Name: "oauth2/slack/work", ConnectorFQN: ref.FQN.String(),
+			StaleReason: "scope_drift", MissingScopes: []string{"chat:write"}},
+	}
+	inst.ScopeDriftHook = func(_ context.Context, _ string, _ []string) []StaleBindingTransition {
+		return stale
+	}
+	res, err := inst.Install(context.Background(), InstallRequest{Ref: ref})
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if len(res.NewlyStale) != 1 || res.NewlyStale[0].Name != "oauth2/slack/work" {
+		t.Fatalf("NewlyStale = %+v, want one transition for oauth2/slack/work", res.NewlyStale)
+	}
+	if res.NewlyStale[0].StaleReason != "scope_drift" {
+		t.Errorf("StaleReason = %q, want scope_drift", res.NewlyStale[0].StaleReason)
+	}
+}
+
+// TestInstall_NewlyStaleTransitionsSurfacedOnShortCircuit: the
+// already-installed short-circuit must propagate transitions too —
+// that path is the migration case (binding has no recorded grant)
+// the user described in #741. Without this branch a reinstall after
+// upgrading the daemon (which adds scope tracking) would mark
+// bindings stale but never tell the caller.
+func TestInstall_NewlyStaleTransitionsSurfacedOnShortCircuit(t *testing.T) {
+	ref := mustRef(t, "github://aileron/slack@1.2.0")
+	inst, hash, _ := happyPathInstaller(t, ref)
+	// First install populates the store but doesn't return transitions.
+	inst.ScopeDriftHook = func(_ context.Context, _ string, _ []string) []StaleBindingTransition {
+		return nil
+	}
+	if _, err := inst.Install(context.Background(), InstallRequest{Ref: ref}); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	// Second install hits the short-circuit; arrange the hook to emit
+	// a transition this time (mimics the migration mark).
+	inst.ScopeDriftHook = func(_ context.Context, _ string, _ []string) []StaleBindingTransition {
+		return []StaleBindingTransition{
+			{Name: "oauth2/slack/work", ConnectorFQN: ref.FQN.String(),
+				StaleReason: "no_grant_record"},
+		}
+	}
+	res, err := inst.Install(context.Background(),
+		InstallRequest{Ref: ref, ExpectedHash: hash})
+	if err != nil {
+		t.Fatalf("short-circuit Install: %v", err)
+	}
+	if !res.AlreadyInstalled {
+		t.Fatal("expected short-circuit (AlreadyInstalled=true)")
+	}
+	if len(res.NewlyStale) != 1 || res.NewlyStale[0].StaleReason != "no_grant_record" {
+		t.Errorf("NewlyStale = %+v, want one no_grant_record transition", res.NewlyStale)
 	}
 }
 
