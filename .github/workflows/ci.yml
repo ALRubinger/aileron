@@ -63,8 +63,18 @@ jobs:
         run: pnpm check
 
   test:
-    name: Unit Tests
+    # Sharded Linux Go unit tests. The single-shot equivalent is
+    # `task test:go:ci`; CI splits it into two matrix shards because
+    # internal/sandbox/... accounts for ~44% of total Go test wall
+    # time. Two parallel shards cut Unit Tests wall from ~5m → ~2m30s.
+    # Both shards upload coverage under the `unit` flag; Codecov
+    # merges by file.
+    name: Unit Tests (${{ matrix.shard }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [sandbox, rest]
     steps:
       - uses: actions/checkout@v6
 
@@ -90,7 +100,7 @@ jobs:
         run: go install gotest.tools/gotestsum@latest
 
       - name: Run Go tests
-        run: task test:go:ci
+        run: task test:go:ci:${{ matrix.shard }}
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v6

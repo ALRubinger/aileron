@@ -300,7 +300,7 @@ tasks:
       - go tool cover -func=coverage.txt | tail -1
 
   test:go:ci:
-    desc: Run Go tests with race, coverage, and JUnit output (used by CI)
+    desc: Run Go tests with race, coverage, and JUnit output (single-shot; local equivalent of the CI shards combined)
     deps:
       - build:forwarder
     cmds:
@@ -312,6 +312,37 @@ tasks:
       # mismatch. Belt-and-suspenders alongside codecov.yml's ignore
       # directive so local `go tool cover` summaries agree with
       # Codecov reports.
+      - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
+      - rm coverage-raw.txt
+
+  test:go:ci:sandbox:
+    # Sandbox shard of the CI Go test suite. Paired with
+    # test:go:ci:rest; together they cover the same package set as
+    # test:go:ci. Split because internal/sandbox/... accounts for ~44%
+    # of total Go test wall time, so isolating it gives a roughly
+    # balanced 2-shard matrix.
+    desc: Run CI Go tests for the internal/sandbox/... shard
+    deps:
+      - build:forwarder
+    cmds:
+      - gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt ./internal/sandbox/...
+      - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
+      - rm coverage-raw.txt
+
+  test:go:ci:rest:
+    # Non-sandbox shard. Computes the package list at runtime as
+    # "everything in GO_TEST_PACKAGES minus internal/sandbox/...";
+    # using `go list | grep` keeps the source-of-truth in
+    # GO_TEST_PACKAGES so newly added packages flow into the right
+    # shard automatically.
+    desc: Run CI Go tests for everything except internal/sandbox/...
+    deps:
+      - build:forwarder
+    cmds:
+      - |
+        set -euo pipefail
+        pkgs=$(go list {{.GO_TEST_PACKAGES}} | grep -vE '/sandbox(/|$)' | tr '\n' ' ')
+        gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt $pkgs
       - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
       - rm coverage-raw.txt
 
