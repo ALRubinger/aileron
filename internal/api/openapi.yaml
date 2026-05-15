@@ -2772,13 +2772,29 @@ paths:
 
         The PKCE verifier never crosses the wire; only the challenge
         appears in the authorize URL. The session_id is the handle the
-        caller uses to complete the flow via `oauth2/finish`.
+        caller uses to complete the flow via `oauth2/finish` (when
+        `caller=cli`) — the daemon itself completes the flow when
+        `caller=daemon`.
 
-        The caller is responsible for opening the user's browser to
-        `authorize_url` and serving the loopback callback at
-        `redirect_uri`. The connector's OAuth app must register
-        `http://localhost` as a redirect URI (loopback-only in v1 per
-        ADR-0002).
+        Two callers are supported. Both serve the callback on the local
+        loopback per ADR-0002; they differ in who binds the port.
+
+        - `caller=cli` (default, current CLI behavior). The daemon picks
+          a free ephemeral port and embeds `http://127.0.0.1:<port>/callback`
+          in the authorize URL. The CLI is responsible for binding that
+          port and posting the captured code/state to
+          `/v1/bindings/setup/oauth2/finish`.
+
+        - `caller=daemon` (browser-driven flow). The daemon's own listen
+          address is the redirect target — the callback path lives at
+          `/v1/bindings/setup/oauth2/callback`. The OAuth provider
+          redirects directly to the daemon; the daemon validates state,
+          exchanges the code, persists the binding, and finally
+          redirects the user's browser to `return_to`. The caller never
+          posts to `oauth2/finish` in this mode.
+
+        The connector's OAuth app must register `http://localhost`
+        (any port — RFC 8252 §7.3) as a redirect URI under either mode.
       operationId: initOAuth2Binding
       requestBody:
         required: true
@@ -2861,6 +2877,125 @@ paths:
                 $ref: "#/components/schemas/Error"
         "423":
           $ref: "#/components/responses/VaultLocked"
+
+  /v1/bindings/setup/oauth2/callback:
+    get:
+      tags: [Bindings]
+      summary: Daemon-hosted OAuth2 callback
+      description: |
+        Provider-driven redirect target for OAuth2 flows opened with
+        `caller=daemon` on `/v1/bindings/setup/oauth2/init`. The
+        endpoint is a `GET` rather than a `POST` because the OAuth
+        provider redirects the user's browser here; query parameters
+        carry the authorization code and state value.
+
+        Behavior on success:
+
+        1. Look up the in-process session by `state` (CSRF binding).
+           A missing or expired session returns `404`.
+        2. Validate that `state` matches what the session was opened
+           with (defensive — same value used as the index).
+        3. Exchange `code` for tokens against the connector's
+           `token_url` using the PKCE verifier stored in the session.
+        4. Persist the binding (create on first setup, upsert on
+           reauthorize — same persistence rules as
+           `oauth2/finish`).
+        5. Redirect the user's browser to the session's `return_to`
+           URL (`303 See Other`).
+
+        On any error the endpoint returns an HTML page summarizing the
+        failure so the user — who lands here in a browser tab — has
+        something to read; the structured `error.code` is still
+        rendered for support escalation.
+
+        Vault must be unlocked to persist the binding.
+      operationId: oauth2BindingCallback
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Authorization code from the OAuth provider.
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+          description: |
+            State token from the OAuth provider's redirect. Daemon
+            compares against the session it indexed under this value
+            on init; mismatch (or no session) returns 404.
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            OAuth-provider-supplied error code (e.g. `access_denied`).
+            When present, the daemon clears the session, skips the
+            token exchange, and surfaces the failure on the rendered
+            page. Mutually exclusive with `code` per OAuth2 §4.1.2.1.
+        - name: error_description
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            OAuth-provider-supplied human-readable error detail. Used
+            alongside `error` in the failure page.
+      responses:
+        "303":
+          description: |
+            Token exchange succeeded; the daemon persisted the binding
+            and is redirecting the browser to the session's `return_to`.
+          headers:
+            Location:
+              schema:
+                type: string
+              description: The session's `return_to` URL.
+        "400":
+          description: |
+            Malformed callback (missing required params, or provider
+            returned `error`). HTML response targeted at the human in
+            the browser tab.
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: |
+            No session matches `state`, or the session expired
+            (10-minute TTL). HTML response targeted at the human in
+            the browser tab.
+          content:
+            text/html:
+              schema:
+                type: string
+        "409":
+          description: |
+            Binding already exists (first-time setup races a concurrent
+            create). HTML response.
+          content:
+            text/html:
+              schema:
+                type: string
+        "422":
+          description: |
+            Token exchange failed at the provider. HTML response.
+          content:
+            text/html:
+              schema:
+                type: string
+        "423":
+          description: |
+            Vault is locked. HTML response prompting the user to unlock
+            before retrying.
+          content:
+            text/html:
+              schema:
+                type: string
 
   /v1/bindings/{name}/rebind:
     post:
@@ -6142,6 +6277,30 @@ components:
             authorize URL is built with `prompt=consent` so the provider
             re-prompts for the upgraded scope set instead of silently
             reissuing from prior consent.
+        caller:
+          type: string
+          enum: [cli, daemon]
+          default: cli
+          description: |
+            Selects who serves the OAuth callback. See the endpoint
+            description for the full contract.
+
+            - `cli` (default) — daemon picks an ephemeral loopback port;
+              the calling CLI binds it and posts to `oauth2/finish`.
+              Unchanged from the pre-#743 behavior.
+            - `daemon` — the daemon's own listen address is the callback
+              target. The provider's redirect lands at
+              `/v1/bindings/setup/oauth2/callback`, the daemon completes
+              the flow internally, and the user's browser is then
+              redirected to `return_to`. Requires `return_to`.
+        return_to:
+          type: string
+          description: |
+            URL the daemon redirects the browser to after completing a
+            `caller=daemon` flow. Required when `caller=daemon`; ignored
+            when `caller=cli`. Validated as loopback-only (`127.0.0.1`,
+            `localhost`, or `[::1]`) under http(s) — same boundary as
+            ADR-0002's loopback constraint on the redirect URI itself.
 
     OAuth2InitResponse:
       type: object
