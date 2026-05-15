@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -753,12 +754,16 @@ func TestRunCaptured_EnforcesLimits(t *testing.T) {
 	}
 }
 
-func TestSpawn_HostFunctions_InjectsProxyEnvWhenNetworkDeclared(t *testing.T) {
+func TestSpawn_HostFunctions_RoutesProxyPerPlatformWhenNetworkDeclared(t *testing.T) {
 	// Contract: when the connector manifest carries
-	// [capabilities.network] hosts, the runtime stands up a per-spawn
-	// proxy on loopback and injects HTTPS_PROXY/HTTP_PROXY on the
-	// subprocess's env before the executor sees it. The proxy is
-	// torn down after Spawn returns.
+	// [capabilities.network] hosts, the runtime stands up a
+	// per-spawn proxy and routes it differently per platform:
+	//   - macOS / Windows: HTTPS_PROXY/HTTP_PROXY injected on the
+	//     subprocess's env (it dials the host TCP proxy directly).
+	//   - Linux: the proxy binds on a UDS and the runtime passes
+	//     the path through SpawnLimits.ProxyUDSPath; the
+	//     in-namespace helper bridges and injects HTTPS_PROXY
+	//     post-fork, so the env at this layer carries neither.
 	fake := &fakeExecutor{result: SpawnResult{ExitCode: 0}}
 	m := goodSpawnManifest()
 	m.Capabilities.Network = &cstore.ManifestNetwork{
@@ -775,6 +780,19 @@ func TestSpawn_HostFunctions_InjectsProxyEnvWhenNetworkDeclared(t *testing.T) {
 	if rc := processSpawn(ctx, state, envBytes); rc != 0 {
 		t.Fatalf("processSpawn rc=%d err=%v", rc, state.spawnErr)
 	}
+
+	if runtime.GOOS == "linux" {
+		// Linux: proxy on UDS, helper injects HTTPS_PROXY.
+		if fake.gotLimits.ProxyUDSPath == "" {
+			t.Errorf("ProxyUDSPath empty; want UDS-bound proxy on Linux. limits=%+v", fake.gotLimits)
+		}
+		if _, ok := fake.gotEnv.Env["HTTPS_PROXY"]; ok {
+			t.Errorf("HTTPS_PROXY injected by runtime on Linux; expected helper to inject post-fork. env=%v", fake.gotEnv.Env)
+		}
+		return
+	}
+
+	// macOS / Windows: proxy on TCP, env injected by runtime.
 	httpsProxy, ok := fake.gotEnv.Env["HTTPS_PROXY"]
 	if !ok {
 		t.Errorf("HTTPS_PROXY missing from injected env; got %v", fake.gotEnv.Env)
@@ -787,10 +805,11 @@ func TestSpawn_HostFunctions_InjectsProxyEnvWhenNetworkDeclared(t *testing.T) {
 	}
 }
 
-func TestSpawn_HostFunctions_NoProxyEnvWhenNetworkAbsent(t *testing.T) {
+func TestSpawn_HostFunctions_NoProxyRoutingWhenNetworkAbsent(t *testing.T) {
 	// Contract: a spawn connector that omits [capabilities.network]
-	// gets no HTTPS_PROXY injection. The subprocess will have no
-	// network path at all (the platform sandbox denies all egress).
+	// gets no proxy routing on any platform — no HTTPS_PROXY env,
+	// no ProxyUDSPath, no ProxyAddr. The subprocess will have no
+	// network path at all once the platform sandbox engages.
 	fake := &fakeExecutor{result: SpawnResult{ExitCode: 0}}
 	m := goodSpawnManifest()
 	state := &hostState{
@@ -809,6 +828,9 @@ func TestSpawn_HostFunctions_NoProxyEnvWhenNetworkAbsent(t *testing.T) {
 	}
 	if _, ok := fake.gotEnv.Env["HTTP_PROXY"]; ok {
 		t.Errorf("HTTP_PROXY injected despite no [capabilities.network]")
+	}
+	if fake.gotLimits.ProxyAddr != "" || fake.gotLimits.ProxyUDSPath != "" {
+		t.Errorf("limits carry proxy routing despite no network: %+v", fake.gotLimits)
 	}
 }
 

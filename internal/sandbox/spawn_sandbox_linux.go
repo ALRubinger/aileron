@@ -99,12 +99,23 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 	// Go's exec package handles this when this flag is false.
 	cmd.SysProcAttr.GidMappingsEnableSetgroups = false
 
-	// When the manifest declares FS scopes, re-exec into the
-	// daemon binary's spawn-helper entry point so Landlock applies
-	// inside the namespace before the wrapped CLI starts. Network-
-	// only scoping (no fs_read / fs_write) keeps the v1 behavior
-	// where the wrapped CLI exec's directly.
-	if len(limits.FSRead) > 0 || len(limits.FSWrite) > 0 {
+	// When the manifest declares [capabilities.network], add
+	// CLONE_NEWNET so direct egress is kernel-blocked. The
+	// in-namespace helper bridges to the daemon's UDS proxy via
+	// RunSpawnShim; the wrapped CLI's HTTPS_PROXY is set by the
+	// helper post-shim-startup.
+	if limits.ProxyUDSPath != "" {
+		cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET
+	}
+
+	// When the manifest declares any sandbox parameter the helper
+	// needs to mediate (FS scopes for Landlock, or network for
+	// shim bridging), re-exec into the daemon's spawn-helper
+	// entry point. The kernel forks into the namespaces per the
+	// Cloneflags above; the helper runs as PID 1 inside the
+	// namespace, applies Landlock, optionally starts the network
+	// shim, then exec's the wrapped CLI.
+	if len(limits.FSRead) > 0 || len(limits.FSWrite) > 0 || limits.ProxyUDSPath != "" {
 		if err := rewireForHelper(cmd, limits); err != nil {
 			return platformSandboxHooks{}, err
 		}
@@ -141,12 +152,13 @@ func rewireForHelper(cmd *exec.Cmd, limits SpawnLimits) error {
 	// Snapshot the wrapped invocation before reassigning cmd.Path
 	// and cmd.Args; the helper will use these for syscall.Exec.
 	req := spawnhelper.Request{
-		Program: cmd.Path,
-		Argv:    append([]string(nil), cmd.Args...),
-		Env:     append([]string(nil), cmd.Env...),
-		Cwd:     cmd.Dir,
-		FSRead:  fsRead,
-		FSWrite: fsWrite,
+		Program:      cmd.Path,
+		Argv:         append([]string(nil), cmd.Args...),
+		Env:          append([]string(nil), cmd.Env...),
+		Cwd:          cmd.Dir,
+		FSRead:       fsRead,
+		FSWrite:      fsWrite,
+		ProxyUDSPath: limits.ProxyUDSPath,
 	}
 	encoded, err := spawnhelper.EncodeRequest(req)
 	if err != nil {
