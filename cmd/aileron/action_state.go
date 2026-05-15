@@ -38,6 +38,38 @@ func actionEnabledLabel(enabled *bool) string {
 	return "false"
 }
 
+// originBadge derives a short ORIGIN column value from the
+// action's source URL. Used by `aileron action list` to let the
+// user distinguish hub-installed connectors from BYOCLI local
+// ones at a glance, without parsing the full source field.
+//
+// Mapping:
+//
+//   - `hub://...` source → `HUB` (publisher-signed, installed
+//     via `aileron action add <FQN>`)
+//   - `local://...` source → `LOCAL` (BYOCLI, installed via
+//     `aileron cli add` or `aileron pp add`)
+//   - `local:<schemeless-FQN>...` → `WRAP` (the legacy
+//     `aileron action wrap --install` shape; pre-BYOCLI authoring
+//     path)
+//   - anything else → `—` so the column stays width-stable and
+//     the user sees the raw source for diagnostics
+//
+// The badge is intentionally short (≤6 chars) so the column
+// stays narrow next to the longer source URL.
+func originBadge(source string) string {
+	switch {
+	case strings.HasPrefix(source, "hub://"):
+		return "HUB"
+	case strings.HasPrefix(source, "local://"):
+		return "LOCAL"
+	case strings.HasPrefix(source, "local:"):
+		return "WRAP"
+	default:
+		return "—"
+	}
+}
+
 // runActionList renders `aileron action list`. Pulls the daemon's
 // /v1/actions view (which already merges the user-preference overlay)
 // and prints one row per installed action with its current enabled
@@ -100,10 +132,16 @@ func runActionList(args []string, stdout, stderr io.Writer) int {
 	}
 
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tVERSION\tENABLED\tSOURCE")
+	fmt.Fprintln(tw, "NAME\tVERSION\tENABLED\tORIGIN\tSOURCE")
 	disabled := 0
 	for _, a := range out.Items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", a.Name, a.Version, actionEnabledLabel(a.Enabled), a.Source)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			a.Name,
+			a.Version,
+			actionEnabledLabel(a.Enabled),
+			originBadge(a.Source),
+			a.Source,
+		)
 		if a.Enabled != nil && !*a.Enabled {
 			disabled++
 		}

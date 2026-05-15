@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/ALRubinger/aileron/internal/action"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/launch"
@@ -140,6 +143,12 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if hash, err := hashBinary(programPath); err == nil {
+		spec.Program.Hash = hash
+	} else {
+		fmt.Fprintf(stderr, "warning: compute binary hash: %v (continuing without pin)\n", err)
+	}
+
 	credKeys := resolveCredentialKeys(helpText, credentialOverrides, *noCredentials)
 	applyCredentialsToSpec(spec, credKeys)
 
@@ -183,6 +192,12 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	actionFiles, err := emitLocalActionFiles(spec, manifest)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: failed to emit action files (%v); the connector is installed but agent-facing tools aren't yet registered\n", err)
+		actionFiles = nil
+	}
+
 	stashedCount := 0
 	if len(credKeys) > 0 {
 		var stashErr error
@@ -198,6 +213,9 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "\nInstalled local connector %s\n", manifest.Connector.Name)
 	fmt.Fprintf(stdout, "  Store dir:   %s\n", dir)
 	fmt.Fprintf(stdout, "  Operations:  %d\n", len(manifest.Capabilities.Spawn.Operations))
+	if len(actionFiles) > 0 {
+		fmt.Fprintf(stdout, "  Actions:     %d registered under %s\n", len(actionFiles), action.DefaultDir())
+	}
 	if len(credKeys) > 0 {
 		fmt.Fprintf(stdout, "  Credentials: %d declared, %d stashed in vault\n", len(credKeys), stashedCount)
 	}
@@ -266,12 +284,43 @@ func runCliRemove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: no local connector named %q\n", name)
 		return 1
 	}
+	// Read the manifest before removing so we know which action
+	// files to delete. A failure to load doesn't block the remove
+	// itself — the on-disk action files become orphans, which
+	// `aileron action list` already tolerates by surfacing as
+	// load errors.
+	var actionFiles []string
+	if m, loadErr := store.Load(name); loadErr == nil {
+		actionFiles = localActionFilePaths(m, name)
+	}
 	if err := store.Remove(name); err != nil {
 		fmt.Fprintf(stderr, "error: remove local connector: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Removed local connector %s\n", name)
+	for _, path := range actionFiles {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(stderr, "warning: remove action file %s: %v\n", path, err)
+		}
+	}
+	fmt.Fprintf(stdout, "Removed local connector %s (%d action file(s) cleaned up)\n", name, len(actionFiles))
 	return 0
+}
+
+// localActionFilePaths returns the absolute paths of every
+// action.md file `aileron cli remove` should delete for a given
+// connector. Mirrors the file naming used by emitLocalActionFiles,
+// but reads the operation list off the parsed manifest so the
+// caller doesn't need a wrap.Spec.
+func localActionFilePaths(m *cstore.Manifest, name string) []string {
+	if m == nil || m.Capabilities.Spawn == nil {
+		return nil
+	}
+	actionsDir := action.DefaultDir()
+	out := make([]string, 0, len(m.Capabilities.Spawn.Operations))
+	for op := range m.Capabilities.Spawn.Operations {
+		out = append(out, filepath.Join(actionsDir, name+"-"+op+".md"))
+	}
+	return out
 }
 
 func runCliRefresh(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -326,6 +375,14 @@ func runCliRefresh(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return 1
 	}
 
+	// Re-pin the binary hash after a `go install`/upgrade.
+	// Intentional rotation: a different binary at the same path
+	// is a new artifact and its hash should replace the prior
+	// pin per #619's binary-integrity decision.
+	if hash, hashErr := hashBinary(programPath); hashErr == nil {
+		spec.Program.Hash = hash
+	}
+
 	// Preserve credential capability from the existing manifest:
 	// `cli refresh` must not silently demote a connector from
 	// credential-bearing to credential-less because the new
@@ -354,8 +411,12 @@ func runCliRefresh(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "error: save refreshed manifest: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "\nRefreshed %s. Operations: %d. Credentials in vault are unchanged.\n",
-		name, len(manifest.Capabilities.Spawn.Operations))
+	actionFiles, err := emitLocalActionFiles(spec, manifest)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: emit refreshed action files: %v\n", err)
+	}
+	fmt.Fprintf(stdout, "\nRefreshed %s. Operations: %d. Actions: %d. Credentials in vault are unchanged.\n",
+		name, len(manifest.Capabilities.Spawn.Operations), len(actionFiles))
 	return 0
 }
 
@@ -464,6 +525,62 @@ func xdgConfigHome() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config")
+}
+
+// hashBinary returns the canonical `sha256:<hex>` content hash
+// of the file at `path`. Populated into the local-mode manifest's
+// `programs[].hash` field so the spawn runtime can detect a
+// later-installed binary at the same path (per [#619]'s
+// binary-integrity decision). The runtime refuses to spawn when
+// the on-disk bytes don't match the pinned hash; `aileron cli
+// refresh` is the documented way to rotate the pin after an
+// intentional upgrade.
+//
+// [#619]: https://github.com/ALRubinger/aileron/issues/619
+func hashBinary(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// emitLocalActionFiles writes one action.md per spawn operation
+// under ~/.aileron/actions/<connector-leaf>-<op>.md. Mirrors the
+// hub-wrap path's `wrap.Install` action emission so local
+// connectors are visible to `aileron action list` and to the
+// daemon's tool-surface layer.
+//
+// Hash field on the action's `[[requires.connectors]]` carries
+// the `sha256:bound-at-install` placeholder — the action
+// executor's local-FQN router (#749) bypasses the hash lookup
+// and resolves via [cstore.LocalStore] instead. Returns the
+// absolute paths of the written files so the caller can display
+// them.
+//
+// Overwrite-safe: `aileron cli refresh` re-introspects and
+// re-emits, deliberately stomping the existing files so a
+// removed CLI subcommand drops out of the action surface.
+func emitLocalActionFiles(spec *wrap.Spec, m *cstore.Manifest) ([]string, error) {
+	actionsDir := action.DefaultDir()
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		return nil, err
+	}
+	written := make([]string, 0, len(spec.Subcommands))
+	for _, sub := range spec.Subcommands {
+		path := filepath.Join(actionsDir, wrap.ActionFileName(spec, sub))
+		body := wrap.RenderActionMD(spec, sub, m, "")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			return written, fmt.Errorf("write action file %s: %w", path, err)
+		}
+		written = append(written, path)
+	}
+	return written, nil
 }
 
 // buildLocalManifest converts a populated wrap.Spec into a
