@@ -182,13 +182,21 @@ type fwpmFilter0 struct {
 }
 
 // FWP_DATA_TYPE values used by the runtime. The full enum has
-// ~30 members; the runtime only needs these.
+// ~30 members; the runtime only needs these. Values from
+// `fwptypes.h` in the Windows SDK.
+//
+// Critically, FWP_BYTE_BLOB_TYPE is 12 (not 9 — 9 is FWP_FLOAT),
+// and FWP_V4_ADDR_MASK is 256 (FWP_SINGLE_DATA_TYPE_MAX + 1, the
+// enum jumps over a 0xff reserved range for "composite" types).
+// Getting these wrong yields FWP_E_TYPE_MISMATCH (0x80320027) at
+// filter-add time, which is how the runtime caught the original
+// values in CI.
 const (
-	fwpEmpty           uint32 = 0
-	fwpUint16          uint32 = 2
-	fwpUint32          uint32 = 3
-	fwpByteBlobType    uint32 = 9
-	fwpV4AddrMask      uint32 = 12
+	fwpEmpty        uint32 = 0
+	fwpUint16       uint32 = 2
+	fwpUint32       uint32 = 3
+	fwpByteBlobType uint32 = 12
+	fwpV4AddrMask   uint32 = 256
 )
 
 // FWP_ACTION_TYPE values.
