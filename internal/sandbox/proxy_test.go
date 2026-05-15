@@ -177,6 +177,81 @@ func TestSpawnProxy_BadGatewayOnUpstreamFailure(t *testing.T) {
 	}
 }
 
+func TestSpawnProxy_TunnelsWithDefaultDialer(t *testing.T) {
+	// Contract: the production dialer (defaultProxyDial) actually
+	// reaches the resolved host:port. Covers the dial path the
+	// fake-dialer tests skip.
+	upstream, _ := newEchoServer(t)
+	defer upstream.Close()
+	host, port, err := net.SplitHostPort(upstream.Addr().String())
+	if err != nil {
+		t.Fatalf("split echo addr: %v", err)
+	}
+	policy := policyForHosts(t, host+":"+port)
+
+	proxy := NewSpawnProxy(policy, nil, "x")
+	ln, addr := newLoopbackListener(t)
+	go proxy.Serve(context.Background(), ln)
+	defer proxy.Close()
+
+	client, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer client.Close()
+	client.SetDeadline(time.Now().Add(2 * time.Second))
+
+	fmt.Fprintf(client, "CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\n\r\n", host, port, host, port)
+	resp, err := http.ReadResponse(bufio.NewReader(client), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestSpawnProxy_RejectsMalformedRequest(t *testing.T) {
+	// Contract: garbage on the wire fails closed without dialing.
+	// Audit records `malformed_request`.
+	policy := policyForHosts(t, "allowed.test:443")
+	logBuf, logger := newCapturingLogger()
+	proxy := NewSpawnProxy(policy, logger, "x")
+	ln, addr := newLoopbackListener(t)
+	go proxy.Serve(context.Background(), ln)
+	defer proxy.Close()
+
+	client, _ := net.Dial("tcp", addr)
+	defer client.Close()
+	client.SetDeadline(time.Now().Add(2 * time.Second))
+	client.Write([]byte("\x00\x01\x02not-an-http-request\r\n\r\n"))
+	_, _ = io.Copy(io.Discard, client)
+
+	time.Sleep(50 * time.Millisecond)
+	if !strings.Contains(logBuf.String(), "malformed_request") {
+		t.Errorf("audit missing malformed_request: %s", logBuf.String())
+	}
+}
+
+func TestSpawnProxy_ItoaCoversStatusRange(t *testing.T) {
+	// Contract: status codes outside 100..999 are clamped to "000".
+	cases := []struct {
+		in   int
+		want string
+	}{
+		{200, "200"},
+		{403, "403"},
+		{502, "502"},
+		{50, "000"},
+		{1000, "000"},
+	}
+	for _, tc := range cases {
+		if got := itoa(tc.in); got != tc.want {
+			t.Errorf("itoa(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestSpawnProxy_CloseStopsServing(t *testing.T) {
 	// Contract: Close unblocks Serve and is idempotent.
 	policy := policyForHosts(t)
