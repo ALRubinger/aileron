@@ -568,3 +568,41 @@ export async function installAction(args: {
 		body: JSON.stringify(args)
 	});
 }
+
+/** Response from POST /v1/bindings/setup/oauth2/init. The caller
+ *  directs the browser to `authorize_url`; the daemon's callback
+ *  endpoint (#745) handles the rest when caller=daemon. */
+export type OAuth2InitResponse = {
+	session_id: string;
+	authorize_url: string;
+	redirect_uri: string;
+};
+
+/** Starts a reauthorize flow for an existing binding from the
+ *  webapp. Caller=daemon means the daemon's own listener at
+ *  /v1/bindings/setup/oauth2/callback receives the OAuth provider's
+ *  redirect (the webapp can't `bind()` a TCP port); after the daemon
+ *  completes the token exchange it 303s the browser to `return_to`
+ *  with a `#aileron_oauth=ok&binding=<name>` fragment.
+ *
+ *  The caller passes the binding's identifying tuple (connector FQN,
+ *  service, identity) — mirrors what `aileron binding reauthorize`
+ *  derives from a bare binding name on the CLI side. */
+export async function startReauthorize(args: {
+	connector_fqn: string;
+	identity: string;
+	service?: string;
+	return_to: string;
+}): Promise<OAuth2InitResponse> {
+	return apiFetch('/v1/bindings/setup/oauth2/init', {
+		method: 'POST',
+		body: JSON.stringify({
+			connector_fqn: args.connector_fqn,
+			identity: args.identity,
+			service: args.service,
+			purpose: 'reauthorize',
+			caller: 'daemon',
+			return_to: args.return_to
+		})
+	});
+}

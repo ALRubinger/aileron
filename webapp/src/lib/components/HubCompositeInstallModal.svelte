@@ -2,10 +2,12 @@
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Badge } from '$lib/components/ui/badge';
 	import { Button } from '$lib/components/ui/button';
+	import { onMount, onDestroy } from 'svelte';
 	import {
 		getHubActionInstallDecision,
 		getHubSuiteInstallDecision,
 		installAction,
+		startReauthorize,
 		type ConfirmedFingerprint,
 		type HubActionInstallDecision,
 		type HubSuiteInstallDecision,
@@ -58,6 +60,21 @@
 	let installResults = $state<InstalledActionResult[]>([]);
 	let installProgress = $state(''); // e.g. "Installing 2 of 5: <fqn>"
 
+	// Per-binding reauthorize state (#743 PR 3). The success panel
+	// renders a "Reauthorize" button per stale binding; clicking it
+	// opens the daemon-hosted OAuth flow (PR #745) in a popup. The
+	// popup ends on /oauth-callback-relay which postMessages this
+	// component with the result. Map is keyed by binding name; absent
+	// means idle.
+	type ReauthorizePhase = 'opening' | 'awaiting' | 'done' | 'failed';
+	type ReauthorizeRow = { phase: ReauthorizePhase; error?: string };
+	let reauthState = $state<Record<string, ReauthorizeRow>>({});
+	// Track open popups so we can refocus an existing one instead of
+	// opening a duplicate if the user clicks twice. Keyed by binding
+	// name; entries are cleared when the popup posts back or is
+	// otherwise observed closed.
+	let popups = new Map<string, Window>();
+
 	// Reset install state when the operator opens the modal for a
 	// different fqn — avoids surfacing the previous install's panel
 	// against a freshly-fetched decision.
@@ -69,6 +86,8 @@
 			installError = '';
 			installResults = [];
 			installProgress = '';
+			reauthState = {};
+			popups.clear();
 			return;
 		}
 		loading = true;
@@ -78,6 +97,8 @@
 		installError = '';
 		installResults = [];
 		installProgress = '';
+		reauthState = {};
+		popups.clear();
 		const target = fqn;
 		const targetKind = kind;
 		const fetcher =
@@ -200,6 +221,106 @@
 		}
 		return out;
 	});
+
+	// parseBindingName splits a canonical binding name (kind/service/
+	// identity) into its parts. Daemon-side binding.MakeName always
+	// emits this shape; reauthorize init needs the (service, identity)
+	// pair to find the existing binding.
+	function parseBindingName(name: string): { kind: string; service: string; identity: string } | null {
+		const parts = name.split('/');
+		if (parts.length !== 3 || parts.some((p) => p === '')) return null;
+		return { kind: parts[0], service: parts[1], identity: parts[2] };
+	}
+
+	// handleReauthorizeMessage receives the result postMessage from
+	// the OAuth callback relay popup. Validates origin + shape, then
+	// flips the matching row to done/failed.
+	function handleReauthorizeMessage(event: MessageEvent) {
+		// Same-origin only — defense in depth against a foreign tab
+		// shouting at this window. The relay always lives on the
+		// webapp's origin (loopback for v1).
+		if (event.origin !== window.location.origin) return;
+		const data = event.data;
+		if (!data || typeof data !== 'object') return;
+		if (data.type !== 'aileron-oauth-callback') return;
+		const binding = typeof data.binding === 'string' ? data.binding : '';
+		const status = typeof data.status === 'string' ? data.status : '';
+		if (!binding) return;
+		popups.delete(binding);
+		reauthState = {
+			...reauthState,
+			[binding]:
+				status === 'ok'
+					? { phase: 'done' }
+					: { phase: 'failed', error: 'Reauthorize was not completed.' }
+		};
+	}
+
+	onMount(() => {
+		window.addEventListener('message', handleReauthorizeMessage);
+	});
+
+	onDestroy(() => {
+		if (typeof window !== 'undefined') {
+			window.removeEventListener('message', handleReauthorizeMessage);
+		}
+	});
+
+	// runReauthorize handles a per-binding "Reauthorize" click. Drives
+	// the daemon-hosted OAuth flow (caller=daemon, from PR #745) in a
+	// popup so the modal's install context survives the OAuth dance —
+	// same-tab navigation would lose it. The popup ends on the
+	// /oauth-callback-relay route which postMessages this component.
+	async function runReauthorize(s: StaleBinding) {
+		const parts = parseBindingName(s.name);
+		if (!parts) {
+			reauthState = {
+				...reauthState,
+				[s.name]: { phase: 'failed', error: 'Malformed binding name.' }
+			};
+			return;
+		}
+		// Refocus an existing popup rather than spawning a duplicate.
+		const existing = popups.get(s.name);
+		if (existing && !existing.closed) {
+			existing.focus();
+			return;
+		}
+		reauthState = { ...reauthState, [s.name]: { phase: 'opening' } };
+		try {
+			const init = await startReauthorize({
+				connector_fqn: s.connector_fqn,
+				identity: parts.identity,
+				service: parts.service,
+				return_to: window.location.origin + '/oauth-callback-relay'
+			});
+			const popup = window.open(
+				init.authorize_url,
+				`aileron-oauth-${s.name}`,
+				'width=600,height=720,menubar=no,toolbar=no,location=yes'
+			);
+			if (!popup) {
+				reauthState = {
+					...reauthState,
+					[s.name]: {
+						phase: 'failed',
+						error: 'Popup blocked. Allow popups for this site and try again.'
+					}
+				};
+				return;
+			}
+			popups.set(s.name, popup);
+			reauthState = { ...reauthState, [s.name]: { phase: 'awaiting' } };
+		} catch (e: unknown) {
+			reauthState = {
+				...reauthState,
+				[s.name]: {
+					phase: 'failed',
+					error: e instanceof Error ? e.message : String(e)
+				}
+			};
+		}
+	}
 
 	// runInstall dispatches the install based on `kind`. Action: one
 	// /v1/actions/install call. Suite: loop through member_actions in
@@ -426,21 +547,67 @@
 									scope tracking). Reauthorize each binding before invoking
 									the action.
 								</p>
-								<ul class="mt-1 space-y-1">
+								<ul class="mt-2 space-y-2">
 									{#each aggregatedStale as s (s.name)}
-										<li>
-											<span class="font-mono break-all">{s.name}</span>
-											{#if s.service}<span class="text-muted-foreground"> ({s.service})</span>{/if}
+										{@const row = reauthState[s.name]}
+										<li
+											class="rounded border border-yellow-500/30 bg-background p-2"
+											data-testid="hub-composite-stale-row"
+											data-binding={s.name}
+										>
+											<div class="flex flex-wrap items-center justify-between gap-2">
+												<div class="min-w-0">
+													<span class="font-mono break-all">{s.name}</span>
+													{#if s.service}<span class="text-muted-foreground"> ({s.service})</span>{/if}
+												</div>
+												<div class="flex items-center gap-2">
+													{#if row?.phase === 'done'}
+														<Badge variant="default" data-testid="hub-composite-stale-status">
+															Reauthorized
+														</Badge>
+													{:else}
+														<Button
+															variant="outline"
+															size="sm"
+															disabled={row?.phase === 'opening' || row?.phase === 'awaiting'}
+															onclick={() => runReauthorize(s)}
+															data-testid="hub-composite-reauthorize-button"
+															data-binding={s.name}
+														>
+															{#if row?.phase === 'opening'}
+																Opening…
+															{:else if row?.phase === 'awaiting'}
+																Waiting for browser…
+															{:else if row?.phase === 'failed'}
+																Retry reauthorize
+															{:else}
+																Reauthorize
+															{/if}
+														</Button>
+													{/if}
+												</div>
+											</div>
 											{#if s.stale_reason === 'scope_drift' && s.missing_scopes && s.missing_scopes.length > 0}
-												<div class="ml-4 text-muted-foreground">
+												<div class="mt-1 ml-1 text-muted-foreground">
 													Missing: {s.missing_scopes.join(', ')}
 												</div>
 											{:else if s.stale_reason === 'no_grant_record'}
-												<div class="ml-4 text-muted-foreground">
+												<div class="mt-1 ml-1 text-muted-foreground">
 													Predates scope tracking; one-time reauthorize needed.
 												</div>
 											{/if}
-											<code class="ml-4 font-mono">aileron binding reauthorize {s.name}</code>
+											{#if row?.phase === 'failed' && row.error}
+												<div
+													class="mt-1 text-destructive"
+													data-testid="hub-composite-reauthorize-error"
+												>
+													{row.error}
+												</div>
+											{/if}
+											<details class="mt-1 ml-1 text-muted-foreground">
+												<summary class="cursor-pointer">Or copy the CLI command</summary>
+												<code class="mt-1 block font-mono">aileron binding reauthorize {s.name}</code>
+											</details>
 										</li>
 									{/each}
 								</ul>
