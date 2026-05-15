@@ -4,8 +4,10 @@ package sandbox
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -90,18 +92,24 @@ func createRestrictedToken(existing windows.Token, flags uint32) (windows.Token,
 //   - Read confinement. Low integrity blocks writes, not reads.
 //     The BYOCLI threat model's "no ~/.ssh exfiltration" claim
 //     requires AppContainer (ADR-0014 defers).
-//   - Network confinement via WFP. Direct egress is not yet
-//     kernel-blocked; HTTPS_PROXY cooperation only. WFP filters
-//     are a Windows v2 follow-up.
 //   - ACL adjustments on fs_write paths. Low integrity is coarse;
 //     per-path ACLs giving the low-integrity token write access
 //     to declared scopes are a follow-up.
+//
+// What this DOES deliver as of Windows v2:
+//
+//   - Kernel-enforced network egress confinement via WFP filters
+//     when the manifest declares [capabilities.network]. A block
+//     filter at the ALE_AUTH_CONNECT layer (V4 + V6) denies
+//     outbound connect calls from the wrapped binary; a higher-
+//     weight permit filter carves out 127.0.0.1:<proxy-port>.
+//     Filters are deleted on cleanup; the engine handle close
+//     also releases any leftover session-scoped state.
 //
 // Returns wrapped ErrSpawnUnavailable on token-construction or
 // job-creation failures. Returns the zero-value hooks when the
 // manifest declares no sandbox params (legacy path).
 func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) (platformSandboxHooks, error) {
-	_ = env
 	if !limits.PlatformSandboxRequested() {
 		return platformSandboxHooks{}, nil
 	}
@@ -122,11 +130,85 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 	}
 	cmd.SysProcAttr.Token = syscall.Token(token)
 
+	// Network filtering: when the connector declared
+	// [capabilities.network] we open a WFP engine session and
+	// install per-binary block + loopback-permit filters. The
+	// filters identify the wrapped CLI via its FWP_APP_ID (a
+	// kernel-computed hash of the binary path) rather than PID,
+	// since WFP has no native PID condition and the binary
+	// identity is unique per connector for our use case. Concurrent
+	// spawns of the same connector binary share filters; this is
+	// safe because each spawn's proxy is aileron-managed.
+	var (
+		netEngine   windows.Handle
+		netAppID    *fwpByteBlob
+		netFilterIDs []uint64
+	)
+	if limits.ProxyAddr != "" {
+		port, perr := parseProxyPort(limits.ProxyAddr)
+		if perr != nil {
+			_ = windows.CloseHandle(job)
+			_ = windows.CloseHandle(windows.Handle(token))
+			return platformSandboxHooks{}, fmt.Errorf("%w: parse proxy address %q: %v",
+				ErrSpawnUnavailable, limits.ProxyAddr, perr)
+		}
+		engine, err := openWFPEngine()
+		if err != nil {
+			_ = windows.CloseHandle(job)
+			_ = windows.CloseHandle(windows.Handle(token))
+			return platformSandboxHooks{}, fmt.Errorf("%w: open WFP engine: %v", ErrSpawnUnavailable, err)
+		}
+		appID, err := getAppID(env.Program)
+		if err != nil {
+			_ = closeWFPEngine(engine)
+			_ = windows.CloseHandle(job)
+			_ = windows.CloseHandle(windows.Handle(token))
+			return platformSandboxHooks{}, fmt.Errorf("%w: resolve app-id for %s: %v",
+				ErrSpawnUnavailable, env.Program, err)
+		}
+		displayName := "aileron-spawn-" + env.Program
+		blockIDs, err := addBlockOutboundForApp(engine, appID, displayName)
+		if err != nil {
+			freeWFPMemory(unsafe.Pointer(appID))
+			_ = closeWFPEngine(engine)
+			_ = windows.CloseHandle(job)
+			_ = windows.CloseHandle(windows.Handle(token))
+			return platformSandboxHooks{}, fmt.Errorf("%w: install WFP block filters: %v",
+				ErrSpawnUnavailable, err)
+		}
+		permitID, err := addPermitLoopbackForApp(engine, appID, port, displayName)
+		if err != nil {
+			for _, id := range blockIDs {
+				_ = deleteFilter(engine, id)
+			}
+			freeWFPMemory(unsafe.Pointer(appID))
+			_ = closeWFPEngine(engine)
+			_ = windows.CloseHandle(job)
+			_ = windows.CloseHandle(windows.Handle(token))
+			return platformSandboxHooks{}, fmt.Errorf("%w: install WFP permit filter: %v",
+				ErrSpawnUnavailable, err)
+		}
+		netEngine = engine
+		netAppID = appID
+		netFilterIDs = append(append([]uint64(nil), blockIDs...), permitID)
+	}
+
 	return platformSandboxHooks{
 		PostStart: func(p *os.Process) error {
 			return assignProcessToSpawnJob(job, p)
 		},
 		Cleanup: func() {
+			// Tear down WFP filters first so the kernel stops
+			// evaluating them; the engine close at the end of
+			// this block also auto-removes any session-scoped
+			// state that survives.
+			if netEngine != 0 {
+				for _, id := range netFilterIDs {
+					_ = deleteFilter(netEngine, id)
+				}
+				freeWFPMemory(unsafe.Pointer(netAppID))
+				_ = closeWFPEngine(netEngine)
+			}
 			// CloseHandle on the job releases the kernel object;
 			// because of JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, any
 			// subprocess still inside the job dies. The token
@@ -136,6 +218,22 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 			_ = windows.CloseHandle(windows.Handle(token))
 		},
 	}, nil
+}
+
+// parseProxyPort extracts the port from a host:port string. The
+// runtime already validates the proxy listener bound on
+// 127.0.0.1; this helper just pulls the number for the WFP
+// IP_REMOTE_PORT condition value.
+func parseProxyPort(hostPort string) (uint16, error) {
+	_, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return 0, fmt.Errorf("SplitHostPort: %w", err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("parse port %q: %w", portStr, err)
+	}
+	return uint16(port), nil
 }
 
 // buildRestrictedToken duplicates the daemon's primary token,
