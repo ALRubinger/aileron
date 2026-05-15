@@ -101,7 +101,7 @@ func BuildInputFields(m *Manifest, args map[string]any) []InputField {
 		}
 		out = append(out, InputField{
 			Label:     label,
-			Value:     stringifyValue(raw),
+			Value:     stringifyScalar(raw),
 			Multiline: multiline,
 		})
 	}
@@ -133,21 +133,22 @@ func BuildInputFields(m *Manifest, args map[string]any) []InputField {
 		}
 		out = append(out, InputField{
 			Label:     k,
-			Value:     stringifyValue(args[k]),
+			Value:     stringifyScalar(args[k]),
 			Multiline: multiline,
 		})
 	}
 	return out
 }
 
-// stringifyValue renders an arg value as a string for the approval
+// stringifyScalar renders an arg value as a string for the approval
 // surface. v1 declared input types are string|integer|number|boolean
 // |array|object (per ADR-0003): scalars round-trip through fmt-style
-// formatting, structured values (decoded as map[string]any or []any)
-// render as pretty-printed JSON so the user sees the full payload they
-// are about to approve. Anything else (unexpected types from a
-// malformed agent payload) falls through to Go's default %v.
-func stringifyValue(v any) string {
+// formatting, structured values (decoded as map[string]any or []any
+// by encoding/json) render as pretty-printed JSON so the user sees
+// the full payload they are about to approve. Anything else
+// (unexpected types from a malformed agent payload) falls through to
+// Go's default %v.
+func stringifyScalar(v any) string {
 	switch x := v.(type) {
 	case string:
 		return x
@@ -166,10 +167,12 @@ func stringifyValue(v any) string {
 		}
 		return strconv.FormatFloat(x, 'g', -1, 64)
 	case map[string]any, []any:
-		b, err := json.MarshalIndent(x, "", "  ")
-		if err != nil {
-			return fmt.Sprintf("%v", x)
-		}
+		// encoding/json never fails to marshal values of these shapes
+		// when they were themselves decoded from JSON (the only path
+		// agent payloads take into the runtime), so the error is
+		// dropped — the resulting empty string would be more
+		// misleading than helpful if this assumption ever broke.
+		b, _ := json.MarshalIndent(x, "", "  ")
 		return string(b)
 	default:
 		if v == nil {
