@@ -161,7 +161,7 @@ required    = false
 Inputs become the JSON Schema `parameters` object the LLM sees when Aileron exposes the action as a tool. The LLM uses `description` to decide what to pass. Write descriptions for the LLM — terse, concrete, with one example if format matters.
 
 - `name` is `^[a-z][a-z0-9_]*$` (snake_case, starts with a letter). It maps to a JSON Schema property name.
-- `type` is one of `string`, `integer`, `number`, `boolean`. Object and array types are post-MVP.
+- `type` is one of `string`, `integer`, `number`, `boolean`, `array`, `object`. Scalar types map to the corresponding JSON Schema primitive. Structured types (`array`, `object`) pass through to the LLM-facing schema as `{"type":"array"}` / `{"type":"object"}` with no per-item or per-property constraints — document the expected shape in the input's `description` so the LLM produces a well-formed value. The connector receives the decoded JSON as `[]any` / `map[string]any` and validates semantic shape at op time. See [Structured inputs](#structured-inputs) below.
 - `required` defaults to `true`. Set `required = false` for optional inputs.
 - `description` is required. This is what the LLM reads — write it accordingly.
 
@@ -196,6 +196,31 @@ multiline   = true
 ```
 
 This composes with the `[approval.preview]` directive from [ADR-0016](/adr/0016-approval-preview/). `[approval.preview]` controls how *external state the runtime fetches before approval* is rendered (e.g. the calendar event being updated); the per-input `label` and `multiline` keys control how *the agent's call-time args* are rendered (e.g. the email the agent wants to send). An action can declare both.
+
+#### Structured inputs
+
+Some upstream APIs take structured arguments — a list of objects, a nested configuration, a tagged-union of commands. Google Docs `documents.batchUpdate` is a typical case: its `requests` field is an array of `Request` union objects (`insertText`, `replaceAllText`, `deleteContentRange`, …) and there is no natural scalar decomposition. Declare those as `array` or `object`:
+
+```toml
+[[inputs]]
+name        = "requests"
+type        = "array"
+description = """
+A list of Docs API request objects. Each element is one of {insertText,
+replaceAllText, deleteContentRange, updateTextStyle, ...}. See the Google
+Docs API reference for the full union. Example:
+[
+  { "insertText": { "location": { "index": 1 }, "text": "hello" } },
+  { "replaceAllText": { "containsText": { "text": "{{NAME}}" }, "replaceText": "Ada" } }
+]
+"""
+```
+
+A few constraints:
+
+- **No per-item or per-property typing.** v1 declares the type as bare `array` / `object`; there is no `items.type` or `properties` map in the manifest. The LLM-visible schema is correspondingly bare. Authors who want item-level typing document it in `description` (and the LLM uses that to produce well-formed values).
+- **The connector validates semantic shape.** The runtime hands the connector whatever the LLM produced, decoded from JSON. Missing required fields or off-spec types surface as `connector_runtime_error` at op time, not at manifest-load time.
+- **`multiline = true` is rejected on non-string declarations.** Structured values get the scrollable affordance automatically — the approval card renders them as pretty-printed JSON blocks under their label, so you do not (and cannot) declare `multiline` for them.
 
 ### Execution chain
 

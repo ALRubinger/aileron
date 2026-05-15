@@ -111,7 +111,7 @@ func TestValidate_NilManifest(t *testing.T) {
 // LLM-facing parameter schema. These tests pin the contract.
 
 func TestValidate_AcceptsAllInputTypes(t *testing.T) {
-	for _, typ := range []string{"string", "integer", "number", "boolean"} {
+	for _, typ := range []string{"string", "integer", "number", "boolean", "array", "object"} {
 		t.Run(typ, func(t *testing.T) {
 			m := goodManifest()
 			m.Inputs = []Input{{Name: "x", Type: typ, Description: "the x"}}
@@ -162,7 +162,7 @@ func TestValidate_RejectsBadInputs(t *testing.T) {
 			m.Inputs = []Input{{Name: "x", Type: "", Description: "x"}}
 		}, "type is required"},
 		{"unknown input type", func(m *Manifest) {
-			m.Inputs = []Input{{Name: "x", Type: "object", Description: "x"}}
+			m.Inputs = []Input{{Name: "x", Type: "decimal", Description: "x"}}
 		}, "must be one of"},
 		{"missing input description", func(m *Manifest) {
 			m.Inputs = []Input{{Name: "x", Type: "string", Description: ""}}
@@ -237,6 +237,12 @@ func TestValidate_RejectsBadInputDisplayMetadata(t *testing.T) {
 		}, "multiline=true is only allowed when type=\"string\""},
 		{"multiline on number", func(m *Manifest) {
 			m.Inputs = []Input{{Name: "r", Type: "number", Description: "ratio", Multiline: true}}
+		}, "multiline=true is only allowed when type=\"string\""},
+		{"multiline on array", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "items", Type: "array", Description: "items", Multiline: true}}
+		}, "multiline=true is only allowed when type=\"string\""},
+		{"multiline on object", func(m *Manifest) {
+			m.Inputs = []Input{{Name: "cfg", Type: "object", Description: "config", Multiline: true}}
 		}, "multiline=true is only allowed when type=\"string\""},
 	}
 	for _, tc := range cases {

@@ -286,6 +286,28 @@ func TestDeriveInputSchema_WithRequiredAndOptional(t *testing.T) {
 	}
 }
 
+// TestDeriveInputSchema_StructuredTypes pins the LLM-facing schema for
+// `array` and `object` input types. Per ADR-0003 v1, structured types
+// pass through to the tool-use schema as bare `{"type":"array"}` /
+// `{"type":"object"}` — no `items`, no `properties`. Authors who want
+// item-level typing document it in the input description (which the
+// LLM sees) and the connector validates semantic shape at op time.
+func TestDeriveInputSchema_StructuredTypes(t *testing.T) {
+	a := actionMeta{
+		Inputs: []actionInput{
+			{Name: "requests", Type: "array", Description: "batchUpdate requests"},
+			{Name: "options", Type: "object", Description: "config options"},
+		},
+	}
+	got := deriveInputSchema(a)
+	if got.Properties["requests"].Type != "array" {
+		t.Errorf("requests type = %q, want array", got.Properties["requests"].Type)
+	}
+	if got.Properties["options"].Type != "object" {
+		t.Errorf("options type = %q, want object", got.Properties["options"].Type)
+	}
+}
+
 func TestActionToolDef(t *testing.T) {
 	a := actionMeta{
 		Name: "ship-update",

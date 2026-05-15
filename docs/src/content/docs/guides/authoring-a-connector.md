@@ -66,6 +66,8 @@ Every invocation reads one JSON object from stdin and writes one JSON object to 
 
 `op` is a string your connector dispatches on. `args` is an arbitrary JSON object — whatever the action template passed in. `output` is whatever you want to return; the runtime hands it back to the caller verbatim. `error.class` is one of the canonical failure classes the runtime understands; `error.message` is a human-readable string.
 
+Action manifests can declare scalar input types (`string`, `integer`, `number`, `boolean`) or structured types (`array`, `object`). Scalar args arrive as the matching Go scalar inside `args` (`string`, `float64`, `bool`); structured args arrive as decoded `[]any` / `map[string]any` payloads exactly as the LLM produced them. There is no per-item or per-property typing in the manifest layer, so your connector is the source of truth for semantic shape — validate required fields and types at op dispatch, and return `connector_runtime_error` with a precise message when the LLM's payload is malformed. See [Authoring an action § Structured inputs](/guides/authoring-an-action/#structured-inputs) for what an author types into the manifest.
+
 Two reference points worth bookmarking:
 
 - [`connector/main.go`](https://github.com/ALRubinger/aileron-connector-google/blob/main/connector/main.go) in `aileron-connector-google` is a complete production connector — six ops, four host functions, real Google API calls.
