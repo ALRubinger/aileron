@@ -30,7 +30,7 @@ type HubConfig struct {
 }
 
 // DefaultHubURL is the public Aileron connector Hub.
-const DefaultHubURL = "https://github.com/ALRubinger/aileron-connectors-hub.git"
+const DefaultHubURL = "https://github.com/ALRubinger/aileron-hub.git"
 
 // NotifyConfig holds the daemon-wide quiet-hours window. Type names
 // mirror the pre-9B types in `internal/policy/launch/schema.go` so

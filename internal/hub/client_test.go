@@ -28,7 +28,7 @@ type fixtureDirs struct {
 }
 
 // makeFixtureHub creates a temporary git repo on disk laid out like
-// `aileron-connectors-hub`, with the supplied entries per directory.
+// `aileron-hub`, with the supplied entries per directory.
 // Returns a `file://` URL the hub.Client can clone from.
 func makeFixtureHub(t *testing.T, dirs fixtureDirs) string {
 	t.Helper()

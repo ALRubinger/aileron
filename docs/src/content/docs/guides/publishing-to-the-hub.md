@@ -1,13 +1,21 @@
 ---
 title: "Publishing to the Hub"
-description: "Submit your connector to the Aileron Connector Hub so users can discover it via aileron hub search and the webapp Hub page. Covers the YAML entry shape, the schema, the PR workflow, and what changes after merge."
+description: "Submit your connector, action, or suite to the Aileron Hub so users can discover it via aileron hub search and the webapp Hub page. Covers the three YAML entry shapes, the schemas, the PR workflow, and what changes after merge."
 ---
 
-This guide is for publishers who have already shipped a connector and want users to discover it through the Aileron Connector Hub. The Hub is a public GitHub repo, [`aileron-connectors-hub`](https://github.com/ALRubinger/aileron-connectors-hub), that maintains one YAML entry per community-published connector. Adding your entry makes you findable through `aileron hub search`, the webapp's `/hub` page, and the install-decision prompt that fires on `aileron connector install`.
+This guide is for publishers who have already shipped a connector and want users to discover it — and optionally their actions and suites — through the Aileron Hub. The Hub is a public GitHub repo, [`aileron-hub`](https://github.com/ALRubinger/aileron-hub), with three catalogs:
 
-This is a discovery decision, not a release decision. Releasing a new version of your connector is unchanged: you push a tag, CI publishes the tarball at `github://<owner>/<repo>`. The Hub entry is one YAML file pointing at that FQN. Versions are not part of the entry.
+- `connectors/*.yaml` — one entry per connector binary you publish.
+- `actions/*.yaml` — one entry per action template you publish on top of a connector.
+- `suites/*.yaml` — one entry per suite (a bundle of related actions installed together).
+
+Adding entries makes you findable through `aileron hub search`, the webapp's `/hub` page, and the install-decision prompt that fires on `aileron connector install` / `aileron action add` / `aileron action add-suite`.
+
+This is a discovery decision, not a release decision. Releasing a new version of your connector is unchanged: you push a tag, CI publishes the tarball at `github://<owner>/<repo>`. Hub entries are pointers — one YAML file per published artifact pointing at the canonical FQN. Versions are not part of the entry.
 
 If you have not shipped your connector yet, start with [Publishing a Connector](/guides/publishing-a-connector/). That guide covers the binary, the signing key, the release workflow, and the trust contract Aileron's install pipeline expects. The Hub builds on top of that. Without a signed release at a `github://` FQN, there is nothing to discover.
+
+For action authoring see [Authoring an Action](/guides/authoring-an-action/); for suites, [Authoring an Action Suite](/guides/authoring-an-action-suite/). Hub entries point at action templates and suite manifests that already live in your connector repo.
 
 ## When to submit a Hub entry
 
@@ -22,9 +30,9 @@ The Hub is optional. Connectors install fine without an entry. The question is w
 
 Inclusion in the Hub is not an endorsement. Aileron does not vet what you publish. Maintainers of the Hub repo confirm that the entry's schema is valid and that it points at a real `github://` FQN. They do not audit your binary or your `keys/publisher.pub`. That contract is between you and the consumers who confirm your fingerprint at install time.
 
-## The entry shape
+## Connector entries
 
-Each entry is one YAML file under `connectors/`. The recommended naming convention is `<scheme>_<owner>_<repo>.yaml`, lowercased, dots replaced with dashes, to keep the directory listing scannable.
+Each connector entry is one YAML file under `connectors/`. The recommended naming convention is `<scheme>_<owner>_<repo>.yaml`, lowercased, dots replaced with dashes, to keep the directory listing scannable.
 
 A complete entry:
 
@@ -36,7 +44,7 @@ key_url: https://raw.githubusercontent.com/ALRubinger/aileron-connector-google/m
 release_pattern: v*
 ```
 
-All five fields are required. The JSON Schema at [`schema/connector-entry.schema.json`](https://github.com/ALRubinger/aileron-connectors-hub/blob/main/schema/connector-entry.schema.json) is the authoritative spec. The Hub repo's CI validates every PR against it.
+All five fields are required. The JSON Schema at [`schema/connector-entry.schema.json`](https://github.com/ALRubinger/aileron-hub/blob/main/schema/connector-entry.schema.json) is the authoritative spec. The Hub repo's CI validates every PR against it.
 
 ### `fqn`
 
@@ -74,18 +82,63 @@ A glob describing your release tag convention. Must be at least one character. v
 
 The pattern is informational in v0.x. The install pipeline locates artifacts via the [ADR-0004](/adr/0004-dependency-resolution/) resolver, not via the Hub entry. Future work, [issue #614](https://github.com/ALRubinger/aileron/issues/614), may use `release_pattern` to drive a server-side "latest stable version" surface.
 
+## Action entries
+
+Each action entry is one YAML file under `actions/`. Filename convention: `<scheme>_<owner>_<repo>_actions_<name>.yaml`. The schema lives at [`schema/action-entry.schema.json`](https://github.com/ALRubinger/aileron-hub/blob/main/schema/action-entry.schema.json) (tracked in [aileron-hub#4](https://github.com/ALRubinger/aileron-hub/issues/4)).
+
+```yaml
+fqn: github://ALRubinger/aileron-connector-google/actions/draft-email
+description: Draft a Gmail message with subject, recipients, and body
+publisher_github: ALRubinger
+connector_fqn: github://ALRubinger/aileron-connector-google
+intents: ["draft email", "compose gmail"]
+category: communication
+```
+
+- `fqn` — canonical action FQN, including the `/actions/<name>` segment.
+- `connector_fqn` — required. The connector your action depends on. Drives the composite install-decision flow and lets the webapp render the action card with its provider visible at a glance.
+- `intents` — optional, informational phrases describing what users would ask their agent to do to trigger this action. Surfaces in the action detail page in the webapp. Not used for LLM-driven intent matching in v0.x.
+- `category` — optional grouping (`communication`, `productivity`, etc.). Pick a value consistent with sibling entries from the same publisher.
+
+The action's authoritative shape — its `[[inputs]]` block, `[[execute]]` steps, Markdown body — lives in your connector repo at the path the FQN points to. The Hub entry is metadata for discovery; the install pipeline reads the action template directly from your repo.
+
+## Suite entries
+
+Each suite entry is one YAML file under `suites/`. Filename convention: `<scheme>_<owner>_<repo>_suite.yaml` for a single-suite repo, or `<scheme>_<owner>_<repo>_suites_<name>.yaml` for a multi-suite repo. The schema lives at [`schema/suite-entry.schema.json`](https://github.com/ALRubinger/aileron-hub/blob/main/schema/suite-entry.schema.json) (tracked in [aileron-hub#4](https://github.com/ALRubinger/aileron-hub/issues/4)).
+
+```yaml
+fqn: github://ALRubinger/aileron-connector-google/suite
+description: Read and draft Gmail; read and create calendar events
+publisher_github: ALRubinger
+member_actions:
+  - github://ALRubinger/aileron-connector-google/actions/list-recent-emails
+  - github://ALRubinger/aileron-connector-google/actions/draft-email
+  - github://ALRubinger/aileron-connector-google/actions/list-upcoming-events
+  - github://ALRubinger/aileron-connector-google/actions/draft-calendar-event
+connectors_required:
+  - github://ALRubinger/aileron-connector-google
+category: communication
+```
+
+- `fqn` — canonical suite FQN. For a single-suite repo this is `<scheme>://<owner>/<repo>/suite` (the trailing path matches the convention the CLI uses to derive the Hub FQN from a `suite.toml@<ref>` source). For a multi-suite repo use `<scheme>://<owner>/<repo>/suites/<name>`.
+- `member_actions` — required, non-empty. FQNs of each action the suite bundles.
+- `connectors_required` — optional. The union of the member actions' connector dependencies. If you leave it off, the daemon walks `member_actions` at install-decision time to compute the closure. Hand-author it for performance, or let CI compute it in [aileron-hub#4](https://github.com/ALRubinger/aileron-hub/issues/4).
+- `category` — optional, same shape as the action variant.
+
+The authoritative suite manifest is your `suite.toml` (see [Authoring an Action Suite](/guides/authoring-an-action-suite/)). The Hub entry is the discovery pointer that lets users find the suite without already knowing its FQN.
+
 ## The PR workflow
 
 The Hub is GitHub-native. There is no upload form, no review committee, no Aileron review.
 
-1. Fork [`aileron-connectors-hub`](https://github.com/ALRubinger/aileron-connectors-hub).
-2. Add one YAML file under `connectors/`. Filename does not have to match `fqn` (the daemon reads `fqn` from the file contents), but follow the `<scheme>_<owner>_<repo>.yaml` convention.
-3. Open a PR. The Hub repo's CI runs JSON Schema validation against `schema/connector-entry.schema.json` (see [PR #1](https://github.com/ALRubinger/aileron-connectors-hub/pull/1)). A green check means the YAML is well-formed, the required fields are present, and the patterns hold.
-4. A maintainer of the Hub repo merges. The merge does not require Aileron-org membership. See [`CONTRIBUTING.md`](https://github.com/ALRubinger/aileron-connectors-hub/blob/main/CONTRIBUTING.md) for the maintainer rotation and review SLA.
+1. Fork [`aileron-hub`](https://github.com/ALRubinger/aileron-hub).
+2. Add one or more YAML files under the appropriate catalog directory (`connectors/`, `actions/`, `suites/`). Filename does not have to match `fqn` (the daemon reads `fqn` from the file contents), but follow the conventions documented per entry type above.
+3. Open a PR. The Hub repo's CI runs JSON Schema validation against the appropriate schema in `schema/`. A green check means the YAML is well-formed, the required fields are present, and the patterns hold.
+4. A maintainer of the Hub repo merges. The merge does not require Aileron-org membership. See [`CONTRIBUTING.md`](https://github.com/ALRubinger/aileron-hub/blob/main/CONTRIBUTING.md) for the maintainer rotation and review SLA.
 
-The maintainer review is light: that the FQN resolves to a real GitHub repo, that `key_url` returns a parseable PEM ed25519 public key, that the entry is not a duplicate of an existing one. Maintainers do not run your binary, audit your code, or grade your description.
+The maintainer review is light: that connector FQNs resolve to real GitHub repos, that `key_url` returns a parseable PEM ed25519 public key, that the action and suite FQNs reference paths that exist in the publisher's repo, and that entries aren't duplicates. Maintainers do not run your binary, audit your code, or grade your description.
 
-A typical PR is one file added under `connectors/`. Touching `schema/`, `CONTRIBUTING.md`, or the workflow files needs a separate PR with a different review bar.
+A typical PR is one file added per catalog directory. A connector publisher landing their connector + suite + N actions at the same time is fine in a single PR. Touching `schema/`, `CONTRIBUTING.md`, or the workflow files needs a separate PR with a different review bar.
 
 ## What changes after merge
 
@@ -128,4 +181,4 @@ There is no "version" of a Hub entry. The Hub does not track release-by-release;
 - [Discovering Connectors](/guides/discovering-connectors/): the user side of this surface.
 - [ADR-0013: Connector Hub and Trust Distribution](/adr/0013-connector-hub-and-trust-distribution/): design rationale for the Hub, the Hub-as-pointer (vs. Hub-as-registry) decision, and what was deferred.
 - [ADR-0002: Connector Model](/adr/0002-connector-model/): the FQN authority + keyring trust model.
-- [`aileron-connectors-hub` on GitHub](https://github.com/ALRubinger/aileron-connectors-hub): the repo itself.
+- [`aileron-hub` on GitHub](https://github.com/ALRubinger/aileron-hub): the repo itself.

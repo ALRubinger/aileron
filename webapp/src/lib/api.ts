@@ -300,7 +300,7 @@ export async function setActionEnabled(
 
 // --- Connector Hub (ADR-0013, #488) ---
 //
-// The daemon shallow-clones the public `aileron-connectors-hub` repo
+// The daemon shallow-clones the public `aileron-hub` repo
 // per query and serves discovery via /v1/hub/*. The webapp is one of
 // two thin clients on top — the CLI (`aileron hub …`) is the other.
 // The install modal layers on top of `/v1/hub/install-decision` and

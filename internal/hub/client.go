@@ -1,7 +1,7 @@
 // Package hub is the daemon's client for the public Aileron discovery
 // Hub (ADR-0013).
 //
-// The Hub is a public GitHub repo at `aileron-connectors-hub` whose
+// The Hub is a public GitHub repo at `aileron-hub` whose
 // catalog holds three entry types, one YAML pointer per published
 // artifact:
 //
@@ -41,7 +41,7 @@ import (
 )
 
 // ConnectorEntry is one Hub connector listing. Matches the YAML files
-// committed to `aileron-connectors-hub/connectors/*.yaml`. Field tags
+// committed to `aileron-hub/connectors/*.yaml`. Field tags
 // align with both the YAML files and the OpenAPI `HubConnectorEntry`
 // schema.
 type ConnectorEntry struct {
@@ -53,7 +53,7 @@ type ConnectorEntry struct {
 }
 
 // ActionEntry is one Hub action-template listing. Matches the YAML
-// files committed to `aileron-connectors-hub/actions/*.yaml`. Action
+// files committed to `aileron-hub/actions/*.yaml`. Action
 // entries are discovery metadata; the canonical action template (TOML
 // frontmatter + Markdown body per ADR-0003) is fetched from the
 // publisher's repo at install time, not from the Hub.
@@ -67,7 +67,7 @@ type ActionEntry struct {
 }
 
 // SuiteEntry is one Hub action-suite listing. Matches the YAML files
-// committed to `aileron-connectors-hub/suites/*.yaml`. A suite entry
+// committed to `aileron-hub/suites/*.yaml`. A suite entry
 // names its member actions and the connectors those actions transitively
 // require. The authoritative `suite.toml` (per #564) still lives in the
 // publisher's repo; the Hub entry is the discovery pointer.
