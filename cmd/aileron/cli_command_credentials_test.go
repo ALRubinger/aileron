@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -413,6 +414,74 @@ func TestStashCredentialBindings_FallsBackToPromptWhenCacheEmpty(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("expected 2 prompts (credential + passphrase fallback), got %d", calls)
+	}
+}
+
+func TestStashCredentialBindings_EmptyPassphraseInFallbackRejected(t *testing.T) {
+	// Daemon-already-running branch: cache is cold so
+	// stashCredentialBindings falls back to readVaultPassphrase.
+	// An empty passphrase from the fallback must surface a clear
+	// error so the user knows the credential value was not
+	// written to the vault (rather than silently producing a 0
+	// return).
+	fakeHome(t)
+	rememberVaultPassphrase("")
+	t.Cleanup(func() { rememberVaultPassphrase("") })
+
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	calls := 0
+	canned := []string{
+		"credential-value", // credential
+		"",                 // empty vault passphrase
+	}
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		v := canned[calls]
+		calls++
+		return v, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	_, err := stashCredentialBindings(
+		"local://user/x", "x",
+		[]string{"X_API_KEY"}, "",
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err == nil || !strings.Contains(err.Error(), "vault passphrase is required") {
+		t.Errorf("err = %v, want 'vault passphrase is required' wrap", err)
+	}
+}
+
+func TestStashCredentialBindings_PassphrasePrompterErrorPropagates(t *testing.T) {
+	// Daemon-already-running + cold cache + the passphrase prompt
+	// fails (e.g., /dev/tty unavailable in a CI container).
+	// stashCredentialBindings must wrap and surface the underlying
+	// error rather than swallowing it — otherwise the user sees a
+	// silent "0 stashed" success message with no indication of
+	// why the binding never lands.
+	fakeHome(t)
+	rememberVaultPassphrase("")
+	t.Cleanup(func() { rememberVaultPassphrase("") })
+
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	calls := 0
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		calls++
+		if calls == 1 {
+			return "credential-value", nil // credential prompt succeeds
+		}
+		return "", errors.New("tty unavailable") // passphrase prompt fails
+	}
+
+	var stdout, stderr bytes.Buffer
+	_, err := stashCredentialBindings(
+		"local://user/y", "y",
+		[]string{"Y_API_KEY"}, "",
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err == nil || !strings.Contains(err.Error(), "tty unavailable") {
+		t.Errorf("err = %v, want underlying prompter error wrapped through", err)
 	}
 }
 
