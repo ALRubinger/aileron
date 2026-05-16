@@ -155,11 +155,27 @@ func ActionFileName(s *Spec, sub SubcommandSpec) string {
 }
 
 func actionFileName(s *Spec, sub SubcommandSpec) string {
+	return ActionName(s, sub) + ".md"
+}
+
+// ActionName returns the registered action name for a wrapped
+// subcommand: `<connector-leaf>-<op>` when the FQN has a leaf
+// segment, or the bare op otherwise. The action store keys on
+// this value, so namespacing it by connector prevents silent
+// collisions between wraps with overlapping op names (e.g. two
+// CLIs both exposing an "auth" op).
+//
+// Action filenames already followed this convention via
+// [ActionFileName]; pre-#781 the filename and the action.md's
+// `name` field disagreed (filename namespaced, name bare), which
+// let two wraps stomp each other in the action store's
+// name-keyed map.
+func ActionName(s *Spec, sub SubcommandSpec) string {
 	prefix := connectorLeaf(s.Connector.Name)
 	if prefix == "" {
-		return sub.Name + ".md"
+		return sub.Name
 	}
-	return prefix + "-" + sub.Name + ".md"
+	return prefix + "-" + sub.Name
 }
 
 // connectorLeaf returns the last `/`-separated path segment of the
@@ -275,7 +291,14 @@ func renderActionMD(s *Spec, sub SubcommandSpec, _ *cstore.Manifest, connectorHa
 	}
 	var b strings.Builder
 	fmt.Fprintln(&b, frontmatterDelim)
-	fmt.Fprintf(&b, "name = %q\n", sub.Name)
+	// Top-level action name is namespaced by connector leaf
+	// (`<leaf>-<op>`) so the daemon's action-store name-keyed map
+	// doesn't silently overwrite when two wraps share an op (e.g.
+	// two CLIs both with `auth`). The action's filename has used
+	// this convention since the wrap package's introduction;
+	// before #781 the `name` field disagreed with the filename,
+	// which is what let the collision through.
+	fmt.Fprintf(&b, "name = %q\n", ActionName(s, sub))
 	fmt.Fprintf(&b, "version = %q\n", s.Connector.Version)
 	fmt.Fprintf(&b, "source = %q\n", actionSource(s, sub))
 	fmt.Fprintln(&b)

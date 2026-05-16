@@ -300,8 +300,11 @@ func TestEmit_ActionMDIsParseableByActionLoader(t *testing.T) {
 	if parseErr != nil {
 		t.Fatalf("emitted action.md does not parse: %v\n%s", parseErr, body)
 	}
-	if manifest.Name != "log" {
-		t.Errorf("manifest.Name = %q, want log", manifest.Name)
+	// Per #781 the rendered name is namespaced by the connector
+	// leaf so two wraps with overlapping op names don't collide
+	// in the action store's name-keyed map.
+	if manifest.Name != "gitcrawl-log" {
+		t.Errorf("manifest.Name = %q, want gitcrawl-log", manifest.Name)
 	}
 	if got := len(manifest.Requires.Connectors); got != 1 {
 		t.Fatalf("requires.connectors len = %d, want 1", got)
