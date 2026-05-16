@@ -280,7 +280,7 @@ func TestRunPpAdd_DryRunDoesNotInstall(t *testing.T) {
 	called := false
 	prev := runGoInstall
 	t.Cleanup(func() { runGoInstall = prev })
-	runGoInstall = func(modulePath string, stdout, stderr io.Writer) error {
+	runGoInstall = func(modulePath, gobin string, stdout, stderr io.Writer) error {
 		called = true
 		return nil
 	}
@@ -303,6 +303,16 @@ func TestRunPpAdd_DryRunDoesNotInstall(t *testing.T) {
 	}
 	if !strings.Contains(out, "dry-run") {
 		t.Errorf("dry-run notice missing: %q", out)
+	}
+	// Install plan must advertise the sandbox-bin path so users
+	// see where the binary will land before they confirm. Per
+	// #780 this is the credential-sealing fix's user-facing
+	// signal — the binary is *not* on $PATH.
+	if !strings.Contains(out, filepath.Join(".aileron", "connectors", "local", "linear", "bin", "linear-pp-cli")) {
+		t.Errorf("install plan should advertise sandbox-bin path: %q", out)
+	}
+	if !strings.Contains(out, "not on $PATH") {
+		t.Errorf("install plan should call out the not-on-$PATH guarantee: %q", out)
 	}
 }
 
@@ -341,52 +351,6 @@ func TestRunPpAdd_GoMissingFailsLoud(t *testing.T) {
 	}
 }
 
-func TestResolveInstalledBinary_FindsGOBIN(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("GOBIN", dir)
-	target := filepath.Join(dir, "fakecli-pp-cli")
-	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := resolveInstalledBinary("fakecli-pp-cli")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if got != target {
-		t.Errorf("got %q want %q", got, target)
-	}
-}
-
-func TestResolveInstalledBinary_FallsBackToGOPATHBin(t *testing.T) {
-	// GOBIN unset, GOPATH custom. Drop the binary in $GOPATH/bin
-	// and verify the fallback finds it.
-	if runtime.GOOS == "windows" {
-		t.Skip("PATHEXT semantics differ on Windows; covered separately")
-	}
-	t.Setenv("GOBIN", "")
-	gopath := t.TempDir()
-	prev := goEnvGOPATH
-	goEnvGOPATH = func() (string, error) { return gopath, nil }
-	t.Cleanup(func() { goEnvGOPATH = prev })
-
-	bindir := filepath.Join(gopath, "bin")
-	if err := os.MkdirAll(bindir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	target := filepath.Join(bindir, "fallbackcli-pp-cli")
-	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	got, err := resolveInstalledBinary("fallbackcli-pp-cli")
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	if got != target {
-		t.Errorf("got %q want %q", got, target)
-	}
-}
-
 func TestRunPpAdd_PassesCatalogEnvVarsAsCredentialOverrides(t *testing.T) {
 	// linear-pp-cli's --help doesn't mention LINEAR_API_KEY by
 	// name, so the wrap heuristic alone would skip the credential
@@ -397,7 +361,6 @@ func TestRunPpAdd_PassesCatalogEnvVarsAsCredentialOverrides(t *testing.T) {
 	// (--dry-run) so the test doesn't have to set up the vault.
 	startFixtureCatalog(t)
 	fakeHome(t)
-	t.Setenv("GOBIN", t.TempDir())
 
 	var stdout, stderr bytes.Buffer
 	if code := runPpAdd(
@@ -415,25 +378,29 @@ func TestRunPpAdd_PassesCatalogEnvVarsAsCredentialOverrides(t *testing.T) {
 
 func TestRunPpAdd_HappyPathHandsOffToCliAdd(t *testing.T) {
 	// End-to-end happy path with `go install` mocked. The mock
-	// writes a sandboxtest.FakeBinary to GOBIN/<name>-pp-cli so
-	// the cli-add handoff has a real binary to introspect.
+	// writes a fake binary into the sandbox-bin directory the
+	// installer hands the toolchain via GOBIN — the same path
+	// the cli-add handoff will introspect.
 	// Verifies: catalog lookup → install plan → mocked install
-	// → binary resolution → cli add manifest write.
+	// → sandbox-bin path resolution → cli add manifest write.
 	if runtime.GOOS == "windows" {
 		t.Skip("sandboxtest.FakeBinary is POSIX-only")
 	}
 	startFixtureCatalog(t)
 	home := fakeHome(t)
-	gobin := filepath.Join(t.TempDir(), "gobin")
-	if err := os.MkdirAll(gobin, 0o755); err != nil {
-		t.Fatalf("mkdir gobin: %v", err)
-	}
-	t.Setenv("GOBIN", gobin)
+	sandboxBin := filepath.Join(home, ".aileron", "connectors", "local", "linear", "bin")
 
-	// Mock `go install` to drop a fake binary at the expected path.
+	// Mock `go install` to drop a fake binary at the sandbox-bin
+	// path the installer just told the toolchain to write to.
+	// `gobin` is the GOBIN override the installer set; the mock
+	// honors it so the resulting path matches what the installer
+	// then looks for.
 	prevInstall := runGoInstall
 	t.Cleanup(func() { runGoInstall = prevInstall })
-	runGoInstall = func(modulePath string, stdout, stderr io.Writer) error {
+	runGoInstall = func(modulePath, gobin string, stdout, stderr io.Writer) error {
+		if gobin != sandboxBin {
+			t.Errorf("runGoInstall received GOBIN=%q, want %q (sandbox-bin path under fake home)", gobin, sandboxBin)
+		}
 		const helpText = "linear-pp-cli - Linear CLI\n\nUsage: linear-pp-cli [command]\n\nCommands:\n  issues   List issues\n  create   Create issue\n"
 		path := filepath.Join(gobin, "linear-pp-cli")
 		if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s' '"+helpText+"'\n"), 0o755); err != nil {
@@ -458,6 +425,19 @@ func TestRunPpAdd_HappyPathHandsOffToCliAdd(t *testing.T) {
 	if _, err := os.Stat(manifestPath); err != nil {
 		t.Fatalf("local manifest missing: %v", err)
 	}
+
+	// The manifest's program path must point at the sandbox-bin
+	// install location — not GOBIN/GOPATH/$PATH. This is the
+	// load-bearing #780 assertion: the binary lives where only
+	// Aileron's spawn primitive can find it.
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	wantProgram := filepath.Join(sandboxBin, "linear-pp-cli")
+	if !strings.Contains(string(manifestBytes), wantProgram) {
+		t.Errorf("manifest does not record sandbox-bin program path %q:\n%s", wantProgram, manifestBytes)
+	}
 }
 
 func TestRunPpAdd_GoInstallFailureSurfacesError(t *testing.T) {
@@ -467,11 +447,10 @@ func TestRunPpAdd_GoInstallFailureSurfacesError(t *testing.T) {
 	// touching the local connector store.
 	startFixtureCatalog(t)
 	fakeHome(t)
-	t.Setenv("GOBIN", t.TempDir())
 
 	prev := runGoInstall
 	t.Cleanup(func() { runGoInstall = prev })
-	runGoInstall = func(modulePath string, stdout, stderr io.Writer) error {
+	runGoInstall = func(modulePath, gobin string, stdout, stderr io.Writer) error {
 		return errors.New("simulated build failure")
 	}
 
@@ -500,16 +479,12 @@ func TestRunPpAdd_PassphraseFileFlagFlowsThrough(t *testing.T) {
 	}
 	startFixtureCatalog(t)
 	home := fakeHome(t)
-	gobin := filepath.Join(t.TempDir(), "gobin")
-	if err := os.MkdirAll(gobin, 0o755); err != nil {
-		t.Fatalf("mkdir gobin: %v", err)
-	}
-	t.Setenv("GOBIN", gobin)
 
 	prev := runGoInstall
 	t.Cleanup(func() { runGoInstall = prev })
-	runGoInstall = func(modulePath string, stdout, stderr io.Writer) error {
-		// Drop a non-trivial fake at the expected path.
+	runGoInstall = func(modulePath, gobin string, stdout, stderr io.Writer) error {
+		// Drop a non-trivial fake at the sandbox-bin path the
+		// installer just told the toolchain to write to.
 		const helpText = "Commands:\n  do  do thing\n"
 		body := "#!/bin/sh\nprintf '%s' '" + helpText + "'\n"
 		return os.WriteFile(filepath.Join(gobin, "linear-pp-cli"), []byte(body), 0o755)
@@ -546,12 +521,13 @@ func TestRunGoInstall_FailsFastOnKnownBadModule(t *testing.T) {
 	// invalid module path so `go install` fails fast (bad module
 	// shape, no network resolution attempted). Exercises every
 	// line of the function body without actually installing
-	// anything — verifies env/stdout/stderr wiring is correct.
+	// anything — verifies env/stdout/stderr/GOBIN wiring is
+	// correct.
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("`go` toolchain not on $PATH; cannot exercise runGoInstall body")
 	}
 	var stdout, stderr bytes.Buffer
-	err := runGoInstall("not-a-valid/module path/with spaces", &stdout, &stderr)
+	err := runGoInstall("not-a-valid/module path/with spaces", t.TempDir(), &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected go install to fail on a malformed module path")
 	}
@@ -563,34 +539,34 @@ func TestRunGoInstall_FailsFastOnKnownBadModule(t *testing.T) {
 	}
 }
 
-func TestGoEnvGOPATH_ReturnsToolchainGOPATH(t *testing.T) {
-	// Companion smoke-test for the goEnvGOPATH test seam — runs
-	// the real `go env GOPATH` shell-out and verifies it returns
-	// a non-empty absolute-looking path. Covers the seam's body
-	// (4 lines) without mocking.
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("`go` not on $PATH")
-	}
-	got, err := goEnvGOPATH()
-	if err != nil {
-		t.Fatalf("goEnvGOPATH: %v", err)
-	}
-	if got == "" {
-		t.Errorf("goEnvGOPATH returned empty string")
-	}
-}
+func TestRunPpAdd_BinaryMissingAfterInstallSurfacesError(t *testing.T) {
+	// Regression for #780: if `go install` succeeds but the
+	// binary isn't at the expected sandbox-bin path (e.g. the
+	// upstream package's main binary name differs from the
+	// `<name>-pp-cli` convention), the installer must bail with
+	// a clear error rather than handing a phantom path to the
+	// cli-add handoff.
+	startFixtureCatalog(t)
+	fakeHome(t)
 
-func TestResolveInstalledBinary_MissingErrors(t *testing.T) {
-	t.Setenv("GOBIN", t.TempDir())
-	prev := goEnvGOPATH
-	goEnvGOPATH = func() (string, error) { return t.TempDir(), nil }
-	t.Cleanup(func() { goEnvGOPATH = prev })
-	// Empty PATH so the LookPath fallback doesn't accidentally
-	// find a real binary on the host.
-	t.Setenv("PATH", "")
+	prev := runGoInstall
+	t.Cleanup(func() { runGoInstall = prev })
+	runGoInstall = func(modulePath, gobin string, stdout, stderr io.Writer) error {
+		// Pretend the toolchain succeeded but wrote nothing —
+		// the only way the post-install check fires.
+		return nil
+	}
 
-	_, err := resolveInstalledBinary("absolutely-nonexistent-pp-cli")
-	if err == nil {
-		t.Fatal("expected error for missing binary")
+	var stdout, stderr bytes.Buffer
+	code := runPpAdd(
+		[]string{"--yes", "--no-credentials", "linear"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	)
+	if code == 0 {
+		t.Fatal("expected nonzero exit when the binary is missing post-install")
+	}
+	if !strings.Contains(stderr.String(), "expected binary at") {
+		t.Errorf("stderr should explain the missing-binary failure: %q", stderr.String())
 	}
 }
