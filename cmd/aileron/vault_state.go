@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
@@ -89,6 +90,7 @@ func promptAndUnlockRunning(daemonURL, passphraseFile string, stderr io.Writer) 
 		}
 		err = postVaultUnlockFn(daemonURL, passphrase)
 		if err == nil {
+			rememberVaultPassphrase(passphrase)
 			return nil
 		}
 		if !errors.Is(err, errVaultUnlockRejected) || source != passphraseSourceInteractive {
@@ -146,7 +148,11 @@ func promptCreateAndUnlock(vaultPath, passphraseFile string, stderr io.Writer) e
 	if err != nil {
 		return fmt.Errorf("spawning daemon: %w", err)
 	}
-	return postVaultUnlockFn(strings.TrimSuffix(url, "/v1"), passphrase)
+	if err := postVaultUnlockFn(strings.TrimSuffix(url, "/v1"), passphrase); err != nil {
+		return err
+	}
+	rememberVaultPassphrase(passphrase)
+	return nil
 }
 
 // promptAndSpawnUnlock is the "daemon stopped, vault file present"
@@ -170,6 +176,7 @@ func promptAndSpawnUnlock(passphraseFile string, stderr io.Writer) error {
 		}
 		err = postVaultUnlockFn(strings.TrimSuffix(url, "/v1"), passphrase)
 		if err == nil {
+			rememberVaultPassphrase(passphrase)
 			return nil
 		}
 		if !errors.Is(err, errVaultUnlockRejected) || source != passphraseSourceInteractive {
@@ -244,6 +251,15 @@ var commandsBypassingVault = map[string]bool{
 // `daemon start` bypasses because selectVault now errors if the vault
 // file is missing — the operator should `aileron vault init` first
 // rather than have the state machine create one mid-`daemon start`.
+//
+// BYOCLI commands (`pp add`, `cli add`, `cli refresh`) used to bypass
+// here because their `stashCredentialBindings` inlined its own
+// passphrase prompt and the state-machine prompt would have stacked
+// on top. Per #783, the BYOCLI commands now go through the state
+// machine — onboarding (banner + ASCII art + vault init + daemon
+// spawn) fires *before* the catalog fetch on a fresh `~/.aileron`,
+// and the resolved passphrase is cached for the subsequent binding
+// write so the user is only prompted once.
 var commandsBypassingVaultPair = map[string]bool{
 	"vault init":    true,
 	"secret set":    true,
@@ -252,14 +268,6 @@ var commandsBypassingVaultPair = map[string]bool{
 	"daemon stop":   true,
 	"daemon start":  true,
 	"policy test":   true,
-	// BYOCLI commands (#749/#750) operate on local connector
-	// manifests and write credentials directly to the vault file
-	// — same shape as `secret set`. The state machine would
-	// double-prompt for the passphrase if it fired on top of the
-	// credential prompt inside `cli add`.
-	"cli add":     true,
-	"cli refresh": true,
-	"pp add":      true, // delegates to `cli add` and writes credentials directly
 	"policy save":   true,
 }
 
@@ -278,6 +286,44 @@ func bypassesVault(args []string) bool {
 		return true
 	}
 	return false
+}
+
+// vaultPassphraseCache holds a passphrase the state machine verified
+// against the vault in this process, so subsequent in-process opens
+// (notably BYOCLI's `stashCredentialBindings`, which writes the
+// binding directly to the vault file rather than through a daemon
+// endpoint) can reuse it without re-prompting. Cleared by the
+// state-machine paths that successfully unlock or initialize the
+// vault; never persisted to disk.
+//
+// Process-scoped because the CLI is a single short-lived process per
+// invocation — a global is the simplest fit, and the cache is
+// explicitly invalidated at the end of the run by the runtime
+// dropping the binary.
+var (
+	vaultPassphraseCacheMu sync.Mutex
+	vaultPassphraseCache   string
+)
+
+// rememberVaultPassphrase stores a verified passphrase in the
+// process-scoped cache. Called by the state-machine paths after
+// they have proven the passphrase opens (or initializes) the vault.
+// Passing an empty string clears the cache (useful for tests that
+// want to assert behavior with the cache cold).
+func rememberVaultPassphrase(p string) {
+	vaultPassphraseCacheMu.Lock()
+	defer vaultPassphraseCacheMu.Unlock()
+	vaultPassphraseCache = p
+}
+
+// recallVaultPassphrase returns the cached passphrase, if any. Used
+// by [stashCredentialBindings] so the first-run flow doesn't double-
+// prompt: the state machine already proved this value against the
+// vault moments ago.
+func recallVaultPassphrase() string {
+	vaultPassphraseCacheMu.Lock()
+	defer vaultPassphraseCacheMu.Unlock()
+	return vaultPassphraseCache
 }
 
 // Test seams. ensureVaultUnlocked is exercised end-to-end with these
