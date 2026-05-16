@@ -210,6 +210,132 @@ func TestSetupBindings_UninstalledConnectorIs404(t *testing.T) {
 	}
 }
 
+// TestSetupBindings_ResolvesLocalConnectorFQN regresses the
+// `aileron pp add linear` → `binding setup local://user/linear` flow.
+// Pre-fix, `lookupConnector` only consulted the hub installer
+// store, so any `local://` FQN 404'd with `connector_not_installed`
+// even though the manifest was on disk under
+// `~/.aileron/connectors/local/<name>/manifest.toml`. With the
+// local-store fallback wired, the same request lands a binding and
+// returns 201.
+func TestSetupBindings_ResolvesLocalConnectorFQN(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+
+	// Seed a local manifest with a credential capability so the
+	// setup handler accepts the api_key source.
+	localRoot := t.TempDir()
+	localStore := cstore.NewLocalStore(localRoot)
+	localFQN, _ := cstore.LocalFQN("linear")
+	localManifest := &cstore.Manifest{
+		Connector: cstore.ManifestConnector{
+			Name:      localFQN,
+			Version:   "0.0.1",
+			Origin:    cstore.OriginLocal,
+			Forwarder: cstore.BuiltinForwarderSpawn,
+		},
+		Capabilities: cstore.ManifestCapabilities{
+			Spawn: &cstore.ManifestSpawn{
+				Programs:   []cstore.ManifestSpawnProgram{{Path: "/usr/local/bin/linear-pp-cli"}},
+				Operations: map[string]cstore.ManifestSpawnOperation{"me": {Argv: "me"}},
+			},
+			Credential: &cstore.ManifestCredential{Kind: cstore.CredentialKindAPIKey},
+		},
+	}
+	if _, err := localStore.Save("linear", localManifest); err != nil {
+		t.Fatalf("seed local manifest: %v", err)
+	}
+	srv.localStore = localStore
+
+	body := `{
+		"connector_fqn": "local://user/linear",
+		"bindings": [{"identity": "default", "source": {"kind": "api_key", "value": "lin_test_token"}}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got api.BindingSetupResponse
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Created) != 1 {
+		t.Fatalf("Created = %+v", got.Created)
+	}
+	b := got.Created[0]
+	if b.Name != "api_key/linear/default" {
+		t.Errorf("Name = %q, want api_key/linear/default", b.Name)
+	}
+	if b.ConnectorFqn != "local://user/linear" {
+		t.Errorf("ConnectorFqn = %q, want local://user/linear", b.ConnectorFqn)
+	}
+}
+
+// TestSetupBindings_LocalFQNWithoutLocalStoreIs404 documents the
+// failure mode for daemons started without the BYOCLI local store
+// wired (e.g., tests, embedded test servers, or a future
+// configuration that opts out). The handler must surface a
+// clear "not installed" 404 rather than panicking on a nil
+// dereference of s.localStore.
+func TestSetupBindings_LocalFQNWithoutLocalStoreIs404(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+	// Deliberately leave srv.localStore nil.
+	body := `{
+		"connector_fqn": "local://user/linear",
+		"bindings": [{"identity": "default", "source": {"kind": "api_key", "value": "x"}}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "is not installed") {
+		t.Errorf("body should say not installed: %s", rec.Body.String())
+	}
+}
+
+// TestSetupBindings_UnknownLocalConnectorIs404 covers the case
+// where the FQN scheme is local but no entry exists under the
+// local store root. Distinguishes "scheme not supported" (nil
+// store) from "name not on disk" (store exists, manifest missing).
+func TestSetupBindings_UnknownLocalConnectorIs404(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+	srv.localStore = cstore.NewLocalStore(t.TempDir())
+	body := `{
+		"connector_fqn": "local://user/never-installed",
+		"bindings": [{"identity": "default", "source": {"kind": "api_key", "value": "x"}}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestSetupBindings_MalformedLocalFQNIs404 covers the
+// scheme-correct-but-rejected branch of LocalNameForFQN: an FQN
+// like `local://other/linear` parses as scheme=local but fails
+// the owner check (local connectors require owner="user"). The
+// handler must surface a clean error rather than crashing.
+func TestSetupBindings_MalformedLocalFQNIs404(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+	srv.localStore = cstore.NewLocalStore(t.TempDir())
+	body := `{
+		"connector_fqn": "local://wrong-owner/linear",
+		"bindings": [{"identity": "default", "source": {"kind": "api_key", "value": "x"}}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (FQN malformed)", rec.Code)
+	}
+}
+
 func TestSetupBindings_VaultLockedReturns423(t *testing.T) {
 	srv, _ := bindingTestServer(t, func(s *apiServer) { s.vaultLocked = true })
 	body := `{

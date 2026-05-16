@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,11 +22,8 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/ALRubinger/aileron/internal/action"
-	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/cstore"
-	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/sandbox"
-	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/wrap"
 )
 
@@ -89,7 +88,6 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	yes := flags.Bool("yes", false, "skip the confirmation prompt")
 	flags.BoolVar(yes, "y", false, "skip the confirmation prompt (alias for --yes)")
 	noCredentials := flags.Bool("no-credentials", false, "skip the credential-env-var heuristic + prompt; manifest stays credential-free")
-	passphraseFile := flags.String("passphrase-file", "", "read the vault passphrase from the named file (newline-terminated); only consulted when credentials are stashed")
 	var credentialOverrides stringList
 	flags.Var(&credentialOverrides, "credential", "explicit credential env-var name to stash (repeatable; supplements the heuristic)")
 	if err := flags.Parse(args); err != nil {
@@ -199,14 +197,25 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	stashedCount := 0
+	var stashErr error
 	if len(credKeys) > 0 {
-		var stashErr error
 		stashedCount, stashErr = stashCredentialBindings(
 			manifest.Connector.Name, resolvedName, credKeys,
-			*passphraseFile, stdin, stdout, stderr,
+			stdin, stdout, stderr,
 		)
 		if stashErr != nil {
-			fmt.Fprintf(stderr, "warning: credential stash incomplete (%v); manifest is installed but bindings need `aileron cli refresh` or manual setup\n", stashErr)
+			// Loud failure: the manifest is installed but the
+			// binding never landed in the daemon's vault, so the
+			// runtime will deny every call to this connector with
+			// `binding_required` until the user re-runs the setup.
+			// A scroll-by warning is exactly how previous users
+			// (including the maintainer dogfooding `aileron pp add
+			// linear`) ended up with a connector whose every action
+			// 403'd. Surface it on stderr and exit non-zero so the
+			// shell prompt's exit-status indicator and any wrapping
+			// automation both notice.
+			fmt.Fprintf(stderr, "error: credential stash failed: %v\n", stashErr)
+			fmt.Fprintln(stderr, "       manifest is installed but no binding is stored; rerun `aileron binding setup "+manifest.Connector.Name+"` to recover")
 		}
 	}
 
@@ -218,6 +227,9 @@ func runCliAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if len(credKeys) > 0 {
 		fmt.Fprintf(stdout, "  Credentials: %d declared, %d stashed in vault\n", len(credKeys), stashedCount)
+	}
+	if stashErr != nil {
+		return 1
 	}
 	return 0
 }
@@ -808,18 +820,22 @@ func applyCredentialsToSpec(spec *wrap.Spec, keys []string) {
 }
 
 // stashCredentialBindings prompts the user once for a credential
-// value, opens the local vault, and creates a single
-// `api_key/<connector-name>/default` binding holding that value.
-// The runtime injects the same credential into every env key
-// the manifest's [capabilities.spawn].credential_env_keys lists,
-// matching the existing publisher-signed forwarder behavior
-// (one credential, N alias env-var names).
+// value and dispatches the write to the daemon via
+// `POST /v1/bindings/setup`. The daemon already holds the
+// unlocked vault (the state machine guarantees this before any
+// dispatched handler runs), so we never re-prompt for a
+// passphrase here — eliminating the dual-prompt UX trap where
+// the credential-value prompt and the vault-passphrase prompt
+// looked identical and the user routinely missed the second
+// one, leaving the manifest installed but no binding written.
 //
-// Empty input skips the stash entirely — the manifest still
-// declares the env keys, but the runtime surfaces
-// `binding_required` until the user runs `aileron cli refresh`
-// or creates the binding through another path. Returns 1 when a
-// binding was written, 0 otherwise.
+// Returns 1 when the binding was created (or already existed
+// and was skipped), 0 with nil error when the user intentionally
+// left the value blank, and 0 with a non-nil error when the
+// daemon rejected the request. Callers surface the error
+// prominently — a silent "credential stash incomplete" warning
+// at the end of `pp add` is the exact failure mode this rewrite
+// is closing.
 //
 // v1 limitation: a connector that genuinely has multiple
 // distinct credentials (e.g. an API token and a separate webhook
@@ -827,7 +843,7 @@ func applyCredentialsToSpec(spec *wrap.Spec, keys []string) {
 // declared in EnvPassthrough so the user can set them in the
 // surrounding shell, but the vault doesn't hold them. Multi-
 // credential connectors fall back to the manual wrap path.
-func stashCredentialBindings(connectorFQN, connectorName string, keys []string, passphraseFile string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+func stashCredentialBindings(connectorFQN, connectorName string, keys []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	if len(keys) == 0 {
 		return 0, nil
 	}
@@ -850,66 +866,53 @@ func stashCredentialBindings(connectorFQN, connectorName string, keys []string, 
 		return 0, nil
 	}
 
-	vaultPath := launch.DefaultVaultPath()
-
-	// Prefer the passphrase the state machine just verified for
-	// this process (#783). On a fresh `~/.aileron` the state
-	// machine fires before runPpAdd / runCliAdd: it prints the
-	// Aileron banner + irretrievable-passphrase warning, asks the
-	// user to pick a passphrase, initializes the vault, and spawns
-	// the daemon — all *before* the catalog fetch. The cached
-	// value lets the binding write here reuse that passphrase
-	// without re-prompting. Empty string means the state machine
-	// took the no-prompt branch (daemon already running + vault
-	// unlocked) and we fall through to the standard resolution
-	// chain.
-	passphrase := recallVaultPassphrase()
-	if passphrase == "" {
-		var err error
-		passphrase, _, err = readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
-		if err != nil {
-			return 0, fmt.Errorf("read vault passphrase: %w", err)
-		}
-		if passphrase == "" {
-			return 0, errors.New("vault passphrase is required to stash credentials")
-		}
-	}
-
-	v, err := launch.OpenLocalVault(vaultPath, passphrase)
+	body, err := json.Marshal(map[string]any{
+		"connector_fqn": connectorFQN,
+		"bindings": []map[string]any{{
+			"identity": defaultBindingIdentity,
+			"source":   map[string]any{"kind": "api_key", "value": value},
+		}},
+	})
 	if err != nil {
-		return 0, fmt.Errorf("open vault: %w", err)
+		return 0, fmt.Errorf("marshal binding request: %w", err)
 	}
-
-	bindingName, err := binding.MakeName(
-		cstore.CredentialKindAPIKey,
-		connectorName,
-		"default",
-	)
+	status, respBody, err := bindingDoRequestFn(http.MethodPost, "/bindings/setup", strings.NewReader(string(body)))
 	if err != nil {
-		return 0, fmt.Errorf("make binding name for %s: %w", connectorName, err)
+		return 0, fmt.Errorf("post bindings/setup: %w", err)
 	}
-	b := binding.Binding{
-		Name:         bindingName,
-		Kind:         cstore.CredentialKindAPIKey,
-		Service:      connectorName,
-		Identity:     "default",
-		ConnectorFQN: connectorFQN,
-		Status:       binding.StatusActive,
-		CreatedAt:    timeNow(),
+	if status != http.StatusCreated {
+		return 0, fmt.Errorf("daemon rejected binding setup (HTTP %d): %s", status, strings.TrimSpace(string(respBody)))
 	}
-	store := &binding.VaultStore{Vault: v}
-	if err := store.Put(context.Background(), b, []byte(value), binding.PutUpsert); err != nil {
-		return 0, fmt.Errorf("put binding %s: %w", bindingName, err)
+	var resp struct {
+		Created []struct {
+			Name string `json:"name"`
+		} `json:"created"`
+		Skipped []string `json:"skipped"`
 	}
-	fmt.Fprintf(stdout, "  Stashed credential under binding %s\n", bindingName)
-	return 1, nil
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return 0, fmt.Errorf("parse bindings/setup response: %w", err)
+	}
+	for _, b := range resp.Created {
+		fmt.Fprintf(stdout, "  Stashed credential under binding %s\n", b.Name)
+	}
+	for _, name := range resp.Skipped {
+		fmt.Fprintf(stdout, "  Binding %s already exists; left untouched\n", name)
+	}
+	return len(resp.Created) + len(resp.Skipped), nil
 }
 
-// Type-system gate: vault is used via the launch package's
-// OpenLocalVault helper; the explicit import keeps the linter
-// from suggesting deletion when the helper is the only call
-// site referenced here.
-var _ vault.Vault = (vault.Vault)(nil)
+// defaultBindingIdentity is the identity segment paired with
+// every credential `aileron pp add` / `aileron cli add` stashes.
+// Matches the historical local-vault binding name shape
+// `api_key/<connector-name>/default` so existing manifests and
+// the runtime credential resolver keep resolving the same key.
+const defaultBindingIdentity = "default"
+
+// bindingDoRequestFn is the HTTP seam tests swap with a fake
+// daemon transport. Production points at [bindingDoRequest] in
+// main.go, which resolves the daemon URL and submits a real
+// request.
+var bindingDoRequestFn = bindingDoRequest
 
 // timeNow is the wall clock the credential binding writes use
 // for CreatedAt stamps. Indirected as a package-level seam so

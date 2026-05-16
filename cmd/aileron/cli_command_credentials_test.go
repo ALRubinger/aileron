@@ -11,9 +11,7 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
-	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/sandbox/sandboxtest"
-	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/wrap"
 )
 
@@ -289,9 +287,17 @@ func contains(s []string, v string) bool {
 }
 
 func TestStashCredentialBindings_EmptyKeysIsNoOp(t *testing.T) {
+	// No credential env keys → no daemon round trip, no prompt.
+	// The fake transport stays untouched.
+	calls := 0
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		calls++
+		return 0, nil, errors.New("no transport call expected")
+	})
+
 	var stdout, stderr bytes.Buffer
 	written, err := stashCredentialBindings(
-		"local://user/x", "x", nil, "",
+		"local://user/x", "x", nil,
 		strings.NewReader(""), &stdout, &stderr,
 	)
 	if err != nil {
@@ -300,24 +306,31 @@ func TestStashCredentialBindings_EmptyKeysIsNoOp(t *testing.T) {
 	if written != 0 {
 		t.Errorf("written=%d want 0", written)
 	}
+	if calls != 0 {
+		t.Errorf("transport called %d times for empty keys; should not be called at all", calls)
+	}
 }
 
-func TestStashCredentialBindings_EmptyValueSkipsVaultWrite(t *testing.T) {
+func TestStashCredentialBindings_EmptyValueSkipsDaemonCall(t *testing.T) {
 	// User leaves the credential value blank (legitimate skip for
 	// connectors where the heuristic surfaced a false positive).
-	// stashCredentialBindings must return (0, nil) without touching
-	// the vault — proven by NOT setting up a vault passphrase.
+	// stashCredentialBindings must return (0, nil) without
+	// hitting the daemon — proven by failing the fake transport.
 	prevPrompt := promptPassphrase
 	t.Cleanup(func() { promptPassphrase = prevPrompt })
 	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
-		// Empty value → skip path.
-		return "", nil
+		return "", nil // empty value → skip path
 	}
+	transportCalls := 0
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		transportCalls++
+		return 0, nil, errors.New("no daemon call expected for empty-value skip")
+	})
 
 	var stdout, stderr bytes.Buffer
 	written, err := stashCredentialBindings(
 		"local://user/skipme", "skipme",
-		[]string{"SKIPME_API_TOKEN"}, "",
+		[]string{"SKIPME_API_TOKEN"},
 		strings.NewReader(""), &stdout, &stderr,
 	)
 	if err != nil {
@@ -326,37 +339,40 @@ func TestStashCredentialBindings_EmptyValueSkipsVaultWrite(t *testing.T) {
 	if written != 0 {
 		t.Errorf("written=%d want 0", written)
 	}
+	if transportCalls != 0 {
+		t.Errorf("daemon transport called %d times during empty-value skip; should be 0", transportCalls)
+	}
+	if !strings.Contains(stdout.String(), "no credential stashed") {
+		t.Errorf("stdout should explain the skip; got %q", stdout.String())
+	}
 }
 
-func TestStashCredentialBindings_WritesBindingToVault(t *testing.T) {
-	// End-to-end: the vault is pre-initialized (state machine's
-	// responsibility per #783), the cached passphrase lets the
-	// stash open the vault without prompting, and one binding
-	// lands. Verifies the binding-write half of the BYOCLI flow
-	// in isolation from the state machine.
-	fakeHome(t)
-	vaultPath := launch.DefaultVaultPath()
-	if _, err := vault.Init(vaultPath, "cached-passphrase"); err != nil {
-		t.Fatalf("vault.Init: %v", err)
-	}
-	rememberVaultPassphrase("cached-passphrase")
-	t.Cleanup(func() { rememberVaultPassphrase("") }) // clear for next test
-
+func TestStashCredentialBindings_PostsBindingToDaemon(t *testing.T) {
+	// Happy path: the user enters a value, stashCredentialBindings
+	// POSTs to /bindings/setup with the right body, and the
+	// daemon's `created` reply lands in stdout. No vault file is
+	// opened; no second prompt fires.
 	prevPrompt := promptPassphrase
 	t.Cleanup(func() { promptPassphrase = prevPrompt })
-	// Only the credential-value prompt fires — the passphrase
-	// comes from the cache. A second prompt here would mean the
-	// state-machine-cache path silently regressed.
-	calls := 0
+	promptCalls := 0
 	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
-		calls++
+		promptCalls++
 		return "super-secret-token-bytes", nil
 	}
+
+	var seenMethod, seenPath, seenBody string
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		seenMethod = method
+		seenPath = path
+		bs, _ := io.ReadAll(body)
+		seenBody = string(bs)
+		return 201, []byte(`{"created":[{"name":"api_key/linear/default"}],"skipped":[]}`), nil
+	})
 
 	var stdout, stderr bytes.Buffer
 	written, err := stashCredentialBindings(
 		"local://user/linear", "linear",
-		[]string{"LINEAR_API_TOKEN"}, "",
+		[]string{"LINEAR_API_TOKEN"},
 		strings.NewReader(""), &stdout, &stderr,
 	)
 	if err != nil {
@@ -365,124 +381,150 @@ func TestStashCredentialBindings_WritesBindingToVault(t *testing.T) {
 	if written != 1 {
 		t.Errorf("written=%d want 1", written)
 	}
-	if calls != 1 {
-		t.Errorf("expected only 1 prompt (credential value); the cached passphrase should skip the passphrase prompt — got %d prompts", calls)
+	if promptCalls != 1 {
+		t.Errorf("expected exactly 1 prompt (credential value); got %d. A second prompt means the dual-prompt UX trap regressed.", promptCalls)
+	}
+	if seenMethod != "POST" || seenPath != "/bindings/setup" {
+		t.Errorf("request: %s %s, want POST /bindings/setup", seenMethod, seenPath)
+	}
+	for _, want := range []string{
+		`"connector_fqn":"local://user/linear"`,
+		`"identity":"default"`,
+		`"kind":"api_key"`,
+		`"value":"super-secret-token-bytes"`,
+	} {
+		if !strings.Contains(seenBody, want) {
+			t.Errorf("request body missing %q; got %s", want, seenBody)
+		}
 	}
 	if !strings.Contains(stdout.String(), "Stashed credential under binding api_key/linear/default") {
 		t.Errorf("stdout missing success line: %q", stdout.String())
 	}
 }
 
-func TestStashCredentialBindings_FallsBackToPromptWhenCacheEmpty(t *testing.T) {
-	// When `pp add` / `cli add` is invoked while the daemon is
-	// already running and the vault is unlocked, the state
-	// machine's no-prompt branch fires and the cache stays empty.
-	// stashCredentialBindings must still resolve a passphrase —
-	// falling back to readVaultPassphrase (file/env/prompt).
-	fakeHome(t)
-	vaultPath := launch.DefaultVaultPath()
-	if _, err := vault.Init(vaultPath, "from-prompt"); err != nil {
-		t.Fatalf("vault.Init: %v", err)
-	}
-	rememberVaultPassphrase("") // ensure cache is clear
-	t.Cleanup(func() { rememberVaultPassphrase("") })
-
+func TestStashCredentialBindings_DaemonRejectionReturnsError(t *testing.T) {
+	// Daemon returns non-201 (e.g., the connector isn't installed
+	// — Bug B before the fix shipped). The caller must see a
+	// concrete error so the install can exit non-zero, never the
+	// silent-warning shape that produced the linear-auth bug.
 	prevPrompt := promptPassphrase
 	t.Cleanup(func() { promptPassphrase = prevPrompt })
-	calls := 0
-	canned := []string{
-		"credential-bytes", // credential value
-		"from-prompt",      // vault passphrase (matches Init)
-	}
 	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
-		v := canned[calls]
-		calls++
-		return v, nil
+		return "value", nil
 	}
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		return 404, []byte(`{"error":{"code":"connector_not_installed","message":"connector local://user/x is not installed"}}`), nil
+	})
 
 	var stdout, stderr bytes.Buffer
 	written, err := stashCredentialBindings(
-		"local://user/already", "already",
-		[]string{"ALREADY_API_KEY"}, "",
+		"local://user/x", "x",
+		[]string{"X_API_KEY"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err == nil {
+		t.Fatalf("expected non-nil error on 404; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(err.Error(), "HTTP 404") {
+		t.Errorf("err = %v, want status surfaced in message", err)
+	}
+	if !strings.Contains(err.Error(), "connector_not_installed") {
+		t.Errorf("err = %v, want daemon response body surfaced in message", err)
+	}
+	if written != 0 {
+		t.Errorf("written=%d want 0 on rejection", written)
+	}
+}
+
+func TestStashCredentialBindings_PrompterErrorPropagates(t *testing.T) {
+	// The credential-value prompt fails (e.g., /dev/tty unavailable
+	// in a non-interactive shell). stashCredentialBindings must
+	// wrap and return the error rather than swallowing it — a
+	// silent zero return would leave the install reporting
+	// "success" while the binding is missing, the exact failure
+	// mode this rewrite is closing.
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		return "", errors.New("tty unavailable")
+	}
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		return 0, nil, errors.New("transport should not be called when prompt fails")
+	})
+
+	var stdout, stderr bytes.Buffer
+	_, err := stashCredentialBindings(
+		"local://user/x", "x",
+		[]string{"X_API_KEY"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err == nil || !strings.Contains(err.Error(), "tty unavailable") {
+		t.Errorf("err = %v, want underlying prompter error wrapped through", err)
+	}
+}
+
+func TestStashCredentialBindings_HTTPErrorPropagates(t *testing.T) {
+	// Transport error (e.g., daemon unreachable) must surface as a
+	// real error, not a silent zero return.
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		return "value", nil
+	}
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		return 0, nil, errors.New("connection refused")
+	})
+
+	var stdout, stderr bytes.Buffer
+	_, err := stashCredentialBindings(
+		"local://user/x", "x",
+		[]string{"X_API_KEY"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err == nil || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("err = %v, want transport error propagated", err)
+	}
+}
+
+func TestStashCredentialBindings_SkippedBindingsCountInReturn(t *testing.T) {
+	// Daemon reports the binding already exists (idempotent
+	// reinstall). That should count toward `written` so the caller
+	// reports a successful end-state and doesn't exit non-zero on
+	// a reinstall.
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		return "value", nil
+	}
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		return 201, []byte(`{"created":[],"skipped":["api_key/linear/default"]}`), nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	written, err := stashCredentialBindings(
+		"local://user/linear", "linear",
+		[]string{"LINEAR_API_TOKEN"},
 		strings.NewReader(""), &stdout, &stderr,
 	)
 	if err != nil {
 		t.Fatalf("stash: %v", err)
 	}
 	if written != 1 {
-		t.Errorf("written=%d want 1", written)
+		t.Errorf("written=%d want 1 (skipped == still-bound counts as a successful end-state)", written)
 	}
-	if calls != 2 {
-		t.Errorf("expected 2 prompts (credential + passphrase fallback), got %d", calls)
-	}
-}
-
-func TestStashCredentialBindings_EmptyPassphraseInFallbackRejected(t *testing.T) {
-	// Daemon-already-running branch: cache is cold so
-	// stashCredentialBindings falls back to readVaultPassphrase.
-	// An empty passphrase from the fallback must surface a clear
-	// error so the user knows the credential value was not
-	// written to the vault (rather than silently producing a 0
-	// return).
-	fakeHome(t)
-	rememberVaultPassphrase("")
-	t.Cleanup(func() { rememberVaultPassphrase("") })
-
-	prevPrompt := promptPassphrase
-	t.Cleanup(func() { promptPassphrase = prevPrompt })
-	calls := 0
-	canned := []string{
-		"credential-value", // credential
-		"",                 // empty vault passphrase
-	}
-	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
-		v := canned[calls]
-		calls++
-		return v, nil
-	}
-
-	var stdout, stderr bytes.Buffer
-	_, err := stashCredentialBindings(
-		"local://user/x", "x",
-		[]string{"X_API_KEY"}, "",
-		strings.NewReader(""), &stdout, &stderr,
-	)
-	if err == nil || !strings.Contains(err.Error(), "vault passphrase is required") {
-		t.Errorf("err = %v, want 'vault passphrase is required' wrap", err)
+	if !strings.Contains(stdout.String(), "already exists") {
+		t.Errorf("stdout should note the skip; got %q", stdout.String())
 	}
 }
 
-func TestStashCredentialBindings_PassphrasePrompterErrorPropagates(t *testing.T) {
-	// Daemon-already-running + cold cache + the passphrase prompt
-	// fails (e.g., /dev/tty unavailable in a CI container).
-	// stashCredentialBindings must wrap and surface the underlying
-	// error rather than swallowing it — otherwise the user sees a
-	// silent "0 stashed" success message with no indication of
-	// why the binding never lands.
-	fakeHome(t)
-	rememberVaultPassphrase("")
-	t.Cleanup(func() { rememberVaultPassphrase("") })
-
-	prevPrompt := promptPassphrase
-	t.Cleanup(func() { promptPassphrase = prevPrompt })
-	calls := 0
-	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
-		calls++
-		if calls == 1 {
-			return "credential-value", nil // credential prompt succeeds
-		}
-		return "", errors.New("tty unavailable") // passphrase prompt fails
-	}
-
-	var stdout, stderr bytes.Buffer
-	_, err := stashCredentialBindings(
-		"local://user/y", "y",
-		[]string{"Y_API_KEY"}, "",
-		strings.NewReader(""), &stdout, &stderr,
-	)
-	if err == nil || !strings.Contains(err.Error(), "tty unavailable") {
-		t.Errorf("err = %v, want underlying prompter error wrapped through", err)
-	}
+// withFakeBindingTransport swaps bindingDoRequestFn for the
+// duration of a test. The restore handler runs through t.Cleanup
+// so test order doesn't affect the cached production value.
+func withFakeBindingTransport(t *testing.T, fn func(method, path string, body io.Reader) (int, []byte, error)) {
+	t.Helper()
+	prev := bindingDoRequestFn
+	t.Cleanup(func() { bindingDoRequestFn = prev })
+	bindingDoRequestFn = fn
 }
 
 func TestRememberRecallVaultPassphrase_RoundTrip(t *testing.T) {
