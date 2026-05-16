@@ -7,7 +7,7 @@ This guide walks you from an empty directory to a working connector binary. By t
 
 If you have not read it yet, start with [Connectors](/concepts/connectors/) for the model. This guide is the *how*; that page is the *what* and *why*. Once your connector compiles and behaves the way you want, [Publishing a Connector](/guides/publishing-a-connector/) covers signing, tagging, and the keyring trust model.
 
-The reference implementation throughout this guide is [`github.com/ALRubinger/aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) — a real connector exposing six Gmail and Calendar ops. Snippets here are simplified for clarity; clone that repo when you want production-shape code to study.
+The reference implementation throughout this guide is [`github.com/ALRubinger/aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) — a real connector exposing twenty-one ops across Gmail, Calendar, Contacts, Drive, and Docs. Snippets here are simplified for clarity; clone that repo when you want production-shape code to study.
 
 ## What you are building
 
