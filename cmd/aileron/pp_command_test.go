@@ -31,7 +31,7 @@ const fixtureRegistry = `{
       "path": "library/project-management/linear",
       "printer": "mvanhorn",
       "description": "Query Linear issues.",
-      "mcp": {"binary": "linear-pp-mcp"}
+      "mcp": {"binary": "linear-pp-mcp", "env_vars": ["LINEAR_API_KEY"]}
     },
     {
       "name": "sentry",
@@ -384,6 +384,32 @@ func TestResolveInstalledBinary_FallsBackToGOPATHBin(t *testing.T) {
 	}
 	if got != target {
 		t.Errorf("got %q want %q", got, target)
+	}
+}
+
+func TestRunPpAdd_PassesCatalogEnvVarsAsCredentialOverrides(t *testing.T) {
+	// linear-pp-cli's --help doesn't mention LINEAR_API_KEY by
+	// name, so the wrap heuristic alone would skip the credential
+	// prompt — even though the catalog declares the auth env var
+	// explicitly. Verify pp add reads `mcp.env_vars` from the
+	// catalog and threads each into the cli-add handoff as a
+	// `--credential <ENV>` override. We stop at the install plan
+	// (--dry-run) so the test doesn't have to set up the vault.
+	startFixtureCatalog(t)
+	fakeHome(t)
+	t.Setenv("GOBIN", t.TempDir())
+
+	var stdout, stderr bytes.Buffer
+	if code := runPpAdd(
+		[]string{"--dry-run", "linear"},
+		strings.NewReader(""),
+		&stdout, &stderr,
+	); code != 0 {
+		t.Fatalf("dry-run exit=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "LINEAR_API_KEY") {
+		t.Errorf("install plan should surface the catalog-declared env var: %q", out)
 	}
 }
 

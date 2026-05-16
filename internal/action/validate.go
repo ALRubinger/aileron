@@ -51,12 +51,20 @@ var inputItemsTypes = map[string]bool{
 }
 
 // fqnSchemes is the closed set of FQN schemes recognized in v1, per ADR-0002.
-// Adding a scheme requires an ADR amendment (or a future ADR delegating
-// scheme registration).
+// Adding a remote-resolver scheme requires an ADR amendment.
+//
+// The `local` scheme is the exception: it names BYOCLI connectors
+// authored by `aileron cli add` / `aileron pp add` (issue #749).
+// Their action.md `source` fields shape as `local://user/<name>/<op>@<version>`;
+// without `local` in this allowlist the action loader rejects
+// every BYOCLI-emitted action with `invalid source: scheme "local"
+// is not recognized`. Mirrors the same entry in
+// [cstore.fqnSchemes].
 var fqnSchemes = map[string]bool{
 	"github": true,
 	"gitlab": true,
 	"hub":    true,
+	"local":  true,
 }
 
 // Validate checks a parsed manifest against the schema described in
