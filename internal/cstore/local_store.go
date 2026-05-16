@@ -63,6 +63,19 @@ func DefaultLocalRoot() string {
 	return filepath.Join(".aileron", "connectors", "local")
 }
 
+// LocalConnectorBinDir returns the sandboxed install directory for
+// a local connector's wrapped binaries — `<root>/<name>/bin`. The
+// `pp add` installer overrides `GOBIN` to this path so the wrapped
+// CLI never lands on the user's `$PATH`, closing the bypass that
+// let an agent's `Bash` tool reach the binary directly and skip
+// vault-mediated credential injection (#780). Aileron's spawn
+// primitive resolves the binary path from the manifest's
+// `programs[].path` field, so the binary doesn't need `$PATH`
+// reachability for the runtime itself.
+func LocalConnectorBinDir(name string) string {
+	return filepath.Join(DefaultLocalRoot(), name, "bin")
+}
+
 // localManifestFile is the single manifest filename a local
 // connector directory holds. Matches the hub store's
 // [tarManifestFile] so manifest parsers see the same byte layout

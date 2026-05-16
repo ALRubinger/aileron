@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ALRubinger/aileron/internal/cstore"
 )
 
 // runPp dispatches `aileron pp <subcommand>`. The `pp` namespace
@@ -67,10 +69,16 @@ flags for ` + "`aileron pp add`" + `:
 //     `github.com/mvanhorn/printing-press-library/<path>`.
 //  5. Print the install plan (module + source URL + binary name)
 //     and require confirmation (unless --yes).
-//  6. Run `go install <module>@latest`. Output streams to the
-//     user's stdout/stderr so they see the toolchain's progress.
-//  7. Locate the installed binary at $GOBIN/<name>-pp-cli (with
-//     fallbacks).
+//  6. Run `go install <module>@latest` with `GOBIN` overridden to
+//     the per-connector sandbox-bin directory
+//     (~/.aileron/connectors/local/<name>/bin) so the binary
+//     never lands on the user's `$PATH`. Closes the credential-
+//     sealing bypass that let agents reach the wrapped CLI via
+//     raw shell (#780). Output streams to the user's stdout/
+//     stderr so they see the toolchain's progress.
+//  7. The binary path is deterministic — `<sandbox-bin>/<binary>`
+//     — so the post-install resolution is a single fileExists
+//     check rather than a GOBIN/GOPATH/$PATH walk.
 //  8. Hand off to runCliAdd against that binary. The introspector
 //     + credential capture from #755 + #759 do the rest.
 func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -109,13 +117,16 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	packagePath := ppPackagePath(entry.Path, name)
 	sourceURL := ppSourceURL(entry.Path)
 	binaryName := name + "-pp-cli"
+	sandboxBinDir := cstore.LocalConnectorBinDir(name)
+	binPath := filepath.Join(sandboxBinDir, binaryName)
 
 	fmt.Fprintln(stdout)
 	fmt.Fprintf(stdout, "Install plan for %s:\n", name)
 	fmt.Fprintf(stdout, "  Module:   %s\n", modulePath)
 	fmt.Fprintf(stdout, "  Package:  %s@latest\n", packagePath)
 	fmt.Fprintf(stdout, "  Source:   %s\n", sourceURL)
-	fmt.Fprintf(stdout, "  Binary:   %s (installed to $GOBIN)\n", binaryName)
+	fmt.Fprintf(stdout, "  Binary:   %s\n", binaryName)
+	fmt.Fprintf(stdout, "  Install:  %s (not on $PATH; reached via Aileron's spawn primitive)\n", binPath)
 	fmt.Fprintf(stdout, "  Wrap as:  local://user/%s\n", name)
 	if entry.MCP != nil && len(entry.MCP.EnvVars) > 0 {
 		fmt.Fprintf(stdout, "  Creds:    %s (catalog-declared; prompted after install)\n", strings.Join(entry.MCP.EnvVars, ", "))
@@ -135,16 +146,25 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	fmt.Fprintf(stdout, "\nRunning `go install %s@latest`…\n", packagePath)
-	if err := runGoInstall(packagePath, stdout, stderr); err != nil {
+	// Create the per-connector sandbox-bin directory before
+	// invoking `go install`; the toolchain refuses to write to a
+	// nonexistent GOBIN. Mode 0o755 matches DefaultLocalRoot's
+	// directory mode so the daemon's connector loader can stat
+	// the path without permission surprises.
+	if err := os.MkdirAll(sandboxBinDir, 0o755); err != nil {
+		fmt.Fprintf(stderr, "error: create sandbox bin dir %s: %v\n", sandboxBinDir, err)
+		return 1
+	}
+
+	fmt.Fprintf(stdout, "\nRunning `GOBIN=%s go install %s@latest`…\n", sandboxBinDir, packagePath)
+	if err := runGoInstall(packagePath, sandboxBinDir, stdout, stderr); err != nil {
 		fmt.Fprintf(stderr, "error: go install: %v\n", err)
 		return 1
 	}
 
-	binPath, err := resolveInstalledBinary(binaryName)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: locate installed binary: %v\n", err)
-		fmt.Fprintln(stderr, "Check that $GOBIN (or $(go env GOPATH)/bin) is on your $PATH.")
+	if !fileExists(binPath) {
+		fmt.Fprintf(stderr, "error: expected binary at %s after go install but the file is missing\n", binPath)
+		fmt.Fprintln(stderr, "This usually means the package's main binary name differs from `<name>-pp-cli`. Check the catalog entry.")
 		return 1
 	}
 
@@ -352,50 +372,32 @@ func requireGoOnPath() error {
 }
 
 // runGoInstall shells out to `go install <module>@latest` with
-// the user's full environment, streaming output to the caller's
-// stdout/stderr. The user sees the toolchain's progress and any
-// build error directly. Per family rule "trust internal code,"
-// the function relies on exec.LookPath having already verified
-// `go` is present.
+// GOBIN overridden to the per-connector sandbox-bin directory,
+// streaming output to the caller's stdout/stderr. The user sees
+// the toolchain's progress and any build error directly. Per
+// family rule "trust internal code," the function relies on
+// exec.LookPath having already verified `go` is present.
+//
+// `gobin` is the absolute path the toolchain writes the resulting
+// binary to. Pinning GOBIN per-install (rather than relying on
+// whatever GOBIN/GOPATH the user has globally) is the load-bearing
+// piece of #780's credential-sealing fix — without it the binary
+// lands on `$PATH` and any shell-capable agent can bypass
+// Aileron's vault-mediated credential injection.
 //
 // Indirected through a package-level var so tests can swap in a
 // fake without forking a real `go` process.
-var runGoInstall = func(modulePath string, stdout, stderr io.Writer) error {
+var runGoInstall = func(modulePath, gobin string, stdout, stderr io.Writer) error {
 	cmd := exec.Command("go", "install", modulePath+"@latest")
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = os.Environ()
+	// Appending after os.Environ() lets our GOBIN override any
+	// pre-existing GOBIN the user set in their shell — the Go
+	// toolchain reads `os.Getenv("GOBIN")` which returns the last
+	// duplicate. Same idiom as exec/cmd.Run's documented append-
+	// to-override.
+	cmd.Env = append(os.Environ(), "GOBIN="+gobin)
 	return cmd.Run()
-}
-
-// resolveInstalledBinary returns the absolute path of the
-// just-installed binary. Walks the precedence Go's install
-// pipeline writes to:
-//
-//  1. $GOBIN (set explicitly by user)
-//  2. $(go env GOPATH)/bin (the default install destination)
-//  3. exec.LookPath fallback ($PATH lookup)
-//
-// Returns an error when none of the three locations contain the
-// expected binary, so the caller can surface a remediation hint
-// rather than handing a malformed path to the wrapper.
-func resolveInstalledBinary(binaryName string) (string, error) {
-	if bin := os.Getenv("GOBIN"); bin != "" {
-		path := filepath.Join(bin, binaryName)
-		if fileExists(path) {
-			return path, nil
-		}
-	}
-	if gopath, err := goEnvGOPATH(); err == nil && gopath != "" {
-		path := filepath.Join(gopath, "bin", binaryName)
-		if fileExists(path) {
-			return path, nil
-		}
-	}
-	if path, err := exec.LookPath(binaryName); err == nil {
-		return path, nil
-	}
-	return "", fmt.Errorf("binary %q not found in $GOBIN, $(go env GOPATH)/bin, or $PATH after install", binaryName)
 }
 
 // fileExists is a stat-and-discard helper. Doesn't distinguish
@@ -404,16 +406,4 @@ func resolveInstalledBinary(binaryName string) (string, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-// goEnvGOPATH returns the Go toolchain's reported GOPATH, the
-// fallback location `go install` writes to when GOBIN is unset.
-// Indirected so tests can mock without forking `go env`.
-var goEnvGOPATH = func() (string, error) {
-	cmd := exec.Command("go", "env", "GOPATH")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }

@@ -268,6 +268,20 @@ func TestDefaultLocalRoot_IncludesAileronSubdir(t *testing.T) {
 	}
 }
 
+func TestLocalConnectorBinDir_IsUnderLocalRoot(t *testing.T) {
+	// #780 contract: the sandbox-bin path is per-connector, lives
+	// under DefaultLocalRoot, and is *not* on $PATH. The agent's
+	// shell tool can't find binaries here, which closes the BYOCLI
+	// credential-sealing bypass.
+	got := LocalConnectorBinDir("linear")
+	if !strings.HasPrefix(got, DefaultLocalRoot()) {
+		t.Errorf("LocalConnectorBinDir(%q)=%q should be under DefaultLocalRoot %q", "linear", got, DefaultLocalRoot())
+	}
+	if !strings.HasSuffix(got, "linear/bin") && !strings.HasSuffix(got, "linear\\bin") {
+		t.Errorf("LocalConnectorBinDir(%q)=%q should end with linear/bin", "linear", got)
+	}
+}
+
 func TestLocalFQN_RejectsInvalidName(t *testing.T) {
 	for _, bad := range []string{"", "Bad-Caps", "with space", "../escape", ".hidden"} {
 		if _, err := LocalFQN(bad); err == nil {
