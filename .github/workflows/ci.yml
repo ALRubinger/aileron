@@ -259,7 +259,7 @@ jobs:
         run: E2E_COVERAGE=1 pnpm build
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-ui-${{ hashFiles('ui/pnpm-lock.yaml') }}
@@ -340,7 +340,7 @@ jobs:
         run: pnpm build
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-webapp-${{ hashFiles('webapp/pnpm-lock.yaml') }}
@@ -407,7 +407,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-webapp-${{ hashFiles('webapp/pnpm-lock.yaml') }}
@@ -614,7 +614,7 @@ jobs:
           cache-dependency-path: ui/pnpm-lock.yaml
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-ui-${{ hashFiles('ui/pnpm-lock.yaml') }}
