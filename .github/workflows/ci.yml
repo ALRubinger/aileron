@@ -448,7 +448,7 @@ jobs:
         # time win there: `load: true` + multi-stage Go builds add
         # ~90s of image-load overhead that swamps the cache savings,
         # and those jobs aren't on the critical path anyway.
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docs/Dockerfile
