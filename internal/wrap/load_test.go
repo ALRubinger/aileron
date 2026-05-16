@@ -456,9 +456,14 @@ func TestEmit_ActionMDIsParseableByActionLoader(t *testing.T) {
 
 func TestEmit_ActionMDInputsLandWhenSpecDeclaresParams(t *testing.T) {
 	// The "log" subcommand in goodYAML has params (since, author);
-	// the emitted action.md should surface them as [[inputs]] entries
-	// with [execute.inputs] interpolation, so the agent can pass args
-	// through to the connector's spawn_op call.
+	// the emitted action.md surfaces them as [[inputs]] entries so
+	// the LLM tool catalog sees the parameter shape. The wrap
+	// emitter deliberately does NOT emit [execute.inputs] — the
+	// agent's call-time args flow directly to the connector through
+	// mergeArgs (the input names match the argv-pattern placeholder
+	// names by construction), and emitting `${args.X}` here would
+	// break optional-group elision for unsupplied inputs by leaving
+	// the literal token in the merged args map.
 	dir := t.TempDir()
 	s, _ := LoadYAML("a.yaml", []byte(goodYAML))
 	if err := Emit(s, dir, false); err != nil {
@@ -475,13 +480,15 @@ func TestEmit_ActionMDInputsLandWhenSpecDeclaresParams(t *testing.T) {
 	if len(manifest.Inputs) == 0 {
 		t.Fatal("expected [[inputs]] entries from spec params")
 	}
-	// Inputs flow into the [execute.inputs] interpolation map.
-	if len(manifest.Execute) != 1 || len(manifest.Execute[0].Inputs) == 0 {
-		t.Fatalf("execute.inputs missing: %+v", manifest.Execute)
+	// [execute.inputs] must be empty/absent — wrap-emitted actions
+	// rely on the args-iteration path in mergeArgs to deliver the
+	// agent's inputs to the connector.
+	if len(manifest.Execute) != 1 {
+		t.Fatalf("expected one execute step, got %d", len(manifest.Execute))
 	}
-	since, _ := manifest.Execute[0].Inputs["since"].(string)
-	if since != "${args.since}" {
-		t.Errorf("execute.inputs.since = %q, want ${args.since}", since)
+	if len(manifest.Execute[0].Inputs) != 0 {
+		t.Errorf("execute.inputs should be empty in wrap-emitted action.md; got %+v",
+			manifest.Execute[0].Inputs)
 	}
 }
 

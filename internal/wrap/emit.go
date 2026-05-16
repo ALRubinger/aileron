@@ -345,13 +345,25 @@ func renderActionMD(s *Spec, sub SubcommandSpec, _ *cstore.Manifest, connectorHa
 	fmt.Fprintf(&b, "id = %q\n", sub.Name)
 	fmt.Fprintf(&b, "connector = %q\n", s.Connector.Name)
 	fmt.Fprintf(&b, "op = %q\n", sub.Name)
-	if len(sub.Params) > 0 {
-		fmt.Fprintln(&b)
-		fmt.Fprintln(&b, "[execute.inputs]")
-		for _, p := range sub.Params {
-			fmt.Fprintf(&b, "%s = \"${args.%s}\"\n", p.Name, p.Name)
-		}
-	}
+	// Intentionally no `[execute.inputs]` block. The wrap-generated
+	// action's input names already match the argv-pattern placeholder
+	// names by construction (the wrap heuristic sets both from the
+	// Cobra flag's long-form), so the agent's call-time args flow
+	// directly to the connector through mergeArgs's args-iteration
+	// loop — no static interpolation needed.
+	//
+	// Critically, this is also the only correct shape for the optional-
+	// group argv extension introduced for this PR: emitting
+	// `description = "${args.description}"` here would, on an agent
+	// invocation that omits the optional `description` input, leave
+	// the literal token `${args.description}` in the merged args (per
+	// interpolateArgs's documented "leave-literal-for-unknown" policy
+	// in internal/action/executor.go). That non-empty literal would
+	// then defeat the optional-group elision in spawn.Substitute and
+	// the resulting argv would carry `--description ${args.description}`
+	// to the wrapped CLI. Skipping the block keeps optional-missing
+	// inputs absent from `args` entirely, which is exactly the
+	// pre-condition for elision.
 	fmt.Fprintln(&b, frontmatterDelim)
 	fmt.Fprintln(&b)
 	if sub.Description != "" {
