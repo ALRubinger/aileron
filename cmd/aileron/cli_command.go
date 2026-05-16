@@ -851,13 +851,56 @@ func stashCredentialBindings(connectorFQN, connectorName string, keys []string, 
 	}
 
 	vaultPath := launch.DefaultVaultPath()
-	passphrase, _, err := readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
+
+	// Detect whether this is a fresh vault so we can print the
+	// irretrievable-passphrase banner before the user picks a
+	// passphrase. Mirrors the contract `aileron vault init` and
+	// `aileron secret set` establish — `cli add` / `pp add` are
+	// often the user's first vault-touching command (a brand-new
+	// laptop running `aileron pp add linear`), and a passphrase
+	// prompt without the new-vault context is alarming.
+	isNewVault := true
+	if fv, openErr := vault.NewFileVault(vaultPath); openErr == nil {
+		isNewVault = !fv.HasContents()
+	}
+	if isNewVault && willPromptInteractively(passphraseFile) {
+		printNewVaultBanner(stderr, vaultPath)
+	}
+
+	passphrase, source, err := readVaultPassphrase(passphraseFile, "Vault passphrase: ", stderr)
 	if err != nil {
 		return 0, fmt.Errorf("read vault passphrase: %w", err)
 	}
 	if passphrase == "" {
 		return 0, errors.New("vault passphrase is required to stash credentials")
 	}
+
+	// First-touch vault: require interactive confirmation so a
+	// typo doesn't lock the user out of their own credential
+	// forever. Skipped for file/env passphrase sources (CI,
+	// scripts) since re-reading the same source would just
+	// confirm itself.
+	if isNewVault && source == passphraseSourceInteractive {
+		confirm, _, confErr := readVaultPassphrase("", "Confirm passphrase: ", stderr)
+		if confErr != nil {
+			return 0, fmt.Errorf("read confirmation passphrase: %w", confErr)
+		}
+		if confirm != passphrase {
+			return 0, errors.New("passphrases do not match; aborting credential stash")
+		}
+	}
+
+	// Initialize the vault file if this is the first write. The
+	// vault file has to exist with a verification blob keyed to
+	// the passphrase before OpenLocalVault accepts it; without
+	// this `pp add` against a fresh ~/.aileron would error out
+	// of the open call with "no verification blob."
+	if isNewVault {
+		if _, initErr := vault.Init(vaultPath, passphrase); initErr != nil && !errors.Is(initErr, vault.ErrVaultExists) {
+			return 0, fmt.Errorf("create vault at %s: %w", vaultPath, initErr)
+		}
+	}
+
 	v, err := launch.OpenLocalVault(vaultPath, passphrase)
 	if err != nil {
 		return 0, fmt.Errorf("open vault: %w", err)
