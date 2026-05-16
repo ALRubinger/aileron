@@ -440,7 +440,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build docs image
         # GHA layer cache for the docs image. The same pattern was
