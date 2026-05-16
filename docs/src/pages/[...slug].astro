@@ -5,7 +5,9 @@ import SectionBreak from '../lib/components/section-break.astro';
 import SectionResume from '../lib/components/section-resume.astro';
 
 export async function getStaticPaths() {
-  const docs = await getCollection('docs');
+  const docs = await getCollection('docs', ({ data }) =>
+    !import.meta.env.PROD || !data.draft
+  );
   return docs.map((entry) => ({
     params: { slug: entry.id === 'index' ? undefined : entry.id },
     props: { entry }

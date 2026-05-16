@@ -1,6 +1,7 @@
 ---
 title: "Setting up BlueBubbles for Aileron"
 description: "Prerequisite for the iMessage connector: install BlueBubbles Server on your Mac, grant the OS permissions it needs, and verify Aileron can reach it."
+draft: true
 ---
 
 The Aileron iMessage connector doesn't touch your Mac's Messages app directly. Instead it talks to **BlueBubbles**, a free open-source server you run locally. BlueBubbles handles the platform-specific work (reading the iMessage history, sending new messages, listening for incoming ones) and exposes a simple HTTP API on your machine. Aileron talks to that API.

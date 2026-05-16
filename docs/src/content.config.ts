@@ -7,7 +7,10 @@ const docs = defineCollection({
   schema: z.object({
     title: z.string(),
     description: z.string().optional(),
-    order: z.number().optional()
+    order: z.number().optional(),
+    // When true, the page is excluded from production builds (both as a route
+    // and from the sidebar). Visible in `astro dev` so authors can preview.
+    draft: z.boolean().default(false)
   })
 });
 
