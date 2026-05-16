@@ -300,17 +300,38 @@ type SpawnResult struct {
 	Stderr   []byte
 }
 
-// argvPattern is a tokenized argv pattern with `{name}` placeholders.
-// A pattern matches an incoming argv when the lengths agree and each
-// token matches.
+// argvPattern is a tokenized argv pattern with `{name}` placeholders
+// and `[...]` optional groups.
+//
+// A pattern is a sequence of token *groups*. Most groups are a single
+// required token. An optional group is a `[...]`-wrapped run of one
+// or more whitespace-separated tokens; the whole group elides at
+// substitution time when every placeholder inside resolves to an
+// empty string (or is missing from `args`).
 //
 // A pattern token is a sequence of literal and placeholder segments.
 // `--since={since}` parses to two segments: literal `--since=` then a
 // placeholder. A whole-token placeholder `{name}` is a single
 // placeholder segment. Matching is greedy from left to right; literal
 // segments anchor the placeholder bounds.
+//
+// Optional-group rationale: PrintingPress-style CLIs expose verbs
+// with required + optional flags (e.g. `linear-pp-cli issues create
+// --title T --team K [--description D] [--priority N]`). Without
+// optional groups, every leaf would need a separate operation per
+// flag-combination (2^N — combinatorial explosion); with them, one
+// operation per leaf suffices and the matcher/substitutor admits or
+// elides each optional group independently.
 type argvPattern struct {
-	tokens [][]argvSegment
+	groups []argvGroup
+}
+
+// argvGroup is one token group in the pattern. A required group
+// carries exactly one token; an optional group (originally
+// `[tok1 tok2 ...]` in the manifest) may carry one or more.
+type argvGroup struct {
+	optional bool
+	tokens   [][]argvSegment
 }
 
 type argvSegment struct {
@@ -322,14 +343,67 @@ type argvSegment struct {
 	name string
 }
 
-// parseArgvPattern tokenizes a manifest argv pattern. Tokens are
-// whitespace-separated. Each token is split on `{name}` placeholders;
-// the resulting segments alternate literal / placeholder.
+// parseArgvPattern tokenizes a manifest argv pattern. The pattern is
+// a sequence of whitespace-separated tokens with two structural
+// extensions:
+//
+//   - `{name}` placeholders inside any token (substituted from
+//     `args` at call time).
+//   - `[tok1 tok2 ...]` optional groups (elided when every
+//     placeholder inside resolves to empty/missing).
+//
+// Optional groups must open and close at token boundaries; nesting
+// is not supported. An unmatched `[` or stray `]` is treated as a
+// literal so manifests with unintended brackets in argv literals
+// don't silently change semantics.
 func parseArgvPattern(pat string) argvPattern {
+	out := argvPattern{}
 	fields := strings.Fields(pat)
-	out := argvPattern{tokens: make([][]argvSegment, 0, len(fields))}
-	for _, f := range fields {
-		out.tokens = append(out.tokens, splitTokenSegments(f))
+	i := 0
+	for i < len(fields) {
+		f := fields[i]
+		// Optional-group opener: a token that starts with `[`. Walk
+		// forward until a token ends with `]`. The first/last
+		// tokens have their brackets stripped before segmentation.
+		if strings.HasPrefix(f, "[") {
+			groupTokens := [][]argvSegment{}
+			// Strip leading `[` from the first token.
+			first := strings.TrimPrefix(f, "[")
+			j := i
+			endFound := false
+			for ; j < len(fields); j++ {
+				cur := fields[j]
+				if j == i {
+					cur = first
+				}
+				if strings.HasSuffix(cur, "]") {
+					cur = strings.TrimSuffix(cur, "]")
+					if cur != "" {
+						groupTokens = append(groupTokens, splitTokenSegments(cur))
+					}
+					endFound = true
+					j++
+					break
+				}
+				if cur != "" {
+					groupTokens = append(groupTokens, splitTokenSegments(cur))
+				}
+			}
+			if !endFound {
+				// Unmatched `[` — fall back to literal-token treatment
+				// so a malformed manifest doesn't silently drop tokens.
+				out.groups = append(out.groups, argvGroup{tokens: [][]argvSegment{splitTokenSegments(f)}})
+				i++
+				continue
+			}
+			if len(groupTokens) > 0 {
+				out.groups = append(out.groups, argvGroup{optional: true, tokens: groupTokens})
+			}
+			i = j
+			continue
+		}
+		out.groups = append(out.groups, argvGroup{tokens: [][]argvSegment{splitTokenSegments(f)}})
+		i++
 	}
 	return out
 }
@@ -371,50 +445,135 @@ func splitTokenSegments(tok string) []argvSegment {
 // Substitute fills the placeholder segments of this pattern using
 // values from `args` and returns the substituted argv tokens. Returns
 // a structured *Error of class capability_denied (boundary=envelope)
-// when a placeholder has no matching arg.
+// when a required placeholder has no matching arg.
+//
+// Optional groups (`[...]` in the manifest) elide entirely when every
+// placeholder inside is missing from `args` or substitutes to an
+// empty string. If at least one placeholder in a group has a non-
+// empty value, the *whole* group renders — partial optional groups
+// are not supported because the manifest author chose to group these
+// tokens together as one logical "optional flag" unit.
 //
 // The resulting argv is whatever the pattern produced. The caller is
 // responsible for re-matching the substituted argv against the
 // pattern via SpawnPolicy.CheckSpawn — substitution does not bypass
 // the gate.
 func (p argvPattern) Substitute(args map[string]string) ([]string, *Error) {
-	out := make([]string, 0, len(p.tokens))
-	for _, segs := range p.tokens {
-		var b strings.Builder
-		for _, seg := range segs {
-			if !seg.isPlaceholder {
-				b.WriteString(seg.literal)
-				continue
-			}
-			v, ok := args[seg.name]
-			if !ok {
-				return nil, newCapabilityDenied(
-					"spawn_op: missing value for placeholder",
-					map[string]any{
-						"placeholder":     "{" + seg.name + "}",
-						"boundary_detail": "envelope",
-					})
-			}
-			b.WriteString(v)
+	out := make([]string, 0, len(p.groups))
+	for _, g := range p.groups {
+		if g.optional && optionalGroupElides(g, args) {
+			continue
 		}
-		out = append(out, b.String())
+		for _, segs := range g.tokens {
+			var b strings.Builder
+			for _, seg := range segs {
+				if !seg.isPlaceholder {
+					b.WriteString(seg.literal)
+					continue
+				}
+				v, ok := args[seg.name]
+				if !ok {
+					if g.optional {
+						// Optional groups tolerate missing
+						// placeholders only when *every* placeholder
+						// resolves empty/missing — that case is
+						// handled above. Reaching here means a peer
+						// placeholder had a value, so this one is
+						// genuinely required to render.
+						return nil, newCapabilityDenied(
+							"spawn_op: optional group has partial input",
+							map[string]any{
+								"placeholder":     "{" + seg.name + "}",
+								"boundary_detail": "envelope",
+							})
+					}
+					return nil, newCapabilityDenied(
+						"spawn_op: missing value for placeholder",
+						map[string]any{
+							"placeholder":     "{" + seg.name + "}",
+							"boundary_detail": "envelope",
+						})
+				}
+				b.WriteString(v)
+			}
+			out = append(out, b.String())
+		}
 	}
 	return out, nil
 }
 
-// matches reports whether `argv` matches this pattern. Token count
-// must agree exactly; each token's segments must consume its argv
-// element.
-func (p argvPattern) matches(argv []string) bool {
-	if len(argv) != len(p.tokens) {
-		return false
-	}
-	for i, segs := range p.tokens {
-		if !segmentsMatch(segs, argv[i]) {
-			return false
+// optionalGroupElides reports whether an optional group should be
+// omitted from the substituted argv. The rule: elide when every
+// placeholder in the group is either missing from `args` or
+// substitutes to an empty string. Groups containing only literals
+// (no placeholders) never elide — that would be a manifest mistake
+// (an "optional" group that always renders) but the gate doesn't
+// silently drop it.
+func optionalGroupElides(g argvGroup, args map[string]string) bool {
+	hasPlaceholder := false
+	for _, segs := range g.tokens {
+		for _, seg := range segs {
+			if !seg.isPlaceholder {
+				continue
+			}
+			hasPlaceholder = true
+			v, ok := args[seg.name]
+			if ok && v != "" {
+				return false
+			}
 		}
 	}
-	return true
+	return hasPlaceholder
+}
+
+// matches reports whether `argv` matches this pattern. Each required
+// group consumes one argv token; each optional group consumes its
+// token-count's worth or zero tokens (elided). The matcher walks
+// the argv and pattern in lockstep, trying both branches at each
+// optional group.
+func (p argvPattern) matches(argv []string) bool {
+	return matchGroups(p.groups, argv)
+}
+
+// matchGroups walks the pattern's group list against `argv`. For
+// required groups, the next argv token must consume the group's
+// single token's segments. For optional groups, the matcher tries
+// the "fully present" branch first (every group token consumed by
+// argv tokens in order) and, on failure, the "elided" branch (skip
+// the group entirely). Returns true when the full pattern consumes
+// the full argv.
+func matchGroups(groups []argvGroup, argv []string) bool {
+	if len(groups) == 0 {
+		return len(argv) == 0
+	}
+	g := groups[0]
+	rest := groups[1:]
+	if g.optional {
+		// Try with the group present first.
+		need := len(g.tokens)
+		if len(argv) >= need {
+			ok := true
+			for i, segs := range g.tokens {
+				if !segmentsMatch(segs, argv[i]) {
+					ok = false
+					break
+				}
+			}
+			if ok && matchGroups(rest, argv[need:]) {
+				return true
+			}
+		}
+		// Fall back to elided.
+		return matchGroups(rest, argv)
+	}
+	// Required group: exactly one token.
+	if len(argv) == 0 {
+		return false
+	}
+	if !segmentsMatch(g.tokens[0], argv[0]) {
+		return false
+	}
+	return matchGroups(rest, argv[1:])
 }
 
 // segmentsMatch reports whether `segs` consumes `s` end-to-end. The

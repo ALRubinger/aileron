@@ -135,7 +135,7 @@ func TestLoadYAML_RejectsMalformedYAML(t *testing.T) {
 // --- --help parsing ---
 
 func TestFromHelp_ParsesCobraStyleSubcommandList(t *testing.T) {
-	help := `gh works with GitHub from the terminal.
+	rootHelp := `gh works with GitHub from the terminal.
 
 Available Commands:
   pr          Manage pull requests
@@ -147,7 +147,23 @@ Flags:
   -h, --help     Show help
   -v, --version  Show version
 `
-	s, err := FromHelp(context.Background(), staticRunner(help, nil),
+	// Each top-level subcommand resolves to a leaf with no further
+	// nesting in this fixture, so the recursion bottoms out
+	// immediately and emits one operation per top-level name —
+	// matching the v1 contract before the recursive walk landed.
+	leafHelp := `Manage things.
+
+Usage:
+  thing <subject>
+`
+	runner := pathRunner(map[string]string{
+		"":      rootHelp,
+		"pr":    leafHelp,
+		"issue": leafHelp,
+		"repo":  leafHelp,
+		"auth":  leafHelp,
+	})
+	s, err := FromHelp(context.Background(), runner,
 		"github://aileron-test/gh", "1.0.0", "/usr/bin/gh")
 	if err != nil {
 		t.Fatalf("FromHelp: %v", err)
@@ -159,8 +175,97 @@ Flags:
 	}
 }
 
+// TestFromHelp_RecursesIntoNamespacesAndEmitsLeafOperations is the
+// new-contract test: when a top-level subcommand is a namespace
+// (has its own Available Commands block), the walk recurses and
+// emits one operation per leaf — joined-by-dash for the op name.
+func TestFromHelp_RecursesIntoNamespacesAndEmitsLeafOperations(t *testing.T) {
+	rootHelp := `linear-pp-cli — Linear from the terminal.
+
+Available Commands:
+  issues      Get, list, or create Linear issues
+  teams       Manage teams
+`
+	issuesHelp := `Linear issue operations.
+
+Available Commands:
+  create      Create a new issue
+  list        List issues
+`
+	createHelp := `Create a new Linear issue.
+
+Flags:
+      --title string         Issue title (required)
+      --team string          Team key (required)
+      --description string   Issue description (markdown)
+      --priority int         Priority: 1=Urgent, 2=High
+`
+	listHelp := `List Linear issues.
+
+Flags:
+      --assignee string   Assignee user UUID
+      --state string      Workflow state UUID
+`
+	teamsHelp := `Manage teams.
+
+Usage:
+  linear-pp-cli teams [flags]
+`
+	runner := pathRunner(map[string]string{
+		"":              rootHelp,
+		"issues":        issuesHelp,
+		"issues create": createHelp,
+		"issues list":   listHelp,
+		"teams":         teamsHelp,
+	})
+	s, err := FromHelp(context.Background(), runner,
+		"github://aileron-test/linear-pp-cli", "1.0.0", "/usr/local/bin/linear-pp-cli")
+	if err != nil {
+		t.Fatalf("FromHelp: %v", err)
+	}
+	got := subcommandNames(s.Subcommands)
+	want := []string{"issues-create", "issues-list", "teams"}
+	if !slicesEqual(got, want) {
+		t.Fatalf("subcommands = %v, want %v", got, want)
+	}
+	// issues-create should carry the four parsed flags with title +
+	// team marked required, description + priority optional. Order
+	// follows required-first then optional, preserving Cobra's
+	// alphabetized listing within each group.
+	var create *SubcommandSpec
+	for i := range s.Subcommands {
+		if s.Subcommands[i].Name == "issues-create" {
+			create = &s.Subcommands[i]
+			break
+		}
+	}
+	if create == nil {
+		t.Fatal("issues-create not found")
+	}
+	wantParams := []ParamSpec{
+		{Name: "title", Type: "string", Required: true},
+		{Name: "team", Type: "string", Required: true},
+		{Name: "description", Type: "string"},
+		{Name: "priority", Type: "integer"},
+	}
+	if len(create.Params) != len(wantParams) {
+		t.Fatalf("issues-create params: got %d want %d (%+v)", len(create.Params), len(wantParams), create.Params)
+	}
+	for i, p := range create.Params {
+		if p.Name != wantParams[i].Name || p.Type != wantParams[i].Type || p.Required != wantParams[i].Required {
+			t.Errorf("param[%d]: got %+v, want name=%s type=%s required=%v",
+				i, p, wantParams[i].Name, wantParams[i].Type, wantParams[i].Required)
+		}
+	}
+	// argv should be `"issues create --title {title} --team {team} [--description {description}] [--priority {priority}]"`.
+	wantArgv := "issues create --title {title} --team {team} [--description {description}] [--priority {priority}]"
+	if create.Argv != wantArgv {
+		t.Errorf("argv = %q\n  want = %q", create.Argv, wantArgv)
+	}
+}
+
 func TestFromHelp_ParsesUrfaveStyleHeader(t *testing.T) {
-	help := `NAME:
+	rootHelp := `NAME:
    slackdump - Export Slack workspaces
 
 USAGE:
@@ -174,7 +279,20 @@ COMMANDS:
 GLOBAL OPTIONS:
    --help, -h     show help
 `
-	s, err := FromHelp(context.Background(), staticRunner(help, nil),
+	leafHelp := `Do the thing.
+
+Usage:
+  slackdump <action>
+`
+	runner := pathRunner(map[string]string{
+		"":       rootHelp,
+		"export": leafHelp,
+		"list":   leafHelp,
+		// "help" is filtered by parseSubcommands's name regex
+		// (lowercase + alphanumeric + dash); "help, h" was already
+		// dropped before the recursion, so we don't fixture it.
+	})
+	s, err := FromHelp(context.Background(), runner,
 		"github://aileron-test/slackdump", "1.0.0", "/usr/local/bin/slackdump")
 	if err != nil {
 		t.Fatalf("FromHelp: %v", err)
@@ -206,11 +324,27 @@ Usage: cat [OPTION]... [FILE]...
 func TestFromHelp_NonZeroExitWithOutputStillParses(t *testing.T) {
 	// curl exits non-zero on `--help` in some versions but still
 	// produces help on stdout; the parser tolerates that.
-	help := `Available Commands:
+	rootHelp := `Available Commands:
   one    First subcommand
   two    Second subcommand
 `
-	s, err := FromHelp(context.Background(), staticRunner(help, errors.New("non-zero")),
+	leafHelp := `Some leaf.
+
+Usage:
+  curl <thing>
+`
+	// pathRunner returns no error for known paths; the non-zero-exit
+	// case is exercised by wrapping the root response in a runner
+	// that yields output AND an error. We need the root invocation
+	// to error but the child invocations to succeed, so build a
+	// composite manually.
+	runner := func(_ context.Context, _ string, args []string) (string, error) {
+		if len(args) == 1 && args[0] == "--help" {
+			return rootHelp, errors.New("non-zero")
+		}
+		return leafHelp, nil
+	}
+	s, err := FromHelp(context.Background(), runner,
 		"github://aileron-test/curl", "1.0.0", "/usr/bin/curl")
 	if err != nil {
 		t.Fatalf("FromHelp: %v", err)
@@ -322,9 +456,14 @@ func TestEmit_ActionMDIsParseableByActionLoader(t *testing.T) {
 
 func TestEmit_ActionMDInputsLandWhenSpecDeclaresParams(t *testing.T) {
 	// The "log" subcommand in goodYAML has params (since, author);
-	// the emitted action.md should surface them as [[inputs]] entries
-	// with [execute.inputs] interpolation, so the agent can pass args
-	// through to the connector's spawn_op call.
+	// the emitted action.md surfaces them as [[inputs]] entries so
+	// the LLM tool catalog sees the parameter shape. The wrap
+	// emitter deliberately does NOT emit [execute.inputs] — the
+	// agent's call-time args flow directly to the connector through
+	// mergeArgs (the input names match the argv-pattern placeholder
+	// names by construction), and emitting `${args.X}` here would
+	// break optional-group elision for unsupplied inputs by leaving
+	// the literal token in the merged args map.
 	dir := t.TempDir()
 	s, _ := LoadYAML("a.yaml", []byte(goodYAML))
 	if err := Emit(s, dir, false); err != nil {
@@ -341,13 +480,15 @@ func TestEmit_ActionMDInputsLandWhenSpecDeclaresParams(t *testing.T) {
 	if len(manifest.Inputs) == 0 {
 		t.Fatal("expected [[inputs]] entries from spec params")
 	}
-	// Inputs flow into the [execute.inputs] interpolation map.
-	if len(manifest.Execute) != 1 || len(manifest.Execute[0].Inputs) == 0 {
-		t.Fatalf("execute.inputs missing: %+v", manifest.Execute)
+	// [execute.inputs] must be empty/absent — wrap-emitted actions
+	// rely on the args-iteration path in mergeArgs to deliver the
+	// agent's inputs to the connector.
+	if len(manifest.Execute) != 1 {
+		t.Fatalf("expected one execute step, got %d", len(manifest.Execute))
 	}
-	since, _ := manifest.Execute[0].Inputs["since"].(string)
-	if since != "${args.since}" {
-		t.Errorf("execute.inputs.since = %q, want ${args.since}", since)
+	if len(manifest.Execute[0].Inputs) != 0 {
+		t.Errorf("execute.inputs should be empty in wrap-emitted action.md; got %+v",
+			manifest.Execute[0].Inputs)
 	}
 }
 
@@ -545,9 +686,44 @@ func TestSortedSubcommands_ReturnsAlphabeticalOrder(t *testing.T) {
 
 // staticRunner returns a HelpRunner that always yields the supplied
 // output and error.
+//
+// Tests that exercise the recursive --help walk should prefer
+// [pathRunner] instead — staticRunner returns the same body for
+// every subcommand path, so a multi-level walk against it would
+// either hit the depth cap or emit deeply-nested leaf names that
+// don't reflect a real CLI. staticRunner is still appropriate for
+// single-level tests (the CLI being wrapped has no nested verbs).
 func staticRunner(out string, err error) HelpRunner {
 	return func(_ context.Context, _ string, _ []string) (string, error) {
 		return out, err
+	}
+}
+
+// pathRunner returns a HelpRunner that yields different output per
+// subcommand path. The key is the space-separated verb path (`""`
+// for the bare program, `"pr"` for `<program> pr`, `"pr create"`
+// for `<program> pr create`), and the value is the body the
+// runner returns when `<program> <key> --help` is invoked.
+//
+// Paths absent from the map return an empty string + a synthetic
+// "no help" error — same shape a real CLI exit with no output
+// produces. The wrap walker treats that as a failed subcommand
+// and drops it from emission, mirroring production behavior.
+func pathRunner(byPath map[string]string) HelpRunner {
+	return func(_ context.Context, _ string, args []string) (string, error) {
+		// args carries `<path...> --help` — drop the trailing
+		// `--help` to build the key.
+		key := ""
+		if n := len(args); n > 0 && args[n-1] == "--help" {
+			key = strings.Join(args[:n-1], " ")
+		} else {
+			key = strings.Join(args, " ")
+		}
+		body, ok := byPath[key]
+		if !ok {
+			return "", errors.New("no help for path " + key)
+		}
+		return body, nil
 	}
 }
 

@@ -475,8 +475,13 @@ func validateConnectorName(name string) error {
 // merged help string. Many CLIs split --help between stdout and
 // stderr; the wrap parser is heuristic enough that handing it
 // both streams concatenated produces the same subcommand list.
-func runHelpSandboxed(ctx context.Context, programPath, cwd string) (string, error) {
-	res, err := sandbox.RunHelp(ctx, programPath, cwd)
+//
+// `subcommandPath` is the verb chain prepended before `--help`.
+// Nil/empty yields `<binary> --help`; `["issues", "create"]`
+// yields `<binary> issues create --help` so the wrap recursion
+// can walk Cobra-style nested verb trees.
+func runHelpSandboxed(ctx context.Context, programPath, cwd string, subcommandPath ...string) (string, error) {
+	res, err := sandbox.RunHelp(ctx, programPath, cwd, subcommandPath...)
 	if err != nil {
 		// Surface the captured output anyway — `curl --help`-style
 		// CLIs exit non-zero but still print usage.
@@ -487,16 +492,38 @@ func runHelpSandboxed(ctx context.Context, programPath, cwd string) (string, err
 	return string(res.Stdout) + string(res.Stderr), nil
 }
 
-// buildSpecFromHelp turns captured help text into a wrap.Spec.
-// Reuses wrap.FromHelp's subcommand parser via a static
-// HelpRunner so the introspection heuristic stays in one place.
-func buildSpecFromHelp(name, version, programPath, helpText string) (*wrap.Spec, error) {
+// buildSpecFromHelp turns the root --help text into a wrap.Spec
+// by handing wrap.FromHelp a sandboxed runner that re-invokes
+// `<binary> <subcommand path...> --help` for each subcommand the
+// recursion encounters.
+//
+// The root help text is pre-captured by the caller — re-invoking
+// the sandbox for it would be a wasted round trip — so the runner
+// short-circuits when the path is empty and returns the cached
+// text directly. Every nested path takes a fresh sandboxed call;
+// this is what makes the recursion's per-leaf flag extraction
+// faithful to the real CLI's verb tree (a static-text runner
+// would feed the root help back at every level and explode the
+// recursion against any non-trivial subcommand set, hence the
+// per-path-sandbox plumbing rather than the v0 single-shot
+// closure that lived here pre-#wrap-recurse-cobra).
+func buildSpecFromHelp(name, version, programPath, rootHelpText string) (*wrap.Spec, error) {
 	fqn, err := cstore.LocalFQN(name)
 	if err != nil {
 		return nil, err
 	}
-	runner := func(context.Context, string, []string) (string, error) {
-		return helpText, nil
+	cwd, _ := os.Getwd()
+	if cwd == "" {
+		cwd = "/"
+	}
+	runner := func(ctx context.Context, _ string, args []string) (string, error) {
+		// `args` is `<path...> --help`. The root invocation has
+		// args=["--help"]; everything else is a nested path.
+		if len(args) <= 1 {
+			return rootHelpText, nil
+		}
+		subPath := args[:len(args)-1] // drop the trailing "--help"
+		return runHelpSandboxed(ctx, programPath, cwd, subPath...)
 	}
 	spec, err := wrap.FromHelp(context.Background(), runner, fqn, version, programPath)
 	if err != nil {

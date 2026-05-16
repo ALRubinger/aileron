@@ -1308,6 +1308,130 @@ func TestArgvPattern_Substitute_PreservesLiteralTokens(t *testing.T) {
 	}
 }
 
+// Optional-group tests (`[...]` syntax). The wrap library targets
+// PrintingPress-style CLIs where leaves expose required + optional
+// flags; the pattern admits both fully-elided and fully-rendered
+// optional groups for the same operation.
+
+func TestArgvPattern_OptionalGroup_ElidesWhenInputMissing(t *testing.T) {
+	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
+	got, err := pat.Substitute(map[string]string{"title": "Bug"})
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	want := []string{"issues", "create", "--title", "Bug"}
+	if !slicesEqualStrings(got, want) {
+		t.Errorf("Substitute = %v, want %v (optional --description should elide)", got, want)
+	}
+}
+
+func TestArgvPattern_OptionalGroup_ElidesWhenInputEmpty(t *testing.T) {
+	// Distinct from missing: the agent supplied the input but as an
+	// empty string. Treat empty same as missing — the manifest's
+	// optional-flag contract is "render only when there is a real
+	// value to pass."
+	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
+	got, err := pat.Substitute(map[string]string{"title": "Bug", "description": ""})
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	want := []string{"issues", "create", "--title", "Bug"}
+	if !slicesEqualStrings(got, want) {
+		t.Errorf("Substitute = %v, want %v", got, want)
+	}
+}
+
+func TestArgvPattern_OptionalGroup_RendersWhenInputPresent(t *testing.T) {
+	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
+	got, err := pat.Substitute(map[string]string{"title": "Bug", "description": "Body"})
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	want := []string{"issues", "create", "--title", "Bug", "--description", "Body"}
+	if !slicesEqualStrings(got, want) {
+		t.Errorf("Substitute = %v, want %v", got, want)
+	}
+}
+
+func TestArgvPattern_OptionalGroup_MultipleGroupsIndependentElision(t *testing.T) {
+	// Two optional groups; supply only the second. Each elides on its
+	// own — the renderer doesn't all-or-nothing across optional groups.
+	pat := parseArgvPattern("issues create --title {title} [--description {description}] [--priority {priority}]")
+	got, err := pat.Substitute(map[string]string{"title": "Bug", "priority": "1"})
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	want := []string{"issues", "create", "--title", "Bug", "--priority", "1"}
+	if !slicesEqualStrings(got, want) {
+		t.Errorf("Substitute = %v, want %v", got, want)
+	}
+}
+
+func TestArgvPattern_OptionalGroup_MatchesElidedArgv(t *testing.T) {
+	// The substituted argv (without the optional flag) must round-trip
+	// through .matches() so SpawnPolicy.CheckSpawn admits it.
+	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
+	if !pat.matches([]string{"issues", "create", "--title", "Bug"}) {
+		t.Error("pattern should match an argv with optional flag absent")
+	}
+}
+
+func TestArgvPattern_OptionalGroup_MatchesRenderedArgv(t *testing.T) {
+	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
+	if !pat.matches([]string{"issues", "create", "--title", "Bug", "--description", "Body"}) {
+		t.Error("pattern should match an argv with optional flag present")
+	}
+}
+
+func TestArgvPattern_OptionalGroup_RejectsPartialGroup(t *testing.T) {
+	// An optional group must be fully present or fully absent. An
+	// argv that includes the flag literal but not its value (or
+	// vice versa) should be rejected.
+	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
+	if pat.matches([]string{"issues", "create", "--title", "Bug", "--description"}) {
+		t.Error("partial optional group should not match")
+	}
+}
+
+func TestArgvPattern_OptionalGroup_RejectsDifferentFlag(t *testing.T) {
+	// An argv that supplies an unrelated flag where the optional flag
+	// would appear must fail — the gate doesn't accept arbitrary tail
+	// tokens.
+	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
+	if pat.matches([]string{"issues", "create", "--title", "Bug", "--priority", "1"}) {
+		t.Error("unknown flag where optional group would go must not match")
+	}
+}
+
+func TestParseArgvPattern_UnmatchedBracketTreatedAsLiteral(t *testing.T) {
+	// A pattern with an unmatched `[` is preserved verbatim so a
+	// manifest mistake doesn't silently drop tokens.
+	pat := parseArgvPattern("issues [create --title {title}")
+	// First group: "issues" required, second: "[create" treated as
+	// literal (unmatched bracket), third: "--title" with placeholder.
+	got, err := pat.Substitute(map[string]string{"title": "Bug"})
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	want := []string{"issues", "[create", "--title", "Bug"}
+	if !slicesEqualStrings(got, want) {
+		t.Errorf("Substitute = %v, want %v (unmatched [ should be literal)", got, want)
+	}
+}
+
+func TestArgvPattern_OptionalGroup_PartialInputErrors(t *testing.T) {
+	// Optional group with two placeholders: if the agent supplies
+	// one but not the other, the group's contract is broken —
+	// substitution rejects rather than silently omitting half.
+	// In practice the wrap heuristic emits one optional group per
+	// flag (single placeholder) so this is defense-in-depth.
+	pat := parseArgvPattern("foo [--a {a} --b {b}]")
+	_, err := pat.Substitute(map[string]string{"a": "x"}) // b absent
+	if err == nil {
+		t.Fatal("expected denial for partial optional-group input")
+	}
+}
+
 func TestHostSpawnOp_HappyPathRoutesThroughGate(t *testing.T) {
 	fake := &fakeExecutor{result: SpawnResult{ExitCode: 0, Stdout: []byte("commit-list")}}
 	state := &hostState{
