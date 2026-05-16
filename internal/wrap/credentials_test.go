@@ -189,7 +189,10 @@ func TestRenderActionMD_EmitsValidFrontmatter(t *testing.T) {
 	body := RenderActionMD(spec, sub, nil, "")
 	for _, want := range []string{
 		"+++",
-		`name = "issues"`,
+		// Action name is namespaced by connector leaf per #781
+		// so the action store doesn't silently collide two
+		// wraps sharing the same op name.
+		`name = "linear-issues"`,
 		`version = "0.0.1"`,
 		`[[requires.connectors]]`,
 		`name = "local://user/linear"`,
@@ -229,6 +232,60 @@ func TestRenderActionMD_HonorsExplicitHash(t *testing.T) {
 	}
 	if strings.Contains(body, "bound-at-install") {
 		t.Errorf("placeholder should not appear when explicit hash supplied: %s", body)
+	}
+}
+
+func TestActionName_NamespacedByConnectorLeaf(t *testing.T) {
+	// Regression for #781: the action.md `name` field must agree
+	// with the filename so the daemon's action-store map (keyed
+	// on `name`) doesn't silently collide when two wraps share
+	// an op (e.g. `linear-pp-cli`'s `auth` vs. a hypothetical
+	// `sentry-pp-cli`'s `auth`).
+	cases := []struct {
+		fqn  string
+		op   string
+		want string
+	}{
+		{"local://user/linear", "issues", "linear-issues"},
+		{"github://acme/gitcrawl", "log", "gitcrawl-log"},
+		{"github://acme/integrations/connectors/imsg", "send", "imsg-send"},
+		// FQN without a leaf segment falls through to the bare
+		// op — defensive only; production FQNs are parsed first.
+		{"barename", "do", "do"},
+	}
+	for _, c := range cases {
+		s := &Spec{Connector: ConnectorSpec{Name: c.fqn}}
+		if got := ActionName(s, SubcommandSpec{Name: c.op}); got != c.want {
+			t.Errorf("ActionName(%q, %q) = %q, want %q", c.fqn, c.op, got, c.want)
+		}
+	}
+}
+
+func TestRenderActionMD_NoCollisionBetweenWrapsSharingAnOp(t *testing.T) {
+	// Concretely: install two distinct wraps whose subcommand sets
+	// overlap on `auth`. Pre-#781 the rendered action.md files both
+	// declared `name = "auth"` and the second load would stomp the
+	// first in the action store. With the namespacing fix, the
+	// rendered names diverge (`linear-auth`, `sentry-auth`) and
+	// both coexist.
+	linear := &Spec{
+		Connector:   ConnectorSpec{Name: "local://user/linear", Version: "0.0.1"},
+		Subcommands: []SubcommandSpec{{Name: "auth"}},
+	}
+	sentry := &Spec{
+		Connector:   ConnectorSpec{Name: "local://user/sentry", Version: "0.0.1"},
+		Subcommands: []SubcommandSpec{{Name: "auth"}},
+	}
+	linearBody := RenderActionMD(linear, linear.Subcommands[0], nil, "")
+	sentryBody := RenderActionMD(sentry, sentry.Subcommands[0], nil, "")
+	if !strings.Contains(linearBody, `name = "linear-auth"`) {
+		t.Errorf("linear action.md missing namespaced name; got:\n%s", linearBody)
+	}
+	if !strings.Contains(sentryBody, `name = "sentry-auth"`) {
+		t.Errorf("sentry action.md missing namespaced name; got:\n%s", sentryBody)
+	}
+	if strings.Contains(linearBody, `name = "auth"`+"\n") {
+		t.Errorf("linear action.md still declares bare `auth` name; the action store would collide with sentry")
 	}
 }
 
