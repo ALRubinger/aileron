@@ -88,7 +88,7 @@ func TestValidate_RejectsBadFields(t *testing.T) {
 }
 
 func TestValidate_AcceptsAllRecognizedSchemes(t *testing.T) {
-	for _, scheme := range []string{"github", "gitlab", "hub"} {
+	for _, scheme := range []string{"github", "gitlab", "hub", "local"} {
 		t.Run(scheme, func(t *testing.T) {
 			m := goodManifest()
 			m.Source = scheme + "://aileron/ship-update@1.0.0"
@@ -98,6 +98,22 @@ func TestValidate_AcceptsAllRecognizedSchemes(t *testing.T) {
 				t.Errorf("Validate() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestValidate_AcceptsBYOCLILocalSource(t *testing.T) {
+	// Regression: action.md files emitted by `aileron cli add` /
+	// `aileron pp add` carry source URLs shaped as
+	// `local://user/<name>/<op>@<version>`. The action validator
+	// must accept this shape — without `local` in fqnSchemes the
+	// loader rejects every BYOCLI-emitted action and the daemon's
+	// /v1/actions surface shows them as load_errors.
+	m := goodManifest()
+	m.Source = "local://user/linear/issues@0.0.1"
+	m.Requires.Connectors[0].Name = "local://user/linear"
+	m.Execute[0].Connector = m.Requires.Connectors[0].Name
+	if err := Validate(m, "linear-issues.md"); err != nil {
+		t.Errorf("Validate() error on BYOCLI source: %v", err)
 	}
 }
 
