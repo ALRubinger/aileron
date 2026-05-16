@@ -44,6 +44,14 @@ type RunHelpResult struct {
 //     and [cstore.DefaultMaxStderrBytes]; output beyond the cap
 //     is dropped with a structured truncation marker per ADR-0014.
 //
+// `subcommandPath` is the verb chain prepended before `--help`.
+// Nil/empty yields `<programPath> --help` (the root-help call);
+// `["issues", "create"]` yields `<programPath> issues create
+// --help` so the introspector can walk Cobra-style nested verb
+// trees. Each call is its own sandboxed invocation — callers
+// running many paths in sequence pay the per-call sandbox-startup
+// cost N times.
+//
 // `programPath` must be absolute. RunHelp returns the
 // [ErrSpawnUnavailable] wrapper from [SandboxAvailable] when the
 // host can't honor the confinement the docstring promises —
@@ -55,7 +63,7 @@ type RunHelpResult struct {
 // `--help` parser. Generalizable to any other one-shot sandboxed
 // invocation that doesn't need a fully-formed connector manifest
 // on disk first.
-func RunHelp(ctx context.Context, programPath, cwd string) (RunHelpResult, error) {
+func RunHelp(ctx context.Context, programPath, cwd string, subcommandPath ...string) (RunHelpResult, error) {
 	if err := SandboxAvailable(); err != nil {
 		return RunHelpResult{}, err
 	}
@@ -69,9 +77,13 @@ func RunHelp(ctx context.Context, programPath, cwd string) (RunHelpResult, error
 		return RunHelpResult{}, fmt.Errorf("run_help: cwd %q must be absolute", cwd)
 	}
 
+	argv := make([]string, 0, 2+len(subcommandPath))
+	argv = append(argv, filepath.Base(programPath))
+	argv = append(argv, subcommandPath...)
+	argv = append(argv, "--help")
 	envelope := SpawnEnvelope{
 		Program: programPath,
-		Argv:    []string{filepath.Base(programPath), "--help"},
+		Argv:    argv,
 		Cwd:     cwd,
 	}
 	// fs_read scope: the user's cwd (so the introspector can
