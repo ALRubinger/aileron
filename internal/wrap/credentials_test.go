@@ -194,12 +194,25 @@ func TestRenderActionMD_EmitsValidFrontmatter(t *testing.T) {
 		`[[requires.connectors]]`,
 		`name = "local://user/linear"`,
 		`hash = "sha256:bound-at-install"`,
+		// Capabilities array names the op the action invokes
+		// (per ADR-0003), not a generic "spawn" label. The
+		// action-boundary check at executor.go matches step.Op
+		// against this list — a wrapped CLI calling "issues"
+		// against an action declaring `capabilities = ["spawn"]`
+		// would get capability_denied.
+		`capabilities = ["issues"]`,
 		`[[execute]]`,
 		`op = "issues"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("RenderActionMD output missing %q; got:\n%s", want, body)
 		}
+	}
+	// Negative: the legacy hardcoded ["spawn"] value must not
+	// appear. Pinned here so a future "let's normalize this
+	// back" patch doesn't silently regress.
+	if strings.Contains(body, `capabilities = ["spawn"]`) {
+		t.Errorf("RenderActionMD emitted the buggy capabilities = [\"spawn\"]; should name the op")
 	}
 }
 

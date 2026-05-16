@@ -283,7 +283,17 @@ func renderActionMD(s *Spec, sub SubcommandSpec, _ *cstore.Manifest, connectorHa
 	fmt.Fprintf(&b, "name = %q\n", s.Connector.Name)
 	fmt.Fprintf(&b, "version = %q\n", s.Connector.Version)
 	fmt.Fprintf(&b, "hash = %q\n", hash)
-	fmt.Fprintln(&b, `capabilities = ["spawn"]`)
+	// Per ADR-0003 the action's capabilities array names each
+	// op the action's execute steps invoke. Wrap-generated
+	// action.md files have exactly one execute step (one
+	// subcommand per action), so the capabilities array is the
+	// single-element list of that op name. The earlier hardcoded
+	// ["spawn"] was a mis-encoding — the action-boundary check
+	// at executor.go's enforceCapabilityWithSpan compares
+	// step.Op against this list, so a wrapped CLI's op never
+	// matched and every action returned capability_denied
+	// before spawn could fire.
+	fmt.Fprintf(&b, "capabilities = [%q]\n", sub.Name)
 	fmt.Fprintln(&b)
 	if intent := actionIntent(sub); intent != "" {
 		fmt.Fprintln(&b, "[match]")
