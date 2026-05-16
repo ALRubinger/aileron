@@ -316,6 +316,26 @@ func TestSetupBindings_UnknownLocalConnectorIs404(t *testing.T) {
 	}
 }
 
+// TestSetupBindings_MalformedLocalFQNIs404 covers the
+// scheme-correct-but-rejected branch of LocalNameForFQN: an FQN
+// like `local://other/linear` parses as scheme=local but fails
+// the owner check (local connectors require owner="user"). The
+// handler must surface a clean error rather than crashing.
+func TestSetupBindings_MalformedLocalFQNIs404(t *testing.T) {
+	srv, _ := bindingTestServer(t)
+	srv.localStore = cstore.NewLocalStore(t.TempDir())
+	body := `{
+		"connector_fqn": "local://wrong-owner/linear",
+		"bindings": [{"identity": "default", "source": {"kind": "api_key", "value": "x"}}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/bindings/setup", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.SetupBindings(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (FQN malformed)", rec.Code)
+	}
+}
+
 func TestSetupBindings_VaultLockedReturns423(t *testing.T) {
 	srv, _ := bindingTestServer(t, func(s *apiServer) { s.vaultLocked = true })
 	body := `{

@@ -436,6 +436,33 @@ func TestStashCredentialBindings_DaemonRejectionReturnsError(t *testing.T) {
 	}
 }
 
+func TestStashCredentialBindings_PrompterErrorPropagates(t *testing.T) {
+	// The credential-value prompt fails (e.g., /dev/tty unavailable
+	// in a non-interactive shell). stashCredentialBindings must
+	// wrap and return the error rather than swallowing it — a
+	// silent zero return would leave the install reporting
+	// "success" while the binding is missing, the exact failure
+	// mode this rewrite is closing.
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		return "", errors.New("tty unavailable")
+	}
+	withFakeBindingTransport(t, func(method, path string, body io.Reader) (int, []byte, error) {
+		return 0, nil, errors.New("transport should not be called when prompt fails")
+	})
+
+	var stdout, stderr bytes.Buffer
+	_, err := stashCredentialBindings(
+		"local://user/x", "x",
+		[]string{"X_API_KEY"},
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err == nil || !strings.Contains(err.Error(), "tty unavailable") {
+		t.Errorf("err = %v, want underlying prompter error wrapped through", err)
+	}
+}
+
 func TestStashCredentialBindings_HTTPErrorPropagates(t *testing.T) {
 	// Transport error (e.g., daemon unreachable) must surface as a
 	// real error, not a silent zero return.
