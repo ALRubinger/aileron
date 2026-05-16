@@ -12,8 +12,6 @@ Both paths produce the same shape: a connector manifest at `~/.aileron/connector
 
 This is the spawn primitive's payoff (per [ADR-0002](/adr/0002-connector-model)'s spawn-primitive section). Where [Authoring a Connector](/guides/authoring-a-connector/) is the path for new services that need their own WASM, this is the path for the long tail of existing CLIs (`gh`, `slackdump`, anything that already does the work you want the agent to compose with).
 
-> **Not for iMessage.** Apple's data model is locked down enough that there is no usable CLI to wrap. The iMessage connector takes a different path: it talks over HTTP to a local [BlueBubbles](https://bluebubbles.app/) bridge that holds the platform permissions instead. See [Setting up BlueBubbles for Aileron](/guides/setting-up-bluebubbles/).
-
 ## Quick start: PrintingPress
 
 ```sh
@@ -567,4 +565,3 @@ Reach for something other than wrapping when:
 - [ADR-0014: Spawn Sandbox Technology](/adr/0014-spawn-sandbox-technology) — what kernel mechanism confines the subprocess on each platform.
 - [Authoring a Connector](/guides/authoring-a-connector/) — for services that need their own WASM rather than a CLI wrap.
 - [Publishing a Connector](/guides/publishing-a-connector/) — if you want to publish your manifest under a stable FQN for others to install.
-- [Setting up BlueBubbles for Aileron](/guides/setting-up-bluebubbles/) — the iMessage path, which uses HTTP-to-a-local-bridge instead of a CLI wrap.

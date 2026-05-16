@@ -1,6 +1,7 @@
 ---
+import { getCollection } from 'astro:content';
 import Sidebar from '../components/Sidebar.svelte';
-import { navigation } from '../lib/navigation';
+import { navigation, isSection, type NavItem } from '../lib/navigation';
 import '../styles/global.css';
 
 interface Props {
@@ -10,11 +11,28 @@ interface Props {
 const { title } = Astro.props;
 const currentPath = Astro.url.pathname;
 
-// Navigation is currently a flat structure (homepage only).
-// Historical content lives in `docs/archive/` off-site; nav will be rebuilt as
-// new pages are written. ADR auto-injection from content collections has been
-// removed since both `adr/` and `archived-adr/` are now archived off-site.
-const nav = navigation;
+// In production, hide nav entries pointing at pages marked `draft: true` in
+// frontmatter. Sections that become empty after filtering are dropped too.
+// In dev, the full nav is shown so authors can navigate to drafts.
+const draftEntries = await getCollection('docs', ({ data }) => data.draft === true);
+const draftHrefs = new Set(
+  draftEntries.map((e) => (e.id === 'index' ? '/' : `/${e.id}/`))
+);
+
+function filterNav(items: NavItem[]): NavItem[] {
+  const result: NavItem[] = [];
+  for (const item of items) {
+    if (isSection(item)) {
+      const children = filterNav(item.children);
+      if (children.length > 0) result.push({ ...item, children });
+    } else if (!draftHrefs.has(item.href)) {
+      result.push(item);
+    }
+  }
+  return result;
+}
+
+const nav = import.meta.env.PROD ? filterNav(navigation) : navigation;
 ---
 
 <!doctype html>

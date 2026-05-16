@@ -2,6 +2,7 @@
 title: "iMessage via BlueBubbles"
 description: "Three actions for reading iMessage conversations and sending new ones through a local BlueBubbles bridge on macOS."
 order: 2
+draft: true
 ---
 
 The iMessage via BlueBubbles suite gives your agent three capabilities against the user's iMessage history: list recent conversations, read a single conversation, and send a new message. Send is gated by per-call user approval; reads run without prompting.
