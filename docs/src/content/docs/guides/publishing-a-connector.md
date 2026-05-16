@@ -5,7 +5,7 @@ description: "How to author, sign, and release a connector + action templates th
 
 This guide walks through publishing a connector and its action templates so Aileron users can install them via `aileron connector install <FQN>` and `aileron action add <FQN>`. It documents the conventions Aileron's install pipeline expects: where the binary lives, how it's signed, how the user trusts your publisher key, and how a single tag push produces every artifact in a release cohort.
 
-The reference implementation is [`github.com/ALRubinger/aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) — a per-service connector exposing six Gmail and Calendar ops with action templates living alongside. Snippets here mirror its layout; clone the repo when you want to see the full working setup.
+The reference implementation is [`github.com/ALRubinger/aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google) — a per-service connector exposing twenty-one ops across Gmail, Calendar, Contacts, Drive, and Docs, with action templates living alongside. Snippets here mirror its layout; clone the repo when you want to see the full working setup.
 
 ## The one-repo-per-service model
 

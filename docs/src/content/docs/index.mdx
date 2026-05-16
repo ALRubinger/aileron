@@ -31,15 +31,15 @@ Creating a new Aileron vault.
 Vault passphrase: ********
 
 Trust publisher github://ALRubinger/aileron-connector-google? [y/N]: y
-Authorize Gmail and Calendar in your browser... done
-✓ Installed 6 actions
+Authorize Google in your browser... done
+✓ Installed 21 actions
 
 ✈️  Aileron — session 01HK6...
 ```
 
-Claude Code now has six Gmail and Calendar capabilities in its catalog: list recent emails, list upcoming events, get an email, draft an email, send an email, and create a calendar event. The first four run silently when your agent reaches for them. The last two pause for your approval. Sent mail and a placed event aren't things you take back.
+Claude Code now has twenty-one Google capabilities in its catalog, spanning Gmail, Calendar, Contacts, Drive, and Docs. Reads run silently when your agent reaches for them. Reversible writes (drafting an email, creating a calendar event, creating or editing a Doc, uploading or renaming a Drive file) run without prompting because the API itself provides the safety net. Irreversible writes (`send-email`, `send-draft`) and third-party-observable writes (`move-file`) pause for your approval — sent mail and a permission change aren't things you take back. Browse the full list in [Google](/actions/google/).
 
-Aileron ships a Slack connector today, and `aileron pp add <name>` or `aileron cli add <path>` turns any CLI you already use into a sandboxed capability your agent can call. Browse the full catalog in [Actions](/actions/gmail-and-google-calendar/).
+Aileron ships a Slack connector today, and `aileron pp add <name>` or `aileron cli add <path>` turns any CLI you already use into a sandboxed capability your agent can call. Browse the full catalog in [Actions](/actions/google/).
 
 ## Put first principles back into AI
 
@@ -94,7 +94,7 @@ The agent calls `search-messages` and `list-channels` from the [Slack connector]
 
 _"Draft replies to anything from a customer in the last 48 hours."_
 
-The agent reads recent threads through the [Gmail connector](/actions/gmail-and-google-calendar/) and lands a draft in your Drafts folder via `draft-email`. Drafts are reversible, so this one's not gated. The existing "click Send in Gmail" step is the human review.
+The agent reads recent threads through the [Gmail connector](/actions/google/) and lands a draft in your Drafts folder via `draft-email`. Drafts are reversible, so this one's not gated. The existing "click Send in Gmail" step is the human review.
 
   </Card.Content>
 </Card.Root>

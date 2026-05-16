@@ -58,7 +58,7 @@ export const navigation: NavItem[] = [
   {
     label: 'Actions',
     children: [
-      { label: 'Gmail and Google Calendar', href: '/actions/gmail-and-google-calendar/' },
+      { label: 'Google', href: '/actions/google/' },
       { label: 'iMessage via BlueBubbles', href: '/actions/imessage-via-bluebubbles/' },
       { label: 'Slack', href: '/actions/slack/' }
     ]
