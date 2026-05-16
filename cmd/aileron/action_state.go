@@ -23,7 +23,22 @@ type actionListItem struct {
 }
 
 type actionListWireResponse struct {
-	Items []actionListItem `json:"items"`
+	Items      []actionListItem      `json:"items"`
+	LoadErrors []actionLoadErrorItem `json:"load_errors,omitempty"`
+}
+
+// actionLoadErrorItem mirrors the api.ActionLoadError shape the
+// daemon returns. Carried separately from the manifest items so
+// the table view can surface load failures without conflating them
+// with successful loads. Inline-decoded rather than imported from
+// internal/api/gen to keep the CLI binary's dep graph small (the
+// CLI talks to the daemon over HTTP and doesn't otherwise need the
+// generated client types).
+type actionLoadErrorItem struct {
+	Class   string `json:"class"`
+	Message string `json:"message"`
+	File    string `json:"file"`
+	Line    int    `json:"line,omitempty"`
 }
 
 // actionsHTTPClient is overridable in tests so they can exercise the
@@ -110,7 +125,7 @@ func runActionList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if len(out.Items) == 0 {
+	if len(out.Items) == 0 && len(out.LoadErrors) == 0 {
 		if *asJSON {
 			fmt.Fprintln(stdout, "[]")
 			return 0
@@ -131,25 +146,46 @@ func runActionList(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tVERSION\tENABLED\tORIGIN\tSOURCE")
-	disabled := 0
-	for _, a := range out.Items {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			a.Name,
-			a.Version,
-			actionEnabledLabel(a.Enabled),
-			originBadge(a.Source),
-			a.Source,
-		)
-		if a.Enabled != nil && !*a.Enabled {
-			disabled++
+	if len(out.Items) > 0 {
+		tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tVERSION\tENABLED\tORIGIN\tSOURCE")
+		disabled := 0
+		for _, a := range out.Items {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+				a.Name,
+				a.Version,
+				actionEnabledLabel(a.Enabled),
+				originBadge(a.Source),
+				a.Source,
+			)
+			if a.Enabled != nil && !*a.Enabled {
+				disabled++
+			}
+		}
+		tw.Flush()
+		if disabled > 0 {
+			fmt.Fprintln(stdout)
+			fmt.Fprintf(stdout, "%d action(s) currently disabled. Restart your MCP server after toggling to pick up changes.\n", disabled)
 		}
 	}
-	tw.Flush()
-	if disabled > 0 {
-		fmt.Fprintln(stdout)
-		fmt.Fprintf(stdout, "%d action(s) currently disabled. Restart your MCP server after toggling to pick up changes.\n", disabled)
+	// Surface per-file load failures on stderr so users see them
+	// immediately. Pre-fix, silent drops in the daemon's loader
+	// were invisible from the CLI — a wrap-emitted action with a
+	// validation error would be missing from `items` with no
+	// indication anything was wrong, and the user would only
+	// discover the gap when the agent couldn't find the tool.
+	if len(out.LoadErrors) > 0 {
+		if len(out.Items) > 0 {
+			fmt.Fprintln(stderr)
+		}
+		fmt.Fprintf(stderr, "%d action file(s) failed to load and are not callable:\n", len(out.LoadErrors))
+		for _, e := range out.LoadErrors {
+			loc := e.File
+			if e.Line > 0 {
+				loc = fmt.Sprintf("%s:%d", e.File, e.Line)
+			}
+			fmt.Fprintf(stderr, "  [%s] %s — %s\n", e.Class, loc, e.Message)
+		}
 	}
 	return 0
 }

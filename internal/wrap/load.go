@@ -267,6 +267,14 @@ func walkSubcommand(ctx context.Context, runner HelpRunner, program string, path
 //	Name:        "issues-create"
 //	Argv:        "issues create --title {title} [--description {description}]"
 //	Params:      [{title, string, required}, {description, string, optional}]
+//
+// Flag names containing dashes (`--data-source`, `--group-by`) are
+// translated to underscore form (`data_source`, `group_by`) for the
+// action input name AND the argv placeholder, since action input
+// names are JSON Schema property names that must match
+// `[a-z][a-z0-9_]*` per the manifest validator. The argv *literal*
+// keeps the original spelling — that's what the wrapped CLI's
+// flag parser expects.
 func buildLeafSpec(path []string, description string, flags []flagSpec) SubcommandSpec {
 	name := strings.Join(path, "-")
 	var argv strings.Builder
@@ -292,26 +300,28 @@ func buildLeafSpec(path []string, description string, flags []flagSpec) Subcomma
 	}
 	var params []ParamSpec
 	for _, f := range required {
+		inputName := flagInputName(f.Name)
 		argv.WriteString(" --")
 		argv.WriteString(f.Name)
 		argv.WriteString(" {")
-		argv.WriteString(f.Name)
+		argv.WriteString(inputName)
 		argv.WriteString("}")
 		params = append(params, ParamSpec{
-			Name:        f.Name,
+			Name:        inputName,
 			Type:        inputType(f.Type),
 			Description: f.Description,
 			Required:    true,
 		})
 	}
 	for _, f := range optional {
+		inputName := flagInputName(f.Name)
 		argv.WriteString(" [--")
 		argv.WriteString(f.Name)
 		argv.WriteString(" {")
-		argv.WriteString(f.Name)
+		argv.WriteString(inputName)
 		argv.WriteString("}]")
 		params = append(params, ParamSpec{
-			Name:        f.Name,
+			Name:        inputName,
 			Type:        inputType(f.Type),
 			Description: f.Description,
 			Required:    false,
@@ -323,6 +333,25 @@ func buildLeafSpec(path []string, description string, flags []flagSpec) Subcomma
 		Argv:        argv.String(),
 		Params:      params,
 	}
+}
+
+// flagInputName translates a Cobra long-form flag name into the
+// shape an action-manifest input requires. The manifest validator
+// enforces `^[a-z][a-z0-9_]*$` on input names (JSON Schema property
+// shape, snake_case convention — `internal/action/validate.go`),
+// but Cobra flags conventionally use kebab-case (`--data-source`,
+// `--auth-set-api-key`). We translate dashes to underscores so the
+// emitted action.md validates while the argv literal — what the
+// wrapped CLI's flag parser actually reads — keeps the original
+// dashed spelling.
+//
+// This is a one-way translation; the agent's call carries
+// `data_source` as the input name and the spawn-pattern
+// placeholder also uses `data_source`. The connector never sees
+// the underscore form because the manifest's argv-template literal
+// is `--data-source`.
+func flagInputName(flagName string) string {
+	return strings.ReplaceAll(flagName, "-", "_")
 }
 
 // parseSubcommands extracts subcommands from a `--help` output. The

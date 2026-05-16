@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -261,6 +262,127 @@ Usage:
 	wantArgv := "issues create --title {title} --team {team} [--description {description}] [--priority {priority}]"
 	if create.Argv != wantArgv {
 		t.Errorf("argv = %q\n  want = %q", create.Argv, wantArgv)
+	}
+}
+
+// TestBuildLeafSpec_TranslatesDashedFlagNamesToUnderscoreInputs pins the
+// load-bearing regression: Cobra long-form flag names with dashes
+// (`--data-source`, `--group-by`, `--auth-set-api-key`) must translate
+// to underscore form for the action-input `name` field and the
+// argv-pattern placeholder, since the action-manifest validator enforces
+// `^[a-z][a-z0-9_]*$` on input names. The argv *literal* keeps the
+// original dashed spelling — that's what the wrapped CLI parses.
+//
+// Without this translation, every leaf with a dashed flag would
+// silently fail to load (validation_error) at daemon startup and the
+// agent's tool catalog would be missing the action — the exact failure
+// mode that bit `aileron pp add linear` after #797 (linear-pp-cli's
+// 69 leaves carry globals like --data-source on every command).
+func TestBuildLeafSpec_TranslatesDashedFlagNamesToUnderscoreInputs(t *testing.T) {
+	rootHelp := `linear-pp-cli — Linear from the terminal.
+
+Available Commands:
+  cycles      Cycle operations
+`
+	leafHelp := `Compare cycles.
+
+Flags:
+      --data-source string   Data source: live, local, auto
+      --group-by string      Field to group by (required)
+`
+	runner := pathRunner(map[string]string{
+		"":               rootHelp,
+		"cycles":         leafHelp,
+	})
+	s, err := FromHelp(context.Background(), runner,
+		"github://aileron-test/linear-pp-cli", "1.0.0", "/usr/local/bin/linear-pp-cli")
+	if err != nil {
+		t.Fatalf("FromHelp: %v", err)
+	}
+	if len(s.Subcommands) != 1 {
+		t.Fatalf("subcommands = %d, want 1", len(s.Subcommands))
+	}
+	sub := s.Subcommands[0]
+	// Input names must be underscore-converted.
+	wantNames := map[string]bool{"group_by": true, "data_source": true}
+	for _, p := range sub.Params {
+		if !wantNames[p.Name] {
+			t.Errorf("param name = %q; want one of %v (dash-to-underscore translation regressed)", p.Name, wantNames)
+		}
+	}
+	// argv literal keeps the dashed spelling; placeholder uses underscores.
+	wantArgv := "cycles --group-by {group_by} [--data-source {data_source}]"
+	if sub.Argv != wantArgv {
+		t.Errorf("argv = %q\n  want = %q", sub.Argv, wantArgv)
+	}
+}
+
+// TestBuildLeafSpec_PreservesUnderscoreFlagNames covers the no-op path
+// — flag names that already use underscores (rare in Cobra but possible
+// elsewhere) pass through unchanged in both the input name and argv.
+func TestBuildLeafSpec_PreservesUnderscoreFlagNames(t *testing.T) {
+	leaf := buildLeafSpec(
+		[]string{"do"},
+		"Do a thing.",
+		[]flagSpec{
+			{Name: "snake_case_flag", Type: "string", Required: true},
+		},
+	)
+	if leaf.Params[0].Name != "snake_case_flag" {
+		t.Errorf("Name = %q, want snake_case_flag", leaf.Params[0].Name)
+	}
+	if leaf.Argv != "do --snake_case_flag {snake_case_flag}" {
+		t.Errorf("argv = %q", leaf.Argv)
+	}
+}
+
+// TestBuildLeafSpec_OutputValidatesAgainstActionManifest is the
+// belt-and-suspenders check: a Spec emitted from a realistic Cobra
+// leaf (dashed flags, mix of required/optional) must produce an
+// action.md that round-trips through internal/action.Validate without
+// surfacing any inputName regex failures. Catches the kind of
+// validation-error miss this PR fixes.
+func TestBuildLeafSpec_OutputValidatesAgainstActionManifest(t *testing.T) {
+	// End-to-end: build a Spec with dashed Cobra flag names, render
+	// it through the production emit path (RenderActionMD), parse
+	// it back via action.Parse, and run action.Validate against the
+	// result. This is the regression boundary for the dash-bug —
+	// before this PR, action.Validate rejected every leaf with a
+	// dashed flag (data-source, group-by, auth-set-api-key, ...)
+	// and the daemon silently dropped all 83 emitted linear-* files
+	// from its action store at load time.
+	leaf := buildLeafSpec(
+		[]string{"issues", "create"},
+		"Create a Linear issue",
+		[]flagSpec{
+			{Name: "title", Type: "string", Required: true},
+			{Name: "team", Type: "string", Required: true},
+			{Name: "data-source", Type: "string", Required: false},
+			{Name: "auth-set-api-key", Type: "string", Required: false},
+			{Name: "group-by", Type: "string", Required: false},
+		},
+	)
+	inputNameRe := `^[a-z][a-z0-9_]*$`
+	matcher := regexp.MustCompile(inputNameRe)
+	for _, p := range leaf.Params {
+		if !matcher.MatchString(p.Name) {
+			t.Errorf("param name %q does not match %s — would fail action.Validate", p.Name, inputNameRe)
+		}
+	}
+
+	spec := &Spec{
+		Connector:   ConnectorSpec{Name: "local://user/linear", Version: "0.0.1"},
+		Program:     ProgramSpec{Path: "/usr/local/bin/linear-pp-cli"},
+		Subcommands: []SubcommandSpec{leaf},
+	}
+	manifest := BuildManifest(spec)
+	md := RenderActionMD(spec, leaf, manifest, "sha256:bound-at-install")
+	parsed, err := action.Parse(ActionFileName(spec, leaf), []byte(md))
+	if err != nil {
+		t.Fatalf("emitted action.md does not parse: %v\n%s", err, md)
+	}
+	if err := action.Validate(parsed, ActionFileName(spec, leaf)); err != nil {
+		t.Fatalf("emitted action.md fails validation: %v\n%s", err, md)
 	}
 }
 

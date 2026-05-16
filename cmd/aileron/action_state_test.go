@@ -173,6 +173,57 @@ func TestRunActionList_DaemonErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestRunActionList_SurfacesLoadErrorsOnStderr pins the visibility
+// fix for the dash-bug class of failures. Pre-fix, the daemon's
+// load_errors field was decoded into `_` and never rendered, so a
+// wrap-emitted action.md with a dashed input name (validation_error
+// from internal/action/validate.go's `^[a-z][a-z0-9_]*$` regex)
+// vanished from the table view with no indication anything was
+// wrong. The fix prints a structured summary to stderr that names
+// the failure class, the file, and the validator message so users
+// can act on it without curl detours.
+func TestRunActionList_SurfacesLoadErrorsOnStderr(t *testing.T) {
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(actionListWireResponse{
+			Items: []actionListItem{
+				{Name: "good-action", Version: "1.0.0", Source: "hub://x/y@1"},
+			},
+			LoadErrors: []actionLoadErrorItem{
+				{
+					Class:   "validation_error",
+					File:    "/Users/x/.aileron/actions/linear-foo.md",
+					Message: "inputs[1].name \"data-source\" must match ^[a-z][a-z0-9_]*$",
+				},
+				{
+					Class:   "parse_error",
+					File:    "/Users/x/.aileron/actions/broken.md",
+					Line:    7,
+					Message: "expected `+++` frontmatter delimiter",
+				},
+			},
+		})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	if code := runActionList(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "good-action") {
+		t.Errorf("stdout missing valid row: %s", stdout.String())
+	}
+	errOut := stderr.String()
+	if !strings.Contains(errOut, "2 action file(s) failed to load") {
+		t.Errorf("stderr missing failure count: %s", errOut)
+	}
+	if !strings.Contains(errOut, "validation_error") || !strings.Contains(errOut, "data-source") {
+		t.Errorf("stderr missing first failure detail: %s", errOut)
+	}
+	if !strings.Contains(errOut, "parse_error") || !strings.Contains(errOut, "broken.md:7") {
+		t.Errorf("stderr missing line-numbered failure: %s", errOut)
+	}
+}
+
 // --- enable / disable ---
 
 func TestRunActionToggle_EnableSendsPatch(t *testing.T) {
