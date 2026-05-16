@@ -99,17 +99,40 @@ func TestRunActionWrap_HelpMode_EmitsScaffoldFromFakeHelpRunner(t *testing.T) {
 	tmp := t.TempDir()
 	out := filepath.Join(tmp, "connector")
 
-	// Swap the help runner with a static fake. The runner returns
-	// a cobra-style subcommand list; the wrap loader scaffolds from
-	// it.
-	orig := actionWrapHelpRunner
-	actionWrapHelpRunner = func(_ context.Context, _ string, _ []string) (string, error) {
-		return `gh works with GitHub.
+	// Swap the help runner with a path-aware fake. Top-level returns
+	// a cobra subcommand list; each top-level subcommand returns a
+	// leaf-style help (no Available Commands) so the recursive walk
+	// terminates immediately and emits one operation per top-level
+	// name — `pr`, `issue`.
+	rootHelp := `gh works with GitHub.
 
 Available Commands:
   pr       Manage pull requests
   issue    Manage issues
-`, nil
+`
+	leafHelp := `Manage things.
+
+Usage:
+  thing <name>
+`
+	orig := actionWrapHelpRunner
+	actionWrapHelpRunner = func(_ context.Context, _ string, args []string) (string, error) {
+		key := ""
+		if n := len(args); n > 0 && args[n-1] == "--help" {
+			for _, a := range args[:n-1] {
+				if key != "" {
+					key += " "
+				}
+				key += a
+			}
+		}
+		switch key {
+		case "":
+			return rootHelp, nil
+		case "pr", "issue":
+			return leafHelp, nil
+		}
+		return "", nil
 	}
 	t.Cleanup(func() { actionWrapHelpRunner = orig })
 

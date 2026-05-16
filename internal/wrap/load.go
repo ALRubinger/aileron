@@ -114,45 +114,215 @@ func HelpRunnerExec(ctx context.Context, program string, args []string) (string,
 	return string(out), err
 }
 
-// FromHelp builds a Spec by invoking `<program> --help` and parsing
-// the output heuristically. The returned Spec is a scaffold the
-// connector author edits — the parser captures the top-level
-// subcommand list and a placeholder argv per subcommand. Per-flag
-// arity, parameter types, and descriptions need hand-editing in the
-// emitted YAML or directly in the manifest.
+// FromHelp builds a Spec by introspecting `<program> --help` and
+// every nested subcommand's `--help`. The output captures one
+// SubcommandSpec per *leaf* command (a command with no further
+// subcommands), with that leaf's required + optional flags as
+// declared inputs and an argv template that uses `[...]` optional
+// groups for the optional flags.
 //
-// `name` is the FQN to assign (`github://acme/foo`).
-// `version` is the connector's initial version (`0.0.1`).
+// For a Cobra CLI like linear-pp-cli:
+//
+//	linear-pp-cli                 (top-level)
+//	└── issues                    (namespace — has Available Commands)
+//	    ├── create                (leaf — has Flags only)   →  emits `issues-create`
+//	    └── list                  (leaf)                     →  emits `issues-list`
+//
+// Namespace commands (those that route to nested subcommands) are
+// not emitted as operations; only leaves are callable. This matches
+// how the agent thinks about tool calls: "create an issue", not
+// "navigate to the issues namespace and then create."
+//
+// `name` is the connector FQN to assign (`github://acme/foo` or
+// `local://user/foo`).
+// `version` is the connector's initial version.
 // `program` is the absolute path of the binary to wrap.
 // `runner` runs the help command; pass HelpRunnerExec in production.
+//
+// CLIs without any subcommands fall back to a single `run`
+// operation invoking the bare binary — same behavior as before the
+// recursion landed, so single-purpose wrapping paths are unchanged.
 func FromHelp(ctx context.Context, runner HelpRunner, name, version, program string) (*Spec, error) {
 	if !isAbsoluteOrTilde(program) {
 		return nil, fmt.Errorf("program path %q must be absolute or ~/-anchored", program)
 	}
-	help, err := runner(ctx, program, []string{"--help"})
+	rootHelp, err := runner(ctx, program, []string{"--help"})
 	if err != nil {
 		// Some programs exit non-zero on --help (notably curl). The
 		// captured output is still parseable; fall through.
-		if help == "" {
+		if rootHelp == "" {
 			return nil, fmt.Errorf("invoke %s --help: %w", program, err)
 		}
 	}
-	subs := parseSubcommands(help)
-	if len(subs) == 0 {
+	rootSubs := parseSubcommands(rootHelp)
+	if len(rootSubs) == 0 {
 		// CLIs without subcommands still get a single default
 		// operation that maps to the bare program invocation.
-		subs = []SubcommandSpec{{
-			Name:        "run",
-			Description: "Default invocation",
-			Argv:        baseName(program),
-		}}
+		return &Spec{
+			Connector: ConnectorSpec{Name: name, Version: version},
+			Program:   ProgramSpec{Path: program},
+			Subcommands: []SubcommandSpec{{
+				Name:        "run",
+				Description: "Default invocation",
+				Argv:        baseName(program),
+			}},
+		}, nil
 	}
-	prog := program
+
+	var leaves []SubcommandSpec
+	for _, rs := range rootSubs {
+		discovered, err := walkSubcommand(ctx, runner, program, []string{rs.Name}, rs.Description, 1)
+		if err != nil {
+			// A subcommand whose --help fails (rare, but happens on
+			// stub commands) drops out of the wrap rather than
+			// failing the whole install. The author can hand-add it
+			// later via the YAML path.
+			continue
+		}
+		leaves = append(leaves, discovered...)
+	}
+	if len(leaves) == 0 {
+		// Every recursive walk failed to surface a leaf. Fall back
+		// to the bare-subcommand emission so we don't ship a Spec
+		// with zero operations (cstore.ValidateManifest rejects that).
+		leaves = rootSubs
+	}
 	return &Spec{
 		Connector: ConnectorSpec{Name: name, Version: version},
-		Program:   ProgramSpec{Path: prog},
-		Subcommands: subs,
+		Program:   ProgramSpec{Path: program},
+		Subcommands: leaves,
 	}, nil
+}
+
+// maxSubcommandDepth caps how deep [walkSubcommand] recurses into a
+// subcommand tree. Cobra-shaped CLIs in PrintingPress's catalog top
+// out at depth 2 (`linear-pp-cli issues create`); gh/kubectl reach
+// 3 (`gh api graphql query`). Cap at 5 — anything deeper is either
+// a CLI authoring pathology or a runner that returns identical help
+// for every path (which the test fixtures used to do, and which
+// would otherwise spin forever). When the cap is hit the current
+// node is emitted as a leaf with whatever flags its help declares,
+// rather than continuing to recurse — the agent loses access to
+// genuinely-deep verbs, but the install completes.
+const maxSubcommandDepth = 5
+
+// walkSubcommand recursively explores a subcommand path. Returns
+// the leaf SubcommandSpecs discovered at this path (one when the
+// command is itself a leaf, many when it's a namespace whose
+// children are leaves, transitively).
+//
+// `path` is the chain of verbs from the root binary to this
+// subcommand (e.g. `["issues", "create"]`). The Cobra runtime
+// invokes `<binary> <path[0]> <path[1]> --help` to discover the
+// next layer.
+//
+// `description` is the line of prose the parent command's --help
+// associated with this subcommand. Plumbed down so leaves carry
+// the agent-facing prose from their parent's row when their own
+// --help body doesn't have a one-line summary at the top.
+//
+// `depth` is the current recursion depth (1 at the top-level
+// subcommand, 2 at its children, ...). Bounded by
+// [maxSubcommandDepth].
+func walkSubcommand(ctx context.Context, runner HelpRunner, program string, path []string, description string, depth int) ([]SubcommandSpec, error) {
+	args := append(append([]string(nil), path...), "--help")
+	help, err := runner(ctx, program, args)
+	if err != nil {
+		if help == "" {
+			return nil, fmt.Errorf("invoke %s %s: %w", program, strings.Join(args, " "), err)
+		}
+		// Tolerate non-zero exit when the output is still parseable.
+	}
+	subs := parseSubcommands(help)
+	if len(subs) > 0 && depth < maxSubcommandDepth {
+		// Namespace: recurse into each child. The namespace itself
+		// is not emitted as an operation — agents don't call
+		// "issues" without a verb; they call "issues create".
+		var out []SubcommandSpec
+		for _, s := range subs {
+			child := append(append([]string(nil), path...), s.Name)
+			discovered, err := walkSubcommand(ctx, runner, program, child, s.Description, depth+1)
+			if err != nil {
+				continue
+			}
+			out = append(out, discovered...)
+		}
+		return out, nil
+	}
+	// Leaf (or depth cap reached): parse flags + emit a SubcommandSpec.
+	flags := parseFlags(help)
+	leaf := buildLeafSpec(path, description, flags)
+	return []SubcommandSpec{leaf}, nil
+}
+
+// buildLeafSpec assembles a SubcommandSpec for a leaf command. The
+// operation name is the verb path joined by `-` (matches manifest
+// op-name shape `^[a-z][a-z0-9_-]*$`). The argv template uses the
+// verb path tokens unmodified, then required flags inline, then
+// each optional flag wrapped in `[...]`.
+//
+// Example for `linear-pp-cli issues create --title (required)
+// --description`:
+//
+//	Name:        "issues-create"
+//	Argv:        "issues create --title {title} [--description {description}]"
+//	Params:      [{title, string, required}, {description, string, optional}]
+func buildLeafSpec(path []string, description string, flags []flagSpec) SubcommandSpec {
+	name := strings.Join(path, "-")
+	var argv strings.Builder
+	for i, p := range path {
+		if i > 0 {
+			argv.WriteByte(' ')
+		}
+		argv.WriteString(p)
+	}
+	// Required flags first (stable order — order they appeared in
+	// the help, which Cobra alphabetizes). Then optional flags in
+	// the same order. The agent's tool catalog renders the JSON
+	// schema's `properties` map by declaration order; required-
+	// first keeps the call shape predictable.
+	required := make([]flagSpec, 0, len(flags))
+	optional := make([]flagSpec, 0, len(flags))
+	for _, f := range flags {
+		if f.Required {
+			required = append(required, f)
+		} else {
+			optional = append(optional, f)
+		}
+	}
+	var params []ParamSpec
+	for _, f := range required {
+		argv.WriteString(" --")
+		argv.WriteString(f.Name)
+		argv.WriteString(" {")
+		argv.WriteString(f.Name)
+		argv.WriteString("}")
+		params = append(params, ParamSpec{
+			Name:        f.Name,
+			Type:        inputType(f.Type),
+			Description: f.Description,
+			Required:    true,
+		})
+	}
+	for _, f := range optional {
+		argv.WriteString(" [--")
+		argv.WriteString(f.Name)
+		argv.WriteString(" {")
+		argv.WriteString(f.Name)
+		argv.WriteString("}]")
+		params = append(params, ParamSpec{
+			Name:        f.Name,
+			Type:        inputType(f.Type),
+			Description: f.Description,
+			Required:    false,
+		})
+	}
+	return SubcommandSpec{
+		Name:        name,
+		Description: description,
+		Argv:        argv.String(),
+		Params:      params,
+	}
 }
 
 // parseSubcommands extracts subcommands from a `--help` output. The
