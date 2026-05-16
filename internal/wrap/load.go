@@ -196,6 +196,17 @@ func parseSubcommands(help string) []SubcommandSpec {
 		if name == "" {
 			continue
 		}
+		// Defense in depth against parser surprises: skip names
+		// that won't survive the manifest schema's POSIX-shape
+		// rule. The introspector should never emit a bad name
+		// after the splitter relaxation below, but a row whose
+		// "name" column happens to contain a number-led token
+		// or punctuation the regex rejects would otherwise fail
+		// the entire install rather than just dropping the
+		// outlier subcommand.
+		if !subcommandNameRe.MatchString(name) {
+			continue
+		}
 		out = append(out, SubcommandSpec{
 			Name:        name,
 			Description: desc,
@@ -204,6 +215,13 @@ func parseSubcommands(help string) []SubcommandSpec {
 	}
 	return out
 }
+
+// subcommandNameRe matches the operation-name shape the manifest
+// schema accepts (`^[a-z][a-z0-9_-]*$` per [cstore.ValidateManifest]).
+// Centralized here so the heuristic parser can drop malformed
+// rows before they reach the manifest validator and fail the
+// whole install.
+var subcommandNameRe = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 
 // isSubcommandHeader recognizes the section headers cobra,
 // urfave/cli, and clap-rs typically emit.
@@ -216,13 +234,19 @@ func isSubcommandHeader(line string) bool {
 	return false
 }
 
-// splitSubcommandLine splits a `name  description` row into its two
-// halves. Whitespace runs of two or more separate the name from the
-// description.
-var twoOrMoreSpaces = regexp.MustCompile(`\s{2,}`)
+// splitSubcommandLine splits a `name <gap> description` row into
+// its two halves. Cobra and urfave/cli space the columns with
+// two or more characters; some other generators (the Linear
+// CLI's reflection-based runtime, for example) use a single
+// space. The splitter treats any run of whitespace as the
+// column separator — operation names are constrained to
+// `[a-z][a-z0-9_-]*` by the manifest schema, so they never
+// contain internal whitespace, and a single-space gap can't
+// occur inside a real name.
+var splitterRe = regexp.MustCompile(`\s+`)
 
 func splitSubcommandLine(line string) (name, desc string) {
-	parts := twoOrMoreSpaces.Split(line, 2)
+	parts := splitterRe.Split(line, 2)
 	switch len(parts) {
 	case 0:
 		return "", ""
