@@ -251,6 +251,100 @@ func TestActionSource_LocalFQNNoDoublePrefix(t *testing.T) {
 	}
 }
 
+func TestParseSubcommands_SingleSpaceColumns(t *testing.T) {
+	// Some CLIs (Linear's reflection-based linear-pp-cli is the
+	// reported case) format `--help` with a single space between
+	// the subcommand name and its description. Before this fix
+	// the splitter treated 2+ spaces as the column separator,
+	// which made the whole row a single "name" token — failing
+	// the manifest schema's `[a-z][a-z0-9_-]*` rule and aborting
+	// the entire `aileron pp add` install. Verify single-space
+	// rows now parse correctly.
+	help := `Usage: foo [command]
+
+Commands:
+  list List things
+  authentication-session-responses Get a single auth session response
+  do-work Run a job
+`
+	subs := parseSubcommands(help)
+	got := map[string]string{}
+	for _, s := range subs {
+		got[s.Name] = s.Description
+	}
+	for _, name := range []string{"list", "authentication-session-responses", "do-work"} {
+		if _, ok := got[name]; !ok {
+			t.Errorf("missing subcommand %q in single-space-column help; got %v", name, got)
+		}
+	}
+	if got["list"] != "List things" {
+		t.Errorf("list desc=%q want %q", got["list"], "List things")
+	}
+}
+
+func TestParseSubcommands_StillHandlesCobraStyleMultiSpace(t *testing.T) {
+	// Regression check: relaxing the splitter to any whitespace
+	// must not break the cobra/urfave-style 2+-space layout that
+	// most CLIs use. The descriptions get a trailing-whitespace
+	// trim from splitSubcommandLine, so both styles read clean.
+	help := `Usage: foo
+
+Commands:
+  list      List things
+  show      Show one
+`
+	subs := parseSubcommands(help)
+	if len(subs) != 2 {
+		t.Fatalf("got %d subcommands, want 2: %v", len(subs), subs)
+	}
+	if subs[0].Name != "list" || subs[0].Description != "List things" {
+		t.Errorf("cobra-style row[0] mismatched: %+v", subs[0])
+	}
+	if subs[1].Name != "show" || subs[1].Description != "Show one" {
+		t.Errorf("cobra-style row[1] mismatched: %+v", subs[1])
+	}
+}
+
+func TestParseSubcommands_SkipsMalformedNames(t *testing.T) {
+	// Defense in depth: a name that survives the splitter but
+	// doesn't match the manifest's POSIX-shape rule is dropped
+	// rather than failing the whole install. Without this, a
+	// single rogue row in a CLI's `--help` would block users
+	// from wrapping the rest of it.
+	help := `Commands:
+  list List things
+  3invalid Number-led so the manifest rejects it
+  Bad-Caps Uppercase not allowed in operation names
+  has_underscore Permitted
+`
+	subs := parseSubcommands(help)
+	names := make([]string, 0, len(subs))
+	for _, s := range subs {
+		names = append(names, s.Name)
+	}
+	wantPresent := []string{"list", "has_underscore"}
+	wantAbsent := []string{"3invalid", "Bad-Caps"}
+	for _, n := range wantPresent {
+		found := false
+		for _, got := range names {
+			if got == n {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %q in %v", n, names)
+		}
+	}
+	for _, n := range wantAbsent {
+		for _, got := range names {
+			if got == n {
+				t.Errorf("malformed name %q should have been dropped; got %v", n, names)
+			}
+		}
+	}
+}
+
 // wantContains asserts the slice contains all expected values.
 func wantContains(t *testing.T, got []string, want string) {
 	t.Helper()
