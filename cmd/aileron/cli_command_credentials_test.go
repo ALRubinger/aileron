@@ -334,9 +334,16 @@ func TestStashCredentialBindings_WritesBindingToVault(t *testing.T) {
 
 	prevPrompt := promptPassphrase
 	t.Cleanup(func() { promptPassphrase = prevPrompt })
-	// First call: credential value. Second call: passphrase.
+	// Prompt sequence for a fresh vault:
+	//   1. credential value
+	//   2. vault passphrase
+	//   3. confirm passphrase (new-vault interactive flow)
 	calls := 0
-	canned := []string{"super-secret-token-bytes", "vault-passphrase-1"}
+	canned := []string{
+		"super-secret-token-bytes",
+		"vault-passphrase-1",
+		"vault-passphrase-1",
+	}
 	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
 		v := canned[calls]
 		calls++
@@ -357,6 +364,78 @@ func TestStashCredentialBindings_WritesBindingToVault(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Stashed credential under binding api_key/linear/default") {
 		t.Errorf("stdout missing success line: %q", stdout.String())
+	}
+}
+
+func TestStashCredentialBindings_NewVaultPromptsConfirmAndShowsBanner(t *testing.T) {
+	// Reported by user: aileron pp add against a fresh ~/.aileron
+	// asked for a passphrase with no context about creating a new
+	// vault, and didn't ask for confirmation — a typo would lock
+	// the user out of the credential they just typed. Verify the
+	// fresh-vault path now (a) prints the new-vault banner and
+	// (b) prompts twice (passphrase + confirm) before stashing.
+	home := fakeHome(t)
+	_ = home
+
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	calls := 0
+	canned := []string{
+		"sekrit-value",  // credential
+		"pass",          // passphrase
+		"pass",          // confirm
+	}
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		v := canned[calls]
+		calls++
+		return v, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	written, err := stashCredentialBindings(
+		"local://user/freshcli", "freshcli",
+		[]string{"FRESHCLI_API_KEY"}, "",
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err != nil {
+		t.Fatalf("stash: %v", err)
+	}
+	if written != 1 {
+		t.Errorf("written=%d want 1", written)
+	}
+	if !strings.Contains(stderr.String(), "Vault") && !strings.Contains(stderr.String(), "vault") {
+		t.Errorf("expected new-vault banner on stderr; got: %q", stderr.String())
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 prompts (credential + passphrase + confirm), got %d", calls)
+	}
+}
+
+func TestStashCredentialBindings_NewVaultMismatchedConfirm(t *testing.T) {
+	// Typo on confirm must reject the stash so the user doesn't
+	// lock themselves out of the credential they just typed.
+	fakeHome(t)
+	prevPrompt := promptPassphrase
+	t.Cleanup(func() { promptPassphrase = prevPrompt })
+	calls := 0
+	canned := []string{"value", "pass-one", "pass-two"} // confirm differs
+	promptPassphrase = func(prompt string, w io.Writer) (string, error) {
+		v := canned[calls]
+		calls++
+		return v, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	_, err := stashCredentialBindings(
+		"local://user/typo", "typo",
+		[]string{"TYPO_API_KEY"}, "",
+		strings.NewReader(""), &stdout, &stderr,
+	)
+	if err == nil {
+		t.Fatal("expected error when confirm doesn't match")
+	}
+	if !strings.Contains(err.Error(), "do not match") {
+		t.Errorf("error should mention passphrase mismatch: %v", err)
 	}
 }
 
