@@ -54,8 +54,7 @@ flags for ` + "`aileron pp add`" + `:
   --dry-run               Print the install plan and exit without running ` + "`go install`" + `
   --edit                  Open the inferred manifest in $EDITOR before confirmation
   -y, --yes               Skip the confirmation prompt
-  --no-credentials        Skip credential detection + prompt
-  --passphrase-file <p>   Read the vault passphrase from <p> (newline-terminated)`
+  --no-credentials        Skip credential detection + prompt`
 
 // runPpAdd implements `aileron pp add <name>`. The flow:
 //
@@ -89,7 +88,6 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	yes := flags.Bool("yes", false, "skip the confirmation prompt")
 	flags.BoolVar(yes, "y", false, "alias for --yes")
 	noCredentials := flags.Bool("no-credentials", false, "skip the credential prompt path entirely")
-	passphraseFile := flags.String("passphrase-file", "", "read the vault passphrase from this path")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
@@ -189,9 +187,6 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *noCredentials {
 		cliArgs = append(cliArgs, "--no-credentials")
-	}
-	if *passphraseFile != "" {
-		cliArgs = append(cliArgs, "--passphrase-file", *passphraseFile)
 	}
 	if entry.MCP != nil {
 		for _, envVar := range entry.MCP.EnvVars {

@@ -468,52 +468,6 @@ func TestRunPpAdd_GoInstallFailureSurfacesError(t *testing.T) {
 	}
 }
 
-func TestRunPpAdd_PassphraseFileFlagFlowsThrough(t *testing.T) {
-	// The --passphrase-file flag must reach the cli-add handoff so
-	// users can do non-interactive installs (CI / config-as-code).
-	// Verify by setting up the full happy path and confirming the
-	// install succeeds with the flag — its presence on the
-	// generated cli-add args is what makes this path testable.
-	if runtime.GOOS == "windows" {
-		t.Skip("sandboxtest fake binary is POSIX-only")
-	}
-	startFixtureCatalog(t)
-	home := fakeHome(t)
-
-	prev := runGoInstall
-	t.Cleanup(func() { runGoInstall = prev })
-	runGoInstall = func(modulePath, gobin string, stdout, stderr io.Writer) error {
-		// Drop a non-trivial fake at the sandbox-bin path the
-		// installer just told the toolchain to write to.
-		const helpText = "Commands:\n  do  do thing\n"
-		body := "#!/bin/sh\nprintf '%s' '" + helpText + "'\n"
-		return os.WriteFile(filepath.Join(gobin, "linear-pp-cli"), []byte(body), 0o755)
-	}
-
-	// Even though we pass --no-credentials, the flag-parsing path
-	// for --passphrase-file still has to recognize the flag and
-	// thread it through.
-	passFile := filepath.Join(t.TempDir(), "phrase")
-	if err := os.WriteFile(passFile, []byte("ignored-by-no-credentials\n"), 0o600); err != nil {
-		t.Fatalf("write passfile: %v", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := runPpAdd(
-		[]string{"--yes", "--no-credentials", "--passphrase-file", passFile, "linear"},
-		strings.NewReader(""),
-		&stdout, &stderr,
-	)
-	if code != 0 {
-		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
-	}
-	// Manifest must exist under short name — proves cli add ran.
-	manifestPath := filepath.Join(home, ".aileron", "connectors", "local", "linear", "manifest.toml")
-	if _, err := os.Stat(manifestPath); err != nil {
-		t.Errorf("manifest missing after happy install: %v", err)
-	}
-}
-
 func TestRunGoInstall_FailsFastOnKnownBadModule(t *testing.T) {
 	// runGoInstall is the production exec.Command shell-out;
 	// tests normally mock the var to avoid forking `go`. This

@@ -467,8 +467,12 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		// ~/.aileron/connectors/local. Set unconditionally; the
 		// executor tolerates a missing root and just resolves no
 		// local connectors for hosts that have never run
-		// `aileron cli add`.
-		sandboxExec.LocalStore = cstore.NewLocalStore(cstore.DefaultLocalRoot())
+		// `aileron cli add`. Stash the same instance on the
+		// apiServer so binding-setup handlers can resolve
+		// `local://` FQNs without re-walking the filesystem.
+		localStore := cstore.NewLocalStore(cstore.DefaultLocalRoot())
+		sandboxExec.LocalStore = localStore
+		server.localStore = localStore
 		executor = sandboxExec
 		server.sandboxRuntime = sandboxRT
 	}

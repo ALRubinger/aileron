@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -259,10 +260,37 @@ func (s *apiServer) RebindBinding(w http.ResponseWriter, r *http.Request, name a
 // trusts the cstore index plus the on-disk manifest. Returns the
 // canonicalised FQN string (so the audit/binding metadata always uses
 // the canonical form), the parsed manifest, and any error.
+//
+// Two stores are consulted in scheme order: `local://` FQNs resolve
+// against the BYOCLI [cstore.LocalStore] (#749); every other scheme
+// resolves against the hub [cstore.Installer.Store]. Wiring both
+// here lets `POST /v1/bindings/setup` create credential bindings for
+// connectors installed via `aileron pp add` / `aileron cli add`,
+// not just hub-published ones. Without this, the runtime accepts
+// `local://` invocations (executor.connectorForLocal reads
+// LocalStore directly) but the binding-setup path 404s, leaving the
+// user with an installed manifest the daemon won't credential.
 func (s *apiServer) lookupConnector(fqnStr string) (string, *cstore.Manifest, error) {
 	fqn, err := cstore.ParseFQN(fqnStr)
 	if err != nil {
 		return "", nil, err
+	}
+	if fqn.Scheme == "local" {
+		if s.localStore == nil {
+			return "", nil, errors.New("connector " + fqn.String() + " is not installed (local connector store not configured)")
+		}
+		name, err := cstore.LocalNameForFQN(fqn.String())
+		if err != nil {
+			return "", nil, err
+		}
+		cmf, err := s.localStore.Load(name)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return "", nil, errors.New("connector " + fqn.String() + " is not installed")
+			}
+			return "", nil, err
+		}
+		return fqn.String(), cmf, nil
 	}
 	_, hash, ok := s.installer.Store.LookupAnyVersion(fqn)
 	if !ok {
