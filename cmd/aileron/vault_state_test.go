@@ -113,6 +113,14 @@ func TestBypassesVault(t *testing.T) {
 		{"sync", []string{"sync"}, false},
 		{"audit list", []string{"audit", "list"}, false},
 		{"sessions list", []string{"sessions", "list"}, false},
+		// Per #783, BYOCLI commands now go through the state machine
+		// so first-run onboarding (banner + ASCII art + vault init)
+		// fires *before* the catalog fetch / go install. The cached
+		// passphrase covers the subsequent binding write without re-
+		// prompting the user.
+		{"pp add", []string{"pp", "add", "linear"}, false},
+		{"cli add", []string{"cli", "add", "/usr/local/bin/gh"}, false},
+		{"cli refresh", []string{"cli", "refresh", "linear"}, false},
 		{"unknown command", []string{"bogus"}, false},
 	}
 	for _, tc := range cases {
@@ -785,6 +793,47 @@ func TestEnsureVaultUnlocked_VaultCheckStateError(t *testing.T) {
 	err := ensureVaultUnlocked("", io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "checking vault") {
 		t.Errorf("err = %v, want 'checking vault' wrap", err)
+	}
+}
+
+// --- passphrase cache populated by state-machine paths (#783) ---
+
+// TestPromptAndUnlockRunning_PopulatesPassphraseCache verifies the
+// running-vault unlock branch stows the resolved passphrase in the
+// process-scoped cache so a subsequent in-process vault open (e.g.
+// `stashCredentialBindings` writing a binding mid-`pp add`) doesn't
+// re-prompt the user.
+func TestPromptAndUnlockRunning_PopulatesPassphraseCache(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	rememberVaultPassphrase("")
+	t.Cleanup(func() { rememberVaultPassphrase("") })
+
+	withVaultStateSeams(t, vaultStateFakes{
+		prompt:     func(string, io.Writer) (string, error) { return "verified-pass", nil },
+		postUnlock: func(string, string) error { return nil },
+	})
+	if err := promptAndUnlockRunning("http://x", "", io.Discard); err != nil {
+		t.Fatalf("promptAndUnlockRunning: %v", err)
+	}
+	if got := recallVaultPassphrase(); got != "verified-pass" {
+		t.Errorf("cache = %q, want verified-pass — state machine must remember the passphrase after a successful unlock", got)
+	}
+}
+
+func TestPromptAndUnlockRunning_NoCacheOnFailedUnlock(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	rememberVaultPassphrase("")
+	t.Cleanup(func() { rememberVaultPassphrase("") })
+
+	withVaultStateSeams(t, vaultStateFakes{
+		prompt:     func(string, io.Writer) (string, error) { return "wrong-pass", nil },
+		postUnlock: func(string, string) error { return errVaultUnlockRejected },
+	})
+	if err := promptAndUnlockRunning("http://x", "", io.Discard); err == nil {
+		t.Fatal("expected rejection")
+	}
+	if got := recallVaultPassphrase(); got != "" {
+		t.Errorf("cache should stay empty after a rejected unlock, got %q", got)
 	}
 }
 
