@@ -117,6 +117,9 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  Source:   %s\n", sourceURL)
 	fmt.Fprintf(stdout, "  Binary:   %s (installed to $GOBIN)\n", binaryName)
 	fmt.Fprintf(stdout, "  Wrap as:  local://user/%s\n", name)
+	if entry.MCP != nil && len(entry.MCP.EnvVars) > 0 {
+		fmt.Fprintf(stdout, "  Creds:    %s (catalog-declared; prompted after install)\n", strings.Join(entry.MCP.EnvVars, ", "))
+	}
 	if entry.Description != "" {
 		fmt.Fprintf(stdout, "  About:    %s\n", entry.Description)
 	}
@@ -149,6 +152,14 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// local-store entry is `linear`, not `linear-pp-cli`; the user
 	// types `aileron pp add linear` and expects the connector to be
 	// reachable as `linear` afterwards.
+	//
+	// Catalog-declared env vars (entry.MCP.EnvVars) are passed as
+	// `--credential <ENV>` overrides so the credential prompt fires
+	// even when the CLI's own `--help` doesn't surface the env var.
+	// Linear's linear-pp-cli is the canonical case: the catalog
+	// declares LINEAR_API_KEY, but the binary's --help text doesn't
+	// mention it, so the wrap heuristic alone would skip the
+	// prompt.
 	cliArgs := []string{"--name", name}
 	if *yes {
 		cliArgs = append(cliArgs, "--yes")
@@ -161,6 +172,11 @@ func runPpAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *passphraseFile != "" {
 		cliArgs = append(cliArgs, "--passphrase-file", *passphraseFile)
+	}
+	if entry.MCP != nil {
+		for _, envVar := range entry.MCP.EnvVars {
+			cliArgs = append(cliArgs, "--credential", envVar)
+		}
 	}
 	cliArgs = append(cliArgs, binPath)
 	return runCliAdd(cliArgs, stdin, stdout, stderr)
@@ -179,13 +195,35 @@ const ppCatalogTimeout = 10 * time.Second
 
 // ppEntry is the subset of a PrintingPress catalog entry the
 // installer reads. The full v2 schema carries fields the
-// installer doesn't need (printer, category, mcp metadata),
-// so we decode only the relevant slots and let the rest
-// pass through silently.
+// installer doesn't need (printer, category, transports, etc.),
+// so we decode only the relevant slots and let the rest pass
+// through silently.
 type ppEntry struct {
 	Name        string `json:"name"`
 	Path        string `json:"path"`
 	Description string `json:"description"`
+
+	// MCP is the per-entry MCP-variant metadata. The CLI
+	// installer reads `env_vars` from this block because the
+	// catalog only documents auth env vars on the MCP variant
+	// (the CLI variant binds the same env vars by convention).
+	// Entries without an `mcp` block leave this nil and the
+	// installer falls back to the `--help` heuristic alone.
+	MCP *ppEntryMCP `json:"mcp,omitempty"`
+}
+
+// ppEntryMCP holds the slice of an entry's `mcp` block the
+// installer actually consults. The wider schema carries
+// transport/auth/tool-count fields the CLI installer ignores.
+type ppEntryMCP struct {
+	// EnvVars lists the environment variables the wrapped CLI
+	// authenticates with. Passed to the `aileron cli add`
+	// handoff as `--credential <ENV>` overrides so the
+	// credential prompt fires even when `<binary> --help`
+	// doesn't mention the env var by name. Matches the
+	// auth-key convention shared between each entry's
+	// `<name>-pp-mcp` and `<name>-pp-cli` binaries.
+	EnvVars []string `json:"env_vars"`
 }
 
 // ppRegistry decodes registry.json's top-level shape (v2).
