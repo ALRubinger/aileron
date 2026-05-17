@@ -169,9 +169,10 @@ func FromHelp(ctx context.Context, runner HelpRunner, name, version, program str
 		}, nil
 	}
 
+	progBase := baseName(program)
 	var leaves []SubcommandSpec
 	for _, rs := range rootSubs {
-		discovered, err := walkSubcommand(ctx, runner, program, []string{rs.Name}, rs.Description, 1)
+		discovered, err := walkSubcommand(ctx, runner, program, progBase, []string{rs.Name}, rs.Description, 1)
 		if err != nil {
 			// A subcommand whose --help fails (rare, but happens on
 			// stub commands) drops out of the wrap rather than
@@ -185,7 +186,18 @@ func FromHelp(ctx context.Context, runner HelpRunner, name, version, program str
 		// Every recursive walk failed to surface a leaf. Fall back
 		// to the bare-subcommand emission so we don't ship a Spec
 		// with zero operations (cstore.ValidateManifest rejects that).
-		leaves = rootSubs
+		// Prepend the binary basename so each fallback op invokes
+		// the wrapped CLI correctly (without this, argv[0] eats
+		// the subcommand token at exec time and the wrapped CLI
+		// runs as if called bare).
+		leaves = make([]SubcommandSpec, len(rootSubs))
+		for i, rs := range rootSubs {
+			leaves[i] = SubcommandSpec{
+				Name:        rs.Name,
+				Description: rs.Description,
+				Argv:        progBase + " " + rs.Name,
+			}
+		}
 	}
 	return &Spec{
 		Connector: ConnectorSpec{Name: name, Version: version},
@@ -224,7 +236,7 @@ const maxSubcommandDepth = 5
 // `depth` is the current recursion depth (1 at the top-level
 // subcommand, 2 at its children, ...). Bounded by
 // [maxSubcommandDepth].
-func walkSubcommand(ctx context.Context, runner HelpRunner, program string, path []string, description string, depth int) ([]SubcommandSpec, error) {
+func walkSubcommand(ctx context.Context, runner HelpRunner, program, progBase string, path []string, description string, depth int) ([]SubcommandSpec, error) {
 	args := append(append([]string(nil), path...), "--help")
 	help, err := runner(ctx, program, args)
 	if err != nil {
@@ -241,7 +253,7 @@ func walkSubcommand(ctx context.Context, runner HelpRunner, program string, path
 		var out []SubcommandSpec
 		for _, s := range subs {
 			child := append(append([]string(nil), path...), s.Name)
-			discovered, err := walkSubcommand(ctx, runner, program, child, s.Description, depth+1)
+			discovered, err := walkSubcommand(ctx, runner, program, progBase, child, s.Description, depth+1)
 			if err != nil {
 				continue
 			}
@@ -249,41 +261,83 @@ func walkSubcommand(ctx context.Context, runner HelpRunner, program string, path
 		}
 		return out, nil
 	}
-	// Leaf (or depth cap reached): parse flags + emit a SubcommandSpec.
+	// Leaf (or depth cap reached): parse positionals + flags and
+	// emit a SubcommandSpec. Positionals come from the Usage block
+	// (`<binary> verb [POS] [flags]`); flags from the Flags + Global
+	// Flags sections.
+	positionals := parsePositionals(help)
 	flags := parseFlags(help)
-	leaf := buildLeafSpec(path, description, flags)
+	leaf := buildLeafSpec(progBase, path, description, positionals, flags)
 	return []SubcommandSpec{leaf}, nil
 }
 
 // buildLeafSpec assembles a SubcommandSpec for a leaf command. The
 // operation name is the verb path joined by `-` (matches manifest
-// op-name shape `^[a-z][a-z0-9_-]*$`). The argv template uses the
-// verb path tokens unmodified, then required flags inline, then
-// each optional flag wrapped in `[...]`.
+// op-name shape `^[a-z][a-z0-9_-]*$`). The argv template lays out
+// the leaf invocation in the order Cobra expects it on the
+// command line:
 //
-// Example for `linear-pp-cli issues create --title (required)
-// --description`:
+//   - binary basename as argv[0] (the runtime exec uses
+//     `Argv[1:]` as the subprocess args, treating Argv[0] as the
+//     conventional binary-name slot — see
+//     `internal/sandbox/spawn.go`'s `exec.CommandContext(ctx,
+//     env.Program, env.Argv[1:]...)`. Omitting the basename here
+//     would cause the first verb token to be eaten by argv[0] and
+//     the wrapped CLI would run as if called bare)
+//   - verb path tokens (literals)
+//   - required positionals as bare placeholders `{name}`
+//   - optional positionals wrapped in `[{name}]` optional groups
+//   - required flags as `--flag {name}`
+//   - optional flags wrapped in `[--flag {name}]` optional groups
 //
-//	Name:        "issues-create"
-//	Argv:        "issues create --title {title} [--description {description}]"
-//	Params:      [{title, string, required}, {description, string, optional}]
+// Example for `linear-pp-cli sql [SQL] [flags]` with a `--rate-limit`
+// optional flag, wrapped as `linear-pp-cli`:
 //
-// Flag names containing dashes (`--data-source`, `--group-by`) are
-// translated to underscore form (`data_source`, `group_by`) for the
-// action input name AND the argv placeholder, since action input
-// names are JSON Schema property names that must match
-// `[a-z][a-z0-9_]*` per the manifest validator. The argv *literal*
-// keeps the original spelling — that's what the wrapped CLI's
-// flag parser expects.
-func buildLeafSpec(path []string, description string, flags []flagSpec) SubcommandSpec {
+//	Name:        "sql"
+//	Argv:        "linear-pp-cli sql [{sql}] [--rate-limit {rate_limit}]"
+//	Params:      [{sql, string, optional}, {rate_limit, number, optional}]
+//
+// Flag and positional names containing dashes (`--data-source`,
+// `<FILE-PATH>`) are translated to underscore form (`data_source`,
+// `file_path`) for the action input name AND the argv placeholder,
+// since action input names are JSON Schema property names that
+// must match `[a-z][a-z0-9_]*` per the manifest validator. The
+// argv *literal* for flag names keeps the original spelling — that's
+// what the wrapped CLI's flag parser expects.
+func buildLeafSpec(progBase string, path []string, description string, positionals []positionalSpec, flags []flagSpec) SubcommandSpec {
 	name := strings.Join(path, "-")
 	var argv strings.Builder
-	for i, p := range path {
-		if i > 0 {
-			argv.WriteByte(' ')
-		}
+	argv.WriteString(progBase)
+	for _, p := range path {
+		argv.WriteByte(' ')
 		argv.WriteString(p)
 	}
+
+	// Positionals follow Cobra ordering: they appear before flags
+	// on the command line. Required positionals are bare
+	// placeholders; optional positionals get the `[...]` group
+	// treatment so the agent can omit them and still produce a
+	// valid argv (the bare-invocation behavior Cobra preserves
+	// for `[ARG]`-shaped slots).
+	var params []ParamSpec
+	for _, p := range positionals {
+		if p.Required {
+			argv.WriteString(" {")
+			argv.WriteString(p.Name)
+			argv.WriteString("}")
+		} else {
+			argv.WriteString(" [{")
+			argv.WriteString(p.Name)
+			argv.WriteString("}]")
+		}
+		params = append(params, ParamSpec{
+			Name:        p.Name,
+			Type:        "string",
+			Description: positionalDescription(p),
+			Required:    p.Required,
+		})
+	}
+
 	// Required flags first (stable order — order they appeared in
 	// the help, which Cobra alphabetizes). Then optional flags in
 	// the same order. The agent's tool catalog renders the JSON
@@ -298,7 +352,6 @@ func buildLeafSpec(path []string, description string, flags []flagSpec) Subcomma
 			optional = append(optional, f)
 		}
 	}
-	var params []ParamSpec
 	for _, f := range required {
 		inputName := flagInputName(f.Name)
 		argv.WriteString(" --")
@@ -333,6 +386,19 @@ func buildLeafSpec(path []string, description string, flags []flagSpec) Subcomma
 		Argv:        argv.String(),
 		Params:      params,
 	}
+}
+
+// positionalDescription returns a human-readable description for a
+// positional input. Cobra's --help doesn't carry per-positional
+// prose the way it does for flags (`--flag string  Description`),
+// so we synthesize a minimal description from the positional's
+// name and required-ness. The author can hand-edit it later via
+// `--edit`.
+func positionalDescription(p positionalSpec) string {
+	if p.Required {
+		return "Positional argument: " + p.Name + " (required)"
+	}
+	return "Positional argument: " + p.Name + " (optional)"
 }
 
 // flagInputName translates a Cobra long-form flag name into the

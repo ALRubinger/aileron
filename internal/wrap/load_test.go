@@ -259,9 +259,50 @@ Usage:
 		}
 	}
 	// argv should be `"issues create --title {title} --team {team} [--description {description}] [--priority {priority}]"`.
-	wantArgv := "issues create --title {title} --team {team} [--description {description}] [--priority {priority}]"
+	wantArgv := "linear-pp-cli issues create --title {title} --team {team} [--description {description}] [--priority {priority}]"
 	if create.Argv != wantArgv {
 		t.Errorf("argv = %q\n  want = %q", create.Argv, wantArgv)
+	}
+}
+
+// TestFromHelp_PlumbsPositionalsThroughLeafSpec confirms that
+// positional arguments declared in a leaf's Usage block flow
+// through the full FromHelp → walkSubcommand → buildLeafSpec
+// pipeline. The leaf's argv pattern must contain the positional
+// placeholder; the leaf's Params slice must contain the input.
+func TestFromHelp_PlumbsPositionalsThroughLeafSpec(t *testing.T) {
+	rootHelp := `linear-pp-cli — Linear from the terminal.
+
+Available Commands:
+  sql      Run SQL against the local store
+`
+	leafHelp := `Run a SQL query against the local store.
+
+Usage:
+  linear-pp-cli sql [SQL] [flags]
+
+Flags:
+      --json   Output as JSON
+`
+	runner := pathRunner(map[string]string{
+		"":    rootHelp,
+		"sql": leafHelp,
+	})
+	s, err := FromHelp(context.Background(), runner,
+		"github://aileron-test/linear-pp-cli", "1.0.0", "/usr/local/bin/linear-pp-cli")
+	if err != nil {
+		t.Fatalf("FromHelp: %v", err)
+	}
+	if len(s.Subcommands) != 1 {
+		t.Fatalf("subcommands = %d, want 1", len(s.Subcommands))
+	}
+	leaf := s.Subcommands[0]
+	wantArgv := "linear-pp-cli sql [{sql}]"
+	if leaf.Argv != wantArgv {
+		t.Errorf("argv = %q\n  want = %q (--json is boolean and dropped per v1)", leaf.Argv, wantArgv)
+	}
+	if len(leaf.Params) != 1 || leaf.Params[0].Name != "sql" || leaf.Params[0].Required {
+		t.Errorf("params = %+v; want one optional `sql` input", leaf.Params)
 	}
 }
 
@@ -311,7 +352,7 @@ Flags:
 		}
 	}
 	// argv literal keeps the dashed spelling; placeholder uses underscores.
-	wantArgv := "cycles --group-by {group_by} [--data-source {data_source}]"
+	wantArgv := "linear-pp-cli cycles --group-by {group_by} [--data-source {data_source}]"
 	if sub.Argv != wantArgv {
 		t.Errorf("argv = %q\n  want = %q", sub.Argv, wantArgv)
 	}
@@ -322,8 +363,10 @@ Flags:
 // elsewhere) pass through unchanged in both the input name and argv.
 func TestBuildLeafSpec_PreservesUnderscoreFlagNames(t *testing.T) {
 	leaf := buildLeafSpec(
+		"mycli",
 		[]string{"do"},
 		"Do a thing.",
+		nil,
 		[]flagSpec{
 			{Name: "snake_case_flag", Type: "string", Required: true},
 		},
@@ -331,7 +374,7 @@ func TestBuildLeafSpec_PreservesUnderscoreFlagNames(t *testing.T) {
 	if leaf.Params[0].Name != "snake_case_flag" {
 		t.Errorf("Name = %q, want snake_case_flag", leaf.Params[0].Name)
 	}
-	if leaf.Argv != "do --snake_case_flag {snake_case_flag}" {
+	if leaf.Argv != "mycli do --snake_case_flag {snake_case_flag}" {
 		t.Errorf("argv = %q", leaf.Argv)
 	}
 }
@@ -352,8 +395,10 @@ func TestBuildLeafSpec_OutputValidatesAgainstActionManifest(t *testing.T) {
 	// and the daemon silently dropped all 83 emitted linear-* files
 	// from its action store at load time.
 	leaf := buildLeafSpec(
+		"linear-pp-cli",
 		[]string{"issues", "create"},
 		"Create a Linear issue",
+		nil,
 		[]flagSpec{
 			{Name: "title", Type: "string", Required: true},
 			{Name: "team", Type: "string", Required: true},
