@@ -357,10 +357,18 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	}
 
 	srv := &http.Server{
-		Handler:      handler,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Handler: handler,
+		// ReadHeaderTimeout bounds the request-header handshake against
+		// a slowloris-style stall. Body and response deadlines are *not*
+		// fixed here: the daemon serves long-lived streams (the
+		// `/v1/messages` Anthropic SSE proxy with extended thinking) and
+		// long-running synchronous actions (`/v1/actions/{name}/run`
+		// hitting slow upstream APIs like Google Docs). A non-zero
+		// http.Server.WriteTimeout would force-close those mid-flight,
+		// surfacing on the agent side as `socket connection was closed
+		// unexpectedly`. Per-request liveness rides on r.Context().
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	serveErr := make(chan error, 1)

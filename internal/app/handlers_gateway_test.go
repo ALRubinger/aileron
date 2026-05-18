@@ -3,7 +3,9 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -386,6 +388,150 @@ func TestPostChatCompletions_UpstreamUnreachable_Returns502(t *testing.T) {
 	}
 	if apiErr.Error.Code != "upstream_error" {
 		t.Errorf("error.code = %q, want upstream_error", apiErr.Error.Code)
+	}
+}
+
+// ----------------------------------------------------------------------
+// Mid-stream interruption logging.
+//
+// httputil.ReverseProxy's ErrorHandler only fires for pre-response
+// transport failures. Once the upstream is past headers, any write-
+// side failure (the http.Server's WriteTimeout firing, the agent
+// dropping the socket mid-SSE, etc.) bubbles up through the
+// response-copy loop and silently terminates the stream — no daemon-
+// side log line, the agent just sees "socket connection was closed
+// unexpectedly". The gateway wraps the ResponseWriter to emit a Warn
+// describing how far the stream got before failure. These tests pin
+// that contract.
+// ----------------------------------------------------------------------
+
+// failingResponseWriter is a minimal ResponseWriter whose Write
+// returns errAfter bytes successfully (across calls), then errors
+// out. Models the "WriteTimeout fired mid-stream" scenario.
+type failingResponseWriter struct {
+	header     http.Header
+	written    *bytes.Buffer
+	failAfter  int
+	statusCode int
+	flushCalls int
+}
+
+func newFailingResponseWriter(failAfter int) *failingResponseWriter {
+	return &failingResponseWriter{header: http.Header{}, written: &bytes.Buffer{}, failAfter: failAfter}
+}
+
+func (w *failingResponseWriter) Header() http.Header { return w.header }
+func (w *failingResponseWriter) WriteHeader(code int) {
+	if w.statusCode == 0 {
+		w.statusCode = code
+	}
+}
+func (w *failingResponseWriter) Write(b []byte) (int, error) {
+	remaining := w.failAfter - w.written.Len()
+	if remaining <= 0 {
+		return 0, errors.New("write: broken pipe")
+	}
+	if remaining < len(b) {
+		w.written.Write(b[:remaining])
+		return remaining, errors.New("write: broken pipe")
+	}
+	w.written.Write(b)
+	return len(b), nil
+}
+func (w *failingResponseWriter) Flush() { w.flushCalls++ }
+
+func TestStreamWatchWriter_LogsOnceOnMidStreamFailure(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	failing := newFailingResponseWriter(8) // allow 8 bytes, then fail
+	w := &streamWatchWriter{
+		ResponseWriter: failing,
+		log:            log,
+		provider:       "anthropic",
+		upstream:       "https://api.anthropic.com",
+		ctx:            context.Background(),
+		start:          time.Now(),
+	}
+
+	// First write fits within failAfter — succeeds, no log.
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatalf("first write: unexpected error %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("first write logged unexpectedly: %s", buf.String())
+	}
+
+	// Second write straddles the failure boundary: 3 bytes succeed, then error.
+	n, err := w.Write([]byte("world!"))
+	if err == nil {
+		t.Fatal("second write: expected error, got nil")
+	}
+	if n != 3 {
+		t.Errorf("second write: n=%d, want 3 (8-byte cap minus 5 already written)", n)
+	}
+	if w.bytes != 8 {
+		t.Errorf("streamWatchWriter.bytes = %d, want 8 (total bytes successfully written)", w.bytes)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("mid-stream failure produced no log line")
+	}
+
+	logLine := buf.String()
+	for _, want := range []string{
+		`"msg":"gateway: response stream interrupted"`,
+		`"provider":"anthropic"`,
+		`"bytes_written":8`,
+		`"error":"write: broken pipe"`,
+	} {
+		if !strings.Contains(logLine, want) {
+			t.Errorf("log missing %q\nlog: %s", want, logLine)
+		}
+	}
+
+	// Subsequent write failures must not log again — one line per
+	// request is the contract (otherwise a write-heavy proxy floods
+	// the log on a single dropped client).
+	buf.Reset()
+	if _, err := w.Write([]byte("more")); err == nil {
+		t.Fatal("third write: expected error, got nil")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("second failure logged again: %s", buf.String())
+	}
+}
+
+func TestStreamWatchWriter_SilentOnSuccess(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	w := &streamWatchWriter{
+		ResponseWriter: httptest.NewRecorder(),
+		log:            log,
+		provider:       "openai",
+		upstream:       "https://api.openai.com",
+		ctx:            context.Background(),
+		start:          time.Now(),
+	}
+	if _, err := w.Write([]byte("ok")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("successful write produced log output: %s", buf.String())
+	}
+}
+
+func TestStreamWatchWriter_FlushProxiesThrough(t *testing.T) {
+	// httputil.ReverseProxy's FlushInterval=-1 mode asserts the
+	// wrapped writer implements http.Flusher. If the wrapper drops
+	// Flush, SSE streams silently buffer instead of flushing per
+	// chunk. The test fixture's Flush increments flushCalls so we
+	// can prove the wrapper forwards the call.
+	failing := newFailingResponseWriter(1024)
+	w := &streamWatchWriter{ResponseWriter: failing, log: slog.Default(), ctx: context.Background(), start: time.Now()}
+	w.Flush()
+	if failing.flushCalls != 1 {
+		t.Errorf("flushCalls = %d, want 1 (wrapper must proxy Flush)", failing.flushCalls)
 	}
 }
 

@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
 
 	"github.com/ALRubinger/aileron/internal/failure"
 )
@@ -81,6 +83,15 @@ func writeVaultLocked(w http.ResponseWriter) {
 //
 // providerLabel is used for structured logs only; it does not affect
 // request routing.
+//
+// The returned handler wraps the proxy's ResponseWriter so a mid-
+// stream write failure (server-side deadline firing, agent
+// disconnecting partway through SSE) emits a single Warn log line
+// with the bytes-written / elapsed-ms / r.Context() error. The
+// proxy's own ErrorHandler only triggers for pre-response transport
+// failures; without this trap the request log shows status=200 even
+// when the stream got severed and the agent saw a "socket connection
+// was closed unexpectedly".
 func newGatewayProxy(upstream *url.URL, providerLabel string, log *slog.Logger) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -97,5 +108,60 @@ func newGatewayProxy(upstream *url.URL, providerLabel string, log *slog.Logger) 
 				"upstream provider request failed: "+err.Error())
 		},
 	}
-	return rp
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &streamWatchWriter{
+			ResponseWriter: w,
+			log:            log,
+			provider:       providerLabel,
+			upstream:       upstream.String(),
+			ctx:            r.Context(),
+			start:          time.Now(),
+		}
+		rp.ServeHTTP(sw, r)
+	})
+}
+
+// streamWatchWriter wraps an http.ResponseWriter to surface mid-
+// stream write failures into the daemon log. Once the upstream is
+// past response headers, httputil.ReverseProxy's ErrorHandler no
+// longer fires — any later write-side failure (the http.Server's
+// WriteTimeout firing, the agent dropping the socket, etc.) returns
+// up the response-copy loop and silently terminates the stream.
+// This wrapper logs once per request when that happens.
+type streamWatchWriter struct {
+	http.ResponseWriter
+	log      *slog.Logger
+	provider string
+	upstream string
+	ctx      context.Context
+	start    time.Time
+	bytes    int64
+	logged   bool
+}
+
+func (w *streamWatchWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += int64(n)
+	if err != nil && !w.logged {
+		w.logged = true
+		w.log.WarnContext(w.ctx, "gateway: response stream interrupted",
+			"provider", w.provider,
+			"upstream", w.upstream,
+			"bytes_written", w.bytes,
+			"elapsed_ms", time.Since(w.start).Milliseconds(),
+			"ctx_err", w.ctx.Err(),
+			"error", err)
+	}
+	return n, err
+}
+
+// Flush proxies through to the underlying ResponseWriter when it
+// implements http.Flusher. Required so httputil.ReverseProxy's
+// FlushInterval=-1 mode can flush SSE chunks through this wrapper —
+// without it, the proxy's type assertion fails and streaming
+// silently buffers until end-of-response.
+func (w *streamWatchWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
