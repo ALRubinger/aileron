@@ -1171,7 +1171,15 @@ func processSpawn(ctx context.Context, s *hostState, raw []byte) int32 {
 	// outbound at the kernel boundary.
 	var proxyTCPAddr string
 	var proxyUDSPath string
-	if s.policy != nil && len(s.policy.AllowedHosts()) > 0 {
+	// Start the per-spawn proxy when either:
+	//   - the manifest's [capabilities.network] declared one or
+	//     more hosts (hub-style strict enforcement), OR
+	//   - the policy is permissive (local-origin BYOCLI wrap with
+	//     no declared block; see ADR-0014 "Local-origin (BYOCLI)
+	//     wrap default"). The proxy still runs so every CONNECT
+	//     lands in the audit log; HostPolicy.CheckHostPort
+	//     short-circuits the allowlist gate when Permissive is true.
+	if s.policy != nil && (len(s.policy.AllowedHosts()) > 0 || s.policy.Permissive) {
 		proxy, endpoint, proxyClose, err := startSpawnProxy(ctx, s.policy, s.logger, s.connectorFQN)
 		if err != nil {
 			s.mu.Lock()

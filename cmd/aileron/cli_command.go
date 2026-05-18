@@ -535,19 +535,42 @@ func buildSpecFromHelp(name, version, programPath, rootHelpText string) (*wrap.S
 }
 
 // defaultFSReadScope returns the default `[capabilities.spawn].fs_read`
-// scope per #619: `$XDG_CONFIG_HOME/<name>` only. Users opt into
-// broader reads at install time via --edit or by editing the
-// emitted manifest. Never includes `$HOME` or the cwd by default.
+// scope for a wrap-emitted local connector. Covers the XDG triad —
+// `$XDG_CONFIG_HOME/<name>`, `$XDG_DATA_HOME/<name>`, and
+// `$XDG_CACHE_HOME/<name>` — so modern CLIs that store config,
+// sync DBs / SQLite caches, and ephemeral scratch in their
+// conventional XDG dirs install working out of the box.
+//
+// The original #619 scope (config-only) under-served service-bound
+// CLIs whose data layer lives in `~/.local/share/<name>`
+// (linear-pp-cli's sync DB is the canonical case). Broadening to
+// the triad keeps the sandbox boundary tight against the realistic
+// threat — a wrapped CLI scraping `~/.ssh`, `~/.aws`, or other
+// adjacent tools' credentials — while removing the false-negative
+// failure mode at first call. See [ADR-0014]'s "Local-origin
+// (BYOCLI) wrap default" section for the model.
+//
+// [ADR-0014]: /adr/0014-spawn-sandbox-technology
 func defaultFSReadScope(name string) []string {
-	return []string{filepath.Join(xdgConfigHome(), name)}
+	return []string{
+		filepath.Join(xdgConfigHome(), name),
+		filepath.Join(xdgDataHome(), name),
+		filepath.Join(xdgCacheHome(), name),
+	}
 }
 
-// defaultFSWriteScope mirrors defaultFSReadScope. Per #619 both
-// reads and writes start scoped to the connector's own XDG dir;
-// CLIs that need broader writes (e.g. a cache directory) require
-// explicit confirmation.
+// defaultFSWriteScope mirrors defaultFSReadScope. Writes follow the
+// same XDG triad — CLIs that read from their data/cache dirs almost
+// always need to write to them too (sync stores, lockfiles,
+// rotation of cached responses), and splitting read vs. write
+// scopes here would block the common case for marginal additional
+// confinement.
 func defaultFSWriteScope(name string) []string {
-	return []string{filepath.Join(xdgConfigHome(), name)}
+	return []string{
+		filepath.Join(xdgConfigHome(), name),
+		filepath.Join(xdgDataHome(), name),
+		filepath.Join(xdgCacheHome(), name),
+	}
 }
 
 // xdgConfigHome resolves the platform's per-user config root.
@@ -564,6 +587,41 @@ func xdgConfigHome() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config")
+}
+
+// xdgDataHome resolves the platform's per-user data root. Honors
+// $XDG_DATA_HOME on POSIX; falls back to ~/.local/share on
+// Linux/macOS and %LOCALAPPDATA% on Windows. linear-pp-cli writes
+// its SQLite sync DB under this root; most modern Cobra CLIs put
+// per-app state here rather than in $XDG_CONFIG_HOME.
+func xdgDataHome() string {
+	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		return v
+	}
+	if runtime.GOOS == "windows" {
+		if v := os.Getenv("LOCALAPPDATA"); v != "" {
+			return v
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share")
+}
+
+// xdgCacheHome resolves the platform's per-user cache root. Honors
+// $XDG_CACHE_HOME on POSIX; falls back to ~/.cache on Linux/macOS
+// and %LOCALAPPDATA%\Cache on Windows. Lockfiles, rotation
+// scratch, and cached HTTP response bodies typically land here.
+func xdgCacheHome() string {
+	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
+		return v
+	}
+	if runtime.GOOS == "windows" {
+		if v := os.Getenv("LOCALAPPDATA"); v != "" {
+			return filepath.Join(v, "Cache")
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache")
 }
 
 // hashBinary returns the canonical `sha256:<hex>` content hash
