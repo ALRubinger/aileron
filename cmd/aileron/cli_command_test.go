@@ -323,14 +323,49 @@ func TestResolveProgramPath_ExpandsTilde(t *testing.T) {
 	}
 }
 
-func TestDefaultFSReadScope_UsesXDGConfigHome(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
-	scope := defaultFSReadScope("mycli")
-	if len(scope) != 1 {
-		t.Fatalf("scope=%v", scope)
+func TestDefaultFSReadScope_CoversXDGTriad(t *testing.T) {
+	// Wrap-emitted local connectors get fs_read on the full XDG
+	// triad (config + data + cache) so modern CLIs that store
+	// sync DBs or caches outside $XDG_CONFIG_HOME install working.
+	// See ADR-0014's "Local-origin (BYOCLI) wrap default" section.
+	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
+	t.Setenv("XDG_DATA_HOME", "/custom/data")
+	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
+	got := defaultFSReadScope("mycli")
+	want := []string{
+		"/custom/config/mycli",
+		"/custom/data/mycli",
+		"/custom/cache/mycli",
 	}
-	if scope[0] != "/custom/xdg/mycli" {
-		t.Errorf("scope=%q", scope[0])
+	if len(got) != len(want) {
+		t.Fatalf("scope=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("scope[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDefaultFSWriteScope_CoversXDGTriad(t *testing.T) {
+	// Writes follow reads — CLIs that read from their data/cache
+	// dirs almost always need to write them too.
+	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
+	t.Setenv("XDG_DATA_HOME", "/custom/data")
+	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
+	got := defaultFSWriteScope("mycli")
+	want := []string{
+		"/custom/config/mycli",
+		"/custom/data/mycli",
+		"/custom/cache/mycli",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("scope=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("scope[%d]=%q, want %q", i, got[i], want[i])
+		}
 	}
 }
 
