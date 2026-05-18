@@ -110,6 +110,7 @@
 <aside
   class="fixed top-16 left-0 z-40 h-[calc(100vh-4rem)] w-80 shrink-0 border-r border-border bg-muted shadow-low transition-transform duration-200
     {mobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 lg:sticky lg:top-16 lg:h-[calc(100vh-4rem)]"
+  style="background-image: var(--pattern-sidebar); background-repeat: repeat;"
 >
   <div class="p-4 flex flex-col h-full">
     <nav class="flex-1 min-h-0 overflow-y-auto pr-4 -mr-4 flex flex-col gap-4 {mounted ? 'visible' : 'invisible'}" aria-label="Documentation">
