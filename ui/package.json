@@ -44,7 +44,7 @@
     "svelte-check": "^4.0.0",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.0",
-    "vite-plugin-istanbul": "^8.0.0",
+    "vite-plugin-istanbul": "^9.0.0",
     "vitest": "^4.1.6"
   },
   "engines": {
