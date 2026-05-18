@@ -119,9 +119,16 @@ func buildSBPLProfile(env SpawnEnvelope, limits SpawnLimits) string {
 	}
 
 	// Network: deny outbound; re-allow the proxy endpoint when set.
+	// SBPL's `remote tcp` grammar rejects IPv4-literal hosts —
+	// `sandbox-exec` fails parse with "host must be * or localhost
+	// in network address" for `127.0.0.1:<port>`. The proxy itself
+	// binds and HTTPS_PROXY uses the IP literal (Go's net package
+	// resolves it normally), but the platform-sandbox rule needs
+	// the `localhost` spelling. Substitute at emit time so the
+	// proxy-side and rule-side stay in sync.
 	b.WriteString("(deny network*)\n")
 	if limits.ProxyAddr != "" {
-		fmt.Fprintf(&b, "(allow network* (remote tcp %s))\n", sbplQuote(limits.ProxyAddr))
+		fmt.Fprintf(&b, "(allow network* (remote tcp %s))\n", sbplQuote(sbplProxyHost(limits.ProxyAddr)))
 	}
 
 	// Record the wrapped program in the profile as a comment so
@@ -153,6 +160,29 @@ func writeSBPLPathRule(b *strings.Builder, op, manifestPath string) {
 		return
 	}
 	fmt.Fprintf(b, "(allow %s (literal %s))\n", op, sbplQuote(expanded))
+}
+
+// sbplProxyHost rewrites the proxy address for inclusion in an
+// SBPL `remote tcp` literal. `sandbox-exec`'s network-address
+// grammar accepts only `localhost` or `*` for the host portion;
+// IPv4 literals fail with "host must be * or localhost in network
+// address" at profile parse time.
+//
+// The proxy itself binds on `127.0.0.1:<port>` and the spawn's
+// `HTTPS_PROXY` env stays as the IP literal (Go's net package
+// resolves it normally). Only the SBPL rule needs the `localhost`
+// spelling — they resolve to the same loopback at runtime, but
+// the grammar accepts only one of them.
+//
+// Non-loopback addresses pass through unchanged; the rule will
+// fail parse if SBPL doesn't accept them, which is preferable to
+// silently rewriting an address the operator deliberately chose.
+func sbplProxyHost(addr string) string {
+	const loopback = "127.0.0.1:"
+	if strings.HasPrefix(addr, loopback) {
+		return "localhost:" + addr[len(loopback):]
+	}
+	return addr
 }
 
 // sbplQuote returns an SBPL string literal: a double-quoted form

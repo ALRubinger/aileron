@@ -108,9 +108,23 @@ func (p *SpawnProxy) Serve(ctx context.Context, ln net.Listener) error {
 
 // Close shuts down the proxy. Outstanding CONNECTs are allowed to
 // finish; new accepts unblock with [net.ErrClosed]. Safe to call
-// from any goroutine. Idempotent.
+// from any goroutine. Idempotent — the second and subsequent
+// Close calls return nil rather than the platform's
+// already-closed error (`use of closed network connection` on
+// Windows, the same shape with a different surrounding message
+// on POSIX).
+//
+// Idempotency uses the atomic `closed` swap rather than guarding
+// `ln.Close()` with `if !p.closed.Load()` so a concurrent caller
+// that won the race can't double-close — exactly one Close call
+// closes the listener and any others short-circuit.
 func (p *SpawnProxy) Close() error {
-	p.closed.Store(true)
+	if p.closed.Swap(true) {
+		// Another caller already closed the listener (or is in
+		// the middle of doing so). Return nil to honor the
+		// docstring's idempotency contract.
+		return nil
+	}
 	p.mu.Lock()
 	ln := p.ln
 	p.mu.Unlock()

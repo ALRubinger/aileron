@@ -123,6 +123,14 @@ func TestBuildSBPLProfile_NetworkDeniedByDefaultButProxyAllowed(t *testing.T) {
 	// Contract (ADR-0014 network confinement): without a proxy
 	// address, network is denied wholesale; with one, exactly one
 	// allow rule names the proxy endpoint.
+	//
+	// Note: the allow rule MUST emit `localhost`, not `127.0.0.1`,
+	// because SBPL's `remote tcp` grammar accepts only `localhost`
+	// or `*` for the host portion. An IP literal makes sandbox-exec
+	// fail parse with "host must be * or localhost in network
+	// address" — the bug fixed in this commit, surfaced once
+	// permissive-mode local-origin connectors started running the
+	// audit proxy.
 	env := SpawnEnvelope{Program: "/usr/bin/git"}
 
 	noNet := buildSBPLProfile(env, SpawnLimits{FSRead: []string{"~/code/"}})
@@ -139,8 +147,37 @@ func TestBuildSBPLProfile_NetworkDeniedByDefaultButProxyAllowed(t *testing.T) {
 	})
 	mustContain(t, withNet,
 		"(deny network*)",
-		`(allow network* (remote tcp "127.0.0.1:54321"))`,
+		`(allow network* (remote tcp "localhost:54321"))`,
 	)
+	// Defense in depth: the IP literal must not appear in the
+	// emitted rule at all — sandbox-exec parses the file before
+	// invoking the wrapped binary, and any rule containing
+	// `127.0.0.1` would fail parse and refuse to spawn anything.
+	if strings.Contains(withNet, `"127.0.0.1:54321"`) {
+		t.Errorf("profile still contains IP literal in SBPL rule (should be `localhost:` form):\n%s", withNet)
+	}
+}
+
+func TestSBPLProxyHost_RewritesLoopbackToLocalhost(t *testing.T) {
+	// The SBPL `remote tcp` host slot accepts only `localhost` or
+	// `*` (see Apple's sandbox(7)). The proxy itself binds on
+	// `127.0.0.1:<port>` because Go's net package and HTTPS_PROXY
+	// both accept the IP literal; only the SBPL rule needs the
+	// `localhost` spelling. sbplProxyHost performs that one
+	// translation and passes everything else through.
+	cases := map[string]string{
+		"127.0.0.1:54321":  "localhost:54321",
+		"127.0.0.1:8080":   "localhost:8080",
+		"localhost:9999":   "localhost:9999",   // already valid SBPL
+		"example.com:443":  "example.com:443",  // non-loopback passes through; will fail SBPL parse cleanly
+		"127.0.0.1":        "127.0.0.1",        // no port suffix → not a port-form match
+	}
+	for in, want := range cases {
+		got := sbplProxyHost(in)
+		if got != want {
+			t.Errorf("sbplProxyHost(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestApplyPlatformSandbox_Darwin_RunsRealBinaryUnderSandbox(t *testing.T) {
