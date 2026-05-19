@@ -26,12 +26,13 @@ type vaultStateFakes struct {
 	postUnlock      func(string, string) error
 	prompt          func(string, io.Writer) (string, error)
 	spawnResolve    func() (string, error)
+	daemonReachable func(string) bool
 }
 
 func withVaultStateSeams(t *testing.T, fakes vaultStateFakes) {
 	t.Helper()
-	prevRead, prevCheck, prevInit, prevPost, prevPrompt, prevSpawn :=
-		discoveryReadFn, vaultCheckStateFn, vaultInitFn, postVaultUnlockFn, promptPassphrase, spawnResolveCachedFn
+	prevRead, prevCheck, prevInit, prevPost, prevPrompt, prevSpawn, prevReachable :=
+		discoveryReadFn, vaultCheckStateFn, vaultInitFn, postVaultUnlockFn, promptPassphrase, spawnResolveCachedFn, daemonReachableFn
 	t.Cleanup(func() {
 		discoveryReadFn = prevRead
 		vaultCheckStateFn = prevCheck
@@ -39,6 +40,7 @@ func withVaultStateSeams(t *testing.T, fakes vaultStateFakes) {
 		postVaultUnlockFn = prevPost
 		promptPassphrase = prevPrompt
 		spawnResolveCachedFn = prevSpawn
+		daemonReachableFn = prevReachable
 	})
 	if fakes.discoveryRead != nil {
 		discoveryReadFn = fakes.discoveryRead
@@ -57,6 +59,9 @@ func withVaultStateSeams(t *testing.T, fakes vaultStateFakes) {
 	}
 	if fakes.spawnResolve != nil {
 		spawnResolveCachedFn = fakes.spawnResolve
+	}
+	if fakes.daemonReachable != nil {
+		daemonReachableFn = fakes.daemonReachable
 	}
 }
 
@@ -779,6 +784,128 @@ func TestEnsureVaultUnlocked_ProbeUnsupported_NoOp(t *testing.T) {
 	}
 	if postCalled {
 		t.Error("postUnlock must not fire when probe is unsupported")
+	}
+}
+
+// --- ensureVaultUnlocked: stale daemon.json from crashed daemon ---
+
+// TestEnsureVaultUnlocked_StaleDaemonJSON_DrivesSpawnAndUnlock pins
+// recovery from a crashed daemon. The daemon writes daemon.json on
+// startup and only removes it on clean shutdown (SIGTERM via the
+// run() defer); a kill -9, OOM, or panic leaves the file behind
+// pointing at a URL nobody listens on anymore.
+//
+// Before the liveness check, ensureVaultUnlocked treated the stale
+// file as proof the daemon was running, probed /v1/vault/status, got
+// a connection error, misclassified that as "daemon doesn't expose
+// the local-vault surface" (cloud-shape / older binary), and silently
+// skipped the passphrase prompt. The dispatched command then auto-
+// spawned a vault-locked daemon and surfaced "vault locked" on its
+// first vault-touching call instead of asking the user for their
+// passphrase.
+//
+// After the fix, an unreachable daemon URL falls through to
+// promptAndSpawnUnlock just like a missing daemon.json would, and
+// spawn.Resolve overwrites the stale discovery files when the fresh
+// daemon comes up.
+func TestEnsureVaultUnlocked_StaleDaemonJSON_DrivesSpawnAndUnlock(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	t.Setenv(envVaultPassphrase, "stored-pass")
+
+	spawned := false
+	var unlockedAt, unlockedWith string
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead: func(string) (discovery.Info, error) {
+			// Stale daemon.json: file is present (no error) but the
+			// URL points at a dead process.
+			return discovery.Info{URL: "http://127.0.0.1:1"}, nil
+		},
+		daemonReachable: func(string) bool { return false },
+		vaultCheckState: func(string) (vault.State, error) { return vault.StateReady, nil },
+		spawnResolve: func() (string, error) {
+			spawned = true
+			return "http://127.0.0.1:54321/v1", nil
+		},
+		postUnlock: func(url, pass string) error {
+			unlockedAt, unlockedWith = url, pass
+			return nil
+		},
+	})
+
+	if err := ensureVaultUnlocked("", io.Discard); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	if !spawned {
+		t.Error("spawnResolveCached must fire when daemon.json is stale (URL unreachable)")
+	}
+	if unlockedAt != "http://127.0.0.1:54321" {
+		t.Errorf("postUnlock url = %q, want fresh daemon URL after spawn", unlockedAt)
+	}
+	if unlockedWith != "stored-pass" {
+		t.Errorf("postUnlock passphrase = %q, want %q", unlockedWith, "stored-pass")
+	}
+}
+
+// TestEnsureVaultUnlocked_StaleDaemonJSON_VaultMissing exercises the
+// less likely cousin: daemon.json is stale AND the vault file is
+// missing. Falls through to the first-run create branch.
+func TestEnsureVaultUnlocked_StaleDaemonJSON_VaultMissing(t *testing.T) {
+	scopeHomeAndAPIURL(t)
+	t.Setenv(envVaultPassphrase, "fresh-pass")
+
+	initFired, spawnFired, unlockFired := false, false, false
+	withVaultStateSeams(t, vaultStateFakes{
+		discoveryRead: func(string) (discovery.Info, error) {
+			return discovery.Info{URL: "http://127.0.0.1:1"}, nil
+		},
+		daemonReachable: func(string) bool { return false },
+		vaultCheckState: func(string) (vault.State, error) { return vault.StateMissing, nil },
+		vaultInit:       func(string, string) (vault.Vault, error) { initFired = true; return vault.NewMemVault(), nil },
+		spawnResolve:    func() (string, error) { spawnFired = true; return "http://x/v1", nil },
+		postUnlock:      func(string, string) error { unlockFired = true; return nil },
+	})
+
+	if err := ensureVaultUnlocked("", io.Discard); err != nil {
+		t.Fatalf("ensureVaultUnlocked: %v", err)
+	}
+	for name, ok := range map[string]bool{"vault.Init": initFired, "spawn": spawnFired, "postUnlock": unlockFired} {
+		if !ok {
+			t.Errorf("%s must fire when stale daemon.json + missing vault", name)
+		}
+	}
+}
+
+// --- daemonURLReachable: contract ---
+
+// TestDaemonURLReachable_Live confirms a live listener registers as
+// reachable. The httptest server gives us a known-bound port without
+// racing on system port allocation.
+func TestDaemonURLReachable_Live(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(srv.Close)
+	if !daemonURLReachable(srv.URL) {
+		t.Errorf("live httptest URL %q must be reachable", srv.URL)
+	}
+}
+
+// TestDaemonURLReachable_DeadURL confirms a URL nobody listens on
+// registers as unreachable within the bounded timeout. Port 1 is the
+// codebase's standard known-dead address (see TestPostVaultUnlock_NetworkError).
+func TestDaemonURLReachable_DeadURL(t *testing.T) {
+	if daemonURLReachable("http://127.0.0.1:1") {
+		t.Error("port 1 should not be reachable")
+	}
+}
+
+// TestDaemonURLReachable_BadScheme confirms a URL that isn't a plain
+// http:// host:port returns false. The daemon URL shape is fixed by
+// ADR-0012; anything else is treated as unreachable so the spawn
+// branch can heal the state.
+func TestDaemonURLReachable_BadScheme(t *testing.T) {
+	for _, u := range []string{"", "127.0.0.1:8080", "https://x", "ftp://x"} {
+		if daemonURLReachable(u) {
+			t.Errorf("daemonURLReachable(%q) = true, want false (non-http:// scheme)", u)
+		}
 	}
 }
 

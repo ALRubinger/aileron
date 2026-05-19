@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,14 +44,23 @@ func ensureVaultUnlocked(passphraseFile string, stderr io.Writer) error {
 	}
 
 	info, derr := discoveryReadFn(stateDir)
-	daemonRunning := derr == nil
+	// "Daemon running" requires both daemon.json present AND the URL
+	// reachable. A stale daemon.json from a prior crash (the daemon
+	// only removes it on clean shutdown) outlives the process; without
+	// the liveness check we'd misclassify that as "running", skip the
+	// passphrase prompt, and let spawn.Resolve below auto-spawn a
+	// vault-locked daemon — the first vault-touching call would then
+	// surface a confusing "vault locked" error instead of asking for
+	// the passphrase.
+	daemonRunning := derr == nil && daemonReachableFn(info.URL)
 
 	if daemonRunning {
 		locked, ok := probeLocalVaultLocked(info.URL)
 		if !ok {
-			// Daemon doesn't expose the local-vault surface (cloud-shape
-			// or older binary). Nothing to do — let the dispatched
-			// command try and surface whatever error it would naturally.
+			// Daemon is reachable but doesn't expose the local-vault
+			// surface (cloud-shape or older binary). Nothing to do —
+			// let the dispatched command try and surface whatever
+			// error it would naturally.
 			return nil
 		}
 		if !locked {
@@ -59,7 +69,9 @@ func ensureVaultUnlocked(passphraseFile string, stderr io.Writer) error {
 		return promptAndUnlockRunning(info.URL, passphraseFile, stderr)
 	}
 
-	// Daemon not running: classify by vault state.
+	// Daemon not running (or dead with stale discovery files): classify
+	// by vault state. promptAndSpawnUnlock drives spawn + unlock;
+	// spawn.Resolve overwrites stale discovery files via atomic rename.
 	vaultPath := launch.DefaultVaultPath()
 	state, err := vaultCheckStateFn(vaultPath)
 	if err != nil {
@@ -339,4 +351,36 @@ var (
 	vaultInitFn          = vault.Init
 	postVaultUnlockFn    = postVaultUnlock
 	spawnResolveCachedFn = spawnResolveCached
+	daemonReachableFn    = daemonURLReachable
 )
+
+// daemonReachableTimeout caps the TCP liveness probe used by
+// ensureVaultUnlocked. Matches the equivalent in internal/daemon/spawn
+// — a tight bound is safe because the daemon binds on loopback and any
+// healthy daemon answers a SYN within sub-millisecond latency. The
+// probe is best-effort context for state-machine classification, not
+// a strict deadline on the daemon.
+const daemonReachableTimeout = 200 * time.Millisecond
+
+// daemonURLReachable reports whether a TCP connection to baseURL's
+// host:port can be established within daemonReachableTimeout. Used by
+// ensureVaultUnlocked to distinguish a live (possibly cloud-shape)
+// daemon from a stale daemon.json left behind by a crashed daemon:
+// daemon.json survives a kill -9 or panic, but no process answers at
+// the recorded URL.
+//
+// A parse failure on baseURL returns false (treated as unreachable);
+// the spawn branch then heals the state by overwriting the stale
+// discovery files via atomic rename on next daemon start.
+func daemonURLReachable(baseURL string) bool {
+	const prefix = "http://"
+	if !strings.HasPrefix(baseURL, prefix) {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", baseURL[len(prefix):], daemonReachableTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
