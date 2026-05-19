@@ -61,33 +61,15 @@ builds:
       - -X github.com/ALRubinger/aileron/internal/version.Version={{.Version}}
       - -X github.com/ALRubinger/aileron/internal/version.Commit={{.Commit}}
 
-  - id: aileron-sh
-    binary: aileron-sh
-    main: ./cmd/aileron-sh
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-
 archives:
-  # One bundled archive per platform contains all four binaries
-  # (aileron, aileron-server, aileron-mcp, aileron-sh) versioned
-  # together. Matches the Linux nfpm package shape and the Homebrew
-  # formula install. Windows archives omit aileron-sh (POSIX-only).
+  # One bundled archive per platform contains all three binaries
+  # (aileron, aileron-server, aileron-mcp) versioned together. Matches
+  # the Linux nfpm package shape and the Homebrew formula install.
   - id: aileron
     ids:
       - aileron
       - aileron-server
       - aileron-mcp
-      - aileron-sh
-    # Windows archives omit aileron-sh (POSIX-only) — fewer binaries
-    # than linux/darwin. Goreleaser flags this as a confusion risk by
-    # default; explicit acknowledgement here.
-    allow_different_binary_count: true
     name_template: "aileron_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
@@ -120,12 +102,11 @@ homebrew_casks:
     homepage: https://withaileron.ai
     description: Local LLM gateway for AI agents to take consequential action without holding credentials
     license: Apache-2.0
-    # All four binaries from the bundled archive land on PATH.
+    # All three binaries from the bundled archive land on PATH.
     binaries:
       - aileron
       - aileron-server
       - aileron-mcp
-      - aileron-sh
     # macOS Gatekeeper blocks first-run of unsigned/non-notarized
     # binaries with "Apple could not verify ... is free of malware."
     # Until we set up Apple Developer ID notarization (needs $99/yr
@@ -143,8 +124,8 @@ homebrew_casks:
 nfpms:
   # Linux distro packages: .deb (Debian/Ubuntu), .rpm (RHEL/Fedora),
   # .apk (Alpine). One bundled "aileron" package per format/arch
-  # contains the CLI, daemon, MCP server, and POSIX shell shim — all
-  # four binaries are versioned together.
+  # contains the CLI, daemon, and MCP server — all three binaries are
+  # versioned together.
   #
   # Install paths follow each distro's bin convention (/usr/bin). After
   # install, `aileron version` works without further setup.
@@ -154,7 +135,6 @@ nfpms:
       - aileron
       - aileron-server
       - aileron-mcp
-      - aileron-sh
     formats:
       - deb
       - rpm
@@ -166,7 +146,7 @@ nfpms:
       Local LLM gateway giving AI agents the ability to take consequential
       action on a user's behalf without ever holding their credentials in
       the agent's process. Ships the CLI (aileron), daemon (aileron-server),
-      MCP server (aileron-mcp), and POSIX shell shim (aileron-sh).
+      and MCP server (aileron-mcp).
     license: Apache-2.0
     bindir: /usr/bin
 
