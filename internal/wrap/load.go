@@ -114,6 +114,21 @@ func HelpRunnerExec(ctx context.Context, program string, args []string) (string,
 	return string(out), err
 }
 
+// FromHelpOptions carries optional inputs to [FromHelpWithOptions].
+// Zero value matches the behavior of [FromHelp]; populated fields
+// enrich the wrap with metadata the bare `--help` parser can't
+// recover.
+type FromHelpOptions struct {
+	// AgentContext is the parsed PrintingPress `agent-context`
+	// JSON, when the wrapped binary supports the convention. Used
+	// to recover positionals that the Cobra `--help` Usage line
+	// hides (e.g. `linear-pp-cli teams` is documented as
+	// `teams <id>` in agent-context but as `teams [flags]` in
+	// --help). When nil, FromHelp parses positionals from --help
+	// alone — the pre-agent-context behavior.
+	AgentContext *AgentContext
+}
+
 // FromHelp builds a Spec by introspecting `<program> --help` and
 // every nested subcommand's `--help`. The output captures one
 // SubcommandSpec per *leaf* command (a command with no further
@@ -143,6 +158,15 @@ func HelpRunnerExec(ctx context.Context, program string, args []string) (string,
 // operation invoking the bare binary — same behavior as before the
 // recursion landed, so single-purpose wrapping paths are unchanged.
 func FromHelp(ctx context.Context, runner HelpRunner, name, version, program string) (*Spec, error) {
+	return FromHelpWithOptions(ctx, runner, name, version, program, FromHelpOptions{})
+}
+
+// FromHelpWithOptions is the option-bearing variant of [FromHelp].
+// Callers that have already captured the binary's `agent-context`
+// output (via [sandbox.RunIntrospect] + [ParseAgentContext]) pass
+// it here so the wrap heuristic can prefer the structured
+// positional declarations over `--help`-line parsing.
+func FromHelpWithOptions(ctx context.Context, runner HelpRunner, name, version, program string, opts FromHelpOptions) (*Spec, error) {
 	if !isAbsoluteOrTilde(program) {
 		return nil, fmt.Errorf("program path %q must be absolute or ~/-anchored", program)
 	}
@@ -154,6 +178,7 @@ func FromHelp(ctx context.Context, runner HelpRunner, name, version, program str
 			return nil, fmt.Errorf("invoke %s --help: %w", program, err)
 		}
 	}
+	positionalOverrides := PositionalsByPath(opts.AgentContext)
 	rootSubs := parseSubcommands(rootHelp)
 	if len(rootSubs) == 0 {
 		// CLIs without subcommands still get a single default
@@ -172,7 +197,7 @@ func FromHelp(ctx context.Context, runner HelpRunner, name, version, program str
 	progBase := baseName(program)
 	var leaves []SubcommandSpec
 	for _, rs := range rootSubs {
-		discovered, err := walkSubcommand(ctx, runner, program, progBase, []string{rs.Name}, rs.Description, 1)
+		discovered, err := walkSubcommand(ctx, runner, program, progBase, []string{rs.Name}, rs.Description, 1, positionalOverrides)
 		if err != nil {
 			// A subcommand whose --help fails (rare, but happens on
 			// stub commands) drops out of the wrap rather than
@@ -236,7 +261,7 @@ const maxSubcommandDepth = 5
 // `depth` is the current recursion depth (1 at the top-level
 // subcommand, 2 at its children, ...). Bounded by
 // [maxSubcommandDepth].
-func walkSubcommand(ctx context.Context, runner HelpRunner, program, progBase string, path []string, description string, depth int) ([]SubcommandSpec, error) {
+func walkSubcommand(ctx context.Context, runner HelpRunner, program, progBase string, path []string, description string, depth int, positionalOverrides map[string][]positionalSpec) ([]SubcommandSpec, error) {
 	args := append(append([]string(nil), path...), "--help")
 	help, err := runner(ctx, program, args)
 	if err != nil {
@@ -253,7 +278,7 @@ func walkSubcommand(ctx context.Context, runner HelpRunner, program, progBase st
 		var out []SubcommandSpec
 		for _, s := range subs {
 			child := append(append([]string(nil), path...), s.Name)
-			discovered, err := walkSubcommand(ctx, runner, program, progBase, child, s.Description, depth+1)
+			discovered, err := walkSubcommand(ctx, runner, program, progBase, child, s.Description, depth+1, positionalOverrides)
 			if err != nil {
 				continue
 			}
@@ -265,7 +290,16 @@ func walkSubcommand(ctx context.Context, runner HelpRunner, program, progBase st
 	// emit a SubcommandSpec. Positionals come from the Usage block
 	// (`<binary> verb [POS] [flags]`); flags from the Flags + Global
 	// Flags sections.
+	//
+	// Agent-context overrides win when present, even if --help
+	// already parsed positionals — the structured source is more
+	// reliable than free-form Usage scraping when the CLI provides
+	// it. CLIs without agent-context fall back to the --help
+	// parser as before.
 	positionals := parsePositionals(help)
+	if override, ok := positionalOverrides[strings.Join(path, " ")]; ok && len(override) > 0 {
+		positionals = override
+	}
 	flags := parseFlags(help)
 	leaf := buildLeafSpec(progBase, path, description, positionals, flags)
 	return []SubcommandSpec{leaf}, nil

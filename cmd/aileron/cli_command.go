@@ -525,13 +525,42 @@ func buildSpecFromHelp(name, version, programPath, rootHelpText string) (*wrap.S
 		subPath := args[:len(args)-1] // drop the trailing "--help"
 		return runHelpSandboxed(ctx, programPath, cwd, subPath...)
 	}
-	spec, err := wrap.FromHelp(context.Background(), runner, fqn, version, programPath)
+	opts := wrap.FromHelpOptions{
+		AgentContext: captureAgentContext(context.Background(), programPath, cwd),
+	}
+	spec, err := wrap.FromHelpWithOptions(context.Background(), runner, fqn, version, programPath, opts)
 	if err != nil {
 		return nil, err
 	}
-	spec.FSRead = defaultFSReadScope(name)
-	spec.FSWrite = defaultFSWriteScope(name)
+	binaryName := filepath.Base(programPath)
+	spec.FSRead = defaultFSReadScope(name, binaryName)
+	spec.FSWrite = defaultFSWriteScope(name, binaryName)
+	spec.EnvPassthrough = mergeStringSets(spec.EnvPassthrough, defaultEnvPassthrough())
 	return spec, nil
+}
+
+// captureAgentContext attempts to run `<binary> agent-context` in
+// the same sandbox profile the --help introspection uses. Returns
+// nil whenever the call fails to produce parseable JSON — the
+// PrintingPress convention is opt-in, and most wrapped CLIs (gh,
+// kubectl, slackdump) don't implement it. The caller falls back
+// to --help-only positional parsing in that case, which is the
+// pre-#agent-context-positionals behavior.
+//
+// The capture runs under the same `fs_read = [cwd]`, no-network,
+// no-write, 5s-timeout profile as the --help walk, so even a
+// malicious binary that exists in the catalog can't read
+// `~/.ssh` or call out to the network from this step.
+func captureAgentContext(ctx context.Context, programPath, cwd string) *wrap.AgentContext {
+	res, err := sandbox.RunIntrospect(ctx, programPath, cwd, "agent-context")
+	if err != nil && len(res.Stdout) == 0 {
+		return nil
+	}
+	parsed, err := wrap.ParseAgentContext(res.Stdout)
+	if err != nil || parsed == nil {
+		return nil
+	}
+	return parsed
 }
 
 // defaultFSReadScope returns the default `[capabilities.spawn].fs_read`
@@ -540,6 +569,16 @@ func buildSpecFromHelp(name, version, programPath, rootHelpText string) (*wrap.S
 // `$XDG_CACHE_HOME/<name>` — so modern CLIs that store config,
 // sync DBs / SQLite caches, and ephemeral scratch in their
 // conventional XDG dirs install working out of the box.
+//
+// `connectorName` is the on-disk connector name (e.g. `linear`);
+// `binaryName` is the actual binary filename (e.g. `linear-pp-cli`).
+// Both are included so that `aileron pp add` — which mints a short
+// connector name distinct from the binary name — covers the dirs
+// the wrapped CLI actually writes to. Most wrapped CLIs use their
+// own filename as the XDG subdir (`linear-pp-cli` →
+// `~/.local/share/linear-pp-cli/`). When the two match (the common
+// `aileron cli add /usr/local/bin/gh` case), the duplicate is
+// folded out.
 //
 // The original #619 scope (config-only) under-served service-bound
 // CLIs whose data layer lives in `~/.local/share/<name>`
@@ -551,12 +590,8 @@ func buildSpecFromHelp(name, version, programPath, rootHelpText string) (*wrap.S
 // (BYOCLI) wrap default" section for the model.
 //
 // [ADR-0014]: /adr/0014-spawn-sandbox-technology
-func defaultFSReadScope(name string) []string {
-	return []string{
-		filepath.Join(xdgConfigHome(), name),
-		filepath.Join(xdgDataHome(), name),
-		filepath.Join(xdgCacheHome(), name),
-	}
+func defaultFSReadScope(connectorName, binaryName string) []string {
+	return xdgScopeFor(connectorName, binaryName)
 }
 
 // defaultFSWriteScope mirrors defaultFSReadScope. Writes follow the
@@ -565,11 +600,68 @@ func defaultFSReadScope(name string) []string {
 // rotation of cached responses), and splitting read vs. write
 // scopes here would block the common case for marginal additional
 // confinement.
-func defaultFSWriteScope(name string) []string {
+func defaultFSWriteScope(connectorName, binaryName string) []string {
+	return xdgScopeFor(connectorName, binaryName)
+}
+
+// xdgScopeFor builds the XDG triad for every distinct app-dir name
+// (connector name + binary name when they differ). The order is
+// stable: connector-name triad first, then binary-name triad,
+// duplicates removed — so an emitter that re-wraps the same binary
+// produces a byte-identical manifest.
+func xdgScopeFor(connectorName, binaryName string) []string {
+	names := []string{connectorName}
+	if binaryName != "" && binaryName != connectorName {
+		names = append(names, binaryName)
+	}
+	out := make([]string, 0, 3*len(names))
+	seen := make(map[string]struct{}, 3*len(names))
+	for _, n := range names {
+		for _, root := range []string{xdgConfigHome(), xdgDataHome(), xdgCacheHome()} {
+			p := filepath.Join(root, n)
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// defaultEnvPassthrough returns the env keys every wrap-emitted
+// local connector inherits by default. These are the non-secret
+// environment knobs nearly every Unix CLI needs to resolve its own
+// state dirs and find sibling executables; without them, a
+// sandboxed subprocess sees an empty environment and computes
+// relative paths like `.local/share/<app>/data.db` that the
+// platform sandbox rejects (the EPERM mkdir failure that surfaced
+// `aileron pp add linear` on first try).
+//
+// The set is intentionally narrow:
+//
+//   - HOME: required for `os.UserHomeDir()` and every `~/`-anchored
+//     path the CLI computes (config files, cache dirs, sync stores).
+//   - PATH: required for any CLI that shells out to a sibling
+//     binary (git wrappers, kubectl plugins, common-case
+//     compose).
+//   - XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_CACHE_HOME: respected
+//     by modern Cobra/clap CLIs to pick app-state roots. Unset on
+//     most macOS shells, set on Linux desktops; passing through
+//     when present lets the CLI follow the user's XDG override.
+//
+// All five are non-secret and present in the daemon's own
+// environment; the spawn envelope builder pulls their live values
+// from `os.Getenv` at invocation time. Credential env vars
+// (`LINEAR_API_KEY`, `GH_TOKEN`) are added separately by the
+// credential-detection heuristic and never flow through this list.
+func defaultEnvPassthrough() []string {
 	return []string{
-		filepath.Join(xdgConfigHome(), name),
-		filepath.Join(xdgDataHome(), name),
-		filepath.Join(xdgCacheHome(), name),
+		"HOME",
+		"PATH",
+		"XDG_CACHE_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
 	}
 }
 

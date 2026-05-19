@@ -64,6 +64,33 @@ type RunHelpResult struct {
 // invocation that doesn't need a fully-formed connector manifest
 // on disk first.
 func RunHelp(ctx context.Context, programPath, cwd string, subcommandPath ...string) (RunHelpResult, error) {
+	args := append(append([]string(nil), subcommandPath...), "--help")
+	return RunIntrospect(ctx, programPath, cwd, args...)
+}
+
+// RunIntrospect runs `<programPath> args...` under the same
+// sandbox profile [RunHelp] uses, with the same timeout, fs scope,
+// and output caps. It exists for one-shot introspection calls
+// whose final argument isn't `--help` — most notably the
+// PrintingPress `agent-context` convention, where the CLI emits
+// a machine-readable JSON description of its commands when
+// invoked with `agent-context` (no `--help`). Sharing the
+// sandbox profile with [RunHelp] means an introspection-time
+// call cannot reach `$HOME`, the network, or write anywhere on
+// disk even when the binary is malicious or buggy.
+//
+// `args` is the full argument tail after the binary basename
+// (which the function supplies as argv[0] itself). Callers pass
+// `[]string{"agent-context"}` for the PP convention, or any
+// other read-only metadata command the binary documents.
+//
+// Returns the same [RunHelpResult] shape as [RunHelp]. A
+// non-zero ExitCode is not an error — the caller decides what
+// to do with the captured streams (PP binaries that don't
+// implement `agent-context` typically exit non-zero with a
+// "unknown command" message that callers should treat as
+// "feature absent," not "install broken").
+func RunIntrospect(ctx context.Context, programPath, cwd string, args ...string) (RunHelpResult, error) {
 	if err := SandboxAvailable(); err != nil {
 		return RunHelpResult{}, err
 	}
@@ -77,10 +104,9 @@ func RunHelp(ctx context.Context, programPath, cwd string, subcommandPath ...str
 		return RunHelpResult{}, fmt.Errorf("run_help: cwd %q must be absolute", cwd)
 	}
 
-	argv := make([]string, 0, 2+len(subcommandPath))
+	argv := make([]string, 0, 1+len(args))
 	argv = append(argv, filepath.Base(programPath))
-	argv = append(argv, subcommandPath...)
-	argv = append(argv, "--help")
+	argv = append(argv, args...)
 	envelope := SpawnEnvelope{
 		Program: programPath,
 		Argv:    argv,
