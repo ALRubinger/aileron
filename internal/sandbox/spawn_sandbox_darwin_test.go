@@ -5,6 +5,8 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +87,49 @@ func TestBuildSBPLProfile_HasPermissiveBaselineWithUserDenies(t *testing.T) {
 		"(deny network*)",
 		"; wrapped program: /usr/bin/git",
 	)
+}
+
+func TestBuildSBPLProfile_AllowsReadOnSpawnedBinaryDir(t *testing.T) {
+	// Contract: the profile auto-allows file-read* on the spawned
+	// binary's parent directory and that allow MUST appear after
+	// the /Users deny so the SBPL evaluator reinstates it. Without
+	// this, macOS Security framework's `SecPolicyCreateSSL` fails
+	// for any Go binary installed under /Users (the default
+	// `aileron pp add` layout), breaking every HTTPS call.
+	//
+	// `subpath` is required: a `literal` rule on the binary file
+	// alone does not satisfy Security framework, which also stats
+	// the surrounding directory while determining code-signing
+	// identity for keychain access scoping.
+	env := SpawnEnvelope{Program: "/Users/someone/.aileron/connectors/local/foo/bin/foo-cli"}
+	profile := buildSBPLProfile(env, SpawnLimits{FSRead: []string{"~/code/"}})
+	wantRule := `(allow file-read* (subpath "/Users/someone/.aileron/connectors/local/foo/bin"))`
+	if !strings.Contains(profile, wantRule) {
+		t.Errorf("profile missing binary-dir allow rule %q:\n%s", wantRule, profile)
+	}
+	// Rule ordering: the auto-allow must follow the /Users deny.
+	idxDeny := strings.Index(profile, `(deny file-read* (subpath "/Users"))`)
+	idxAllow := strings.Index(profile, wantRule)
+	if idxDeny < 0 || idxAllow < 0 || idxAllow < idxDeny {
+		t.Errorf("binary-dir allow must follow /Users deny (deny=%d allow=%d):\n%s",
+			idxDeny, idxAllow, profile)
+	}
+}
+
+func TestBuildSBPLProfile_BinaryDirAllowExpandsTilde(t *testing.T) {
+	// Contract: when env.Program is ~/-anchored, the auto-allow
+	// rule emits the expanded absolute path so SBPL (which has no
+	// shell-style expansion) can match it at runtime.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	env := SpawnEnvelope{Program: "~/bin/my-cli"}
+	profile := buildSBPLProfile(env, SpawnLimits{})
+	wantRule := `(allow file-read* (subpath "` + filepath.Join(home, "bin") + `"))`
+	if !strings.Contains(profile, wantRule) {
+		t.Errorf("profile missing expanded binary-dir allow %q:\n%s", wantRule, profile)
+	}
 }
 
 func TestBuildSBPLProfile_TranslatesFSScopes(t *testing.T) {
@@ -282,6 +327,106 @@ func TestApplyPlatformSandbox_Darwin_AllowsUserHomeReadInsideScope(t *testing.T)
 	}
 	if !strings.Contains(string(out), "hello-from-sandbox") {
 		t.Errorf("output = %q, want to contain sentinel", string(out))
+	}
+}
+
+func TestApplyPlatformSandbox_Darwin_GoTLSHandshakeUnderUsersDeny(t *testing.T) {
+	// Contract (regression for the linear-pp-cli TLS failure):
+	// a Go binary installed under /Users must be able to complete
+	// the platform-side of a TLS handshake even when the profile
+	// denies /Users wholesale. macOS Security framework reads the
+	// caller binary's directory to scope code-signing identity
+	// before issuing the SSL trust policy; the auto-allow in
+	// buildSBPLProfile re-grants that read.
+	//
+	// The test compiles a tiny HTTPS client into a directory under
+	// $HOME (so the deny rule would apply), points it at an
+	// httptest.NewTLSServer, and asserts the failure mode is a
+	// normal "unknown authority" cert error — NOT
+	// "SecPolicyCreateSSL error: 0" (the symptom when the platform
+	// verifier itself can't initialize). The self-signed test cert
+	// is rejected either way; what we're proving is that the
+	// platform verifier ran at all.
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	binDir := filepath.Join(home, "aileron-sandbox-tls-test")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bindir: %v", err)
+	}
+	defer os.RemoveAll(binDir)
+
+	srcPath := filepath.Join(binDir, "main.go")
+	const src = `package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+)
+
+func main() {
+	resp, err := http.Get(os.Args[1])
+	if err != nil {
+		fmt.Println("ERR:", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	fmt.Println("OK")
+}
+`
+	if err := os.WriteFile(srcPath, []byte(src), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	binPath := filepath.Join(binDir, "tls-probe")
+	build := exec.CommandContext(context.Background(), "go", "build", "-o", binPath, srcPath)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+
+	// Spin up a TLS server with a self-signed cert. The probe will
+	// fail TLS verification (cert isn't trusted), but the FAILURE
+	// SHAPE is what we care about: a real x509 error, not a
+	// SecPolicyCreateSSL initialization failure.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	cmd := exec.CommandContext(context.Background(), binPath, srv.URL)
+	limits := SpawnLimits{
+		// No FSRead/FSWrite — exercise the auto-allow path in
+		// isolation. The /Users deny applies; only the binary's
+		// own directory should be re-granted by the auto-allow.
+		// ProxyAddr is empty: SBPL will deny network*, but the
+		// loopback test server lives in the same process and is
+		// reached over loopback. To allow that, we set ProxyAddr
+		// to the server's host:port so the network allow covers
+		// the test path. This is a test-only convenience; in
+		// production the proxy is the daemon's CONNECT proxy.
+		ProxyAddr: strings.TrimPrefix(srv.URL, "https://"),
+	}
+	if _, err := applyPlatformSandbox(cmd, SpawnEnvelope{Program: binPath}, limits); err != nil {
+		t.Fatalf("applyPlatformSandbox: %v", err)
+	}
+	out, _ := cmd.CombinedOutput()
+	got := string(out)
+	if strings.Contains(got, "SecPolicyCreateSSL") {
+		t.Fatalf("TLS handshake never initialized — Security framework can't read the binary's directory:\n%s\nprofile state:\n%s",
+			got, buildSBPLProfile(SpawnEnvelope{Program: binPath}, limits))
+	}
+	// Sanity: the probe should have reached the TLS layer. Either
+	// it succeeded against the test server (unlikely without
+	// custom RootCAs) or it failed with a cert-trust error.
+	if !strings.Contains(got, "OK") &&
+		!strings.Contains(got, "certificate") &&
+		!strings.Contains(got, "x509") &&
+		!strings.Contains(got, "tls:") {
+		t.Fatalf("unexpected probe output (expected TLS-layer outcome):\n%s", got)
 	}
 }
 
