@@ -331,7 +331,7 @@ func TestDefaultFSReadScope_CoversXDGTriad(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
 	t.Setenv("XDG_DATA_HOME", "/custom/data")
 	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
-	got := defaultFSReadScope("mycli")
+	got := defaultFSReadScope("mycli", "mycli")
 	want := []string{
 		"/custom/config/mycli",
 		"/custom/data/mycli",
@@ -353,7 +353,7 @@ func TestDefaultFSWriteScope_CoversXDGTriad(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
 	t.Setenv("XDG_DATA_HOME", "/custom/data")
 	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
-	got := defaultFSWriteScope("mycli")
+	got := defaultFSWriteScope("mycli", "mycli")
 	want := []string{
 		"/custom/config/mycli",
 		"/custom/data/mycli",
@@ -366,6 +366,69 @@ func TestDefaultFSWriteScope_CoversXDGTriad(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("scope[%d]=%q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// TestDefaultFSScope_CoversBothConnectorAndBinaryNames pins the
+// behavior that drove `aileron pp add linear` to install broken:
+// the binary `linear-pp-cli` writes to `~/.local/share/linear-pp-cli`,
+// but the on-disk connector name `pp add` mints is the bare `linear`.
+// Both XDG triads must appear so the sandbox doesn't EPERM the first
+// `sync` write.
+func TestDefaultFSScope_CoversBothConnectorAndBinaryNames(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
+	t.Setenv("XDG_DATA_HOME", "/custom/data")
+	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
+	for label, got := range map[string][]string{
+		"fs_read":  defaultFSReadScope("linear", "linear-pp-cli"),
+		"fs_write": defaultFSWriteScope("linear", "linear-pp-cli"),
+	} {
+		want := []string{
+			"/custom/config/linear",
+			"/custom/data/linear",
+			"/custom/cache/linear",
+			"/custom/config/linear-pp-cli",
+			"/custom/data/linear-pp-cli",
+			"/custom/cache/linear-pp-cli",
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s: scope=%v, want %v", label, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s: scope[%d]=%q, want %q", label, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// TestDefaultEnvPassthrough_IncludesHomeAndXDG pins the set of
+// non-secret env keys every wrap-emitted local connector forwards
+// to its subprocess. Without HOME, Go's `os.UserHomeDir()` returns
+// "" and CLIs fall back to relative paths like `.local/share/...`
+// that the platform sandbox rejects with EPERM (the failure mode
+// that surfaced on `aileron pp add linear`'s first sync). XDG_*
+// support the user override; PATH covers shell-out cases.
+func TestDefaultEnvPassthrough_IncludesHomeAndXDG(t *testing.T) {
+	got := defaultEnvPassthrough()
+	want := map[string]bool{
+		"HOME":            true,
+		"PATH":            true,
+		"XDG_CACHE_HOME":  true,
+		"XDG_CONFIG_HOME": true,
+		"XDG_DATA_HOME":   true,
+	}
+	if len(got) != len(want) {
+		t.Errorf("defaultEnvPassthrough returned %d keys, want %d; got=%v", len(got), len(want), got)
+	}
+	for _, k := range got {
+		if !want[k] {
+			t.Errorf("defaultEnvPassthrough returned unexpected key %q", k)
+		}
+		delete(want, k)
+	}
+	for k := range want {
+		t.Errorf("defaultEnvPassthrough missing key %q", k)
 	}
 }
 
