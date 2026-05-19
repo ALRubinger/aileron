@@ -7,7 +7,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.43.0
 	github.com/getkin/kin-openapi v0.138.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/google/go-github/v86 v86.0.0
+	github.com/google/go-github/v87 v87.0.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/oapi-codegen/oapi-codegen/v2 v2.7.0

@@ -11,7 +11,7 @@ import (
 	"strconv"
 
 	"github.com/ALRubinger/aileron/internal/source"
-	gh "github.com/google/go-github/v86/github"
+	gh "github.com/google/go-github/v87/github"
 	"golang.org/x/oauth2"
 )
 
@@ -93,7 +93,10 @@ func (c *Connector) Execute(ctx context.Context, tool string, params map[string]
 		return nil, fmt.Errorf("invalid token: %w", err)
 	}
 
-	client := c.newClient(ctx, accessToken)
+	client, err := c.newClient(accessToken)
+	if err != nil {
+		return nil, fmt.Errorf("github client: %w", err)
+	}
 
 	switch tool {
 	case "github_search_code":
@@ -111,14 +114,12 @@ func (c *Connector) Execute(ctx context.Context, tool string, params map[string]
 	}
 }
 
-func (c *Connector) newClient(ctx context.Context, token string) *gh.Client {
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	tc := oauth2.NewClient(ctx, ts)
-	client := gh.NewClient(tc)
+func (c *Connector) newClient(token string) (*gh.Client, error) {
+	opts := []gh.ClientOptionsFunc{gh.WithAuthToken(token)}
 	if c.baseURL != "" {
-		client, _ = client.WithEnterpriseURLs(c.baseURL, c.baseURL)
+		opts = append(opts, gh.WithEnterpriseURLs(c.baseURL, c.baseURL))
 	}
-	return client
+	return gh.NewClient(opts...)
 }
 
 func (c *Connector) searchCode(ctx context.Context, client *gh.Client, params map[string]any) (map[string]any, error) {
