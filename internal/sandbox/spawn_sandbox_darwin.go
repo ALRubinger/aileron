@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -114,6 +115,27 @@ func buildSBPLProfile(env SpawnEnvelope, limits SpawnLimits) string {
 	// else stays permissive per the comment above.
 	b.WriteString("(deny file-read* (subpath \"/Users\"))\n")
 	b.WriteString("(deny file-read* (subpath \"/Volumes\"))\n")
+	// Re-allow the spawned binary's own directory. macOS Security
+	// framework reads the calling binary's location to determine
+	// its code-signing identity before issuing TLS policies; under
+	// a profile that denies the path, `SecPolicyCreateSSL` returns
+	// NULL and Go's TLS stack surfaces it as
+	// `tls: failed to verify certificate: SecPolicyCreateSSL error: 0`
+	// on every HTTPS call. This affects every Go-on-darwin spawn
+	// connector installed under /Users (the default `aileron pp add`
+	// layout puts them under `~/.aileron/connectors/...`).
+	//
+	// `subpath` is required, not `literal`: Security stats the
+	// surrounding directory in addition to mapping the Mach-O,
+	// so a literal-file allow alone does not suffice. This grant
+	// does not widen the BYOCLI threat model — the binary is
+	// already trusted to execute under this profile; reading its
+	// own resting directory adds no exfiltration surface.
+	if env.Program != "" {
+		if expanded, err := expandTilde(env.Program); err == nil {
+			fmt.Fprintf(&b, "(allow file-read* (subpath %s))\n", sbplQuote(filepath.Dir(expanded)))
+		}
+	}
 	for _, p := range limits.FSRead {
 		writeSBPLPathRule(&b, "file-read*", p)
 	}
