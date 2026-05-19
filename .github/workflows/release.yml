@@ -87,28 +87,33 @@ jobs:
         # alone doesn't move main, so the docs would otherwise stay
         # frozen at the previous release until the next code push.
         #
-        # Hits Railway's GraphQL deploymentCreate mutation directly.
         # Inlined here (rather than a separate workflow on `release:
         # published`) because events triggered by GITHUB_TOKEN don't
         # cascade into other workflow runs — goreleaser publishes the
         # release using GITHUB_TOKEN, so a `release: published` listener
         # would never fire.
         #
-        # The serviceId and environmentId are project-scoped UUIDs from
-        # Railway dashboard → project → service → Settings (or the
-        # auto-generated example in dashboard's deploy-via-API helper).
-        # They're identifiers, not credentials — fine to commit.
+        # Calls Railway's `environmentTriggersDeploy` mutation; that's
+        # the documented entry point for "build a new deployment of
+        # service S in environment E from the configured branch."
+        # `deploymentCreate` (used through v0.0.4) is not a real
+        # Railway mutation and was rejected with HTTP 400.
+        #
+        # The projectId, serviceId, and environmentId are
+        # project-scoped UUIDs from Railway dashboard → project →
+        # service → Settings. They're identifiers, not credentials —
+        # fine to commit.
         if: success()
         run: |
           if [ -z "${RAILWAY_TOKEN}" ]; then
             echo "RAILWAY_TOKEN not configured; skipping docs rebuild"
             exit 0
           fi
-          curl -fsSL -X POST https://backboard.railway.app/graphql/v2 \
+          curl -fsSL -X POST https://backboard.railway.com/graphql/v2 \
             -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{
-              "query": "mutation { deploymentCreate(input: {serviceId: \"f8f317e4-02d1-4e41-9375-d570214702f4\", environmentId: \"64bbbfb8-a7ce-4caf-96cb-df94e1c7356e\"}) { id } }"
+              "query": "mutation { environmentTriggersDeploy(input: {projectId: \"a0c85d99-cadb-4830-a964-b124098a949e\", serviceId: \"f8f317e4-02d1-4e41-9375-d570214702f4\", environmentId: \"64bbbfb8-a7ce-4caf-96cb-df94e1c7356e\"}) }"
             }'
           echo "Triggered Railway docs rebuild"
         env:
