@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -17,15 +19,24 @@ import (
 // (GOOSE_MODE=auto for autonomous; smart_approve/approve for prompted)
 // stays in charge.
 //
-// MCP wiring goes into `~/.config/goose/config.yaml`'s `extensions:`
-// block. Goose discovers MCP servers from this file at startup;
-// ConfigureMCP returns no extra args.
+// MCP wiring uses Goose's `session --with-extension` CLI flag rather
+// than writing into `~/.config/goose/config.yaml`. Goose v1.9.x
+// deserializes the `extensions:` block in one shot as a HashMap; if
+// any single entry fails the schema (e.g. a `type: platform` entry
+// written by a newer Goose version), the whole map silently becomes
+// empty and no extensions load. The `--with-extension` flag parses
+// directly into an ExtensionConfig::Stdio and bypasses that fragile
+// map decode.
 type Goose struct{}
 
 func (g Goose) Name() string          { return "goose" }
 func (g Goose) BinaryNames() []string { return []string{"goose"} }
 
-func (g Goose) Args() []string { return nil }
+// Args returns `["session"]` so the launcher invokes `goose session
+// --with-extension …`. `--with-extension` is a session-subcommand
+// flag in Goose's clap config; without an explicit subcommand the
+// flag isn't recognized.
+func (g Goose) Args() []string { return []string{"session"} }
 
 // Env sets GOOSE_MODE=auto so Goose runs without per-tool approval
 // prompts. Users who want Goose's own approval prompts can override
@@ -39,50 +50,112 @@ func (g Goose) Env() map[string]string {
 // Gateway routing for Goose is not available under launch today.
 func (g Goose) LLMEndpointEnv() string { return "" }
 
-// ConfigureMCP merges an `aileron` entry into the `extensions:` block
-// of `~/.config/goose/config.yaml`. Existing extensions and other
-// top-level keys are preserved. Goose's extension config is a YAML
-// object keyed by extension name; we use the `stdio` transport with
-// the aileron-mcp binary's absolute path.
+// ConfigureMCP returns CLI args that register aileron-mcp as a stdio
+// extension via Goose's `--with-extension` flag. The value format is
+// `ENV1=val1 ENV2=val2 cmd [args]` per Goose's parse_stdio_extension
+// parser. Values containing whitespace or shell metacharacters get
+// double-quoted.
 //
-// Returns nil args — Goose reads MCP servers from the config file, not
-// from CLI flags.
+// As a side effect this removes any stale `aileron` entry from
+// `~/.config/goose/config.yaml` left by prior launches that wrote
+// to the config file. Without cleanup, a future Goose version with
+// a fixed deserializer would load the stale config entry alongside
+// the live --with-extension one and spawn aileron-mcp twice (with
+// the wrong daemon URL and session ID from the stale entry).
 func (g Goose) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+	if err := removeStaleAileronEntry(); err != nil {
+		return nil, fmt.Errorf("cleaning stale goose config entry: %w", err)
+	}
+	return []string{"--with-extension", encodeWithExtensionValue(mcpBin, mcpEnv)}, nil
+}
+
+// encodeWithExtensionValue builds the `ENV=val ENV=val cmd` string
+// Goose's parse_stdio_extension consumes. Env vars are emitted in
+// sorted order so the output is deterministic (Go map iteration is
+// otherwise randomized, which would make tests flaky and would
+// produce different cache keys for what is logically the same
+// invocation).
+func encodeWithExtensionValue(cmd string, envs map[string]string) string {
+	keys := make([]string, 0, len(envs))
+	for k := range envs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys)+1)
+	for _, k := range keys {
+		parts = append(parts, k+"="+shellQuoteIfNeeded(envs[k]))
+	}
+	parts = append(parts, shellQuoteIfNeeded(cmd))
+	return strings.Join(parts, " ")
+}
+
+// shellQuoteIfNeeded wraps s in double quotes (escaping any embedded
+// quotes and backslashes) when it contains whitespace or shell
+// metacharacters. Goose's split_quoted understands double-quoted
+// strings, so the round-trip is lossless for typical paths and env
+// values.
+func shellQuoteIfNeeded(s string) string {
+	if s == "" {
+		return `""`
+	}
+	if !strings.ContainsAny(s, " \t\n\"'\\$`") {
+		return s
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"', '\\':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// removeStaleAileronEntry deletes any `extensions.aileron` block
+// from `~/.config/goose/config.yaml` (leaving the rest of the file
+// untouched). A missing config file is not an error — the user
+// just hasn't run Goose yet.
+func removeStaleAileronEntry() error {
 	configDir, err := gooseConfigDir()
 	if err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return nil, fmt.Errorf("creating %s: %w", configDir, err)
+		return err
 	}
 	path := filepath.Join(configDir, "config.yaml")
-
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
 	root := map[string]any{}
-	if data, err := os.ReadFile(path); err == nil {
-		_ = yaml.Unmarshal(data, &root)
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		// Don't fail the launch over a malformed pre-existing
+		// config — leave it alone and let Goose itself surface
+		// any parse errors.
+		return nil
 	}
-
-	extensions, _ := root["extensions"].(map[string]any)
-	if extensions == nil {
-		extensions = map[string]any{}
+	extensions, ok := root["extensions"].(map[string]any)
+	if !ok {
+		return nil
 	}
-	extensions[launch.MCPServerName] = map[string]any{
-		"type":    "stdio",
-		"enabled": true,
-		"name":    launch.MCPServerName,
-		"cmd":     mcpBin,
-		"envs":    mcpEnv,
+	if _, present := extensions[launch.MCPServerName]; !present {
+		return nil
 	}
+	delete(extensions, launch.MCPServerName)
 	root["extensions"] = extensions
 
 	out, err := yaml.Marshal(root)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling goose config: %w", err)
+		return fmt.Errorf("marshaling goose config: %w", err)
 	}
 	if err := os.WriteFile(path, out, 0o600); err != nil {
-		return nil, fmt.Errorf("writing %s: %w", path, err)
+		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	return nil, nil
+	return nil
 }
 
 // gooseConfigDir returns Goose's per-user config directory:
