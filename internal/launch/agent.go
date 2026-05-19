@@ -37,9 +37,9 @@ type Agent interface {
 	LLMEndpointEnv() string
 	// ConfigureMCP arranges for the agent to discover Aileron's MCP
 	// server. Agents that accept MCP wiring on the CLI (Claude Code's
-	// --mcp-config) return extra args; agents that read MCP server
-	// configuration from a config file (Codex's ~/.codex/config.toml,
-	// Goose's ~/.config/goose/config.yaml, OpenCode's opencode.json)
+	// --mcp-config, Goose's session --with-extension) return extra
+	// args; agents that read MCP server configuration from a config
+	// file (Codex's ~/.codex/config.toml, OpenCode's opencode.json)
 	// write the file and return nil args.
 	//
 	// mcpBin is the absolute path to the aileron-mcp binary.

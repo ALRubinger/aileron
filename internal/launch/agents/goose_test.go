@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -31,7 +32,24 @@ func TestGoose_Env_ForcesAutonomousMode(t *testing.T) {
 	}
 }
 
-func TestGoose_ConfigureMCP_WritesConfigYAML(t *testing.T) {
+// TestGoose_Args_StartsSessionSubcommand pins the contract that
+// Aileron invokes `goose session …` rather than `goose` with no
+// subcommand. `--with-extension` is a session-subcommand flag in
+// Goose's clap config; without an explicit subcommand the flag
+// isn't recognized and our extension wiring silently disappears.
+func TestGoose_Args_StartsSessionSubcommand(t *testing.T) {
+	args := agents.Goose{}.Args()
+	if len(args) != 1 || args[0] != "session" {
+		t.Errorf("Args() = %v, want [\"session\"]", args)
+	}
+}
+
+// TestGoose_ConfigureMCP_ReturnsWithExtensionFlag verifies the
+// returned args are the `--with-extension <ENV=val ENV=val cmd>`
+// pair Goose's parse_stdio_extension consumes. We assert on the
+// shape rather than the exact string so future env-var additions
+// don't churn this test.
+func TestGoose_ConfigureMCP_ReturnsWithExtensionFlag(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("XDG-based path test; Windows path resolution covered separately")
 	}
@@ -46,45 +64,62 @@ func TestGoose_ConfigureMCP_WritesConfigYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
-	if args != nil {
-		t.Errorf("Args = %v, want nil for Goose (config-file integration)", args)
+	if len(args) != 2 || args[0] != "--with-extension" {
+		t.Fatalf("Args = %v, want [\"--with-extension\", <value>]", args)
 	}
-
-	configPath := filepath.Join(home, ".config", "goose", "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("config.yaml not written: %v", err)
+	value := args[1]
+	if !strings.HasSuffix(value, "/usr/local/bin/aileron-mcp") {
+		t.Errorf("--with-extension value = %q, want suffix \"/usr/local/bin/aileron-mcp\"", value)
 	}
-	var root map[string]any
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		t.Fatalf("config.yaml not valid YAML: %v\n%s", err, data)
+	if !strings.Contains(value, "AILERON_URL=http://127.0.0.1:7000") {
+		t.Errorf("--with-extension value = %q, missing AILERON_URL", value)
 	}
-	extensions, _ := root["extensions"].(map[string]any)
-	if extensions == nil {
-		t.Fatalf("extensions key missing: %+v", root)
-	}
-	entry, _ := extensions["aileron"].(map[string]any)
-	if entry == nil {
-		t.Fatalf("extensions.aileron missing: %+v", extensions)
-	}
-	if entry["cmd"] != "/usr/local/bin/aileron-mcp" {
-		t.Errorf("extensions.aileron.cmd = %v, want /usr/local/bin/aileron-mcp", entry["cmd"])
-	}
-	if entry["type"] != "stdio" {
-		t.Errorf("extensions.aileron.type = %v, want \"stdio\"", entry["type"])
-	}
-	envs, _ := entry["envs"].(map[string]any)
-	if envs == nil {
-		t.Fatalf("extensions.aileron.envs missing: %+v", entry)
-	}
-	if envs["AILERON_URL"] != "http://127.0.0.1:7000" {
-		t.Errorf("envs.AILERON_URL = %v, want http://127.0.0.1:7000", envs["AILERON_URL"])
+	if !strings.Contains(value, "AILERON_SESSION_ID=sess-goose") {
+		t.Errorf("--with-extension value = %q, missing AILERON_SESSION_ID", value)
 	}
 }
 
-func TestGoose_ConfigureMCP_PreservesOtherExtensions(t *testing.T) {
+// TestGoose_ConfigureMCP_EnvVarOrderIsDeterministic prevents
+// flakiness from Go's randomized map iteration. The encoded value
+// must be stable across calls so test assertions and any cache
+// keys downstream don't churn.
+func TestGoose_ConfigureMCP_EnvVarOrderIsDeterministic(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("XDG-based path test; Windows path resolution covered separately")
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	envs := map[string]string{
+		"AILERON_URL":          "http://127.0.0.1:7000",
+		"AILERON_COMMS_URL":    "http://127.0.0.1:7000",
+		"AILERON_SESSION_ID":   "sess",
+		"AILERON_APPROVAL_URL": "http://127.0.0.1:7000/approvals",
+	}
+	first, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", envs, "")
+	if err != nil {
+		t.Fatalf("ConfigureMCP first: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		next, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", envs, "")
+		if err != nil {
+			t.Fatalf("ConfigureMCP repeat: %v", err)
+		}
+		if next[1] != first[1] {
+			t.Fatalf("--with-extension value not deterministic across calls\nfirst = %q\nrepeat = %q", first[1], next[1])
+		}
+	}
+}
+
+// TestGoose_ConfigureMCP_RemovesStaleAileronEntry covers the
+// cleanup of any pre-existing `extensions.aileron` block left by
+// older Aileron versions that wrote to config.yaml. The other
+// extensions and top-level keys must survive untouched — the user
+// (and Goose itself) may rely on them.
+func TestGoose_ConfigureMCP_RemovesStaleAileronEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
 	}
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -98,31 +133,87 @@ func TestGoose_ConfigureMCP_PreservesOtherExtensions(t *testing.T) {
 		"GOOSE_PROVIDER": "openai",
 		"extensions": map[string]any{
 			"developer": map[string]any{"enabled": true, "type": "builtin"},
-			"aileron":   map[string]any{"cmd": "/old/path"},
+			"aileron":   map[string]any{"cmd": "/old/path", "type": "stdio"},
 		},
 	}
 	seedYAML, _ := yaml.Marshal(seed)
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), seedYAML, 0o600); err != nil {
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, seedYAML, 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	_, err := agents.Goose{}.ConfigureMCP("/new/path", map[string]string{}, "")
-	if err != nil {
+	if _, err := (agents.Goose{}).ConfigureMCP("/new/path", map[string]string{}, ""); err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
 
-	data, _ := os.ReadFile(filepath.Join(configDir, "config.yaml"))
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
 	var root map[string]any
-	_ = yaml.Unmarshal(data, &root)
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 	if root["GOOSE_PROVIDER"] != "openai" {
 		t.Error("top-level GOOSE_PROVIDER not preserved")
 	}
 	exts, _ := root["extensions"].(map[string]any)
+	if exts == nil {
+		t.Fatal("extensions block dropped")
+	}
 	if exts["developer"] == nil {
 		t.Error("developer extension not preserved")
 	}
-	aileronEntry, _ := exts["aileron"].(map[string]any)
-	if aileronEntry["cmd"] != "/new/path" {
-		t.Errorf("aileron extension not overwritten: %v", aileronEntry)
+	if _, present := exts["aileron"]; present {
+		t.Errorf("stale aileron entry should have been removed; got: %v", exts["aileron"])
+	}
+}
+
+// TestGoose_ConfigureMCP_NoConfigYAMLIsFine covers a fresh install
+// where the user has never run Goose. ConfigureMCP must succeed
+// without trying to create or modify any file in that case — the
+// `--with-extension` flag carries everything Goose needs.
+func TestGoose_ConfigureMCP_NoConfigYAMLIsFine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	if _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, ""); err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+	configPath := filepath.Join(home, ".config", "goose", "config.yaml")
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Errorf("ConfigureMCP should not create config.yaml when none exists; stat err = %v", err)
+	}
+}
+
+// TestGoose_ConfigureMCP_ShellQuotesValuesWithSpaces guards the
+// encoder against the case where a path or env value contains
+// whitespace — without quoting, Goose's split_quoted would slice
+// it in half and either point at a nonexistent binary or drop
+// half the value.
+func TestGoose_ConfigureMCP_ShellQuotesValuesWithSpaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	args, err := agents.Goose{}.ConfigureMCP("/Users/me/Application Support/aileron-mcp", map[string]string{
+		"WITH SPACE": "a b",
+	}, "")
+	if err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+	value := args[1]
+	if !strings.Contains(value, `"a b"`) {
+		t.Errorf("env value with space not quoted; value = %q", value)
+	}
+	if !strings.Contains(value, `"/Users/me/Application Support/aileron-mcp"`) {
+		t.Errorf("cmd path with space not quoted; value = %q", value)
 	}
 }
