@@ -104,7 +104,7 @@ jobs:
             echo "RAILWAY_TOKEN not configured; skipping docs rebuild"
             exit 0
           fi
-          curl -fsSL -X POST https://api.railway.app/graphql \
+          curl -fsSL -X POST https://backboard.railway.app/graphql/v2 \
             -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{
