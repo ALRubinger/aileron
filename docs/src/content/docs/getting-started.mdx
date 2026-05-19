@@ -76,7 +76,7 @@ We're about to take your first flight with Aileron. In under 5 minutes, you'll b
     note: "Extract the zip and add the directory to PATH. Note that Windows support is not yet confirmed; file an issue if not working correctly.",
     code: `Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron`,
   },
-]} client:load />
+]} />
 
 Prefer to compile it yourself? See [Building from Source](/development/building-from-source/).
 

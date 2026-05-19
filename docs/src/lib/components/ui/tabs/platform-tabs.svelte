@@ -9,6 +9,9 @@
 		label: string;
 		lang?: string;
 		code: string;
+		// Optional pre-rendered Shiki HTML; takes precedence over `code`
+		// in CodeBlock so MDX callers can match markdown-fence theming.
+		html?: string;
 		note?: string;
 	};
 </script>
@@ -69,7 +72,7 @@
 			{#if item.note}
 				<p class="text-sm">{item.note}</p>
 			{/if}
-			<CodeBlock code={item.code} lang={item.lang} />
+			<CodeBlock code={item.code} lang={item.lang} html={item.html} />
 		</TabsPrimitive.Content>
 	{/each}
 </TabsPrimitive.Root>

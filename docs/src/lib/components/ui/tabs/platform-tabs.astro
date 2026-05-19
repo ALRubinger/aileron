@@ -1,0 +1,32 @@
+---
+import PlatformTabsIsland from './platform-tabs.svelte';
+import type { PlatformTabItem } from './platform-tabs.svelte';
+import { highlight } from '$lib/highlight';
+
+interface Props {
+  items: PlatformTabItem[];
+  defaultValue?: string;
+  class?: string;
+}
+
+const { items, defaultValue, class: className } = Astro.props;
+
+// Pre-highlight each tab's code at build time so the rendered output
+// matches markdown fences (which run through Astro's Shiki). Shiki
+// never reaches the client; the Svelte island receives HTML strings
+// and renders them verbatim via `{@html}`.
+const augmentedItems: PlatformTabItem[] = await Promise.all(
+  items.map(async (item) => {
+    if (item.lang && !item.html) {
+      return { ...item, html: await highlight(item.code, item.lang) };
+    }
+    return item;
+  }),
+);
+---
+<PlatformTabsIsland
+  items={augmentedItems}
+  defaultValue={defaultValue}
+  class={className}
+  client:load
+/>
