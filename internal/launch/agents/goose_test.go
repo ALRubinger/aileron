@@ -217,3 +217,207 @@ func TestGoose_ConfigureMCP_ShellQuotesValuesWithSpaces(t *testing.T) {
 		t.Errorf("cmd path with space not quoted; value = %q", value)
 	}
 }
+
+// TestGoose_ConfigureMCP_QuotesEmptyEnvValues prevents an empty
+// env value from being emitted as bare `KEY=` followed by a
+// space — Goose's split_quoted would then consume the next
+// token as the value. `KEY=""` is the unambiguous form.
+func TestGoose_ConfigureMCP_QuotesEmptyEnvValues(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	args, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", map[string]string{
+		"EMPTY":  "",
+		"NORMAL": "value",
+	}, "")
+	if err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+	value := args[1]
+	if !strings.Contains(value, `EMPTY=""`) {
+		t.Errorf("empty env value not quoted as \"\"; value = %q", value)
+	}
+	if !strings.Contains(value, "NORMAL=value") {
+		t.Errorf("normal env value mangled; value = %q", value)
+	}
+}
+
+// TestGoose_ConfigureMCP_LeavesConfigUntouched_NoExtensionsKey
+// covers a config.yaml that exists but has no `extensions:`
+// block at all (older Goose installations, or users who never
+// added any). The cleanup must be a no-op — don't fabricate an
+// empty extensions key just to write one back.
+func TestGoose_ConfigureMCP_LeavesConfigUntouched_NoExtensionsKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	configDir := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	original := []byte("GOOSE_PROVIDER: openai\nGOOSE_MODEL: gpt-4o\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, ""); err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("config.yaml mutated when no extensions key was present:\nwant: %q\ngot:  %q", original, got)
+	}
+}
+
+// TestGoose_ConfigureMCP_TolratesMalformedConfigYAML pins the
+// design decision that a pre-existing malformed config.yaml
+// must NOT fail the launch. The user's config is theirs to
+// manage; Goose itself will surface the parse error. Aileron's
+// MCP wiring still has to go through.
+func TestGoose_ConfigureMCP_ToleratesMalformedConfigYAML(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	configDir := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// `:`-prefixed value at top level isn't valid YAML.
+	bad := []byte("extensions:\n  aileron:\n    cmd: :::not yaml\n  : whoops\n")
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), bad, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	args, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{"AILERON_URL": "http://x"}, "")
+	if err != nil {
+		t.Fatalf("ConfigureMCP should tolerate malformed user config, got: %v", err)
+	}
+	if len(args) != 2 || args[0] != "--with-extension" {
+		t.Errorf("Args = %v, want [\"--with-extension\", <value>]", args)
+	}
+}
+
+// TestGoose_ConfigureMCP_EscapesQuotesAndBackslashes covers
+// the inner switch in the quoter — values containing a literal
+// double-quote or backslash need to be escaped, not just
+// wrapped. An unescaped `"` would terminate the quoted string
+// early and Goose's split_quoted would consume the rest as a
+// separate token (silently losing data); an unescaped `\` could
+// be interpreted as an escape introducer.
+func TestGoose_ConfigureMCP_EscapesQuotesAndBackslashes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	args, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", map[string]string{
+		"QUOTE": `a"b`,
+		"SLASH": `a\b`,
+	}, "")
+	if err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+	value := args[1]
+	if !strings.Contains(value, `QUOTE="a\"b"`) {
+		t.Errorf("double-quote not escaped; value = %q", value)
+	}
+	if !strings.Contains(value, `SLASH="a\\b"`) {
+		t.Errorf("backslash not escaped; value = %q", value)
+	}
+}
+
+// TestGoose_ConfigureMCP_PreservesOtherExtensionsWhenNoAileronEntry
+// covers the cleanup's early-return when an existing config has
+// other extensions but no `aileron` key. The file must not be
+// rewritten — that would churn formatting/comments unnecessarily
+// for every launch.
+func TestGoose_ConfigureMCP_PreservesOtherExtensionsWhenNoAileronEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	configDir := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.yaml")
+	original := []byte("extensions:\n  developer:\n    enabled: true\n    type: builtin\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	beforeMtime, _ := os.Stat(configPath)
+
+	if _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, ""); err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+
+	afterMtime, _ := os.Stat(configPath)
+	if !afterMtime.ModTime().Equal(beforeMtime.ModTime()) {
+		// File was rewritten despite having nothing to clean — a
+		// no-op cleanup should not touch the file.
+		got, _ := os.ReadFile(configPath)
+		t.Errorf("config.yaml rewritten when no aileron entry existed to clean\nbefore: %q\nafter:  %q", original, got)
+	}
+}
+
+// TestGoose_ConfigureMCP_HonorsXDGConfigHome covers the
+// non-default XDG path. Users with a custom XDG_CONFIG_HOME
+// (common on Linux setups) need the cleanup to target their
+// actual config directory, not the implicit ~/.config fallback.
+func TestGoose_ConfigureMCP_HonorsXDGConfigHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("XDG-based path test")
+	}
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("HOME", t.TempDir())
+
+	configDir := filepath.Join(xdg, "goose")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	seed := map[string]any{
+		"extensions": map[string]any{
+			"aileron": map[string]any{"cmd": "/old/path", "type": "stdio"},
+		},
+	}
+	seedYAML, _ := yaml.Marshal(seed)
+	configPath := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configPath, seedYAML, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if _, err := (agents.Goose{}).ConfigureMCP("/new/path", map[string]string{}, ""); err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	var root map[string]any
+	_ = yaml.Unmarshal(data, &root)
+	exts, _ := root["extensions"].(map[string]any)
+	if _, present := exts["aileron"]; present {
+		t.Errorf("stale aileron entry under XDG_CONFIG_HOME not cleaned up: %v", exts)
+	}
+}
