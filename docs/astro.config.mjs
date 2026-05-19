@@ -20,6 +20,17 @@ export default defineConfig({
           target: '_blank',
           rel: ['noopener', 'noreferrer'],
           content: { type: 'text', value: ' ↗' }, // ↗
+          // Opt-out: anchors with `class="no-arrow"` skip the entire
+          // external-link transformation (no arrow, no target, no rel
+          // override). Set those attributes inline if you still want
+          // them. Useful for icon-only links where a dangling ↗ next
+          // to an SVG reads as garbage.
+          test: (element) => {
+            const c = element.properties?.className;
+            if (!c) return true;
+            const list = Array.isArray(c) ? c : String(c).split(/\s+/);
+            return !list.includes('no-arrow');
+          },
         },
       ],
       // Wrap fenced code blocks with a "Copy" button. Inherited by MDX via

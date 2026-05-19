@@ -1,0 +1,45 @@
+---
+import OsInstallTabsIsland from './os-install-tabs.svelte';
+import type {
+  OsInstallPlatform,
+  OsInstallVariant,
+} from './os-install-tabs.svelte';
+import { highlight } from '$lib/highlight';
+
+interface Props {
+  platforms: OsInstallPlatform[];
+  defaultPlatform?: string;
+  class?: string;
+}
+
+const { platforms, defaultPlatform, class: className } = Astro.props;
+
+// Pre-highlight each platform's (and variant's) code at build time so
+// the rendered output matches markdown fences. Shiki never reaches
+// the client; the Svelte island gets HTML strings.
+async function augmentVariant(variant: OsInstallVariant): Promise<OsInstallVariant> {
+  if (variant.lang && !variant.html) {
+    return { ...variant, html: await highlight(variant.code, variant.lang) };
+  }
+  return variant;
+}
+
+const augmentedPlatforms: OsInstallPlatform[] = await Promise.all(
+  platforms.map(async (platform) => {
+    const next: OsInstallPlatform = { ...platform };
+    if (next.code && next.lang && !next.html) {
+      next.html = await highlight(next.code, next.lang);
+    }
+    if (next.variants && next.variants.length > 0) {
+      next.variants = await Promise.all(next.variants.map(augmentVariant));
+    }
+    return next;
+  }),
+);
+---
+<OsInstallTabsIsland
+  platforms={augmentedPlatforms}
+  defaultPlatform={defaultPlatform}
+  class={className}
+  client:load
+/>

@@ -9,6 +9,10 @@
 		label: string;
 		lang?: string;
 		code: string;
+		// Optional pre-rendered Shiki HTML; takes precedence over `code`
+		// in CodeBlock so MDX callers can match markdown-fence theming.
+		// Populated by the os-install-tabs.astro wrapper at SSR time.
+		html?: string;
 		note?: string;
 	};
 
@@ -20,6 +24,7 @@
 		// Mutually exclusive; if both are set, `variants` wins.
 		lang?: string;
 		code?: string;
+		html?: string;
 		note?: string;
 		variants?: OsInstallVariant[];
 	};
@@ -130,12 +135,12 @@
 							{#if variant.note}
 								<p class="text-sm">{@html variant.note}</p>
 							{/if}
-							<CodeBlock code={variant.code} lang={variant.lang} />
+							<CodeBlock code={variant.code} lang={variant.lang} html={variant.html} />
 						</TabsPrimitive.Content>
 					{/each}
 				</TabsPrimitive.Root>
 			{:else if platform.code}
-				<CodeBlock code={platform.code} lang={platform.lang} />
+				<CodeBlock code={platform.code} lang={platform.lang} html={platform.html} />
 			{/if}
 		</TabsPrimitive.Content>
 	{/each}

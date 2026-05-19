@@ -41,7 +41,7 @@
 }
 
 .ink-bleed,
-.ink-bleed :is(h2, h3, h4, h5, h6, p, li, blockquote) {
+.ink-bleed :is(h2, h3, h4, h5, h6, p, li) {
 	filter: var(--effect-ink-bleed);
 }
 

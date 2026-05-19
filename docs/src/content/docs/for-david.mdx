@@ -1,0 +1,101 @@
+---
+title: "For David Cramer"
+description: "You said vendor bots lose and general bots win. Here is the substrate piece that makes Sentry safely embeddable in every general bot every team builds."
+---
+
+import HighlightCard from '$lib/components/ui/highlight-card.svelte';
+import { PlatformTabs } from '$lib/components/ui/tabs';
+import GithubLogo from '$lib/components/icons/github-logo.svelte';
+import LinkedinLogo from '$lib/components/icons/linkedin-logo.svelte';
+import XLogo from '$lib/components/icons/x-logo.svelte';
+
+My name is Andrew Rubinger. I built open source program offices at Block and Apple. 
+
+Last weekend, you hit on [issues](https://x.com/zeeg/status/2055322853701267859) I've been driving to understand and solve. The result is this Aileron prototype. It's young and immature. But it's already starting to reveal something.
+
+YES: per-vendor bots constrain us. Real work doesn't end at a vendor API. Agents built for context across connections get geometric gains.
+
+I cobbled a demo together for you today. It runs in about 90 seconds and I hope teases what becomes possible.
+
+## A 90-second demo
+
+You ship the [Sentry MCP](https://mcp.sentry.dev/). This demo shows what changes one layer below — Sentry and Google composing in a single prompt, uniform install across both, kernel-level sandbox, credentials sealed locally.
+
+<div class="not-prose my-6">
+  <script src="https://asciinema.org/a/SnVzbbvVy6mMIjxO.js" id="asciicast-SnVzbbvVy6mMIjxO" async data-size="big" is:inline></script>
+</div>
+
+That's a coding agent:
+
+* Prompted with "_Email alr@withaileron.ai my most active Sentry events and summarize what’s causing them and how to remediate, then show me what you sent._" 
+* Running the wrapped Sentry CLI in a sandbox that cannot read `~/.ssh` or any other tool's credentials.
+* Devising remediation based on the full existing context it has about the user or project it's running in.
+* Sending the findings to my email with a human approval gate:
+
+<img src="/aileron-email-approval.png" alt="Aileron approval dialog for the send_email action, showing the rendered email preview before the agent's call is allowed to go through" class="my-6 mx-auto block w-full max-w-2xl h-auto rounded-lg border border-border" />
+
+I ran this with Claude Code; it works uniformly in Codex, OpenCode, and Goose.
+
+## Try it yourself
+
+Got it down to 3 commands.
+
+```sh
+brew install --cask ALRubinger/aileron/aileron
+```
+
+Installs Aileron on your system. You'll be prompted to create a passphrase for your new local Aileron vault, which is where we store credentials. Think 1Password or LastPass.
+
+```sh
+aileron pp add sentry
+```
+
+Pulls Sentry from the [PrintingPress](https://printingpress.dev/) catalog, runs Sentry's own CLI through Aileron's introspector, prompts you for `SENTRY_AUTH_TOKEN` token, and stores it sealed in the vault.
+
+<PlatformTabs items={[
+  { value: "claude", label: "Claude Code", lang: "sh", code: "aileron launch claude" },
+  { value: "codex", label: "Codex", lang: "sh", code: "aileron launch codex" },
+  { value: "opencode", label: "OpenCode", lang: "sh", code: "aileron launch opencode" },
+  { value: "goose", label: "Goose", lang: "sh", code: "aileron launch goose" },
+]} />
+
+Launches your agent with `sentry` available in its tool catalog. The same command shape works across all four.
+
+Then prompt your agent:
+
+> Show me my most active Sentry events and summarize what's causing them and how to remediate.
+
+My demo was armed with the Aileron [Google Connector](/actions/google/), which is in test mode and pending Google Security review for public consumption. It proves our belief in cross-vendor tooling.
+
+<SectionBreak />
+
+<div>
+
+## What changes for Sentry
+
+Sentry MCP and `getsentry/skills` are exactly right on the Sentry side. The limiting factor is the integration complexity. Linear, GitHub, and Notion each have a different auth flow. Each MCP process runs with full disk access. Configuring across Claude / Cursor / Codex / Goose means four parallel setups. So most orgs leave it to each engineer to figure out.
+
+Aileron is what that work looks like when it's productized: one install per capability, sandboxed, credentials sealed locally, uniform across coding agents. For orgs adopting the general-bot pattern, Sentry's MCP isn't the friction. Standing up the rest of the bot around it is.
+
+</div>
+
+## What's Next?
+
+Curious if this piques your interest. I can see a couple paths if so:
+
+**Design partner.** Aileron is at the stage where one enterprise's feedback compounds. Sentry has the customer base, the engineering taste, and you're already shipping in the direction Aileron sits underneath. Worth going deeper?
+
+**Develop Within Sentry.** Your tweet named open recs and the bar to clear. This page and the Aileron repo are my opening submission. If there's an effort at Sentry that moves this forward for all, I'd like that conversation.
+
+Available in DM or calendar. Appreciate your thoughts!
+
+S,
+<img src="/signature-alr.png" alt="Andrew Lee Rubinger" width="300" class="my-6 ink-bleed" />
+
+ALR
+
+[alr@withaileron.ai](mailto:alr@withaileron.ai) <a href="https://github.com/ALRubinger" target="_blank" rel="noopener noreferrer" aria-label="GitHub" class="no-arrow inline-flex items-center align-middle ml-3 hover:opacity-70"><GithubLogo size={20} /></a> <a href="https://www.linkedin.com/in/alrubinger/" target="_blank" rel="noopener noreferrer" aria-label="LinkedIn" class="no-arrow inline-flex items-center align-middle ml-3 hover:opacity-70"><LinkedinLogo size={20} /></a> <a href="https://x.com/ALRubinger" target="_blank" rel="noopener noreferrer" aria-label="X" class="no-arrow inline-flex items-center align-middle ml-3 hover:opacity-70"><XLogo size={20} /></a>
+
+<link href="https://calendar.google.com/calendar/scheduling-button-script.css" rel="stylesheet" />
+<script src="https://calendar.google.com/calendar/scheduling-button-script.js" async is:inline></script>
+<script src="/booking-button.js" is:inline></script>
