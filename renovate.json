@@ -5,6 +5,7 @@
   ],
   "platformAutomerge": true,
   "automergeStrategy": "squash",
+  "minimumReleaseAge": "3 days",
   "packageRules": [
     {
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
