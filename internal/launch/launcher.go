@@ -227,17 +227,19 @@ func resolveStateDir() (string, error) {
 }
 
 // resolveDaemonBinary locates the daemon binary — a sibling of the
-// running aileron binary named "server" — and falls back to PATH.
+// running aileron binary named "aileron-server" — and falls back to
+// PATH. The name matches the goreleaser/Homebrew artifact so installs
+// from a packaged distribution work without further setup.
 func resolveDaemonBinary() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	candidate := filepath.Join(filepath.Dir(self), "server")
+	candidate := filepath.Join(filepath.Dir(self), "aileron-server")
 	if _, err := os.Stat(candidate); err == nil {
 		return filepath.Abs(candidate)
 	}
-	return exec.LookPath("server")
+	return exec.LookPath("aileron-server")
 }
 
 // printStartupBanner writes a single line on stderr before exec'ing the

@@ -485,20 +485,20 @@ func defaultStateDir() (string, error) {
 }
 
 // daemonBinaryPath resolves the daemon binary's path: a sibling of
-// the running aileron binary named "server" (current build artifact
-// per task build:server). Falls back to PATH lookup so users running
-// `aileron` from PATH can still spawn the daemon if `server` is also
-// on PATH.
+// the running aileron binary named "aileron-server" — the name used
+// by `task build:server` and the goreleaser/Homebrew bundle. Falls
+// back to PATH lookup for layouts where os.Executable does not point
+// at the same directory the daemon is installed into.
 func daemonBinaryPath() (string, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	candidate := filepath.Join(filepath.Dir(self), "server")
+	candidate := filepath.Join(filepath.Dir(self), "aileron-server")
 	if _, err := os.Stat(candidate); err == nil {
 		return filepath.Abs(candidate)
 	}
-	return exec.LookPath("server")
+	return exec.LookPath("aileron-server")
 }
 
 // bindingDoRequest issues an HTTP request to the server and returns

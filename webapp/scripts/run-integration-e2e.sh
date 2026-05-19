@@ -2,7 +2,7 @@
 #
 # Orchestrates the tier-2 (real-daemon) Playwright integration suite.
 #
-# - Builds the daemon (or assumes a fresh `build/server` from task deps).
+# - Builds the daemon (or assumes a fresh `build/aileron-server` from task deps).
 # - Creates an isolated state dir + vault file under a temporary HOME.
 # - Starts the daemon with the basic.json seed fixture on an ephemeral
 #   loopback port.
@@ -19,7 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-SERVER_BIN="${REPO_ROOT}/build/server"
+SERVER_BIN="${REPO_ROOT}/build/aileron-server"
 AILERON_BIN="${REPO_ROOT}/build/aileron"
 SEED_FILE="${REPO_ROOT}/test/fixtures/action-approvals/basic.json"
 WEBAPP_DIR="${REPO_ROOT}/webapp"

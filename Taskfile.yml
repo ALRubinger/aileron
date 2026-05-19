@@ -53,7 +53,7 @@ tasks:
       COMMIT:
         sh: git rev-parse --short HEAD
     cmds:
-      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/server ./internal/server
+      - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-server ./internal/server
 
   build:mcp:
     desc: Build the Aileron MCP server binary locally

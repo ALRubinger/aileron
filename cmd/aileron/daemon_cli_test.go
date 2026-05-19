@@ -275,11 +275,11 @@ func TestRunDaemonStart_HappyPath_PrintsURL(t *testing.T) {
 		return "http://127.0.0.1:54321", nil
 	})
 
-	// daemonBinaryPath looks for a sibling 'server' binary; when not
-	// found it falls back to PATH lookup, which will fail in test.
-	// Place a no-op binary on PATH so the resolution succeeds.
+	// daemonBinaryPath looks for a sibling 'aileron-server' binary;
+	// when not found it falls back to PATH lookup, which will fail in
+	// test. Place a no-op binary on PATH so the resolution succeeds.
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "server")
+	server := filepath.Join(binDir, "aileron-server")
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestRunDaemonStart_SpawnError_NonZeroExit(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "server")
+	server := filepath.Join(binDir, "aileron-server")
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -321,8 +321,8 @@ func TestRunDaemonStart_SpawnError_NonZeroExit(t *testing.T) {
 
 func TestRunDaemonStart_BinaryNotFound_NonZeroExit(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	// Empty PATH and no sibling 'server' next to the test binary →
-	// daemonBinaryPath fails before spawn is even called.
+	// Empty PATH and no sibling 'aileron-server' next to the test
+	// binary → daemonBinaryPath fails before spawn is even called.
 	t.Setenv("PATH", "")
 
 	var stdout, stderr bytes.Buffer
@@ -343,7 +343,7 @@ func TestRunDaemonStart_BinaryNotFound_NonZeroExit(t *testing.T) {
 func TestSpawnResolveOnce_HappyPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "server")
+	server := filepath.Join(binDir, "aileron-server")
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestSpawnResolveOnce_HappyPath(t *testing.T) {
 func TestSpawnResolveOnce_TrimsTrailingSlash(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "server")
+	server := filepath.Join(binDir, "aileron-server")
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestSpawnResolveOnce_BinaryMissing_Errors(t *testing.T) {
 func TestSpawnResolveOnce_PropagatesSpawnError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "server")
+	server := filepath.Join(binDir, "aileron-server")
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -462,14 +462,14 @@ func TestDefaultStateDir_UnderHome(t *testing.T) {
 }
 
 func TestDaemonBinaryPath_FindsSibling(t *testing.T) {
-	// Drop a "server" binary next to the running test binary's dir.
-	// daemonBinaryPath uses os.Executable() to find the "self" path
+	// Drop an "aileron-server" binary next to the running test binary's
+	// dir. daemonBinaryPath uses os.Executable() to find the "self" path
 	// and looks for a sibling — this test verifies that branch.
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	sibling := filepath.Join(filepath.Dir(self), "server")
+	sibling := filepath.Join(filepath.Dir(self), "aileron-server")
 	if _, err := os.Stat(sibling); err == nil {
 		// Already exists from a previous test run; fine, just verify.
 		got, err := daemonBinaryPath()
@@ -499,10 +499,11 @@ func TestDaemonBinaryPath_FindsSibling(t *testing.T) {
 }
 
 func TestDaemonBinaryPath_FallsBackToPATH(t *testing.T) {
-	// No sibling 'server' near the test binary (we don't write one),
-	// so resolution should fall back to PATH lookup. Place one on PATH.
+	// No sibling 'aileron-server' near the test binary (we don't write
+	// one), so resolution should fall back to PATH lookup. Place one
+	// on PATH — mirrors the Homebrew install layout.
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "server")
+	server := filepath.Join(binDir, "aileron-server")
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -523,10 +524,10 @@ func TestDaemonBinaryPath_FallsBackToPATH(t *testing.T) {
 func TestDaemonBinaryPath_NotFound(t *testing.T) {
 	// Empty PATH and no sibling next to the test binary → not found.
 	t.Setenv("PATH", "")
-	// Best-effort: remove any sibling 'server' a previous test left
-	// behind. If we can't, the assertion below is a no-op (still safe).
+	// Best-effort: remove any sibling 'aileron-server' a previous test
+	// left behind. If we can't, the assertion below is a no-op (safe).
 	if self, err := os.Executable(); err == nil {
-		_ = os.Remove(filepath.Join(filepath.Dir(self), "server"))
+		_ = os.Remove(filepath.Join(filepath.Dir(self), "aileron-server"))
 	}
 	_, err := daemonBinaryPath()
 	if err == nil {

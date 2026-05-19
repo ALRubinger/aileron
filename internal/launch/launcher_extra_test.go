@@ -7,16 +7,19 @@ import (
 )
 
 // resolveDaemonBinary contract:
-//   - sibling 'server' next to the running test binary takes priority
+//   - sibling 'aileron-server' next to the running test binary takes priority
 //   - falls back to PATH lookup when no sibling exists
 //   - returns an error when neither is reachable
+//
+// The literal name 'aileron-server' must match the goreleaser/Homebrew
+// artifact name; mismatch broke `aileron launch` for Homebrew installs.
 
 func TestResolveDaemonBinary_FindsSibling(t *testing.T) {
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	sibling := filepath.Join(filepath.Dir(self), "server")
+	sibling := filepath.Join(filepath.Dir(self), "aileron-server")
 	created := false
 	if _, err := os.Stat(sibling); err != nil {
 		if err := os.WriteFile(sibling, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
@@ -39,10 +42,10 @@ func TestResolveDaemonBinary_FindsSibling(t *testing.T) {
 func TestResolveDaemonBinary_FallsBackToPATH(t *testing.T) {
 	// Make sure no sibling is in the way (best effort).
 	if self, err := os.Executable(); err == nil {
-		_ = os.Remove(filepath.Join(filepath.Dir(self), "server"))
+		_ = os.Remove(filepath.Join(filepath.Dir(self), "aileron-server"))
 	}
 	binDir := t.TempDir()
-	server := filepath.Join(binDir, "server")
+	server := filepath.Join(binDir, "aileron-server")
 	if err := os.WriteFile(server, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +62,7 @@ func TestResolveDaemonBinary_FallsBackToPATH(t *testing.T) {
 
 func TestResolveDaemonBinary_NotFound(t *testing.T) {
 	if self, err := os.Executable(); err == nil {
-		_ = os.Remove(filepath.Join(filepath.Dir(self), "server"))
+		_ = os.Remove(filepath.Join(filepath.Dir(self), "aileron-server"))
 	}
 	t.Setenv("PATH", "")
 	if _, err := resolveDaemonBinary(); err == nil {
