@@ -327,15 +327,19 @@ func TestDefaultFSReadScope_CoversXDGTriad(t *testing.T) {
 	// Wrap-emitted local connectors get fs_read on the full XDG
 	// triad (config + data + cache) so modern CLIs that store
 	// sync DBs or caches outside $XDG_CONFIG_HOME install working.
+	// Trailing slashes mark each entry as a directory scope per the
+	// manifest contract — the SBPL emitter promotes these to
+	// `subpath` rules; slashless entries would become `literal` rules
+	// and EPERM the first file write under the dir.
 	// See ADR-0014's "Local-origin (BYOCLI) wrap default" section.
 	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
 	t.Setenv("XDG_DATA_HOME", "/custom/data")
 	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
 	got := defaultFSReadScope("mycli", "mycli")
 	want := []string{
-		"/custom/config/mycli",
-		"/custom/data/mycli",
-		"/custom/cache/mycli",
+		"/custom/config/mycli/",
+		"/custom/data/mycli/",
+		"/custom/cache/mycli/",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("scope=%v, want %v", got, want)
@@ -355,9 +359,9 @@ func TestDefaultFSWriteScope_CoversXDGTriad(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
 	got := defaultFSWriteScope("mycli", "mycli")
 	want := []string{
-		"/custom/config/mycli",
-		"/custom/data/mycli",
-		"/custom/cache/mycli",
+		"/custom/config/mycli/",
+		"/custom/data/mycli/",
+		"/custom/cache/mycli/",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("scope=%v, want %v", got, want)
@@ -384,12 +388,12 @@ func TestDefaultFSScope_CoversBothConnectorAndBinaryNames(t *testing.T) {
 		"fs_write": defaultFSWriteScope("linear", "linear-pp-cli"),
 	} {
 		want := []string{
-			"/custom/config/linear",
-			"/custom/data/linear",
-			"/custom/cache/linear",
-			"/custom/config/linear-pp-cli",
-			"/custom/data/linear-pp-cli",
-			"/custom/cache/linear-pp-cli",
+			"/custom/config/linear/",
+			"/custom/data/linear/",
+			"/custom/cache/linear/",
+			"/custom/config/linear-pp-cli/",
+			"/custom/data/linear-pp-cli/",
+			"/custom/cache/linear-pp-cli/",
 		}
 		if len(got) != len(want) {
 			t.Fatalf("%s: scope=%v, want %v", label, got, want)
@@ -397,6 +401,42 @@ func TestDefaultFSScope_CoversBothConnectorAndBinaryNames(t *testing.T) {
 		for i := range want {
 			if got[i] != want[i] {
 				t.Errorf("%s: scope[%d]=%q, want %q", label, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// TestDefaultFSScope_PathsAreDirectoryScopes pins the manifest-
+// schema invariant the macOS sandbox depends on: every wrap-emitted
+// fs_read/fs_write entry must end with `/` so the SBPL emitter
+// translates it to a `subpath` rule. The slashless form becomes a
+// `literal` rule that permits opening only the directory inode
+// itself — every file the wrapped CLI writes underneath (sync DBs,
+// lockfiles, journal files) then faults with EPERM /
+// SQLITE_CANTOPEN. This was the breakage path on `aileron pp add
+// linear` even after #806 expanded the XDG triad and #825 added the
+// binary-basename triad: the paths reached the sandbox but
+// `(allow file-write* (literal ...))` denied data.db on first sync.
+//
+// Independently of any specific path layout, this test asserts the
+// contract directly so a future refactor of xdgScopeFor that drops
+// trailing slashes regresses the macOS run.
+func TestDefaultFSScope_PathsAreDirectoryScopes(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
+	t.Setenv("XDG_DATA_HOME", "/custom/data")
+	t.Setenv("XDG_CACHE_HOME", "/custom/cache")
+	for label, paths := range map[string][]string{
+		"fs_read same-name":  defaultFSReadScope("mycli", "mycli"),
+		"fs_write same-name": defaultFSWriteScope("mycli", "mycli"),
+		"fs_read split":      defaultFSReadScope("linear", "linear-pp-cli"),
+		"fs_write split":     defaultFSWriteScope("linear", "linear-pp-cli"),
+	} {
+		if len(paths) == 0 {
+			t.Errorf("%s: scope is empty; expected at least one entry", label)
+		}
+		for _, p := range paths {
+			if !strings.HasSuffix(p, "/") {
+				t.Errorf("%s: scope entry %q must end with `/` so the SBPL emitter writes a subpath rule, not a literal", label, p)
 			}
 		}
 	}
