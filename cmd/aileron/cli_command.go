@@ -609,6 +609,18 @@ func defaultFSWriteScope(connectorName, binaryName string) []string {
 // stable: connector-name triad first, then binary-name triad,
 // duplicates removed — so an emitter that re-wraps the same binary
 // produces a byte-identical manifest.
+//
+// Each emitted path carries a trailing slash. The manifest fs_read/
+// fs_write contract treats trailing-slash paths as directory scopes
+// (every file beneath the path is in scope); slashless paths denote
+// a single-file scope. The wrap emitter always produces directory
+// scopes — config/data/cache roots are never single files — so the
+// trailing slash is required for the platform sandbox to translate
+// these into `subpath` (macOS SBPL) / path-beneath (Linux Landlock)
+// allow rules. Without it, macOS sandbox-exec emits `literal` rules
+// that permit opening only the directory inode itself, and any file
+// the wrapped CLI writes underneath (`data.db`, lockfiles, journal
+// files) faults with SQLITE_CANTOPEN / EPERM.
 func xdgScopeFor(connectorName, binaryName string) []string {
 	names := []string{connectorName}
 	if binaryName != "" && binaryName != connectorName {
@@ -618,7 +630,7 @@ func xdgScopeFor(connectorName, binaryName string) []string {
 	seen := make(map[string]struct{}, 3*len(names))
 	for _, n := range names {
 		for _, root := range []string{xdgConfigHome(), xdgDataHome(), xdgCacheHome()} {
-			p := filepath.Join(root, n)
+			p := filepath.Join(root, n) + "/"
 			if _, ok := seen[p]; ok {
 				continue
 			}
