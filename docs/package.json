@@ -18,6 +18,7 @@
     "astro": "^6.1.6",
     "bits-ui": "^2.18.0",
     "clsx": "^2.1.1",
+    "mermaid": "^11.4.1",
     "rehype-external-links": "^3.0.0",
     "shiki": "^4.0.2",
     "svelte": "^5.55.4",
