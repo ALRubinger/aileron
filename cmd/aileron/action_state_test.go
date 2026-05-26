@@ -68,49 +68,16 @@ func TestRunActionList_RendersTableWithEnabledColumn(t *testing.T) {
 
 func TestOriginBadge_ClassifiesSources(t *testing.T) {
 	cases := map[string]string{
-		"hub://aileron/ship-update@1.0.0":          "HUB",
-		"hub://aileron/list@2.0.0":                 "HUB",
-		"local://user/linear/issues@0.0.1":         "LOCAL",
-		"local://user/sentry/events@0.0.1":         "LOCAL",
-		"local:github://acme/gitcrawl/list@0.0.1":  "WRAP",
-		"local:slackdump/dump@0.0.1":               "WRAP",
-		"":                                         "—",
-		"some-arbitrary-string":                    "—",
-		"https://example.com/foo":                  "—",
+		"hub://aileron/ship-update@1.0.0": "HUB",
+		"hub://aileron/list@2.0.0":        "HUB",
+		"":                                "—",
+		"some-arbitrary-string":           "—",
+		"https://example.com/foo":         "—",
 	}
 	for source, want := range cases {
 		if got := originBadge(source); got != want {
 			t.Errorf("originBadge(%q) = %q, want %q", source, got, want)
 		}
-	}
-}
-
-func TestRunActionList_RendersLocalOriginBadge(t *testing.T) {
-	// A BYOCLI-installed action surfaces its source as
-	// `local://user/<name>/<op>@<version>` (the new shape after
-	// dropping the `local:` wrap-emit prefix for local connectors).
-	// Verify the ORIGIN column reads `LOCAL` for that source.
-	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
-		enabled := true
-		_ = json.NewEncoder(w).Encode(actionListWireResponse{
-			Items: []actionListItem{
-				{Name: "linear-issues", Version: "0.0.1", Source: "local://user/linear/issues@0.0.1", Enabled: &enabled},
-				{Name: "sentry-events", Version: "0.0.1", Source: "local://user/sentry/events@0.0.1", Enabled: &enabled},
-			},
-		})
-	})
-	setBindingBase(t, base)
-
-	var stdout, stderr bytes.Buffer
-	if code := runActionList(nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "LOCAL") {
-		t.Errorf("expected LOCAL badge in output: %s", out)
-	}
-	if strings.Contains(out, "HUB") {
-		t.Errorf("HUB should not appear in a local-only listing: %s", out)
 	}
 }
 

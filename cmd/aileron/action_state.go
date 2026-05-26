@@ -54,35 +54,13 @@ func actionEnabledLabel(enabled *bool) string {
 }
 
 // originBadge derives a short ORIGIN column value from the
-// action's source URL. Used by `aileron action list` to let the
-// user distinguish hub-installed connectors from BYOCLI local
-// ones at a glance, without parsing the full source field.
-//
-// Mapping:
-//
-//   - `hub://...` source → `HUB` (publisher-signed, installed
-//     via `aileron action add <FQN>`)
-//   - `local://...` source → `LOCAL` (BYOCLI, installed via
-//     `aileron cli add` or `aileron pp add`)
-//   - `local:<schemeless-FQN>...` → `WRAP` (the legacy
-//     `aileron action wrap --install` shape; pre-BYOCLI authoring
-//     path)
-//   - anything else → `—` so the column stays width-stable and
-//     the user sees the raw source for diagnostics
-//
-// The badge is intentionally short (≤6 chars) so the column
-// stays narrow next to the longer source URL.
+// action's source URL. Used by `aileron action list` to render a
+// stable column width alongside the longer source URL.
 func originBadge(source string) string {
-	switch {
-	case strings.HasPrefix(source, "hub://"):
+	if strings.HasPrefix(source, "hub://") {
 		return "HUB"
-	case strings.HasPrefix(source, "local://"):
-		return "LOCAL"
-	case strings.HasPrefix(source, "local:"):
-		return "WRAP"
-	default:
-		return "—"
 	}
+	return "—"
 }
 
 // runActionList renders `aileron action list`. Pulls the daemon's
