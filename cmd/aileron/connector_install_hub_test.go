@@ -259,8 +259,8 @@ func TestRunConnectorInstall_HubFlowAlreadyTrustedRendersGreen(t *testing.T) {
 // TestRunConnectorInstall_HubMissingFallsBackToPreview: a 404 from
 // /v1/hub/install-decision means the FQN is not in the Hub. The CLI
 // falls back to the legacy preview-then-install flow without surfacing
-// any error — pre-Hub connectors (private repos, BYOCLI wrappers) keep
-// working the same way they did before #488.
+// any error — pre-Hub connectors (private repos) keep working the same
+// way they did before #488.
 func TestRunConnectorInstall_HubMissingFallsBackToPreview(t *testing.T) {
 	var previewCalled, installCalled bool
 	hubInstallServer(t,

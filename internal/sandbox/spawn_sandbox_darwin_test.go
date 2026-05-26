@@ -71,11 +71,10 @@ func TestApplyPlatformSandbox_Darwin_WrapsCmdWhenParamsDeclared(t *testing.T) {
 }
 
 func TestBuildSBPLProfile_HasPermissiveBaselineWithUserDenies(t *testing.T) {
-	// Contract: per the BYOCLI threat model in ADR-0014's macOS
-	// section, the profile uses an `(allow default)` baseline plus
-	// surgical denies on user-private paths and writes. The wrapped
-	// program name appears as a trailing comment for post-hoc
-	// inspection.
+	// Contract: per ADR-0014's macOS section, the profile uses an
+	// `(allow default)` baseline plus surgical denies on user-private
+	// paths and writes. The wrapped program name appears as a
+	// trailing comment for post-hoc inspection.
 	env := SpawnEnvelope{Program: "/usr/bin/git"}
 	profile := buildSBPLProfile(env, SpawnLimits{FSRead: []string{"~/code/"}})
 	mustContain(t, profile,
@@ -246,12 +245,11 @@ func TestApplyPlatformSandbox_Darwin_RunsRealBinaryUnderSandbox(t *testing.T) {
 }
 
 func TestApplyPlatformSandbox_Darwin_BlocksUserHomeReadOutsideScope(t *testing.T) {
-	// Contract (BYOCLI threat model): a binary spawned under a
-	// profile whose fs_read does not cover a path under /Users
-	// cannot read that path. The kernel sandbox kext rejects the
-	// open, the binary errors. This is the load-bearing defense
-	// against user-secret exfiltration. /bin/cat is a small Mach-O
-	// to use as a probe.
+	// Contract: a binary spawned under a profile whose fs_read does
+	// not cover a path under /Users cannot read that path. The kernel
+	// sandbox kext rejects the open, the binary errors. This is the
+	// load-bearing defense against user-secret exfiltration.
+	// /bin/cat is a small Mach-O to use as a probe.
 	//
 	// Write a sentinel file outside the manifest's scope, then
 	// declare an fs_read that does not cover it, then run cat on

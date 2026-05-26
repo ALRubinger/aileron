@@ -36,8 +36,7 @@ const sandboxExecPath = "/usr/bin/sandbox-exec"
 // (impossible on a healthy macOS install but the runtime fails
 // closed rather than spawn unconfined). Returns nil with no
 // modification to `cmd` when no manifest sandbox parameters were
-// declared (legacy path; pre-BYOCLI connectors continue to run
-// unchanged).
+// declared.
 func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) (platformSandboxHooks, error) {
 	if !limits.PlatformSandboxRequested() {
 		return platformSandboxHooks{}, nil
@@ -66,7 +65,7 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 // private Apple operations like `mach-bootstrap`, `syscall*`,
 // `file-map-executable` for every framework, and is brittle across
 // macOS versions), then surgical denies on the operations that
-// carry the BYOCLI threat model:
+// carry the threat model:
 //
 //   - **File reads under user-private paths.** `/Users`, `/Volumes`,
 //     and user-scoped `/private/var/folders` are denied by default;
@@ -83,10 +82,10 @@ func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) 
 //
 // Reads of `/etc`, `/opt`, `/usr/local`, and other system paths
 // outside `/Users` and `/Volumes` are allowed by the permissive
-// baseline. This matches the BYOCLI threat model (which targets
-// user-secret exfiltration, not OS-file reads) and aligns with
-// what `brew install`-style CLIs already see when run bare from
-// the shell. A future tightening can move toward `(deny default)`
+// baseline. The threat model targets user-secret exfiltration,
+// not OS-file reads, and the permissive baseline aligns with what
+// `brew install`-style CLIs already see when run bare from the
+// shell. A future tightening can move toward `(deny default)`
 // with explicit allows once the system-essentials set has been
 // empirically validated across macOS releases.
 //
@@ -121,16 +120,14 @@ func buildSBPLProfile(env SpawnEnvelope, limits SpawnLimits) string {
 	// a profile that denies the path, `SecPolicyCreateSSL` returns
 	// NULL and Go's TLS stack surfaces it as
 	// `tls: failed to verify certificate: SecPolicyCreateSSL error: 0`
-	// on every HTTPS call. This affects every Go-on-darwin spawn
-	// connector installed under /Users (the default `aileron pp add`
-	// layout puts them under `~/.aileron/connectors/...`).
+	// on every HTTPS call.
 	//
 	// `subpath` is required, not `literal`: Security stats the
 	// surrounding directory in addition to mapping the Mach-O,
 	// so a literal-file allow alone does not suffice. This grant
-	// does not widen the BYOCLI threat model — the binary is
-	// already trusted to execute under this profile; reading its
-	// own resting directory adds no exfiltration surface.
+	// does not widen the threat model — the binary is already
+	// trusted to execute under this profile; reading its own
+	// resting directory adds no exfiltration surface.
 	if env.Program != "" {
 		if expanded, err := expandTilde(env.Program); err == nil {
 			fmt.Fprintf(&b, "(allow file-read* (subpath %s))\n", sbplQuote(filepath.Dir(expanded)))

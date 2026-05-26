@@ -1,7 +1,7 @@
 // Package main is the test-only fake binary the runtime's
 // integration tests wrap to prove the platform sandbox enforces
-// the BYOCLI threat model. The same source is compiled and
-// invoked on every CI runner (linux, macOS, Windows), so the
+// the spawn-primitive threat model. The same source is compiled
+// and invoked on every CI runner (linux, macOS, Windows), so the
 // assertions across the matrix exercise identical attack
 // scenarios and the test surface stays portable.
 //

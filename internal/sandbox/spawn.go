@@ -315,12 +315,12 @@ type SpawnResult struct {
 // placeholder segment. Matching is greedy from left to right; literal
 // segments anchor the placeholder bounds.
 //
-// Optional-group rationale: PrintingPress-style CLIs expose verbs
-// with required + optional flags (e.g. `linear-pp-cli issues create
-// --title T --team K [--description D] [--priority N]`). Without
-// optional groups, every leaf would need a separate operation per
-// flag-combination (2^N — combinatorial explosion); with them, one
-// operation per leaf suffices and the matcher/substitutor admits or
+// Optional-group rationale: CLIs commonly expose verbs with
+// required + optional flags (e.g. `gh issue create --title T
+// --body B [--milestone M] [--label L]`). Without optional
+// groups, every leaf would need a separate operation per
+// flag-combination (2^N — combinatorial explosion); with them,
+// one operation per leaf suffices and the matcher/substitutor admits or
 // elides each optional group independently.
 type argvPattern struct {
 	groups []argvGroup

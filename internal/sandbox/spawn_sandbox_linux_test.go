@@ -196,12 +196,12 @@ func TestApplyPlatformSandbox_Linux_NoRewireWhenOnlyProxyAddrDeclared(t *testing
 }
 
 func TestApplyPlatformSandbox_Linux_HelperEnforcesLandlockReadScope(t *testing.T) {
-	// End-to-end (BYOCLI threat model): a wrapped CLI cannot read
-	// outside its declared fs_read scope. The test binary acts as
-	// the daemon: when the runtime re-execs into the helper marker
-	// (via TestMain dispatch), Landlock is applied and cat is
-	// exec'd; cat reading a sentinel outside the scope fails with
-	// EPERM/EACCES at the kernel boundary.
+	// End-to-end: a wrapped CLI cannot read outside its declared
+	// fs_read scope. The test binary acts as the daemon: when the
+	// runtime re-execs into the helper marker (via TestMain
+	// dispatch), Landlock is applied and cat is exec'd; cat
+	// reading a sentinel outside the scope fails with EPERM/EACCES
+	// at the kernel boundary.
 	if _, err := os.Stat("/bin/cat"); err != nil {
 		t.Skip("/bin/cat not present")
 	}

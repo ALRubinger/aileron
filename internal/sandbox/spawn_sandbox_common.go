@@ -12,9 +12,8 @@ package sandbox
 // A manifest that declares no FS scopes, no network, and no proxy
 // address (zero-value SpawnLimits) gets the legacy no-op behavior
 // so pre-sandbox tests and internal smoke checks continue to
-// function. Production BYOCLI connectors always declare at least
-// an FS scope and therefore land in the unavailable path on
-// unsupported OSes.
+// function. Connectors that declare any sandbox-relevant scope
+// land in the unavailable path on unsupported OSes.
 //
 // Lives in a non-build-tagged file so every supported platform's
 // CI run measures it. The build-tagged entry point in
