@@ -92,7 +92,6 @@ type apiServer struct {
 	actionState        action.StateStore // per-action user preferences (enabled/disabled overlay); nil means defaults apply
 	executor           action.Executor   // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
 	installer          *cstore.Installer    // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
-	localStore         *cstore.LocalStore   // BYOCLI local-mode connectors under ~/.aileron/connectors/local (#749); nil disables local-FQN lookups in binding setup
 	versionLister      cstore.VersionLister // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
 	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
 	actionApprovals    *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
