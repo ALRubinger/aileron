@@ -103,4 +103,3 @@ The full set of operations the connector exposes is listed in its [hub entry](ht
 
 - [BlueBubbles documentation](https://bluebubbles.app/docs/)
 - [Installing a Connector](/guides/installing-a-connector/)
-- [Wrapping a CLI](/guides/wrapping-a-cli/) — for the spawn-primitive pattern used by other connectors (not this one; iMessage uses HTTP instead).

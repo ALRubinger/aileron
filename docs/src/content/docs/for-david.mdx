@@ -47,10 +47,11 @@ brew install --cask ALRubinger/aileron/aileron
 Installs Aileron on your system. You'll be prompted to create a passphrase for your new local Aileron vault, which is where we store credentials. Think 1Password or LastPass.
 
 ```sh
-aileron pp add sentry
+aileron connector install github://aileron/google
+aileron secret set GOOGLE_OAUTH_TOKEN
 ```
 
-Pulls Sentry from the [PrintingPress](https://printingpress.dev/) catalog, runs Sentry's own CLI through Aileron's introspector, prompts you for `SENTRY_AUTH_TOKEN` token, and stores it sealed in the vault.
+Installs the Aileron Google connector and stores its OAuth credential sealed in the vault.
 
 <PlatformTabs items={[
   { value: "claude", label: "Claude Code", lang: "sh", code: "aileron launch claude" },

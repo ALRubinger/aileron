@@ -39,7 +39,7 @@ Authorize Google in your browser... done
 
 Claude Code now has twenty-one Google capabilities in its catalog, spanning Gmail, Calendar, Contacts, Drive, and Docs. Reads run silently when your agent reaches for them. Reversible writes (drafting an email, creating a calendar event, creating or editing a Doc, uploading or renaming a Drive file) run without prompting because the API itself provides the safety net. Irreversible writes (`send-email`, `send-draft`) and third-party-observable writes (`move-file`) pause for your approval — sent mail and a permission change aren't things you take back. Browse the full list in [Google](/actions/google/).
 
-Aileron ships a Slack connector today, and `aileron pp add <name>` or `aileron cli add <path>` turns any CLI you already use into a sandboxed capability your agent can call. Browse the full catalog in [Actions](/actions/google/).
+Aileron ships a Slack connector today alongside the Google catalog. Browse the full catalog in [Actions](/actions/google/).
 
 ## Put first principles back into AI
 
@@ -130,8 +130,7 @@ Your agent's existing MCP servers keep exposing tools the same way. The LLM stil
 The architecture above is real, shipped, and runs against real APIs. Three milestones anchor it:
 
 - **[Milestone v1](https://github.com/ALRubinger/aileron/issues/493)** — First end-to-end install-and-execute path. A signed reference connector ([`aileron-connector-google`](https://github.com/ALRubinger/aileron-connector-google)) is installed by FQN, six Gmail and Calendar actions are bound to OAuth credentials in the local vault, and `aileron launch claude` runs the whole loop with sealed credentials, capability bounds, and audit emission. Ratified by 11 ADRs at [docs.withaileron.ai/adr](/adr/).
-- **[Milestone v2](https://github.com/ALRubinger/aileron/issues/505)** — Personal-context demo for power users. Adds the spawn capability primitive ([ADR-0002](/adr/0002-connector-model/), [ADR-0014](/adr/0014-spawn-sandbox-technology/)) so sandboxed connectors can request the host to run a bounded local CLI subprocess. The shared spawn-forwarder lets you wrap any CLI with a manifest, no per-tool WASM build. A native HTTP [Slack connector](/actions/slack/) ships alongside the [Wrapping a CLI](/guides/wrapping-a-cli/) guide.
-- **[Milestone v3](https://github.com/ALRubinger/aileron/issues/584)** — BYOCLI: one-command CLI wrapping. `aileron cli add <path>` introspects an installed binary's `--help` inside the spawn sandbox, generates the connector manifest, prompts once for any credential env var, and writes a vault binding. `aileron pp add <name>` does the same starting from the [PrintingPress](https://printingpress.dev/) catalog — fetches the live `registry.json`, runs `go install`, hands off to the introspector. Closes the gap between "I have a CLI on my laptop" and "my agent can call it sandboxed and audited" to one command.
+- **[Milestone v2](https://github.com/ALRubinger/aileron/issues/505)** — Personal-context demo for power users. Adds the spawn capability primitive ([ADR-0002](/adr/0002-connector-model/), [ADR-0014](/adr/0014-spawn-sandbox-technology/)) so sandboxed connectors can request the host to run a bounded local CLI subprocess. A native HTTP [Slack connector](/actions/slack/) ships in this milestone.
 
 The [ADR index](/adr/) is the canonical record of every architectural decision that got us here.
 
