@@ -93,16 +93,16 @@ func TestBuildSBPLProfile_AllowsReadOnSpawnedBinaryDir(t *testing.T) {
 	// binary's parent directory and that allow MUST appear after
 	// the /Users deny so the SBPL evaluator reinstates it. Without
 	// this, macOS Security framework's `SecPolicyCreateSSL` fails
-	// for any Go binary installed under /Users (the default
-	// `aileron pp add` layout), breaking every HTTPS call.
+	// for any Go binary installed under /Users, breaking every
+	// HTTPS call.
 	//
 	// `subpath` is required: a `literal` rule on the binary file
 	// alone does not satisfy Security framework, which also stats
 	// the surrounding directory while determining code-signing
 	// identity for keychain access scoping.
-	env := SpawnEnvelope{Program: "/Users/someone/.aileron/connectors/local/foo/bin/foo-cli"}
+	env := SpawnEnvelope{Program: "/Users/someone/.aileron/store/connectors/sha256/abc123/bin/foo-cli"}
 	profile := buildSBPLProfile(env, SpawnLimits{FSRead: []string{"~/code/"}})
-	wantRule := `(allow file-read* (subpath "/Users/someone/.aileron/connectors/local/foo/bin"))`
+	wantRule := `(allow file-read* (subpath "/Users/someone/.aileron/store/connectors/sha256/abc123/bin"))`
 	if !strings.Contains(profile, wantRule) {
 		t.Errorf("profile missing binary-dir allow rule %q:\n%s", wantRule, profile)
 	}
