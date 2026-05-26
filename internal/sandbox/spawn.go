@@ -1004,9 +1004,8 @@ func hostSpawn(ctx context.Context, mod api.Module, reqPtr, reqLen uint32) int32
 // The runtime resolves the op against the manifest, substitutes
 // placeholders, builds the spawn envelope from the manifest's program
 // and env_passthrough, then dispatches through the same gate / executor
-// / audit path as `spawn`. The forwarder WASM is the canonical caller;
-// the function is the high-level convenience for connectors that
-// don't need direct envelope control.
+// / audit path as `spawn`. It is the high-level convenience for
+// connectors that don't need direct envelope control.
 //
 // Return codes match `spawn`:
 //

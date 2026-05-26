@@ -14,7 +14,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/sandbox"
-	"github.com/ALRubinger/aileron/internal/sandbox/forwarder"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -393,7 +392,7 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 	if err != nil {
 		return nil, nil, "", err
 	}
-	binBytes, err := loadConnectorBytes(cmf, entryDir)
+	binBytes, err := loadConnectorBytes(entryDir)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -408,29 +407,10 @@ func (e *SandboxExecutor) connectorFor(ctx context.Context, m *Manifest, connect
 }
 
 // loadConnectorBytes returns the WASM bytes the runtime should compile
-// for `cmf`. For forwarder-shaped connectors (those whose manifest
-// declares `connector.forwarder = "builtin://spawn-forwarder"`), the
-// bytes are the daemon-embedded forwarder; entryDir holds the manifest
-// only. For per-binary connectors, the bytes are read from disk under
-// entryDir as before.
-func loadConnectorBytes(cmf *cstore.Manifest, entryDir string) ([]byte, error) {
-	if cmf != nil && cmf.Connector.Forwarder == cstore.BuiltinForwarderSpawn {
-		// The forwarder bytes are part of the daemon binary; the
-		// manifest's content hash already includes them via
-		// cstore.ForwarderConnectorHash so the store does not need a
-		// copy on disk.
-		//
-		// Empty WASM means this daemon was built without
-		// `task build:forwarder` (the embed wrapper falls back to a
-		// zero-length slice when the file is absent at compile time).
-		// Surface that loudly rather than handing empty bytes to
-		// Wazero's compiler.
-		if len(forwarder.WASM) == 0 {
-			return nil, fmt.Errorf("connector %q uses %s but this daemon was built without the forwarder WASM; rebuild with `task build:cli` (or `task build`)",
-				cmf.Connector.Name, cstore.BuiltinForwarderSpawn)
-		}
-		return forwarder.WASM, nil
-	}
+// for the connector under entryDir. Reads `connector.wasm` and falls
+// back to `connector.wat` so test fixtures can ship a text-format
+// connector without needing a `wat2wasm` toolchain.
+func loadConnectorBytes(entryDir string) ([]byte, error) {
 	binPath := filepath.Join(entryDir, "connector.wasm")
 	if _, statErr := os.Stat(binPath); errors.Is(statErr, os.ErrNotExist) {
 		binPath = filepath.Join(entryDir, "connector.wat")

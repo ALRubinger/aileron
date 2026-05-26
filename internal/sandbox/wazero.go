@@ -92,10 +92,9 @@ func NewWazeroRuntime(ctx context.Context, opts ...RuntimeOption) (*WazeroRuntim
 // `http_response_status`, `http_response_read`.
 //
 // Spawn-side imports (per ADR-0002 spawn primitive): `spawn` (low-level
-// envelope shape used by custom connectors), `spawn_op` (high-level
-// op-name + args shape consumed by the shared forwarder), and the
-// output retrieval trio `spawn_status`, `spawn_output_size`,
-// `spawn_output_read`.
+// envelope shape used by connectors that drive the runtime directly),
+// `spawn_op` (high-level op-name + args shape), and the output
+// retrieval trio `spawn_status`, `spawn_output_size`, `spawn_output_read`.
 func (w *WazeroRuntime) installHostModule(ctx context.Context) error {
 	w.hostMu.Lock()
 	defer w.hostMu.Unlock()
