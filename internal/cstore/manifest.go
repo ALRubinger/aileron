@@ -65,14 +65,6 @@ type ManifestConnector struct {
 	// install consent UI. Not load-bearing; provenance lives in the FQN.
 	Publisher string `toml:"publisher"`
 
-	// Forwarder, when set, opts the connector into the daemon-embedded
-	// shared spawn-forwarder WASM (per ADR-0002's spawn-primitive
-	// section). The only allowed value in v1 is "builtin://spawn-forwarder".
-	// When set, the install pipeline routes around the per-connector
-	// WASM fetch; the daemon supplies the forwarder bytes at execution
-	// time and the manifest is the connector's complete identity.
-	Forwarder string `toml:"forwarder,omitempty"`
-
 	// Idempotency is the optional `[connector.idempotency]` block per
 	// ADR-0010. Absent → idempotent default; present → must declare
 	// `default = "idempotent" | "not_idempotent"`. The retry primitive
@@ -80,11 +72,6 @@ type ManifestConnector struct {
 	// retry a failed call.
 	Idempotency *ManifestIdempotency `toml:"idempotency"`
 }
-
-// BuiltinForwarderSpawn is the reserved FQN for the daemon-embedded
-// spawn-forwarder. The only allowed value of ManifestConnector.Forwarder
-// in v1; new builtin:// shapes require an ADR amendment.
-const BuiltinForwarderSpawn = "builtin://spawn-forwarder"
 
 // ManifestIdempotency is `[connector.idempotency]` — the connector's
 // declaration of whether a retry could double-send a side effect.
@@ -215,10 +202,8 @@ type ManifestSpawn struct {
 	// gate's argv allow-list is derived from operations[*].argv.
 	//
 	// An incoming op whose name is not in this map is denied with
-	// capability_denied. The forwarder WASM consumes this table via the
-	// aileron_host.spawn_op host function; per-binary connectors using
-	// the low-level aileron_host.spawn can also read it from the runtime
-	// gate.
+	// capability_denied. Connectors consume this table via the
+	// aileron_host.spawn host function from inside their WASM.
 	Operations map[string]ManifestSpawnOperation `toml:"operations"`
 
 	// EnvPassthrough is the closed set of environment keys the runtime
@@ -229,8 +214,6 @@ type ManifestSpawn struct {
 
 	// CredentialEnvKeys is the subset of EnvPassthrough into which the
 	// runtime injects the resolved credential value (per [capabilities.credential]).
-	// Forwarder connectors use this declaration so the runtime knows
-	// which env keys to fill with the vault binding at spawn_op time.
 	// Each entry must also appear in EnvPassthrough.
 	CredentialEnvKeys []string `toml:"credential_env_keys,omitempty"`
 
@@ -411,17 +394,6 @@ func ValidateManifest(m *Manifest, file string) error {
 	if m.Connector.ProvenanceHash != "" {
 		if !strings.HasPrefix(m.Connector.ProvenanceHash, "sha256:") || len(m.Connector.ProvenanceHash) <= len("sha256:") {
 			return newValidationErr(file, "[connector].provenance_hash %q must be prefixed with sha256:", m.Connector.ProvenanceHash)
-		}
-	}
-	if m.Connector.Forwarder != "" {
-		if m.Connector.Forwarder != BuiltinForwarderSpawn {
-			return newValidationErr(file,
-				"[connector].forwarder %q is not recognized; v1 supports only %q",
-				m.Connector.Forwarder, BuiltinForwarderSpawn)
-		}
-		if m.Capabilities.Spawn == nil {
-			return newValidationErr(file,
-				"[connector].forwarder is set but [capabilities.spawn] is absent; the forwarder requires a spawn capability to drive")
 		}
 	}
 	if m.Capabilities.Network != nil {

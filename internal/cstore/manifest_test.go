@@ -702,55 +702,6 @@ func TestValidateManifest_RejectsInvalidCredentialKeyName(t *testing.T) {
 	}
 }
 
-func TestValidateManifest_AcceptsForwarderConnector(t *testing.T) {
-	// A connector that opts into the daemon-embedded forwarder declares
-	// connector.forwarder plus a normal spawn block. Validation accepts.
-	m := canonicalManifestForTest()
-	m.Connector.Forwarder = BuiltinForwarderSpawn
-	m.Capabilities.Spawn = goodSpawn()
-	if err := ValidateManifest(m, "ok.toml"); err != nil {
-		t.Errorf("Validate() = %v", err)
-	}
-}
-
-func TestValidateManifest_RejectsUnknownForwarder(t *testing.T) {
-	m := canonicalManifestForTest()
-	m.Connector.Forwarder = "builtin://something-else"
-	m.Capabilities.Spawn = goodSpawn()
-	err := ValidateManifest(m, "ok.toml")
-	if err == nil {
-		t.Fatal("expected error for unknown forwarder")
-	}
-	if !strings.Contains(err.Error(), "not recognized") {
-		t.Errorf("err = %v", err)
-	}
-}
-
-func TestValidateManifest_RejectsForwarderWithoutSpawn(t *testing.T) {
-	// The forwarder needs a spawn capability to drive; setting it
-	// without [capabilities.spawn] is meaningless.
-	m := canonicalManifestForTest()
-	m.Connector.Forwarder = BuiltinForwarderSpawn
-	err := ValidateManifest(m, "ok.toml")
-	if err == nil {
-		t.Fatal("expected error when forwarder is set but no spawn block")
-	}
-	if !strings.Contains(err.Error(), "[capabilities.spawn]") {
-		t.Errorf("err = %v", err)
-	}
-}
-
-func TestValidateManifest_AcceptsForwarderFreeSpawnConnector(t *testing.T) {
-	// A connector can use spawn without opting into the forwarder
-	// (e.g. a custom WASM body that calls aileron_host.spawn directly).
-	m := canonicalManifestForTest()
-	m.Capabilities.Spawn = goodSpawn()
-	// Forwarder field intentionally absent.
-	if err := ValidateManifest(m, "ok.toml"); err != nil {
-		t.Errorf("Validate() = %v", err)
-	}
-}
-
 func TestManifestSpawn_ArgvPatternsDerivedFromOperations(t *testing.T) {
 	s := &ManifestSpawn{
 		Operations: map[string]ManifestSpawnOperation{

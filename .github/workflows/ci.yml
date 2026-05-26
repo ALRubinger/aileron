@@ -142,14 +142,6 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build forwarder WASM
-        # The sandbox/forwarder tests load the embedded spawn-forwarder
-        # WASM bytes; without this build step those tests fail with
-        # "invalid magic number". The ubuntu Unit Tests job gets this
-        # automatically via `task test:go:ci`'s deps; this job runs a
-        # narrower target so it has to build the dep itself.
-        run: task build:forwarder
-
       - name: Run platform-specific sandbox tests
         shell: bash
         run: |
@@ -195,14 +187,6 @@ jobs:
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build forwarder WASM
-        # internal/sandbox/forwarder tests load the embedded
-        # spawn-forwarder WASM bytes; without this build step those
-        # tests fail with "invalid magic number". The ubuntu job
-        # gets this via `task test:go:ci`'s deps; the targeted
-        # platform jobs build it explicitly.
-        run: task build:forwarder
 
       - name: Run platform-specific tests
         shell: bash
