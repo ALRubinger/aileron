@@ -231,16 +231,6 @@ The connector itself never calls `os/exec` directly. The connector is a sandboxe
 
 The platform-level enforcement mechanism (how the kernel actually confines the subprocess to its declared filesystem scope, blocks network access from the subprocess itself, and prevents privilege escalation) is the subject of [ADR-0014](/adr/0014-spawn-sandbox-technology). This ADR commits to the property: the subprocess executes under an enforcement boundary that the runtime owns. It does not commit to a specific mechanism.
 
-#### Shared spawn-forwarder is the common shape
-
-For the vast majority of spawn-primitive connectors (wrapping a CLI like `gitcrawl`, `slackdump`, or `imsg`), the WASM body is identical boilerplate: read an op name and a parameters object from stdin, look up the operation in the manifest, substitute placeholders, call the host function, emit the captured output. The interesting variation between one wrap and the next lives entirely in the manifest.
-
-Aileron ships a single WASM module (the **spawn forwarder**) embedded in the daemon binary. When a connector manifest declares `forwarder = "builtin://spawn-forwarder"` in its `[connector]` block, the runtime loads the embedded bytes; the manifest is the connector's complete identity. There is no per-wrap WASM binary to build, sign, or publish.
-
-This collapses the cost of "wrap any CLI as a connector" from a per-CLI repo with its own CI and signing pipeline down to a manifest file. The `aileron action wrap <cli>` tool from [#511](https://github.com/ALRubinger/aileron/issues/511) emits a forwarder-referencing manifest directly; `aileron action wrap <cli> --install` registers the manifest with the daemon in one step, no build required.
-
-Connectors that need more than the forwarder offers (custom retry logic, response shaping, multiple primitives in one connector) continue to ship their own WASM body and omit the `forwarder` field. The two modes coexist; the manifest's `forwarder` field is what tells the install pipeline which one applies.
-
 #### Enforcement and audit
 
 Every spawn call passes through `SpawnPolicy.CheckSpawn(envelope)` before the runtime exec's anything. The check is the gate. It validates:
@@ -267,9 +257,8 @@ The mechanics below are the deeper spec for runtime and tooling implementors; re
 
 ```toml
 [connector]
-name      = "github://alr/local-gitcrawl"
-version   = "0.0.1"
-forwarder = "builtin://spawn-forwarder"   # opt into the daemon-embedded WASM
+name    = "github://alr/local-gitcrawl"
+version = "0.0.1"
 
 [capabilities.spawn]
 programs = [{ path = "/usr/bin/git", hash = "sha256:bd6e..." }]
@@ -301,8 +290,8 @@ The runtime registers the following functions under the existing `aileron_host` 
 
 | Function | Shape | Purpose |
 |---|---|---|
-| `spawn` | `(envelope_ptr, envelope_len) -> handle` | Low-level. Submits a fully-formed spawn envelope: `{ program, argv, env, cwd?, stdin? }`. Used by custom-WASM connectors that need envelope control. |
-| `spawn_op` | `(op_ptr, op_len, args_ptr, args_len) -> handle` | High-level. Names an operation declared in `[capabilities.spawn.operations]` and a JSON map of placeholder values. The runtime substitutes, builds the envelope, and dispatches through the same gate as `spawn`. Used by the shared forwarder. |
+| `spawn` | `(envelope_ptr, envelope_len) -> handle` | Low-level. Submits a fully-formed spawn envelope: `{ program, argv, env, cwd?, stdin? }`. Used by connectors that need envelope control. |
+| `spawn_op` | `(op_ptr, op_len, args_ptr, args_len) -> handle` | High-level. Names an operation declared in `[capabilities.spawn.operations]` and a JSON map of placeholder values. The runtime substitutes, builds the envelope, and dispatches through the same gate as `spawn`. |
 | `spawn_status` | `(handle) -> exit_code` | Returns the subprocess exit code (or a negative sentinel for runtime-side denial). |
 | `spawn_output_size` | `(handle, which) -> n_bytes` | Reports the captured size of stdout (`which=0`) or stderr (`which=1`). |
 | `spawn_output_read` | `(handle, which, dst_ptr, dst_len) -> n_read` | Copies captured output bytes into the connector's linear memory. |
@@ -327,36 +316,7 @@ For `spawn_op`, the connector passes only the op name and a parameter map; the r
 { "op": "log", "args": { "since": "2026-04-01", "author": "alr" } }
 ```
 
-A `{name}` placeholder with no value in `args` produces `capability_denied` with `boundary_detail: "envelope"`. The forwarder cannot exceed the manifest's declarations any more than a per-CLI WASM body could.
-
-##### Connector identity for shared-forwarder connectors
-
-ADR-0002's content-hash invariant (the connector's identity is the content hash of binary plus manifest) holds for both modes:
-
-- **Per-binary connector** (no `connector.forwarder` field): hash is `sha256(binary || manifest.toml)` as before.
-- **Shared-forwarder connector** (`connector.forwarder = "builtin://spawn-forwarder"`): hash is `sha256(forwarder_bytes || manifest.toml)`, where `forwarder_bytes` is the daemon-embedded forwarder for the running daemon's release. Tampering with the manifest after install still produces a hash mismatch; the trust boundary for a wrapped CLI flows from the user's manifest plus the Aileron daemon binary they ran.
-
-For wraps the user pulled from a Hub entry or a friend's gist, the manifest's signature (an ed25519 signature over the manifest bytes) is verified at install. The embedded forwarder is implicitly trusted because it is part of the daemon binary, which the user already accepted by running it.
-
-A daemon upgrade that ships new forwarder bytes invalidates every shared-forwarder wrap's cached hash on the host. The install pipeline detects the mismatch and re-stores the manifest under the new hash; the manifest content is unchanged.
-
-##### Distribution: embedded in the daemon, addressable by a reserved FQN
-
-The forwarder ships inside the Aileron daemon binary via `go:embed`. The reserved FQN `builtin://spawn-forwarder` is the only `builtin://` scheme defined in v1; the scheme is closed and not user-extensible. Adding more `builtin://` entries (a future shared-HTTP-forwarder, for example) is an explicit ADR decision, never a manifest-side configuration.
-
-The install pipeline routes around the binary fetch when `connector.forwarder` is set: it verifies the manifest's signature, writes the manifest into `~/.aileron/store/connectors/sha256/<hash>/`, and never goes to the network. The forwarder is loaded from the daemon binary at execution time.
-
-##### Tooling: `aileron action wrap`
-
-With the forwarder in place, `aileron action wrap <cli>` produces a complete, locally-runnable connector source tree without a WASM build step. The Taskfile.yml and `release.yml` stubs the tool currently emits become optional (only useful when the user wants to publish the manifest to a Hub entry). The default output is:
-
-```
-connector/manifest.toml         (with [capabilities.spawn.operations] and forwarder reference)
-actions/<op>/action.md          (one per declared operation)
-keys/README.md                  (optional, only for publishing)
-```
-
-A new `aileron action wrap --install` short-circuits the source-tree step: it writes the manifest directly to the daemon's connector store and emits action.md files into the user's `~/.aileron/actions/`. The "wrap" verb then matches the user's mental model: in one command, a local CLI becomes an action surface the agent can call.
+A `{name}` placeholder with no value in `args` produces `capability_denied` with `boundary_detail: "envelope"`. A connector cannot exceed the manifest's declarations at runtime.
 
 ### Capabilities are abstract types, not concrete resources
 
