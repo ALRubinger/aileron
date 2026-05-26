@@ -72,8 +72,7 @@ var osExecutable = os.Executable
 // Returns [ErrSpawnUnavailable] when unprivileged user namespaces
 // are disabled at the sysctl level or when the daemon binary
 // path cannot be discovered. Returns nil with no modification to
-// `cmd` when no manifest sandbox parameters were declared
-// (legacy path; pre-BYOCLI connectors continue to run unchanged).
+// `cmd` when no manifest sandbox parameters were declared.
 func applyPlatformSandbox(cmd *exec.Cmd, env SpawnEnvelope, limits SpawnLimits) (platformSandboxHooks, error) {
 	_ = env
 	if !limits.PlatformSandboxRequested() {

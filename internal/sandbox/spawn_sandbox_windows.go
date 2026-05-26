@@ -46,7 +46,7 @@ var (
 // The disable/delete/restrict lists are all nil for v1 (we rely on
 // DISABLE_MAX_PRIVILEGE | LUA_TOKEN to do the work). Plumbing them
 // through is a v2 hardening: explicit SIDs-to-restrict tightens the
-// trust further but isn't load-bearing for the BYOCLI threat model.
+// trust further but isn't load-bearing for the current threat model.
 func createRestrictedToken(existing windows.Token, flags uint32) (windows.Token, error) {
 	var newToken windows.Token
 	r1, _, e1 := procCreateRestrictedToken.Call(
@@ -90,8 +90,8 @@ func createRestrictedToken(existing windows.Token, flags uint32) (windows.Token,
 // What this does NOT yet deliver:
 //
 //   - Read confinement. Low integrity blocks writes, not reads.
-//     The BYOCLI threat model's "no ~/.ssh exfiltration" claim
-//     requires AppContainer (ADR-0014 defers).
+//     The "no ~/.ssh exfiltration" claim requires AppContainer
+//     (ADR-0014 defers).
 //   - ACL adjustments on fs_write paths. Low integrity is coarse;
 //     per-path ACLs giving the low-integrity token write access
 //     to declared scopes are a follow-up.
@@ -326,8 +326,8 @@ func createSpawnJobObject() (windows.Handle, error) {
 // Between exec.Cmd.Start and this call the subprocess is live
 // but unjobbed for a few microseconds. The window is a known
 // trade-off versus CREATE_SUSPENDED + manual ResumeThread which
-// Go's os/exec does not directly expose. For the BYOCLI threat
-// model the brief unjobbed window is acceptable; documented in
+// Go's os/exec does not directly expose. The brief unjobbed
+// window is acceptable for the threat model; documented in
 // ADR-0014's Windows section.
 func assignProcessToSpawnJob(job windows.Handle, p *os.Process) error {
 	procHandle, err := windows.OpenProcess(

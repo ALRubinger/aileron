@@ -118,14 +118,6 @@ func TestBypassesVault(t *testing.T) {
 		{"sync", []string{"sync"}, false},
 		{"audit list", []string{"audit", "list"}, false},
 		{"sessions list", []string{"sessions", "list"}, false},
-		// Per #783, BYOCLI commands now go through the state machine
-		// so first-run onboarding (banner + ASCII art + vault init)
-		// fires *before* the catalog fetch / go install. The cached
-		// passphrase covers the subsequent binding write without re-
-		// prompting the user.
-		{"pp add", []string{"pp", "add", "linear"}, false},
-		{"cli add", []string{"cli", "add", "/usr/local/bin/gh"}, false},
-		{"cli refresh", []string{"cli", "refresh", "linear"}, false},
 		{"unknown command", []string{"bogus"}, false},
 	}
 	for _, tc := range cases {

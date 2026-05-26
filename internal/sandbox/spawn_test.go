@@ -1308,10 +1308,10 @@ func TestArgvPattern_Substitute_PreservesLiteralTokens(t *testing.T) {
 	}
 }
 
-// Optional-group tests (`[...]` syntax). The wrap library targets
-// PrintingPress-style CLIs where leaves expose required + optional
-// flags; the pattern admits both fully-elided and fully-rendered
-// optional groups for the same operation.
+// Optional-group tests (`[...]` syntax). Pattern admits both
+// fully-elided and fully-rendered optional groups for the same
+// operation, supporting CLIs whose leaves expose required +
+// optional flags.
 
 func TestArgvPattern_OptionalGroup_ElidesWhenInputMissing(t *testing.T) {
 	pat := parseArgvPattern("issues create --title {title} [--description {description}]")
