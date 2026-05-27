@@ -6,6 +6,7 @@
   "platformAutomerge": true,
   "automergeStrategy": "squash",
   "minimumReleaseAge": "3 days",
+  "postUpdateOptions": ["gomodTidy"],
   "packageRules": [
     {
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
