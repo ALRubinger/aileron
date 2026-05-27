@@ -11,7 +11,7 @@ import (
 	"strconv"
 
 	"github.com/ALRubinger/aileron/internal/source"
-	gh "github.com/google/go-github/v87/github"
+	gh "github.com/google/go-github/v88/github"
 	"golang.org/x/oauth2"
 )
 
