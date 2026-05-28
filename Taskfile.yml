@@ -16,6 +16,7 @@ tasks:
     desc: Run all code generators
     cmds:
       - task: generate:api
+      - task: generate:tokens
 
   generate:api:
     desc: Generate Go types and server interface from OpenAPI spec
@@ -27,6 +28,18 @@ tasks:
       - api/oapi-codegen.yaml
     generates:
       - api/gen/server.gen.go
+
+  generate:tokens:
+    desc: Generate design token CSS for docs and webapp
+    cmds:
+      - node design/build/generate-tokens.mjs
+    sources:
+      - design/tokens.json
+      - design/build/generate-tokens.mjs
+    generates:
+      - design/build/output/tokens.generated.css
+      - docs/src/styles/tokens.generated.css
+      - webapp/src/tokens.generated.css
 
   build:
     desc: Build everything (containers, server, MCP, enclave, CLI, webapp, docs)
@@ -102,6 +115,7 @@ tasks:
 
   build:webapp:
     desc: Install webapp dependencies, build static output, copy into internal/app/webapp_dist for Go embed
+    deps: [generate:tokens]
     dir: webapp
     cmds:
       - pnpm install
@@ -123,6 +137,7 @@ tasks:
 
   build:docs:
     desc: Install docs dependencies and build
+    deps: [generate:tokens]
     dir: docs
     cmds:
       - pnpm install
@@ -176,6 +191,7 @@ tasks:
 
   dev:webapp:
     desc: Run the local webapp dev server. Iterate without rebuilding the daemon — `aileron launch` still serves the embedded build, but the dev server at localhost:5173 hot-reloads on edits.
+    deps: [generate:tokens]
     dir: webapp
     cmds:
       - pnpm dev
@@ -188,6 +204,7 @@ tasks:
 
   dev:docs:
     desc: Run the docs dev server locally
+    deps: [generate:tokens]
     dir: docs
     cmds:
       - mkdir -p public
