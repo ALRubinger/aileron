@@ -8,6 +8,16 @@
 
 # Build artifacts
 build
+dist
+docs/.astro
+docs/dist
+docs/node_modules
+ui/.svelte-kit
+ui/build
+ui/node_modules
+webapp/.svelte-kit
+webapp/build
+webapp/node_modules
 
 # Node / UI (separate Railway service with its own root)
 ui
