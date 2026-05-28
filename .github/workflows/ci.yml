@@ -317,6 +317,9 @@ jobs:
         working-directory: webapp
         run: pnpm test
 
+      - name: Generate design tokens
+        run: node design/build/generate-tokens.mjs
+
       - name: Build for E2E
         working-directory: webapp
         run: pnpm build

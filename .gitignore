@@ -22,6 +22,7 @@ ui/node_modules/
 webapp/.svelte-kit/
 webapp/build/
 webapp/node_modules/
+webapp/src/tokens.generated.css
 
 # The webapp embed dir lives next to its embed directive so `//go:embed`
 # can reach it. Everything in there is build output overwritten by
@@ -63,6 +64,7 @@ docs/.astro/
 docs/dist/
 docs/node_modules/
 docs/public/openapi.yaml
+docs/src/styles/tokens.generated.css
 
 # Environment files with secrets
 deploy/.env
