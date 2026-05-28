@@ -20,6 +20,6 @@ test
 deploy
 saas
 
-# Documentation (docs service only needs docs/ and internal/api/openapi.yaml)
+# Documentation image needs docs/, design tokens, and internal/api/openapi.yaml.
 *.md
 !AILERON.md
