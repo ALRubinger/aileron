@@ -171,6 +171,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron connector install <FQN>    Install a connector binary from its FQN")
 	fmt.Fprintln(w, "  aileron connector check            Check installed connectors for newer versions")
 	fmt.Fprintln(w, "  aileron action add <FQN>           Install an action template from its FQN")
+	fmt.Fprintln(w, "  aileron action run <NAME>          Invoke an installed action directly")
 	fmt.Fprintln(w, "  aileron keyring trust <auth> <key> Authorize a publisher's signing key for installs")
 	fmt.Fprintln(w, "  aileron keyring list               List trusted publishers and key fingerprints")
 	fmt.Fprintln(w, "  aileron keyring revoke <auth>      Remove a publisher's keys from the trust list")
@@ -1262,6 +1263,7 @@ const connectorUsage = `usage:
 
 const actionUsage = `usage:
   aileron action list                  [--json]
+  aileron action run <NAME>            [--arg k=v ...] [--args <json>] [--json] [--audit-id-out <path>]
   aileron action enable <NAME>
   aileron action disable <NAME>
   aileron action add <FQN>             [--version=<v>] [--force] [--yes] [--no-bind]
@@ -1449,6 +1451,8 @@ func runAction(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runActionAddSuite(args[1:], br, stdout, stderr)
 	case "list":
 		return runActionList(args[1:], stdout, stderr)
+	case "run":
+		return runActionRun(args[1:], stdout, stderr)
 	case "enable":
 		return runActionToggle(args[1:], true, stdout, stderr)
 	case "disable":

@@ -24,7 +24,40 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 | `aileron action add <FQN>@<version>` | Fetch an action template from the named source and copy it into `~/.aileron/actions/`. Walks declared connector dependencies and prompts for each. | [ADR-0003](/adr/0003-action-model), [ADR-0007](/adr/0007-install-consent) |
 | `aileron action update <name>` | Fetch the latest version of an installed action's template; show a diff against the local file; apply on confirmation. | [ADR-0003](/adr/0003-action-model) |
 | `aileron action list` | List every action in `~/.aileron/actions/` with its source FQN, version, and connector dependencies. | [ADR-0003](/adr/0003-action-model) |
+| `aileron action run <name>` | Invoke an installed action directly from the terminal through the same daemon endpoint used by the agent-facing MCP server. Useful for smoke tests, connector diagnostics, and scripts. | [ADR-0003](/adr/0003-action-model), [ADR-0008](/adr/0008-intent-matching), [ADR-0009](/adr/0009-user-channel) |
 | `aileron action remove <name>` | Delete an installed action file. Connectors no longer referenced are *not* automatically removed; use `aileron connector gc`. | [ADR-0003](/adr/0003-action-model) |
+
+### `aileron action run`
+
+```bash
+aileron action run <name> [--arg k=v ...] [--args <json>] [--json] [--audit-id-out <path>]
+```
+
+`<name>` is the installed action name shown by `aileron action list`, such as `sentry-organizations-list` or `linear-issues-create`. The CLI posts to `POST /v1/actions/{name}/run`; there is no separate execution path or weaker approval path for terminal invocations.
+
+Arguments can be supplied in either of two mutually exclusive forms:
+
+```bash
+aileron action run linear-issues-create \
+  --arg team=ENG \
+  --arg title='Smoke test'
+
+aileron action run linear-issues-create \
+  --args '{"labels":["bug","triage"],"priority":2}'
+```
+
+`--arg k=v` is repeatable and sends string values. `--args <json>` sends a raw JSON object for nested values, arrays, numbers, or booleans.
+
+By default, successful calls print:
+
+```text
+wrapped output:
+<result>
+```
+
+Use `--json` to print the daemon response envelope exactly as returned, including `audit_id` and `result`. Use `--audit-id-out <path>` to write the successful execution's `audit_id` to a file for follow-up audit-log tooling.
+
+Approval-gated actions return an approval-pending message instead of running immediately. The CLI prints the review URL or `aileron approval approve <id>` command and exits with code `75` (`EX_TEMPFAIL`) so scripts can distinguish "approval needed" from ordinary failures.
 
 ## Connectors
 

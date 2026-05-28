@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -24,6 +26,8 @@ func newActionsFakeDaemon(t *testing.T, handler http.HandlerFunc) string {
 	t.Cleanup(srv.Close)
 	return srv.URL + "/v1"
 }
+
+func ptrString(s string) *string { return &s }
 
 // --- list ---
 
@@ -348,6 +352,163 @@ func TestRunActionList_EmptyJSONMode(t *testing.T) {
 	}
 }
 
+// --- run ---
+
+func TestRunActionRun_ArgFlagsSendArgsAndRenderResult(t *testing.T) {
+	var gotPath, gotMethod, gotContentType string
+	var gotBody []byte
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		gotBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(actionRunResponse{
+			AuditID: "audit-123",
+			Result:  ptrString(`{"ok":true}`),
+		})
+	})
+	setBindingBase(t, base)
+
+	auditPath := filepath.Join(t.TempDir(), "audit-id")
+	var stdout, stderr bytes.Buffer
+	code := runActionRun([]string{"--arg", "team=ENG", "--arg", "title=Smoke test", "--audit-id-out", auditPath, "linear-issues-create"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q", gotMethod)
+	}
+	if gotPath != "/v1/actions/linear-issues-create/run" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("content-type = %q", gotContentType)
+	}
+	var parsed actionRunRequest
+	if err := json.Unmarshal(gotBody, &parsed); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if parsed.Args["team"] != "ENG" || parsed.Args["title"] != "Smoke test" {
+		t.Errorf("args = %#v", parsed.Args)
+	}
+	if !strings.Contains(stdout.String(), "wrapped output:") || !strings.Contains(stdout.String(), `{"ok":true}`) {
+		t.Errorf("stdout missing rendered result: %s", stdout.String())
+	}
+	written, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit id: %v", err)
+	}
+	if string(written) != "audit-123\n" {
+		t.Errorf("audit id file = %q", string(written))
+	}
+}
+
+func TestRunActionRun_RawArgsJSONPassthrough(t *testing.T) {
+	var gotBody []byte
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(actionRunResponse{AuditID: "audit-raw"})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionRun([]string{"--args", `{"labels":["bug","triage"],"priority":2}`, "linear-issues-create"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	var parsed actionRunRequest
+	if err := json.Unmarshal(gotBody, &parsed); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	labels, ok := parsed.Args["labels"].([]any)
+	if !ok || len(labels) != 2 || labels[0] != "bug" || labels[1] != "triage" {
+		t.Errorf("labels = %#v", parsed.Args["labels"])
+	}
+	if parsed.Args["priority"] != float64(2) {
+		t.Errorf("priority = %#v", parsed.Args["priority"])
+	}
+}
+
+func TestRunActionRun_JSONModePrintsRawEnvelope(t *testing.T) {
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"audit_id":"audit-json","result":"ok"}`)
+	})
+	setBindingBase(t, base)
+
+	auditPath := filepath.Join(t.TempDir(), "audit-id")
+	var stdout, stderr bytes.Buffer
+	code := runActionRun([]string{"--json", "--audit-id-out", auditPath, "ship-update"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != `{"audit_id":"audit-json","result":"ok"}` {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+	written, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit id: %v", err)
+	}
+	if string(written) != "audit-json\n" {
+		t.Errorf("audit id file = %q", string(written))
+	}
+}
+
+func TestRunActionRun_PendingApprovalReturnsTempFail(t *testing.T) {
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(actionRunPendingResponse{
+			Status:     "pending_approval",
+			ApprovalID: "act-123",
+			ReviewURL:  "http://127.0.0.1:50419/approvals?focus=act-123",
+		})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionRun([]string{"send-draft"}, &stdout, &stderr)
+	if code != 75 {
+		t.Fatalf("exit = %d, want 75; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "approval pending") ||
+		!strings.Contains(stderr.String(), "http://127.0.0.1:50419/approvals?focus=act-123") ||
+		!strings.Contains(stderr.String(), "aileron approval approve act-123") {
+		t.Errorf("stderr missing approval guidance: %s", stderr.String())
+	}
+}
+
+func TestRunActionRun_SurfacesStructuredErrorClass(t *testing.T) {
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		_, _ = io.WriteString(w, `{"error":{"class":"binding_required","message":"vault is locked","boundary":"runtime","retriable":true}}`)
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runActionRun([]string{"ship-update"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("expected non-zero exit")
+	}
+	if !strings.Contains(stderr.String(), "binding_required: vault is locked") {
+		t.Errorf("stderr missing structured class: %s", stderr.String())
+	}
+}
+
+func TestRunActionRun_RejectsInvalidArgs(t *testing.T) {
+	cases := [][]string{
+		{"--arg", "missing-equals", "ship-update"},
+		{"--arg", "x=y", "--args", `{"x":"z"}`, "ship-update"},
+		{"--args", `[1,2]`, "ship-update"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := runActionRun(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("expected non-zero exit for args %v", args)
+			}
+		})
+	}
+}
+
 func TestRunActionToggle_BaseURLError(t *testing.T) {
 	orig := bindingAPIBaseURL
 	bindingAPIBaseURL = func() (string, error) { return "", fmt.Errorf("spawn boom") }
@@ -382,6 +543,24 @@ func TestRunAction_DispatchesList(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "No actions installed") {
 		t.Errorf("list dispatch did not call runActionList: %s", stdout.String())
+	}
+}
+
+func TestRunAction_DispatchesRun(t *testing.T) {
+	var gotPath string
+	base := newActionsFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewEncoder(w).Encode(actionRunResponse{AuditID: "audit-run"})
+	})
+	setBindingBase(t, base)
+
+	var stdout, stderr bytes.Buffer
+	code := runAction([]string{"run", "ship-update"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr=%s", code, stderr.String())
+	}
+	if gotPath != "/v1/actions/ship-update/run" {
+		t.Errorf("run dispatch path = %q", gotPath)
 	}
 }
 
