@@ -71,26 +71,29 @@ HOME="${TMP_HOME}" "${SERVER_BIN}" \
   >"${TMP_HOME}/server.log" 2>&1 &
 DAEMON_PID=$!
 
-# Poll daemon.json for up to 10s waiting for the URL to appear.
+# Poll daemon.json for up to 10s waiting for the URL and bearer token to appear.
 DAEMON_URL=""
+DAEMON_TOKEN=""
 for _ in $(seq 1 50); do
   if [[ -f "${TMP_HOME}/.aileron/daemon.json" ]]; then
     DAEMON_URL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "${TMP_HOME}/.aileron/daemon.json" 2>/dev/null || true)"
-    if [[ -n "${DAEMON_URL}" ]]; then
+    DAEMON_TOKEN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("token", ""))' "${TMP_HOME}/.aileron/daemon.json" 2>/dev/null || true)"
+    if [[ -n "${DAEMON_URL}" && -n "${DAEMON_TOKEN}" ]]; then
       break
     fi
   fi
   sleep 0.2
 done
-if [[ -z "${DAEMON_URL}" ]]; then
-  echo "error: daemon did not publish daemon.json within 10s" >&2
+if [[ -z "${DAEMON_URL}" || -z "${DAEMON_TOKEN}" ]]; then
+  echo "error: daemon did not publish daemon.json URL and token within 10s" >&2
   echo "--- daemon log ---" >&2
   cat "${TMP_HOME}/server.log" >&2 || true
   exit 1
 fi
 
 # Confirm reachability before handing off to Playwright.
-if ! curl -fsS "${DAEMON_URL}/v1/action-approvals" >/dev/null; then
+AUTH_HEADER="Authorization: Bearer ${DAEMON_TOKEN}"
+if ! curl -fsS -H "${AUTH_HEADER}" "${DAEMON_URL}/v1/action-approvals" >/dev/null; then
   echo "error: daemon at ${DAEMON_URL} not reachable" >&2
   echo "--- daemon log ---" >&2
   cat "${TMP_HOME}/server.log" >&2 || true
@@ -102,7 +105,7 @@ fi
 # intercepts clicks on the approval cards. The approvals endpoints
 # themselves don't read credentials, so this is purely a UI-layer
 # concern — but Playwright sees real DOM, so we have to clear it.
-if ! curl -fsS -X POST -H 'Content-Type: application/json' \
+if ! curl -fsS -X POST -H 'Content-Type: application/json' -H "${AUTH_HEADER}" \
   -d '{"passphrase":"test-passphrase"}' \
   "${DAEMON_URL}/v1/vault/unlock" >/dev/null; then
   echo "error: vault unlock failed" >&2
