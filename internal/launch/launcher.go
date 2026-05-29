@@ -172,6 +172,27 @@ func prepareSandbox(ctx context.Context, workDir, runtimeName string, stdout, st
 
 var prepareSandboxForLaunch = prepareSandbox
 
+func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig) error {
+	commandName := firstAgentBinary(config.Agent)
+	if commandName == "" {
+		return fmt.Errorf("agent %q has no container command", config.Agent.Name())
+	}
+	if err := (sandboxcontainer.Builder{
+		Runtime: plan.Runtime,
+		Stdout:  io.Discard,
+	}).Validate(ctx, sandboxcontainer.ValidateOptions{
+		Runtime: plan.Runtime,
+		Image:   plan.Image,
+		WorkDir: config.Dir,
+		Command: []string{commandName},
+	}); err != nil {
+		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
+	}
+	return nil
+}
+
+var validateSandboxForLaunch = validateSandbox
+
 // Launch starts the agent as a child process under Aileron's daemon.
 //
 // Per ADR-0015 the launcher is the daemon-connection + MCP-registration
@@ -228,6 +249,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			fmt.Fprint(os.Stderr, ", built=true")
 		}
 		fmt.Fprintln(os.Stderr, ")")
+		if err := validateSandboxForLaunch(ctx, sandboxPlan, config); err != nil {
+			return LaunchResult{}, err
+		}
 	}
 
 	regCtx, cancelReg := context.WithTimeout(ctx, daemonHTTPTimeout)

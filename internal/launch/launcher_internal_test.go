@@ -88,3 +88,12 @@ func TestLaunchSandboxRejectsAgentWithoutBinary(t *testing.T) {
 		t.Fatal("expected missing container command error")
 	}
 }
+
+func TestValidateSandboxRejectsAgentWithoutBinary(t *testing.T) {
+	err := validateSandbox(nil, SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
+		Agent: emptyBinaryAgent{},
+	})
+	if err == nil {
+		t.Fatal("expected missing container command error")
+	}
+}

@@ -2,6 +2,7 @@
 package container
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -74,6 +75,14 @@ type RunOptions struct {
 // RunResult reports the selected runtime after a sandbox container exits.
 type RunResult struct {
 	Runtime string
+}
+
+// ValidateOptions configures a launch-time sandbox image validation run.
+type ValidateOptions struct {
+	Runtime string
+	Image   string
+	WorkDir string
+	Command []string
 }
 
 // Build builds the image for plan. Tier 0 builds Aileron's local sandbox-base
@@ -181,6 +190,61 @@ func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	}
 	return RunResult{Runtime: runtimeName}, nil
 }
+
+// Validate checks that an image can satisfy the minimal launch-time sandbox
+// runtime contract: shell command execution, the mounted workspace as CWD, a
+// writable workspace mount, and the requested agent command on PATH.
+func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
+	if opts.Image == "" {
+		return fmt.Errorf("sandbox image is required")
+	}
+	if len(opts.Command) == 0 || strings.TrimSpace(opts.Command[0]) == "" {
+		return fmt.Errorf("sandbox command is required")
+	}
+	var stderr bytes.Buffer
+	builder := b
+	if builder.Stderr == nil {
+		builder.Stderr = &stderr
+	}
+	_, err := builder.Run(ctx, RunOptions{
+		Runtime: opts.Runtime,
+		Image:   opts.Image,
+		WorkDir: opts.WorkDir,
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			validationScript,
+			"aileron-validate",
+			opts.Command[0],
+		},
+	})
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(stderr.String())
+	if detail != "" {
+		return fmt.Errorf("validate sandbox image %s: %s: %w", opts.Image, detail, err)
+	}
+	return fmt.Errorf("validate sandbox image %s: image must support /bin/sh command execution, a writable %s workspace mount, and agent command %q on PATH: %w", opts.Image, WorkspacePath, opts.Command[0], err)
+}
+
+const validationScript = `
+if [ "$(pwd)" != "` + WorkspacePath + `" ]; then
+  echo "sandbox working directory is $(pwd), want ` + WorkspacePath + `" >&2
+  exit 2
+fi
+probe=".aileron-sandbox-validate-$$"
+if ! ( : > "$probe" ) 2>/dev/null; then
+  echo "sandbox workspace is not writable at ` + WorkspacePath + `" >&2
+  exit 3
+fi
+rm -f "$probe"
+if ! command -v "$1" >/dev/null 2>&1; then
+  echo "agent command not found in sandbox image: $1" >&2
+  echo "install the agent CLI in the sandbox image or launch with --sandbox=off" >&2
+  exit 127
+fi
+`
 
 // ResolveRuntime returns the container runtime executable to use.
 func ResolveRuntime(name string) (string, error) {

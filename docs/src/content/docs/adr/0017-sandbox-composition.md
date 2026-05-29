@@ -70,9 +70,9 @@ The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented s
 
 `aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan.
 
-`aileron sandbox build` is the first user-facing build consumer of that plan. It builds Tier 0 from Aileron's local sandbox-base image definition and Tier 1 from the devcontainer Dockerfile through Docker or Podman. Tier 2 BYO images are selected as-is until runtime injection and launch-time validation land. Later launch work consumes the same composition contract and built image selection.
+`aileron sandbox build` is the first user-facing build consumer of that plan. It builds Tier 0 from Aileron's local sandbox-base image definition and Tier 1 from the devcontainer Dockerfile through Docker or Podman. Tier 2 BYO images are selected as-is; launch validates the minimal runtime contract before running the agent. Later launch work adds runtime injection.
 
-`aileron launch --sandbox=auto|docker|podman` consumes the same build path to prepare the selected image, then runs the agent command inside a one-shot Docker/Podman container. The project is mounted at `/home/agent/workspace` and used as the container working directory. Launch passes the session-scoped Aileron daemon env into the container and rewrites loopback daemon URLs to the runtime host alias (`host.docker.internal` for Docker, `host.containers.internal` for Podman).
+`aileron launch --sandbox=auto|docker|podman` consumes the same build path to prepare the selected image, validates that it can execute `/bin/sh`, use a writable `/home/agent/workspace` mount, and resolve the agent command on `PATH`, then runs the agent command inside a one-shot Docker/Podman container. The project is mounted at `/home/agent/workspace` and used as the container working directory. Launch passes the session-scoped Aileron daemon env into the container and rewrites loopback daemon URLs to the runtime host alias (`host.docker.internal` for Docker, `host.containers.internal` for Podman).
 
 ## Consequences
 
