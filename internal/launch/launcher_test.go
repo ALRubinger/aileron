@@ -327,6 +327,51 @@ func TestLaunch_SandboxBuildFailureFailsBeforeAgentStart(t *testing.T) {
 	}
 }
 
+func TestLaunch_SandboxValidationFailureFailsBeforeAgentRun(t *testing.T) {
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\necho 'agent command not found in sandbox image: codex' >&2\nexit 127\n"
+	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err == nil {
+		t.Fatal("expected sandbox validation failure")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"sandbox image ghcr.io/acme/agent:latest is not launchable for test-script",
+		"agent command not found in sandbox image: codex",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+	data, readErr := os.ReadFile(argsFile)
+	if readErr != nil {
+		t.Fatalf("read docker args: %v", readErr)
+	}
+	if strings.Contains(string(data), "ghcr.io/acme/agent:latest\ncodex\n") {
+		t.Fatalf("agent run happened despite validation failure:\n%s", data)
+	}
+}
+
 func TestLaunch_SandboxInvalidRuntimeFails(t *testing.T) {
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
 		Agent:          scriptAgent{script: "/bin/sh"},

@@ -102,7 +102,7 @@ Build behavior by tier:
 |---|---|
 | Tier 0 | Builds the local `images/sandbox-base/Containerfile` as `aileron/sandbox-base:<version>`. |
 | Tier 1 | Builds the devcontainer Dockerfile and tags it as a deterministic local `aileron/sandbox-project:<hash>` image unless `--tag` is supplied. |
-| Tier 2 | Does not build. The BYO image is reported as-is; runtime injection and launch-time validation land later. |
+| Tier 2 | Does not build. The BYO image is reported as-is; launch validates it before agent startup. |
 
 When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_CONTEXT` to the directory containing the sandbox-base `Containerfile`.
 
@@ -119,6 +119,13 @@ aileron launch --sandbox=podman goose
 `auto` detects Docker or Podman from `PATH`. `docker` and `podman` select a runtime explicitly. The default is `--sandbox=off`, which preserves the current direct host launch path.
 
 The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker and `host.containers.internal` for Podman.
+
+Before registering the session, launch validates the selected image with the same mount/workdir shape it will use for the agent. The image must:
+
+- execute `/bin/sh` commands through the selected container runtime
+- use `/home/agent/workspace` as the working directory
+- allow a temporary file to be written in the mounted workspace
+- resolve the agent command on `PATH`
 
 The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied until runtime injection lands.
 
@@ -148,4 +155,4 @@ Do not put Aileron credentials or user secrets in the image. Credentialed traffi
 
 ## What This Does Not Do Yet
 
-This slice does not inject runtime files into BYO images, generate discovery shims, or mediate shell commands. Follow-on work adds BYO runtime injection and validation, the discovery watcher, proxy bootstrap, and shell-layer interception.
+This slice does not inject runtime files into BYO images, generate discovery shims, add proxy bootstrap, or mediate shell commands. Follow-on work adds runtime injection, the discovery watcher, proxy bootstrap, and shell-layer interception.

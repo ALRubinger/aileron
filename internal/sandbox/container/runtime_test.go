@@ -3,11 +3,13 @@ package container
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
@@ -358,6 +360,107 @@ func TestRunRejectsMissingCommand(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected missing command error")
+	}
+}
+
+func TestValidateRunsMinimalContractProbe(t *testing.T) {
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: dir,
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if runner.name != "docker" {
+		t.Fatalf("runtime = %q, want docker", runner.name)
+	}
+	wantPrefix := []string{
+		"run", "--rm", "-i",
+		"--workdir", WorkspacePath,
+		"--volume", dir + ":" + WorkspacePath,
+		"ghcr.io/acme/agent:latest",
+		"/bin/sh", "-c",
+	}
+	if len(runner.args) < len(wantPrefix)+2 {
+		t.Fatalf("args too short: %#v", runner.args)
+	}
+	if !reflect.DeepEqual(runner.args[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("args prefix = %#v, want %#v", runner.args[:len(wantPrefix)], wantPrefix)
+	}
+	if runner.args[len(runner.args)-1] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-1])
+	}
+}
+
+func TestValidateReportsActionableRuntimeFailure(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
+		_, _ = stderr.Write([]byte("agent command not found in sandbox image: codex\n"))
+		return errors.New("exit status 127")
+	})
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: t.TempDir(),
+		Command: []string{"codex"},
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"validate sandbox image ghcr.io/acme/agent:latest",
+		"agent command not found in sandbox image: codex",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func TestValidateRejectsMissingImage(t *testing.T) {
+	err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Validate(context.Background(), ValidateOptions{
+		Command: []string{"codex"},
+	})
+	if err == nil {
+		t.Fatal("expected missing image error")
+	}
+}
+
+func TestValidateRejectsMissingCommand(t *testing.T) {
+	err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Validate(context.Background(), ValidateOptions{
+		Image: "ghcr.io/acme/agent:latest",
+	})
+	if err == nil {
+		t.Fatal("expected missing command error")
+	}
+}
+
+func TestValidateReportsFallbackWhenRuntimeHasNoDetail(t *testing.T) {
+	runner := runnerFunc(func(context.Context, string, []string, io.Writer, io.Writer) error {
+		return errors.New("exit status 126")
+	})
+	err := Builder{
+		Runtime: "docker",
+		Runner:  runner,
+		Stderr:  io.Discard,
+	}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: t.TempDir(),
+		Command: []string{"codex"},
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"image must support /bin/sh command execution",
+		"agent command \"codex\" on PATH",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
 	}
 }
 
