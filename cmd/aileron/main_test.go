@@ -155,6 +155,139 @@ func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
 	}
 }
 
+func TestRunSandboxInitCreatesDevcontainerScaffold(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "init"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), ".devcontainer/devcontainer.json") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".devcontainer", "devcontainer.json")); err != nil {
+		t.Fatalf("devcontainer.json not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".devcontainer", "Dockerfile")); err != nil {
+		t.Fatalf("Dockerfile not created: %v", err)
+	}
+}
+
+func TestRunSandboxPlanReportsTier(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "plan"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "tier: base") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunSandboxRejectsUnknownCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "bogus"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), `unknown sandbox command: "bogus"`) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxRequiresSubcommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron sandbox") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxInitRejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "init", "extra"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron sandbox init") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxInitSurfacesExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"sandbox", "init"}, newTestRegistry(), &stdout, &stderr); code != 0 {
+		t.Fatalf("first init failed: %d stderr=%q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := run([]string{"sandbox", "init"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "--force") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxPlanRejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "plan", "extra"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron sandbox plan") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxPlanSurfacesParseError(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.MkdirAll(filepath.Join(dir, ".devcontainer"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".devcontainer", "devcontainer.json"), []byte(`{"customizations":{"aileron":{"approval_surface":"sms"}}}`), 0o644); err != nil {
+		t.Fatalf("write devcontainer: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "plan"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "approval_surface") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestRunStatus_All(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
