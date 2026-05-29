@@ -6,7 +6,7 @@ order: 6
 
 Sandbox composition is the contract for deciding which container image an agent session runs in. It is defined by [ADR-0017](/adr/0017-sandbox-composition/) and implemented by the `aileron sandbox` CLI.
 
-This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold, inspect, and build sandbox images, while later work wires those images into `aileron launch`.
+This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold, inspect, build, and prepare sandbox images during `aileron launch`, while later work runs the agent inside the prepared container.
 
 ## Choose a Composition Tier
 
@@ -106,6 +106,20 @@ Build behavior by tier:
 
 When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_CONTEXT` to the directory containing the sandbox-base `Containerfile`.
 
+## Prepare During Launch
+
+Use `--sandbox` on `aileron launch` to have launch prepare the composition-selected image before starting the agent:
+
+```bash
+aileron launch --sandbox=auto claude
+aileron launch --sandbox=docker codex
+aileron launch --sandbox=podman goose
+```
+
+`auto` detects Docker or Podman from `PATH`. `docker` and `podman` select a runtime explicitly. The default is `--sandbox=off`, which preserves the current direct host launch path.
+
+This slice prepares image selection only. Launch exports `AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, and, when a build ran, `AILERON_SANDBOX_RUNTIME` to the child process for the follow-on runtime path. It does not run the agent inside the container yet.
+
 ## Use a BYO Image
 
 Set `customizations.aileron.image` when your team owns the complete image:
@@ -132,4 +146,4 @@ Do not put Aileron credentials or user secrets in the image. Credentialed traffi
 
 ## What This Does Not Do Yet
 
-This slice does not run containers or inject runtime files into BYO images. Follow-on work wires built images into launch, adds BYO runtime injection and validation, and adds the discovery watcher. Shell-layer interception builds on top of that runtime substrate.
+This slice does not run containers or inject runtime files into BYO images. Follow-on work runs agents inside the prepared image, adds BYO runtime injection and validation, and adds the discovery watcher. Shell-layer interception builds on top of that runtime substrate.

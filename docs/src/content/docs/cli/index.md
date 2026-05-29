@@ -14,7 +14,7 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 
 | Command | Purpose | Ratified by |
 |---|---|---|
-| `aileron launch` | Start the local Aileron server. Prompts for the vault passphrase if one is set; creates a vault on first run. Listens on `http://localhost:8721/v1` by default. | [ADR-0011](/adr/0011-local-credential-vault) |
+| `aileron launch [--sandbox=off\|auto\|docker\|podman]` | Launch an AI coding agent connected to the Aileron daemon. `--sandbox` prepares the project sandbox image for the session; container execution lands in follow-on sandbox runtime work. | [ADR-0011](/adr/0011-local-credential-vault), [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron status` | Report the running runtime: version, listen address, action count, connector count, binding count, vault state. Read-only; safe to run frequently. | — |
 
 ## Sandbox composition

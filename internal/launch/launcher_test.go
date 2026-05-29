@@ -46,11 +46,11 @@ type scriptAgent struct {
 	mcpArgs  []string
 }
 
-func (a scriptAgent) Name() string                                  { return "test-script" }
-func (a scriptAgent) BinaryNames() []string                         { return []string{a.script} }
-func (a scriptAgent) Args() []string                                { return nil }
-func (a scriptAgent) Env() map[string]string                        { return a.extraEnv }
-func (a scriptAgent) LLMEndpointEnv() string                        { return "" }
+func (a scriptAgent) Name() string           { return "test-script" }
+func (a scriptAgent) BinaryNames() []string  { return []string{a.script} }
+func (a scriptAgent) Args() []string         { return nil }
+func (a scriptAgent) Env() map[string]string { return a.extraEnv }
+func (a scriptAgent) LLMEndpointEnv() string { return "" }
 func (a scriptAgent) ConfigureMCP(string, map[string]string, string) ([]string, error) {
 	return a.mcpArgs, nil
 }
@@ -193,6 +193,145 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 		if !found {
 			t.Errorf("expected arg %q in child argv, got %v", w, args)
 		}
+	}
+}
+
+func TestLaunch_SandboxBYOImageEnvVarsFlowThrough(t *testing.T) {
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outFile := filepath.Join(dir, "env.txt")
+	script := filepath.Join(dir, "capture.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: script},
+		Dir:            dir,
+		SandboxRuntime: "auto",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	env := string(data)
+	for _, want := range []string{
+		"AILERON_SANDBOX_IMAGE=ghcr.io/acme/agent:latest",
+		"AILERON_SANDBOX_TIER=byo_image",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("expected %q in child env:\n%s", want, env)
+		}
+	}
+	if strings.Contains(env, "AILERON_SANDBOX_RUNTIME=") {
+		t.Errorf("BYO image should not report a build runtime:\n%s", env)
+	}
+}
+
+func TestLaunch_SandboxBuildEnvVarsFlowThrough(t *testing.T) {
+	dir := t.TempDir()
+	baseDir := filepath.Join(dir, "images", "sandbox-base")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "Containerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	outFile := filepath.Join(dir, "env.txt")
+	script := filepath.Join(dir, "capture.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: script},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	env := string(data)
+	for _, want := range []string{
+		"AILERON_SANDBOX_IMAGE=aileron/sandbox-base:latest",
+		"AILERON_SANDBOX_TIER=base",
+		"AILERON_SANDBOX_RUNTIME=docker",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("expected %q in child env:\n%s", want, env)
+		}
+	}
+}
+
+func TestLaunch_SandboxBuildFailureFailsBeforeAgentStart(t *testing.T) {
+	dir := t.TempDir()
+	baseDir := filepath.Join(dir, "images", "sandbox-base")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "Containerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	outFile := filepath.Join(dir, "agent-started")
+	script := filepath.Join(dir, "capture.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch "+outFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: script},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err == nil {
+		t.Fatal("expected sandbox build failure")
+	}
+	if !strings.Contains(err.Error(), "prepare sandbox") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(outFile); !os.IsNotExist(statErr) {
+		t.Fatalf("agent started despite build failure; stat err=%v", statErr)
+	}
+}
+
+func TestLaunch_SandboxInvalidRuntimeFails(t *testing.T) {
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "/bin/sh"},
+		SandboxRuntime: "containerd",
+	})
+	if err == nil {
+		t.Fatal("expected invalid sandbox runtime error")
+	}
+	if !strings.Contains(err.Error(), "unsupported sandbox runtime") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
