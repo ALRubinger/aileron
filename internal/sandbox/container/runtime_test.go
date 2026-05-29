@@ -296,6 +296,71 @@ func TestBuilderStreamsRuntimeOutput(t *testing.T) {
 	}
 }
 
+func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron/sandbox-base:test",
+		WorkDir: dir,
+		Env: map[string]string{
+			"Z_VAR": "last",
+			"A_VAR": "first",
+		},
+		Command: []string{"codex", "--model", "gpt-5"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Runtime != "docker" {
+		t.Fatalf("runtime = %q, want docker", result.Runtime)
+	}
+	want := []string{
+		"run", "--rm", "-i",
+		"--workdir", WorkspacePath,
+		"--volume", dir + ":" + WorkspacePath,
+		"--env", "A_VAR=first",
+		"--env", "Z_VAR=last",
+		"aileron/sandbox-base:test",
+		"codex", "--model", "gpt-5",
+	}
+	if runner.name != "docker" || !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("runner = %s %#v, want docker %#v", runner.name, runner.args, want)
+	}
+}
+
+func TestRunAddsTTYWhenRequested(t *testing.T) {
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "podman", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron/sandbox-base:test",
+		Command: []string{"claude"},
+		TTY:     true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !reflect.DeepEqual(runner.args[:4], []string{"run", "--rm", "-i", "-t"}) {
+		t.Fatalf("args prefix = %#v, want tty run prefix", runner.args[:4])
+	}
+}
+
+func TestRunRejectsMissingImage(t *testing.T) {
+	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Run(context.Background(), RunOptions{
+		Command: []string{"codex"},
+	})
+	if err == nil {
+		t.Fatal("expected missing image error")
+	}
+}
+
+func TestRunRejectsMissingCommand(t *testing.T) {
+	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Run(context.Background(), RunOptions{
+		Image: "aileron/sandbox-base:test",
+	})
+	if err == nil {
+		t.Fatal("expected missing command error")
+	}
+}
+
 type runnerFunc func(context.Context, string, []string, io.Writer, io.Writer) error
 
 func (f runnerFunc) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {

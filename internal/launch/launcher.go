@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/version"
+	"golang.org/x/term"
 )
 
 // MCPServerName is the name Aileron registers itself under in agents'
@@ -39,11 +43,11 @@ type LaunchConfig struct {
 	Dir string
 	// LogLevel sets the session log verbosity (e.g. slog.LevelDebug).
 	LogLevel slog.Level
-	// SandboxRuntime selects the container runtime used to prepare the
-	// sandbox image for this launch. Empty or "off" preserves today's
-	// direct host launch path. "auto", "docker", and "podman" prepare
-	// the composition-selected image; container execution lands in a
-	// follow-on sandbox runtime slice.
+	// SandboxRuntime selects the container runtime used to run the
+	// agent in the prepared sandbox image. Empty or "off" preserves
+	// today's direct host launch path. "auto", "docker", and "podman"
+	// prepare the composition-selected image and execute the agent in a
+	// one-shot container.
 	SandboxRuntime string
 }
 
@@ -53,8 +57,8 @@ type LaunchResult struct {
 }
 
 // SandboxLaunchPlan is the sandbox image selected or prepared for a launch.
-// It is intentionally image-level only; container execution, runtime
-// injection, and network/proxy bootstrap are follow-on launch work.
+// Runtime injection, watcher refresh, and shell interception are follow-on
+// launch work.
 type SandboxLaunchPlan struct {
 	Runtime string
 	Image   string
@@ -145,9 +149,14 @@ func prepareSandbox(ctx context.Context, workDir, runtimeName string, stdout, st
 		Plan:    plan,
 	})
 	if errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
+		runtime, runtimeErr := sandboxcontainer.ResolveRuntime(runtimeName)
+		if runtimeErr != nil {
+			return SandboxLaunchPlan{}, runtimeErr
+		}
 		return SandboxLaunchPlan{
-			Image: result.Image,
-			Tier:  result.Tier,
+			Runtime: runtime,
+			Image:   result.Image,
+			Tier:    result.Tier,
 		}, nil
 	}
 	if err != nil {
@@ -203,23 +212,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 	client := newDaemonClient(daemonURL, daemonToken)
 
-	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
-	if err != nil {
-		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
-	}
-
-	// Resolve aileron-mcp up front. Per ADR-0015 the MCP server is the
-	// runtime path for every Aileron tool the agent calls; running
-	// without it isn't running. Resolve before session registration so
-	// a missing binary fails before the daemon has anything to clean up.
-	selfPath, _ := os.Executable()
-	mcpBin, err := resolveMCPBinary(selfPath)
-	if err != nil {
-		return LaunchResult{}, err
-	}
-
+	sandboxEnabled := sandboxLaunchEnabled(config.SandboxRuntime)
 	var sandboxPlan SandboxLaunchPlan
-	if sandboxLaunchEnabled(config.SandboxRuntime) {
+	if sandboxEnabled {
 		plan, err := prepareSandboxForLaunch(ctx, config.Dir, config.SandboxRuntime, os.Stdout, os.Stderr)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare sandbox: %w", err)
@@ -233,7 +228,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			fmt.Fprint(os.Stderr, ", built=true")
 		}
 		fmt.Fprintln(os.Stderr, ")")
-		fmt.Fprintln(os.Stderr, "aileron: container execution is not enabled yet; launching agent directly")
 	}
 
 	regCtx, cancelReg := context.WithTimeout(ctx, daemonHTTPTimeout)
@@ -243,7 +237,11 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("register session: %w", err)
 	}
 
-	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), daemonURL)
+	agentEndpointURL := daemonURL
+	if sandboxEnabled {
+		agentEndpointURL = containerURLForRuntime(daemonURL, sandboxPlan.Runtime)
+	}
+	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), agentEndpointURL)
 	if sandboxPlan.Image != "" {
 		agentEnv["AILERON_SANDBOX_IMAGE"] = sandboxPlan.Image
 		agentEnv["AILERON_SANDBOX_TIER"] = string(sandboxPlan.Tier)
@@ -251,30 +249,14 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			agentEnv["AILERON_SANDBOX_RUNTIME"] = sandboxPlan.Runtime
 		}
 	}
-	env := buildEnv(agentEnv)
-
-	allArgs := append(config.Agent.Args(), config.Args...)
-
-	// MCP registration. The agent decides the wire shape: CLI flag
-	// (Claude, Pi) or config-file (Codex, Goose, OpenCode). The env
-	// passed here ends up inside the MCP server process so it can
-	// reach the daemon's session-scoped surfaces.
-	mcpEnv := map[string]string{
-		"AILERON_URL":          daemonURL,
-		"AILERON_COMMS_URL":    daemonURL,
-		"AILERON_SESSION_ID":   sessionID,
-		"AILERON_APPROVAL_URL": daemonURL + "/approvals",
-	}
-	extraArgs, mcpErr := config.Agent.ConfigureMCP(mcpBin, mcpEnv, config.Dir)
-	if mcpErr != nil {
-		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
-	}
-	allArgs = append(allArgs, extraArgs...)
-
-	cmd := exec.CommandContext(ctx, agentPath, allArgs...)
-	cmd.Env = env
-	if config.Dir != "" {
-		cmd.Dir = config.Dir
+	if sandboxEnabled {
+		agentEnv["AILERON_URL"] = agentEndpointURL
+		agentEnv["AILERON_COMMS_URL"] = agentEndpointURL
+		agentEnv["AILERON_SESSION_ID"] = sessionID
+		agentEnv["AILERON_APPROVAL_URL"] = agentEndpointURL + "/approvals"
+		if daemonToken != "" {
+			agentEnv["AILERON_TOKEN"] = daemonToken
+		}
 	}
 
 	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)
@@ -285,7 +267,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		"agent", config.Agent.Name(),
 		"session_id", sessionID,
 		"dir", config.Dir,
-		"binary", agentPath,
+		"binary", firstAgentBinary(config.Agent),
 		"daemon_url", daemonURL,
 		"daemon_log", filepath.Join(stateDir, "daemon.log"),
 		"sandbox_image", sandboxPlan.Image,
@@ -298,7 +280,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	cancelProbe()
 	printStartupBanner(os.Stderr, daemonURL, sessionID, SessionLogPath(config.Dir), ok && locked)
 
-	result, runErr := launchDirect(cmd, config)
+	var result LaunchResult
+	var runErr error
+	if sandboxEnabled {
+		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv)
+	} else {
+		result, runErr = launchHost(ctx, config, daemonURL, sessionID, agentEnv)
+	}
 
 	endCtx, cancelEnd := context.WithTimeout(context.Background(), daemonHTTPTimeout)
 	exit := result.ExitCode
@@ -323,6 +311,46 @@ func composeAgentEnv(agentEnv map[string]string, endpointEnv, url string) map[st
 		merged[endpointEnv] = url
 	}
 	return merged
+}
+
+func firstAgentBinary(agent Agent) string {
+	names := agent.BinaryNames()
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+func containerURLForRuntime(rawURL, runtimeName string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return rawURL
+	}
+	host, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		host = parsed.Hostname()
+		port = parsed.Port()
+	}
+	if !isLoopbackHost(host) {
+		return rawURL
+	}
+	switch runtimeName {
+	case "podman":
+		host = "host.containers.internal"
+	default:
+		host = "host.docker.internal"
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(host, port)
+	} else {
+		parsed.Host = host
+	}
+	return parsed.String()
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 // resolveStateDir returns ~/.aileron, the state directory the daemon
@@ -363,6 +391,67 @@ func printStartupBanner(w io.Writer, daemonURL, sessionID, logPath string, vault
 	if vaultLocked {
 		fmt.Fprintf(w, "✈️  Vault locked — open %s and enter your passphrase to unlock.\n", daemonURL)
 	}
+}
+
+func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID string, agentEnv map[string]string) (LaunchResult, error) {
+	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
+	}
+
+	// Resolve aileron-mcp up front for the host launch path. Sandbox
+	// launch does not revive aileron-mcp as the container runtime model;
+	// container-side shims/proxy bootstrap land in later #796/#801 slices.
+	selfPath, _ := os.Executable()
+	mcpBin, err := resolveMCPBinary(selfPath)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+
+	allArgs := append(config.Agent.Args(), config.Args...)
+	mcpEnv := map[string]string{
+		"AILERON_URL":          daemonURL,
+		"AILERON_COMMS_URL":    daemonURL,
+		"AILERON_SESSION_ID":   sessionID,
+		"AILERON_APPROVAL_URL": daemonURL + "/approvals",
+	}
+	extraArgs, mcpErr := config.Agent.ConfigureMCP(mcpBin, mcpEnv, config.Dir)
+	if mcpErr != nil {
+		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
+	}
+	allArgs = append(allArgs, extraArgs...)
+
+	cmd := exec.CommandContext(ctx, agentPath, allArgs...)
+	cmd.Env = buildEnv(agentEnv)
+	if config.Dir != "" {
+		cmd.Dir = config.Dir
+	}
+	return launchDirect(cmd, config)
+}
+
+func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string) (LaunchResult, error) {
+	commandName := firstAgentBinary(config.Agent)
+	if commandName == "" {
+		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
+	}
+	command := append([]string{commandName}, config.Agent.Args()...)
+	command = append(command, config.Args...)
+	_, err := sandboxcontainer.Builder{
+		Runtime: plan.Runtime,
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
+	}.Run(ctx, sandboxcontainer.RunOptions{
+		Runtime: plan.Runtime,
+		Image:   plan.Image,
+		WorkDir: config.Dir,
+		Env:     agentEnv,
+		Command: command,
+		TTY:     term.IsTerminal(int(os.Stdin.Fd())),
+	})
+	if err != nil {
+		return exitResult(err)
+	}
+	return LaunchResult{ExitCode: 0}, nil
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.
