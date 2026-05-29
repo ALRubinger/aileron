@@ -144,6 +144,45 @@ func TestNewHandler_LocalDaemonHandshakeSetsCookie(t *testing.T) {
 	}
 }
 
+func TestNewHandler_LocalDaemonHandshakeDisabled(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := NewHandlerWithConfig(log, Config{Vault: vault.NewMemVault()})
+	if err != nil {
+		t.Fatalf("NewHandlerWithConfig: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/auth/handshake", nil)
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("handshake status = %d, want 204", rr.Code)
+	}
+	if got := rr.Result().Cookies(); len(got) != 0 {
+		t.Fatalf("cookies = %#v, want none", got)
+	}
+}
+
+func TestNewHandler_LocalDaemonHandshakeRejectsAbsoluteHostMismatch(t *testing.T) {
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := NewHandlerWithConfig(log, Config{
+		Vault:            vault.NewMemVault(),
+		LocalDaemonToken: "tok_cookie",
+	})
+	if err != nil {
+		t.Fatalf("NewHandlerWithConfig: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://daemon.test/v1/auth/handshake", nil)
+	req.Host = "other.test"
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("handshake status = %d, want 403", rr.Code)
+	}
+}
+
 func TestNewHandler_CreateIntentAndPolicyEvaluation(t *testing.T) {
 	handler := newTestHandler(t)
 	srv := httptest.NewServer(handler)
