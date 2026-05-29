@@ -68,7 +68,9 @@ This ADR follows the updated sandbox runtime direction:
 
 The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented snippets for common tools. The snippets are guidance, not a runtime resolver. Users own their container contents using normal Docker/devcontainer workflows.
 
-`aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan. Later launch work consumes the same composition contract and built image selection.
+`aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan.
+
+`aileron sandbox build` is the first user-facing build consumer of that plan. It builds Tier 0 from Aileron's local sandbox-base image definition and Tier 1 from the devcontainer Dockerfile through Docker or Podman. Tier 2 BYO images are selected as-is until runtime injection and launch-time validation land. Later launch work consumes the same composition contract and built image selection.
 
 ## Consequences
 

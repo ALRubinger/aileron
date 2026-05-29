@@ -6,7 +6,7 @@ order: 6
 
 Sandbox composition is the contract for deciding which container image an agent session runs in. It is defined by [ADR-0017](/adr/0017-sandbox-composition/) and implemented by the `aileron sandbox` CLI.
 
-This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold and inspect the composition plan, while later work wires that plan into container build and `aileron launch`.
+This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold, inspect, and build sandbox images, while later work wires those images into `aileron launch`.
 
 ## Choose a Composition Tier
 
@@ -81,6 +81,31 @@ devcontainer: .devcontainer/devcontainer.json
 dockerfile: Dockerfile
 ```
 
+## Build the Image
+
+Use `sandbox build` to build the image selected by the plan:
+
+```bash
+aileron sandbox build
+```
+
+Aileron detects Docker or Podman from `PATH`. You can choose explicitly:
+
+```bash
+aileron sandbox build --runtime=podman
+aileron sandbox build --runtime=docker --tag=ghcr.io/acme/agent-dev:local
+```
+
+Build behavior by tier:
+
+| Tier | Build behavior |
+|---|---|
+| Tier 0 | Builds the local `images/sandbox-base/Containerfile` as `aileron/sandbox-base:<version>`. |
+| Tier 1 | Builds the devcontainer Dockerfile and tags it as a deterministic local `aileron/sandbox-project:<hash>` image unless `--tag` is supplied. |
+| Tier 2 | Does not build. The BYO image is reported as-is; runtime injection and launch-time validation land later. |
+
+When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_CONTEXT` to the directory containing the sandbox-base `Containerfile`.
+
 ## Use a BYO Image
 
 Set `customizations.aileron.image` when your team owns the complete image:
@@ -107,4 +132,4 @@ Do not put Aileron credentials or user secrets in the image. Credentialed traffi
 
 ## What This Does Not Do Yet
 
-This slice does not run containers or inject runtime files into BYO images. Follow-on work wires image builds into launch, adds BYO runtime injection and validation, and adds the discovery watcher. Shell-layer interception builds on top of that runtime substrate.
+This slice does not run containers or inject runtime files into BYO images. Follow-on work wires built images into launch, adds BYO runtime injection and validation, and adds the discovery watcher. Shell-layer interception builds on top of that runtime substrate.

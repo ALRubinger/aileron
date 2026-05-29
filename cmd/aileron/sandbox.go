@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/version"
 )
 
 func runSandbox(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build>")
 		return 1
 	}
 	switch args[0] {
@@ -20,9 +23,11 @@ func runSandbox(args []string, stdout, stderr io.Writer) int {
 		return runSandboxInit(args[1:], stdout, stderr)
 	case "plan":
 		return runSandboxPlan(args[1:], stdout, stderr)
+	case "build":
+		return runSandboxBuild(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown sandbox command: %q\n", args[0])
-		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan>")
+		fmt.Fprintln(stderr, "usage: aileron sandbox <init|plan|build>")
 		return 1
 	}
 }
@@ -86,4 +91,56 @@ func runSandboxPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "dockerfile: %s\n", plan.DockerfilePath)
 	}
 	return 0
+}
+
+func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("sandbox build", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto, docker, or podman")
+	tag := flags.String("tag", "", "Override the image tag to build")
+	if err := flags.Parse(args); err != nil {
+		return 1
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker|podman] [--tag=<image>]")
+		return 1
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	plan, err := sandboxcomposition.Discover(cwd, version.Version)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	result, err := sandboxBuildFn(context.Background(), *runtimeName, stdout, stderr, sandboxcontainer.BuildOptions{
+		WorkDir: cwd,
+		Plan:    plan,
+		Tag:     *tag,
+	})
+	if errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
+		fmt.Fprintf(stdout, "tier: %s\n", result.Tier)
+		fmt.Fprintf(stdout, "image: %s\n", result.Image)
+		fmt.Fprintln(stdout, "build: not required")
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "tier: %s\n", result.Tier)
+	fmt.Fprintf(stdout, "runtime: %s\n", result.Runtime)
+	fmt.Fprintf(stdout, "image: %s\n", result.Image)
+	fmt.Fprintln(stdout, "build: complete")
+	return 0
+}
+
+var sandboxBuildFn = func(ctx context.Context, runtimeName string, stdout, stderr io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+	return sandboxcontainer.Builder{
+		Runtime: runtimeName,
+		Stdout:  stdout,
+		Stderr:  stderr,
+	}.Build(ctx, opts)
 }
