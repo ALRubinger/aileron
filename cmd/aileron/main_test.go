@@ -22,6 +22,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
 // init bypasses the CLI vault state machine for the bulk of tests.
@@ -260,6 +261,179 @@ func TestRunSandboxPlanRejectsExtraArgs(t *testing.T) {
 		t.Fatalf("expected exit code 1, got %d", code)
 	}
 	if !strings.Contains(stderr.String(), "usage: aileron sandbox plan") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxBuildRejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build", "extra"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron sandbox build") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxBuildRejectsInvalidFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build", "--bogus"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxBuildReportsComplete(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	origBuild := sandboxBuildFn
+	t.Cleanup(func() { sandboxBuildFn = origBuild })
+	sandboxBuildFn = func(_ context.Context, runtimeName string, buildStdout, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+		if runtimeName != "podman" {
+			t.Fatalf("runtimeName = %q, want podman", runtimeName)
+		}
+		if opts.Tag != "ghcr.io/acme/sandbox:test" {
+			t.Fatalf("Tag = %q", opts.Tag)
+		}
+		if opts.Plan.Tier != "base" {
+			t.Fatalf("Plan.Tier = %q, want base", opts.Plan.Tier)
+		}
+		if _, ok := buildStdout.(*bytes.Buffer); !ok {
+			t.Fatalf("stdout writer = %T, want *bytes.Buffer", buildStdout)
+		}
+		return sandboxcontainer.BuildResult{
+			Runtime: runtimeName,
+			Image:   opts.Tag,
+			Built:   true,
+			Tier:    opts.Plan.Tier,
+		}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build", "--runtime=podman", "--tag=ghcr.io/acme/sandbox:test"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"tier: base", "runtime: podman", "image: ghcr.io/acme/sandbox:test", "build: complete"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout = %q, missing %q", out, want)
+		}
+	}
+}
+
+func TestRunSandboxBuildReportsNoBuildRequired(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.MkdirAll(filepath.Join(dir, ".devcontainer"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".devcontainer", "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatalf("write devcontainer: %v", err)
+	}
+
+	origBuild := sandboxBuildFn
+	t.Cleanup(func() { sandboxBuildFn = origBuild })
+	sandboxBuildFn = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+		return sandboxcontainer.BuildResult{
+			Image: opts.Plan.Image,
+			Tier:  opts.Plan.Tier,
+		}, sandboxcontainer.ErrNoBuildRequired
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "tier: byo_image") || !strings.Contains(out, "image: ghcr.io/acme/agent:latest") || !strings.Contains(out, "build: not required") {
+		t.Fatalf("stdout = %q", out)
+	}
+}
+
+func TestRunSandboxBuildWithDefaultBuilderReportsNoBuildRequired(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.MkdirAll(filepath.Join(dir, ".devcontainer"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".devcontainer", "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatalf("write devcontainer: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "tier: byo_image") || !strings.Contains(out, "image: ghcr.io/acme/agent:latest") || !strings.Contains(out, "build: not required") {
+		t.Fatalf("stdout = %q", out)
+	}
+}
+
+func TestRunSandboxBuildSurfacesBuildError(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	origBuild := sandboxBuildFn
+	t.Cleanup(func() { sandboxBuildFn = origBuild })
+	sandboxBuildFn = func(context.Context, string, io.Writer, io.Writer, sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+		return sandboxcontainer.BuildResult{}, errors.New("runtime unavailable")
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "runtime unavailable") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxBuildSurfacesParseError(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	if err := os.MkdirAll(filepath.Join(dir, ".devcontainer"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".devcontainer", "devcontainer.json"), []byte(`{"customizations":{"aileron":{"approval_surface":"sms"}}}`), 0o644); err != nil {
+		t.Fatalf("write devcontainer: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "approval_surface") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
