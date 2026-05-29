@@ -13,23 +13,23 @@ import (
 	"github.com/ALRubinger/aileron/internal/account"
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
-	"github.com/ALRubinger/aileron/internal/cstore"
-	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/comms"
-	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/config"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/crypto"
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/failure"
+	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/policy"
+	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/sessions"
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store"
@@ -88,29 +88,30 @@ type apiServer struct {
 	localVaultMu       sync.Mutex                  // serializes /v1/vault/unlock so concurrent submits don't both call vault.Unlock
 	vaultUnlockedCh    chan struct{}               // closed on the first successful unlock; nil when daemon started already-unlocked. Used by respawned approval executors to park until the user unlocks the vault (#649).
 	newID              func() string
-	actions            *action.Store     // installed actions in ~/.aileron/actions/ (ADR-0003)
-	actionState        action.StateStore // per-action user preferences (enabled/disabled overlay); nil means defaults apply
-	executor           action.Executor   // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
-	installer          *cstore.Installer    // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
-	versionLister      cstore.VersionLister // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
-	sandboxRuntime     sandbox.Runtime   // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
+	actions            *action.Store                 // installed actions in ~/.aileron/actions/ (ADR-0003)
+	actionState        action.StateStore             // per-action user preferences (enabled/disabled overlay); nil means defaults apply
+	executor           action.Executor               // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
+	installer          *cstore.Installer             // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
+	versionLister      cstore.VersionLister          // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
+	sandboxRuntime     sandbox.Runtime               // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
 	actionApprovals    *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
 	sessions           sessions.Store                // ADR-0012: persistent launch-session records; nil → /v1/sessions endpoints return 503
 	webappURL          string                        // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
+	localDaemonToken   string                        // local-daemon bearer token; empty disables local bearer auth
 	actionApprovalTTL  time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
-	bindings           binding.Store     // capability bindings (ADR-0006); nil when no vault is wired
-	oauth2Sessions     *oauth2Sessions   // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
-	oauth2HTTPClient   *http.Client      // for OAuth token exchanges; nil → http.DefaultClient
+	bindings           binding.Store                 // capability bindings (ADR-0006); nil when no vault is wired
+	oauth2Sessions     *oauth2Sessions               // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
+	oauth2HTTPClient   *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient
 
 	// --- Hub (ADR-0013, #486, #487) ---
-	hub          *hub.Client // connector-discovery Hub client; nil disables /v1/hub/* endpoints
-	keyringPath  string      // path to ~/.aileron/keyring.json for install-decision trust state; "" falls back to cstore.DefaultKeyringPath()
+	hub         *hub.Client // connector-discovery Hub client; nil disables /v1/hub/* endpoints
+	keyringPath string      // path to ~/.aileron/keyring.json for install-decision trust state; "" falls back to cstore.DefaultKeyringPath()
 
 	// --- Comms (ADR-0012 step 9B-2) ---
-	notifyQueue   *comms.NotifyQueue        // daemon-wide inbound messages; nil disables /comms/* endpoints
-	listeners     *comms.ListenerRegistry   // registered channel listeners; populated by the vault-unlock callback
-	onVaultUnlock func(vault.Vault)         // fires after POST /v1/vault/unlock so listener startup can resolve tokens
-	auditStateDir string                    // scopes message-event audit log writes; "" disables audit emission for /comms/*
+	notifyQueue     *comms.NotifyQueue      // daemon-wide inbound messages; nil disables /comms/* endpoints
+	listeners       *comms.ListenerRegistry // registered channel listeners; populated by the vault-unlock callback
+	onVaultUnlock   func(vault.Vault)       // fires after POST /v1/vault/unlock so listener startup can resolve tokens
+	auditStateDir   string                  // scopes message-event audit log writes; "" disables audit emission for /comms/*
 	commsHTTPClient *http.Client            // outbound client for /comms/http; nil falls back to http.DefaultClient
 }
 
@@ -178,6 +179,31 @@ func (s *apiServer) GetHealth(w http.ResponseWriter, r *http.Request) {
 		Version:   version.Version,
 		Timestamp: time.Now().UTC(),
 	})
+}
+
+func (s *apiServer) handleLocalAuthHandshake(w http.ResponseWriter, r *http.Request) {
+	if s.localDaemonToken == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Host == "" || r.Host != r.URL.Host {
+		// For ordinary origin-form browser requests r.URL.Host is empty;
+		// reconstruct the effective request origin from Host. The
+		// explicit comparison below is only meaningful for absolute-form
+		// requests, which local browsers should not send.
+		if r.URL.Host != "" {
+			writeError(w, http.StatusForbidden, "host_mismatch", "request host does not match daemon origin")
+			return
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     localDaemonTokenCookie,
+		Value:    s.localDaemonToken,
+		Path:     "/v1",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // --- Intents ---
@@ -1725,7 +1751,6 @@ func buildPendingApprovalResponse(approvalID, actionName, connFQN, reviewURL str
 		Message:    msg,
 	}
 }
-
 
 func manifestToAPI(la action.LoadedAction, enabled bool) api.Action {
 	m := la.Manifest

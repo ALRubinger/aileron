@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -126,6 +127,57 @@ func TestSelectVault_CorruptFileFailsStartup(t *testing.T) {
 	}
 }
 
+func TestShouldProtectLocalDaemon(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{addr: "127.0.0.1:8721", want: true},
+		{addr: "[::1]:8721", want: true},
+		{addr: "localhost:8721", want: true},
+		{addr: "0.0.0.0:8080", want: false},
+		{addr: "[::]:8080", want: false},
+		{addr: "10.0.0.5:8080", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.addr, func(t *testing.T) {
+			got := shouldProtectLocalDaemon(&net.TCPAddr{IP: parseTestIP(t, tc.addr), Port: parseTestPort(t, tc.addr)})
+			if strings.HasPrefix(tc.addr, "localhost:") {
+				got = shouldProtectLocalDaemon(stringAddr(tc.addr))
+			}
+			if got != tc.want {
+				t.Fatalf("shouldProtectLocalDaemon(%q) = %v, want %v", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
+
+type stringAddr string
+
+func (a stringAddr) Network() string { return "tcp" }
+func (a stringAddr) String() string  { return string(a) }
+
+func parseTestIP(t *testing.T, addr string) net.IP {
+	t.Helper()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	return net.ParseIP(host)
+}
+
+func parseTestPort(t *testing.T, addr string) int {
+	t.Helper()
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	if port == "8721" {
+		return 8721
+	}
+	return 8080
+}
+
 // seedVault creates a passphrase-protected vault file at path, so the
 // daemon's selectVault has something to start with. After #492 item 6a
 // the dev fallback is gone — every test that boots the daemon must
@@ -176,10 +228,7 @@ func TestRun_NoTTYDaemonHonorsVaultUnlock(t *testing.T) {
 
 	// Pre-unlock the vault should report locked. (Empty cfg.Vault +
 	// LocalVaultPath set → LockableVault wrap → vaultLocked = true.)
-	statusResp, err := http.Get(info.URL + "/v1/vault/status")
-	if err != nil {
-		t.Fatalf("GET /v1/vault/status: %v", err)
-	}
+	statusResp := doDaemonRequest(t, http.MethodGet, info.URL+"/v1/vault/status", info.Token, "")
 	defer statusResp.Body.Close()
 	statusBody, _ := io.ReadAll(statusResp.Body)
 	if !strings.Contains(string(statusBody), `"locked":true`) {
@@ -187,11 +236,7 @@ func TestRun_NoTTYDaemonHonorsVaultUnlock(t *testing.T) {
 	}
 
 	// Drive the unlock with the right passphrase.
-	unlockBody := strings.NewReader(`{"passphrase":"` + passphrase + `"}`)
-	unlockResp, err := http.Post(info.URL+"/v1/vault/unlock", "application/json", unlockBody)
-	if err != nil {
-		t.Fatalf("POST /v1/vault/unlock: %v", err)
-	}
+	unlockResp := doDaemonRequest(t, http.MethodPost, info.URL+"/v1/vault/unlock", info.Token, `{"passphrase":"`+passphrase+`"}`)
 	defer unlockResp.Body.Close()
 	if unlockResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(unlockResp.Body)
@@ -199,10 +244,7 @@ func TestRun_NoTTYDaemonHonorsVaultUnlock(t *testing.T) {
 	}
 
 	// Status after unlock: locked:false.
-	statusResp2, err := http.Get(info.URL + "/v1/vault/status")
-	if err != nil {
-		t.Fatalf("GET /v1/vault/status (post-unlock): %v", err)
-	}
+	statusResp2 := doDaemonRequest(t, http.MethodGet, info.URL+"/v1/vault/status", info.Token, "")
 	defer statusResp2.Body.Close()
 	statusBody2, _ := io.ReadAll(statusResp2.Body)
 	if !strings.Contains(string(statusBody2), `"locked":false`) {
@@ -237,11 +279,7 @@ func TestRun_NoTTYDaemonRejectsWrongPassphrase(t *testing.T) {
 	go func() { runErr <- run(ctx, log, opts) }()
 	info := waitForDaemon(t, stateDir, 3*time.Second)
 
-	resp, err := http.Post(info.URL+"/v1/vault/unlock", "application/json",
-		strings.NewReader(`{"passphrase":"wrong"}`))
-	if err != nil {
-		t.Fatalf("POST /v1/vault/unlock: %v", err)
-	}
+	resp := doDaemonRequest(t, http.MethodPost, info.URL+"/v1/vault/unlock", info.Token, `{"passphrase":"wrong"}`)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 for wrong passphrase", resp.StatusCode)
@@ -288,10 +326,7 @@ func TestRun_PublishesDiscoveryAndCleansUp(t *testing.T) {
 	}
 
 	// URL is reachable: GET an endpoint that exists without auth setup.
-	resp, err := http.Get(info.URL + "/v1/vault/status")
-	if err != nil {
-		t.Fatalf("GET %s: %v", info.URL, err)
-	}
+	resp := doDaemonRequest(t, http.MethodGet, info.URL+"/v1/vault/status", info.Token, "")
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusInternalServerError {
 		t.Errorf("status = %d, expected non-5xx from a wired daemon", resp.StatusCode)
@@ -349,7 +384,7 @@ func TestRun_WebappURL_DefaultsToBoundURL(t *testing.T) {
 
 	info := waitForDaemon(t, stateDir, 3*time.Second)
 
-	got := fetchStatusGatewayURL(t, info.URL)
+	got := fetchStatusGatewayURL(t, info.URL, info.Token)
 	if got != info.URL {
 		t.Errorf("gateway_url = %q, want %q (the daemon's own bound URL)", got, info.URL)
 	}
@@ -386,7 +421,7 @@ func TestRun_WebappURL_EnvOverrides(t *testing.T) {
 
 	info := waitForDaemon(t, stateDir, 3*time.Second)
 
-	got := fetchStatusGatewayURL(t, info.URL)
+	got := fetchStatusGatewayURL(t, info.URL, info.Token)
 	if got != override {
 		t.Errorf("gateway_url = %q, want %q (env override wins over bound URL)", got, override)
 	}
@@ -398,12 +433,9 @@ func TestRun_WebappURL_EnvOverrides(t *testing.T) {
 // fetchStatusGatewayURL hits the daemon's `/v1/status` endpoint and
 // returns the `gateway_url` field (which surfaces `s.webappURL` per
 // handlers_status.go). Empty string when the field is absent.
-func fetchStatusGatewayURL(t *testing.T, daemonURL string) string {
+func fetchStatusGatewayURL(t *testing.T, daemonURL, token string) string {
 	t.Helper()
-	resp, err := http.Get(daemonURL + "/v1/status")
-	if err != nil {
-		t.Fatalf("GET /v1/status: %v", err)
-	}
+	resp := doDaemonRequest(t, http.MethodGet, daemonURL+"/v1/status", token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /v1/status status = %d, want 200", resp.StatusCode)
@@ -415,6 +447,29 @@ func fetchStatusGatewayURL(t *testing.T, daemonURL string) string {
 		t.Fatalf("decode status: %v", err)
 	}
 	return body.GatewayURL
+}
+
+func doDaemonRequest(t *testing.T, method, url, token, body string) *http.Response {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	return resp
 }
 
 // TestRun_RefusesWhenAnotherDaemonHoldsLock asserts the singleton
@@ -931,10 +986,7 @@ func TestRun_SeedApprovals_PopulatesQueue(t *testing.T) {
 		}
 	}()
 
-	resp, err := http.Get(info.URL + "/v1/action-approvals")
-	if err != nil {
-		t.Fatalf("GET /v1/action-approvals: %v", err)
-	}
+	resp := doDaemonRequest(t, http.MethodGet, info.URL+"/v1/action-approvals", info.Token, "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)

@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -102,6 +104,53 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+const localDaemonTokenCookie = "aileron_daemon_token"
+
+// localDaemonAuthMiddleware protects the local daemon's /v1/* surface
+// with the token advertised in daemon.json. CLI/shim clients send it as
+// Authorization: Bearer <token>; the same-origin webapp gets a cookie
+// through /v1/auth/handshake so browser EventSource can authenticate.
+func localDaemonAuthMiddleware(token string, next http.Handler) http.Handler {
+	if token == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions || !strings.HasPrefix(r.URL.Path, "/v1/") || localDaemonAuthSkip(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		got := bearerToken(r)
+		if got == "" {
+			if c, err := r.Cookie(localDaemonTokenCookie); err == nil {
+				got = c.Value
+			}
+		}
+		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid daemon token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func localDaemonAuthSkip(path string) bool {
+	switch path {
+	case "/v1/health", "/v1/auth/handshake":
+		return true
+	default:
+		return false
+	}
+}
+
+func bearerToken(r *http.Request) string {
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(h, prefix))
 }
 
 func generateID() string {

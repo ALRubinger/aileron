@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 )
 
@@ -120,7 +121,14 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("daemon: %w", err)
 	}
 	daemonURL = trimTrailingSlash(daemonURL)
-	client := newDaemonClient(daemonURL)
+	var daemonToken string
+	if info, err := discovery.Read(stateDir); err == nil && trimTrailingSlash(info.URL) == daemonURL {
+		daemonToken = info.Token
+	}
+	if daemonToken == "" {
+		daemonToken = os.Getenv("AILERON_TOKEN")
+	}
+	client := newDaemonClient(daemonURL, daemonToken)
 
 	agentPath, err := ResolveBinary(config.Agent.BinaryNames())
 	if err != nil {

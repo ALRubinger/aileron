@@ -19,6 +19,7 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
@@ -508,6 +509,7 @@ func bindingDoRequest(method, path string, body io.Reader) (int, []byte, error) 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	setDaemonAuthorization(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, nil, err
@@ -518,6 +520,27 @@ func bindingDoRequest(method, path string, body io.Reader) (int, []byte, error) 
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, out, nil
+}
+
+func setDaemonAuthorization(req *http.Request) {
+	if token := daemonAuthToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func daemonAuthToken() string {
+	if token := os.Getenv("AILERON_TOKEN"); token != "" {
+		return token
+	}
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		return ""
+	}
+	info, err := discovery.Read(stateDir)
+	if err != nil {
+		return ""
+	}
+	return info.Token
 }
 
 // runBindingList renders the user's bindings as a fixed-width table.
@@ -1153,6 +1176,7 @@ func fetchRuntimeStatus() (*runtimeStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	setDaemonAuthorization(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -1350,6 +1374,7 @@ func fetchConnectorCheck(includePrerelease bool) (*connectorsCheckResponse, erro
 	if err != nil {
 		return nil, err
 	}
+	setDaemonAuthorization(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -1468,12 +1493,12 @@ func runAction(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // locally so the CLI binary doesn't pull the full generated types
 // graph just to render this surface.
 type syncResult struct {
-	ActionsSeen      int                       `json:"actions_seen"`
-	Required         []connectorRefWire        `json:"required"`
-	Installed        []installedConnectorWire  `json:"installed"`
-	AlreadyInstalled []connectorRefWire        `json:"already_installed"`
-	InstallFailures  []connectorFailureWire    `json:"install_failures"`
-	Unbound          []unboundCapabilityWire   `json:"unbound"`
+	ActionsSeen      int                      `json:"actions_seen"`
+	Required         []connectorRefWire       `json:"required"`
+	Installed        []installedConnectorWire `json:"installed"`
+	AlreadyInstalled []connectorRefWire       `json:"already_installed"`
+	InstallFailures  []connectorFailureWire   `json:"install_failures"`
+	Unbound          []unboundCapabilityWire  `json:"unbound"`
 }
 
 type connectorRefWire struct {
@@ -1482,11 +1507,11 @@ type connectorRefWire struct {
 }
 
 type installedConnectorWire struct {
-	Fqn              string  `json:"fqn"`
-	Version          string  `json:"version"`
-	Hash             string  `json:"hash"`
-	EntryDir         string  `json:"entry_dir"`
-	AlreadyInstalled *bool   `json:"already_installed,omitempty"`
+	Fqn              string `json:"fqn"`
+	Version          string `json:"version"`
+	Hash             string `json:"hash"`
+	EntryDir         string `json:"entry_dir"`
+	AlreadyInstalled *bool  `json:"already_installed,omitempty"`
 }
 
 type connectorFailureWire struct {
@@ -1519,6 +1544,7 @@ func postSyncRequest(autoInstall bool) (*syncResult, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	setDaemonAuthorization(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

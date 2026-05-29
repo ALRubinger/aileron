@@ -44,6 +44,7 @@ type Info struct {
 	PID       int       `json:"pid"`
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
+	Token     string    `json:"token,omitempty"`
 }
 
 // ErrNotRunning is returned by Read when daemon.json does not exist.

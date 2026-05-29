@@ -1,12 +1,13 @@
 // Local-webapp API client.
 //
 // The daemon serves this webapp at the same origin it serves the
-// `/v1/*` API. No JWT, no token refresh — there's no multi-user auth
-// boundary on the local surface. The one cross-cutting concern is
-// vault-locked handling: under `aileron launch` the daemon may start
-// vault-locked and refuse vault-needing endpoints with 423; the
-// passphrase modal (#429) opens, the user unlocks, and the original
-// request is retried.
+// `/v1/*` API. The local daemon uses a single same-origin handshake to
+// set an HttpOnly daemon-token cookie; there is no multi-user login,
+// JWT refresh, or organization selector. The other cross-cutting
+// concern is vault-locked handling: under `aileron launch` the daemon
+// may start vault-locked and refuse vault-needing endpoints with 423;
+// the passphrase modal (#429) opens, the user unlocks, and the
+// original request is retried.
 //
 // See ../../../ui/src/lib/api.ts for the cloud-tier reference client
 // (frozen). The shape is deliberately pared-down here — only what
@@ -15,8 +16,21 @@
 import { onVaultLocked } from './vault.svelte';
 
 const API_BASE = '';
+let daemonHandshake: Promise<void> | null = null;
+
+async function ensureDaemonHandshake(): Promise<void> {
+	if (!daemonHandshake) {
+		daemonHandshake = fetch(`${API_BASE}/v1/auth/handshake`).then((res) => {
+			if (!res.ok && res.status !== 204) {
+				throw new Error(`daemon auth handshake: ${res.statusText}`);
+			}
+		});
+	}
+	return daemonHandshake;
+}
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+	await ensureDaemonHandshake();
 	const res = await fetch(`${API_BASE}${path}`, {
 		...init,
 		headers: {
@@ -51,6 +65,7 @@ export type LocalVaultStatus = {
  *  load so it can open the modal even if the user hasn't yet
  *  triggered a vault-needing call. */
 export async function getLocalVaultStatus(): Promise<LocalVaultStatus> {
+	await ensureDaemonHandshake();
 	const res = await fetch(`${API_BASE}/v1/vault/status`);
 	if (!res.ok) {
 		throw new Error(`vault status: ${res.statusText}`);
@@ -62,6 +77,7 @@ export async function getLocalVaultStatus(): Promise<LocalVaultStatus> {
  *  with a recognisable message on 401 (wrong passphrase) so the modal
  *  can keep the field open and let the user retry. */
 export async function unlockLocalVault(passphrase: string): Promise<LocalVaultStatus> {
+	await ensureDaemonHandshake();
 	const res = await fetch(`${API_BASE}/v1/vault/unlock`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -187,40 +203,51 @@ export type ActionApprovalSubscriber = {
  *  expected to refetch via [listActionApprovals]. */
 export function watchActionApprovals(sub: ActionApprovalSubscriber): () => void {
 	const url = `${API_BASE}/v1/action-approvals/watch`;
-	const es = new EventSource(url);
+	let es: EventSource | null = null;
+	let closed = false;
 
-	es.addEventListener('snapshot', (e: MessageEvent) => {
-		try {
-			const payload = JSON.parse(e.data);
-			sub.onSnapshot(payload.items ?? []);
-		} catch (err) {
-			sub.onError?.(err);
-		}
-	});
-	es.addEventListener('pending', (e: MessageEvent) => {
-		try {
-			sub.onPending(JSON.parse(e.data));
-		} catch (err) {
-			sub.onError?.(err);
-		}
-	});
-	es.addEventListener('resolved', (e: MessageEvent) => {
-		try {
-			sub.onResolved(JSON.parse(e.data));
-		} catch (err) {
-			sub.onError?.(err);
-		}
-	});
-	es.addEventListener('error', (e) => {
-		// EventSource auto-reconnects on transient failure. We only
-		// surface the error once per disconnect — readyState === CLOSED
-		// means the browser gave up; CONNECTING means it'll retry.
-		if (es.readyState === EventSource.CLOSED) {
-			sub.onError?.(e);
-		}
-	});
+	void ensureDaemonHandshake()
+		.then(() => {
+			if (closed) return;
+			es = new EventSource(url);
 
-	return () => es.close();
+			es.addEventListener('snapshot', (e: MessageEvent) => {
+				try {
+					const payload = JSON.parse(e.data);
+					sub.onSnapshot(payload.items ?? []);
+				} catch (err) {
+					sub.onError?.(err);
+				}
+			});
+			es.addEventListener('pending', (e: MessageEvent) => {
+				try {
+					sub.onPending(JSON.parse(e.data));
+				} catch (err) {
+					sub.onError?.(err);
+				}
+			});
+			es.addEventListener('resolved', (e: MessageEvent) => {
+				try {
+					sub.onResolved(JSON.parse(e.data));
+				} catch (err) {
+					sub.onError?.(err);
+				}
+			});
+			es.addEventListener('error', (e) => {
+				// EventSource auto-reconnects on transient failure. We only
+				// surface the error once per disconnect — readyState === CLOSED
+				// means the browser gave up; CONNECTING means it'll retry.
+				if (es?.readyState === EventSource.CLOSED) {
+					sub.onError?.(e);
+				}
+			});
+		})
+		.catch((err) => sub.onError?.(err));
+
+	return () => {
+		closed = true;
+		es?.close();
+	};
 }
 
 /** Resolves a pending action-approval. The runtime's blocked

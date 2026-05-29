@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
+	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
@@ -154,20 +155,6 @@ func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 func TestRunStatus_All(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
@@ -191,8 +178,6 @@ func TestRunStatus_All(t *testing.T) {
 		t.Error("expected Vault section")
 	}
 }
-
-
 
 func TestRunStatus_Notifications(t *testing.T) {
 	dir := t.TempDir()
@@ -280,9 +265,6 @@ func TestRunStatus_InHelp(t *testing.T) {
 		t.Error("expected 'aileron status' in help output")
 	}
 }
-
-
-
 
 // TestRunStatus_RuntimeUnreachable covers the offline path: with no
 // daemon listening, `aileron status runtime` must exit cleanly and
@@ -392,7 +374,6 @@ func TestRunStatus_RuntimeIncludedInDefault(t *testing.T) {
 		t.Error("expected daemon version in default status output")
 	}
 }
-
 
 func TestRunSecret_NoSubcommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -1010,6 +991,63 @@ func TestBindingAPIBaseURL_OverrideTrimsTrailingSlash(t *testing.T) {
 	}
 }
 
+func TestDaemonAuthTokenPrefersEnvironment(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AILERON_TOKEN", "tok_env")
+	if got := daemonAuthToken(); got != "tok_env" {
+		t.Fatalf("daemonAuthToken = %q, want tok_env", got)
+	}
+}
+
+func TestDaemonAuthTokenReadsDiscovery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stateDir := filepath.Join(os.Getenv("HOME"), ".aileron")
+	if err := discovery.Write(stateDir, discovery.Info{
+		URL:   "http://127.0.0.1:8721",
+		Token: "tok_file",
+	}); err != nil {
+		t.Fatalf("write discovery: %v", err)
+	}
+	if got := daemonAuthToken(); got != "tok_file" {
+		t.Fatalf("daemonAuthToken = %q, want tok_file", got)
+	}
+}
+
+func TestSetDaemonAuthorization(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("AILERON_TOKEN", "tok_req")
+	req := httptest.NewRequest(http.MethodGet, "http://daemon.test/v1/status", nil)
+
+	setDaemonAuthorization(req)
+
+	if got := req.Header.Get("Authorization"); got != "Bearer tok_req" {
+		t.Fatalf("Authorization = %q, want bearer token", got)
+	}
+}
+
+func TestBindingDoRequestSendsDaemonAuthorization(t *testing.T) {
+	t.Setenv("AILERON_TOKEN", "tok_binding")
+	var sawAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+	t.Setenv("AILERON_API_URL", srv.URL+"/v1")
+
+	status, _, err := bindingDoRequest(http.MethodGet, "/bindings", nil)
+	if err != nil {
+		t.Fatalf("bindingDoRequest: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if sawAuth != "Bearer tok_binding" {
+		t.Fatalf("Authorization = %q, want bearer token", sawAuth)
+	}
+}
+
 // TestBindingAPIBaseURL_PropagatesSpawnErrorThroughCallers locks in
 // the post-#490 contract: every helper that previously dialed the
 // hardcoded `localhost:8721` fallback now propagates the spawn
@@ -1131,23 +1169,6 @@ func TestRunBinding_UnknownSubcommand(t *testing.T) {
 		t.Error("expected nonzero exit code for unknown subcommand")
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 func TestRunSecret_InHelp(t *testing.T) {
 	var stdout bytes.Buffer
@@ -4610,7 +4631,9 @@ actions = [
 `)
 	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var req struct{ FQN string `json:"fqn"` }
+		var req struct {
+			FQN string `json:"fqn"`
+		}
 		_ = json.Unmarshal(body, &req)
 		switch r.URL.Path {
 		case "/actions/preview":

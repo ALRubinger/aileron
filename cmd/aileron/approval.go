@@ -181,5 +181,6 @@ func approvalDoRequest(method, path string, body []byte) (*http.Response, error)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	setDaemonAuthorization(req)
 	return http.DefaultClient.Do(req)
 }

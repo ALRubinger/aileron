@@ -54,7 +54,7 @@ func ensureVaultUnlocked(passphraseFile string, stderr io.Writer) error {
 	daemonRunning := derr == nil && daemonReachableFn(info.URL)
 
 	if daemonRunning {
-		locked, ok := probeLocalVaultLocked(info.URL)
+		locked, ok := probeLocalVaultLocked(info.URL, info.Token)
 		if !ok {
 			// Daemon is reachable but doesn't expose the local-vault
 			// surface (cloud-shape or older binary). Nothing to do —
@@ -213,6 +213,7 @@ func postVaultUnlock(daemonURL, passphrase string) error {
 		return fmt.Errorf("build unlock request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	setDaemonAuthorization(req)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

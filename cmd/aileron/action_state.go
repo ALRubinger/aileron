@@ -112,6 +112,7 @@ func runActionList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
+	setDaemonAuthorization(req)
 	resp, err := actionsHTTPClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -388,6 +389,7 @@ func runActionToggle(args []string, enabled bool, stdout, stderr io.Writer) int 
 		return 1
 	}
 	req.Header.Set("Content-Type", "application/json")
+	setDaemonAuthorization(req)
 	resp, err := actionsHTTPClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)

@@ -194,6 +194,13 @@ async function emit(page: Page, event: string, data: unknown): Promise<void> {
 }
 
 async function installDecideMock(page: Page, decides: DecideRecorder): Promise<void> {
+	// The local-daemon client performs a same-origin auth handshake before
+	// API fetches and EventSource setup. Mocked E2E does not run a daemon,
+	// so acknowledge the handshake without setting a cookie.
+	await page.route('**/v1/auth/handshake', async (route) => {
+		await route.fulfill({ status: 204 });
+	});
+
 	await page.route('**/v1/action-approvals/*/decide', async (route) => {
 		const req: Request = route.request();
 		const url = new URL(req.url());

@@ -148,7 +148,7 @@ func TestProbeLocalVaultLocked_LockedTrue(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	locked, ok := probeLocalVaultLocked(srv.URL)
+	locked, ok := probeLocalVaultLocked(srv.URL, "")
 	if !ok {
 		t.Fatal("ok should be true on a 200 response")
 	}
@@ -163,7 +163,7 @@ func TestProbeLocalVaultLocked_UnlockedFalse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	locked, ok := probeLocalVaultLocked(srv.URL)
+	locked, ok := probeLocalVaultLocked(srv.URL, "")
 	if !ok {
 		t.Fatal("ok should be true on a 200 response")
 	}
@@ -174,7 +174,7 @@ func TestProbeLocalVaultLocked_UnlockedFalse(t *testing.T) {
 
 func TestProbeLocalVaultLocked_NoServer(t *testing.T) {
 	// Port 1 is privileged + nothing listens — connect refused / timeout.
-	_, ok := probeLocalVaultLocked("http://127.0.0.1:1")
+	_, ok := probeLocalVaultLocked("http://127.0.0.1:1", "")
 	if ok {
 		t.Fatal("ok should be false when the daemon isn't reachable")
 	}
@@ -186,7 +186,7 @@ func TestProbeLocalVaultLocked_Non200(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, ok := probeLocalVaultLocked(srv.URL)
+	_, ok := probeLocalVaultLocked(srv.URL, "")
 	if ok {
 		t.Fatal("ok should be false on non-200")
 	}

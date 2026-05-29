@@ -22,15 +22,21 @@ const daemonHTTPTimeout = 5 * time.Second
 // one per Launch invocation.
 type daemonClient struct {
 	baseURL string
+	token   string
 	client  *http.Client
 }
 
 // newDaemonClient wraps the daemon's URL (e.g. "http://127.0.0.1:54321")
 // in a thin HTTP client. baseURL has any trailing slash trimmed and
 // is treated as the root the /v1 paths attach to.
-func newDaemonClient(baseURL string) *daemonClient {
+func newDaemonClient(baseURL string, token ...string) *daemonClient {
+	var tok string
+	if len(token) > 0 {
+		tok = token[0]
+	}
 	return &daemonClient{
 		baseURL: trimTrailingSlash(baseURL),
+		token:   tok,
 		client:  &http.Client{Timeout: daemonHTTPTimeout},
 	}
 }
@@ -51,6 +57,7 @@ func (c *daemonClient) RegisterSession(ctx context.Context, agent, workingDir st
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.authorize(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("post /v1/sessions: %w", err)
@@ -86,6 +93,7 @@ func (c *daemonClient) EndSession(ctx context.Context, sessionID string, exitCod
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.authorize(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post end-session: %w", err)
@@ -107,6 +115,7 @@ func (c *daemonClient) LocalVaultLocked(ctx context.Context) (locked bool, ok bo
 	if err != nil {
 		return false, false
 	}
+	c.authorize(req)
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return false, false
@@ -122,6 +131,12 @@ func (c *daemonClient) LocalVaultLocked(ctx context.Context) (locked bool, ok bo
 		return false, false
 	}
 	return body.Locked, true
+}
+
+func (c *daemonClient) authorize(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 }
 
 // httpStatusError reads the response body and returns a human-friendly
@@ -150,4 +165,3 @@ func trimTrailingSlash(u string) string {
 	}
 	return u
 }
-
