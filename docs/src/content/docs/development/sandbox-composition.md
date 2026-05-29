@@ -6,7 +6,7 @@ order: 6
 
 Sandbox composition is the contract for deciding which container image an agent session runs in. It is defined by [ADR-0017](/adr/0017-sandbox-composition/) and implemented by the `aileron sandbox` CLI.
 
-This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold, inspect, build, and prepare sandbox images during `aileron launch`, while later work runs the agent inside the prepared container.
+This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold, inspect, build, and run the agent command in the prepared sandbox image, while later work adds runtime injection, discovery refresh, proxy bootstrap, and shell mediation.
 
 ## Choose a Composition Tier
 
@@ -106,9 +106,9 @@ Build behavior by tier:
 
 When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_CONTEXT` to the directory containing the sandbox-base `Containerfile`.
 
-## Prepare During Launch
+## Run During Launch
 
-Use `--sandbox` on `aileron launch` to have launch prepare the composition-selected image before starting the agent:
+Use `--sandbox` on `aileron launch` to have launch prepare the composition-selected image and start the agent inside it:
 
 ```bash
 aileron launch --sandbox=auto claude
@@ -118,7 +118,9 @@ aileron launch --sandbox=podman goose
 
 `auto` detects Docker or Podman from `PATH`. `docker` and `podman` select a runtime explicitly. The default is `--sandbox=off`, which preserves the current direct host launch path.
 
-This slice prepares image selection only. Launch exports `AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, and, when a build ran, `AILERON_SANDBOX_RUNTIME` to the child process for the follow-on runtime path. It does not run the agent inside the container yet.
+The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker and `host.containers.internal` for Podman.
+
+The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied until runtime injection lands.
 
 ## Use a BYO Image
 
@@ -136,14 +138,14 @@ Set `customizations.aileron.image` when your team owns the complete image:
 }
 ```
 
-In BYO-image mode, later runtime launch work will use the image as supplied and inject Aileron's runtime contract at launch: the `aileron` binary/shims, discovery files, proxy bootstrap, session CA, and shell mediation files.
+In BYO-image mode, launch currently uses the image as supplied. Later runtime launch work injects Aileron's runtime contract at launch: the `aileron` binary/shims, discovery files, proxy bootstrap, session CA, and shell mediation files.
 
 ## What Belongs in the Image
 
 Put ordinary project tooling in the devcontainer: language runtimes, CLIs, package managers, private CA bundles, and internal helper tools.
 
-Do not put Aileron credentials or user secrets in the image. Credentialed traffic is designed to flow through the Aileron HTTPS proxy/data plane. Runtime bootstrap supplies `HTTPS_PROXY` and `AILERON_TOKEN` when container launch support lands.
+Do not put Aileron credentials or user secrets in the image. Credentialed traffic is designed to flow through the Aileron HTTPS proxy/data plane. Runtime bootstrap supplies proxy configuration when that layer lands.
 
 ## What This Does Not Do Yet
 
-This slice does not run containers or inject runtime files into BYO images. Follow-on work runs agents inside the prepared image, adds BYO runtime injection and validation, and adds the discovery watcher. Shell-layer interception builds on top of that runtime substrate.
+This slice does not inject runtime files into BYO images, generate discovery shims, or mediate shell commands. Follow-on work adds BYO runtime injection and validation, the discovery watcher, proxy bootstrap, and shell-layer interception.

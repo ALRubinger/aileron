@@ -1,4 +1,4 @@
-// Package container builds sandbox container images from composition plans.
+// Package container builds and runs sandbox container images from composition plans.
 package container
 
 import (
@@ -18,6 +18,7 @@ import (
 )
 
 const DefaultRuntime = "auto"
+const WorkspacePath = "/home/agent/workspace"
 
 var ErrNoBuildRequired = errors.New("sandbox image does not require a build")
 
@@ -31,6 +32,7 @@ type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
@@ -57,6 +59,21 @@ type BuildResult struct {
 	Image   string
 	Built   bool
 	Tier    composition.Tier
+}
+
+// RunOptions configures one sandbox container execution.
+type RunOptions struct {
+	Runtime string
+	Image   string
+	WorkDir string
+	Env     map[string]string
+	Command []string
+	TTY     bool
+}
+
+// RunResult reports the selected runtime after a sandbox container exits.
+type RunResult struct {
+	Runtime string
 }
 
 // Build builds the image for plan. Tier 0 builds Aileron's local sandbox-base
@@ -131,6 +148,40 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 	}
 }
 
+// Run starts a one-shot sandbox container for an agent command.
+func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
+	if opts.Image == "" {
+		return RunResult{}, fmt.Errorf("sandbox image is required")
+	}
+	if len(opts.Command) == 0 || strings.TrimSpace(opts.Command[0]) == "" {
+		return RunResult{}, fmt.Errorf("sandbox command is required")
+	}
+	runner := b.Runner
+	if runner == nil {
+		runner = execRunner{}
+	}
+	stdout := b.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	stderr := b.Stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	runtimeName, err := resolveRuntime(firstNonEmpty(opts.Runtime, b.Runtime), b.Runner == nil)
+	if err != nil {
+		return RunResult{}, err
+	}
+	args, err := runArgs(opts)
+	if err != nil {
+		return RunResult{}, err
+	}
+	if err := runner.Run(ctx, runtimeName, args, stdout, stderr); err != nil {
+		return RunResult{}, err
+	}
+	return RunResult{Runtime: runtimeName}, nil
+}
+
 // ResolveRuntime returns the container runtime executable to use.
 func ResolveRuntime(name string) (string, error) {
 	return resolveRuntime(name, true)
@@ -160,6 +211,45 @@ func resolveRuntime(name string, checkPath bool) (string, error) {
 		}
 		return "", fmt.Errorf("unsupported sandbox runtime %q (want auto, docker, or podman)", name)
 	}
+}
+
+func runArgs(opts RunOptions) ([]string, error) {
+	workDir := opts.WorkDir
+	if workDir == "" {
+		workDir = "."
+	}
+	absWorkDir, err := filepath.Abs(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve sandbox workdir: %w", err)
+	}
+	args := []string{"run", "--rm", "-i"}
+	if opts.TTY {
+		args = append(args, "-t")
+	}
+	args = append(args,
+		"--workdir", WorkspacePath,
+		"--volume", absWorkDir+":"+WorkspacePath,
+	)
+	keys := make([]string, 0, len(opts.Env))
+	for k := range opts.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--env", k+"="+opts.Env[k])
+	}
+	args = append(args, opts.Image)
+	args = append(args, opts.Command...)
+	return args, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // ProjectImageTag returns the deterministic local image tag for a project.

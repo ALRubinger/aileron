@@ -196,7 +196,7 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 	}
 }
 
-func TestLaunch_SandboxBYOImageEnvVarsFlowThrough(t *testing.T) {
+func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 	dir := t.TempDir()
 	devcontainerDir := filepath.Join(dir, ".devcontainer")
 	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
@@ -206,39 +206,45 @@ func TestLaunch_SandboxBYOImageEnvVarsFlowThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outFile := filepath.Join(dir, "env.txt")
-	script := filepath.Join(dir, "capture.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755); err != nil {
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
-		Agent:          scriptAgent{script: script},
+		Agent:          scriptAgent{script: "codex"},
 		Dir:            dir,
+		Args:           []string{"--ask-for-approval", "never"},
 		SandboxRuntime: "auto",
 	})
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
-	data, err := os.ReadFile(outFile)
+	data, err := os.ReadFile(argsFile)
 	if err != nil {
-		t.Fatalf("read env: %v", err)
+		t.Fatalf("read docker args: %v", err)
 	}
-	env := string(data)
+	args := string(data)
 	for _, want := range []string{
-		"AILERON_SANDBOX_IMAGE=ghcr.io/acme/agent:latest",
-		"AILERON_SANDBOX_TIER=byo_image",
+		"run\n",
+		"--workdir\n/home/agent/workspace\n",
+		"--volume\n" + dir + ":/home/agent/workspace\n",
+		"--env\nAILERON_SANDBOX_IMAGE=ghcr.io/acme/agent:latest\n",
+		"--env\nAILERON_SANDBOX_TIER=byo_image\n",
+		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
+		"--env\nAILERON_URL=http://host.docker.internal:",
+		"ghcr.io/acme/agent:latest\ncodex\n--ask-for-approval\nnever\n",
 	} {
-		if !strings.Contains(env, want) {
-			t.Errorf("expected %q in child env:\n%s", want, env)
+		if !strings.Contains(args, want) {
+			t.Errorf("expected %q in docker args:\n%s", want, args)
 		}
-	}
-	if strings.Contains(env, "AILERON_SANDBOX_RUNTIME=") {
-		t.Errorf("BYO image should not report a build runtime:\n%s", env)
 	}
 }
 
-func TestLaunch_SandboxBuildEnvVarsFlowThrough(t *testing.T) {
+func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 	dir := t.TempDir()
 	baseDir := filepath.Join(dir, "images", "sandbox-base")
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
@@ -248,38 +254,37 @@ func TestLaunch_SandboxBuildEnvVarsFlowThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
 	docker := filepath.Join(binDir, "docker")
-	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" >> "+argsFile+"\nprintf '%s\\n' --- >> "+argsFile+"\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	outFile := filepath.Join(dir, "env.txt")
-	script := filepath.Join(dir, "capture.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nenv > "+outFile+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
-		Agent:          scriptAgent{script: script},
+		Agent:          scriptAgent{script: "claude"},
 		Dir:            dir,
+		Args:           []string{"--dangerously-skip-permissions"},
 		SandboxRuntime: "docker",
 	})
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
-	data, err := os.ReadFile(outFile)
+	data, err := os.ReadFile(argsFile)
 	if err != nil {
-		t.Fatalf("read env: %v", err)
+		t.Fatalf("read docker args: %v", err)
 	}
-	env := string(data)
+	args := string(data)
 	for _, want := range []string{
-		"AILERON_SANDBOX_IMAGE=aileron/sandbox-base:latest",
-		"AILERON_SANDBOX_TIER=base",
-		"AILERON_SANDBOX_RUNTIME=docker",
+		"build\n-t\naileron/sandbox-base:latest\n",
+		"run\n--rm\n-i\n",
+		"--env\nAILERON_SANDBOX_IMAGE=aileron/sandbox-base:latest\n",
+		"--env\nAILERON_SANDBOX_TIER=base\n",
+		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
+		"aileron/sandbox-base:latest\nclaude\n--dangerously-skip-permissions\n",
 	} {
-		if !strings.Contains(env, want) {
-			t.Errorf("expected %q in child env:\n%s", want, env)
+		if !strings.Contains(args, want) {
+			t.Errorf("expected %q in docker args:\n%s", want, args)
 		}
 	}
 }
