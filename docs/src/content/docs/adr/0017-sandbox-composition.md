@@ -1,6 +1,6 @@
 ---
 title: "ADR-0017: Sandbox Composition"
-description: "v4 sandbox images are composed through devcontainer.json with Aileron-specific extensions under customizations.aileron. Aileron owns a minimal sandbox-base image and users extend or replace it using standard container workflows."
+description: "Sandbox images are composed through devcontainer.json with Aileron-specific extensions under customizations.aileron. Aileron owns a minimal sandbox-base image and users extend or replace it using standard container workflows."
 order: 17
 ---
 
@@ -14,7 +14,7 @@ order: 17
 
 ## Context
 
-v4 moves Aileron from a host-launched MCP-first runtime toward the Aileron Way: the agent runs inside a container Aileron defines, with credentialed HTTPS traffic flowing through the Aileron data plane and shell/runtime boundaries mediated inside the container.
+Aileron is moving from a host-launched MCP-first runtime toward the Aileron Way: the agent runs inside a container Aileron defines, with credentialed HTTPS traffic flowing through the Aileron data plane and shell/runtime boundaries mediated inside the container.
 
 That shift creates an image-composition question: who decides what is in the agent container? Aileron needs to own the security substrate, but users still need ordinary development tools such as `gh`, `kubectl`, language runtimes, private CLIs, and internal certificates.
 
@@ -46,15 +46,15 @@ The Aileron extension block starts narrow:
 }
 ```
 
-`image` selects the BYO-image tier. `mediation` and `approval_surface` are declared here so the config surface exists before #801 and #802 add the runtime behavior.
+`image` selects the BYO-image tier. `mediation` and `approval_surface` are declared here so the config surface exists before shell mediation and the approval UI add the runtime behavior.
 
 The Aileron-owned base image contains only the runtime substrate: the `aileron` binary/shim entrypoints, discovery files, proxy/session bootstrap, CA installation hooks, and shell mediation files as those features land. It does not carry language runtimes or third-party development tools.
 
 ## Single-binary alignment
 
-This ADR follows the updated #747 v4 direction:
+This ADR follows the updated sandbox runtime direction:
 
-- v4 uses one `aileron` binary with multiple modes.
+- Aileron uses one `aileron` binary with multiple modes.
 - This composition contract does not introduce an `aileron-mcp` image or launch path.
 - The canonical credentialed-action path is HTTPS through the Aileron proxy/data plane.
 - Runtime bootstrap supplies `HTTPS_PROXY` and `AILERON_TOKEN` when container/non-loopback daemon access is enabled.
@@ -68,7 +68,7 @@ This ADR follows the updated #747 v4 direction:
 
 The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented snippets for common tools. The snippets are guidance, not a runtime resolver. Users own their container contents using normal Docker/devcontainer workflows.
 
-`aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan. Later launch work consumes the same composition contract.
+`aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan. Later launch work consumes the same composition contract and built image selection.
 
 ## Consequences
 
@@ -76,7 +76,7 @@ Users with existing devcontainers get an upgrade path rather than a parallel Ail
 
 Aileron keeps a clear boundary: it owns mediation, credentials, approvals, audit, and runtime bootstrap; users own development tooling in the image.
 
-The first implementation can establish the contract without also implementing runtime orchestration, watcher processes, shell interception, or proxy bootstrap. Those build on this substrate in later #796/#801 slices.
+The first implementations can establish the contract and image-build substrate without also implementing runtime orchestration, watcher processes, shell interception, or proxy bootstrap. Those build on this substrate in later sandbox and shell-mediation work.
 
 ## Alternatives Considered
 
@@ -88,6 +88,6 @@ The first implementation can establish the contract without also implementing ru
 
 ## References
 
-- [Issue #796](https://github.com/ALRubinger/aileron/issues/796) — v4 sandbox composition
-- [Issue #747](https://github.com/ALRubinger/aileron/issues/747) — v4 runtime-first milestone
+- [Issue #796](https://github.com/ALRubinger/aileron/issues/796) — sandbox composition
+- [Issue #747](https://github.com/ALRubinger/aileron/issues/747) — runtime-first milestone
 - [ADR-0015](/adr/0015-launch-audit-scope) — old host launch audit boundary

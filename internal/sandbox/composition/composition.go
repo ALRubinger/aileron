@@ -1,4 +1,4 @@
-// Package composition defines the v4 sandbox image-composition contract.
+// Package composition defines the sandbox image-composition contract.
 package composition
 
 import (
@@ -30,7 +30,7 @@ const (
 )
 
 // Plan is the normalized sandbox-composition plan consumed by launch/runtime
-// code in later #796 slices.
+// code in later sandbox launch/runtime work.
 type Plan struct {
 	Tier             Tier
 	BaseImage        string
