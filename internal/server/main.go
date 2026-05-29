@@ -9,6 +9,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,11 +27,11 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/app"
 	"github.com/ALRubinger/aileron/internal/approval"
+	approvaljsonl "github.com/ALRubinger/aileron/internal/approval/jsonl"
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
-	approvaljsonl "github.com/ALRubinger/aileron/internal/approval/jsonl"
 	"github.com/ALRubinger/aileron/internal/sessions/jsonl"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
@@ -96,6 +98,14 @@ func parseLogLevel(env string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+func generateDaemonToken() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // options holds the inputs run needs. Extracted so tests can construct
@@ -312,6 +322,12 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	}
 
 	url := "http://" + listener.Addr().String()
+	daemonToken, err := generateDaemonToken()
+	if err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("generate daemon token: %w", err)
+	}
+	cfg.LocalDaemonToken = daemonToken
 
 	// The daemon serves the webapp itself (see internal/app/webapp_embed.go),
 	// so its own bound URL is the right default for the approval review URL
@@ -329,6 +345,7 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		PID:       os.Getpid(),
 		Version:   version.Version,
 		StartedAt: time.Now().UTC(),
+		Token:     daemonToken,
 	}
 	if err := discovery.Write(opts.StateDir, info); err != nil {
 		_ = listener.Close()

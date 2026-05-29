@@ -43,6 +43,23 @@ func TestDaemonClient_RegisterSession_Success(t *testing.T) {
 	}
 }
 
+func TestDaemonClient_SendsBearerToken(t *testing.T) {
+	seen := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "01HK00000000000000000XYZAB"})
+	}))
+	defer srv.Close()
+
+	c := newDaemonClient(srv.URL, "tok_launch")
+	if _, err := c.RegisterSession(context.Background(), "claude", "/work"); err != nil {
+		t.Fatalf("RegisterSession: %v", err)
+	}
+	if got := <-seen; got != "Bearer tok_launch" {
+		t.Fatalf("Authorization = %q, want bearer token", got)
+	}
+}
+
 func TestDaemonClient_RegisterSession_NonOK_ReturnsStatusError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -205,13 +222,13 @@ func TestDaemonClient_LocalVaultLocked_GarbageBodyReturnsNotOK(t *testing.T) {
 
 func TestTrimTrailingSlash(t *testing.T) {
 	cases := map[string]string{
-		"":                     "",
-		"http://x":             "http://x",
-		"http://x/":            "http://x",
-		"http://x///":          "http://x",
-		"/":                    "/", // single-char "/" is preserved
-		"/v1":                  "/v1",
-		"/v1/":                 "/v1",
+		"":            "",
+		"http://x":    "http://x",
+		"http://x/":   "http://x",
+		"http://x///": "http://x",
+		"/":           "/", // single-char "/" is preserved
+		"/v1":         "/v1",
+		"/v1/":        "/v1",
 	}
 	for in, want := range cases {
 		if got := trimTrailingSlash(in); got != want {

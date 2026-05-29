@@ -144,7 +144,7 @@ func runDaemonStatus(_ []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  Started:    %s\n", info.StartedAt.Local().Format(time.RFC3339))
 	fmt.Fprintf(stdout, "  State dir:  %s\n", stateDir)
 
-	if locked, ok := probeLocalVaultLocked(info.URL); ok {
+	if locked, ok := probeLocalVaultLocked(info.URL, info.Token); ok {
 		state := "unlocked"
 		if locked {
 			state = "locked"
@@ -158,9 +158,16 @@ func runDaemonStatus(_ []string, stdout, stderr io.Writer) int {
 // locked. Returns (locked, true) on a successful probe; (_, false)
 // when the daemon doesn't respond or doesn't expose the endpoint
 // (e.g. cloud-shaped deployment without a local vault).
-func probeLocalVaultLocked(baseURL string) (bool, bool) {
+func probeLocalVaultLocked(baseURL, token string) (bool, bool) {
 	client := &http.Client{Timeout: 1 * time.Second}
-	resp, err := client.Get(baseURL + "/v1/vault/status")
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/v1/vault/status", nil)
+	if err != nil {
+		return false, false
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, false
 	}

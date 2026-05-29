@@ -22,6 +22,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 		PID:       12345,
 		Version:   "0.0.7-dev+abc123",
 		StartedAt: time.Now().UTC().Truncate(time.Second),
+		Token:     "tok_test",
 	}
 	if err := discovery.Write(dir, want); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -31,7 +32,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if got.URL != want.URL || got.PID != want.PID || got.Version != want.Version {
+	if got.URL != want.URL || got.PID != want.PID || got.Version != want.Version || got.Token != want.Token {
 		t.Fatalf("round-trip mismatch:\n got=%+v\nwant=%+v", got, want)
 	}
 	if !got.StartedAt.Equal(want.StartedAt) {
@@ -285,5 +286,3 @@ func TestWriteFailsWhenStateDirIsFile(t *testing.T) {
 		t.Fatal("Write should fail when stateDir is a regular file")
 	}
 }
-
-

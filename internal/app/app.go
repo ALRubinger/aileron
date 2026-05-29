@@ -16,23 +16,23 @@ import (
 	"github.com/ALRubinger/aileron/internal/account"
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
-	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/approval"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/auth"
 	githubauth "github.com/ALRubinger/aileron/internal/auth/github"
 	googleauth "github.com/ALRubinger/aileron/internal/auth/google"
-	"github.com/ALRubinger/aileron/internal/config"
-	"github.com/ALRubinger/aileron/internal/connector"
-	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/comms"
+	"github.com/ALRubinger/aileron/internal/config"
+	"github.com/ALRubinger/aileron/internal/connector"
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/draft"
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/hub"
-	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/observability"
 	"github.com/ALRubinger/aileron/internal/policy"
+	"github.com/ALRubinger/aileron/internal/sandbox"
 	"github.com/ALRubinger/aileron/internal/sessions"
 	"github.com/ALRubinger/aileron/internal/source"
 	calendarsource "github.com/ALRubinger/aileron/internal/source/calendar"
@@ -74,6 +74,13 @@ type Config struct {
 	// empty. Empty surfaces a generic prompt instead of a URL — the
 	// operator at least learns something needs attention.
 	WebappURL string
+
+	// LocalDaemonToken enables always-on bearer authentication for the
+	// local daemon's /v1/* surface. CLI and in-container clients read
+	// the token from daemon.json and send Authorization: Bearer <token>.
+	// The local webapp obtains an HttpOnly same-origin cookie through
+	// GET /v1/auth/handshake so EventSource can authenticate too.
+	LocalDaemonToken string
 
 	// Notifier overrides the default notification dispatcher (log +
 	// terminal multi). Production wiring leaves this nil; tests inject
@@ -407,6 +414,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		grantCapabilityKey: grantCapabilityKey,
 		openAIProxy:        openAIProxy,
 		anthropicProxy:     anthropicProxy,
+		localDaemonToken:   cfg.LocalDaemonToken,
 		newID:              idGen,
 		actions:            action.NewStore(action.DefaultDir()),
 		actionState:        newActionStateStore(log),
@@ -589,6 +597,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	if teeCfg.TEEEnabled() {
 		server.teeState = newTeeState()
 	}
+	mux.HandleFunc("GET /v1/auth/handshake", server.handleLocalAuthHandshake)
 	api.HandlerFromMux(server, mux)
 
 	// Source connector tools API (read-only context retrieval).
@@ -646,6 +655,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 
 	// Middleware chain: CORS -> request ID -> logging -> [auth] -> routes.
 	var handler http.Handler = mux
+	handler = localDaemonAuthMiddleware(cfg.LocalDaemonToken, handler)
 
 	if authCfg.AuthEnabled() {
 		db, err := postgres.NewDB(ctx, authCfg.DatabaseURL)
