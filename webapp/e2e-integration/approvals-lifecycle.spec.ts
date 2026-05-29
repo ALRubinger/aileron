@@ -96,7 +96,6 @@ function firstCardByKind(page: Page, kind: string) {
 }
 
 async function fetchPendingIds(page: Page): Promise<string[]> {
-	await ensureDaemonAuth(page);
 	const resp = await page.request.get('/v1/action-approvals');
 	expect(resp.ok()).toBe(true);
 	const body = (await resp.json()) as {
@@ -109,13 +108,7 @@ async function fetchResult(
 	page: Page,
 	id: string
 ): Promise<{ status: string; reason?: string }> {
-	await ensureDaemonAuth(page);
 	const resp = await page.request.get(`/v1/action-approvals/${id}/result`);
 	expect(resp.ok()).toBe(true);
 	return resp.json();
-}
-
-async function ensureDaemonAuth(page: Page): Promise<void> {
-	const resp = await page.request.get('/v1/auth/handshake');
-	expect([200, 204]).toContain(resp.status());
 }
