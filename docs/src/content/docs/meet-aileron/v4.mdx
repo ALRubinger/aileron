@@ -144,6 +144,28 @@ The Aileron Way environment. Contents:
 - Placeholder auth configs for supported third-party CLIs (e.g., a dummy `~/.config/gh/hosts.yml`).
 - Any user-installed third-party tools brought in via devcontainer.json.
 
+### Sandbox composition contract
+
+v4 uses `.devcontainer/devcontainer.json` as the project-local composition substrate ([ADR-0017](/adr/0017-sandbox-composition)). If the file is absent, Aileron uses `aileron/sandbox-base:<version>` directly. If present, Aileron reads standard devcontainer build/image settings and the Aileron-specific `customizations.aileron` block.
+
+```json
+{
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "aileron": {
+      "mediation": "default",
+      "approval_surface": "both"
+    }
+  }
+}
+```
+
+`customizations.aileron.image` selects the BYO-image tier, where Aileron uses the image as supplied and injects the runtime contract at launch: the `aileron` binary/shims, discovery files, proxy bootstrap, session CA, and shell mediation files. Runtime bootstrap supplies `HTTPS_PROXY` and `AILERON_TOKEN`; non-loopback/container daemon binds are intentionally not protected until that explicit token path exists.
+
+`aileron sandbox init` scaffolds the starter `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile`. The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented snippets for common tools. Tool installation remains standard container work; Aileron does not maintain an `aileron.yaml` tool resolver.
+
 <Alert.Root class="my-6">
   <Alert.Title>What is not in v4</Alert.Title>
   <Alert.Description>

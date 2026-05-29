@@ -88,6 +88,7 @@ export const navigation: NavItem[] = [
       { label: 'Binary Architecture', href: '/development/binary-architecture/' },
       { label: 'Building from Source', href: '/development/building-from-source/' },
       { label: 'Running Tests', href: '/development/running-tests/' },
+      { label: 'Sandbox Composition', href: '/development/sandbox-composition/' },
       { label: 'Submitting Changes', href: '/development/submitting-changes/' }
     ]
   },
@@ -108,7 +109,10 @@ export const navigation: NavItem[] = [
       { label: 'ADR-0011: Local Credential Vault', href: '/adr/0011-local-credential-vault/' },
       { label: 'ADR-0012: Local Daemon Architecture', href: '/adr/0012-local-daemon-architecture/' },
       { label: 'ADR-0013: Connector Hub and Trust Distribution', href: '/adr/0013-connector-hub-and-trust-distribution/' },
-      { label: 'ADR-0014: Spawn Sandbox Technology', href: '/adr/0014-spawn-sandbox-technology/' }
+      { label: 'ADR-0014: Spawn Sandbox Technology', href: '/adr/0014-spawn-sandbox-technology/' },
+      { label: 'ADR-0015: Launch Audit Scope', href: '/adr/0015-launch-audit-scope/' },
+      { label: 'ADR-0016: Approval-Time Preview Fetch', href: '/adr/0016-approval-preview/' },
+      { label: 'ADR-0017: Sandbox Composition', href: '/adr/0017-sandbox-composition/' }
     ]
   }
 ];

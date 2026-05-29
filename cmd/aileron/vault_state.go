@@ -251,6 +251,7 @@ var commandsBypassingVault = map[string]bool{
 	"log":       true, // reads local shell-audit JSONL log
 	"stop":      true, // alias for `daemon stop` — signals existing daemon
 	"open":      true, // reads daemon.json and shells out to the OS opener — no daemon HTTP traffic
+	"sandbox":   true, // scaffolds/inspects project-local sandbox files
 }
 
 // commandsBypassingVaultPair handles two-token bypass paths. Includes

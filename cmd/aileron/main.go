@@ -141,6 +141,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runAudit(args[1:], stdout, stderr)
 	case "sessions":
 		return runSessions(args[1:], stdout, stderr)
+	case "sandbox":
+		return runSandbox(args[1:], stdout, stderr)
 	case "vault":
 		return runVault(args[1:], stdout, stderr)
 	case "daemon":
@@ -186,6 +188,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron sync [--bind-all] [--yes]  Reconcile installed actions: install missing connectors; report unbound capabilities")
 	fmt.Fprintln(w, "  aileron audit [list|show]          View the action-execution audit log (ADR-0010)")
 	fmt.Fprintln(w, "  aileron sessions [list|get]        View `aileron launch` session records (ADR-0012)")
+	fmt.Fprintln(w, "  aileron sandbox [init|plan]        Scaffold/inspect v4 sandbox composition")
 	fmt.Fprintln(w, "  aileron daemon start|stop|status   Manage the local Aileron daemon (auto-spawned on demand)")
 	fmt.Fprintln(w, "  aileron stop                       Alias for 'aileron daemon stop'")
 	fmt.Fprintln(w, "  aileron open [approvals|approval <id>]  Open the Aileron webapp (default: root) in your browser")
