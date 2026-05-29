@@ -2,6 +2,7 @@ package launch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,9 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
+	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/version"
 )
 
 // MCPServerName is the name Aileron registers itself under in agents'
@@ -35,11 +39,27 @@ type LaunchConfig struct {
 	Dir string
 	// LogLevel sets the session log verbosity (e.g. slog.LevelDebug).
 	LogLevel slog.Level
+	// SandboxRuntime selects the container runtime used to prepare the
+	// sandbox image for this launch. Empty or "off" preserves today's
+	// direct host launch path. "auto", "docker", and "podman" prepare
+	// the composition-selected image; container execution lands in a
+	// follow-on sandbox runtime slice.
+	SandboxRuntime string
 }
 
 // LaunchResult holds the outcome of a launched agent process.
 type LaunchResult struct {
 	ExitCode int
+}
+
+// SandboxLaunchPlan is the sandbox image selected or prepared for a launch.
+// It is intentionally image-level only; container execution, runtime
+// injection, and network/proxy bootstrap are follow-on launch work.
+type SandboxLaunchPlan struct {
+	Runtime string
+	Image   string
+	Tier    sandboxcomposition.Tier
+	Built   bool
 }
 
 // ResolveBinary searches PATH for the first matching binary name from
@@ -89,6 +109,59 @@ func resolveMCPBinary(selfPath string) (string, error) {
 		siblingDir, siblingDir,
 	)
 }
+
+func sandboxLaunchEnabled(runtimeName string) bool {
+	switch runtimeName {
+	case "", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func validateSandboxRuntime(runtimeName string) error {
+	switch runtimeName {
+	case "", "off", sandboxcontainer.DefaultRuntime, "docker", "podman":
+		return nil
+	default:
+		return fmt.Errorf("unsupported sandbox runtime %q (want off, auto, docker, or podman)", runtimeName)
+	}
+}
+
+func prepareSandbox(ctx context.Context, workDir, runtimeName string, stdout, stderr io.Writer) (SandboxLaunchPlan, error) {
+	if err := validateSandboxRuntime(runtimeName); err != nil {
+		return SandboxLaunchPlan{}, err
+	}
+	plan, err := sandboxcomposition.Discover(workDir, version.Version)
+	if err != nil {
+		return SandboxLaunchPlan{}, err
+	}
+	result, err := sandboxcontainer.Builder{
+		Runtime: runtimeName,
+		Stdout:  stdout,
+		Stderr:  stderr,
+	}.Build(ctx, sandboxcontainer.BuildOptions{
+		WorkDir: workDir,
+		Plan:    plan,
+	})
+	if errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
+		return SandboxLaunchPlan{
+			Image: result.Image,
+			Tier:  result.Tier,
+		}, nil
+	}
+	if err != nil {
+		return SandboxLaunchPlan{}, err
+	}
+	return SandboxLaunchPlan{
+		Runtime: result.Runtime,
+		Image:   result.Image,
+		Tier:    result.Tier,
+		Built:   result.Built,
+	}, nil
+}
+
+var prepareSandboxForLaunch = prepareSandbox
 
 // Launch starts the agent as a child process under Aileron's daemon.
 //
@@ -145,6 +218,24 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, err
 	}
 
+	var sandboxPlan SandboxLaunchPlan
+	if sandboxLaunchEnabled(config.SandboxRuntime) {
+		plan, err := prepareSandboxForLaunch(ctx, config.Dir, config.SandboxRuntime, os.Stdout, os.Stderr)
+		if err != nil {
+			return LaunchResult{}, fmt.Errorf("prepare sandbox: %w", err)
+		}
+		sandboxPlan = plan
+		fmt.Fprintf(os.Stderr, "aileron: sandbox image %s ready (tier=%s", sandboxPlan.Image, sandboxPlan.Tier)
+		if sandboxPlan.Runtime != "" {
+			fmt.Fprintf(os.Stderr, ", runtime=%s", sandboxPlan.Runtime)
+		}
+		if sandboxPlan.Built {
+			fmt.Fprint(os.Stderr, ", built=true")
+		}
+		fmt.Fprintln(os.Stderr, ")")
+		fmt.Fprintln(os.Stderr, "aileron: container execution is not enabled yet; launching agent directly")
+	}
+
 	regCtx, cancelReg := context.WithTimeout(ctx, daemonHTTPTimeout)
 	sessionID, err := client.RegisterSession(regCtx, config.Agent.Name(), config.Dir)
 	cancelReg()
@@ -153,6 +244,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 
 	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), daemonURL)
+	if sandboxPlan.Image != "" {
+		agentEnv["AILERON_SANDBOX_IMAGE"] = sandboxPlan.Image
+		agentEnv["AILERON_SANDBOX_TIER"] = string(sandboxPlan.Tier)
+		if sandboxPlan.Runtime != "" {
+			agentEnv["AILERON_SANDBOX_RUNTIME"] = sandboxPlan.Runtime
+		}
+	}
 	env := buildEnv(agentEnv)
 
 	allArgs := append(config.Agent.Args(), config.Args...)
@@ -190,6 +288,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		"binary", agentPath,
 		"daemon_url", daemonURL,
 		"daemon_log", filepath.Join(stateDir, "daemon.log"),
+		"sandbox_image", sandboxPlan.Image,
+		"sandbox_tier", sandboxPlan.Tier,
+		"sandbox_runtime", sandboxPlan.Runtime,
 	)
 
 	probeCtx, cancelProbe := context.WithTimeout(ctx, daemonHTTPTimeout)

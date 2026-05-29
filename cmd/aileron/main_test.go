@@ -145,6 +145,28 @@ func TestRun_LaunchPopulatesWorkingDir(t *testing.T) {
 	}
 }
 
+func TestRun_LaunchPassesSandboxRuntime(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() {
+		launchFn = origLaunch
+	})
+
+	var captured launch.LaunchConfig
+	launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
+		captured = cfg
+		return launch.LaunchResult{ExitCode: 0}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"launch", "--sandbox=docker", "claude"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, stderr.String())
+	}
+	if captured.SandboxRuntime != "docker" {
+		t.Errorf("LaunchConfig.SandboxRuntime = %q, want docker", captured.SandboxRuntime)
+	}
+}
+
 func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"launch", "--log-level=debug"}, newTestRegistry(), &stdout, &stderr)

@@ -72,6 +72,8 @@ The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented s
 
 `aileron sandbox build` is the first user-facing build consumer of that plan. It builds Tier 0 from Aileron's local sandbox-base image definition and Tier 1 from the devcontainer Dockerfile through Docker or Podman. Tier 2 BYO images are selected as-is until runtime injection and launch-time validation land. Later launch work consumes the same composition contract and built image selection.
 
+`aileron launch --sandbox=auto|docker|podman` consumes the same build path to prepare the selected image before agent startup. This first launch integration makes image selection visible to the launcher and exports the prepared image metadata to the child process. It does not run the agent inside the container until the container execution slice lands.
+
 ## Consequences
 
 Users with existing devcontainers get an upgrade path rather than a parallel Aileron-only config file.
