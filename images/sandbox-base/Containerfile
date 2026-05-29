@@ -1,0 +1,28 @@
+FROM alpine:3.20
+
+LABEL org.opencontainers.image.title="Aileron sandbox base"
+LABEL org.opencontainers.image.description="Minimal sandbox substrate for Aileron-managed agent containers."
+LABEL org.opencontainers.image.source="https://github.com/ALRubinger/aileron"
+
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    coreutils \
+    findutils \
+    gawk \
+    grep \
+    procps \
+    sed \
+    tini
+
+RUN addgroup -S agent && adduser -S -G agent -h /home/agent agent \
+    && mkdir -p /etc/aileron /opt/aileron/manifests /home/agent/workspace \
+    && touch /etc/aileron/tools.txt \
+    && chown -R agent:agent /home/agent
+
+COPY profile.d/aileron-tools.sh /etc/profile.d/aileron-tools.sh
+
+WORKDIR /home/agent/workspace
+USER agent
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/bin/bash", "-l"]

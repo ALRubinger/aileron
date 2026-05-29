@@ -20,7 +20,7 @@ type InitResult struct {
 	DockerfilePath   string
 }
 
-// Init writes the starter devcontainer scaffold for v4 sandbox composition.
+// Init writes the starter devcontainer scaffold for sandbox composition.
 func Init(opts InitOptions) (InitResult, error) {
 	workDir := opts.WorkDir
 	if workDir == "" {

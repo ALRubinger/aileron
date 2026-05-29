@@ -1,12 +1,12 @@
 ---
 title: "Sandbox Composition"
-description: "How to configure the v4 agent container with devcontainer.json, Aileron's sandbox-base image, and the aileron sandbox CLI."
+description: "How to configure the agent container with devcontainer.json, Aileron's sandbox-base image, and the aileron sandbox CLI."
 order: 6
 ---
 
-v4 sandbox composition is the contract for deciding which container image an agent session runs in. It is defined by [ADR-0017](/adr/0017-sandbox-composition/) and implemented by the `aileron sandbox` CLI.
+Sandbox composition is the contract for deciding which container image an agent session runs in. It is defined by [ADR-0017](/adr/0017-sandbox-composition/) and implemented by the `aileron sandbox` CLI.
 
-This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold and inspect the composition plan, while later #796 slices wire that plan into container build and launch.
+This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold and inspect the composition plan, while later work wires that plan into container build and `aileron launch`.
 
 ## Choose a Composition Tier
 
@@ -103,8 +103,8 @@ In BYO-image mode, later runtime launch work will use the image as supplied and 
 
 Put ordinary project tooling in the devcontainer: language runtimes, CLIs, package managers, private CA bundles, and internal helper tools.
 
-Do not put Aileron credentials or user secrets in the image. v4 credentialed traffic is designed to flow through the Aileron HTTPS proxy/data plane. Runtime bootstrap supplies `HTTPS_PROXY` and `AILERON_TOKEN` when container launch support lands.
+Do not put Aileron credentials or user secrets in the image. Credentialed traffic is designed to flow through the Aileron HTTPS proxy/data plane. Runtime bootstrap supplies `HTTPS_PROXY` and `AILERON_TOKEN` when container launch support lands.
 
 ## What This Does Not Do Yet
 
-This first slice does not build or run containers. It establishes the composition contract and CLI scaffolding only. Follow-on #796 work wires the plan into the selected container runtime; #801 then adds shell-layer interception on top of the runtime substrate.
+This slice does not run containers or inject runtime files into BYO images. Follow-on work wires image builds into launch, adds BYO runtime injection and validation, and adds the discovery watcher. Shell-layer interception builds on top of that runtime substrate.

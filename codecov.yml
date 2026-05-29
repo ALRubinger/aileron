@@ -24,6 +24,7 @@ flags:
   unit:
     paths:
       - internal/
+      - cmd/aileron/
       - cmd/aileron-enclave/
       - cmd/aileron-mcp/
       - sdk/go/
@@ -49,6 +50,7 @@ ignore:
   - "ui/**"                           # tracked separately via ui flag
   - "webapp/**"                       # webapp tests run via vitest; coverage not uploaded to codecov
   - "docs/**"                         # documentation and ADRs
+  - "images/**"                       # container image definitions are validated by build smoke tests
 
 comment:
   layout: "condensed_header, diff, flags, components"

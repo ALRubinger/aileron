@@ -21,7 +21,7 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 
 | Command | Purpose | Ratified by |
 |---|---|---|
-| `aileron sandbox init` | Scaffold `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile` for v4 sandbox composition. The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented tool snippets. | [ADR-0017](/adr/0017-sandbox-composition) |
+| `aileron sandbox init` | Scaffold `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile` for sandbox composition. The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented tool snippets. | [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron sandbox plan` | Inspect the normalized composition tier and image Aileron infers from the current project. | [ADR-0017](/adr/0017-sandbox-composition) |
 
 See [Sandbox Composition](/development/sandbox-composition/) for the full workflow and examples.
