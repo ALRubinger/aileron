@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -124,6 +125,57 @@ func TestSelectVault_CorruptFileFailsStartup(t *testing.T) {
 	if err == nil {
 		t.Fatal("selectVault: expected error for corrupt vault file, got nil")
 	}
+}
+
+func TestShouldProtectLocalDaemon(t *testing.T) {
+	cases := []struct {
+		addr string
+		want bool
+	}{
+		{addr: "127.0.0.1:8721", want: true},
+		{addr: "[::1]:8721", want: true},
+		{addr: "localhost:8721", want: true},
+		{addr: "0.0.0.0:8080", want: false},
+		{addr: "[::]:8080", want: false},
+		{addr: "10.0.0.5:8080", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.addr, func(t *testing.T) {
+			got := shouldProtectLocalDaemon(&net.TCPAddr{IP: parseTestIP(t, tc.addr), Port: parseTestPort(t, tc.addr)})
+			if strings.HasPrefix(tc.addr, "localhost:") {
+				got = shouldProtectLocalDaemon(stringAddr(tc.addr))
+			}
+			if got != tc.want {
+				t.Fatalf("shouldProtectLocalDaemon(%q) = %v, want %v", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
+
+type stringAddr string
+
+func (a stringAddr) Network() string { return "tcp" }
+func (a stringAddr) String() string  { return string(a) }
+
+func parseTestIP(t *testing.T, addr string) net.IP {
+	t.Helper()
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	return net.ParseIP(host)
+}
+
+func parseTestPort(t *testing.T, addr string) int {
+	t.Helper()
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	if port == "8721" {
+		return 8721
+	}
+	return 8080
 }
 
 // seedVault creates a passphrase-protected vault file at path, so the

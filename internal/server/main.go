@@ -108,6 +108,18 @@ func generateDaemonToken() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+func shouldProtectLocalDaemon(addr net.Addr) bool {
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // options holds the inputs run needs. Extracted so tests can construct
 // it with a t.TempDir()-scoped state directory.
 type options struct {
@@ -322,12 +334,15 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	}
 
 	url := "http://" + listener.Addr().String()
-	daemonToken, err := generateDaemonToken()
-	if err != nil {
-		_ = listener.Close()
-		return fmt.Errorf("generate daemon token: %w", err)
+	var daemonToken string
+	if shouldProtectLocalDaemon(listener.Addr()) {
+		daemonToken, err = generateDaemonToken()
+		if err != nil {
+			_ = listener.Close()
+			return fmt.Errorf("generate daemon token: %w", err)
+		}
+		cfg.LocalDaemonToken = daemonToken
 	}
-	cfg.LocalDaemonToken = daemonToken
 
 	// The daemon serves the webapp itself (see internal/app/webapp_embed.go),
 	// so its own bound URL is the right default for the approval review URL
