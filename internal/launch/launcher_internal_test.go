@@ -1,9 +1,13 @@
 package launch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
 type emptyBinaryAgent struct{}
@@ -102,6 +106,40 @@ func TestValidateSandboxRejectsAgentWithoutBinary(t *testing.T) {
 	}
 }
 
+func TestValidateSandboxPassesRuntimeMounts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionsDir, "send-email.md"), []byte(validActionManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := validateSandboxImageForLaunch
+	t.Cleanup(func() { validateSandboxImageForLaunch = orig })
+	var got []sandboxcontainer.Volume
+	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, mounts []sandboxcontainer.Volume, commandName string) error {
+		got = append(got, mounts...)
+		if commandName != "codex" {
+			t.Fatalf("commandName = %q, want codex", commandName)
+		}
+		return nil
+	}
+
+	err := validateSandbox(context.Background(), SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
+		Agent: namedBinaryAgent{name: "codex"},
+		Dir:   t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("validateSandbox: %v", err)
+	}
+	if !hasMountTarget(got, "/opt/aileron/manifests/actions") || !hasMountTarget(got, "/etc/aileron/tools.txt") {
+		t.Fatalf("validateSandbox mounts = %#v, want actions and tools.txt mounts", got)
+	}
+}
+
 func TestNormalizeLaunchBuildPolicy(t *testing.T) {
 	tests := map[string]string{
 		"":       "auto",
@@ -123,9 +161,40 @@ func TestNormalizeLaunchBuildPolicy(t *testing.T) {
 	}
 }
 
+func TestSandboxRuntimeMountsReportsToolsTempDirError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionsDir, "send-email.md"), []byte(validActionManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(tmpFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmpFile)
+
+	_, cleanup, err := sandboxRuntimeMounts()
+	defer cleanup()
+	if err == nil {
+		t.Fatal("expected tempdir error")
+	}
+	if !strings.Contains(err.Error(), "create sandbox discovery tempdir") {
+		t.Fatalf("error = %v, want discovery tempdir context", err)
+	}
+}
+
 func TestSandboxRuntimeMountsSkipsMissingStores(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	if got := sandboxRuntimeMounts(); len(got) != 0 {
+	got, cleanup, err := sandboxRuntimeMounts()
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("sandboxRuntimeMounts: %v", err)
+	}
+	if len(got) != 0 {
 		t.Fatalf("sandboxRuntimeMounts = %#v, want no mounts", got)
 	}
 }
@@ -141,7 +210,11 @@ func TestSandboxRuntimeMountsIncludesExistingStores(t *testing.T) {
 		}
 	}
 
-	mounts := sandboxRuntimeMounts()
+	mounts, cleanup, err := sandboxRuntimeMounts()
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("sandboxRuntimeMounts: %v", err)
+	}
 	if len(mounts) != 2 {
 		t.Fatalf("mounts = %#v, want two mounts", mounts)
 	}
@@ -152,3 +225,79 @@ func TestSandboxRuntimeMountsIncludesExistingStores(t *testing.T) {
 		t.Fatalf("connectors mount = %#v", mounts[1])
 	}
 }
+
+func TestSandboxRuntimeMountsIncludesGeneratedToolsText(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	actionPath := filepath.Join(actionsDir, "send-email.md")
+	if err := os.WriteFile(actionPath, []byte(validActionManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mounts, cleanup, err := sandboxRuntimeMounts()
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("sandboxRuntimeMounts: %v", err)
+	}
+	var toolsMount *sandboxcontainer.Volume
+	for i := range mounts {
+		if mounts[i].Target == "/etc/aileron/tools.txt" {
+			toolsMount = &mounts[i]
+			break
+		}
+	}
+	if toolsMount == nil {
+		t.Fatalf("tools.txt mount missing from %#v", mounts)
+	}
+	if !toolsMount.ReadOnly {
+		t.Fatalf("tools.txt mount should be read-only: %#v", toolsMount)
+	}
+	data, err := os.ReadFile(toolsMount.Source)
+	if err != nil {
+		t.Fatalf("read tools.txt: %v", err)
+	}
+	if !strings.Contains(string(data), "google\tgithub://ALRubinger/aileron-connector-google") {
+		t.Fatalf("tools.txt did not include google connector:\n%s", data)
+	}
+}
+
+func hasMountTarget(mounts []sandboxcontainer.Volume, target string) bool {
+	for _, mount := range mounts {
+		if mount.Target == target {
+			return true
+		}
+	}
+	return false
+}
+
+const validActionManifest = `+++
+name = "send-email"
+version = "1.0.0"
+source = "hub://aileron/send-email@1.0.0"
+
+[[requires.connectors]]
+name = "github://ALRubinger/aileron-connector-google"
+version = "1.0.0"
+hash = "sha256:abc123"
+capabilities = ["send"]
+
+[match]
+intent = "send email"
+
+[[inputs]]
+name = "to"
+type = "string"
+description = "recipient"
+
+[[execute]]
+id = "send"
+connector = "github://ALRubinger/aileron-connector-google"
+op = "send_email"
++++
+
+# Send Email
+`

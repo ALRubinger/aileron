@@ -587,10 +587,19 @@ func TestRunRejectsMissingCommand(t *testing.T) {
 
 func TestValidateRunsMinimalContractProbe(t *testing.T) {
 	dir := t.TempDir()
+	manifest := filepath.Join(t.TempDir(), "tools.txt")
+	if err := os.WriteFile(manifest, []byte("tool\tfqn\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	runner := &recordingRunner{}
 	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
 		Image:   "ghcr.io/acme/agent:latest",
 		WorkDir: dir,
+		Volumes: []Volume{{
+			Source:   manifest,
+			Target:   "/etc/aileron/tools.txt",
+			ReadOnly: true,
+		}},
 		Command: []string{"codex"},
 	})
 	if err != nil {
@@ -603,6 +612,7 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 		"run", "--rm", "-i",
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
+		"--volume", manifest + ":/etc/aileron/tools.txt:ro",
 		"ghcr.io/acme/agent:latest",
 		"/bin/sh", "-c",
 	}

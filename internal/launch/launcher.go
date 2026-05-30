@@ -22,6 +22,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	sandboxdiscovery "github.com/ALRubinger/aileron/internal/sandbox/discovery"
 	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
 )
@@ -199,6 +200,18 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 	if commandName == "" {
 		return fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
+	mounts, cleanupMounts, err := sandboxRuntimeMounts()
+	if err != nil {
+		return err
+	}
+	defer cleanupMounts()
+	if err := validateSandboxImageForLaunch(ctx, plan, config, mounts, commandName); err != nil {
+		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
+	}
+	return nil
+}
+
+func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, mounts []sandboxcontainer.Volume, commandName string) error {
 	if err := (sandboxcontainer.Builder{
 		Runtime: plan.Runtime,
 		Stdout:  io.Discard,
@@ -206,14 +219,16 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 		Runtime: plan.Runtime,
 		Image:   plan.Image,
 		WorkDir: config.Dir,
+		Volumes: mounts,
 		Command: []string{commandName},
 	}); err != nil {
-		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
+		return err
 	}
 	return nil
 }
 
 var validateSandboxForLaunch = validateSandbox
+var validateSandboxImageForLaunch = validateSandboxImage
 
 // Launch starts the agent as a child process under Aileron's daemon.
 //
@@ -480,9 +495,14 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	if commandName == "" {
 		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
+	mounts, cleanupMounts, err := sandboxRuntimeMounts()
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	defer cleanupMounts()
 	command := append([]string{commandName}, config.Agent.Args()...)
 	command = append(command, config.Args...)
-	_, err := sandboxcontainer.Builder{
+	_, err = sandboxcontainer.Builder{
 		Runtime: plan.Runtime,
 		Stdout:  os.Stdout,
 		Stderr:  os.Stderr,
@@ -491,7 +511,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		Image:   plan.Image,
 		WorkDir: config.Dir,
 		Env:     agentEnv,
-		Volumes: sandboxRuntimeMounts(),
+		Volumes: mounts,
 		Command: command,
 		TTY:     term.IsTerminal(int(os.Stdin.Fd())),
 	})
@@ -501,7 +521,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	return LaunchResult{ExitCode: 0}, nil
 }
 
-func sandboxRuntimeMounts() []sandboxcontainer.Volume {
+func sandboxRuntimeMounts() ([]sandboxcontainer.Volume, func(), error) {
 	candidates := []sandboxcontainer.Volume{
 		{
 			Source:   action.DefaultDir(),
@@ -522,7 +542,33 @@ func sandboxRuntimeMounts() []sandboxcontainer.Volume {
 		}
 		mounts = append(mounts, candidate)
 	}
-	return mounts
+	cleanup := func() {}
+	if toolsText := sandboxToolsText(); len(toolsText) > 0 {
+		dir, err := os.MkdirTemp("", "aileron-sandbox-discovery-*")
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("create sandbox discovery tempdir: %w", err)
+		}
+		cleanup = func() { _ = os.RemoveAll(dir) }
+		path := filepath.Join(dir, "tools.txt")
+		if err := os.WriteFile(path, toolsText, 0o600); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("write sandbox tools manifest: %w", err)
+		}
+		mounts = append(mounts, sandboxcontainer.Volume{
+			Source:   path,
+			Target:   "/etc/aileron/tools.txt",
+			ReadOnly: true,
+		})
+	}
+	return mounts, cleanup, nil
+}
+
+func sandboxToolsText() []byte {
+	store := action.NewStore(action.DefaultDir())
+	if _, err := store.Load(); err != nil {
+		return nil
+	}
+	return sandboxdiscovery.ToolsText(store.List())
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.

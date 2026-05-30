@@ -139,7 +139,7 @@ aileron launch --sandbox=podman --sandbox-build=never codex
 
 The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker and `host.containers.internal` for Podman.
 
-When installed action manifests or connector store metadata exist on the host, launch mounts them read-only under `/opt/aileron/manifests/actions` and `/opt/aileron/manifests/connectors`. Later runtime work adds generated shims, `tools.txt` refresh, and the watcher process on top of these manifest mounts.
+When installed action manifests or connector store metadata exist on the host, launch mounts them read-only under `/opt/aileron/manifests/actions` and `/opt/aileron/manifests/connectors`. When installed actions declare connector dependencies, launch also generates a session-scoped static `/etc/aileron/tools.txt` manifest and mounts it read-only into the sandbox. Later runtime work adds generated shims, live `tools.txt` refresh, and the watcher process on top of these manifest mounts.
 
 Before registering the session, launch validates the selected image with the same mount/workdir shape it will use for the agent. The image must:
 
@@ -176,4 +176,4 @@ Do not put Aileron credentials or user secrets in the image. Credentialed traffi
 
 ## What This Does Not Do Yet
 
-This slice does not inject runtime files into BYO images, generate discovery shims, add proxy bootstrap, or mediate shell commands. Follow-on work adds runtime injection, the discovery watcher, proxy bootstrap, and shell-layer interception.
+This slice does not inject runtime files into BYO images, generate discovery shims, add live discovery refresh, add proxy bootstrap, or mediate shell commands. Follow-on work adds runtime injection, the discovery watcher, proxy bootstrap, and shell-layer interception.
