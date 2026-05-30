@@ -118,6 +118,23 @@ aileron launch --sandbox=podman goose
 
 `auto` detects Docker or Podman from `PATH`. `docker` and `podman` select a runtime explicitly. The default is `--sandbox=off`, which preserves the current direct host launch path.
 
+Launch uses `--sandbox-build=auto` by default. Build policy options are:
+
+| Policy | Behavior |
+|---|---|
+| `auto` | Use the selected image if it already exists locally; build Tier 0/Tier 1 images only when missing. |
+| `always` | Rebuild Tier 0/Tier 1 images before validation and launch. |
+| `never` | Do not build; fail with an actionable error if the selected image is missing locally. |
+
+Examples:
+
+```bash
+aileron launch --sandbox=docker --sandbox-build=always claude
+aileron launch --sandbox=podman --sandbox-build=never codex
+```
+
+`aileron sandbox build` remains the explicit manual build command and always invokes the selected runtime build for Tier 0/Tier 1.
+
 The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker and `host.containers.internal` for Podman.
 
 Before registering the session, launch validates the selected image with the same mount/workdir shape it will use for the agent. The image must:

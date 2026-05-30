@@ -85,13 +85,14 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		launchFlags.SetOutput(stderr)
 		logLevel := launchFlags.String("log-level", "info", "Log level: trace, debug, info, warn, error")
 		sandboxRuntime := launchFlags.String("sandbox", "off", "Prepare sandbox image with runtime: off, auto, docker, or podman")
+		sandboxBuild := launchFlags.String("sandbox-build", "auto", "Sandbox build policy during launch: auto, always, or never")
 		if err := launchFlags.Parse(args[1:]); err != nil {
 			return 1
 		}
 		launchArgs := launchFlags.Args()
 
 		if len(launchArgs) < 1 {
-			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--sandbox=off|auto|docker|podman] <agent> [args...]")
+			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--sandbox=off|auto|docker|podman] [--sandbox-build=auto|always|never] <agent> [args...]")
 			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
 			return 1
 		}
@@ -110,11 +111,12 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		cwd, _ := os.Getwd()
 
 		result, err := launchFn(context.Background(), launch.LaunchConfig{
-			Agent:          agent,
-			Args:           launchArgs[1:],
-			Dir:            cwd,
-			LogLevel:       launch.ParseLogLevel(*logLevel),
-			SandboxRuntime: *sandboxRuntime,
+			Agent:              agent,
+			Args:               launchArgs[1:],
+			Dir:                cwd,
+			LogLevel:           launch.ParseLogLevel(*logLevel),
+			SandboxRuntime:     *sandboxRuntime,
+			SandboxBuildPolicy: *sandboxBuild,
 		})
 		if err != nil {
 			fmt.Fprintf(stderr, "error: %v\n", err)
@@ -168,7 +170,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "aileron — the execution layer for AI coding agents")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  aileron launch [--sandbox=<runtime>] <agent> [args...]")
+	fmt.Fprintln(w, "  aileron launch [--sandbox=<runtime>] [--sandbox-build=<policy>] <agent> [args...]")
 	fmt.Fprintln(w, "                                      Launch an AI coding agent connected to the Aileron daemon")
 	fmt.Fprintln(w, "  aileron vault init                 Create the local encrypted vault with a passphrase")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")

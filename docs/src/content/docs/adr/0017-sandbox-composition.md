@@ -74,6 +74,8 @@ The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented s
 
 `aileron launch --sandbox=auto|docker|podman` consumes the same build path to prepare the selected image, validates that it can execute `/bin/sh`, use a writable `/home/agent/workspace` mount, and resolve the agent command on `PATH`, then runs the agent command inside a one-shot Docker/Podman container. The project is mounted at `/home/agent/workspace` and used as the container working directory. Launch passes the session-scoped Aileron daemon env into the container and rewrites loopback daemon URLs to the runtime host alias (`host.docker.internal` for Docker, `host.containers.internal` for Podman).
 
+Launch build behavior is controlled by `--sandbox-build=auto|always|never`. `auto` is the default and builds Tier 0/Tier 1 images only when the selected local image is missing. `always` forces a rebuild. `never` fails if the selected image is not already present. The explicit `aileron sandbox build` command keeps its manual-build behavior.
+
 ## Consequences
 
 Users with existing devcontainers get an upgrade path rather than a parallel Aileron-only config file.

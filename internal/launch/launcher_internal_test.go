@@ -97,3 +97,24 @@ func TestValidateSandboxRejectsAgentWithoutBinary(t *testing.T) {
 		t.Fatal("expected missing container command error")
 	}
 }
+
+func TestNormalizeLaunchBuildPolicy(t *testing.T) {
+	tests := map[string]string{
+		"":       "auto",
+		" auto ": "auto",
+		"always": "always",
+		"never":  "never",
+	}
+	for input, want := range tests {
+		got, err := normalizeLaunchBuildPolicy(input)
+		if err != nil {
+			t.Fatalf("normalizeLaunchBuildPolicy(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("normalizeLaunchBuildPolicy(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if _, err := normalizeLaunchBuildPolicy("sometimes"); err == nil {
+		t.Fatal("expected unsupported build policy error")
+	}
+}

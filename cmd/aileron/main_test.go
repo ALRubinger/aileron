@@ -145,7 +145,7 @@ func TestRun_LaunchPopulatesWorkingDir(t *testing.T) {
 	}
 }
 
-func TestRun_LaunchPassesSandboxRuntime(t *testing.T) {
+func TestRun_LaunchPassesSandboxOptions(t *testing.T) {
 	origLaunch := launchFn
 	t.Cleanup(func() {
 		launchFn = origLaunch
@@ -158,12 +158,15 @@ func TestRun_LaunchPassesSandboxRuntime(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"launch", "--sandbox=docker", "claude"}, newTestRegistry(), &stdout, &stderr)
+	code := run([]string{"launch", "--sandbox=docker", "--sandbox-build=never", "claude"}, newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d (stderr=%q)", code, stderr.String())
 	}
 	if captured.SandboxRuntime != "docker" {
 		t.Errorf("LaunchConfig.SandboxRuntime = %q, want docker", captured.SandboxRuntime)
+	}
+	if captured.SandboxBuildPolicy != "never" {
+		t.Errorf("LaunchConfig.SandboxBuildPolicy = %q, want never", captured.SandboxBuildPolicy)
 	}
 }
 
