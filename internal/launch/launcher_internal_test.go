@@ -88,6 +88,18 @@ func TestContainerURLForRuntimeRewritesLoopbackAliases(t *testing.T) {
 	}
 }
 
+func TestDaemonAPIBaseURLAppendsV1(t *testing.T) {
+	tests := map[string]string{
+		"http://host.docker.internal:48123":  "http://host.docker.internal:48123/v1",
+		"http://host.docker.internal:48123/": "http://host.docker.internal:48123/v1",
+	}
+	for input, want := range tests {
+		if got := daemonAPIBaseURL(input); got != want {
+			t.Fatalf("daemonAPIBaseURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestLaunchSandboxRejectsAgentWithoutBinary(t *testing.T) {
 	_, err := launchSandbox(nil, SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
 		Agent: emptyBinaryAgent{},

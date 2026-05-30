@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -241,6 +242,9 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Errorf("expected %q in docker args:\n%s", want, args)
 		}
+	}
+	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(args) {
+		t.Errorf("expected container AILERON_API_URL /v1 env in docker args:\n%s", args)
 	}
 }
 
