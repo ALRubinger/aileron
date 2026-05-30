@@ -49,6 +49,9 @@ type LaunchConfig struct {
 	// prepare the composition-selected image and execute the agent in a
 	// one-shot container.
 	SandboxRuntime string
+	// SandboxBuildPolicy controls launch-time builds for buildable
+	// sandbox tiers. Empty defaults to auto for launch.
+	SandboxBuildPolicy string
 }
 
 // LaunchResult holds the outcome of a launched agent process.
@@ -132,8 +135,24 @@ func validateSandboxRuntime(runtimeName string) error {
 	}
 }
 
-func prepareSandbox(ctx context.Context, workDir, runtimeName string, stdout, stderr io.Writer) (SandboxLaunchPlan, error) {
+func normalizeLaunchBuildPolicy(policy string) (string, error) {
+	normalized := strings.TrimSpace(policy)
+	switch normalized {
+	case "":
+		return sandboxcontainer.BuildPolicyAuto, nil
+	case sandboxcontainer.BuildPolicyAuto, sandboxcontainer.BuildPolicyAlways, sandboxcontainer.BuildPolicyNever:
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("unsupported sandbox build policy %q (want auto, always, or never)", normalized)
+	}
+}
+
+func prepareSandbox(ctx context.Context, workDir, runtimeName, buildPolicy string, stdout, stderr io.Writer) (SandboxLaunchPlan, error) {
 	if err := validateSandboxRuntime(runtimeName); err != nil {
+		return SandboxLaunchPlan{}, err
+	}
+	policy, err := normalizeLaunchBuildPolicy(buildPolicy)
+	if err != nil {
 		return SandboxLaunchPlan{}, err
 	}
 	plan, err := sandboxcomposition.Discover(workDir, version.Version)
@@ -147,6 +166,7 @@ func prepareSandbox(ctx context.Context, workDir, runtimeName string, stdout, st
 	}.Build(ctx, sandboxcontainer.BuildOptions{
 		WorkDir: workDir,
 		Plan:    plan,
+		Policy:  policy,
 	})
 	if errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
 		runtime, runtimeErr := sandboxcontainer.ResolveRuntime(runtimeName)
@@ -236,7 +256,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	sandboxEnabled := sandboxLaunchEnabled(config.SandboxRuntime)
 	var sandboxPlan SandboxLaunchPlan
 	if sandboxEnabled {
-		plan, err := prepareSandboxForLaunch(ctx, config.Dir, config.SandboxRuntime, os.Stdout, os.Stderr)
+		plan, err := prepareSandboxForLaunch(ctx, config.Dir, config.SandboxRuntime, config.SandboxBuildPolicy, os.Stdout, os.Stderr)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare sandbox: %w", err)
 		}

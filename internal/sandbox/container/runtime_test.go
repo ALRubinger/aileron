@@ -26,6 +26,26 @@ func (r *recordingRunner) Run(_ context.Context, name string, args []string, _, 
 	return nil
 }
 
+type callRecordingRunner struct {
+	calls []runnerCall
+	errs  []error
+}
+
+type runnerCall struct {
+	name string
+	args []string
+}
+
+func (r *callRecordingRunner) Run(_ context.Context, name string, args []string, _, _ io.Writer) error {
+	r.calls = append(r.calls, runnerCall{name: name, args: append([]string(nil), args...)})
+	if len(r.errs) == 0 {
+		return nil
+	}
+	err := r.errs[0]
+	r.errs = r.errs[1:]
+	return err
+}
+
 func TestBuildBaseImageUsesLocalContainerfile(t *testing.T) {
 	dir := t.TempDir()
 	containerfile := filepath.Join(dir, "images", "sandbox-base", "Containerfile")
@@ -83,6 +103,130 @@ func TestBuildDevcontainerUsesProjectTagAndBuildArgs(t *testing.T) {
 	want := []string{"build", "-t", wantTag, "-f", dockerfile, "--build-arg", "A=first", "--build-arg", "Z=last", dir}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestBuildBaseImageAutoSkipsExistingImage(t *testing.T) {
+	dir := t.TempDir()
+	containerfile := filepath.Join(dir, "images", "sandbox-base", "Containerfile")
+	if err := os.MkdirAll(filepath.Dir(containerfile), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(containerfile, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write Containerfile: %v", err)
+	}
+	runner := &callRecordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: dir,
+		Policy:  BuildPolicyAuto,
+		Plan: composition.Plan{
+			Tier:  composition.TierBase,
+			Image: "aileron/sandbox-base:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Built {
+		t.Fatalf("result.Built = true, want false")
+	}
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", "aileron/sandbox-base:test"}}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestBuildBaseImageAutoBuildsMissingImage(t *testing.T) {
+	dir := t.TempDir()
+	containerfile := filepath.Join(dir, "images", "sandbox-base", "Containerfile")
+	if err := os.MkdirAll(filepath.Dir(containerfile), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(containerfile, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write Containerfile: %v", err)
+	}
+	runner := &callRecordingRunner{errs: []error{errors.New("missing"), nil}}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: dir,
+		Policy:  BuildPolicyAuto,
+		Plan: composition.Plan{
+			Tier:  composition.TierBase,
+			Image: "aileron/sandbox-base:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !result.Built {
+		t.Fatalf("result.Built = false, want true")
+	}
+	want := []runnerCall{
+		{name: "docker", args: []string{"image", "inspect", "aileron/sandbox-base:test"}},
+		{name: "docker", args: []string{"build", "-t", "aileron/sandbox-base:test", "-f", containerfile, filepath.Dir(containerfile)}},
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestBuildBaseImageNeverRequiresExistingImage(t *testing.T) {
+	runner := &callRecordingRunner{errs: []error{errors.New("missing")}}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyNever,
+		Plan: composition.Plan{
+			Tier:  composition.TierBase,
+			Image: "aileron/sandbox-base:test",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected missing image error")
+	}
+	if !strings.Contains(err.Error(), "sandbox build policy is never") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBuildBaseImageNeverSkipsExistingImage(t *testing.T) {
+	runner := &callRecordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyNever,
+		Plan: composition.Plan{
+			Tier:  composition.TierBase,
+			Image: "aileron/sandbox-base:test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Built {
+		t.Fatalf("result.Built = true, want false")
+	}
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", "aileron/sandbox-base:test"}}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestBuildRejectsUnsupportedPolicy(t *testing.T) {
+	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  "sometimes",
+		Plan: composition.Plan{
+			Tier:  composition.TierBase,
+			Image: "aileron/sandbox-base:test",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected unsupported policy error")
+	}
+}
+
+func TestShouldBuildRejectsUnsupportedPolicy(t *testing.T) {
+	_, err := (Builder{}).shouldBuild(context.Background(), &recordingRunner{}, "docker", "image:test", "sometimes")
+	if err == nil {
+		t.Fatal("expected unsupported policy error")
 	}
 }
 

@@ -23,6 +23,12 @@ const WorkspacePath = "/home/agent/workspace"
 
 var ErrNoBuildRequired = errors.New("sandbox image does not require a build")
 
+const (
+	BuildPolicyAlways = "always"
+	BuildPolicyAuto   = "auto"
+	BuildPolicyNever  = "never"
+)
+
 // Runner executes a container runtime command. It exists so build planning can
 // be tested without Docker or Podman on the host.
 type Runner interface {
@@ -52,6 +58,7 @@ type BuildOptions struct {
 	WorkDir string
 	Plan    composition.Plan
 	Tag     string
+	Policy  string
 }
 
 // BuildResult reports the image selected or built for launch.
@@ -111,6 +118,10 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		image = opts.Plan.Image
 	}
 	result := BuildResult{Image: image, Tier: opts.Plan.Tier}
+	policy, err := normalizeBuildPolicy(opts.Policy)
+	if err != nil {
+		return BuildResult{}, err
+	}
 	switch opts.Plan.Tier {
 	case composition.TierBase:
 		runtimeName, err := resolveRuntime(b.Runtime, b.Runner == nil)
@@ -118,6 +129,13 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			return BuildResult{}, err
 		}
 		result.Runtime = runtimeName
+		shouldBuild, err := b.shouldBuild(ctx, runner, runtimeName, image, policy)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if !shouldBuild {
+			return result, nil
+		}
 		args, err := baseBuildArgs(workDir, image)
 		if err != nil {
 			return BuildResult{}, err
@@ -140,6 +158,13 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		if opts.Tag == "" {
 			result.Image = ProjectImageTag(workDir)
 		}
+		shouldBuild, err := b.shouldBuild(ctx, runner, runtimeName, result.Image, policy)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		if !shouldBuild {
+			return result, nil
+		}
 		args, err := devcontainerBuildArgs(workDir, opts.Plan, result.Image)
 		if err != nil {
 			return BuildResult{}, err
@@ -155,6 +180,40 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 	default:
 		return BuildResult{}, fmt.Errorf("unsupported sandbox composition tier %q", opts.Plan.Tier)
 	}
+}
+
+func normalizeBuildPolicy(policy string) (string, error) {
+	normalized := strings.TrimSpace(policy)
+	switch normalized {
+	case "", BuildPolicyAlways:
+		return BuildPolicyAlways, nil
+	case BuildPolicyAuto:
+		return BuildPolicyAuto, nil
+	case BuildPolicyNever:
+		return BuildPolicyNever, nil
+	default:
+		return "", fmt.Errorf("unsupported sandbox build policy %q (want auto, always, or never)", normalized)
+	}
+}
+
+func (b Builder) shouldBuild(ctx context.Context, runner Runner, runtimeName, image, policy string) (bool, error) {
+	switch policy {
+	case BuildPolicyAlways:
+		return true, nil
+	case BuildPolicyAuto:
+		return !b.imageExists(ctx, runner, runtimeName, image), nil
+	case BuildPolicyNever:
+		if b.imageExists(ctx, runner, runtimeName, image) {
+			return false, nil
+		}
+		return false, fmt.Errorf("sandbox image %s not found locally and sandbox build policy is never; run `aileron sandbox build --runtime=%s` or use --sandbox-build=auto|always", image, runtimeName)
+	default:
+		return false, fmt.Errorf("unsupported sandbox build policy %q (want auto, always, or never)", policy)
+	}
+}
+
+func (b Builder) imageExists(ctx context.Context, runner Runner, runtimeName, image string) bool {
+	return runner.Run(ctx, runtimeName, []string{"image", "inspect", image}, io.Discard, io.Discard) == nil
 }
 
 // Run starts a one-shot sandbox container for an agent command.

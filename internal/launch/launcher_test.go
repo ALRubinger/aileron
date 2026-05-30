@@ -262,10 +262,11 @@ func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
-		Agent:          scriptAgent{script: "claude"},
-		Dir:            dir,
-		Args:           []string{"--dangerously-skip-permissions"},
-		SandboxRuntime: "docker",
+		Agent:              scriptAgent{script: "claude"},
+		Dir:                dir,
+		Args:               []string{"--dangerously-skip-permissions"},
+		SandboxRuntime:     "docker",
+		SandboxBuildPolicy: "always",
 	})
 	if err != nil {
 		t.Fatalf("launch: %v", err)
@@ -312,9 +313,10 @@ func TestLaunch_SandboxBuildFailureFailsBeforeAgentStart(t *testing.T) {
 	}
 
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
-		Agent:          scriptAgent{script: script},
-		Dir:            dir,
-		SandboxRuntime: "docker",
+		Agent:              scriptAgent{script: script},
+		Dir:                dir,
+		SandboxRuntime:     "docker",
+		SandboxBuildPolicy: "always",
 	})
 	if err == nil {
 		t.Fatal("expected sandbox build failure")
@@ -324,6 +326,36 @@ func TestLaunch_SandboxBuildFailureFailsBeforeAgentStart(t *testing.T) {
 	}
 	if _, statErr := os.Stat(outFile); !os.IsNotExist(statErr) {
 		t.Fatalf("agent started despite build failure; stat err=%v", statErr)
+	}
+}
+
+func TestLaunch_SandboxBuildNeverFailsBeforeAgentStart(t *testing.T) {
+	dir := t.TempDir()
+	baseDir := filepath.Join(dir, "images", "sandbox-base")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(baseDir, "Containerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:              scriptAgent{script: "claude"},
+		Dir:                dir,
+		SandboxRuntime:     "docker",
+		SandboxBuildPolicy: "never",
+	})
+	if err == nil {
+		t.Fatal("expected missing image failure")
+	}
+	if !strings.Contains(err.Error(), "sandbox build policy is never") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
