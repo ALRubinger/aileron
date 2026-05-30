@@ -1,6 +1,10 @@
 package launch
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 type emptyBinaryAgent struct{}
 
@@ -116,5 +120,35 @@ func TestNormalizeLaunchBuildPolicy(t *testing.T) {
 	}
 	if _, err := normalizeLaunchBuildPolicy("sometimes"); err == nil {
 		t.Fatal("expected unsupported build policy error")
+	}
+}
+
+func TestSandboxRuntimeMountsSkipsMissingStores(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if got := sandboxRuntimeMounts(); len(got) != 0 {
+		t.Fatalf("sandboxRuntimeMounts = %#v, want no mounts", got)
+	}
+}
+
+func TestSandboxRuntimeMountsIncludesExistingStores(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	connectorsDir := filepath.Join(home, ".aileron", "store", "connectors")
+	for _, dir := range []string{actionsDir, connectorsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mounts := sandboxRuntimeMounts()
+	if len(mounts) != 2 {
+		t.Fatalf("mounts = %#v, want two mounts", mounts)
+	}
+	if mounts[0].Source != actionsDir || mounts[0].Target != "/opt/aileron/manifests/actions" || !mounts[0].ReadOnly {
+		t.Fatalf("actions mount = %#v", mounts[0])
+	}
+	if mounts[1].Source != connectorsDir || mounts[1].Target != "/opt/aileron/manifests/connectors" || !mounts[1].ReadOnly {
+		t.Fatalf("connectors mount = %#v", mounts[1])
 	}
 }

@@ -474,6 +474,84 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 	}
 }
 
+func TestRunMountsAdditionalReadOnlyVolumes(t *testing.T) {
+	dir := t.TempDir()
+	extra := filepath.Join(dir, "actions")
+	if err := os.MkdirAll(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron/sandbox-base:test",
+		WorkDir: dir,
+		Volumes: []Volume{{
+			Source:   extra,
+			Target:   "/opt/aileron/manifests/actions",
+			ReadOnly: true,
+		}},
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	absExtra, _ := filepath.Abs(extra)
+	want := []string{
+		"run", "--rm", "-i",
+		"--workdir", WorkspacePath,
+		"--volume", dir + ":" + WorkspacePath,
+		"--volume", absExtra + ":/opt/aileron/manifests/actions:ro",
+		"aileron/sandbox-base:test",
+		"codex",
+	}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestRunMountsAdditionalReadWriteVolumes(t *testing.T) {
+	dir := t.TempDir()
+	extra := filepath.Join(dir, "connectors")
+	if err := os.MkdirAll(extra, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron/sandbox-base:test",
+		WorkDir: dir,
+		Volumes: []Volume{{
+			Source: extra,
+			Target: "/opt/aileron/manifests/connectors",
+		}},
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	absExtra, _ := filepath.Abs(extra)
+	want := "--volume"
+	found := false
+	for i := 0; i < len(runner.args)-1; i++ {
+		if runner.args[i] == want && runner.args[i+1] == absExtra+":/opt/aileron/manifests/connectors" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("read-write volume missing from args: %#v", runner.args)
+	}
+}
+
+func TestRunRejectsIncompleteAdditionalVolume(t *testing.T) {
+	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Run(context.Background(), RunOptions{
+		Image:   "aileron/sandbox-base:test",
+		Volumes: []Volume{{Target: "/opt/aileron/manifests/actions"}},
+		Command: []string{"codex"},
+	})
+	if err == nil {
+		t.Fatal("expected incomplete volume error")
+	}
+}
+
 func TestRunAddsTTYWhenRequested(t *testing.T) {
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "podman", Runner: runner}.Run(context.Background(), RunOptions{

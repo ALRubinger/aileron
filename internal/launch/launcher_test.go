@@ -244,6 +244,57 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 	}
 }
 
+func TestLaunch_SandboxMountsAileronManifestStores(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	connectorsDir := filepath.Join(home, ".aileron", "store", "connectors")
+	for _, dir := range []string{actionsDir, connectorsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	args := string(data)
+	for _, want := range []string{
+		"--volume\n" + actionsDir + ":/opt/aileron/manifests/actions:ro\n",
+		"--volume\n" + connectorsDir + ":/opt/aileron/manifests/connectors:ro\n",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("expected %q in docker args:\n%s", want, args)
+		}
+	}
+}
+
 func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 	dir := t.TempDir()
 	baseDir := filepath.Join(dir, "images", "sandbox-base")

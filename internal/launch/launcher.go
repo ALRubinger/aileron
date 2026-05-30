@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/action"
+	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
@@ -489,6 +491,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		Image:   plan.Image,
 		WorkDir: config.Dir,
 		Env:     agentEnv,
+		Volumes: sandboxRuntimeMounts(),
 		Command: command,
 		TTY:     term.IsTerminal(int(os.Stdin.Fd())),
 	})
@@ -496,6 +499,30 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		return exitResult(err)
 	}
 	return LaunchResult{ExitCode: 0}, nil
+}
+
+func sandboxRuntimeMounts() []sandboxcontainer.Volume {
+	candidates := []sandboxcontainer.Volume{
+		{
+			Source:   action.DefaultDir(),
+			Target:   "/opt/aileron/manifests/actions",
+			ReadOnly: true,
+		},
+		{
+			Source:   filepath.Join(cstore.DefaultRoot(), "connectors"),
+			Target:   "/opt/aileron/manifests/connectors",
+			ReadOnly: true,
+		},
+	}
+	mounts := make([]sandboxcontainer.Volume, 0, len(candidates))
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate.Source)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		mounts = append(mounts, candidate)
+	}
+	return mounts
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.
