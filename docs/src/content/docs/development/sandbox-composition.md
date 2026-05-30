@@ -6,7 +6,7 @@ order: 6
 
 Sandbox composition is the contract for deciding which container image an agent session runs in. It is defined by [ADR-0017](/adr/0017-sandbox-composition/) and implemented by the `aileron sandbox` CLI.
 
-This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold, inspect, build, and run the agent command in the prepared sandbox image, while later work adds runtime injection, discovery refresh, proxy bootstrap, and shell mediation.
+This page covers the user-facing workflow. Runtime launch support is intentionally still staged: the current implementation can scaffold, inspect, build, run the agent command in the prepared sandbox image, and inject static discovery/action shims, while later work adds live discovery refresh, proxy bootstrap, and shell mediation.
 
 ## Choose a Composition Tier
 
@@ -139,7 +139,7 @@ aileron launch --sandbox=podman --sandbox-build=never codex
 
 The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_API_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). `AILERON_API_URL` points at the daemon's `/v1` API and is the stable endpoint for sandbox-side execution shims. For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker and `host.containers.internal` for Podman.
 
-When installed action manifests or connector store metadata exist on the host, launch mounts them read-only under `/opt/aileron/manifests/actions` and `/opt/aileron/manifests/connectors`. When installed actions declare connector dependencies, launch also generates a session-scoped static `/etc/aileron/tools.txt` manifest and read-only connector shim scripts under `/usr/local/bin`. These shims support `--help` for discovery and fail closed for execution until proxy-backed shim dispatch lands. Later runtime work adds live `tools.txt` refresh and the watcher process on top of these generated files.
+When installed action manifests or connector store metadata exist on the host, launch mounts them read-only under `/opt/aileron/manifests/actions` and `/opt/aileron/manifests/connectors`. When installed actions declare connector dependencies, launch also generates a session-scoped static `/etc/aileron/tools.txt` manifest and read-only connector shim scripts under `/usr/local/bin`. These shims support `--help` for discovery and can execute an explicit installed action name through `AILERON_API_URL` with optional raw JSON args. Later runtime work adds live `tools.txt` refresh and the watcher process on top of these generated files.
 
 Before registering the session, launch validates the selected image with the same mount/workdir shape it will use for the agent. The image must:
 
@@ -148,7 +148,7 @@ Before registering the session, launch validates the selected image with the sam
 - allow a temporary file to be written in the mounted workspace
 - resolve the agent command on `PATH`
 
-The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied until runtime injection lands.
+The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied while Aileron's runtime injection remains limited to session env, manifest mounts, `tools.txt`, and connector shims.
 
 ## Use a BYO Image
 
@@ -166,7 +166,7 @@ Set `customizations.aileron.image` when your team owns the complete image:
 }
 ```
 
-In BYO-image mode, launch currently uses the image as supplied. Later runtime launch work injects Aileron's runtime contract at launch: the `aileron` binary/shims, discovery files, proxy bootstrap, session CA, and shell mediation files.
+In BYO-image mode, launch currently uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Later runtime launch work extends that contract with proxy bootstrap, session CA, and shell mediation files.
 
 ## What Belongs in the Image
 
@@ -176,4 +176,4 @@ Do not put Aileron credentials or user secrets in the image. Credentialed traffi
 
 ## What This Does Not Do Yet
 
-This slice does not execute connector shims, add live discovery refresh, add proxy bootstrap, or mediate shell commands. Follow-on work adds proxy-backed shim dispatch, the discovery watcher, proxy bootstrap, and shell-layer interception.
+This slice does not add live discovery refresh, proxy bootstrap, or shell command mediation. Generated session-scoped `/etc/aileron/tools.txt` and read-only connector shims support `--help` discovery, and the shims can execute installed actions via `AILERON_API_URL` with optional raw JSON args. Follow-on work adds the discovery watcher, proxy bootstrap, and shell-layer interception.
