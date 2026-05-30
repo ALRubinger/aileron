@@ -106,6 +106,8 @@ Build behavior by tier:
 
 When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_CONTEXT` to the directory containing the sandbox-base `Containerfile`.
 
+Release tags also build the sandbox-base image for `linux/amd64` and `linux/arm64` and publish it to GitHub Container Registry as `ghcr.io/alrubinger/aileron-sandbox-base:<version>`. Pull-request runs build both platforms without publishing, so image regressions are caught before release.
+
 ## Run During Launch
 
 Use `--sandbox` on `aileron launch` to have launch prepare the composition-selected image and start the agent inside it:
