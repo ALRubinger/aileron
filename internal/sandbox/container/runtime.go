@@ -75,8 +75,16 @@ type RunOptions struct {
 	Image   string
 	WorkDir string
 	Env     map[string]string
+	Volumes []Volume
 	Command []string
 	TTY     bool
+}
+
+// Volume describes an additional host bind mount for a sandbox container.
+type Volume struct {
+	Source   string
+	Target   string
+	ReadOnly bool
 }
 
 // RunResult reports the selected runtime after a sandbox container exits.
@@ -353,6 +361,20 @@ func runArgs(opts RunOptions) ([]string, error) {
 		"--workdir", WorkspacePath,
 		"--volume", absWorkDir+":"+WorkspacePath,
 	)
+	for _, volume := range opts.Volumes {
+		if strings.TrimSpace(volume.Source) == "" || strings.TrimSpace(volume.Target) == "" {
+			return nil, fmt.Errorf("sandbox volume source and target are required")
+		}
+		source, err := filepath.Abs(volume.Source)
+		if err != nil {
+			return nil, fmt.Errorf("resolve sandbox volume source: %w", err)
+		}
+		spec := source + ":" + volume.Target
+		if volume.ReadOnly {
+			spec += ":ro"
+		}
+		args = append(args, "--volume", spec)
+	}
 	keys := make([]string, 0, len(opts.Env))
 	for k := range opts.Env {
 		keys = append(keys, k)
