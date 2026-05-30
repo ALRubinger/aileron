@@ -313,6 +313,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 	if sandboxEnabled {
 		agentEnv["AILERON_URL"] = agentEndpointURL
+		agentEnv["AILERON_API_URL"] = daemonAPIBaseURL(agentEndpointURL)
 		agentEnv["AILERON_COMMS_URL"] = agentEndpointURL
 		agentEnv["AILERON_SESSION_ID"] = sessionID
 		agentEnv["AILERON_APPROVAL_URL"] = agentEndpointURL + "/approvals"
@@ -413,6 +414,10 @@ func containerURLForRuntime(rawURL, runtimeName string) string {
 func isLoopbackHost(host string) bool {
 	host = strings.Trim(strings.ToLower(host), "[]")
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func daemonAPIBaseURL(baseURL string) string {
+	return strings.TrimRight(baseURL, "/") + "/v1"
 }
 
 // resolveStateDir returns ~/.aileron, the state directory the daemon
