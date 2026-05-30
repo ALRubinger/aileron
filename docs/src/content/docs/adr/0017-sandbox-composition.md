@@ -76,6 +76,8 @@ The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented s
 
 Launch build behavior is controlled by `--sandbox-build=auto|always|never`. `auto` is the default and builds Tier 0/Tier 1 images only when the selected local image is missing. `always` forces a rebuild. `never` fails if the selected image is not already present. The explicit `aileron sandbox build` command keeps its manual-build behavior.
 
+The sandbox-base image has a dedicated CI/publish workflow. Pull requests build the image for `linux/amd64` and `linux/arm64` without publishing. Release tags publish the same multi-arch image to GitHub Container Registry as `ghcr.io/alrubinger/aileron-sandbox-base:<version>`.
+
 ## Consequences
 
 Users with existing devcontainers get an upgrade path rather than a parallel Aileron-only config file.
