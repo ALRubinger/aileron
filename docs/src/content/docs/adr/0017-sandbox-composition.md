@@ -70,13 +70,13 @@ The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented s
 
 `aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan.
 
-`aileron sandbox build` is the first user-facing build consumer of that plan. It builds Tier 0 from Aileron's local sandbox-base image definition and Tier 1 from the devcontainer Dockerfile through Docker or Podman. Tier 2 BYO images are selected as-is; launch validates the minimal runtime contract before running the agent. Later launch work adds runtime injection.
+`aileron sandbox build` is the first user-facing build consumer of that plan. It builds Tier 0 from Aileron's local sandbox-base image definition and Tier 1 from the devcontainer Dockerfile through Docker or Podman. Tier 2 BYO images are selected as-is; launch validates the minimal runtime contract before running the agent. Later launch work extends the initial runtime-injection substrate.
 
 `aileron launch --sandbox=auto|docker|podman` consumes the same build path to prepare the selected image, validates that it can execute `/bin/sh`, use a writable `/home/agent/workspace` mount, and resolve the agent command on `PATH`, then runs the agent command inside a one-shot Docker/Podman container. The project is mounted at `/home/agent/workspace` and used as the container working directory. Launch passes the session-scoped Aileron daemon env into the container, including `AILERON_API_URL` for the daemon `/v1` API used by sandbox-side execution shims, and rewrites loopback daemon URLs to the runtime host alias (`host.docker.internal` for Docker, `host.containers.internal` for Podman).
 
 Launch build behavior is controlled by `--sandbox-build=auto|always|never`. `auto` is the default and builds Tier 0/Tier 1 images only when the selected local image is missing. `always` forces a rebuild. `never` fails if the selected image is not already present. The explicit `aileron sandbox build` command keeps its manual-build behavior.
 
-Sandbox launch also bind-mounts Aileron's installed action manifests and connector store metadata read-only under `/opt/aileron/manifests/actions` and `/opt/aileron/manifests/connectors` when the corresponding host directories exist. When installed action manifests declare connector dependencies, launch renders a session-scoped static `tools.txt` manifest and bind-mounts it read-only at `/etc/aileron/tools.txt`; it also renders read-only connector shim scripts under `/usr/local/bin` for `--help` discovery. The shims fail closed for execution until proxy-backed dispatch lands. This is the first runtime-injection substrate for discovery; live `tools.txt` refresh and watcher processes remain follow-on work.
+Sandbox launch also bind-mounts Aileron's installed action manifests and connector store metadata read-only under `/opt/aileron/manifests/actions` and `/opt/aileron/manifests/connectors` when the corresponding host directories exist. When installed action manifests declare connector dependencies, launch renders a session-scoped static `tools.txt` manifest and bind-mounts it read-only at `/etc/aileron/tools.txt`; it also renders read-only connector shim scripts under `/usr/local/bin` for `--help` discovery and explicit installed-action execution through `AILERON_API_URL`. This is the first runtime-injection substrate for discovery and action dispatch; live `tools.txt` refresh and watcher processes remain follow-on work.
 
 The sandbox-base image has a dedicated CI/publish workflow. Pull requests build the image for `linux/amd64` and `linux/arm64` without publishing. Release tags publish the same multi-arch image to GitHub Container Registry as `ghcr.io/alrubinger/aileron-sandbox-base:<version>`.
 
@@ -86,7 +86,7 @@ Users with existing devcontainers get an upgrade path rather than a parallel Ail
 
 Aileron keeps a clear boundary: it owns mediation, credentials, approvals, audit, and runtime bootstrap; users own development tooling in the image.
 
-The first implementations establish the contract, image-build substrate, and minimal container execution path without also implementing runtime injection, watcher processes, shell interception, or proxy bootstrap. Those build on this substrate in later sandbox and shell-mediation work.
+The first implementations establish the contract, image-build substrate, minimal container execution path, and initial runtime-injection substrate. Live discovery refresh, watcher processes, shell interception, and proxy bootstrap build on this substrate in later sandbox and shell-mediation work.
 
 ## Alternatives Considered
 

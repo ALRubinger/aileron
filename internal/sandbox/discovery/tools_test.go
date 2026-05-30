@@ -1,6 +1,10 @@
 package discovery
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,7 +41,7 @@ func TestConnectorToolsRendersActionHelp(t *testing.T) {
 	}
 }
 
-func TestShimScriptsRenderHelpAndFailClosed(t *testing.T) {
+func TestShimScriptsRenderHelpAndDispatch(t *testing.T) {
 	scripts := ShimScripts(testActions())
 	script := string(scripts["google"])
 	for _, want := range []string{
@@ -45,12 +49,137 @@ func TestShimScriptsRenderHelpAndFailClosed(t *testing.T) {
 		"Aileron connector shim: google\n",
 		"send-email - send email\n",
 		"--to <string> (required) - recipient\n",
-		"execution is not wired yet",
-		"exit 64\n",
+		"Run `google <action-name> --args '<json-object>'`",
+		"--post-data \"$body\" \"$url\"",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("shim script missing %q:\n%s", want, script)
 		}
+	}
+}
+
+func TestShimScriptExecutesInstalledActionThroughDaemonAPI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("generated shim execution is POSIX shell behavior")
+	}
+	scripts := ShimScripts(testActions())
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "google")
+	if err := os.WriteFile(shimPath, scripts["google"], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	capturePath := filepath.Join(dir, "wget-args.txt")
+	wgetPath := filepath.Join(dir, "wget")
+	if err := os.WriteFile(wgetPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+capturePath+"\nprintf '{\"ok\":true}\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("/bin/sh", shimPath, "send-email", "--args", `{"to":"a@example.com"}`, "--json")
+	cmd.Env = append(os.Environ(),
+		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"AILERON_API_URL=http://host.docker.internal:48123/v1",
+		"AILERON_TOKEN=test-token",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim execution failed: %v\n%s", err, out)
+	}
+	if got := string(out); got != "{\"ok\":true}\n" {
+		t.Fatalf("shim output = %q", got)
+	}
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := string(captured)
+	for _, want := range []string{
+		"--header\nContent-Type: application/json\n",
+		"--header\nAuthorization: Bearer test-token\n",
+		"--post-data\n{\"args\":{\"to\":\"a@example.com\"}}\n",
+		"http://host.docker.internal:48123/v1/actions/send-email/run\n",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("wget args missing %q:\n%s", want, args)
+		}
+	}
+}
+
+func TestShimScriptRejectsUnknownAction(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("generated shim execution is POSIX shell behavior")
+	}
+	scripts := ShimScripts(testActions())
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "google")
+	if err := os.WriteFile(shimPath, scripts["google"], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", shimPath, "missing-action")
+	cmd.Env = append(os.Environ(), "AILERON_API_URL=http://host.docker.internal:48123/v1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("shim succeeded unexpectedly:\n%s", out)
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 64 {
+		t.Fatalf("shim exit = %v, want 64; output:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Unknown action for google: missing-action") {
+		t.Fatalf("unknown action output = %s", out)
+	}
+}
+
+func TestShimScriptFailsWithoutAILERONAPIURL(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("generated shim execution is POSIX shell behavior")
+	}
+	scripts := ShimScripts(testActions())
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "google")
+	if err := os.WriteFile(shimPath, scripts["google"], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", shimPath, "send-email")
+	cmd.Env = append(os.Environ(), "AILERON_API_URL=")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("shim succeeded unexpectedly:\n%s", out)
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 69 {
+		t.Fatalf("shim exit = %v, want 69; output:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "AILERON_API_URL") {
+		t.Fatalf("missing API URL output = %s", out)
+	}
+}
+
+func TestShimScriptFailsWithoutWget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("generated shim execution is POSIX shell behavior")
+	}
+	scripts := ShimScripts(testActions())
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "google")
+	if err := os.WriteFile(shimPath, scripts["google"], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	emptyPathDir := filepath.Join(dir, "empty-path")
+	if err := os.Mkdir(emptyPathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", shimPath, "send-email")
+	cmd.Env = append(os.Environ(),
+		"PATH="+emptyPathDir,
+		"AILERON_API_URL=http://host.docker.internal:48123/v1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("shim succeeded unexpectedly:\n%s", out)
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 69 {
+		t.Fatalf("shim exit = %v, want 69; output:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "wget") {
+		t.Fatalf("missing wget output = %s", out)
 	}
 }
 

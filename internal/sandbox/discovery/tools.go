@@ -61,8 +61,6 @@ func ToolsText(actions []action.LoadedAction) []byte {
 }
 
 // ShimScripts renders static connector shim scripts keyed by command name.
-// These scripts are a discovery surface only until proxy-backed shim dispatch
-// lands; they support --help and fail closed for execution attempts.
 func ShimScripts(actions []action.LoadedAction) map[string][]byte {
 	tools := ConnectorTools(actions)
 	if len(tools) == 0 {
@@ -237,10 +235,11 @@ func shimScript(tool ConnectorTool) []byte {
 			}
 		}
 	}
-	fmt.Fprintf(&help, "\nExecution is not wired in this sandbox slice yet; proxy-backed shim dispatch lands in a follow-on #796 PR.\n")
+	fmt.Fprintf(&help, "\nRun `%s <action-name> --args '<json-object>'` to execute an installed action through the Aileron daemon API.\n", tool.Name)
 
 	var out bytes.Buffer
 	out.WriteString("#!/bin/sh\n")
+	out.WriteString("set -u\n")
 	out.WriteString("case \"${1:-}\" in\n")
 	out.WriteString("  \"\"|\"-h\"|\"--help\"|\"help\")\n")
 	out.WriteString("    cat <<'AILERON_HELP'\n")
@@ -249,10 +248,66 @@ func shimScript(tool ConnectorTool) []byte {
 	out.WriteString("    exit 0\n")
 	out.WriteString("    ;;\n")
 	out.WriteString("esac\n")
-	out.WriteString("cat >&2 <<'AILERON_ERROR'\n")
-	fmt.Fprintf(&out, "Aileron connector shim %q is installed for discovery, but execution is not wired yet.\n", tool.Name)
-	out.WriteString("Run with --help to inspect installed actions. Proxy-backed shim dispatch lands in a follow-on #796 PR.\n")
-	out.WriteString("AILERON_ERROR\n")
-	out.WriteString("exit 64\n")
+	out.WriteString("action_name=$1\n")
+	out.WriteString("shift\n")
+	out.WriteString("case \"$action_name\" in\n")
+	for _, action := range tool.Actions {
+		fmt.Fprintf(&out, "  %s)\n", shellQuote(action.Name))
+		out.WriteString("    ;;\n")
+	}
+	out.WriteString("  *)\n")
+	fmt.Fprintf(&out, "    echo 'Unknown action for %s: '\"$action_name\" >&2\n", shellSingleQuote(tool.Name))
+	out.WriteString("    echo 'Run with --help to list installed actions.' >&2\n")
+	out.WriteString("    exit 64\n")
+	out.WriteString("    ;;\n")
+	out.WriteString("esac\n")
+	out.WriteString("args_json='{}'\n")
+	out.WriteString("while [ \"$#\" -gt 0 ]; do\n")
+	out.WriteString("  case \"$1\" in\n")
+	out.WriteString("    --args)\n")
+	out.WriteString("      shift\n")
+	out.WriteString("      if [ \"$#\" -eq 0 ]; then\n")
+	out.WriteString("        echo 'Missing value for --args' >&2\n")
+	out.WriteString("        exit 64\n")
+	out.WriteString("      fi\n")
+	out.WriteString("      args_json=$1\n")
+	out.WriteString("      ;;\n")
+	out.WriteString("    --json)\n")
+	out.WriteString("      ;;\n")
+	out.WriteString("    -h|--help|help)\n")
+	out.WriteString("      exec \"$0\" --help\n")
+	out.WriteString("      ;;\n")
+	out.WriteString("    *)\n")
+	out.WriteString("      echo 'Unsupported argument: '\"$1\" >&2\n")
+	out.WriteString("      echo 'Usage: ")
+	out.WriteString(shellSingleQuote(tool.Name))
+	out.WriteString(" <action-name> [--args <json-object>] [--json]' >&2\n")
+	out.WriteString("      exit 64\n")
+	out.WriteString("      ;;\n")
+	out.WriteString("  esac\n")
+	out.WriteString("  shift\n")
+	out.WriteString("done\n")
+	out.WriteString("if [ -z \"${AILERON_API_URL:-}\" ]; then\n")
+	out.WriteString("  echo 'AILERON_API_URL is not set; cannot reach the Aileron daemon API.' >&2\n")
+	out.WriteString("  exit 69\n")
+	out.WriteString("fi\n")
+	out.WriteString("if ! command -v wget >/dev/null 2>&1; then\n")
+	out.WriteString("  echo 'wget is required for Aileron connector shims in this sandbox image.' >&2\n")
+	out.WriteString("  exit 69\n")
+	out.WriteString("fi\n")
+	out.WriteString("body='{\"args\":'\"$args_json\"'}'\n")
+	out.WriteString("url=${AILERON_API_URL%/}/actions/$action_name/run\n")
+	out.WriteString("if [ -n \"${AILERON_TOKEN:-}\" ]; then\n")
+	out.WriteString("  exec wget -T 30 -t 3 -q -O - --header 'Content-Type: application/json' --header \"Authorization: Bearer $AILERON_TOKEN\" --post-data \"$body\" \"$url\"\n")
+	out.WriteString("fi\n")
+	out.WriteString("exec wget -T 30 -t 3 -q -O - --header 'Content-Type: application/json' --post-data \"$body\" \"$url\"\n")
 	return out.Bytes()
+}
+
+func shellQuote(value string) string {
+	return "'" + shellSingleQuote(value) + "'"
+}
+
+func shellSingleQuote(value string) string {
+	return strings.ReplaceAll(value, "'", "'\"'\"'")
 }
