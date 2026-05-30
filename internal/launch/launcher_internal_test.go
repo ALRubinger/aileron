@@ -135,8 +135,10 @@ func TestValidateSandboxPassesRuntimeMounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validateSandbox: %v", err)
 	}
-	if !hasMountTarget(got, "/opt/aileron/manifests/actions") || !hasMountTarget(got, "/etc/aileron/tools.txt") {
-		t.Fatalf("validateSandbox mounts = %#v, want actions and tools.txt mounts", got)
+	for _, target := range []string{"/opt/aileron/manifests/actions", "/etc/aileron/tools.txt", "/usr/local/bin/google"} {
+		if !hasMountTarget(got, target) {
+			t.Fatalf("validateSandbox mounts = %#v, want target %s", got, target)
+		}
 	}
 }
 
@@ -256,12 +258,62 @@ func TestSandboxRuntimeMountsIncludesGeneratedToolsText(t *testing.T) {
 	if !toolsMount.ReadOnly {
 		t.Fatalf("tools.txt mount should be read-only: %#v", toolsMount)
 	}
+	if info, err := os.Stat(toolsMount.Source); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("tools.txt mode = %v, %v; want 0644", info, err)
+	}
 	data, err := os.ReadFile(toolsMount.Source)
 	if err != nil {
 		t.Fatalf("read tools.txt: %v", err)
 	}
 	if !strings.Contains(string(data), "google\tgithub://ALRubinger/aileron-connector-google") {
 		t.Fatalf("tools.txt did not include google connector:\n%s", data)
+	}
+	var shimMount *sandboxcontainer.Volume
+	for i := range mounts {
+		if mounts[i].Target == "/usr/local/bin/google" {
+			shimMount = &mounts[i]
+			break
+		}
+	}
+	if shimMount == nil {
+		t.Fatalf("google shim mount missing from %#v", mounts)
+	}
+	if !shimMount.ReadOnly {
+		t.Fatalf("google shim mount should be read-only: %#v", shimMount)
+	}
+	if info, err := os.Stat(shimMount.Source); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("google shim mode = %v, %v; want 0755", info, err)
+	}
+	shim, err := os.ReadFile(shimMount.Source)
+	if err != nil {
+		t.Fatalf("read google shim: %v", err)
+	}
+	if !strings.Contains(string(shim), "Aileron connector shim: google") {
+		t.Fatalf("google shim did not include help text:\n%s", shim)
+	}
+}
+
+func TestSandboxRuntimeMountsSkipsReservedShimNames(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionsDir, "send-email.md"), []byte(validActionManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mounts, cleanup, err := sandboxRuntimeMounts("google")
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("sandboxRuntimeMounts: %v", err)
+	}
+	if hasMountTarget(mounts, "/usr/local/bin/google") {
+		t.Fatalf("reserved google shim should not be mounted: %#v", mounts)
+	}
+	if !hasMountTarget(mounts, "/etc/aileron/tools.txt") {
+		t.Fatalf("tools.txt should still be mounted: %#v", mounts)
 	}
 }
 

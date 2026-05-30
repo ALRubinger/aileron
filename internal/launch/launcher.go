@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -200,7 +201,7 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 	if commandName == "" {
 		return fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
-	mounts, cleanupMounts, err := sandboxRuntimeMounts()
+	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName)
 	if err != nil {
 		return err
 	}
@@ -495,7 +496,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	if commandName == "" {
 		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
-	mounts, cleanupMounts, err := sandboxRuntimeMounts()
+	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName)
 	if err != nil {
 		return LaunchResult{}, err
 	}
@@ -521,7 +522,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	return LaunchResult{ExitCode: 0}, nil
 }
 
-func sandboxRuntimeMounts() ([]sandboxcontainer.Volume, func(), error) {
+func sandboxRuntimeMounts(reservedNames ...string) ([]sandboxcontainer.Volume, func(), error) {
 	candidates := []sandboxcontainer.Volume{
 		{
 			Source:   action.DefaultDir(),
@@ -542,17 +543,43 @@ func sandboxRuntimeMounts() ([]sandboxcontainer.Volume, func(), error) {
 		}
 		mounts = append(mounts, candidate)
 	}
+	discoveryMounts, cleanup, err := sandboxDiscoveryMounts(reservedNames...)
+	if err != nil {
+		return nil, cleanup, err
+	}
+	mounts = append(mounts, discoveryMounts...)
+	return mounts, cleanup, nil
+}
+
+func sandboxDiscoveryMounts(reservedNames ...string) ([]sandboxcontainer.Volume, func(), error) {
 	cleanup := func() {}
-	if toolsText := sandboxToolsText(); len(toolsText) > 0 {
-		dir, err := os.MkdirTemp("", "aileron-sandbox-discovery-*")
-		if err != nil {
-			return nil, cleanup, fmt.Errorf("create sandbox discovery tempdir: %w", err)
-		}
-		cleanup = func() { _ = os.RemoveAll(dir) }
+	store := action.NewStore(action.DefaultDir())
+	if _, err := store.Load(); err != nil {
+		return nil, cleanup, nil
+	}
+	actions := store.List()
+	toolsText := sandboxdiscovery.ToolsText(actions)
+	shimScripts := sandboxdiscovery.ShimScripts(actions)
+	if len(toolsText) == 0 && len(shimScripts) == 0 {
+		return nil, cleanup, nil
+	}
+
+	dir, err := os.MkdirTemp("", "aileron-sandbox-discovery-*")
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("create sandbox discovery tempdir: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+
+	mounts := []sandboxcontainer.Volume{}
+	if len(toolsText) > 0 {
 		path := filepath.Join(dir, "tools.txt")
-		if err := os.WriteFile(path, toolsText, 0o600); err != nil {
+		if err := os.WriteFile(path, toolsText, 0o644); err != nil {
 			cleanup()
 			return nil, func() {}, fmt.Errorf("write sandbox tools manifest: %w", err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("chmod sandbox tools manifest: %w", err)
 		}
 		mounts = append(mounts, sandboxcontainer.Volume{
 			Source:   path,
@@ -560,15 +587,41 @@ func sandboxRuntimeMounts() ([]sandboxcontainer.Volume, func(), error) {
 			ReadOnly: true,
 		})
 	}
+
+	names := make([]string, 0, len(shimScripts))
+	for name := range shimScripts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if isReservedSandboxCommand(name, reservedNames) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, shimScripts[name], 0o755); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("write sandbox shim %s: %w", name, err)
+		}
+		if err := os.Chmod(path, 0o755); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("chmod sandbox shim %s: %w", name, err)
+		}
+		mounts = append(mounts, sandboxcontainer.Volume{
+			Source:   path,
+			Target:   "/usr/local/bin/" + name,
+			ReadOnly: true,
+		})
+	}
 	return mounts, cleanup, nil
 }
 
-func sandboxToolsText() []byte {
-	store := action.NewStore(action.DefaultDir())
-	if _, err := store.Load(); err != nil {
-		return nil
+func isReservedSandboxCommand(name string, reservedNames []string) bool {
+	for _, reserved := range reservedNames {
+		if name == reserved {
+			return true
+		}
 	}
-	return sandboxdiscovery.ToolsText(store.List())
+	return false
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.
