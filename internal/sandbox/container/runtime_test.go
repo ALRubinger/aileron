@@ -622,8 +622,42 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 	if !reflect.DeepEqual(runner.args[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("args prefix = %#v, want %#v", runner.args[:len(wantPrefix)], wantPrefix)
 	}
-	if runner.args[len(runner.args)-1] != "codex" {
-		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-1])
+	if runner.args[len(runner.args)-2] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-2])
+	}
+	if runner.args[len(runner.args)-1] != "0" {
+		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-1])
+	}
+}
+
+func TestValidateRequiresWgetWhenShimsAreMounted(t *testing.T) {
+	dir := t.TempDir()
+	shim := filepath.Join(t.TempDir(), "google")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: dir,
+		Volumes: []Volume{{
+			Source:   shim,
+			Target:   "/usr/local/bin/google",
+			ReadOnly: true,
+		}},
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if runner.args[len(runner.args)-1] != "1" {
+		t.Fatalf("shim validation flag = %q, want 1", runner.args[len(runner.args)-1])
+	}
+	if !strings.Contains(runner.args[len(runner.args)-4], "generated Aileron connector shims require wget") {
+		t.Fatalf("validation script did not include wget requirement:\n%s", runner.args[len(runner.args)-4])
+	}
+	if !strings.Contains(runner.args[len(runner.args)-4], `"--post-data"`) {
+		t.Fatalf("validation script did not include wget flag probe:\n%s", runner.args[len(runner.args)-4])
 	}
 }
 
@@ -644,6 +678,62 @@ func TestValidateReportsActionableRuntimeFailure(t *testing.T) {
 	for _, want := range []string{
 		"validate sandbox image ghcr.io/acme/agent:latest",
 		"agent command not found in sandbox image: codex",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func TestValidateReportsMissingWgetForShimImages(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
+		_, _ = stderr.Write([]byte("generated Aileron connector shims require wget in the sandbox image\n"))
+		return errors.New("exit status 127")
+	})
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: t.TempDir(),
+		Volumes: []Volume{{
+			Source: filepath.Join(t.TempDir(), "google"),
+			Target: "/usr/local/bin/google",
+		}},
+		Command: []string{"codex"},
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"validate sandbox image ghcr.io/acme/agent:latest",
+		"generated Aileron connector shims require wget in the sandbox image",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func TestValidateReportsUnsupportedWgetForShimImages(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
+		_, _ = stderr.Write([]byte("generated Aileron connector shims require wget support for --post-data\n"))
+		return errors.New("exit status 127")
+	})
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: t.TempDir(),
+		Volumes: []Volume{{
+			Source: filepath.Join(t.TempDir(), "google"),
+			Target: "/usr/local/bin/google",
+		}},
+		Command: []string{"codex"},
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"validate sandbox image ghcr.io/acme/agent:latest",
+		"generated Aileron connector shims require wget support for --post-data",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q does not contain %q", msg, want)

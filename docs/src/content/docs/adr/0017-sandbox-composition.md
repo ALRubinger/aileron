@@ -48,7 +48,7 @@ The Aileron extension block starts narrow:
 
 `image` selects the BYO-image tier. `mediation` and `approval_surface` are declared here so the config surface exists before shell mediation and the approval UI add the runtime behavior.
 
-The Aileron-owned base image contains only the runtime substrate: the `aileron` binary/shim entrypoints, discovery files, proxy/session bootstrap, CA installation hooks, and shell mediation files as those features land. It does not carry language runtimes or third-party development tools.
+The Aileron-owned base image contains only the runtime substrate: the `aileron` binary/shim entrypoints, discovery files, the minimal HTTP client used by generated connector shims, proxy/session bootstrap, CA installation hooks, and shell mediation files as those features land. It does not carry language runtimes or third-party development tools.
 
 ## Single-binary alignment
 
@@ -72,7 +72,7 @@ The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented s
 
 `aileron sandbox build` is the first user-facing build consumer of that plan. It builds Tier 0 from Aileron's local sandbox-base image definition and Tier 1 from the devcontainer Dockerfile through Docker or Podman. Tier 2 BYO images are selected as-is; launch validates the minimal runtime contract before running the agent. Later launch work extends the initial runtime-injection substrate.
 
-`aileron launch --sandbox=auto|docker|podman` consumes the same build path to prepare the selected image, validates that it can execute `/bin/sh`, use a writable `/home/agent/workspace` mount, and resolve the agent command on `PATH`, then runs the agent command inside a one-shot Docker/Podman container. The project is mounted at `/home/agent/workspace` and used as the container working directory. Launch passes the session-scoped Aileron daemon env into the container, including `AILERON_API_URL` for the daemon `/v1` API used by sandbox-side execution shims, and rewrites loopback daemon URLs to the runtime host alias (`host.docker.internal` for Docker, `host.containers.internal` for Podman).
+`aileron launch --sandbox=auto|docker|podman` consumes the same build path to prepare the selected image, validates that it can execute `/bin/sh`, use a writable `/home/agent/workspace` mount, and resolve the agent command on `PATH`, then runs the agent command inside a one-shot Docker/Podman container. When generated connector shims are mounted, launch also validates that `wget` is available because those shims use it to reach `AILERON_API_URL`. The project is mounted at `/home/agent/workspace` and used as the container working directory. Launch passes the session-scoped Aileron daemon env into the container, including `AILERON_API_URL` for the daemon `/v1` API used by sandbox-side execution shims, and rewrites loopback daemon URLs to the runtime host alias (`host.docker.internal` for Docker, `host.containers.internal` for Podman).
 
 Launch build behavior is controlled by `--sandbox-build=auto|always|never`. `auto` is the default and builds Tier 0/Tier 1 images only when the selected local image is missing. `always` forces a rebuild. `never` fails if the selected image is not already present. The explicit `aileron sandbox build` command keeps its manual-build behavior.
 

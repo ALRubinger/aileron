@@ -285,6 +285,7 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 			validationScript,
 			"aileron-validate",
 			opts.Command[0],
+			boolArg(requiresShimHTTPClient(opts.Volumes)),
 		},
 	})
 	if err == nil {
@@ -313,7 +314,41 @@ if ! command -v "$1" >/dev/null 2>&1; then
   echo "install the agent CLI in the sandbox image or launch with --sandbox=off" >&2
   exit 127
 fi
+if [ "${2:-0}" = "1" ] && ! command -v wget >/dev/null 2>&1; then
+  echo "generated Aileron connector shims require wget in the sandbox image" >&2
+  echo "install wget in the sandbox image or launch with --sandbox=off" >&2
+  exit 127
+fi
+if [ "${2:-0}" = "1" ]; then
+  wget_help="$(wget --help 2>&1 || true)"
+  for flag in "--header" "--post-data" "-T" "-t" "-O"; do
+    case "$wget_help" in
+      *"$flag"*) ;;
+      *)
+        echo "generated Aileron connector shims require wget support for $flag" >&2
+        echo "install GNU wget or an equivalent wget implementation in the sandbox image" >&2
+        exit 127
+        ;;
+    esac
+  done
+fi
 `
+
+func boolArg(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+func requiresShimHTTPClient(volumes []Volume) bool {
+	for _, volume := range volumes {
+		if strings.HasPrefix(volume.Target, "/usr/local/bin/") {
+			return true
+		}
+	}
+	return false
+}
 
 // ResolveRuntime returns the container runtime executable to use.
 func ResolveRuntime(name string) (string, error) {
