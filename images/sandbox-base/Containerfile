@@ -13,7 +13,8 @@ RUN apk add --no-cache \
     grep \
     procps \
     sed \
-    tini
+    tini \
+    wget
 
 RUN addgroup -S agent && adduser -S -G agent -h /home/agent agent \
     && mkdir -p /etc/aileron /opt/aileron/manifests /home/agent/workspace \
