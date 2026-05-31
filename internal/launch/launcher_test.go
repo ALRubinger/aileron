@@ -299,6 +299,82 @@ func TestLaunch_SandboxMountsAileronManifestStores(t *testing.T) {
 	}
 }
 
+func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionsDir, "send-email.md"), []byte(sandboxDiscoveryActionManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' '---' >> " + argsFile + "\nprintf '%s\\n' \"$@\" >> " + argsFile + "\n"
+	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	calls := strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n")
+	if len(calls) != 2 {
+		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
+	}
+	validateCall, runCall := calls[0], calls[1]
+	for _, call := range []struct {
+		name string
+		args string
+	}{
+		{name: "validation", args: validateCall},
+		{name: "run", args: runCall},
+	} {
+		for _, want := range []string{
+			":/etc/aileron/tools.txt:ro\n",
+			":/usr/local/bin/google:ro\n",
+		} {
+			if !strings.Contains(call.args, want) {
+				t.Fatalf("%s call missing %q:\n%s", call.name, want, call.args)
+			}
+		}
+	}
+	if !strings.Contains(validateCall, "/bin/sh\n-c\n") {
+		t.Fatalf("validation call did not run contract probe:\n%s", validateCall)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(validateCall), "\ncodex\n1") {
+		t.Fatalf("validation call did not enable shim HTTP-client validation:\n%s", validateCall)
+	}
+	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(runCall) {
+		t.Fatalf("run call missing container AILERON_API_URL:\n%s", runCall)
+	}
+	if !strings.Contains(runCall, "ghcr.io/acme/agent:latest\ncodex\n") {
+		t.Fatalf("run call did not execute agent image command:\n%s", runCall)
+	}
+}
+
 func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 	dir := t.TempDir()
 	baseDir := filepath.Join(dir, "images", "sandbox-base")
@@ -514,3 +590,31 @@ func TestSessionLogPath_EmptyDirFallsBackToCWD(t *testing.T) {
 		t.Errorf("SessionLogPath(\"\") = %q, want %q", got, want)
 	}
 }
+
+const sandboxDiscoveryActionManifest = `+++
+name = "send-email"
+version = "1.0.0"
+source = "hub://aileron/send-email@1.0.0"
+
+[[requires.connectors]]
+name = "github://ALRubinger/aileron-connector-google"
+version = "1.0.0"
+hash = "sha256:abc123"
+capabilities = ["send"]
+
+[match]
+intent = "send email"
+
+[[inputs]]
+name = "to"
+type = "string"
+description = "recipient"
+
+[[execute]]
+id = "send"
+connector = "github://ALRubinger/aileron-connector-google"
+op = "send_email"
++++
+
+# Send Email
+`
