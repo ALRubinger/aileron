@@ -678,6 +678,7 @@ func TestValidateReportsActionableRuntimeFailure(t *testing.T) {
 	for _, want := range []string{
 		"validate sandbox image ghcr.io/acme/agent:latest",
 		"agent command not found in sandbox image: codex",
+		AgentImagesDocsURL,
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q does not contain %q", msg, want)
@@ -779,6 +780,7 @@ func TestValidateReportsFallbackWhenRuntimeHasNoDetail(t *testing.T) {
 	for _, want := range []string{
 		"image must support /bin/sh command execution",
 		"agent command \"codex\" on PATH",
+		AgentImagesDocsURL,
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q does not contain %q", msg, want)

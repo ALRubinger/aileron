@@ -108,6 +108,17 @@ When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_
 
 Release tags also build the sandbox-base image for `linux/amd64` and `linux/arm64` and publish it to GitHub Container Registry as `ghcr.io/alrubinger/aileron-sandbox-base:<version>`. Pull-request runs build both platforms without publishing, so image regressions are caught before release.
 
+## Check Agent Support
+
+Use `sandbox check` to validate that the selected image can run an agent command before starting a daemon-backed launch session:
+
+```bash
+aileron sandbox check --runtime=docker --agent=claude
+aileron sandbox check --runtime=podman --build=never codex
+```
+
+`sandbox check` uses the same composition plan, build policy, and minimal image validation as sandbox launch. It reports the selected tier, runtime, image, command, and `support: ok` when the command is available. Agent-specific image recipes and support status live in the [sandbox agent image matrix](/development/sandbox-agent-images/).
+
 ## Run During Launch
 
 Use `--sandbox` on `aileron launch` to have launch prepare the composition-selected image and start the agent inside it:
@@ -149,7 +160,7 @@ Before registering the session, launch validates the selected image with the sam
 - resolve the agent command on `PATH`
 - provide `wget` when generated connector shims are mounted
 
-The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied while Aileron's runtime injection remains limited to session env, manifest mounts, `tools.txt`, and connector shims. The supported-agent image matrix and first-class recipes are tracked in [#894](https://github.com/ALRubinger/aileron/issues/894).
+The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied while Aileron's runtime injection remains limited to session env, manifest mounts, `tools.txt`, and connector shims. See the [sandbox agent image matrix](/development/sandbox-agent-images/) for the current support contract and recipes.
 
 ## Use a BYO Image
 

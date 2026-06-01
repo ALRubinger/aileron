@@ -22,6 +22,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
+	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
@@ -286,6 +287,81 @@ func TestRunSandboxPlanRejectsExtraArgs(t *testing.T) {
 		t.Fatalf("expected exit code 1, got %d", code)
 	}
 	if !strings.Contains(stderr.String(), "usage: aileron sandbox plan") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunSandboxCheckValidatesAgentCommand(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	origBuild := sandboxCheckBuildFn
+	origValidate := sandboxCheckValidateFn
+	t.Cleanup(func() {
+		sandboxCheckBuildFn = origBuild
+		sandboxCheckValidateFn = origValidate
+	})
+
+	var capturedPolicy string
+	sandboxCheckBuildFn = func(_ context.Context, runtimeName string, _, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+		if runtimeName != "docker" {
+			t.Fatalf("runtimeName = %q, want docker", runtimeName)
+		}
+		capturedPolicy = opts.Policy
+		return sandboxcontainer.BuildResult{
+			Runtime: "docker",
+			Image:   "ghcr.io/acme/agent:latest",
+			Tier:    sandboxcomposition.TierBYOImage,
+		}, nil
+	}
+	var capturedCommand string
+	sandboxCheckValidateFn = func(_ context.Context, runtimeName, workDir, image, command string) error {
+		if runtimeName != "docker" || workDir != cwd || image != "ghcr.io/acme/agent:latest" {
+			t.Fatalf("validate args = %q %q %q", runtimeName, workDir, image)
+		}
+		capturedCommand = command
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "check", "--runtime=docker", "--build=never", "claude"}, newTestRegistry(), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d stderr=%q", code, stderr.String())
+	}
+	if capturedPolicy != "never" {
+		t.Fatalf("build policy = %q, want never", capturedPolicy)
+	}
+	if capturedCommand != "claude" {
+		t.Fatalf("command = %q, want claude", capturedCommand)
+	}
+	for _, want := range []string{
+		"tier: byo_image",
+		"runtime: docker",
+		"image: ghcr.io/acme/agent:latest",
+		"agent: claude",
+		"support: ok",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestRunSandboxCheckRequiresAgentCommand(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "check"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: aileron sandbox check") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
