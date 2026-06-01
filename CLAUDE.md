@@ -8,6 +8,12 @@ task generate:api
 
 Never hand-edit `internal/api/gen/server.gen.go`. If the spec and the code diverge, the spec wins. Regenerate after every spec change to keep them in sync.
 
+# Pre-PR Review Workflow
+
+Before committing changes and opening a pull request, run the local `coderabbit`
+CLI and the local code-review skill. Resolve actionable findings before
+publishing the PR.
+
 # Testing Philosophy
 
 Tests must be written against the **contract** of the code — the expected inputs, outputs, side effects, and error conditions defined by the function signature, API spec, or documentation. Never write tests against implementation internals.
