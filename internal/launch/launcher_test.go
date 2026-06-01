@@ -236,6 +236,8 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 		"--env\nAILERON_SANDBOX_IMAGE=ghcr.io/acme/agent:latest\n",
 		"--env\nAILERON_SANDBOX_TIER=byo_image\n",
 		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
+		"--env\nAILERON_TOOLS_FILE=/etc/aileron/tools.txt\n",
+		"--env\nAILERON_SHIMS_DIR=/usr/local/bin\n",
 		"--env\nAILERON_URL=http://host.docker.internal:",
 		"ghcr.io/acme/agent:latest\ncodex\n--ask-for-approval\nnever\n",
 	} {
@@ -369,6 +371,14 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	}
 	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(runCall) {
 		t.Fatalf("run call missing container AILERON_API_URL:\n%s", runCall)
+	}
+	for _, want := range []string{
+		"--env\nAILERON_TOOLS_FILE=/etc/aileron/tools.txt\n",
+		"--env\nAILERON_SHIMS_DIR=/usr/local/bin\n",
+	} {
+		if !strings.Contains(runCall, want) {
+			t.Fatalf("run call missing discovery hint env %q:\n%s", want, runCall)
+		}
 	}
 	if !strings.Contains(runCall, "ghcr.io/acme/agent:latest\ncodex\n") {
 		t.Fatalf("run call did not execute agent image command:\n%s", runCall)

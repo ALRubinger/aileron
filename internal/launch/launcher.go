@@ -36,6 +36,11 @@ import (
 // for tools the daemon already gates (ADR-0009 / ADR-0010).
 const MCPServerName = "aileron"
 
+const (
+	sandboxToolsFilePath = "/etc/aileron/tools.txt"
+	sandboxShimsDirPath  = "/usr/local/bin"
+)
+
 // LaunchConfig holds the configuration for launching an agent.
 type LaunchConfig struct {
 	// Agent is the agent to launch.
@@ -317,6 +322,8 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		agentEnv["AILERON_COMMS_URL"] = agentEndpointURL
 		agentEnv["AILERON_SESSION_ID"] = sessionID
 		agentEnv["AILERON_APPROVAL_URL"] = agentEndpointURL + "/approvals"
+		agentEnv["AILERON_TOOLS_FILE"] = sandboxToolsFilePath
+		agentEnv["AILERON_SHIMS_DIR"] = sandboxShimsDirPath
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
 		}
@@ -588,7 +595,7 @@ func sandboxDiscoveryMounts(reservedNames ...string) ([]sandboxcontainer.Volume,
 		}
 		mounts = append(mounts, sandboxcontainer.Volume{
 			Source:   path,
-			Target:   "/etc/aileron/tools.txt",
+			Target:   sandboxToolsFilePath,
 			ReadOnly: true,
 		})
 	}
@@ -613,7 +620,7 @@ func sandboxDiscoveryMounts(reservedNames ...string) ([]sandboxcontainer.Volume,
 		}
 		mounts = append(mounts, sandboxcontainer.Volume{
 			Source:   path,
-			Target:   "/usr/local/bin/" + name,
+			Target:   sandboxShimsDirPath + "/" + name,
 			ReadOnly: true,
 		})
 	}
