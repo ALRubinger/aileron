@@ -1,6 +1,6 @@
 ---
 title: "ADR-0008: Action Exposure to Agents"
-description: "MCP is the canonical surface for exposing Aileron actions to agents; the LLM gateway is a transparent reverse proxy"
+description: "MCP is the canonical host-launch action surface; v4 sandbox launch supersedes this with generated HTTPS shims and the data-plane direction."
 order: 8
 ---
 
@@ -15,6 +15,8 @@ order: 8
 
 ## Context
 
+> **Revision note, 2026-06-01:** This ADR remains accurate for the current host-launch integration path that registers `aileron-mcp` with agents. It is no longer the v4 sandbox-runtime architecture. For containerized launch, see [ADR-0018](/adr/0018-v4-single-binary-runtime), [ADR-0019](/adr/0019-v4-https-data-plane), and [ADR-0020](/adr/0020-v4-connector-specs-and-shims). The sandbox path uses generated HTTPS shims and the Aileron data plane rather than reviving `aileron-mcp` as an in-container runtime model.
+
 [ADR-0003](/adr/0003-action-model) establishes that actions are atomic, declaratively-defined units that the agent invokes. It defers a load-bearing question: *how does an agent see and call an installed action?*
 
 Two integration surfaces are theoretically available:
@@ -25,11 +27,11 @@ Two integration surfaces are theoretically available:
 
 Surface (1) needs the agent host to support MCP. Every agent in Aileron's launch matrix does — `aileron launch claude` registers `aileron-mcp` via `--mcp-config`; `aileron launch codex` writes the same registration into `~/.codex/config.toml`; the Goose / OpenCode / Pi launchers do the equivalent in their respective config formats. Surface (2) needs the agent's API base URL to be redirectable. Some launch agents do this (claude → `ANTHROPIC_BASE_URL`, codex → `OPENAI_BASE_URL`); others don't (goose, opencode, pi resolve their LLM endpoint per-provider in their own config).
 
-This ADR ratifies that MCP is the canonical action-exposure surface and that the LLM gateway is a transparent reverse proxy with no in-band tool catalog augmentation or call interception.
+For host launch, this ADR ratifies that MCP is the canonical action-exposure surface and that the LLM gateway is a transparent reverse proxy with no in-band tool catalog augmentation or call interception.
 
 ## Decision
 
-### MCP is the only path actions reach the agent
+### In host launch, MCP is the only path actions reach the agent
 
 Aileron exposes actions to agents via the Model Context Protocol, served by `aileron-mcp`. There is exactly one execution path for every action invocation, regardless of which agent is launched:
 

@@ -6,7 +6,7 @@ order: 6
 
 Sandbox composition is the contract for deciding which container image an agent session runs in. It is defined by [ADR-0017](/adr/0017-sandbox-composition/) and implemented by the `aileron sandbox` CLI.
 
-This page covers the user-facing workflow. Runtime launch support can scaffold, inspect, build, run the agent command in the prepared sandbox image, and inject static discovery/action shims. Live discovery refresh, proxy/session CA bootstrap, and shell mediation are follow-on runtime layers.
+This page covers the user-facing workflow. Runtime launch support can scaffold, inspect, build, run the agent command in the prepared sandbox image, and inject static discovery/action shims. Live discovery refresh, proxy/session CA bootstrap, and shell mediation are follow-on runtime layers tracked in [#897](https://github.com/ALRubinger/aileron/issues/897), [#896](https://github.com/ALRubinger/aileron/issues/896), and [#801](https://github.com/ALRubinger/aileron/issues/801).
 
 ## Choose a Composition Tier
 
@@ -149,7 +149,7 @@ Before registering the session, launch validates the selected image with the sam
 - resolve the agent command on `PATH`
 - provide `wget` when generated connector shims are mounted
 
-The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied while Aileron's runtime injection remains limited to session env, manifest mounts, `tools.txt`, and connector shims.
+The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied while Aileron's runtime injection remains limited to session env, manifest mounts, `tools.txt`, and connector shims. The supported-agent image matrix and first-class recipes are tracked in [#894](https://github.com/ALRubinger/aileron/issues/894).
 
 ## Use a BYO Image
 
@@ -177,4 +177,4 @@ Do not put Aileron credentials or user secrets in the image. Current generated a
 
 ## What This Does Not Do Yet
 
-This runtime path does not add live discovery refresh, proxy bootstrap, or shell command mediation. Generated session-scoped `/etc/aileron/tools.txt` and read-only connector shims support `--help` discovery, and the shims can execute installed actions via `AILERON_API_URL` with optional raw JSON args. Follow-on work adds live discovery refresh only if dynamic in-session connector changes require it; proxy/session CA bootstrap and shell-layer interception are later runtime layers.
+This runtime path does not add live discovery refresh, proxy bootstrap, or shell command mediation. Generated session-scoped `/etc/aileron/tools.txt` and read-only connector shims support `--help` discovery, and the shims can execute installed actions via `AILERON_API_URL` with optional raw JSON args. Follow-on work adds live discovery refresh only if dynamic in-session connector changes require it ([#897](https://github.com/ALRubinger/aileron/issues/897)); proxy/session CA bootstrap and credentialed HTTPS data-plane mediation are tracked in [#896](https://github.com/ALRubinger/aileron/issues/896) and [ADR-0019](/adr/0019-v4-https-data-plane/); shell-layer interception is tracked in [#801](https://github.com/ALRubinger/aileron/issues/801) and [ADR-0021](/adr/0021-v4-shell-layer-mediation/).

@@ -57,7 +57,7 @@ This ADR follows the updated sandbox runtime direction:
 - Aileron uses one `aileron` binary with multiple modes.
 - This composition contract does not introduce an `aileron-mcp` image or launch path.
 - The canonical credentialed-action path is HTTPS through the Aileron proxy/data plane.
-- Runtime bootstrap supplies `AILERON_API_URL`, `AILERON_TOKEN`, and launch session metadata for the current action-shim path. Later proxy work can add `HTTPS_PROXY` and session CA configuration without changing the composition tiers.
+- Runtime bootstrap supplies `AILERON_API_URL`, `AILERON_TOKEN`, and launch session metadata for the current action-shim path. Later proxy work can add `HTTPS_PROXY` and session CA configuration without changing the composition tiers; see [ADR-0019](/adr/0019-v4-https-data-plane).
 
 ## CLI surface
 
@@ -86,7 +86,7 @@ Users with existing devcontainers get an upgrade path rather than a parallel Ail
 
 Aileron keeps a clear boundary: it owns mediation, credentials, approvals, audit, and runtime bootstrap; users own development tooling in the image.
 
-The first implementations establish the contract, image-build substrate, container execution path, validation, and launch-scoped discovery/action substrate. That is the #796 cut line before #801: live discovery refresh, watcher processes, shell interception, and proxy/session-CA bootstrap build on this substrate only when later runtime layers need them.
+The first implementations establish the contract, image-build substrate, container execution path, validation, and launch-scoped discovery/action substrate. That is the #796 cut line before #801: live discovery refresh ([#897](https://github.com/ALRubinger/aileron/issues/897)), proxy/session-CA bootstrap ([#896](https://github.com/ALRubinger/aileron/issues/896)), agent image recipes ([#894](https://github.com/ALRubinger/aileron/issues/894)), and shell interception ([ADR-0021](/adr/0021-v4-shell-layer-mediation)) build on this substrate only when later runtime layers need them.
 
 ## Alternatives Considered
 
@@ -100,4 +100,12 @@ The first implementations establish the contract, image-build substrate, contain
 
 - [Issue #796](https://github.com/ALRubinger/aileron/issues/796) — sandbox composition
 - [Issue #747](https://github.com/ALRubinger/aileron/issues/747) — runtime-first milestone
+- [Issue #894](https://github.com/ALRubinger/aileron/issues/894) — sandbox agent image support matrix
+- [Issue #895](https://github.com/ALRubinger/aileron/issues/895) — connector specs and generated HTTPS shims
+- [Issue #896](https://github.com/ALRubinger/aileron/issues/896) — HTTPS proxy/data-plane mediation
+- [Issue #897](https://github.com/ALRubinger/aileron/issues/897) — dynamic discovery refresh
 - [ADR-0015](/adr/0015-launch-audit-scope) — old host launch audit boundary
+- [ADR-0018](/adr/0018-v4-single-binary-runtime) — single-binary runtime model
+- [ADR-0019](/adr/0019-v4-https-data-plane) — HTTPS data-plane mediation
+- [ADR-0020](/adr/0020-v4-connector-specs-and-shims) — connector specs and shims
+- [ADR-0021](/adr/0021-v4-shell-layer-mediation) — shell-layer mediation

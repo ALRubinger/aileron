@@ -15,6 +15,8 @@ order: 15
 
 ## Context
 
+> **Revision note, 2026-06-01:** This ADR bounds host launch. It removed fragile host shell interception and remains correct for `--sandbox=off`. The v4 container runtime changes the enforcement boundary because Aileron owns the image and can define `/bin/bash` inside it. Container-only shell mediation is tracked in [#801](https://github.com/ALRubinger/aileron/issues/801) and [ADR-0021](/adr/0021-v4-shell-layer-mediation); it does not revive the old host shell-shim model.
+
 `aileron launch <agent>` was originally specified in [issue #63](https://github.com/ALRubinger/aileron/issues/63) as "the connected coding session." Its pitch had two halves:
 
 1. **Aileron is the trust surface for actions the agent performs through us** — sending a Slack message, calling an external API with a credential, writing to a vault entry. This is the surface [ADR-0009](/adr/0009-user-channel) and [ADR-0010](/adr/0010-failure-handling) ratified: agent-defined intent, Aileron-defined enforcement, decision recorded on an immutable audit store.

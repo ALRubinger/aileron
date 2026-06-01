@@ -4,7 +4,7 @@ description: "How to wire a new AI coding agent into `aileron launch`."
 order: 6
 ---
 
-`aileron launch <agent>` runs a supported AI coding agent under the Aileron daemon so its LLM traffic can flow through the gateway and its tool calls can flow through `aileron-mcp`. Adding a new agent means writing one Go file under `internal/launch/agents/`, registering it in `cmd/aileron/main.go`, and shipping tests. This guide is the rules of the road.
+`aileron launch <agent>` runs a supported AI coding agent under the Aileron daemon. With `--sandbox=off`, host launch wires the agent to the daemon and current MCP/gateway path. With `--sandbox=auto|docker|podman`, sandbox launch prepares a container image, validates that the agent command exists inside it, and runs the agent in the container with Aileron's session env and generated discovery/action shims. Adding a new agent means writing one Go file under `internal/launch/agents/`, registering it in `cmd/aileron/main.go`, documenting whether its command is available in sandbox images, and shipping tests.
 
 ## When `aileron launch` is the right answer
 
@@ -17,6 +17,8 @@ An agent is integrable when it:
 An agent is **not** a candidate for `aileron launch` when it has no MCP support, no CLI entry point, or runs only inside an IDE the daemon can't talk to. Those agents may still belong elsewhere in the Aileron stack. They just don't fit this SPI.
 
 [ADR-0015](https://docs.withaileron.ai/adr/0015-launch-audit-scope/) bounds what `aileron launch` is responsible for. The launcher resolves the daemon, routes LLM traffic, and registers `aileron-mcp`. It does **not** replace `$SHELL`, install wrapper scripts, write policy files, or audit shell commands the agent runs locally. The agent's own approval and sandbox layer keeps that boundary.
+
+Sandbox launch adds a separate runtime path defined by [ADR-0017](/adr/0017-sandbox-composition/) and [ADR-0018](/adr/0018-v4-single-binary-runtime/). It does not use `aileron-mcp` as the in-container runtime model. The first sandbox cut injects `AILERON_API_URL`, session metadata, `/etc/aileron/tools.txt`, and generated connector shims. Future shell mediation is container-only work tracked in [ADR-0021](/adr/0021-v4-shell-layer-mediation/) and #801.
 
 ## The `Agent` interface
 
@@ -222,4 +224,6 @@ Per [ADR-0015](https://docs.withaileron.ai/adr/0015-launch-audit-scope/), the ag
 
 The host agent's own approval and sandbox layer (Claude Code's allowedTools, Codex's `approval_policy` and sandbox mode, Goose's permission profile, OpenCode's `permission.bash`, Pi's `--tools` allowlist) keeps the local-exec boundary. Aileron's audit boundary is the actions the agent calls through `aileron-mcp` and the LLM traffic it routes through the gateway. Nothing more.
 
-If a future contribution proposes reintroducing shell interception under a new name, point them here first.
+For sandbox launch, the agent command must exist in the selected image. If `BinaryNames()` returns `["claude"]`, then `claude` must be on `PATH` inside the Tier 0/Tier 1/Tier 2 image before launch validation passes. The support matrix and image recipes are tracked in [#894](https://github.com/ALRubinger/aileron/issues/894).
+
+If a future contribution proposes reintroducing host shell interception under a new name, point them here first. Container-only shell mediation belongs in #801.
