@@ -114,7 +114,7 @@ Use `sandbox check` to validate that the selected image can run an agent command
 
 ```bash
 aileron sandbox check --runtime=docker --agent=claude
-aileron sandbox check --runtime=podman --build=never codex
+aileron sandbox check --runtime=podman --build=never --agent=codex
 ```
 
 `sandbox check` uses the same composition plan, build policy, and minimal image validation as sandbox launch. It reports the selected tier, runtime, image, command, and `support: ok` when the command is available. Agent-specific image recipes and support status live in the [sandbox agent image matrix](/development/sandbox-agent-images/).

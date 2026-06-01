@@ -10,7 +10,7 @@ Use `sandbox check` to validate an image before starting a daemon-backed session
 
 ```bash
 aileron sandbox check --runtime=docker --agent=claude
-aileron sandbox check --runtime=podman --build=never codex
+aileron sandbox check --runtime=podman --build=never --agent=codex
 ```
 
 The check uses the same composition plan and minimal launch validation as `aileron launch --sandbox=...`: `/bin/sh`, the `/home/agent/workspace` mount, workspace write access, and the requested agent command on `PATH`.

@@ -366,6 +366,38 @@ func TestRunSandboxCheckRequiresAgentCommand(t *testing.T) {
 	}
 }
 
+func TestRunSandboxCheckRewritesBuildPolicyHint(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	origBuild := sandboxCheckBuildFn
+	origValidate := sandboxCheckValidateFn
+	t.Cleanup(func() {
+		sandboxCheckBuildFn = origBuild
+		sandboxCheckValidateFn = origValidate
+	})
+	sandboxCheckBuildFn = func(context.Context, string, io.Writer, io.Writer, sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+		return sandboxcontainer.BuildResult{}, errors.New("use --sandbox-build=auto")
+	}
+	sandboxCheckValidateFn = func(context.Context, string, string, string, string) error {
+		t.Fatal("validate should not run after build error")
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "check", "--agent=claude"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), "--build=auto") || strings.Contains(stderr.String(), "--sandbox-build") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestRunSandboxBuildRejectsExtraArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"sandbox", "build", "extra"}, newTestRegistry(), &stdout, &stderr)

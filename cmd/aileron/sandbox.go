@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
@@ -176,7 +177,7 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 		Policy:  *buildPolicy,
 	})
 	if err != nil && !errors.Is(err, sandboxcontainer.ErrNoBuildRequired) {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		fmt.Fprintf(stderr, "error: %s\n", sandboxCheckError(err))
 		return 1
 	}
 	resolvedRuntime := result.Runtime
@@ -197,6 +198,10 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "agent: %s\n", command)
 	fmt.Fprintln(stdout, "support: ok")
 	return 0
+}
+
+func sandboxCheckError(err error) string {
+	return strings.ReplaceAll(err.Error(), "--sandbox-build", "--build")
 }
 
 var sandboxBuildFn = func(ctx context.Context, runtimeName string, stdout, stderr io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
