@@ -15,6 +15,8 @@ order: 12
 
 ## Context
 
+> **Revision note, 2026-06-01:** This ADR describes the local daemon architecture that current CLI and host launch use. The v4 sandbox runtime keeps the daemon as the host-side control/data-plane authority, but container-facing calls use runtime-provided env such as `AILERON_API_URL` and later `HTTPS_PROXY` / session CA bootstrap. See [ADR-0018](/adr/0018-v4-single-binary-runtime) and [ADR-0019](/adr/0019-v4-https-data-plane).
+
 The local Aileron runtime today is split awkwardly across three command shapes:
 
 1. **`aileron serve`** — a long-running standalone HTTP server on `localhost:8721`. CLI commands like `aileron binding list` connect to it via `AILERON_API_URL`.
