@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/ALRubinger/aileron/internal/launch"
+	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
 func TestResolveBinary_Found(t *testing.T) {
@@ -382,6 +384,95 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	}
 	if !strings.Contains(runCall, "ghcr.io/acme/agent:latest\ncodex\n") {
 		t.Fatalf("run call did not execute agent image command:\n%s", runCall)
+	}
+}
+
+func TestLaunch_SandboxScaffoldBuildsAndRunsWithDiscoveryMounts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	actionsDir := filepath.Join(home, ".aileron", "actions")
+	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionsDir, "send-email.md"), []byte(sandboxDiscoveryActionManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	if _, err := sandboxcomposition.Init(sandboxcomposition.InitOptions{WorkDir: dir, Version: "test"}); err != nil {
+		t.Fatalf("init scaffold: %v", err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' '---' >> " + argsFile + "\nprintf '%s\\n' \"$@\" >> " + argsFile + "\n"
+	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:              scriptAgent{script: "codex"},
+		Dir:                dir,
+		Args:               []string{"--ask-for-approval", "never"},
+		SandboxRuntime:     "docker",
+		SandboxBuildPolicy: "always",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	calls := strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n")
+	if len(calls) != 3 {
+		t.Fatalf("docker calls = %d, want build, validate, and run:\n%s", len(calls), data)
+	}
+	buildCall, validateCall, runCall := calls[0], calls[1], calls[2]
+	image := sandboxcontainer.ProjectImageTag(dir)
+	dockerfile := filepath.Join(dir, ".devcontainer", "Dockerfile")
+	for _, want := range []string{
+		"build\n-t\n" + image + "\n",
+		"-f\n" + dockerfile + "\n",
+		"\n" + dir,
+	} {
+		if !strings.Contains(buildCall, want) {
+			t.Fatalf("build call missing %q:\n%s", want, buildCall)
+		}
+	}
+	for _, call := range []struct {
+		name string
+		args string
+	}{
+		{name: "validation", args: validateCall},
+		{name: "run", args: runCall},
+	} {
+		for _, want := range []string{
+			":/etc/aileron/tools.txt:ro\n",
+			":/usr/local/bin/google:ro\n",
+			image + "\n",
+		} {
+			if !strings.Contains(call.args, want) {
+				t.Fatalf("%s call missing %q:\n%s", call.name, want, call.args)
+			}
+		}
+	}
+	if !strings.Contains(validateCall, "/bin/sh\n-c\n") {
+		t.Fatalf("validation call did not run contract probe:\n%s", validateCall)
+	}
+	for _, want := range []string{
+		"--env\nAILERON_SANDBOX_IMAGE=" + image + "\n",
+		"--env\nAILERON_SANDBOX_TIER=devcontainer\n",
+		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
+		"--env\nAILERON_TOOLS_FILE=/etc/aileron/tools.txt\n",
+		"--env\nAILERON_SHIMS_DIR=/usr/local/bin\n",
+		"codex\n--ask-for-approval\nnever\n",
+	} {
+		if !strings.Contains(runCall, want) {
+			t.Fatalf("run call missing %q:\n%s", want, runCall)
+		}
 	}
 }
 
