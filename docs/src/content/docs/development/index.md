@@ -15,6 +15,8 @@ If you're looking for end-user docs, the [Getting Started](/getting-started/) gu
 - [Building from Source](/development/building-from-source/) — prerequisites, the Taskfile entry points, and how the embedded assets (webapp, forwarder WASM) get folded in.
 - [Running Tests](/development/running-tests/) — unit, integration, race, coverage. What CI runs, and how to reproduce a CI failure locally.
 - [Sandbox Composition](/development/sandbox-composition/) — how Aileron uses devcontainer.json, `aileron/sandbox-base`, and `aileron sandbox` to define the agent container image.
+- [Sandbox Agent Images](/development/sandbox-agent-images/) — which agent commands are supported by the selected sandbox image and how to check them before launch.
+- [Sandbox Connector Specs](/development/sandbox-connector-specs/) — how installed connector specs become sandbox-visible tools and generated HTTPS shims.
 - [Submitting Changes](/development/submitting-changes/) — branch and PR conventions, commit message format, ADR amendments, what gets reviewed.
 - [Adding an Agent](/development/adding-an-agent/) — how to wire a new AI coding agent into `aileron launch` via the `Agent` SPI.
 

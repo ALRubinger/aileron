@@ -387,6 +387,78 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	}
 }
 
+func TestLaunch_SandboxDiscoveryMountsConnectorSpecShims(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	specDir := filepath.Join(home, ".aileron", "store", "connectors", "sha256", "abc123")
+	if err := os.MkdirAll(specDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := `{
+	  "schema_version": "aileron.connector.v1",
+	  "connector": {"fqn": "github://acme/aileron-connector-google", "version": "1.2.3"},
+	  "tools": [{
+	    "name": "google",
+	    "description": "Google APIs",
+	    "operations": [{"name": "gmail.messages.search", "summary": "Search Gmail messages"}]
+	  }]
+	}`
+	if err := os.WriteFile(filepath.Join(specDir, "aileron.connector.v1.json"), []byte(spec), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' '---' >> " + argsFile + "\nprintf '%s\\n' \"$@\" >> " + argsFile + "\n"
+	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	calls := strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n")
+	if len(calls) != 2 {
+		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
+	}
+	for _, call := range []struct {
+		name string
+		args string
+	}{
+		{name: "validation", args: calls[0]},
+		{name: "run", args: calls[1]},
+	} {
+		for _, want := range []string{
+			":/etc/aileron/tools.txt:ro\n",
+			":/usr/local/bin/google:ro\n",
+		} {
+			if !strings.Contains(call.args, want) {
+				t.Fatalf("%s call missing %q:\n%s", call.name, want, call.args)
+			}
+		}
+	}
+}
+
 func TestLaunch_SandboxScaffoldBuildsAndRunsWithDiscoveryMounts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

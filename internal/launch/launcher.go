@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/action"
+	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
@@ -570,8 +571,14 @@ func sandboxDiscoveryMounts(reservedNames ...string) ([]sandboxcontainer.Volume,
 		return nil, cleanup, nil
 	}
 	actions := store.List()
-	toolsText := sandboxdiscovery.ToolsText(actions)
-	shimScripts := sandboxdiscovery.ShimScripts(actions)
+	specs, err := connectorspec.LoadInstalled(cstore.DefaultRoot())
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("load sandbox connector specs: %w", err)
+	}
+	toolsText, shimScripts, err := sandboxDiscoveryArtifacts(actions, specs, reservedNames...)
+	if err != nil {
+		return nil, cleanup, err
+	}
 	if len(toolsText) == 0 && len(shimScripts) == 0 {
 		return nil, cleanup, nil
 	}
@@ -625,6 +632,39 @@ func sandboxDiscoveryMounts(reservedNames ...string) ([]sandboxcontainer.Volume,
 		})
 	}
 	return mounts, cleanup, nil
+}
+
+func sandboxDiscoveryArtifacts(actions []action.LoadedAction, specs []connectorspec.Spec, reservedNames ...string) ([]byte, map[string][]byte, error) {
+	var toolsText []byte
+	if actionTools := sandboxdiscovery.ToolsText(actions); len(actionTools) > 0 {
+		toolsText = append(toolsText, actionTools...)
+	}
+	specTools, err := sandboxdiscovery.SpecToolsText(specs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("render sandbox connector tools: %w", err)
+	}
+	if len(specTools) > 0 {
+		toolsText = append(toolsText, specTools...)
+	}
+
+	shimScripts := sandboxdiscovery.ShimScripts(actions)
+	if shimScripts == nil {
+		shimScripts = map[string][]byte{}
+	}
+	specShims, err := sandboxdiscovery.SpecShimScripts(specs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("render sandbox connector shims: %w", err)
+	}
+	for name, script := range specShims {
+		if isReservedSandboxCommand(name, reservedNames) {
+			return nil, nil, fmt.Errorf("sandbox connector shim %q conflicts with the selected agent command", name)
+		}
+		if _, ok := shimScripts[name]; ok {
+			return nil, nil, fmt.Errorf("sandbox connector shim %q conflicts with an installed action shim", name)
+		}
+		shimScripts[name] = script
+	}
+	return toolsText, shimScripts, nil
 }
 
 func isReservedSandboxCommand(name string, reservedNames []string) bool {

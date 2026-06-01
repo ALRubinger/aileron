@@ -90,6 +90,7 @@ export const navigation: NavItem[] = [
       { label: 'Running Tests', href: '/development/running-tests/' },
       { label: 'Sandbox Composition', href: '/development/sandbox-composition/' },
       { label: 'Sandbox Agent Images', href: '/development/sandbox-agent-images/' },
+      { label: 'Sandbox Connector Specs', href: '/development/sandbox-connector-specs/' },
       { label: 'Submitting Changes', href: '/development/submitting-changes/' }
     ]
   },
