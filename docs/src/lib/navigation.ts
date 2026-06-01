@@ -89,6 +89,7 @@ export const navigation: NavItem[] = [
       { label: 'Building from Source', href: '/development/building-from-source/' },
       { label: 'Running Tests', href: '/development/running-tests/' },
       { label: 'Sandbox Composition', href: '/development/sandbox-composition/' },
+      { label: 'Sandbox Agent Images', href: '/development/sandbox-agent-images/' },
       { label: 'Submitting Changes', href: '/development/submitting-changes/' }
     ]
   },

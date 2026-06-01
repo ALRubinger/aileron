@@ -72,6 +72,15 @@ func starterDockerfile(version string) string {
 
 # Uncomment snippets below to add tools to the Aileron sandbox.
 # Keep rarely changing snippets earlier for better layer caching.
+#
+# Aileron's base image runs as the non-root "agent" user. Switch to root
+# before installing packages, then switch back to agent before launch.
+
+# USER root
+
+# --- Claude Code ---
+# RUN apk add --no-cache git nodejs npm ripgrep && \
+#     npm install -g @anthropic-ai/claude-code
 
 # --- GitHub CLI ---
 # RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
@@ -98,5 +107,7 @@ func starterDockerfile(version string) string {
 #     curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg && \
 #     echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
 #     apt-get update && apt-get install -y --no-install-recommends terraform
+
+# USER agent
 `, BaseImage(version))
 }

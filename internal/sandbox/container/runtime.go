@@ -20,6 +20,7 @@ import (
 
 const DefaultRuntime = "auto"
 const WorkspacePath = "/home/agent/workspace"
+const AgentImagesDocsURL = "https://docs.withaileron.ai/development/sandbox-agent-images/"
 
 var ErrNoBuildRequired = errors.New("sandbox image does not require a build")
 
@@ -293,9 +294,17 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 	}
 	detail := strings.TrimSpace(stderr.String())
 	if detail != "" {
+		detail = sandboxValidationDetail(detail)
 		return fmt.Errorf("validate sandbox image %s: %s: %w", opts.Image, detail, err)
 	}
-	return fmt.Errorf("validate sandbox image %s: image must support /bin/sh command execution, a writable %s workspace mount, and agent command %q on PATH: %w", opts.Image, WorkspacePath, opts.Command[0], err)
+	return fmt.Errorf("validate sandbox image %s: image must support /bin/sh command execution, a writable %s workspace mount, and agent command %q on PATH; see %s: %w", opts.Image, WorkspacePath, opts.Command[0], AgentImagesDocsURL, err)
+}
+
+func sandboxValidationDetail(detail string) string {
+	if strings.Contains(detail, "agent command not found in sandbox image:") && !strings.Contains(detail, AgentImagesDocsURL) {
+		return detail + "\nagent image recipes: " + AgentImagesDocsURL
+	}
+	return detail
 }
 
 const validationScript = `
@@ -312,6 +321,7 @@ rm -f "$probe"
 if ! command -v "$1" >/dev/null 2>&1; then
   echo "agent command not found in sandbox image: $1" >&2
   echo "install the agent CLI in the sandbox image or launch with --sandbox=off" >&2
+  echo "agent image recipes: ` + AgentImagesDocsURL + `" >&2
   exit 127
 fi
 if [ "${2:-0}" = "1" ] && ! command -v wget >/dev/null 2>&1; then
