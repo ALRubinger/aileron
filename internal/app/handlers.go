@@ -20,6 +20,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/comms"
 	"github.com/ALRubinger/aileron/internal/config"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
+	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/draft"
@@ -38,6 +39,8 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
 )
+
+type connectorSpecLoader func() ([]connectorspec.Spec, error)
 
 // apiServer implements the generated api.ServerInterface.
 type apiServer struct {
@@ -100,6 +103,7 @@ type apiServer struct {
 	localDaemonToken   string                        // local-daemon bearer token; empty disables local bearer auth
 	actionApprovalTTL  time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
 	bindings           binding.Store                 // capability bindings (ADR-0006); nil when no vault is wired
+	specLoader         connectorSpecLoader           // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
 	oauth2Sessions     *oauth2Sessions               // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
 	oauth2HTTPClient   *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient
 

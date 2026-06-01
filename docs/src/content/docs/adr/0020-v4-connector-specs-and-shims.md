@@ -50,6 +50,8 @@ POST ${AILERON_API_URL%/}/connector-operations/run
 
 The request body contains `connector_fqn`, `tool`, `operation`, and raw JSON `args`. The proxy/data-plane implementation behind this contract is deferred to [ADR-0019](/adr/0019-v4-https-data-plane/) and [#896](https://github.com/ALRubinger/aileron/issues/896).
 
+As the first #896 cut, the daemon endpoint resolves installed specs, writes an audit event for recognized connector-operation attempts, and returns `501 not_implemented` until mediated HTTPS execution and credential injection are available. That keeps generated shims fail-closed while giving the proxy/data-plane work a tested API boundary.
+
 The v1 spec requires:
 
 | Field | Requirement |
