@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/action"
+	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
@@ -38,6 +40,46 @@ func TestFirstAgentBinaryHandlesEmptyAgent(t *testing.T) {
 	}
 	if got := firstAgentBinary(namedBinaryAgent{name: "codex"}); got != "codex" {
 		t.Fatalf("firstAgentBinary = %q, want codex", got)
+	}
+}
+
+func TestSandboxDiscoveryArtifactsRejectsSpecActionShimConflict(t *testing.T) {
+	actions := []action.LoadedAction{{
+		Manifest: &action.Manifest{
+			Name: "send-email",
+			Requires: action.Requires{
+				Connectors: []action.RequiresConnector{{Name: "github://acme/aileron-connector-google"}},
+			},
+		},
+	}}
+	specs := []connectorspec.Spec{{
+		SchemaVersion: connectorspec.SchemaVersion,
+		Connector:     connectorspec.Connector{FQN: "github://acme/google"},
+		Tools:         []connectorspec.Tool{{Name: "google", Operations: []connectorspec.Operation{{Name: "search"}}}},
+	}}
+
+	_, _, err := sandboxDiscoveryArtifacts(actions, specs)
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	if !strings.Contains(err.Error(), `conflicts with an installed action shim`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSandboxDiscoveryArtifactsRejectsSpecAgentCommandConflict(t *testing.T) {
+	specs := []connectorspec.Spec{{
+		SchemaVersion: connectorspec.SchemaVersion,
+		Connector:     connectorspec.Connector{FQN: "github://acme/claude"},
+		Tools:         []connectorspec.Tool{{Name: "claude", Operations: []connectorspec.Operation{{Name: "search"}}}},
+	}}
+
+	_, _, err := sandboxDiscoveryArtifacts(nil, specs, "claude")
+	if err == nil {
+		t.Fatal("expected conflict error")
+	}
+	if !strings.Contains(err.Error(), `conflicts with the selected agent command`) {
+		t.Fatalf("error = %v", err)
 	}
 }
 
