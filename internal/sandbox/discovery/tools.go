@@ -297,10 +297,14 @@ func shimScript(tool ConnectorTool) []byte {
 	out.WriteString("fi\n")
 	out.WriteString("body='{\"args\":'\"$args_json\"'}'\n")
 	out.WriteString("url=${AILERON_API_URL%/}/actions/$action_name/run\n")
+	out.WriteString("set -- -T 30 -t 3 -q -O - --header 'Content-Type: application/json'\n")
 	out.WriteString("if [ -n \"${AILERON_TOKEN:-}\" ]; then\n")
-	out.WriteString("  exec wget -T 30 -t 3 -q -O - --header 'Content-Type: application/json' --header \"Authorization: Bearer $AILERON_TOKEN\" --post-data \"$body\" \"$url\"\n")
+	out.WriteString("  set -- \"$@\" --header \"Authorization: Bearer $AILERON_TOKEN\"\n")
 	out.WriteString("fi\n")
-	out.WriteString("exec wget -T 30 -t 3 -q -O - --header 'Content-Type: application/json' --post-data \"$body\" \"$url\"\n")
+	out.WriteString("if [ -n \"${AILERON_SESSION_ID:-}\" ]; then\n")
+	out.WriteString("  set -- \"$@\" --header \"X-Aileron-Session-Id: $AILERON_SESSION_ID\"\n")
+	out.WriteString("fi\n")
+	out.WriteString("exec wget \"$@\" --post-data \"$body\" \"$url\"\n")
 	return out.Bytes()
 }
 

@@ -51,6 +51,7 @@ func TestShimScriptsRenderHelpAndDispatch(t *testing.T) {
 		"--to <string> (required) - recipient\n",
 		"Run `google <action-name> --args '<json-object>'`",
 		"--post-data \"$body\" \"$url\"",
+		"X-Aileron-Session-Id: $AILERON_SESSION_ID",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("shim script missing %q:\n%s", want, script)
@@ -79,6 +80,7 @@ func TestShimScriptExecutesInstalledActionThroughDaemonAPI(t *testing.T) {
 		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"AILERON_API_URL=http://host.docker.internal:48123/v1",
 		"AILERON_TOKEN=test-token",
+		"AILERON_SESSION_ID=sess-sandbox",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -95,12 +97,51 @@ func TestShimScriptExecutesInstalledActionThroughDaemonAPI(t *testing.T) {
 	for _, want := range []string{
 		"--header\nContent-Type: application/json\n",
 		"--header\nAuthorization: Bearer test-token\n",
+		"--header\nX-Aileron-Session-Id: sess-sandbox\n",
 		"--post-data\n{\"args\":{\"to\":\"a@example.com\"}}\n",
 		"http://host.docker.internal:48123/v1/actions/send-email/run\n",
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("wget args missing %q:\n%s", want, args)
 		}
+	}
+}
+
+func TestShimScriptExecutesInstalledActionWithoutSessionID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("generated shim execution is POSIX shell behavior")
+	}
+	scripts := ShimScripts(testActions())
+	dir := t.TempDir()
+	shimPath := filepath.Join(dir, "google")
+	if err := os.WriteFile(shimPath, scripts["google"], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	capturePath := filepath.Join(dir, "wget-args.txt")
+	wgetPath := filepath.Join(dir, "wget")
+	if err := os.WriteFile(wgetPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+capturePath+"\nprintf '{\"ok\":true}\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("/bin/sh", shimPath, "send-email", "--args", `{"to":"a@example.com"}`, "--json")
+	cmd.Env = []string{
+		"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"AILERON_API_URL=http://host.docker.internal:48123/v1",
+		"AILERON_TOKEN=test-token",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("shim execution failed: %v\n%s", err, out)
+	}
+	if got := string(out); got != "{\"ok\":true}\n" {
+		t.Fatalf("shim output = %q", got)
+	}
+	captured, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args := string(captured); strings.Contains(args, "X-Aileron-Session-Id") {
+		t.Fatalf("wget args included session header without session id:\n%s", args)
 	}
 }
 
