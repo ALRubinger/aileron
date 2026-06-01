@@ -63,7 +63,7 @@ type Money struct {
 
 // GitAction carries git/source-control-specific intent fields.
 type GitAction struct {
-	Provider       string   `json:"provider"`        // "github", "gitlab", "bitbucket", "custom"
+	Provider       string   `json:"provider"` // "github", "gitlab", "bitbucket", "custom"
 	Repository     string   `json:"repository"`
 	Branch         string   `json:"branch"`
 	BaseBranch     string   `json:"base_branch"`
@@ -268,9 +268,9 @@ const (
 	EventTypeExecutionFailed    EventType = "execution.failed"
 
 	// Gateway tool call events.
-	EventTypeToolCallIntercepted    EventType = "tool.call.intercepted"
-	EventTypeToolCallForwarded      EventType = "tool.call.forwarded"
-	EventTypeToolCallDenied         EventType = "tool.call.denied"
+	EventTypeToolCallIntercepted     EventType = "tool.call.intercepted"
+	EventTypeToolCallForwarded       EventType = "tool.call.forwarded"
+	EventTypeToolCallDenied          EventType = "tool.call.denied"
 	EventTypeToolCallPendingApproval EventType = "tool.call.pending_approval"
 
 	// Binding lifecycle events (ADR-0006). Payloads carry the binding
@@ -290,4 +290,9 @@ const (
 	// version, hash, signature status, and the consent decision per
 	// the install-consent acceptance criteria.
 	EventTypeConnectorInstalled EventType = "connector.installed"
+
+	// Connector operation event for generated sandbox shims. Payload
+	// identifies the spec-declared operation and mediation decision,
+	// never credential values.
+	EventTypeConnectorOperationRejected EventType = "connector.operation.rejected"
 )

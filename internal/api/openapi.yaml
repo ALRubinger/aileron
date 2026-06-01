@@ -2636,6 +2636,51 @@ paths:
               schema:
                 $ref: "#/components/schemas/FailureEnvelope"
 
+  /v1/connector-operations/run:
+    post:
+      tags: [Connectors]
+      summary: Resolve a generated sandbox connector operation shim
+      description: |
+        Resolves the connector, tool, and operation named by a generated
+        sandbox shim against the installed `aileron.connector.v1` specs.
+        This is the stable daemon-side contract for spec-backed shims.
+
+        The first #896 cut is intentionally fail-closed: recognized
+        operations are audited and return `501 not_implemented` until the
+        mediated HTTPS proxy/data-plane can execute the operation and
+        inject credentials at the daemon boundary. Unknown operations are
+        rejected before any execution attempt.
+      operationId: runConnectorOperation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectorOperationRunRequest"
+      responses:
+        "501":
+          description: |
+            Operation was recognized and audited, but mediated connector
+            operation execution is not available in this runtime cut.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorOperationRunRejectedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Connector spec lookup failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/bindings:
     get:
       tags: [Bindings]
@@ -6126,6 +6171,51 @@ components:
             Action-side failure envelope; populated when
             `status = failed`. Same shape the synchronous path would
             have returned as a 4xx/5xx body.
+
+    ConnectorOperationRunRequest:
+      type: object
+      description: |
+        Request emitted by generated sandbox connector-operation shims.
+        The daemon resolves the identity fields against installed
+        `aileron.connector.v1` specs before any execution work is
+        attempted.
+      required: [connector_fqn, tool, operation]
+      properties:
+        connector_fqn:
+          type: string
+          description: Connector FQN from the installed connector spec.
+        tool:
+          type: string
+          description: Sandbox-visible tool command name generated from the spec.
+        operation:
+          type: string
+          description: Operation name within the tool.
+        args:
+          type: object
+          additionalProperties: true
+          description: JSON arguments supplied to the operation shim.
+
+    ConnectorOperationRunRejectedResponse:
+      type: object
+      description: |
+        Fail-closed response for a recognized connector operation when
+        mediated execution is not yet available.
+      required: [status, audit_id, connector_fqn, tool, operation, message]
+      properties:
+        status:
+          type: string
+          enum: [rejected]
+        audit_id:
+          type: string
+          description: Audit log ID for the rejected operation attempt.
+        connector_fqn:
+          type: string
+        tool:
+          type: string
+        operation:
+          type: string
+        message:
+          type: string
 
     Binding:
       type: object
