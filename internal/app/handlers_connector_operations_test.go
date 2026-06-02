@@ -215,29 +215,65 @@ func TestRecordSandboxProxyRequest_RejectsNonHTTPSWithoutAudit(t *testing.T) {
 }
 
 func TestRecordSandboxProxyRequest_MethodOrPathMismatchReturns404WithoutAudit(t *testing.T) {
-	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "method",
+			body: `{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.search","method":"POST","upstream_url":"https://gmail.googleapis.com/gmail/v1/users/me/messages"}`,
+		},
+		{
+			name: "path",
+			body: `{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.search","method":"GET","upstream_url":"https://gmail.googleapis.com/gmail/v1/users/me/labels"}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
+				{
+					SchemaVersion: connectorspec.SchemaVersion,
+					Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-google"},
+					Tools: []connectorspec.Tool{
+						{Name: "google", Operations: []connectorspec.Operation{{Name: "gmail.messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages"}}},
+					},
+				},
+			})
+			req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/requests", bytes.NewReader([]byte(tt.body)))
+			rec := httptest.NewRecorder()
+
+			srv.RecordSandboxProxyRequest(rec, req)
+
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+			events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			if len(events) != 0 {
+				t.Fatalf("events = %d, want 0", len(events))
+			}
+		})
+	}
+}
+
+func TestRecordSandboxProxyRequest_RootPathMatchesOperation(t *testing.T) {
+	srv, _ := newConnectorOperationTestServer([]connectorspec.Spec{
 		{
 			SchemaVersion: connectorspec.SchemaVersion,
-			Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-google"},
+			Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-root"},
 			Tools: []connectorspec.Tool{
-				{Name: "google", Operations: []connectorspec.Operation{{Name: "gmail.messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages"}}},
+				{Name: "root", Operations: []connectorspec.Operation{{Name: "root.get", Method: "GET", Path: "/"}}},
 			},
 		},
 	})
-	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/requests", bytes.NewReader([]byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.search","method":"POST","upstream_url":"https://gmail.googleapis.com/gmail/v1/users/me/messages"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/requests", bytes.NewReader([]byte(`{"connector_fqn":"github://acme/aileron-connector-root","tool":"root","operation":"root.get","method":"GET","upstream_url":"https://api.example.test"}`)))
 	rec := httptest.NewRecorder()
 
 	srv.RecordSandboxProxyRequest(rec, req)
 
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
-	}
-	if len(events) != 0 {
-		t.Fatalf("events = %d, want 0", len(events))
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

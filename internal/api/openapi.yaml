@@ -6286,6 +6286,7 @@ components:
         upstream_url:
           type: string
           format: uri
+          pattern: '^https://'
           description: Absolute HTTPS upstream URL requested by the sandboxed client.
 
     SandboxProxyRejectedResponse:

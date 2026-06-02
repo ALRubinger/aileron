@@ -171,7 +171,11 @@ func sandboxProxyRequestMatchesOperation(method string, upstream *url.URL, opera
 	if !strings.EqualFold(method, operation.Method) {
 		return false
 	}
-	return upstream.EscapedPath() == operation.Path
+	path := upstream.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return path == operation.Path
 }
 
 func (s *apiServer) recordConnectorOperationRejected(r *http.Request, connectorFQN, toolName string, operation discovery.SpecOperationHelp) string {
