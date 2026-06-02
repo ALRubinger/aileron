@@ -250,6 +250,66 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(args) {
 		t.Errorf("expected container AILERON_API_URL /v1 env in docker args:\n%s", args)
 	}
+	for _, unwanted := range []string{"HTTPS_PROXY=", "HTTP_PROXY=", "AILERON_SANDBOX_PROXY_MODE="} {
+		if strings.Contains(args, unwanted) {
+			t.Errorf("did not expect proxy bootstrap env %q by default:\n%s", unwanted, args)
+		}
+	}
+}
+
+func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "1")
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	args := string(data)
+	caPath := filepath.Join(home, ".aileron", "sessions", "01HK0000000000000000000FAK", "sandbox-proxy", "ca.pem")
+	if _, err := os.Stat(caPath); err != nil {
+		t.Fatalf("stat generated CA: %v", err)
+	}
+	for _, want := range []string{
+		"--volume\n" + caPath + ":/etc/aileron/proxy/ca.pem:ro\n",
+		"--env\nAILERON_SANDBOX_PROXY_CA_FILE=/etc/aileron/proxy/ca.pem\n",
+		"--env\nAILERON_SANDBOX_PROXY_MODE=bootstrap\n",
+		"--env\nAILERON_SANDBOX_PROXY_URL=http://host.docker.internal:",
+		"--env\nHTTPS_PROXY=http://host.docker.internal:",
+		"--env\nHTTP_PROXY=http://host.docker.internal:",
+		"host.docker.internal",
+		"host.containers.internal",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("run call missing %q:\n%s", want, args)
+		}
+	}
 }
 
 func TestLaunch_SandboxMountsAileronManifestStores(t *testing.T) {

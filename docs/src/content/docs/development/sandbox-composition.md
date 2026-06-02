@@ -150,6 +150,8 @@ aileron launch --sandbox=podman --sandbox-build=never codex
 
 The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_API_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, discovery hints (`AILERON_TOOLS_FILE`, `AILERON_SHIMS_DIR`), and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). `AILERON_API_URL` points at the daemon's `/v1` API and is the stable endpoint for sandbox-side execution shims. For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker and `host.containers.internal` for Podman.
 
+An internal proxy-bootstrap mode is available for development of the #896 HTTPS data plane. When `AILERON_SANDBOX_PROXY_BOOTSTRAP=1` is set, sandbox launch generates a session-local CA, mounts the public CA at `/etc/aileron/proxy/ca.pem`, and sets standard proxy env (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`) plus Aileron metadata (`AILERON_SANDBOX_PROXY_MODE`, `AILERON_SANDBOX_PROXY_URL`, `AILERON_SANDBOX_PROXY_CA_FILE`). This mode is not yet a user-facing credential mediation feature: the CA is not installed into the image trust store, and credential injection at the proxy boundary remains follow-on #896 work.
+
 When installed action manifests or connector store metadata exist on the host, launch mounts them read-only under `/opt/aileron/manifests/actions` and `/opt/aileron/manifests/connectors`. Launch also generates a session-scoped static `/etc/aileron/tools.txt` manifest and read-only connector shim scripts under `/usr/local/bin` from two sources:
 
 - installed action manifests, which create shims that can execute an explicit installed action name through `AILERON_API_URL` with optional raw JSON args
@@ -183,7 +185,7 @@ Set `customizations.aileron.image` when your team owns the complete image:
 }
 ```
 
-In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Later runtime launch work can extend that contract with proxy bootstrap, session CA, and shell mediation files.
+In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Later runtime launch work can extend that contract with trusted proxy bootstrap, session CA installation, and shell mediation files.
 
 ## What Belongs in the Image
 
@@ -193,4 +195,4 @@ Do not put Aileron credentials or user secrets in the image. Current generated a
 
 ## What This Does Not Do Yet
 
-This runtime path does not add live discovery refresh, proxy bootstrap, or shell command mediation. Generated session-scoped `/etc/aileron/tools.txt` and read-only connector shims support `--help` discovery; action shims can execute installed actions via `AILERON_API_URL`, and spec-backed operation shims call the stable `/connector-operations/run` daemon API contract. Follow-on work adds the mediated execution path behind connector-operation shims ([#896](https://github.com/ALRubinger/aileron/issues/896)), live discovery refresh only if dynamic in-session connector changes require it ([#897](https://github.com/ALRubinger/aileron/issues/897)), proxy/session CA bootstrap and credentialed HTTPS data-plane mediation ([ADR-0019](/adr/0019-v4-https-data-plane/)), and shell-layer interception ([#801](https://github.com/ALRubinger/aileron/issues/801), [ADR-0021](/adr/0021-v4-shell-layer-mediation/)).
+This runtime path does not add live discovery refresh, trusted proxy execution, or shell command mediation. Generated session-scoped `/etc/aileron/tools.txt` and read-only connector shims support `--help` discovery; action shims can execute installed actions via `AILERON_API_URL`, and spec-backed operation shims call the stable `/connector-operations/run` daemon API contract. Follow-on work adds the mediated execution path behind connector-operation shims ([#896](https://github.com/ALRubinger/aileron/issues/896)), live discovery refresh only if dynamic in-session connector changes require it ([#897](https://github.com/ALRubinger/aileron/issues/897)), session CA trust-store installation and credentialed HTTPS data-plane mediation ([ADR-0019](/adr/0019-v4-https-data-plane/)), and shell-layer interception ([#801](https://github.com/ALRubinger/aileron/issues/801), [ADR-0021](/adr/0021-v4-shell-layer-mediation/)).

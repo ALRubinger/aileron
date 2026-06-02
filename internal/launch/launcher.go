@@ -40,6 +40,7 @@ const MCPServerName = "aileron"
 const (
 	sandboxToolsFilePath = "/etc/aileron/tools.txt"
 	sandboxShimsDirPath  = "/usr/local/bin"
+	sandboxProxyCAPath   = "/etc/aileron/proxy/ca.pem"
 )
 
 // LaunchConfig holds the configuration for launching an agent.
@@ -310,6 +311,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		agentEndpointURL = containerURLForRuntime(daemonURL, sandboxPlan.Runtime)
 	}
 	agentEnv := composeAgentEnv(config.Agent.Env(), config.Agent.LLMEndpointEnv(), agentEndpointURL)
+	var proxyBootstrap sandboxProxyBootstrap
 	if sandboxPlan.Image != "" {
 		agentEnv["AILERON_SANDBOX_IMAGE"] = sandboxPlan.Image
 		agentEnv["AILERON_SANDBOX_TIER"] = string(sandboxPlan.Tier)
@@ -328,6 +330,11 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
 		}
+		proxyBootstrap, err = prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL)
+		if err != nil {
+			return LaunchResult{}, fmt.Errorf("prepare sandbox proxy bootstrap: %w", err)
+		}
+		applySandboxProxyBootstrapEnv(agentEnv, proxyBootstrap)
 	}
 
 	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)
@@ -344,6 +351,9 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		"sandbox_image", sandboxPlan.Image,
 		"sandbox_tier", sandboxPlan.Tier,
 		"sandbox_runtime", sandboxPlan.Runtime,
+		"sandbox_proxy_mode", proxyBootstrap.Mode,
+		"sandbox_proxy_url", proxyBootstrap.ProxyURL,
+		"sandbox_proxy_ca_path", proxyBootstrap.CAPath,
 	)
 
 	probeCtx, cancelProbe := context.WithTimeout(ctx, daemonHTTPTimeout)
@@ -354,7 +364,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	var result LaunchResult
 	var runErr error
 	if sandboxEnabled {
-		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv)
+		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv, proxyBootstrap.Mounts...)
 	} else {
 		result, runErr = launchHost(ctx, config, daemonURL, sessionID, agentEnv)
 	}
@@ -504,7 +514,7 @@ func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID s
 	return launchDirect(cmd, config)
 }
 
-func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string) (LaunchResult, error) {
+func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, extraMounts ...sandboxcontainer.Volume) (LaunchResult, error) {
 	commandName := firstAgentBinary(config.Agent)
 	if commandName == "" {
 		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
@@ -514,6 +524,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		return LaunchResult{}, err
 	}
 	defer cleanupMounts()
+	mounts = append(mounts, extraMounts...)
 	command := append([]string{commandName}, config.Agent.Args()...)
 	command = append(command, config.Args...)
 	_, err = sandboxcontainer.Builder{
