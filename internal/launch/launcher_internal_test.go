@@ -154,7 +154,7 @@ func TestLaunchSandboxRejectsAgentWithoutBinary(t *testing.T) {
 func TestValidateSandboxRejectsAgentWithoutBinary(t *testing.T) {
 	err := validateSandbox(nil, SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
 		Agent: emptyBinaryAgent{},
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("expected missing container command error")
 	}
@@ -174,7 +174,7 @@ func TestValidateSandboxPassesRuntimeMounts(t *testing.T) {
 	orig := validateSandboxImageForLaunch
 	t.Cleanup(func() { validateSandboxImageForLaunch = orig })
 	var got []sandboxcontainer.Volume
-	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, mounts []sandboxcontainer.Volume, commandName string) error {
+	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, _ map[string]string, mounts []sandboxcontainer.Volume, commandName string) error {
 		got = append(got, mounts...)
 		if commandName != "codex" {
 			t.Fatalf("commandName = %q, want codex", commandName)
@@ -185,7 +185,7 @@ func TestValidateSandboxPassesRuntimeMounts(t *testing.T) {
 	err := validateSandbox(context.Background(), SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
 		Agent: namedBinaryAgent{name: "codex"},
 		Dir:   t.TempDir(),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("validateSandbox: %v", err)
 	}
@@ -193,6 +193,41 @@ func TestValidateSandboxPassesRuntimeMounts(t *testing.T) {
 		if !hasMountTarget(got, target) {
 			t.Fatalf("validateSandbox mounts = %#v, want target %s", got, target)
 		}
+	}
+}
+
+func TestValidateSandboxPassesExtraMountsAndEnv(t *testing.T) {
+	orig := validateSandboxImageForLaunch
+	t.Cleanup(func() { validateSandboxImageForLaunch = orig })
+	agentEnv := map[string]string{"HTTPS_PROXY": "http://host.docker.internal:48123"}
+	extraMount := sandboxcontainer.Volume{
+		Source:   filepath.Join(t.TempDir(), "ca.pem"),
+		Target:   sandboxProxyCAPath,
+		ReadOnly: true,
+	}
+	var gotEnv map[string]string
+	var gotMounts []sandboxcontainer.Volume
+	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, env map[string]string, mounts []sandboxcontainer.Volume, commandName string) error {
+		gotEnv = env
+		gotMounts = append(gotMounts, mounts...)
+		if commandName != "codex" {
+			t.Fatalf("commandName = %q, want codex", commandName)
+		}
+		return nil
+	}
+
+	err := validateSandbox(context.Background(), SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
+		Agent: namedBinaryAgent{name: "codex"},
+		Dir:   t.TempDir(),
+	}, agentEnv, extraMount)
+	if err != nil {
+		t.Fatalf("validateSandbox: %v", err)
+	}
+	if gotEnv["HTTPS_PROXY"] != "http://host.docker.internal:48123" {
+		t.Fatalf("validation env = %#v", gotEnv)
+	}
+	if !hasMountTarget(gotMounts, sandboxProxyCAPath) {
+		t.Fatalf("validation mounts = %#v, missing %s", gotMounts, sandboxProxyCAPath)
 	}
 }
 
