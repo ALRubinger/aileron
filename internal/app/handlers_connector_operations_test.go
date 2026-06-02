@@ -258,7 +258,7 @@ func TestRecordSandboxProxyRequest_MethodOrPathMismatchReturns404WithoutAudit(t 
 }
 
 func TestRecordSandboxProxyRequest_RootPathMatchesOperation(t *testing.T) {
-	srv, _ := newConnectorOperationTestServer([]connectorspec.Spec{
+	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
 		{
 			SchemaVersion: connectorspec.SchemaVersion,
 			Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-root"},
@@ -274,6 +274,32 @@ func TestRecordSandboxProxyRequest_RootPathMatchesOperation(t *testing.T) {
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want 501; body=%s", rec.Code, rec.Body.String())
+	}
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeConnectorProxyRejected {
+		t.Errorf("event type = %q, want %q", events[0].EventType, model.EventTypeConnectorProxyRejected)
+	}
+	payload := events[0].Payload
+	if payload["aileron.connector.fqn"] != "github://acme/aileron-connector-root" {
+		t.Errorf("connector payload = %v", payload["aileron.connector.fqn"])
+	}
+	if payload["aileron.connector.tool"] != "root" {
+		t.Errorf("tool payload = %v", payload["aileron.connector.tool"])
+	}
+	if payload["aileron.connector.operation"] != "root.get" {
+		t.Errorf("operation payload = %v", payload["aileron.connector.operation"])
+	}
+	if payload["aileron.proxy.upstream.path"] != "/" {
+		t.Errorf("path payload = %v", payload["aileron.proxy.upstream.path"])
+	}
+	if _, ok := payload["upstream_url"]; ok {
+		t.Errorf("raw upstream_url should not be audited: %v", payload["upstream_url"])
 	}
 }
 

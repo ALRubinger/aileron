@@ -171,11 +171,15 @@ func sandboxProxyRequestMatchesOperation(method string, upstream *url.URL, opera
 	if !strings.EqualFold(method, operation.Method) {
 		return false
 	}
+	return sandboxProxyUpstreamPath(upstream) == operation.Path
+}
+
+func sandboxProxyUpstreamPath(upstream *url.URL) string {
 	path := upstream.EscapedPath()
 	if path == "" {
-		path = "/"
+		return "/"
 	}
-	return path == operation.Path
+	return path
 }
 
 func (s *apiServer) recordConnectorOperationRejected(r *http.Request, connectorFQN, toolName string, operation discovery.SpecOperationHelp) string {
@@ -236,7 +240,7 @@ func (s *apiServer) recordSandboxProxyRejected(r *http.Request, connectorFQN, to
 		"aileron.proxy.method":            method,
 		"aileron.proxy.upstream.scheme":   upstream.Scheme,
 		"aileron.proxy.upstream.host":     upstream.Host,
-		"aileron.proxy.upstream.path":     upstream.EscapedPath(),
+		"aileron.proxy.upstream.path":     sandboxProxyUpstreamPath(upstream),
 	}
 	if operation.Credential != "" {
 		payload["aileron.connector.credential_required"] = true
