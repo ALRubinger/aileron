@@ -95,12 +95,13 @@ type RunResult struct {
 
 // ValidateOptions configures a launch-time sandbox image validation run.
 type ValidateOptions struct {
-	Runtime string
-	Image   string
-	WorkDir string
-	Env     map[string]string
-	Volumes []Volume
-	Command []string
+	Runtime           string
+	Image             string
+	WorkDir           string
+	Env               map[string]string
+	Volumes           []Volume
+	Command           []string
+	RequireProxyTrust bool
 }
 
 // Build builds the image for plan. Tier 0 builds Aileron's local sandbox-base
@@ -289,6 +290,7 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 			"aileron-validate",
 			opts.Command[0],
 			boolArg(requiresShimHTTPClient(opts.Volumes)),
+			boolArg(opts.RequireProxyTrust),
 		},
 	})
 	if err == nil {
@@ -343,6 +345,14 @@ if [ "${2:-0}" = "1" ]; then
         ;;
     esac
   done
+fi
+if [ "${3:-0}" = "1" ]; then
+  if ! command -v aileron-install-proxy-ca >/dev/null 2>&1; then
+    echo "sandbox proxy bootstrap requires aileron-install-proxy-ca in the sandbox image" >&2
+    echo "extend the current aileron/sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
+    exit 127
+  fi
+  aileron-install-proxy-ca --check "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
 fi
 `
 

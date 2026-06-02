@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+mode="install"
+case "${1:-}" in
+  --check)
+    mode="check"
+    shift
+    ;;
+  --help|-h)
+    echo "usage: aileron-install-proxy-ca [--check] [CA_PEM]" >&2
+    exit 0
+    ;;
+esac
+
+ca_file="${1:-${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}}"
+
+if [ ! -s "$ca_file" ]; then
+  echo "sandbox proxy CA file is missing or empty: $ca_file" >&2
+  exit 2
+fi
+if ! command -v update-ca-certificates >/dev/null 2>&1; then
+  echo "sandbox proxy CA trust requires update-ca-certificates in the image" >&2
+  exit 127
+fi
+if [ ! -d /usr/local/share/ca-certificates ]; then
+  echo "sandbox proxy CA trust requires /usr/local/share/ca-certificates" >&2
+  exit 127
+fi
+
+if [ "$mode" = "check" ]; then
+  exit 0
+fi
+
+if [ "$(id -u)" != "0" ]; then
+  echo "sandbox proxy CA install must run as root before the agent starts" >&2
+  exit 126
+fi
+
+install -m 0644 "$ca_file" /usr/local/share/ca-certificates/aileron-sandbox-proxy-ca.crt
+update-ca-certificates

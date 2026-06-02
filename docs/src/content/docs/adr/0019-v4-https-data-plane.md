@@ -37,6 +37,8 @@ The second #896 slice adds an internal opt-in bootstrap mode for launch validati
 
 The third #896 slice adds the daemon-side proxy request boundary at `POST /v1/sandbox-proxy/requests`. This endpoint is internal to the HTTPS data-plane implementation: it resolves a candidate proxy request against installed connector specs, records sanitized proxy-vs-direct audit metadata for recognized HTTPS attempts, and fails closed with `501 not_implemented` until credential injection and upstream transport are implemented. It deliberately does not accept raw headers, request bodies, query strings, or credential material in the audit payload.
 
+The fourth #896 slice adds the image-side trust-store helper contract. `aileron/sandbox-base` now carries `aileron-install-proxy-ca`, creates `/etc/aileron/proxy`, and launch validation requires the helper when proxy bootstrap mode is enabled. The helper can validate the mounted session CA as an unprivileged user and can install it with `update-ca-certificates` when invoked as root. The runtime still does not run a root pre-start trust install, proxy upstream HTTPS traffic, or inject credentials; those remain follow-on #896 work.
+
 ## Consequences
 
 Images must be able to trust the session CA or fail before the agent starts. BYO images need documented trust-store requirements and actionable launch validation.

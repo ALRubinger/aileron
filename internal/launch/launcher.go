@@ -225,12 +225,13 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 		Runtime: plan.Runtime,
 		Stdout:  io.Discard,
 	}).Validate(ctx, sandboxcontainer.ValidateOptions{
-		Runtime: plan.Runtime,
-		Image:   plan.Image,
-		WorkDir: config.Dir,
-		Env:     agentEnv,
-		Volumes: mounts,
-		Command: []string{commandName},
+		Runtime:           plan.Runtime,
+		Image:             plan.Image,
+		WorkDir:           config.Dir,
+		Env:               agentEnv,
+		Volumes:           mounts,
+		Command:           []string{commandName},
+		RequireProxyTrust: agentEnv["AILERON_SANDBOX_PROXY_MODE"] != "",
 	}); err != nil {
 		return err
 	}
