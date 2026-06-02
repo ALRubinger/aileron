@@ -66,7 +66,7 @@ func TestRunConnectorOperation_RecognizedOperationAuditsAndFailsClosed(t *testin
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
 	}
-	if resp.Status != api.Rejected {
+	if resp.Status != api.ConnectorOperationRunRejectedResponseStatusRejected {
 		t.Errorf("status = %q, want rejected", resp.Status)
 	}
 	if resp.AuditId != "audit-connector-operation" {
@@ -105,6 +105,139 @@ func TestRunConnectorOperation_RecognizedOperationAuditsAndFailsClosed(t *testin
 	}
 	if payload["aileron.session.id"] != "session-123" {
 		t.Errorf("session payload = %v", payload["aileron.session.id"])
+	}
+}
+
+func TestRecordSandboxProxyRequest_RecognizedHTTPSAttemptAuditsAndFailsClosed(t *testing.T) {
+	const connectorFQN = "github://acme/aileron-connector-google"
+	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
+		{
+			SchemaVersion: connectorspec.SchemaVersion,
+			Connector:     connectorspec.Connector{FQN: connectorFQN, Version: "1.0.0"},
+			Tools: []connectorspec.Tool{
+				{
+					Name: "Google",
+					Operations: []connectorspec.Operation{
+						{
+							Name:        "gmail.messages.search",
+							Method:      "GET",
+							Path:        "/gmail/v1/users/me/messages",
+							Idempotency: "idempotent",
+							Credential:  "oauth2",
+						},
+					},
+				},
+			},
+		},
+	})
+
+	body := []byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.search","method":"GET","upstream_url":"https://gmail.googleapis.com/gmail/v1/users/me/messages?q=secret"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/requests", bytes.NewReader(body))
+	req.Header.Set("X-Aileron-Session-Id", "session-123")
+	rec := httptest.NewRecorder()
+
+	srv.RecordSandboxProxyRequest(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp api.SandboxProxyRejectedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.Status != api.SandboxProxyRejectedResponseStatusRejected {
+		t.Errorf("status = %q, want rejected", resp.Status)
+	}
+	if resp.AuditId != "audit-connector-operation" {
+		t.Errorf("audit_id = %q", resp.AuditId)
+	}
+	if resp.Tool != "google" || resp.Operation != "gmail.messages.search" || resp.ConnectorFqn != connectorFQN {
+		t.Errorf("response identity = %+v", resp)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventType != model.EventTypeConnectorProxyRejected {
+		t.Fatalf("event type = %q", event.EventType)
+	}
+	payload := event.Payload
+	if payload["aileron.connector.boundary"] != "https_proxy" {
+		t.Errorf("boundary payload = %v", payload["aileron.connector.boundary"])
+	}
+	if payload["aileron.connector.mediation"] != "https_proxy" {
+		t.Errorf("mediation payload = %v", payload["aileron.connector.mediation"])
+	}
+	if payload["aileron.proxy.upstream.host"] != "gmail.googleapis.com" {
+		t.Errorf("host payload = %v", payload["aileron.proxy.upstream.host"])
+	}
+	if payload["aileron.proxy.upstream.path"] != "/gmail/v1/users/me/messages" {
+		t.Errorf("path payload = %v", payload["aileron.proxy.upstream.path"])
+	}
+	if _, ok := payload["aileron.proxy.upstream.query"]; ok {
+		t.Errorf("query should not be audited: %v", payload["aileron.proxy.upstream.query"])
+	}
+	if payload["aileron.session.id"] != "session-123" {
+		t.Errorf("session payload = %v", payload["aileron.session.id"])
+	}
+}
+
+func TestRecordSandboxProxyRequest_RejectsNonHTTPSWithoutAudit(t *testing.T) {
+	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
+		{
+			SchemaVersion: connectorspec.SchemaVersion,
+			Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-google"},
+			Tools: []connectorspec.Tool{
+				{Name: "google", Operations: []connectorspec.Operation{{Name: "gmail.messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages"}}},
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/requests", bytes.NewReader([]byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.search","method":"GET","upstream_url":"http://gmail.googleapis.com/gmail/v1/users/me/messages"}`)))
+	rec := httptest.NewRecorder()
+
+	srv.RecordSandboxProxyRequest(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %d, want 0", len(events))
+	}
+}
+
+func TestRecordSandboxProxyRequest_MethodOrPathMismatchReturns404WithoutAudit(t *testing.T) {
+	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
+		{
+			SchemaVersion: connectorspec.SchemaVersion,
+			Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-google"},
+			Tools: []connectorspec.Tool{
+				{Name: "google", Operations: []connectorspec.Operation{{Name: "gmail.messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages"}}},
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/requests", bytes.NewReader([]byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.search","method":"POST","upstream_url":"https://gmail.googleapis.com/gmail/v1/users/me/messages"}`)))
+	rec := httptest.NewRecorder()
+
+	srv.RecordSandboxProxyRequest(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %d, want 0", len(events))
 	}
 }
 
