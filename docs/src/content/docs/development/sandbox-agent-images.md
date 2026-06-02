@@ -85,4 +85,4 @@ aileron sandbox check --runtime=docker --build=never --agent=claude
 
 ## Current Limits
 
-The support matrix covers image contents only. It does not add shell mediation, HTTPS proxy/session CA bootstrap, credential injection, or live discovery refresh. Those runtime layers are tracked separately.
+The support matrix covers image contents only. It does not add shell mediation, credential injection, or live discovery refresh. Internal HTTPS proxy/session CA bootstrap work now expects images used for that development mode to provide `aileron-install-proxy-ca`; the Aileron sandbox-base image includes it. Real proxy transport and credential injection are tracked separately.
