@@ -35,6 +35,8 @@ The first #896 implementation slice establishes the daemon-side connector-operat
 
 The second #896 slice adds an internal opt-in bootstrap mode for launch validation and follow-on implementation work. When `AILERON_SANDBOX_PROXY_BOOTSTRAP=1` is set for a sandboxed launch, Aileron generates a session-local CA under the daemon state directory, mounts the public CA into the container at `/etc/aileron/proxy/ca.pem`, and sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY` for the agent container. This does not yet install the CA into the image trust store, run a credential-injecting proxy, or make credentialed HTTPS execution succeed; it only establishes the launch/session metadata boundary that the data plane will use.
 
+The third #896 slice adds the daemon-side proxy request boundary at `POST /v1/sandbox-proxy/requests`. This endpoint is internal to the HTTPS data-plane implementation: it resolves a candidate proxy request against installed connector specs, records sanitized proxy-vs-direct audit metadata for recognized HTTPS attempts, and fails closed with `501 not_implemented` until credential injection and upstream transport are implemented. It deliberately does not accept raw headers, request bodies, query strings, or credential material in the audit payload.
+
 ## Consequences
 
 Images must be able to trust the session CA or fail before the agent starts. BYO images need documented trust-store requirements and actionable launch validation.

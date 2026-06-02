@@ -96,7 +96,7 @@ The shim posts this payload to `${AILERON_API_URL%/}/connector-operations/run`:
 
 The endpoint is the stable sandbox-side contract for generated connector-operation shims. The mediated HTTPS proxy/data-plane implementation behind that endpoint is tracked separately in [#896](https://github.com/ALRubinger/aileron/issues/896).
 
-In the current daemon cut, `/v1/connector-operations/run` resolves the connector, tool, and operation against installed specs, records an audit event for recognized attempts, and fails closed with `501 not_implemented`. Credential injection and upstream HTTPS execution remain behind the proxy/data-plane work tracked in [#896](https://github.com/ALRubinger/aileron/issues/896). Unknown connector operations are rejected before any execution attempt.
+In the current daemon cut, `/v1/connector-operations/run` resolves the connector, tool, and operation against installed specs, records an audit event for recognized direct-shim attempts, and fails closed with `501 not_implemented`. The HTTPS data-plane boundary also exposes an internal `POST /v1/sandbox-proxy/requests` endpoint for proxy attempts; it resolves candidate HTTPS requests against the same installed specs, records sanitized proxy audit metadata for recognized attempts, and fails closed with `501 not_implemented`. Credential injection and upstream HTTPS execution remain behind the proxy/data-plane work tracked in [#896](https://github.com/ALRubinger/aileron/issues/896). Unknown connector operations are rejected before any execution attempt.
 
 ## Conflict Handling
 

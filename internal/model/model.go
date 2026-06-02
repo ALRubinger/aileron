@@ -295,4 +295,9 @@ const (
 	// identifies the spec-declared operation and mediation decision,
 	// never credential values.
 	EventTypeConnectorOperationRejected EventType = "connector.operation.rejected"
+
+	// Connector proxy event for HTTPS data-plane attempts. Payload
+	// identifies the spec-declared operation and upstream destination,
+	// never credential values.
+	EventTypeConnectorProxyRejected EventType = "connector.proxy.rejected"
 )

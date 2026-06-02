@@ -2681,6 +2681,51 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/sandbox-proxy/requests:
+    post:
+      tags: [Connectors]
+      summary: Resolve a sandbox HTTPS proxy data-plane request
+      description: |
+        Resolves a sandbox proxy request against installed
+        `aileron.connector.v1` specs and records the proxy/data-plane
+        mediation decision.
+
+        This #896 cut is intentionally fail-closed: recognized HTTPS
+        proxy attempts are audited and return `501 not_implemented`
+        until credential injection and upstream transport are
+        implemented. Unknown or non-HTTPS attempts are rejected before
+        any credential access or upstream request.
+      operationId: recordSandboxProxyRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxProxyRequest"
+      responses:
+        "501":
+          description: |
+            Proxy request was recognized and audited, but mediated
+            HTTPS execution is not available in this runtime cut.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxProxyRejectedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: Connector spec lookup failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/bindings:
     get:
       tags: [Bindings]
@@ -6208,6 +6253,56 @@ components:
         audit_id:
           type: string
           description: Audit log ID for the rejected operation attempt.
+        connector_fqn:
+          type: string
+        tool:
+          type: string
+        operation:
+          type: string
+        message:
+          type: string
+
+    SandboxProxyRequest:
+      type: object
+      description: |
+        Internal request shape emitted by the sandbox HTTPS data-plane
+        proxy when it has identified a candidate connector operation.
+        Header and credential material are intentionally absent from
+        this contract.
+      required: [connector_fqn, tool, operation, method, upstream_url]
+      properties:
+        connector_fqn:
+          type: string
+          description: Connector FQN from the installed connector spec.
+        tool:
+          type: string
+          description: Sandbox-visible tool command name generated from the spec.
+        operation:
+          type: string
+          description: Operation name within the tool.
+        method:
+          type: string
+          description: HTTP method observed by the sandbox proxy.
+        upstream_url:
+          type: string
+          format: uri
+          pattern: '^https://'
+          description: Absolute HTTPS upstream URL requested by the sandboxed client.
+
+    SandboxProxyRejectedResponse:
+      type: object
+      description: |
+        Fail-closed response for a recognized sandbox HTTPS proxy
+        request when credentialed data-plane execution is not yet
+        available.
+      required: [status, audit_id, connector_fqn, tool, operation, message]
+      properties:
+        status:
+          type: string
+          enum: [rejected]
+        audit_id:
+          type: string
+          description: Audit log ID for the rejected proxy attempt.
         connector_fqn:
           type: string
         tool:
