@@ -203,7 +203,7 @@ func prepareSandbox(ctx context.Context, workDir, runtimeName, buildPolicy strin
 
 var prepareSandboxForLaunch = prepareSandbox
 
-func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig) error {
+func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, extraMounts ...sandboxcontainer.Volume) error {
 	commandName := firstAgentBinary(config.Agent)
 	if commandName == "" {
 		return fmt.Errorf("agent %q has no container command", config.Agent.Name())
@@ -213,13 +213,14 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 		return err
 	}
 	defer cleanupMounts()
-	if err := validateSandboxImageForLaunch(ctx, plan, config, mounts, commandName); err != nil {
+	mounts = append(mounts, extraMounts...)
+	if err := validateSandboxImageForLaunch(ctx, plan, config, agentEnv, mounts, commandName); err != nil {
 		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
 	}
 	return nil
 }
 
-func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, mounts []sandboxcontainer.Volume, commandName string) error {
+func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, mounts []sandboxcontainer.Volume, commandName string) error {
 	if err := (sandboxcontainer.Builder{
 		Runtime: plan.Runtime,
 		Stdout:  io.Discard,
@@ -227,6 +228,7 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 		Runtime: plan.Runtime,
 		Image:   plan.Image,
 		WorkDir: config.Dir,
+		Env:     agentEnv,
 		Volumes: mounts,
 		Command: []string{commandName},
 	}); err != nil {
@@ -294,9 +296,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			fmt.Fprint(os.Stderr, ", built=true")
 		}
 		fmt.Fprintln(os.Stderr, ")")
-		if err := validateSandboxForLaunch(ctx, sandboxPlan, config); err != nil {
-			return LaunchResult{}, err
-		}
 	}
 
 	regCtx, cancelReg := context.WithTimeout(ctx, daemonHTTPTimeout)
@@ -305,6 +304,15 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	if err != nil {
 		return LaunchResult{}, fmt.Errorf("register session: %w", err)
 	}
+	sessionClosed := false
+	defer func() {
+		if sessionClosed {
+			return
+		}
+		endCtx, cancelEnd := context.WithTimeout(context.Background(), daemonHTTPTimeout)
+		_ = client.EndSession(endCtx, sessionID, nil)
+		cancelEnd()
+	}()
 
 	agentEndpointURL := daemonURL
 	if sandboxEnabled {
@@ -335,6 +343,11 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			return LaunchResult{}, fmt.Errorf("prepare sandbox proxy bootstrap: %w", err)
 		}
 		applySandboxProxyBootstrapEnv(agentEnv, proxyBootstrap)
+	}
+	if sandboxEnabled {
+		if err := validateSandboxForLaunch(ctx, sandboxPlan, config, agentEnv, proxyBootstrap.Mounts...); err != nil {
+			return LaunchResult{}, err
+		}
 	}
 
 	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)
@@ -375,6 +388,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		sessionLog.Warn("end session", "error", endErr)
 	}
 	cancelEnd()
+	sessionClosed = true
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	return result, runErr

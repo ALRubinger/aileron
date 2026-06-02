@@ -98,6 +98,7 @@ type ValidateOptions struct {
 	Runtime string
 	Image   string
 	WorkDir string
+	Env     map[string]string
 	Volumes []Volume
 	Command []string
 }
@@ -279,6 +280,7 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 		Runtime: opts.Runtime,
 		Image:   opts.Image,
 		WorkDir: opts.WorkDir,
+		Env:     opts.Env,
 		Volumes: opts.Volumes,
 		Command: []string{
 			"/bin/sh",

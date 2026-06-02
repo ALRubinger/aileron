@@ -64,6 +64,37 @@ func TestPrepareSandboxProxyBootstrap_GeneratesSessionCAAndMount(t *testing.T) {
 	}
 }
 
+func TestPrepareSandboxProxyBootstrap_RejectsUnsafeSessionID(t *testing.T) {
+	t.Setenv(sandboxProxyBootstrapEnv, "1")
+	for _, sessionID := range []string{"../escape", "nested/session", `nested\session`, " session-123", "session-123 ", ".", ".."} {
+		t.Run(sessionID, func(t *testing.T) {
+			_, err := prepareSandboxProxyBootstrap(t.TempDir(), sessionID, "http://host.docker.internal:48123")
+			if err == nil {
+				t.Fatal("expected unsafe session id error")
+			}
+		})
+	}
+}
+
+func TestPrepareSandboxProxyBootstrap_RequiresAgentEndpointURL(t *testing.T) {
+	t.Setenv(sandboxProxyBootstrapEnv, "1")
+	_, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "")
+	if err == nil {
+		t.Fatal("expected agent endpoint URL error")
+	}
+}
+
+func TestWriteSessionCA_ReturnsCreateDirError(t *testing.T) {
+	parentFile := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := writeSessionCA(filepath.Join(parentFile, "ca.pem"), filepath.Join(parentFile, "ca.key"), "session-123")
+	if err == nil {
+		t.Fatal("expected create dir error")
+	}
+}
+
 func TestApplySandboxProxyBootstrapEnv(t *testing.T) {
 	env := map[string]string{"NO_PROXY": "internal.example"}
 	applySandboxProxyBootstrapEnv(env, sandboxProxyBootstrap{

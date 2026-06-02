@@ -595,6 +595,9 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
 		Image:   "ghcr.io/acme/agent:latest",
 		WorkDir: dir,
+		Env: map[string]string{
+			"HTTPS_PROXY": "http://host.docker.internal:48123",
+		},
 		Volumes: []Volume{{
 			Source:   manifest,
 			Target:   "/etc/aileron/tools.txt",
@@ -613,6 +616,7 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
 		"--volume", manifest + ":/etc/aileron/tools.txt:ro",
+		"--env", "HTTPS_PROXY=http://host.docker.internal:48123",
 		"ghcr.io/acme/agent:latest",
 		"/bin/sh", "-c",
 	}

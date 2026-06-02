@@ -35,6 +35,9 @@ func prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL string) 
 	if strings.TrimSpace(sessionID) == "" {
 		return sandboxProxyBootstrap{}, fmt.Errorf("session id is required")
 	}
+	if err := validateProxyBootstrapSessionID(sessionID); err != nil {
+		return sandboxProxyBootstrap{}, err
+	}
 	proxyURL := strings.TrimRight(agentEndpointURL, "/")
 	if proxyURL == "" {
 		return sandboxProxyBootstrap{}, fmt.Errorf("agent endpoint URL is required")
@@ -56,6 +59,16 @@ func prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL string) 
 			ReadOnly: true,
 		}},
 	}, nil
+}
+
+func validateProxyBootstrapSessionID(sessionID string) error {
+	if sessionID != strings.TrimSpace(sessionID) {
+		return fmt.Errorf("session id must not contain surrounding whitespace")
+	}
+	if sessionID == "." || sessionID == ".." || filepath.Clean(sessionID) != sessionID || filepath.Base(sessionID) != sessionID || strings.ContainsAny(sessionID, `/\`) {
+		return fmt.Errorf("session id %q is not a safe path segment", sessionID)
+	}
+	return nil
 }
 
 func sandboxProxyBootstrapEnabled() bool {
