@@ -44,69 +44,70 @@ type connectorSpecLoader func() ([]connectorspec.Spec, error)
 
 // apiServer implements the generated api.ServerInterface.
 type apiServer struct {
-	log                *slog.Logger
-	registry           *connectorpkg.Registry
-	policyEngine       *policy.RuleEngine
-	orchestrator       *approval.InMemoryOrchestrator
-	vault              vault.Vault
-	notifier           notify.Notifier
-	intents            *mem.IntentStore
-	approvals          *mem.ApprovalStore
-	policies           *mem.PolicyStore
-	grants             *mem.GrantStore
-	executions         *mem.ExecutionStore
-	connectors         *mem.ConnectorStore
-	credentials        *mem.CredentialStore
-	fundingSources     *mem.FundingSourceStore
-	traces             *mem.TraceStore
-	connectedAccounts  store.ConnectedAccountStore
-	accountService     *account.Registry           // nil when no account providers configured
-	sourceRegistry     *source.Registry            // read-only source connectors for context retrieval
-	draftPipeline      *draft.Pipeline             // nil when LLM not configured
-	drafts             store.DraftStore            // draft lifecycle store
-	instructions       store.UserInstructionStore  // user instructions for context store
-	feedback           store.DraftFeedbackStore    // draft feedback signals for behavioral model
-	llmConfigs         store.LLMConfigStore        // per-user/per-org LLM provider config
-	enterprises        store.EnterpriseStore       // nil when auth is disabled
-	users              store.UserStore             // nil when auth is disabled
-	userAuthProviders  store.UserAuthProviderStore // nil when auth is disabled
-	userKeyMaterials   store.UserKeyMaterialStore  // nil when auth is disabled
-	kekSessionCache    *auth.KEKSessionCache       // nil when auth is disabled
-	enclaveClient      enclave.Client              // nil when TEE is disabled
-	enclaveVerifier    enclave.Verifier            // nil when TEE is disabled
-	teeCfg             *config.TEEConfig           // nil when TEE is disabled
-	teeState           *teeState                   // nil when TEE is disabled
-	escrowTTL          time.Duration               // TTL for auto-escrowed credentials
-	grantCapabilityKey []byte                      // HMAC key for durable grant capabilities
-	escrowIndex        sync.Map                    // vault path (string) -> escrow ID (string)
-	escrowIndexStore   *postgres.EscrowIndexStore  // nil when auth is disabled; persists escrowIndex across restarts
-	uiBaseURL          string                      // base URL for the web UI (for constructing unlock links)
-	openAIProxy        http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
-	anthropicProxy     http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
-	auditStore         audit.EventStore            // ADR-0010 audit store; file-backed by default, MemStore in tests, Postgres post-MVP
-	auditRecorder      audit.Recorder              // ADR-0010 recorder; mints audit IDs and emits binding-lifecycle events
-	vaultLocked        bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked
-	lockableVault      *vault.LockableVault        // wraps s.vault when the daemon runs with a deferred-unlock local vault (#429); nil otherwise
-	localVaultPath     string                      // path to the local file vault for /v1/vault/unlock (#429); empty when no local vault is managed
-	localVaultMu       sync.Mutex                  // serializes /v1/vault/unlock so concurrent submits don't both call vault.Unlock
-	vaultUnlockedCh    chan struct{}               // closed on the first successful unlock; nil when daemon started already-unlocked. Used by respawned approval executors to park until the user unlocks the vault (#649).
-	newID              func() string
-	actions            *action.Store                 // installed actions in ~/.aileron/actions/ (ADR-0003)
-	actionState        action.StateStore             // per-action user preferences (enabled/disabled overlay); nil means defaults apply
-	executor           action.Executor               // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
-	installer          *cstore.Installer             // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
-	versionLister      cstore.VersionLister          // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
-	sandboxRuntime     sandbox.Runtime               // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
-	actionApprovals    *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
-	sessions           sessions.Store                // ADR-0012: persistent launch-session records; nil → /v1/sessions endpoints return 503
-	webappURL          string                        // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
-	localDaemonToken   string                        // local-daemon bearer token; empty disables local bearer auth
-	actionApprovalTTL  time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
-	bindings           binding.Store                 // capability bindings (ADR-0006); nil when no vault is wired
-	specLoader         connectorSpecLoader           // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
-	oauth2Sessions     *oauth2Sessions               // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
-	oauth2HTTPClient   *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient
-	sandboxProxyClient *http.Client                  // for sandbox HTTPS data-plane upstream requests; nil → http.DefaultClient
+	log                  *slog.Logger
+	registry             *connectorpkg.Registry
+	policyEngine         *policy.RuleEngine
+	orchestrator         *approval.InMemoryOrchestrator
+	vault                vault.Vault
+	notifier             notify.Notifier
+	intents              *mem.IntentStore
+	approvals            *mem.ApprovalStore
+	policies             *mem.PolicyStore
+	grants               *mem.GrantStore
+	executions           *mem.ExecutionStore
+	connectors           *mem.ConnectorStore
+	credentials          *mem.CredentialStore
+	fundingSources       *mem.FundingSourceStore
+	traces               *mem.TraceStore
+	connectedAccounts    store.ConnectedAccountStore
+	accountService       *account.Registry           // nil when no account providers configured
+	sourceRegistry       *source.Registry            // read-only source connectors for context retrieval
+	draftPipeline        *draft.Pipeline             // nil when LLM not configured
+	drafts               store.DraftStore            // draft lifecycle store
+	instructions         store.UserInstructionStore  // user instructions for context store
+	feedback             store.DraftFeedbackStore    // draft feedback signals for behavioral model
+	llmConfigs           store.LLMConfigStore        // per-user/per-org LLM provider config
+	enterprises          store.EnterpriseStore       // nil when auth is disabled
+	users                store.UserStore             // nil when auth is disabled
+	userAuthProviders    store.UserAuthProviderStore // nil when auth is disabled
+	userKeyMaterials     store.UserKeyMaterialStore  // nil when auth is disabled
+	kekSessionCache      *auth.KEKSessionCache       // nil when auth is disabled
+	enclaveClient        enclave.Client              // nil when TEE is disabled
+	enclaveVerifier      enclave.Verifier            // nil when TEE is disabled
+	teeCfg               *config.TEEConfig           // nil when TEE is disabled
+	teeState             *teeState                   // nil when TEE is disabled
+	escrowTTL            time.Duration               // TTL for auto-escrowed credentials
+	grantCapabilityKey   []byte                      // HMAC key for durable grant capabilities
+	escrowIndex          sync.Map                    // vault path (string) -> escrow ID (string)
+	escrowIndexStore     *postgres.EscrowIndexStore  // nil when auth is disabled; persists escrowIndex across restarts
+	uiBaseURL            string                      // base URL for the web UI (for constructing unlock links)
+	openAIProxy          http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
+	anthropicProxy       http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
+	auditStore           audit.EventStore            // ADR-0010 audit store; file-backed by default, MemStore in tests, Postgres post-MVP
+	auditRecorder        audit.Recorder              // ADR-0010 recorder; mints audit IDs and emits binding-lifecycle events
+	vaultLocked          bool                        // ADR-0011 gate: when true, gateway endpoints refuse to serve until the vault is unlocked
+	lockableVault        *vault.LockableVault        // wraps s.vault when the daemon runs with a deferred-unlock local vault (#429); nil otherwise
+	localVaultPath       string                      // path to the local file vault for /v1/vault/unlock (#429); empty when no local vault is managed
+	localVaultMu         sync.Mutex                  // serializes /v1/vault/unlock so concurrent submits don't both call vault.Unlock
+	vaultUnlockedCh      chan struct{}               // closed on the first successful unlock; nil when daemon started already-unlocked. Used by respawned approval executors to park until the user unlocks the vault (#649).
+	newID                func() string
+	actions              *action.Store                 // installed actions in ~/.aileron/actions/ (ADR-0003)
+	actionState          action.StateStore             // per-action user preferences (enabled/disabled overlay); nil means defaults apply
+	executor             action.Executor               // synchronous action executor used by /v1/actions/{name}/run; nil falls back to stub
+	installer            *cstore.Installer             // connector install pipeline (ADR-0004); nil disables /v1/connectors/install
+	versionLister        cstore.VersionLister          // connector version source query (ADR-0004); nil falls back to cstore.DefaultVersionLister inside the check handler
+	sandboxRuntime       sandbox.Runtime               // WASM runtime for connector execution (ADR-0005); nil falls back to stub executor
+	actionApprovals      *approval.ActionApprovalQueue // pending action-level approvals (manifest [approval] required = true); RunAction blocks on Decide
+	sessions             sessions.Store                // ADR-0012: persistent launch-session records; nil → /v1/sessions endpoints return 503
+	webappURL            string                        // base URL the webapp is served at; surfaces in /v1/status (#364) and the approval-notification ReviewURL
+	localDaemonToken     string                        // local-daemon bearer token; empty disables local bearer auth
+	actionApprovalTTL    time.Duration                 // how long RunAction holds the response open before timing out; default 5m, configurable for tests
+	bindings             binding.Store                 // capability bindings (ADR-0006); nil when no vault is wired
+	specLoader           connectorSpecLoader           // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
+	oauth2Sessions       *oauth2Sessions               // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
+	oauth2HTTPClient     *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient
+	sandboxProxyClient   *http.Client                  // for sandbox HTTPS data-plane upstream requests; nil → http.DefaultClient
+	sandboxProxyStateDir string                        // daemon state dir containing session-scoped sandbox proxy CA/key artifacts; empty disables CONNECT transport
 
 	// --- Hub (ADR-0013, #486, #487) ---
 	hub         *hub.Client // connector-discovery Hub client; nil disables /v1/hub/* endpoints

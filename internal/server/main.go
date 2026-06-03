@@ -224,6 +224,7 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	cfg.NotifyQueue = notifyQueue
 	cfg.Listeners = listenerRegistry
 	cfg.AuditStateDir = opts.StateDir
+	cfg.SandboxProxyStateDir = opts.StateDir
 
 	// Vault-unlock callback: when the user unlocks the local vault via
 	// the webapp passphrase modal, resolve Slack/Discord tokens and
