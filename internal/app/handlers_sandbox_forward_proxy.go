@@ -2,23 +2,32 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
 )
 
 const sandboxForwardProxyRealm = "aileron sandbox proxy"
+const sandboxForwardProxyMaxRequestBytes = 1 << 20
+
+var errSandboxForwardProxyAmbiguousOperation = errors.New("sandbox proxy decrypted request matched multiple connector operations")
 
 type sandboxProxyAuth struct {
 	SessionID string
@@ -105,10 +114,168 @@ func (s *apiServer) handleSandboxForwardProxyConnect(w http.ResponseWriter, r *h
 		_, _ = tlsConn.Write([]byte("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 45\r\n\r\nsandbox proxy decrypted request is invalid\n"))
 		return
 	}
-	_ = decrypted.Body.Close()
+	defer decrypted.Body.Close()
+	decrypted = decrypted.WithContext(r.Context())
+	decrypted.Header.Set("X-Aileron-Session-Id", auth.SessionID)
+	s.handleSandboxForwardProxyDecrypted(tlsConn, decrypted, auth, targetHost)
+}
 
-	body := "sandbox HTTPS forward proxy decrypted request routing is not implemented yet; tracked by issue #896\n"
-	_, _ = fmt.Fprintf(tlsConn, "HTTP/1.1 501 Not Implemented\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nX-Aileron-Session-Id: %s\r\nX-Aileron-Proxy-Upstream-Host: %s\r\nContent-Length: %d\r\n\r\n%s", auth.SessionID, targetHost, len(body), body)
+func (s *apiServer) handleSandboxForwardProxyDecrypted(conn io.Writer, decrypted *http.Request, auth sandboxProxyAuth, targetHost string) {
+	upstream, err := sandboxForwardProxyUpstreamURL(targetHost, decrypted)
+	if err != nil {
+		writeSandboxForwardProxyError(conn, http.StatusBadRequest, auth.SessionID, targetHost, "sandbox proxy decrypted request target is invalid")
+		return
+	}
+	match, ok, err := s.matchSandboxForwardProxyOperation(decrypted.Method, upstream)
+	if err != nil {
+		if errors.Is(err, errSandboxForwardProxyAmbiguousOperation) {
+			writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, err.Error())
+			return
+		}
+		writeSandboxForwardProxyError(conn, http.StatusInternalServerError, auth.SessionID, targetHost, err.Error())
+		return
+	}
+	if !ok {
+		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy decrypted request did not match an installed connector operation")
+		return
+	}
+	body, contentType, err := readSandboxForwardProxyRequestBody(decrypted)
+	if err != nil {
+		writeSandboxForwardProxyError(conn, http.StatusRequestEntityTooLarge, auth.SessionID, targetHost, err.Error())
+		return
+	}
+
+	captured := newSandboxForwardProxyCapture()
+	result, ok := s.executeSandboxProxyRequest(captured, decrypted, match.connectorFQN, match.toolName, decrypted.Method, upstream, match.operation, body, contentType)
+	if !ok {
+		writeSandboxForwardProxyCaptured(conn, auth.SessionID, targetHost, captured)
+		return
+	}
+	writeSandboxForwardProxyResponse(conn, auth.SessionID, targetHost, result.UpstreamStatus, derefString(result.ContentType), result.BodyBase64)
+}
+
+type sandboxForwardProxyOperationMatch struct {
+	connectorFQN string
+	toolName     string
+	operation    discovery.SpecOperationHelp
+}
+
+func (s *apiServer) matchSandboxForwardProxyOperation(method string, upstream *url.URL) (sandboxForwardProxyOperationMatch, bool, error) {
+	specs, err := s.loadConnectorOperationSpecs()
+	if err != nil {
+		return sandboxForwardProxyOperationMatch{}, false, fmt.Errorf("connector specs unavailable")
+	}
+	tools, err := discovery.SpecConnectorTools(specs)
+	if err != nil {
+		return sandboxForwardProxyOperationMatch{}, false, fmt.Errorf("connector specs invalid")
+	}
+	var match sandboxForwardProxyOperationMatch
+	for _, tool := range tools {
+		for _, operation := range tool.Operations {
+			if !sandboxProxyRequestMatchesOperation(method, upstream, operation) {
+				continue
+			}
+			if match.operation.Name != "" {
+				return sandboxForwardProxyOperationMatch{}, false, errSandboxForwardProxyAmbiguousOperation
+			}
+			match = sandboxForwardProxyOperationMatch{
+				connectorFQN: tool.FQN,
+				toolName:     tool.Name,
+				operation:    operation,
+			}
+		}
+	}
+	if match.operation.Name == "" {
+		return sandboxForwardProxyOperationMatch{}, false, nil
+	}
+	return match, true, nil
+}
+
+func sandboxForwardProxyUpstreamURL(targetHost string, decrypted *http.Request) (*url.URL, error) {
+	requestURI := decrypted.URL.RequestURI()
+	if requestURI == "" {
+		requestURI = "/"
+	}
+	return parseSandboxProxyUpstreamURL("https://" + targetHost + requestURI)
+}
+
+func readSandboxForwardProxyRequestBody(decrypted *http.Request) ([]byte, string, error) {
+	if decrypted.Body == nil {
+		return nil, "", nil
+	}
+	body, err := io.ReadAll(io.LimitReader(decrypted.Body, sandboxForwardProxyMaxRequestBytes+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("sandbox proxy decrypted request body read failed")
+	}
+	if len(body) > sandboxForwardProxyMaxRequestBytes {
+		return nil, "", fmt.Errorf("sandbox proxy decrypted request body exceeded size limit")
+	}
+	if len(body) == 0 {
+		return nil, "", nil
+	}
+	return body, strings.TrimSpace(decrypted.Header.Get("Content-Type")), nil
+}
+
+type sandboxForwardProxyCapture struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newSandboxForwardProxyCapture() *sandboxForwardProxyCapture {
+	return &sandboxForwardProxyCapture{header: http.Header{}, status: http.StatusOK}
+}
+
+func (w *sandboxForwardProxyCapture) Header() http.Header {
+	return w.header
+}
+
+func (w *sandboxForwardProxyCapture) WriteHeader(status int) {
+	w.status = status
+}
+
+func (w *sandboxForwardProxyCapture) Write(p []byte) (int, error) {
+	return w.body.Write(p)
+}
+
+func writeSandboxForwardProxyCaptured(conn io.Writer, sessionID, targetHost string, captured *sandboxForwardProxyCapture) {
+	contentType := strings.TrimSpace(captured.header.Get("Content-Type"))
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	writeSandboxForwardProxyResponse(conn, sessionID, targetHost, captured.status, contentType, captured.body.Bytes())
+}
+
+func writeSandboxForwardProxyError(conn io.Writer, status int, sessionID, targetHost, message string) {
+	body := strings.TrimSpace(message) + "\n"
+	writeSandboxForwardProxyResponse(conn, sessionID, targetHost, status, "text/plain; charset=utf-8", []byte(body))
+}
+
+func writeSandboxForwardProxyResponse(conn io.Writer, sessionID, targetHost string, status int, contentType string, body []byte) {
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	contentType = sandboxForwardProxyHeaderValue(contentType)
+	sessionID = sandboxForwardProxyHeaderValue(sessionID)
+	targetHost = sandboxForwardProxyHeaderValue(targetHost)
+	_, _ = fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nConnection: close\r\nContent-Type: %s\r\nX-Aileron-Session-Id: %s\r\nX-Aileron-Proxy-Upstream-Host: %s\r\nContent-Length: %d\r\n\r\n", status, http.StatusText(status), contentType, sessionID, targetHost, len(body))
+	if len(body) > 0 {
+		_, _ = conn.Write(body)
+	}
+}
+
+func sandboxForwardProxyHeaderValue(value string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(value)
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func sandboxForwardProxyConnectHost(r *http.Request) (string, error) {

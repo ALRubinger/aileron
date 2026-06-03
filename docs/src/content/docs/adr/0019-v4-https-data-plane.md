@@ -51,6 +51,8 @@ The ninth #896 slice prepares the transparent proxy entrypoint. Internal proxy-b
 
 The tenth #896 slice proves the transparent proxy transport boundary. Authenticated `CONNECT host:443` requests can now load the session CA/key generated under the daemon state directory, complete a TLS server handshake with a per-host leaf certificate, read the first decrypted HTTP request from the tunnel, and fail closed with `501 not_implemented`. This still does not match the decrypted request to connector specs, inject credentials, proxy upstream, or audit successful transparent-proxy execution; those remain the next data-plane slices.
 
+The eleventh #896 slice routes the first transparent proxy requests through the same credential-injection boundary. After authenticated `CONNECT` and TLS interception, the daemon matches the decrypted request by method, host, and path against installed connector specs. A unique match reuses the existing sandbox proxy executor to resolve the daemon-side credential binding, inject credentials, proxy the upstream request, and return the sanitized upstream response through the TLS tunnel. Missing or ambiguous matches, binding failures, invalid decrypted requests, and oversized request bodies fail closed. This still remains an internal proxy-bootstrap path pending broader client smoke coverage and final audit-schema work.
+
 ## Consequences
 
 Images must be able to trust the session CA or fail before the agent starts. BYO images need documented trust-store requirements and actionable launch validation.
