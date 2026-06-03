@@ -113,9 +113,22 @@ type ManifestNetwork struct {
 // your email and send messages"). For OAuth credentials, the technical
 // scope strings sent to the provider live on `OAuth2.Scopes` instead;
 // the two fields serve different audiences.
+//
+// `Header` and `Format` are optional, api_key-specific knobs for how the
+// runtime injects the bound credential at the network boundary
+// (`internal/sandbox/host.go`). Empty values fall back to the pre-#917
+// default `Authorization: Bearer <key>`. Real-world API keys do not all
+// take the Bearer prefix — Linear's personal API key, for example, uses
+// a raw `Authorization: <key>` shape (`format = "{key}"`); other APIs
+// use `Authorization: Token <key>` or `X-API-Key: <key>`. The `{key}`
+// placeholder is substituted with the bound credential's value. Only
+// consulted when `Kind == "api_key"` (OAuth2 access tokens have an RFC-
+// fixed `Bearer` wire format and ignore these fields).
 type ManifestCredential struct {
 	Kind   string          `toml:"kind"`
 	Scope  string          `toml:"scope"`
+	Header string          `toml:"header,omitempty"`
+	Format string          `toml:"format,omitempty"`
 	OAuth2 *ManifestOAuth2 `toml:"oauth2,omitempty"`
 }
 
@@ -456,11 +469,53 @@ func validateCredential(c *ManifestCredential, file string) error {
 			return newValidationErr(file,
 				"[capabilities.credential.oauth2] must be absent when kind = %q", c.Kind)
 		}
+		// `header`, when set, replaces the default `Authorization`
+		// target. Whitespace-only or RFC 7230-invalid names would be
+		// silently coerced or rejected at request time; surface that
+		// at install instead.
+		if c.Header != "" {
+			if strings.TrimSpace(c.Header) == "" {
+				return newValidationErr(file,
+					"[capabilities.credential].header must not be empty or whitespace-only")
+			}
+			if !isValidHTTPHeaderName(c.Header) {
+				return newValidationErr(file,
+					"[capabilities.credential].header %q is not a valid HTTP header name (RFC 7230 §3.2 token characters only)", c.Header)
+			}
+		}
+		// `format`, when set, controls the wire shape of the
+		// `Authorization` header (or the alternative declared in
+		// `header`). The `{key}` placeholder is substituted with the
+		// bound credential value at injection time. A format string
+		// without that placeholder would silently emit a header without
+		// the credential — fail closed at install time. A format with
+		// CR/LF would corrupt HTTP framing once injected.
+		if c.Format != "" {
+			if !strings.Contains(c.Format, "{key}") {
+				return newValidationErr(file,
+					"[capabilities.credential].format %q must contain the `{key}` placeholder", c.Format)
+			}
+			if strings.ContainsAny(c.Format, "\r\n") {
+				return newValidationErr(file,
+					"[capabilities.credential].format must not contain newline characters")
+			}
+		}
 		return nil
 	case CredentialKindOAuth2:
 		if c.OAuth2 == nil {
 			return newValidationErr(file,
 				"[capabilities.credential.oauth2] is required when kind = %q", c.Kind)
+		}
+		// `header` and `format` are api_key-specific. Allowing them on
+		// oauth2 would suggest they shape the OAuth2 wire format; they
+		// don't (RFC 6750 fixes `Authorization: Bearer <token>`).
+		if c.Header != "" {
+			return newValidationErr(file,
+				"[capabilities.credential].header is only valid when kind = %q", CredentialKindAPIKey)
+		}
+		if c.Format != "" {
+			return newValidationErr(file,
+				"[capabilities.credential].format is only valid when kind = %q", CredentialKindAPIKey)
 		}
 		return validateOAuth2(c.OAuth2, file)
 	default:
@@ -468,6 +523,26 @@ func validateCredential(c *ManifestCredential, file string) error {
 			"[capabilities.credential].kind %q is not in the v1 closed set (%q, %q)",
 			c.Kind, CredentialKindAPIKey, CredentialKindOAuth2)
 	}
+}
+
+// isValidHTTPHeaderName reports whether name is a valid HTTP header
+// field name per RFC 7230 §3.2 (`field-name = token`, `token = 1*tchar`).
+// `tchar` excludes CTLs and separator characters; permits the visible
+// ASCII printable set minus the punctuation in `sepChars`.
+func isValidHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	const sepChars = "()<>@,;:\\\"/[]?={} \t"
+	for _, r := range name {
+		if r <= 32 || r >= 127 {
+			return false
+		}
+		if strings.ContainsRune(sepChars, r) {
+			return false
+		}
+	}
+	return true
 }
 
 // validateOAuth2 enforces the schema of `[capabilities.credential.oauth2]`.

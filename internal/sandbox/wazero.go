@@ -200,6 +200,8 @@ func (c *wazeroConnector) Invoke(ctx context.Context, call Call) (Result, error)
 		logger:                 c.runtime.log,
 		connectorFQN:           manifestFQN(c.manifest),
 		expectedCredentialKind: manifestCredentialKind(c.manifest),
+		credentialHeader:       manifestCredentialHeader(c.manifest),
+		credentialFormat:       manifestCredentialFormat(c.manifest),
 		credentialResolver:     call.CredentialResolver,
 		spawnPolicy:            c.spawnPolicy,
 		spawnExecutor:          c.runtime.spawnExecutor,
@@ -337,6 +339,26 @@ func manifestCredentialKind(m *cstore.Manifest) string {
 		return ""
 	}
 	return m.Capabilities.Credential.Kind
+}
+
+// manifestCredentialHeader safely returns the connector manifest's
+// optional `[capabilities.credential].header`. Empty string means the
+// injection path uses its default (Authorization).
+func manifestCredentialHeader(m *cstore.Manifest) string {
+	if m == nil || m.Capabilities.Credential == nil {
+		return ""
+	}
+	return m.Capabilities.Credential.Header
+}
+
+// manifestCredentialFormat safely returns the connector manifest's
+// optional `[capabilities.credential].format`. Empty string means the
+// injection path uses its default (`Bearer {key}`).
+func manifestCredentialFormat(m *cstore.Manifest) string {
+	if m == nil || m.Capabilities.Credential == nil {
+		return ""
+	}
+	return m.Capabilities.Credential.Format
 }
 
 // toSet converts a slice of capability strings to a lookup set used by

@@ -235,6 +235,152 @@ func TestValidateManifest_AcceptsAPIKeyKind(t *testing.T) {
 	}
 }
 
+func TestValidateManifest_AcceptsAPIKeyWithHeaderAndFormat(t *testing.T) {
+	// Linear's API-key shape — raw `Authorization: <key>` (no Bearer).
+	// Header defaults to "Authorization"; format must contain `{key}`.
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:   "api_key",
+		Header: "Authorization",
+		Format: "{key}",
+	}
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_AcceptsAPIKeyWithCustomHeader(t *testing.T) {
+	// X-API-Key plus raw value — a common alternative wire shape.
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:   "api_key",
+		Header: "X-API-Key",
+		Format: "{key}",
+	}
+	if err := ValidateManifest(m, "ok.toml"); err != nil {
+		t.Errorf("Validate() = %v", err)
+	}
+}
+
+func TestValidateManifest_RejectsAPIKeyFormatWithoutKeyPlaceholder(t *testing.T) {
+	// A format without `{key}` would silently emit a header without the
+	// credential. Fail at install rather than at first request.
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:   "api_key",
+		Format: "Bearer fixed-value",
+	}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error for format string without {key}")
+	}
+	if !strings.Contains(err.Error(), "{key}") {
+		t.Errorf("err = %v, want mention of {key} placeholder", err)
+	}
+}
+
+func TestValidateManifest_RejectsAPIKeyFormatWithNewline(t *testing.T) {
+	// A format containing CR/LF would inject newlines into the
+	// Authorization header value, corrupting HTTP framing.
+	cases := []string{
+		"Bearer\r\n{key}",
+		"Bearer\n{key}",
+		"\r{key}",
+	}
+	for _, format := range cases {
+		t.Run(strings.ReplaceAll(strings.ReplaceAll(format, "\r", `\r`), "\n", `\n`), func(t *testing.T) {
+			m := canonicalManifestForTest()
+			m.Capabilities.Credential = &ManifestCredential{Kind: "api_key", Format: format}
+			err := ValidateManifest(m, "ok.toml")
+			if err == nil {
+				t.Fatal("expected error for format with newline")
+			}
+			if !strings.Contains(err.Error(), "newline") {
+				t.Errorf("err = %v, want mention of newline", err)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_RejectsInvalidAPIKeyHeaderNames(t *testing.T) {
+	// Header names must be valid HTTP tokens per RFC 7230 §3.2.
+	// Whitespace, colons, and other separators are silently mangled or
+	// rejected at request time; surface at install instead.
+	cases := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"whitespace only", "   ", "whitespace-only"},
+		{"space in name", "X API Key", "valid HTTP header name"},
+		{"colon in name", "X-API-Key:", "valid HTTP header name"},
+		{"non-ascii", "X-Köey", "valid HTTP header name"},
+		{"newline in name", "X-Key\n", "valid HTTP header name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := canonicalManifestForTest()
+			m.Capabilities.Credential = &ManifestCredential{
+				Kind:   "api_key",
+				Header: tc.header,
+				Format: "{key}",
+			}
+			err := ValidateManifest(m, "ok.toml")
+			if err == nil {
+				t.Fatalf("expected error for header %q", tc.header)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("err = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateManifest_RejectsOAuth2WithHeaderOverride(t *testing.T) {
+	// OAuth2's wire shape is RFC 6750–fixed; header/format are
+	// api_key-only knobs. A manifest that sets them on oauth2 is
+	// surfaced at install rather than silently ignored at injection.
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:   "oauth2",
+		Header: "X-Bearer",
+		OAuth2: &ManifestOAuth2{
+			AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+			TokenURL:     "https://oauth2.googleapis.com/token",
+			ClientID:     "x",
+			Scopes:       []string{"openid"},
+		},
+	}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error when header is set on oauth2 kind")
+	}
+	if !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("err = %v, want hint that header is api_key-only", err)
+	}
+}
+
+func TestValidateManifest_RejectsOAuth2WithFormatOverride(t *testing.T) {
+	m := canonicalManifestForTest()
+	m.Capabilities.Credential = &ManifestCredential{
+		Kind:   "oauth2",
+		Format: "raw {key}",
+		OAuth2: &ManifestOAuth2{
+			AuthorizeURL: "https://accounts.google.com/o/oauth2/v2/auth",
+			TokenURL:     "https://oauth2.googleapis.com/token",
+			ClientID:     "x",
+			Scopes:       []string{"openid"},
+		},
+	}
+	err := ValidateManifest(m, "ok.toml")
+	if err == nil {
+		t.Fatal("expected error when format is set on oauth2 kind")
+	}
+	if !strings.Contains(err.Error(), "api_key") {
+		t.Errorf("err = %v, want hint that format is api_key-only", err)
+	}
+}
+
 func TestValidateManifest_RejectsAPIKeyWithOAuth2Block(t *testing.T) {
 	m := canonicalManifestForTest()
 	m.Capabilities.Credential = &ManifestCredential{

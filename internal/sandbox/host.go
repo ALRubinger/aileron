@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/tetratelabs/wazero/api"
@@ -59,6 +60,16 @@ type hostState struct {
 	// declares no credential capability — any `credential` field on an
 	// http_request envelope is then refused as capability_denied.
 	expectedCredentialKind string
+
+	// credentialHeader and credentialFormat are the manifest's optional
+	// `[capabilities.credential].header` / `.format` fields, only
+	// consulted for api_key credentials. Empty means the v1 defaults
+	// (`Authorization: Bearer <key>`). The `{key}` placeholder in
+	// credentialFormat is substituted with the resolved value at
+	// injection time. OAuth2 ignores both fields — RFC 6750 fixes its
+	// wire format.
+	credentialHeader string
+	credentialFormat string
 
 	// credentialResolver is the per-Invoke handle the host uses to
 	// fetch a bound credential when the connector's http_request
@@ -443,8 +454,15 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 		}
 	}
 	switch cred.Kind {
-	case "oauth2", "api_key":
+	case "oauth2":
+		// RFC 6750 fixes OAuth2 access tokens as
+		// `Authorization: Bearer <token>`. The manifest's `header` and
+		// `format` fields are rejected at validation for oauth2 kind,
+		// so we never have to consult them here.
 		req.Header.Set("Authorization", "Bearer "+string(cred.Value))
+	case "api_key":
+		header, format := apiKeyInjection(s.credentialHeader, s.credentialFormat)
+		req.Header.Set(header, strings.ReplaceAll(format, "{key}", string(cred.Value)))
 	default:
 		return newCapabilityDenied(
 			"http_request: unsupported credential kind for v1 injection",
@@ -455,6 +473,22 @@ func injectCredential(ctx context.Context, s *hostState, req *http.Request, requ
 			})
 	}
 	return nil
+}
+
+// apiKeyInjection resolves the `(header, format)` pair the api_key
+// injection path uses. Defaults match the pre-#917 wire shape so
+// connectors that don't set either field keep their current behavior.
+// The format is validated at manifest install time to contain the
+// `{key}` placeholder, so this returns the raw string for the caller
+// to substitute.
+func apiKeyInjection(header, format string) (string, string) {
+	if header == "" {
+		header = "Authorization"
+	}
+	if format == "" {
+		format = "Bearer {key}"
+	}
+	return header, format
 }
 
 // hostFromURL extracts the host:port portion of a URL using the same
