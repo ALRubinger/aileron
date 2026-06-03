@@ -167,10 +167,10 @@ func TestInjectCredential_OAuth2InjectsBearerHeader(t *testing.T) {
 	}
 }
 
-func TestInjectCredential_APIKeyInjectsBearerHeader(t *testing.T) {
-	// v1 wire convention: oauth2 and api_key both render as
-	// Authorization: Bearer <token>. Header-name customisation is
-	// post-MVP (per the plan's out-of-scope list).
+func TestInjectCredential_APIKeyDefaultsToBearerHeader(t *testing.T) {
+	// Default api_key wire shape is `Authorization: Bearer <key>` —
+	// preserves the pre-#917 behavior so existing connectors that don't
+	// set the new `header` / `format` manifest fields are unchanged.
 	st := &hostState{
 		connectorFQN:           "github://x/y",
 		expectedCredentialKind: "api_key",
@@ -184,6 +184,107 @@ func TestInjectCredential_APIKeyInjectsBearerHeader(t *testing.T) {
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer k-secret" {
 		t.Errorf("Authorization = %q, want Bearer k-secret", got)
+	}
+}
+
+func TestInjectCredential_APIKeyRawFormat(t *testing.T) {
+	// Linear's personal API keys go in as `Authorization: <key>` with
+	// no Bearer prefix (verified empirically against api.linear.app —
+	// see ALRubinger/aileron#917 for the curl evidence). The manifest
+	// declares format = "{key}" and the runtime substitutes.
+	st := &hostState{
+		connectorFQN:           "github://ALRubinger/aileron-connector-linear",
+		expectedCredentialKind: "api_key",
+		credentialFormat:       "{key}",
+		credentialResolver: &stubResolver{
+			cred: credential.Credential{Kind: "api_key", Value: []byte("lin_api_xxxxxxxx")},
+		},
+	}
+	req, _ := http.NewRequest("GET", "https://api.linear.app/graphql", nil)
+	if err := injectCredential(context.Background(), st, req, "api_key"); err != nil {
+		t.Fatalf("expected success; got %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "lin_api_xxxxxxxx" {
+		t.Errorf("Authorization = %q, want raw key without prefix", got)
+	}
+}
+
+func TestInjectCredential_APIKeyTokenFormat(t *testing.T) {
+	// GitHub personal access tokens go in as `Authorization: token <key>`
+	// (lower-case `token`, no Bearer). A representative non-Bearer
+	// prefix — exercises the `format` template's prefix support.
+	st := &hostState{
+		connectorFQN:           "github://x/y",
+		expectedCredentialKind: "api_key",
+		credentialFormat:       "token {key}",
+		credentialResolver: &stubResolver{
+			cred: credential.Credential{Kind: "api_key", Value: []byte("ghp_abcdef")},
+		},
+	}
+	req, _ := http.NewRequest("GET", "https://api.github.com", nil)
+	if err := injectCredential(context.Background(), st, req, "api_key"); err != nil {
+		t.Fatalf("expected success; got %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "token ghp_abcdef" {
+		t.Errorf("Authorization = %q, want token ghp_abcdef", got)
+	}
+}
+
+func TestInjectCredential_APIKeyCustomHeader(t *testing.T) {
+	// X-API-Key is a common alternative header name. The manifest
+	// declares header = "X-API-Key" and the runtime writes there
+	// instead of Authorization. format defaults to Bearer {key}; for
+	// custom-header connectors that's usually not what they want, so
+	// they typically set both. This test exercises the header-only
+	// override; the next test exercises both at once.
+	st := &hostState{
+		connectorFQN:           "github://x/y",
+		expectedCredentialKind: "api_key",
+		credentialHeader:       "X-API-Key",
+		credentialFormat:       "{key}",
+		credentialResolver: &stubResolver{
+			cred: credential.Credential{Kind: "api_key", Value: []byte("sk-secret")},
+		},
+	}
+	req, _ := http.NewRequest("GET", "https://example.com", nil)
+	if err := injectCredential(context.Background(), st, req, "api_key"); err != nil {
+		t.Fatalf("expected success; got %v", err)
+	}
+	if got := req.Header.Get("X-API-Key"); got != "sk-secret" {
+		t.Errorf("X-API-Key = %q, want sk-secret", got)
+	}
+	// Authorization header must remain untouched — otherwise upstreams
+	// that read both would see a stale or empty value masquerading as
+	// an auth attempt.
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Errorf("Authorization = %q, want empty (custom header path)", got)
+	}
+}
+
+func TestInjectCredential_OAuth2IgnoresFormatOverride(t *testing.T) {
+	// OAuth2 access tokens are RFC 6750–fixed at `Bearer <token>`. Even
+	// if a manifest somehow declared a header/format for oauth2 kind
+	// (manifest validation catches that at install, but defense in
+	// depth at injection too), the runtime ignores them and emits the
+	// RFC shape.
+	st := &hostState{
+		connectorFQN:           "github://x/y",
+		expectedCredentialKind: "oauth2",
+		credentialHeader:       "X-Should-Not-Use",
+		credentialFormat:       "raw {key}",
+		credentialResolver: &stubResolver{
+			cred: credential.Credential{Kind: "oauth2", Value: []byte("xoxb-token")},
+		},
+	}
+	req, _ := http.NewRequest("GET", "https://example.com", nil)
+	if err := injectCredential(context.Background(), st, req, "oauth2"); err != nil {
+		t.Fatalf("expected success; got %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer xoxb-token" {
+		t.Errorf("Authorization = %q, want Bearer xoxb-token (oauth2 ignores format)", got)
+	}
+	if got := req.Header.Get("X-Should-Not-Use"); got != "" {
+		t.Errorf("X-Should-Not-Use = %q, want empty (oauth2 ignores header field)", got)
 	}
 }
 
