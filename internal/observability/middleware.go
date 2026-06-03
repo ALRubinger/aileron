@@ -1,6 +1,8 @@
 package observability
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 
 	"go.opentelemetry.io/otel"
@@ -110,4 +112,12 @@ func (s *statusRecorder) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := s.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return h.Hijack()
 }

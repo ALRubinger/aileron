@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -81,6 +83,14 @@ func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	return h.Hijack()
 }
 
 // corsMiddleware adds CORS headers, echoing the request Origin so that

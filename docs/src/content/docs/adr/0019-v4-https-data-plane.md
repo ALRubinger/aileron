@@ -49,6 +49,8 @@ The eighth #896 slice adds generated-shim JSON request bodies for write-style me
 
 The ninth #896 slice prepares the transparent proxy entrypoint. Internal proxy-bootstrap launch now embeds the launch session id, and the local daemon token when available, into the standard proxy URL userinfo so HTTPS clients send `Proxy-Authorization` on proxy requests. The daemon recognizes proxy-shaped requests before normal webapp/API routing, validates standard Basic proxy auth, associates the request with the sandbox session, and fails closed with `501 not_implemented` until the CONNECT/TLS interception transport lands. This separates proxy authentication/session binding from the later request mediation implementation.
 
+The tenth #896 slice proves the transparent proxy transport boundary. Authenticated `CONNECT host:443` requests can now load the session CA/key generated under the daemon state directory, complete a TLS server handshake with a per-host leaf certificate, read the first decrypted HTTP request from the tunnel, and fail closed with `501 not_implemented`. This still does not match the decrypted request to connector specs, inject credentials, proxy upstream, or audit successful transparent-proxy execution; those remain the next data-plane slices.
+
 ## Consequences
 
 Images must be able to trust the session CA or fail before the agent starts. BYO images need documented trust-store requirements and actionable launch validation.

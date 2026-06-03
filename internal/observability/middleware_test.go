@@ -1,10 +1,12 @@
 package observability
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -244,6 +246,47 @@ func TestHTTPMiddleware_PreservesFlusher(t *testing.T) {
 	}
 }
 
+func TestHTTPMiddleware_PreservesHijacker(t *testing.T) {
+	var sawHijacker bool
+	var hijackedThrough bool
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h, ok := w.(http.Hijacker)
+		sawHijacker = ok
+		if ok {
+			conn, _, err := h.Hijack()
+			if err != nil {
+				t.Errorf("Hijack returned error: %v", err)
+				return
+			}
+			_ = conn.Close()
+		}
+	})
+	wrapped := HTTPMiddleware(nil)(handler)
+
+	underlying := &hijackTrackingWriter{
+		ResponseWriter: httptest.NewRecorder(),
+		onHijack:       func() { hijackedThrough = true },
+	}
+	req := httptest.NewRequest(http.MethodConnect, "http://api.example.test:443", nil)
+	wrapped.ServeHTTP(underlying, req)
+	underlying.closePeer()
+
+	if !sawHijacker {
+		t.Error("handler's w.(http.Hijacker) assertion failed — statusRecorder must implement Hijack")
+	}
+	if !hijackedThrough {
+		t.Error("Hijack did not reach the underlying ResponseWriter — statusRecorder.Hijack must proxy through")
+	}
+}
+
+func TestStatusRecorder_HijackUnsupported(t *testing.T) {
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder(), status: http.StatusOK}
+	if _, _, err := rec.Hijack(); err == nil {
+		t.Fatal("expected unsupported hijack error")
+	}
+}
+
 // flushTrackingWriter is an http.ResponseWriter that records when its
 // Flush is invoked. Used to assert middleware wrappers proxy Flush
 // down the chain instead of swallowing it.
@@ -255,6 +298,27 @@ type flushTrackingWriter struct {
 func (w *flushTrackingWriter) Flush() {
 	if w.onFlush != nil {
 		w.onFlush()
+	}
+}
+
+type hijackTrackingWriter struct {
+	http.ResponseWriter
+	onHijack func()
+	peer     net.Conn
+}
+
+func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.onHijack != nil {
+		w.onHijack()
+	}
+	server, client := net.Pipe()
+	w.peer = client
+	return server, bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)), nil
+}
+
+func (w *hijackTrackingWriter) closePeer() {
+	if w.peer != nil {
+		_ = w.peer.Close()
 	}
 }
 
