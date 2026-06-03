@@ -14,7 +14,7 @@ require (
 	github.com/oapi-codegen/runtime v1.4.1
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
-	github.com/tetratelabs/wazero v1.11.0
+	github.com/tetratelabs/wazero v1.12.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.43.0
