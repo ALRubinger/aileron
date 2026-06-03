@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -8,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -20,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
+	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -86,29 +90,330 @@ func TestSandboxForwardProxy_CONNECTTerminatesTLSAndFailsClosedAfterDecryptedReq
 	if err != nil {
 		t.Fatalf("parse proxy URL: %v", err)
 	}
-	client := &http.Client{Transport: &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
-		ProxyConnectHeader: http.Header{
-			"Proxy-Authorization": []string{basicProxyAuth("session-123", "daemon-token")},
-		},
-		TLSClientConfig: &tls.Config{
-			RootCAs:    roots,
-			MinVersion: tls.VersionTLS12,
-		},
-	}}
+	client := newSandboxForwardProxyClient(t, proxyURL, roots)
 	resp, err := client.Get("https://api.example.test/v1/resource?secret=not-audited")
 	if err != nil {
 		t.Fatalf("GET through sandbox forward proxy: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
 	if got := resp.Header.Get("X-Aileron-Session-Id"); got != "session-123" {
 		t.Fatalf("X-Aileron-Session-Id = %q, want session-123", got)
 	}
 	if got := resp.Header.Get("X-Aileron-Proxy-Upstream-Host"); got != "api.example.test" {
 		t.Fatalf("X-Aileron-Proxy-Upstream-Host = %q, want api.example.test", got)
+	}
+}
+
+func TestSandboxForwardProxy_CONNECTRoutesMatchedDecryptedRequestThroughProxyBoundary(t *testing.T) {
+	stateDir := t.TempDir()
+	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	var upstreamMethod, upstreamURL, upstreamAuth string
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return []connectorspec.Spec{{
+				SchemaVersion: connectorspec.SchemaVersion,
+				Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-linear", Version: "1.0.0"},
+				Tools: []connectorspec.Tool{{
+					Name: "linear",
+					Operations: []connectorspec.Operation{{
+						Name:       "issues.list",
+						Method:     http.MethodGet,
+						Path:       "/graphql",
+						Hosts:      []string{"api.example.test"},
+						Credential: "api_key",
+					}},
+				}},
+			}}, nil
+		},
+		bindings: sandboxProxyTestBindingStore{resolver: sandboxProxyTestResolver{cred: credential.Credential{Kind: "api_key", Value: []byte("lin_secret")}}},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamMethod = req.Method
+			upstreamURL = req.URL.String()
+			upstreamAuth = req.Header.Get("Authorization")
+			return &http.Response{
+				StatusCode: http.StatusAccepted,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to append CA cert")
+	}
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	client := newSandboxForwardProxyClient(t, proxyURL, roots)
+	resp, err := client.Get("https://api.example.test/graphql?query=viewer")
+	if err != nil {
+		t.Fatalf("GET through sandbox forward proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%s", resp.StatusCode, string(body))
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if string(body) != `{"ok":true}` {
+		t.Fatalf("body = %q", string(body))
+	}
+	if upstreamMethod != http.MethodGet {
+		t.Fatalf("upstream method = %q, want GET", upstreamMethod)
+	}
+	if upstreamURL != "https://api.example.test/graphql?query=viewer" {
+		t.Fatalf("upstream URL = %q", upstreamURL)
+	}
+	if upstreamAuth != "Bearer lin_secret" {
+		t.Fatalf("upstream Authorization = %q, want bearer token", upstreamAuth)
+	}
+}
+
+func TestSandboxForwardProxy_CONNECTMatchedRequestReturnsCapturedProxyRejection(t *testing.T) {
+	stateDir := t.TempDir()
+	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return []connectorspec.Spec{{
+				SchemaVersion: connectorspec.SchemaVersion,
+				Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-linear", Version: "1.0.0"},
+				Tools: []connectorspec.Tool{{
+					Name: "linear",
+					Operations: []connectorspec.Operation{{
+						Name:       "issues.list",
+						Method:     http.MethodGet,
+						Path:       "/graphql",
+						Hosts:      []string{"api.example.test"},
+						Credential: "api_key",
+					}},
+				}},
+			}}, nil
+		},
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to append CA cert")
+	}
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	client := newSandboxForwardProxyClient(t, proxyURL, roots)
+	resp, err := client.Get("https://api.example.test/graphql")
+	if err != nil {
+		t.Fatalf("GET through sandbox forward proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", resp.StatusCode, string(body))
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	if !strings.Contains(string(body), "binding store is unavailable") {
+		t.Fatalf("body = %s, want binding-store rejection", string(body))
+	}
+}
+
+func TestSandboxForwardProxy_CONNECTRejectsAmbiguousOperationMatch(t *testing.T) {
+	stateDir := t.TempDir()
+	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return []connectorspec.Spec{{
+				SchemaVersion: connectorspec.SchemaVersion,
+				Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-linear", Version: "1.0.0"},
+				Tools: []connectorspec.Tool{{
+					Name: "linear",
+					Operations: []connectorspec.Operation{{
+						Name:       "issues.list",
+						Method:     http.MethodGet,
+						Path:       "/graphql",
+						Hosts:      []string{"api.example.test"},
+						Credential: "api_key",
+					}, {
+						Name:       "issues.search",
+						Method:     http.MethodGet,
+						Path:       "/graphql",
+						Hosts:      []string{"api.example.test"},
+						Credential: "api_key",
+					}},
+				}},
+			}}, nil
+		},
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to append CA cert")
+	}
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	client := newSandboxForwardProxyClient(t, proxyURL, roots)
+	resp, err := client.Get("https://api.example.test/graphql")
+	if err != nil {
+		t.Fatalf("GET through sandbox forward proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", resp.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), "matched multiple connector operations") {
+		t.Fatalf("body = %s, want ambiguous-match rejection", string(body))
+	}
+}
+
+func TestWriteSandboxForwardProxyResponseSanitizesHeaderValues(t *testing.T) {
+	var out bytes.Buffer
+
+	writeSandboxForwardProxyResponse(&out, "session\r\nbad", "api.example.test\r\nbad", http.StatusOK, "text/plain\r\nbad", []byte("ok"))
+
+	raw := out.String()
+	if strings.Contains(raw, "\r\nbad") {
+		t.Fatalf("response contains unsanitized header injection: %q", raw)
+	}
+	if !strings.Contains(raw, "Content-Type: text/plain  bad\r\n") {
+		t.Fatalf("response = %q, want sanitized Content-Type", raw)
+	}
+	if !strings.Contains(raw, "X-Aileron-Session-Id: session  bad\r\n") {
+		t.Fatalf("response = %q, want sanitized session id", raw)
+	}
+	if !strings.Contains(raw, "X-Aileron-Proxy-Upstream-Host: api.example.test  bad\r\n") {
+		t.Fatalf("response = %q, want sanitized upstream host", raw)
+	}
+}
+
+func TestWriteSandboxForwardProxyResponseDefaults(t *testing.T) {
+	var out bytes.Buffer
+
+	writeSandboxForwardProxyResponse(&out, "session-123", "api.example.test", 0, "", nil)
+
+	raw := out.String()
+	if !strings.HasPrefix(raw, "HTTP/1.1 500 Internal Server Error\r\n") {
+		t.Fatalf("response = %q, want default 500 status", raw)
+	}
+	if !strings.Contains(raw, "Content-Type: application/octet-stream\r\n") {
+		t.Fatalf("response = %q, want default content type", raw)
+	}
+	if !strings.HasSuffix(raw, "Content-Length: 0\r\n\r\n") {
+		t.Fatalf("response = %q, want empty body framing", raw)
+	}
+}
+
+func TestSandboxForwardProxyUpstreamURL(t *testing.T) {
+	req := &http.Request{URL: &url.URL{}}
+	upstream, err := sandboxForwardProxyUpstreamURL("api.example.test", req)
+	if err != nil {
+		t.Fatalf("sandboxForwardProxyUpstreamURL: %v", err)
+	}
+	if got := upstream.String(); got != "https://api.example.test/" {
+		t.Fatalf("upstream = %q, want default root path", got)
+	}
+
+	if _, err := sandboxForwardProxyUpstreamURL("%zz", req); err == nil {
+		t.Fatal("expected invalid target host to fail URL parsing")
+	}
+}
+
+func TestReadSandboxForwardProxyRequestBody(t *testing.T) {
+	body, contentType, err := readSandboxForwardProxyRequestBody(&http.Request{})
+	if err != nil {
+		t.Fatalf("nil body read failed: %v", err)
+	}
+	if body != nil || contentType != "" {
+		t.Fatalf("nil body = %q contentType = %q, want empty", body, contentType)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "https://api.example.test/graphql", strings.NewReader(`{"ok":true}`))
+	req.Header.Set("Content-Type", " application/json ")
+	body, contentType, err = readSandboxForwardProxyRequestBody(req)
+	if err != nil {
+		t.Fatalf("body read failed: %v", err)
+	}
+	if string(body) != `{"ok":true}` || contentType != "application/json" {
+		t.Fatalf("body = %q contentType = %q", string(body), contentType)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "https://api.example.test/graphql", strings.NewReader(""))
+	body, contentType, err = readSandboxForwardProxyRequestBody(req)
+	if err != nil {
+		t.Fatalf("empty body read failed: %v", err)
+	}
+	if body != nil || contentType != "" {
+		t.Fatalf("empty body = %q contentType = %q, want empty", body, contentType)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "https://api.example.test/graphql", strings.NewReader(strings.Repeat("x", sandboxForwardProxyMaxRequestBytes+1)))
+	if _, _, err := readSandboxForwardProxyRequestBody(req); err == nil {
+		t.Fatal("expected oversized body to fail")
+	}
+}
+
+func TestMatchSandboxForwardProxyOperationSpecErrors(t *testing.T) {
+	upstream, err := parseSandboxProxyUpstreamURL("https://api.example.test/graphql")
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+
+	srv := &apiServer{specLoader: func() ([]connectorspec.Spec, error) {
+		return nil, errors.New("boom")
+	}}
+	if _, _, err := srv.matchSandboxForwardProxyOperation(http.MethodGet, upstream); err == nil || !strings.Contains(err.Error(), "connector specs unavailable") {
+		t.Fatalf("load error = %v, want unavailable", err)
+	}
+
+	srv = &apiServer{specLoader: func() ([]connectorspec.Spec, error) {
+		return []connectorspec.Spec{{
+			SchemaVersion: connectorspec.SchemaVersion,
+			Connector:     connectorspec.Connector{FQN: "github://acme/one"},
+			Tools:         []connectorspec.Tool{{Name: "linear", Operations: []connectorspec.Operation{{Name: "one"}}}},
+		}, {
+			SchemaVersion: connectorspec.SchemaVersion,
+			Connector:     connectorspec.Connector{FQN: "github://acme/two"},
+			Tools:         []connectorspec.Tool{{Name: "linear", Operations: []connectorspec.Operation{{Name: "two"}}}},
+		}}, nil
+	}}
+	if _, _, err := srv.matchSandboxForwardProxyOperation(http.MethodGet, upstream); err == nil || !strings.Contains(err.Error(), "connector specs invalid") {
+		t.Fatalf("invalid specs error = %v, want invalid", err)
 	}
 }
 
@@ -286,6 +591,20 @@ func newSandboxForwardProxyTestHandlerWithStateDir(t *testing.T, token, stateDir
 
 func basicProxyAuth(sessionID, token string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(sessionID+":"+token))
+}
+
+func newSandboxForwardProxyClient(t *testing.T, proxyURL *url.URL, roots *x509.CertPool) *http.Client {
+	t.Helper()
+	return &http.Client{Transport: &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+		ProxyConnectHeader: http.Header{
+			"Proxy-Authorization": []string{basicProxyAuth("session-123", "daemon-token")},
+		},
+		TLSClientConfig: &tls.Config{
+			RootCAs:    roots,
+			MinVersion: tls.VersionTLS12,
+		},
+	}}
 }
 
 type noHijackResponseWriter struct {
