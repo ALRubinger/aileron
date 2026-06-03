@@ -297,6 +297,7 @@ func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
 		t.Fatalf("stat generated CA: %v", err)
 	}
 	for _, want := range []string{
+		"--user\nroot\n",
 		"--volume\n" + caPath + ":/etc/aileron/proxy/ca.pem:ro\n",
 		"--env\nAILERON_SANDBOX_PROXY_CA_FILE=/etc/aileron/proxy/ca.pem\n",
 		"--env\nAILERON_SANDBOX_PROXY_MODE=bootstrap\n",
@@ -305,6 +306,7 @@ func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
 		"--env\nHTTP_PROXY=http://host.docker.internal:",
 		"host.docker.internal",
 		"host.containers.internal",
+		"aileron-run-with-proxy-ca\ncodex\n",
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("run call missing %q:\n%s", want, args)

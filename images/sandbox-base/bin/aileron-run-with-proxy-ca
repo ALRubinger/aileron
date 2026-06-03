@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: aileron-run-with-proxy-ca COMMAND [ARG...]" >&2
+  exit 64
+fi
+
+if [ "$(id -u)" != "0" ]; then
+  echo "aileron-run-with-proxy-ca must run as root" >&2
+  exit 126
+fi
+
+aileron-install-proxy-ca "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
+exec su -p -s /bin/sh agent -c 'exec "$@"' aileron-agent "$@"

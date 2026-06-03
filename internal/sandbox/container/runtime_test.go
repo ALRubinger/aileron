@@ -474,6 +474,31 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 	}
 }
 
+func TestRunCanOverrideContainerUser(t *testing.T) {
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron/sandbox-base:test",
+		WorkDir: dir,
+		User:    "root",
+		Command: []string{"aileron-run-with-proxy-ca", "codex"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []string{
+		"run", "--rm", "-i",
+		"--user", "root",
+		"--workdir", WorkspacePath,
+		"--volume", dir + ":" + WorkspacePath,
+		"aileron/sandbox-base:test",
+		"aileron-run-with-proxy-ca", "codex",
+	}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
 func TestRunMountsAdditionalReadOnlyVolumes(t *testing.T) {
 	dir := t.TempDir()
 	extra := filepath.Join(dir, "actions")
@@ -709,6 +734,9 @@ func TestValidateRequiresProxyTrustHelperWhenRequested(t *testing.T) {
 	script := runner.args[len(runner.args)-5]
 	if !strings.Contains(script, "aileron-install-proxy-ca --check") {
 		t.Fatalf("validation script missing proxy trust helper check:\n%s", script)
+	}
+	if !strings.Contains(script, "command -v aileron-run-with-proxy-ca") {
+		t.Fatalf("validation script missing proxy wrapper check:\n%s", script)
 	}
 }
 
