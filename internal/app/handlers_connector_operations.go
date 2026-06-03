@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -59,6 +60,20 @@ func (s *apiServer) RunConnectorOperation(w http.ResponseWriter, r *http.Request
 	}
 	if !ok {
 		writeError(w, http.StatusNotFound, "connector_operation_not_found", "connector operation not found")
+		return
+	}
+
+	upstream, canProxy, err := connectorOperationRunUpstreamURL(req, operation)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	if canProxy {
+		result, ok := s.executeSandboxProxyRequest(w, r, connectorFQN, toolName, strings.ToUpper(operation.Method), upstream, operation)
+		if !ok {
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 		return
 	}
 
@@ -153,6 +168,71 @@ func findSpecConnectorOperation(specs []connectorspec.Spec, connectorFQN, toolNa
 		}
 	}
 	return discovery.SpecOperationHelp{}, false, nil
+}
+
+func connectorOperationRunUpstreamURL(req api.ConnectorOperationRunRequest, operation discovery.SpecOperationHelp) (*url.URL, bool, error) {
+	method := strings.ToUpper(strings.TrimSpace(operation.Method))
+	path := strings.TrimSpace(operation.Path)
+	if path == "" {
+		path = "/"
+	}
+	if method == "" || len(operation.Hosts) == 0 {
+		return nil, false, nil
+	}
+	if path[0] != '/' {
+		return nil, false, nil
+	}
+	switch method {
+	case http.MethodGet, http.MethodDelete, http.MethodHead:
+	default:
+		return nil, false, nil
+	}
+
+	args := map[string]any{}
+	if req.Args != nil {
+		args = *req.Args
+	}
+	query := url.Values{}
+	if len(args) > 0 {
+		for key, value := range args {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				return nil, false, fmt.Errorf("args contains an empty query parameter name")
+			}
+			if err := addConnectorOperationQueryArg(query, key, value); err != nil {
+				return nil, false, err
+			}
+		}
+	}
+
+	upstream, err := parseSandboxProxyUpstreamURL("https://" + strings.TrimSpace(operation.Hosts[0]) + path)
+	if err != nil {
+		return nil, false, nil
+	}
+	upstream.RawQuery = query.Encode()
+	return upstream, true, nil
+}
+
+func addConnectorOperationQueryArg(query url.Values, key string, value any) error {
+	switch value := value.(type) {
+	case nil:
+		query.Add(key, "")
+	case string:
+		query.Add(key, value)
+	case bool:
+		query.Add(key, fmt.Sprintf("%t", value))
+	case float64:
+		query.Add(key, fmt.Sprintf("%v", value))
+	case []any:
+		for _, item := range value {
+			if err := addConnectorOperationQueryArg(query, key, item); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("args.%s must be a string, number, boolean, null, or array of those values for bodyless proxy execution", key)
+	}
+	return nil
 }
 
 func parseSandboxProxyUpstreamURL(raw string) (*url.URL, error) {

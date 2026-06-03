@@ -96,9 +96,9 @@ The shim posts this payload to `${AILERON_API_URL%/}/connector-operations/run`:
 }
 ```
 
-The endpoint is the stable sandbox-side contract for generated connector-operation shims. The mediated HTTPS proxy/data-plane implementation behind that endpoint is tracked separately in [#896](https://github.com/ALRubinger/aileron/issues/896).
+The endpoint is the stable sandbox-side contract for generated connector-operation shims.
 
-In the current daemon cut, `/v1/connector-operations/run` resolves the connector, tool, and operation against installed specs, records an audit event for recognized direct-shim attempts, and fails closed with `501 not_implemented`. The HTTPS data-plane boundary also exposes an internal `POST /v1/sandbox-proxy/requests` endpoint for proxy attempts. It resolves candidate bodyless HTTPS requests against the same installed specs, requires method, path, and upstream host to match the operation, resolves any spec-declared credential binding in the daemon, injects supported credentials at the upstream request boundary, returns a sanitized response, and audits `connector.proxy.proxied` without credential bytes or query strings. Unknown connector operations are rejected before any execution attempt. Full forward-proxy integration and request-body transport remain tracked in [#896](https://github.com/ALRubinger/aileron/issues/896).
+In the current daemon cut, `/v1/connector-operations/run` resolves the connector, tool, and operation against installed specs. Bodyless `GET`, `DELETE`, and `HEAD` operations with spec-declared method, path, and upstream hosts are mediated through the sandbox HTTPS proxy boundary; shim args are encoded as query parameters. The proxy boundary resolves any spec-declared credential binding in the daemon, injects supported credentials at the upstream request boundary, returns a sanitized response, and audits `connector.proxy.proxied` without credential bytes or query strings. Operations that need request-body mapping still fail closed with `501 not_implemented` and an audited direct-shim rejection. Unknown connector operations are rejected before any execution attempt. Full forward-proxy integration and request-body transport remain tracked in [#896](https://github.com/ALRubinger/aileron/issues/896).
 
 ## Conflict Handling
 

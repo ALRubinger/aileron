@@ -159,6 +159,147 @@ func TestRunConnectorOperation_RecognizedOperationAuditsAndFailsClosed(t *testin
 	}
 }
 
+func TestRunConnectorOperation_BodylessGETProxiesThroughSandboxDataPlane(t *testing.T) {
+	const connectorFQN = "github://acme/aileron-connector-google"
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("upstream method = %s, want GET", r.Method)
+		}
+		if r.URL.Path != "/gmail/v1/users/me/messages" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		if got := r.URL.Query()["labelIds"]; len(got) != 2 || got[0] != "INBOX" || got[1] != "UNREAD" {
+			t.Errorf("labelIds query = %#v", got)
+		}
+		if got := r.URL.Query().Get("includeSpamTrash"); got != "true" {
+			t.Errorf("includeSpamTrash query = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gmail_secret" {
+			t.Errorf("authorization = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"messages":[]}`))
+	}))
+	defer upstream.Close()
+
+	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
+		{
+			SchemaVersion: connectorspec.SchemaVersion,
+			Connector:     connectorspec.Connector{FQN: connectorFQN, Version: "1.0.0"},
+			Tools: []connectorspec.Tool{
+				{
+					Name: "Google",
+					Operations: []connectorspec.Operation{
+						{
+							Name:        "gmail.messages.search",
+							Method:      "GET",
+							Path:        "/gmail/v1/users/me/messages",
+							Hosts:       []string{strings.TrimPrefix(upstream.URL, "https://")},
+							Idempotency: "idempotent",
+							Credential:  "oauth2",
+							Inputs: []connectorspec.Input{
+								{Name: "labelIds", Type: "array"},
+								{Name: "includeSpamTrash", Type: "boolean"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	srv.sandboxProxyClient = upstream.Client()
+	srv.bindings = sandboxProxyTestBindingStore{resolver: sandboxProxyTestResolver{
+		cred: credential.Credential{Kind: "oauth2", Value: []byte("gmail_secret")},
+	}}
+
+	body := []byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.search","args":{"labelIds":["INBOX","UNREAD"],"includeSpamTrash":true}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/connector-operations/run", bytes.NewReader(body))
+	req.Header.Set("X-Aileron-Session-Id", "session-123")
+	rec := httptest.NewRecorder()
+
+	srv.RunConnectorOperation(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp api.SandboxProxyResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.Status != api.Proxied {
+		t.Errorf("status = %q, want proxied", resp.Status)
+	}
+	if resp.UpstreamStatus != http.StatusOK {
+		t.Errorf("upstream status = %d, want 200", resp.UpstreamStatus)
+	}
+	if string(resp.BodyBase64) != `{"messages":[]}` {
+		t.Errorf("body = %s", resp.BodyBase64)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.EventType != model.EventTypeConnectorProxyProxied {
+		t.Fatalf("event type = %q, want %q", event.EventType, model.EventTypeConnectorProxyProxied)
+	}
+	payload := event.Payload
+	if payload["aileron.connector.boundary"] != "https_proxy" {
+		t.Errorf("boundary payload = %v", payload["aileron.connector.boundary"])
+	}
+	if payload["aileron.session.id"] != "session-123" {
+		t.Errorf("session payload = %v", payload["aileron.session.id"])
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	if strings.Contains(string(payloadJSON), "gmail_secret") || strings.Contains(string(payloadJSON), "INBOX") {
+		t.Fatalf("audit payload leaked credential or query args: %s", payloadJSON)
+	}
+}
+
+func TestRunConnectorOperation_PostWithArgsStillFailsClosed(t *testing.T) {
+	const connectorFQN = "github://acme/aileron-connector-google"
+	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
+		{
+			SchemaVersion: connectorspec.SchemaVersion,
+			Connector:     connectorspec.Connector{FQN: connectorFQN},
+			Tools: []connectorspec.Tool{
+				{Name: "google", Operations: []connectorspec.Operation{{
+					Name: "gmail.messages.send", Method: "POST", Path: "/gmail/v1/users/me/messages/send", Hosts: []string{"gmail.googleapis.com"}, Credential: "oauth2",
+				}}},
+			},
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/connector-operations/run", bytes.NewReader([]byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.send","args":{"to":"alice@example.com"}}`)))
+	rec := httptest.NewRecorder()
+
+	srv.RunConnectorOperation(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp api.ConnectorOperationRunRejectedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if resp.Status != api.ConnectorOperationRunRejectedResponseStatusRejected {
+		t.Errorf("status = %q, want rejected", resp.Status)
+	}
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeConnectorOperationRejected {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeConnectorOperationRejected)
+	}
+}
+
 func TestRecordSandboxProxyRequest_RecognizedHTTPSAttemptInjectsCredentialAndProxies(t *testing.T) {
 	const connectorFQN = "github://acme/aileron-connector-google"
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
