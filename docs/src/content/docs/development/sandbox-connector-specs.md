@@ -35,6 +35,7 @@ The current schema version is `aileron.connector.v1`.
           "summary": "Search Gmail messages",
           "method": "GET",
           "path": "/gmail/v1/users/me/messages",
+          "hosts": ["gmail.googleapis.com"],
           "idempotency": "idempotent",
           "credential": "oauth2",
           "inputs": [
@@ -61,10 +62,11 @@ Required fields:
 | `tools[].name` | Must be unique within the spec and use only letters, digits, dots, dashes, underscores, or colons. |
 | `tools[].operations[]` | Each tool must declare at least one operation. |
 | `operations[].name` | Must be unique within its tool and use only letters, digits, dots, dashes, underscores, or colons. |
+| `operations[].hosts[]` | Required for proxy transport. Each entry is an allowed upstream host, with an optional port, and must not include a URL scheme or path. |
 | `operations[].inputs[].name` | Optional, but when present must be unique within the operation and use the same restricted character set. |
 | `operations[].audit[].name` | Optional, but when present must be unique within the operation and use the same restricted character set. |
 
-Optional operation metadata such as `summary`, `description`, `method`, `path`, `idempotency`, `approval`, `credential`, `inputs`, and `audit` is rendered into shim help and is available to the data-plane work that follows.
+Optional operation metadata such as `summary`, `description`, `method`, `path`, `hosts`, `idempotency`, `approval`, `credential`, `inputs`, and `audit` is rendered into shim help and is available to the data-plane work that follows.
 
 ## Generated Tools
 
@@ -96,7 +98,7 @@ The shim posts this payload to `${AILERON_API_URL%/}/connector-operations/run`:
 
 The endpoint is the stable sandbox-side contract for generated connector-operation shims. The mediated HTTPS proxy/data-plane implementation behind that endpoint is tracked separately in [#896](https://github.com/ALRubinger/aileron/issues/896).
 
-In the current daemon cut, `/v1/connector-operations/run` resolves the connector, tool, and operation against installed specs, records an audit event for recognized direct-shim attempts, and fails closed with `501 not_implemented`. The HTTPS data-plane boundary also exposes an internal `POST /v1/sandbox-proxy/requests` endpoint for proxy attempts; it resolves candidate HTTPS requests against the same installed specs, records sanitized proxy audit metadata for recognized attempts, and fails closed with `501 not_implemented`. Credential injection and upstream HTTPS execution remain behind the proxy/data-plane work tracked in [#896](https://github.com/ALRubinger/aileron/issues/896). Unknown connector operations are rejected before any execution attempt.
+In the current daemon cut, `/v1/connector-operations/run` resolves the connector, tool, and operation against installed specs, records an audit event for recognized direct-shim attempts, and fails closed with `501 not_implemented`. The HTTPS data-plane boundary also exposes an internal `POST /v1/sandbox-proxy/requests` endpoint for proxy attempts. It resolves candidate bodyless HTTPS requests against the same installed specs, requires method, path, and upstream host to match the operation, resolves any spec-declared credential binding in the daemon, injects supported credentials at the upstream request boundary, returns a sanitized response, and audits `connector.proxy.proxied` without credential bytes or query strings. Unknown connector operations are rejected before any execution attempt. Full forward-proxy integration and request-body transport remain tracked in [#896](https://github.com/ALRubinger/aileron/issues/896).
 
 ## Conflict Handling
 

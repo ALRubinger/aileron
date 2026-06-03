@@ -27,6 +27,7 @@ type SpecOperationHelp struct {
 	Description string
 	Method      string
 	Path        string
+	Hosts       []string
 	Idempotency string
 	Approval    string
 	Credential  string
@@ -121,6 +122,7 @@ func specOperationHelp(operation connectorspec.Operation) SpecOperationHelp {
 		Description: strings.TrimSpace(operation.Description),
 		Method:      strings.TrimSpace(operation.Method),
 		Path:        strings.TrimSpace(operation.Path),
+		Hosts:       trimNonEmptyStrings(operation.Hosts),
 		Idempotency: strings.TrimSpace(operation.Idempotency),
 		Approval:    strings.TrimSpace(operation.Approval),
 		Credential:  strings.TrimSpace(operation.Credential),
@@ -138,6 +140,17 @@ func specOperationHelp(operation connectorspec.Operation) SpecOperationHelp {
 		})
 	}
 	return help
+}
+
+func trimNonEmptyStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func specShimScript(tool SpecConnectorTool) []byte {
@@ -159,6 +172,9 @@ func specShimScript(tool SpecConnectorTool) []byte {
 		fmt.Fprintf(&help, "  %s - %s\n", operation.Name, summary)
 		if operation.Method != "" || operation.Path != "" {
 			fmt.Fprintf(&help, "    target: %s %s\n", operation.Method, operation.Path)
+		}
+		if len(operation.Hosts) > 0 {
+			fmt.Fprintf(&help, "    hosts: %s\n", strings.Join(operation.Hosts, ", "))
 		}
 		if operation.Credential != "" || operation.Approval != "" || operation.Idempotency != "" {
 			fmt.Fprintf(&help, "    policy:")

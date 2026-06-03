@@ -2690,11 +2690,11 @@ paths:
         `aileron.connector.v1` specs and records the proxy/data-plane
         mediation decision.
 
-        This #896 cut is intentionally fail-closed: recognized HTTPS
-        proxy attempts are audited and return `501 not_implemented`
-        until credential injection and upstream transport are
-        implemented. Unknown or non-HTTPS attempts are rejected before
-        any credential access or upstream request.
+        Recognized HTTPS proxy attempts resolve any spec-declared
+        credential binding at the daemon boundary, inject the credential
+        into the upstream request, proxy the request, and return a
+        sanitized response. Unknown or non-HTTPS attempts are rejected
+        before any credential access or upstream request.
       operationId: recordSandboxProxyRequest
       requestBody:
         required: true
@@ -2703,10 +2703,26 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxProxyRequest"
       responses:
-        "501":
+        "200":
+          description: Proxy request was recognized, mediated, and sent upstream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxProxyResponse"
+        "403":
           description: |
-            Proxy request was recognized and audited, but mediated
-            HTTPS execution is not available in this runtime cut.
+            Proxy request was recognized and audited, but credential
+            mediation failed closed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SandboxProxyRejectedResponse"
+                  - $ref: "#/components/schemas/Error"
+        "502":
+          description: |
+            Proxy request was recognized and audited, but upstream
+            transport or response handling failed.
           content:
             application/json:
               schema:
@@ -2715,8 +2731,6 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -6267,8 +6281,8 @@ components:
       description: |
         Internal request shape emitted by the sandbox HTTPS data-plane
         proxy when it has identified a candidate connector operation.
-        Header and credential material are intentionally absent from
-        this contract.
+        Credential material is intentionally absent from this contract.
+        This initial transport cut supports bodyless upstream requests.
       required: [connector_fqn, tool, operation, method, upstream_url]
       properties:
         connector_fqn:
@@ -6289,12 +6303,41 @@ components:
           pattern: '^https://'
           description: Absolute HTTPS upstream URL requested by the sandboxed client.
 
+    SandboxProxyResponse:
+      type: object
+      description: |
+        Sanitized response for a sandbox HTTPS proxy request. Credential
+        material and upstream request headers are never included.
+      required: [status, audit_id, connector_fqn, tool, operation, upstream_status, body_base64]
+      properties:
+        status:
+          type: string
+          enum: [proxied]
+        audit_id:
+          type: string
+          description: Audit log ID for the proxied request.
+        connector_fqn:
+          type: string
+        tool:
+          type: string
+        operation:
+          type: string
+        upstream_status:
+          type: integer
+          description: HTTP status returned by the upstream service.
+        content_type:
+          type: string
+          description: Upstream Content-Type response header, when present.
+        body_base64:
+          type: string
+          format: byte
+          description: Base64-encoded upstream response body.
+
     SandboxProxyRejectedResponse:
       type: object
       description: |
         Fail-closed response for a recognized sandbox HTTPS proxy
-        request when credentialed data-plane execution is not yet
-        available.
+        request when the request cannot be mediated safely.
       required: [status, audit_id, connector_fqn, tool, operation, message]
       properties:
         status:

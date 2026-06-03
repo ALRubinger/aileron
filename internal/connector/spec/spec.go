@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/cstore"
@@ -51,6 +53,7 @@ type Operation struct {
 	Description string       `json:"description,omitempty"`
 	Method      string       `json:"method,omitempty"`
 	Path        string       `json:"path,omitempty"`
+	Hosts       []string     `json:"hosts,omitempty"`
 	Idempotency string       `json:"idempotency,omitempty"`
 	Approval    string       `json:"approval,omitempty"`
 	Credential  string       `json:"credential,omitempty"`
@@ -179,9 +182,40 @@ func Validate(spec Spec) error {
 			if err := validateNamedFields("audit field", operation.Audit, func(field AuditField) string { return field.Name }, name, opName); err != nil {
 				return err
 			}
+			for _, host := range operation.Hosts {
+				if !validOperationHost(host) {
+					return fmt.Errorf("tool %q operation %q host %q is invalid", name, opName, host)
+				}
+			}
 		}
 	}
 	return nil
+}
+
+func validOperationHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" || strings.ContainsAny(host, "/ \t\r\n?#@") {
+		return false
+	}
+	if strings.Contains(host, ":") {
+		hostPart, port, err := net.SplitHostPort(host)
+		if err != nil {
+			index := strings.LastIndex(host, ":")
+			if index <= 0 || index == len(host)-1 {
+				return false
+			}
+			hostPart = host[:index]
+			port = host[index+1:]
+		}
+		if strings.TrimSpace(hostPart) == "" {
+			return false
+		}
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 1 || value > 65535 {
+			return false
+		}
+	}
+	return true
 }
 
 func validateNamedFields[T any](kind string, fields []T, name func(T) string, toolName, operationName string) error {

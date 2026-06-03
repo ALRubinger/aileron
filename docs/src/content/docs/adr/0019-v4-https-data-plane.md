@@ -39,7 +39,9 @@ The third #896 slice adds the daemon-side proxy request boundary at `POST /v1/sa
 
 The fourth #896 slice adds the image-side trust-store helper contract. `aileron/sandbox-base` now carries `aileron-install-proxy-ca`, creates `/etc/aileron/proxy`, and launch validation requires the helper when proxy bootstrap mode is enabled. The helper can validate the mounted session CA as an unprivileged user and can install it with `update-ca-certificates` when invoked as root. The runtime still does not run a root pre-start trust install, proxy upstream HTTPS traffic, or inject credentials; those remain follow-on #896 work.
 
-The fifth #896 slice wires that helper into sandbox launch. In internal proxy-bootstrap mode, the agent container starts as root, runs `aileron-run-with-proxy-ca` to install the mounted session CA into the container trust store, then drops back to the `agent` user and execs the requested agent command in the same container. The data plane still does not proxy upstream HTTPS traffic or inject credentials.
+The fifth #896 slice wires that helper into sandbox launch. In internal proxy-bootstrap mode, the agent container starts as root, runs `aileron-run-with-proxy-ca` to install the mounted session CA into the container trust store, then drops back to the `agent` user and execs the requested agent command in the same container.
+
+The sixth #896 slice adds the first daemon-side upstream transport path behind `POST /v1/sandbox-proxy/requests`. Recognized, bodyless HTTPS requests now resolve the matching connector spec operation by method, path, and explicit upstream host allowlist; resolve the spec-declared credential binding in the daemon; inject `api_key` or `oauth2` credentials as an upstream bearer token; proxy the request; return a sanitized response body; and audit `connector.proxy.proxied` without recording credential bytes or query strings. The full forward-proxy/TLS interception surface, request bodies, and generated client integration remain follow-on work.
 
 ## Consequences
 
