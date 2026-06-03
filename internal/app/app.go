@@ -808,6 +808,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		log.Info("auth middleware enabled")
 	}
 
+	handler = server.sandboxForwardProxyMiddleware(handler)
 	handler = loggingMiddleware(log, handler)
 	// Tracing middleware sits just outside the route handlers (and
 	// auth) so the server-root span captures the full handler-side
