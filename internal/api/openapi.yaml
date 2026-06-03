@@ -2645,11 +2645,12 @@ paths:
         sandbox shim against the installed `aileron.connector.v1` specs.
         This is the stable daemon-side contract for spec-backed shims.
 
-        The first #896 cut is intentionally fail-closed: recognized
-        operations are audited and return `501 not_implemented` until the
-        mediated HTTPS proxy/data-plane can execute the operation and
-        inject credentials at the daemon boundary. Unknown operations are
-        rejected before any execution attempt.
+        Bodyless operations with spec-declared HTTPS method/path/hosts
+        are mediated through the sandbox HTTPS proxy boundary. For
+        `GET`, `DELETE`, and `HEAD`, shim args are encoded as query
+        parameters. Operations that require request-body mapping still
+        fail closed until request-body transport is implemented. Unknown
+        operations are rejected before any execution attempt.
       operationId: runConnectorOperation
       requestBody:
         required: true
@@ -2658,10 +2659,18 @@ paths:
             schema:
               $ref: "#/components/schemas/ConnectorOperationRunRequest"
       responses:
+        "200":
+          description: |
+            Operation was recognized, mediated through the sandbox HTTPS
+            proxy boundary, and sent upstream.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxProxyResponse"
         "501":
           description: |
-            Operation was recognized and audited, but mediated connector
-            operation execution is not available in this runtime cut.
+            Operation was recognized and audited, but it is not eligible
+            for the current bodyless proxy execution cut.
           content:
             application/json:
               schema:
@@ -2671,7 +2680,14 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          description: |
+            Operation was recognized, but credential mediation failed closed.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SandboxProxyRejectedResponse"
+                  - $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -2680,6 +2696,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "502":
+          description: Upstream HTTPS request failed or returned an unsupported response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxProxyRejectedResponse"
 
   /v1/sandbox-proxy/requests:
     post:
