@@ -28,7 +28,7 @@ type sandboxProxyBootstrap struct {
 	Mounts   []sandboxcontainer.Volume
 }
 
-func prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL string) (sandboxProxyBootstrap, error) {
+func prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL, daemonToken string) (sandboxProxyBootstrap, error) {
 	if !sandboxProxyBootstrapEnabled() {
 		return sandboxProxyBootstrap{}, nil
 	}
@@ -41,6 +41,10 @@ func prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL string) 
 	proxyURL := strings.TrimRight(agentEndpointURL, "/")
 	if proxyURL == "" {
 		return sandboxProxyBootstrap{}, fmt.Errorf("agent endpoint URL is required")
+	}
+	proxyURL, err := sandboxProxyURLWithSessionAuth(proxyURL, sessionID, daemonToken)
+	if err != nil {
+		return sandboxProxyBootstrap{}, err
 	}
 	root := filepath.Join(stateDir, "sessions", sessionID, "sandbox-proxy")
 	caPath := filepath.Join(root, "ca.pem")
@@ -65,7 +69,7 @@ func validateProxyBootstrapSessionID(sessionID string) error {
 	if sessionID != strings.TrimSpace(sessionID) {
 		return fmt.Errorf("session id must not contain surrounding whitespace")
 	}
-	if sessionID == "." || sessionID == ".." || filepath.Clean(sessionID) != sessionID || filepath.Base(sessionID) != sessionID || strings.ContainsAny(sessionID, `/\`) {
+	if sessionID == "." || sessionID == ".." || filepath.Clean(sessionID) != sessionID || filepath.Base(sessionID) != sessionID || strings.ContainsAny(sessionID, `/\:`) {
 		return fmt.Errorf("session id %q is not a safe path segment", sessionID)
 	}
 	return nil
@@ -120,6 +124,19 @@ func mergeNoProxy(existing, proxyURL string) string {
 		}
 	}
 	return strings.Join(entries, ",")
+}
+
+func sandboxProxyURLWithSessionAuth(rawURL, sessionID, daemonToken string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("sandbox proxy URL must be absolute")
+	}
+	if daemonToken != "" {
+		parsed.User = url.UserPassword(sessionID, daemonToken)
+	} else {
+		parsed.User = url.User(sessionID)
+	}
+	return parsed.String(), nil
 }
 
 func writeSessionCA(caPath, keyPath, sessionID string) error {

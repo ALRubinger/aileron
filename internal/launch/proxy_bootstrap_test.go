@@ -11,7 +11,7 @@ import (
 
 func TestPrepareSandboxProxyBootstrap_DefaultOff(t *testing.T) {
 	t.Setenv(sandboxProxyBootstrapEnv, "")
-	got, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "http://host.docker.internal:48123")
+	got, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "http://host.docker.internal:48123", "")
 	if err != nil {
 		t.Fatalf("prepareSandboxProxyBootstrap: %v", err)
 	}
@@ -23,14 +23,14 @@ func TestPrepareSandboxProxyBootstrap_DefaultOff(t *testing.T) {
 func TestPrepareSandboxProxyBootstrap_GeneratesSessionCAAndMount(t *testing.T) {
 	t.Setenv(sandboxProxyBootstrapEnv, "1")
 	stateDir := t.TempDir()
-	got, err := prepareSandboxProxyBootstrap(stateDir, "session-123", "http://host.docker.internal:48123/")
+	got, err := prepareSandboxProxyBootstrap(stateDir, "session-123", "http://host.docker.internal:48123/", "daemon-token")
 	if err != nil {
 		t.Fatalf("prepareSandboxProxyBootstrap: %v", err)
 	}
 	if got.Mode != "bootstrap" {
 		t.Fatalf("Mode = %q, want bootstrap", got.Mode)
 	}
-	if got.ProxyURL != "http://host.docker.internal:48123" {
+	if got.ProxyURL != "http://session-123:daemon-token@host.docker.internal:48123" {
 		t.Fatalf("ProxyURL = %q", got.ProxyURL)
 	}
 	wantCAPath := filepath.Join(stateDir, "sessions", "session-123", "sandbox-proxy", "ca.pem")
@@ -66,9 +66,9 @@ func TestPrepareSandboxProxyBootstrap_GeneratesSessionCAAndMount(t *testing.T) {
 
 func TestPrepareSandboxProxyBootstrap_RejectsUnsafeSessionID(t *testing.T) {
 	t.Setenv(sandboxProxyBootstrapEnv, "1")
-	for _, sessionID := range []string{"../escape", "nested/session", `nested\session`, " session-123", "session-123 ", ".", ".."} {
+	for _, sessionID := range []string{"../escape", "nested/session", `nested\session`, "session:123", " session-123", "session-123 ", ".", ".."} {
 		t.Run(sessionID, func(t *testing.T) {
-			_, err := prepareSandboxProxyBootstrap(t.TempDir(), sessionID, "http://host.docker.internal:48123")
+			_, err := prepareSandboxProxyBootstrap(t.TempDir(), sessionID, "http://host.docker.internal:48123", "")
 			if err == nil {
 				t.Fatal("expected unsafe session id error")
 			}
@@ -78,9 +78,17 @@ func TestPrepareSandboxProxyBootstrap_RejectsUnsafeSessionID(t *testing.T) {
 
 func TestPrepareSandboxProxyBootstrap_RequiresAgentEndpointURL(t *testing.T) {
 	t.Setenv(sandboxProxyBootstrapEnv, "1")
-	_, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "")
+	_, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "", "")
 	if err == nil {
 		t.Fatal("expected agent endpoint URL error")
+	}
+}
+
+func TestPrepareSandboxProxyBootstrap_RejectsInvalidAgentEndpointURL(t *testing.T) {
+	t.Setenv(sandboxProxyBootstrapEnv, "1")
+	_, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "http://", "")
+	if err == nil {
+		t.Fatal("expected invalid agent endpoint URL error")
 	}
 }
 
@@ -99,15 +107,15 @@ func TestApplySandboxProxyBootstrapEnv(t *testing.T) {
 	env := map[string]string{"NO_PROXY": "internal.example"}
 	applySandboxProxyBootstrapEnv(env, sandboxProxyBootstrap{
 		Mode:     "bootstrap",
-		ProxyURL: "http://host.docker.internal:48123",
+		ProxyURL: "http://session-123:daemon-token@host.docker.internal:48123",
 	})
 
 	for key, want := range map[string]string{
 		"AILERON_SANDBOX_PROXY_MODE":    "bootstrap",
-		"AILERON_SANDBOX_PROXY_URL":     "http://host.docker.internal:48123",
+		"AILERON_SANDBOX_PROXY_URL":     "http://session-123:daemon-token@host.docker.internal:48123",
 		"AILERON_SANDBOX_PROXY_CA_FILE": sandboxProxyCAPath,
-		"HTTPS_PROXY":                   "http://host.docker.internal:48123",
-		"HTTP_PROXY":                    "http://host.docker.internal:48123",
+		"HTTPS_PROXY":                   "http://session-123:daemon-token@host.docker.internal:48123",
+		"HTTP_PROXY":                    "http://session-123:daemon-token@host.docker.internal:48123",
 	} {
 		if got := env[key]; got != want {
 			t.Fatalf("%s = %q, want %q", key, got, want)
@@ -117,5 +125,21 @@ func TestApplySandboxProxyBootstrapEnv(t *testing.T) {
 		if !strings.Contains(env["NO_PROXY"], want) {
 			t.Fatalf("NO_PROXY = %q, missing %q", env["NO_PROXY"], want)
 		}
+	}
+}
+
+func TestSandboxProxyURLWithSessionAuth_NoDaemonToken(t *testing.T) {
+	got, err := sandboxProxyURLWithSessionAuth("http://host.docker.internal:48123", "session-123", "")
+	if err != nil {
+		t.Fatalf("sandboxProxyURLWithSessionAuth: %v", err)
+	}
+	if got != "http://session-123@host.docker.internal:48123" {
+		t.Fatalf("proxy URL = %q", got)
+	}
+}
+
+func TestSandboxProxyURLWithSessionAuth_RejectsInvalidURL(t *testing.T) {
+	if _, err := sandboxProxyURLWithSessionAuth("host.docker.internal:48123", "session-123", "daemon-token"); err == nil {
+		t.Fatal("expected invalid proxy URL error")
 	}
 }

@@ -47,6 +47,8 @@ The seventh #896 slice bridges generated spec shims onto the existing proxy requ
 
 The eighth #896 slice adds generated-shim JSON request bodies for write-style methods. `POST`, `PATCH`, and `PUT` operations now send the shim `args` object upstream as an `application/json` body through the same daemon proxy boundary. Audit remains sanitized: it records operation identity and upstream destination/status, not credential bytes, query strings, or request body values. Full transparent `HTTPS_PROXY` / TLS interception for arbitrary clients remains follow-on work.
 
+The ninth #896 slice prepares the transparent proxy entrypoint. Internal proxy-bootstrap launch now embeds the launch session id, and the local daemon token when available, into the standard proxy URL userinfo so HTTPS clients send `Proxy-Authorization` on proxy requests. The daemon recognizes proxy-shaped requests before normal webapp/API routing, validates standard Basic proxy auth, associates the request with the sandbox session, and fails closed with `501 not_implemented` until the CONNECT/TLS interception transport lands. This separates proxy authentication/session binding from the later request mediation implementation.
+
 ## Consequences
 
 Images must be able to trust the session CA or fail before the agent starts. BYO images need documented trust-store requirements and actionable launch validation.

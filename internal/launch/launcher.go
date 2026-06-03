@@ -339,7 +339,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
 		}
-		proxyBootstrap, err = prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL)
+		proxyBootstrap, err = prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL, daemonToken)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare sandbox proxy bootstrap: %w", err)
 		}
