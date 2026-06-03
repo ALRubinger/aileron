@@ -43,7 +43,9 @@ The fifth #896 slice wires that helper into sandbox launch. In internal proxy-bo
 
 The sixth #896 slice adds the first daemon-side upstream transport path behind `POST /v1/sandbox-proxy/requests`. Recognized, bodyless HTTPS requests now resolve the matching connector spec operation by method, path, and explicit upstream host allowlist; resolve the spec-declared credential binding in the daemon; inject `api_key` or `oauth2` credentials as an upstream bearer token; proxy the request; return a sanitized response body; and audit `connector.proxy.proxied` without recording credential bytes or query strings. The full forward-proxy/TLS interception surface, request bodies, and generated client integration remain follow-on work.
 
-The seventh #896 slice bridges generated spec shims onto the existing proxy request boundary for bodyless operations. `POST /v1/connector-operations/run` can now proxy eligible `GET`, `DELETE`, and `HEAD` operations by building the upstream HTTPS URL from the installed spec's method, path, and first allowed host, then encoding shim args as query parameters. POST-like operations that require request-body mapping still fail closed with an audited direct-shim rejection until request-body transport is defined.
+The seventh #896 slice bridges generated spec shims onto the existing proxy request boundary for bodyless operations. `POST /v1/connector-operations/run` can now proxy eligible `GET`, `DELETE`, and `HEAD` operations by building the upstream HTTPS URL from the installed spec's method, path, and first allowed host, then encoding shim args as query parameters.
+
+The eighth #896 slice adds generated-shim JSON request bodies for write-style methods. `POST`, `PATCH`, and `PUT` operations now send the shim `args` object upstream as an `application/json` body through the same daemon proxy boundary. Audit remains sanitized: it records operation identity and upstream destination/status, not credential bytes, query strings, or request body values. Full transparent `HTTPS_PROXY` / TLS interception for arbitrary clients remains follow-on work.
 
 ## Consequences
 

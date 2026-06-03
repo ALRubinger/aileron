@@ -2645,12 +2645,12 @@ paths:
         sandbox shim against the installed `aileron.connector.v1` specs.
         This is the stable daemon-side contract for spec-backed shims.
 
-        Bodyless operations with spec-declared HTTPS method/path/hosts
-        are mediated through the sandbox HTTPS proxy boundary. For
-        `GET`, `DELETE`, and `HEAD`, shim args are encoded as query
-        parameters. Operations that require request-body mapping still
-        fail closed until request-body transport is implemented. Unknown
-        operations are rejected before any execution attempt.
+        Operations with spec-declared HTTPS method/path/hosts are
+        mediated through the sandbox HTTPS proxy boundary. For `GET`,
+        `DELETE`, and `HEAD`, shim args are encoded as query parameters.
+        For `POST`, `PATCH`, and `PUT`, shim args are sent upstream as
+        an `application/json` request body. Unknown operations are
+        rejected before any execution attempt.
       operationId: runConnectorOperation
       requestBody:
         required: true
@@ -2670,7 +2670,7 @@ paths:
         "501":
           description: |
             Operation was recognized and audited, but it is not eligible
-            for the current bodyless proxy execution cut.
+            for the current generated-shim proxy execution cut.
           content:
             application/json:
               schema:
