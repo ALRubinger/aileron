@@ -106,6 +106,7 @@ type apiServer struct {
 	specLoader         connectorSpecLoader           // installed connector operation specs for generated sandbox shims; nil loads from cstore.DefaultRoot
 	oauth2Sessions     *oauth2Sessions               // ADR-0006 server-driven OAuth dance state; lazy-initialized on first use
 	oauth2HTTPClient   *http.Client                  // for OAuth token exchanges; nil → http.DefaultClient
+	sandboxProxyClient *http.Client                  // for sandbox HTTPS data-plane upstream requests; nil → http.DefaultClient
 
 	// --- Hub (ADR-0013, #486, #487) ---
 	hub         *hub.Client // connector-discovery Hub client; nil disables /v1/hub/* endpoints

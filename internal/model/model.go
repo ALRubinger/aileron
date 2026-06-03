@@ -300,4 +300,5 @@ const (
 	// identifies the spec-declared operation and upstream destination,
 	// never credential values.
 	EventTypeConnectorProxyRejected EventType = "connector.proxy.rejected"
+	EventTypeConnectorProxyProxied  EventType = "connector.proxy.proxied"
 )

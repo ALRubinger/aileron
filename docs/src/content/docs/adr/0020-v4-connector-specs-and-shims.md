@@ -52,6 +52,8 @@ The request body contains `connector_fqn`, `tool`, `operation`, and raw JSON `ar
 
 As the first #896 cut, the daemon endpoint resolves installed specs, writes an audit event for recognized connector-operation attempts, and returns `501 not_implemented` until mediated HTTPS execution and credential injection are available. That keeps generated shims fail-closed while giving the proxy/data-plane work a tested API boundary.
 
+Later #896 proxy work adds the internal `/sandbox-proxy/requests` data-plane boundary. That boundary can now proxy recognized bodyless HTTPS requests with daemon-side credential injection after method, path, and explicit upstream host allowlist matching, while `/connector-operations/run` remains the stable direct operation contract until generated client wiring moves onto the proxy path.
+
 The v1 spec requires:
 
 | Field | Requirement |
@@ -60,6 +62,7 @@ The v1 spec requires:
 | `connector.fqn` | valid connector FQN |
 | `tools[].name` | unique command name using letters, digits, dots, dashes, underscores, or colons |
 | `tools[].operations[].name` | unique operation name per tool using the same restricted character set |
+| `tools[].operations[].hosts[]` | allowed upstream hosts for proxy transport; no scheme or path |
 | `tools[].operations[].inputs[].name` | optional, unique input name per operation using the same restricted character set |
 | `tools[].operations[].audit[].name` | optional, unique audit field name per operation using the same restricted character set |
 

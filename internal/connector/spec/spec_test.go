@@ -19,6 +19,7 @@ func TestParseValidatesConnectorSpec(t *testing.T) {
 	      "summary": "Send a Gmail message",
 	      "method": "POST",
 	      "path": "/gmail/v1/users/me/messages/send",
+	      "hosts": ["gmail.googleapis.com"],
 	      "idempotency": "not_idempotent",
 	      "approval": "required",
 	      "credential": "oauth2",
@@ -34,6 +35,9 @@ func TestParseValidatesConnectorSpec(t *testing.T) {
 	}
 	if got := spec.Tools[0].Operations[0].Inputs[0].Name; got != "to" {
 		t.Fatalf("input name = %q", got)
+	}
+	if got := spec.Tools[0].Operations[0].Hosts[0]; got != "gmail.googleapis.com" {
+		t.Fatalf("host = %q", got)
 	}
 }
 
@@ -210,6 +214,66 @@ func TestValidateRejectsRequiredFieldErrors(t *testing.T) {
 				}}}},
 			},
 			want: "duplicate audit field",
+		},
+		{
+			name: "invalid host path",
+			spec: Spec{
+				SchemaVersion: SchemaVersion,
+				Connector:     Connector{FQN: "github://acme/connector"},
+				Tools: []Tool{{
+					Name: "google",
+					Operations: []Operation{{
+						Name:  "list",
+						Hosts: []string{"https://gmail.googleapis.com/path"},
+					}},
+				}},
+			},
+			want: "host",
+		},
+		{
+			name: "invalid host query",
+			spec: Spec{
+				SchemaVersion: SchemaVersion,
+				Connector:     Connector{FQN: "github://acme/connector"},
+				Tools: []Tool{{
+					Name: "google",
+					Operations: []Operation{{
+						Name:  "list",
+						Hosts: []string{"gmail.googleapis.com?alt=json"},
+					}},
+				}},
+			},
+			want: "host",
+		},
+		{
+			name: "invalid host userinfo",
+			spec: Spec{
+				SchemaVersion: SchemaVersion,
+				Connector:     Connector{FQN: "github://acme/connector"},
+				Tools: []Tool{{
+					Name: "google",
+					Operations: []Operation{{
+						Name:  "list",
+						Hosts: []string{"token@gmail.googleapis.com"},
+					}},
+				}},
+			},
+			want: "host",
+		},
+		{
+			name: "invalid host port",
+			spec: Spec{
+				SchemaVersion: SchemaVersion,
+				Connector:     Connector{FQN: "github://acme/connector"},
+				Tools: []Tool{{
+					Name: "google",
+					Operations: []Operation{{
+						Name:  "list",
+						Hosts: []string{"gmail.googleapis.com:70000"},
+					}},
+				}},
+			},
+			want: "host",
 		},
 	}
 	for _, tt := range tests {
