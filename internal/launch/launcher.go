@@ -542,6 +542,11 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	mounts = append(mounts, extraMounts...)
 	command := append([]string{commandName}, config.Agent.Args()...)
 	command = append(command, config.Args...)
+	user := ""
+	if sandboxProxyBootstrapActive(agentEnv) {
+		user = "root"
+		command = append([]string{"aileron-run-with-proxy-ca"}, command...)
+	}
 	_, err = sandboxcontainer.Builder{
 		Runtime: plan.Runtime,
 		Stdout:  os.Stdout,
@@ -553,12 +558,17 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		Env:     agentEnv,
 		Volumes: mounts,
 		Command: command,
+		User:    user,
 		TTY:     term.IsTerminal(int(os.Stdin.Fd())),
 	})
 	if err != nil {
 		return exitResult(err)
 	}
 	return LaunchResult{ExitCode: 0}, nil
+}
+
+func sandboxProxyBootstrapActive(agentEnv map[string]string) bool {
+	return strings.TrimSpace(agentEnv["AILERON_SANDBOX_PROXY_MODE"]) != ""
 }
 
 func sandboxRuntimeMounts(reservedNames ...string) ([]sandboxcontainer.Volume, func(), error) {

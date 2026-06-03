@@ -78,6 +78,7 @@ type RunOptions struct {
 	Env     map[string]string
 	Volumes []Volume
 	Command []string
+	User    string
 	TTY     bool
 }
 
@@ -352,6 +353,11 @@ if [ "${3:-0}" = "1" ]; then
     echo "extend the current aileron/sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
     exit 127
   fi
+  if ! command -v aileron-run-with-proxy-ca >/dev/null 2>&1; then
+    echo "sandbox proxy bootstrap requires aileron-run-with-proxy-ca in the sandbox image" >&2
+    echo "extend the current aileron/sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
+    exit 127
+  fi
   aileron-install-proxy-ca --check "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
 fi
 `
@@ -415,6 +421,9 @@ func runArgs(opts RunOptions) ([]string, error) {
 	args := []string{"run", "--rm", "-i"}
 	if opts.TTY {
 		args = append(args, "-t")
+	}
+	if strings.TrimSpace(opts.User) != "" {
+		args = append(args, "--user", strings.TrimSpace(opts.User))
 	}
 	args = append(args,
 		"--workdir", WorkspacePath,
