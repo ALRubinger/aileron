@@ -18,6 +18,7 @@ import (
 	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/credential"
 	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -297,6 +298,120 @@ func TestRunConnectorOperation_PostWithArgsStillFailsClosed(t *testing.T) {
 	}
 	if events[0].EventType != model.EventTypeConnectorOperationRejected {
 		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeConnectorOperationRejected)
+	}
+}
+
+func TestConnectorOperationRunUpstreamURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation connectorspec.Operation
+		args      *map[string]any
+		wantURL   string
+		wantProxy bool
+		wantErr   string
+	}{
+		{
+			name: "delete query args",
+			operation: connectorspec.Operation{
+				Name: "messages.delete", Method: "DELETE", Path: "/gmail/v1/users/me/messages", Hosts: []string{"gmail.googleapis.com"},
+			},
+			args:      &map[string]any{"id": "msg-123", "dryRun": false, "attempt": float64(2), "empty": nil},
+			wantURL:   "https://gmail.googleapis.com/gmail/v1/users/me/messages?attempt=2&dryRun=false&empty=&id=msg-123",
+			wantProxy: true,
+		},
+		{
+			name: "head without args",
+			operation: connectorspec.Operation{
+				Name: "messages.head", Method: "HEAD", Path: "/gmail/v1/users/me/messages", Hosts: []string{"gmail.googleapis.com"},
+			},
+			wantURL:   "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+			wantProxy: true,
+		},
+		{
+			name: "missing method",
+			operation: connectorspec.Operation{
+				Name: "messages.search", Path: "/gmail/v1/users/me/messages", Hosts: []string{"gmail.googleapis.com"},
+			},
+			wantProxy: false,
+		},
+		{
+			name: "missing hosts",
+			operation: connectorspec.Operation{
+				Name: "messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages",
+			},
+			wantProxy: false,
+		},
+		{
+			name: "relative path",
+			operation: connectorspec.Operation{
+				Name: "messages.search", Method: "GET", Path: "gmail/v1/users/me/messages", Hosts: []string{"gmail.googleapis.com"},
+			},
+			wantProxy: false,
+		},
+		{
+			name: "post not eligible",
+			operation: connectorspec.Operation{
+				Name: "messages.send", Method: "POST", Path: "/gmail/v1/users/me/messages/send", Hosts: []string{"gmail.googleapis.com"},
+			},
+			args:      &map[string]any{"to": "alice@example.com"},
+			wantProxy: false,
+		},
+		{
+			name: "invalid host",
+			operation: connectorspec.Operation{
+				Name: "messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages", Hosts: []string{"bad host"},
+			},
+			wantProxy: false,
+		},
+		{
+			name: "empty arg key",
+			operation: connectorspec.Operation{
+				Name: "messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages", Hosts: []string{"gmail.googleapis.com"},
+			},
+			args:    &map[string]any{" ": "value"},
+			wantErr: "args contains an empty query parameter name",
+		},
+		{
+			name: "object arg rejected",
+			operation: connectorspec.Operation{
+				Name: "messages.search", Method: "GET", Path: "/gmail/v1/users/me/messages", Hosts: []string{"gmail.googleapis.com"},
+			},
+			args:    &map[string]any{"filter": map[string]any{"q": "secret"}},
+			wantErr: "args.filter must be a string, number, boolean, null, or array of those values for bodyless proxy execution",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := api.ConnectorOperationRunRequest{Args: tt.args}
+			upstream, canProxy, err := connectorOperationRunUpstreamURL(req, discovery.SpecOperationHelp{
+				Name:       tt.operation.Name,
+				Method:     tt.operation.Method,
+				Path:       tt.operation.Path,
+				Hosts:      tt.operation.Hosts,
+				Credential: tt.operation.Credential,
+			})
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("connectorOperationRunUpstreamURL error: %v", err)
+			}
+			if canProxy != tt.wantProxy {
+				t.Fatalf("canProxy = %v, want %v", canProxy, tt.wantProxy)
+			}
+			if !tt.wantProxy {
+				if upstream != nil {
+					t.Fatalf("upstream = %s, want nil", upstream)
+				}
+				return
+			}
+			if upstream.String() != tt.wantURL {
+				t.Fatalf("upstream = %s, want %s", upstream, tt.wantURL)
+			}
+		})
 	}
 }
 
