@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,13 +64,13 @@ func (s *apiServer) RunConnectorOperation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	upstream, canProxy, err := connectorOperationRunUpstreamURL(req, operation)
+	proxyReq, canProxy, err := connectorOperationRunProxyRequest(req, operation)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
 		return
 	}
 	if canProxy {
-		result, ok := s.executeSandboxProxyRequest(w, r, connectorFQN, toolName, strings.ToUpper(operation.Method), upstream, operation)
+		result, ok := s.executeSandboxProxyRequest(w, r, connectorFQN, toolName, proxyReq.method, proxyReq.upstream, operation, proxyReq.body, proxyReq.contentType)
 		if !ok {
 			return
 		}
@@ -138,7 +139,7 @@ func (s *apiServer) RecordSandboxProxyRequest(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	result, ok := s.executeSandboxProxyRequest(w, r, connectorFQN, toolName, method, upstream, operation)
+	result, ok := s.executeSandboxProxyRequest(w, r, connectorFQN, toolName, method, upstream, operation, nil, "")
 	if !ok {
 		return
 	}
@@ -170,47 +171,72 @@ func findSpecConnectorOperation(specs []connectorspec.Spec, connectorFQN, toolNa
 	return discovery.SpecOperationHelp{}, false, nil
 }
 
-func connectorOperationRunUpstreamURL(req api.ConnectorOperationRunRequest, operation discovery.SpecOperationHelp) (*url.URL, bool, error) {
+type connectorOperationProxyRequest struct {
+	method      string
+	upstream    *url.URL
+	body        []byte
+	contentType string
+}
+
+func connectorOperationRunProxyRequest(req api.ConnectorOperationRunRequest, operation discovery.SpecOperationHelp) (connectorOperationProxyRequest, bool, error) {
 	method := strings.ToUpper(strings.TrimSpace(operation.Method))
 	path := strings.TrimSpace(operation.Path)
 	if path == "" {
 		path = "/"
 	}
 	if method == "" || len(operation.Hosts) == 0 {
-		return nil, false, nil
+		return connectorOperationProxyRequest{}, false, nil
 	}
 	if path[0] != '/' {
-		return nil, false, nil
-	}
-	switch method {
-	case http.MethodGet, http.MethodDelete, http.MethodHead:
-	default:
-		return nil, false, nil
+		return connectorOperationProxyRequest{}, false, nil
 	}
 
 	args := map[string]any{}
 	if req.Args != nil {
 		args = *req.Args
 	}
-	query := url.Values{}
+	upstream, err := parseSandboxProxyUpstreamURL("https://" + strings.TrimSpace(operation.Hosts[0]) + path)
+	if err != nil {
+		return connectorOperationProxyRequest{}, false, nil
+	}
+	proxyReq := connectorOperationProxyRequest{
+		method:   method,
+		upstream: upstream,
+	}
+
+	switch method {
+	case http.MethodGet, http.MethodDelete, http.MethodHead:
+		if err := addConnectorOperationQueryArgs(upstream.Query(), args, upstream); err != nil {
+			return connectorOperationProxyRequest{}, false, err
+		}
+		return proxyReq, true, nil
+	case http.MethodPost, http.MethodPatch, http.MethodPut:
+		body, err := json.Marshal(args)
+		if err != nil {
+			return connectorOperationProxyRequest{}, false, fmt.Errorf("args must be JSON-serializable for request-body proxy execution: %w", err)
+		}
+		proxyReq.body = body
+		proxyReq.contentType = "application/json"
+		return proxyReq, true, nil
+	default:
+		return connectorOperationProxyRequest{}, false, nil
+	}
+}
+
+func addConnectorOperationQueryArgs(query url.Values, args map[string]any, upstream *url.URL) error {
 	if len(args) > 0 {
 		for key, value := range args {
 			key = strings.TrimSpace(key)
 			if key == "" {
-				return nil, false, fmt.Errorf("args contains an empty query parameter name")
+				return fmt.Errorf("args contains an empty query parameter name")
 			}
 			if err := addConnectorOperationQueryArg(query, key, value); err != nil {
-				return nil, false, err
+				return err
 			}
 		}
 	}
-
-	upstream, err := parseSandboxProxyUpstreamURL("https://" + strings.TrimSpace(operation.Hosts[0]) + path)
-	if err != nil {
-		return nil, false, nil
-	}
 	upstream.RawQuery = query.Encode()
-	return upstream, true, nil
+	return nil
 }
 
 func addConnectorOperationQueryArg(query url.Values, key string, value any) error {
@@ -300,8 +326,12 @@ func sandboxProxyHostWithDefaultPort(upstream *url.URL) string {
 	return strings.ToLower(upstream.Host)
 }
 
-func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Request, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp) (api.SandboxProxyResponse, bool) {
-	req, err := http.NewRequestWithContext(r.Context(), method, upstream.String(), nil)
+func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Request, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp, requestBody []byte, contentType string) (api.SandboxProxyResponse, bool) {
+	var reqBody io.Reader
+	if requestBody != nil {
+		reqBody = bytes.NewReader(requestBody)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), method, upstream.String(), reqBody)
 	if err != nil {
 		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "invalid_upstream_request")
 		writeJSON(w, http.StatusBadRequest, api.SandboxProxyRejectedResponse{
@@ -315,6 +345,9 @@ func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Re
 		return api.SandboxProxyResponse{}, false
 	}
 	req.Header.Set("User-Agent", "aileron-sandbox-proxy")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 
 	if operation.Credential != "" {
 		if !s.injectSandboxProxyCredential(w, r, req, connectorFQN, toolName, method, upstream, operation) {

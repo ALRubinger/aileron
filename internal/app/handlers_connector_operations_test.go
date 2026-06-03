@@ -261,33 +261,77 @@ func TestRunConnectorOperation_BodylessGETProxiesThroughSandboxDataPlane(t *test
 	}
 }
 
-func TestRunConnectorOperation_PostWithArgsStillFailsClosed(t *testing.T) {
+func TestRunConnectorOperation_POSTProxiesJSONBodyThroughSandboxDataPlane(t *testing.T) {
 	const connectorFQN = "github://acme/aileron-connector-google"
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("upstream method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/gmail/v1/users/me/messages/send" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		if got := r.URL.RawQuery; got != "" {
+			t.Errorf("upstream query = %q, want empty", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("content-type = %q, want application/json", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gmail_secret" {
+			t.Errorf("authorization = %q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("decode upstream body: %v; body=%s", err, body)
+		}
+		if got["to"] != "alice@example.com" || got["subject"] != "hello" {
+			t.Errorf("upstream body = %#v", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"sent-123"}`))
+	}))
+	defer upstream.Close()
+
 	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
 		{
 			SchemaVersion: connectorspec.SchemaVersion,
 			Connector:     connectorspec.Connector{FQN: connectorFQN},
 			Tools: []connectorspec.Tool{
 				{Name: "google", Operations: []connectorspec.Operation{{
-					Name: "gmail.messages.send", Method: "POST", Path: "/gmail/v1/users/me/messages/send", Hosts: []string{"gmail.googleapis.com"}, Credential: "oauth2",
+					Name: "gmail.messages.send", Method: "POST", Path: "/gmail/v1/users/me/messages/send", Hosts: []string{strings.TrimPrefix(upstream.URL, "https://")}, Credential: "oauth2",
 				}}},
 			},
 		},
 	})
-	req := httptest.NewRequest(http.MethodPost, "/v1/connector-operations/run", bytes.NewReader([]byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.send","args":{"to":"alice@example.com"}}`)))
+	srv.sandboxProxyClient = upstream.Client()
+	srv.bindings = sandboxProxyTestBindingStore{resolver: sandboxProxyTestResolver{
+		cred: credential.Credential{Kind: "oauth2", Value: []byte("gmail_secret")},
+	}}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/connector-operations/run", bytes.NewReader([]byte(`{"connector_fqn":"github://acme/aileron-connector-google","tool":"google","operation":"gmail.messages.send","args":{"to":"alice@example.com","subject":"hello"}}`)))
+	req.Header.Set("X-Aileron-Session-Id", "session-123")
 	rec := httptest.NewRecorder()
 
 	srv.RunConnectorOperation(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var resp api.ConnectorOperationRunRejectedResponse
+	var resp api.SandboxProxyResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
 	}
-	if resp.Status != api.ConnectorOperationRunRejectedResponseStatusRejected {
-		t.Errorf("status = %q, want rejected", resp.Status)
+	if resp.Status != api.Proxied {
+		t.Errorf("status = %q, want proxied", resp.Status)
+	}
+	if resp.UpstreamStatus != http.StatusOK {
+		t.Errorf("upstream status = %d, want 200", resp.UpstreamStatus)
+	}
+	if string(resp.BodyBase64) != `{"id":"sent-123"}` {
+		t.Errorf("body = %s", resp.BodyBase64)
 	}
 	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
 	if err != nil {
@@ -296,12 +340,18 @@ func TestRunConnectorOperation_PostWithArgsStillFailsClosed(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if events[0].EventType != model.EventTypeConnectorOperationRejected {
-		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeConnectorOperationRejected)
+	if events[0].EventType != model.EventTypeConnectorProxyProxied {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeConnectorProxyProxied)
+	}
+	payloadJSON, _ := json.Marshal(events[0].Payload)
+	for _, secret := range []string{"gmail_secret", "alice@example.com", "hello"} {
+		if strings.Contains(string(payloadJSON), secret) {
+			t.Fatalf("audit payload leaked body or credential value %q: %s", secret, payloadJSON)
+		}
 	}
 }
 
-func TestConnectorOperationRunUpstreamURL(t *testing.T) {
+func TestConnectorOperationRunProxyRequest_QueryMethods(t *testing.T) {
 	tests := []struct {
 		name      string
 		operation connectorspec.Operation
@@ -349,11 +399,10 @@ func TestConnectorOperationRunUpstreamURL(t *testing.T) {
 			wantProxy: false,
 		},
 		{
-			name: "post not eligible",
+			name: "unsupported method not eligible",
 			operation: connectorspec.Operation{
-				Name: "messages.send", Method: "POST", Path: "/gmail/v1/users/me/messages/send", Hosts: []string{"gmail.googleapis.com"},
+				Name: "messages.options", Method: "OPTIONS", Path: "/gmail/v1/users/me/messages", Hosts: []string{"gmail.googleapis.com"},
 			},
-			args:      &map[string]any{"to": "alice@example.com"},
 			wantProxy: false,
 		},
 		{
@@ -383,7 +432,7 @@ func TestConnectorOperationRunUpstreamURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := api.ConnectorOperationRunRequest{Args: tt.args}
-			upstream, canProxy, err := connectorOperationRunUpstreamURL(req, discovery.SpecOperationHelp{
+			proxyReq, canProxy, err := connectorOperationRunProxyRequest(req, discovery.SpecOperationHelp{
 				Name:       tt.operation.Name,
 				Method:     tt.operation.Method,
 				Path:       tt.operation.Path,
@@ -403,15 +452,81 @@ func TestConnectorOperationRunUpstreamURL(t *testing.T) {
 				t.Fatalf("canProxy = %v, want %v", canProxy, tt.wantProxy)
 			}
 			if !tt.wantProxy {
-				if upstream != nil {
-					t.Fatalf("upstream = %s, want nil", upstream)
+				if proxyReq.upstream != nil {
+					t.Fatalf("upstream = %s, want nil", proxyReq.upstream)
 				}
 				return
 			}
-			if upstream.String() != tt.wantURL {
-				t.Fatalf("upstream = %s, want %s", upstream, tt.wantURL)
+			if proxyReq.upstream.String() != tt.wantURL {
+				t.Fatalf("upstream = %s, want %s", proxyReq.upstream, tt.wantURL)
+			}
+			if len(proxyReq.body) != 0 {
+				t.Fatalf("body = %s, want empty", proxyReq.body)
+			}
+			if proxyReq.contentType != "" {
+				t.Fatalf("contentType = %q, want empty", proxyReq.contentType)
 			}
 		})
+	}
+}
+
+func TestConnectorOperationRunProxyRequest_JSONBodyMethods(t *testing.T) {
+	for _, method := range []string{"POST", "PATCH", "PUT"} {
+		t.Run(method, func(t *testing.T) {
+			args := map[string]any{"to": "alice@example.com", "count": float64(2)}
+			req := api.ConnectorOperationRunRequest{Args: &args}
+			proxyReq, canProxy, err := connectorOperationRunProxyRequest(req, discovery.SpecOperationHelp{
+				Name:   "messages.write",
+				Method: method,
+				Path:   "/gmail/v1/users/me/messages",
+				Hosts:  []string{"gmail.googleapis.com"},
+			})
+			if err != nil {
+				t.Fatalf("connectorOperationRunProxyRequest error: %v", err)
+			}
+			if !canProxy {
+				t.Fatal("canProxy = false, want true")
+			}
+			if proxyReq.method != method {
+				t.Fatalf("method = %q, want %q", proxyReq.method, method)
+			}
+			if proxyReq.upstream.String() != "https://gmail.googleapis.com/gmail/v1/users/me/messages" {
+				t.Fatalf("upstream = %s", proxyReq.upstream)
+			}
+			if proxyReq.contentType != "application/json" {
+				t.Fatalf("contentType = %q, want application/json", proxyReq.contentType)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(proxyReq.body, &got); err != nil {
+				t.Fatalf("decode body: %v; body=%s", err, proxyReq.body)
+			}
+			if got["to"] != "alice@example.com" || got["count"] != float64(2) {
+				t.Fatalf("body = %#v", got)
+			}
+		})
+	}
+}
+
+func TestConnectorOperationRunProxyRequest_JSONBodyRejectsUnserializableArgs(t *testing.T) {
+	args := map[string]any{"callback": func() {}}
+	req := api.ConnectorOperationRunRequest{Args: &args}
+	proxyReq, canProxy, err := connectorOperationRunProxyRequest(req, discovery.SpecOperationHelp{
+		Name:   "messages.write",
+		Method: http.MethodPost,
+		Path:   "/gmail/v1/users/me/messages",
+		Hosts:  []string{"gmail.googleapis.com"},
+	})
+	if err == nil {
+		t.Fatal("connectorOperationRunProxyRequest error = nil, want error")
+	}
+	if canProxy {
+		t.Fatal("canProxy = true, want false")
+	}
+	if proxyReq.upstream != nil {
+		t.Fatalf("upstream = %s, want nil", proxyReq.upstream)
+	}
+	if !strings.Contains(err.Error(), "args must be JSON-serializable") {
+		t.Fatalf("error = %q, want JSON-serializable message", err.Error())
 	}
 }
 
