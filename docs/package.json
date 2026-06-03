@@ -12,7 +12,7 @@
     "test": "node --test \"src/lib/**/*.test.mjs\""
   },
   "dependencies": {
-    "@astrojs/mdx": "^5.0.4",
+    "@astrojs/mdx": "^6.0.0",
     "@astrojs/svelte": "^8.0.5",
     "@lucide/svelte": "^1.16.0",
     "astro": "^6.1.6",
