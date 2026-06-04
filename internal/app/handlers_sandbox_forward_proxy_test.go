@@ -212,6 +212,66 @@ func TestSandboxForwardProxy_CONNECTRoutesMatchedDecryptedRequestThroughProxyBou
 	}
 }
 
+func TestSandboxForwardProxy_CONNECTAuthenticatesWithProxyURLUserinfo(t *testing.T) {
+	stateDir := t.TempDir()
+	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	var upstreamAuth string
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return []connectorspec.Spec{{
+				SchemaVersion: connectorspec.SchemaVersion,
+				Connector:     connectorspec.Connector{FQN: "github://acme/aileron-connector-linear", Version: "1.0.0"},
+				Tools: []connectorspec.Tool{{
+					Name: "linear",
+					Operations: []connectorspec.Operation{{
+						Name:       "issues.list",
+						Method:     http.MethodGet,
+						Path:       "/graphql",
+						Hosts:      []string{"api.example.test"},
+						Credential: "api_key",
+					}},
+				}},
+			}}, nil
+		},
+		bindings: sandboxProxyTestBindingStore{resolver: sandboxProxyTestResolver{cred: credential.Credential{Kind: "api_key", Value: []byte("lin_secret")}}},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamAuth = req.Header.Get("Authorization")
+			return &http.Response{
+				StatusCode: http.StatusAccepted,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
+	}
+	proxy := httptest.NewServer(srv.sandboxForwardProxyMiddleware(http.NotFoundHandler()))
+	defer proxy.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to append CA cert")
+	}
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	proxyURL.User = url.UserPassword("session-123", "daemon-token")
+	client := newSandboxForwardProxyClientFromProxyURL(t, proxyURL, roots)
+	resp, err := client.Get("https://api.example.test/graphql")
+	if err != nil {
+		t.Fatalf("GET through sandbox forward proxy: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	if upstreamAuth != "Bearer lin_secret" {
+		t.Fatalf("upstream Authorization = %q, want bearer token", upstreamAuth)
+	}
+}
+
 func TestSandboxForwardProxy_CONNECTNoMatchAuditsUnresolvedRejection(t *testing.T) {
 	stateDir := t.TempDir()
 	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
@@ -700,11 +760,17 @@ func basicProxyAuth(sessionID, token string) string {
 
 func newSandboxForwardProxyClient(t *testing.T, proxyURL *url.URL, roots *x509.CertPool) *http.Client {
 	t.Helper()
+	client := newSandboxForwardProxyClientFromProxyURL(t, proxyURL, roots)
+	client.Transport.(*http.Transport).ProxyConnectHeader = http.Header{
+		"Proxy-Authorization": []string{basicProxyAuth("session-123", "daemon-token")},
+	}
+	return client
+}
+
+func newSandboxForwardProxyClientFromProxyURL(t *testing.T, proxyURL *url.URL, roots *x509.CertPool) *http.Client {
+	t.Helper()
 	return &http.Client{Transport: &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
-		ProxyConnectHeader: http.Header{
-			"Proxy-Authorization": []string{basicProxyAuth("session-123", "daemon-token")},
-		},
 		TLSClientConfig: &tls.Config{
 			RootCAs:    roots,
 			MinVersion: tls.VersionTLS12,
