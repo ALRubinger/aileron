@@ -22,6 +22,12 @@ import (
 const connectorOperationNotImplementedMessage = "connector operation dispatch is not implemented yet; mediated HTTPS data-plane execution is tracked by issue #896"
 const sandboxProxyMaxResponseBytes = 4 << 20
 
+const (
+	sandboxProxySourceGeneratedConnectorShim = "generated_connector_shim"
+	sandboxProxySourceDaemonRequestBoundary  = "daemon_request_boundary"
+	sandboxProxySourceTransparentConnectTLS  = "transparent_connect_tls"
+)
+
 var sandboxProxyDefaultClient = &http.Client{
 	Timeout:       30 * time.Second,
 	CheckRedirect: sandboxProxyRejectRedirect,
@@ -70,7 +76,7 @@ func (s *apiServer) RunConnectorOperation(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if canProxy {
-		result, ok := s.executeSandboxProxyRequest(w, r, connectorFQN, toolName, proxyReq.method, proxyReq.upstream, operation, proxyReq.body, proxyReq.contentType)
+		result, ok := s.executeSandboxProxyRequest(w, r, sandboxProxySourceGeneratedConnectorShim, connectorFQN, toolName, proxyReq.method, proxyReq.upstream, operation, proxyReq.body, proxyReq.contentType)
 		if !ok {
 			return
 		}
@@ -139,7 +145,7 @@ func (s *apiServer) RecordSandboxProxyRequest(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	result, ok := s.executeSandboxProxyRequest(w, r, connectorFQN, toolName, method, upstream, operation, nil, "")
+	result, ok := s.executeSandboxProxyRequest(w, r, sandboxProxySourceDaemonRequestBoundary, connectorFQN, toolName, method, upstream, operation, nil, "")
 	if !ok {
 		return
 	}
@@ -326,14 +332,14 @@ func sandboxProxyHostWithDefaultPort(upstream *url.URL) string {
 	return strings.ToLower(upstream.Host)
 }
 
-func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Request, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp, requestBody []byte, contentType string) (api.SandboxProxyResponse, bool) {
+func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Request, source, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp, requestBody []byte, contentType string) (api.SandboxProxyResponse, bool) {
 	var reqBody io.Reader
 	if requestBody != nil {
 		reqBody = bytes.NewReader(requestBody)
 	}
 	req, err := http.NewRequestWithContext(r.Context(), method, upstream.String(), reqBody)
 	if err != nil {
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "invalid_upstream_request")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "invalid_upstream_request")
 		writeJSON(w, http.StatusBadRequest, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -350,7 +356,7 @@ func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Re
 	}
 
 	if operation.Credential != "" {
-		if !s.injectSandboxProxyCredential(w, r, req, connectorFQN, toolName, method, upstream, operation) {
+		if !s.injectSandboxProxyCredential(w, r, req, source, connectorFQN, toolName, method, upstream, operation) {
 			return api.SandboxProxyResponse{}, false
 		}
 	}
@@ -358,7 +364,7 @@ func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Re
 	client := sandboxProxyHTTPClient(s.sandboxProxyClient)
 	resp, err := client.Do(req)
 	if err != nil {
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "upstream_transport_failed")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "upstream_transport_failed")
 		writeJSON(w, http.StatusBadGateway, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -372,7 +378,7 @@ func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Re
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, sandboxProxyMaxResponseBytes+1))
 	if err != nil {
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "upstream_read_failed")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "upstream_read_failed")
 		writeJSON(w, http.StatusBadGateway, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -384,7 +390,7 @@ func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Re
 		return api.SandboxProxyResponse{}, false
 	}
 	if len(body) > sandboxProxyMaxResponseBytes {
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "upstream_response_too_large")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "upstream_response_too_large")
 		writeJSON(w, http.StatusBadGateway, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -396,7 +402,7 @@ func (s *apiServer) executeSandboxProxyRequest(w http.ResponseWriter, r *http.Re
 		return api.SandboxProxyResponse{}, false
 	}
 
-	auditID := s.recordSandboxProxyProxied(r, connectorFQN, toolName, method, upstream, operation, resp.StatusCode)
+	auditID := s.recordSandboxProxyProxied(r, source, connectorFQN, toolName, method, upstream, operation, resp.StatusCode)
 	return api.SandboxProxyResponse{
 		Status:         api.Proxied,
 		AuditId:        auditID,
@@ -425,9 +431,9 @@ func sandboxProxyHTTPClient(client *http.Client) *http.Client {
 	return &copy
 }
 
-func (s *apiServer) injectSandboxProxyCredential(w http.ResponseWriter, r *http.Request, req *http.Request, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp) bool {
+func (s *apiServer) injectSandboxProxyCredential(w http.ResponseWriter, r *http.Request, req *http.Request, source, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp) bool {
 	if s.bindings == nil {
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "binding_store_unavailable")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "binding_store_unavailable")
 		writeJSON(w, http.StatusForbidden, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -440,7 +446,7 @@ func (s *apiServer) injectSandboxProxyCredential(w http.ResponseWriter, r *http.
 	}
 	resolver := s.bindings.ResolverFor(r.Context(), connectorFQN, operation.Credential)
 	if resolver == nil {
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "binding_required")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "binding_required")
 		writeJSON(w, http.StatusForbidden, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -466,7 +472,7 @@ func (s *apiServer) injectSandboxProxyCredential(w http.ResponseWriter, r *http.
 			status = http.StatusForbidden
 			message = "sandbox proxy credential kind does not match connector spec"
 		}
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, reason)
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, reason)
 		writeJSON(w, status, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -478,7 +484,7 @@ func (s *apiServer) injectSandboxProxyCredential(w http.ResponseWriter, r *http.
 		return false
 	}
 	if cred.Kind != operation.Credential {
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "credential_kind_mismatch")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "credential_kind_mismatch")
 		writeJSON(w, http.StatusForbidden, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -493,7 +499,7 @@ func (s *apiServer) injectSandboxProxyCredential(w http.ResponseWriter, r *http.
 	case "oauth2", "api_key":
 		req.Header.Set("Authorization", "Bearer "+string(cred.Value))
 	default:
-		auditID := s.recordSandboxProxyRejected(r, connectorFQN, toolName, method, upstream, operation, "unsupported_credential_kind")
+		auditID := s.recordSandboxProxyRejected(r, source, connectorFQN, toolName, method, upstream, operation, "unsupported_credential_kind")
 		writeJSON(w, http.StatusForbidden, api.SandboxProxyRejectedResponse{
 			Status:       api.SandboxProxyRejectedResponseStatusRejected,
 			AuditId:      auditID,
@@ -549,7 +555,7 @@ func (s *apiServer) recordConnectorOperationRejected(r *http.Request, connectorF
 	)
 }
 
-func (s *apiServer) recordSandboxProxyRejected(r *http.Request, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp, reason string) string {
+func (s *apiServer) recordSandboxProxyRejected(r *http.Request, source, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp, reason string) string {
 	if s.auditRecorder == nil {
 		if s.newID != nil {
 			return s.newID()
@@ -569,6 +575,7 @@ func (s *apiServer) recordSandboxProxyRejected(r *http.Request, connectorFQN, to
 		"aileron.connector.mediation":     "https_proxy",
 		"aileron.connector.decision":      "rejected",
 		"aileron.connector.reject_reason": reason,
+		"aileron.proxy.source":            source,
 		"aileron.proxy.method":            method,
 		"aileron.proxy.upstream.scheme":   upstream.Scheme,
 		"aileron.proxy.upstream.host":     upstream.Host,
@@ -588,7 +595,7 @@ func (s *apiServer) recordSandboxProxyRejected(r *http.Request, connectorFQN, to
 	)
 }
 
-func (s *apiServer) recordSandboxProxyProxied(r *http.Request, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp, upstreamStatus int) string {
+func (s *apiServer) recordSandboxProxyProxied(r *http.Request, source, connectorFQN, toolName, method string, upstream *url.URL, operation discovery.SpecOperationHelp, upstreamStatus int) string {
 	if s.auditRecorder == nil {
 		if s.newID != nil {
 			return s.newID()
@@ -607,6 +614,7 @@ func (s *apiServer) recordSandboxProxyProxied(r *http.Request, connectorFQN, too
 		"aileron.connector.boundary":    "https_proxy",
 		"aileron.connector.mediation":   "https_proxy",
 		"aileron.connector.decision":    "proxied",
+		"aileron.proxy.source":          source,
 		"aileron.proxy.method":          method,
 		"aileron.proxy.upstream.scheme": upstream.Scheme,
 		"aileron.proxy.upstream.host":   upstream.Host,
@@ -622,6 +630,35 @@ func (s *apiServer) recordSandboxProxyProxied(r *http.Request, connectorFQN, too
 	return s.auditRecorder.RecordSuccess(
 		r.Context(),
 		model.EventTypeConnectorProxyProxied,
+		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
+		payload,
+	)
+}
+
+func (s *apiServer) recordSandboxProxyUnresolvedRejected(r *http.Request, source, method string, upstream *url.URL, reason string) string {
+	if s.auditRecorder == nil {
+		if s.newID != nil {
+			return s.newID()
+		}
+		return audit.DefaultIDFn()
+	}
+	payload := map[string]any{
+		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.mediation":       "https_proxy",
+		"aileron.proxy.decision":        "rejected",
+		"aileron.proxy.reject_reason":   reason,
+		"aileron.proxy.source":          source,
+		"aileron.proxy.method":          method,
+		"aileron.proxy.upstream.scheme": upstream.Scheme,
+		"aileron.proxy.upstream.host":   upstream.Host,
+		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
+	}
+	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	return s.auditRecorder.RecordSuccess(
+		r.Context(),
+		model.EventTypeSandboxProxyRejected,
 		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
 		payload,
 	)

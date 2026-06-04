@@ -53,6 +53,8 @@ The tenth #896 slice proves the transparent proxy transport boundary. Authentica
 
 The eleventh #896 slice routes the first transparent proxy requests through the same credential-injection boundary. After authenticated `CONNECT` and TLS interception, the daemon matches the decrypted request by method, host, and path against installed connector specs. A unique match reuses the existing sandbox proxy executor to resolve the daemon-side credential binding, inject credentials, proxy the upstream request, and return the sanitized upstream response through the TLS tunnel. Missing or ambiguous matches, binding failures, invalid decrypted requests, and oversized request bodies fail closed. This still remains an internal proxy-bootstrap path pending broader client smoke coverage and final audit-schema work.
 
+The first #898 audit-schema slice distinguishes the HTTPS data-plane entry source in audit payloads. Connector-resolved proxy events now include `aileron.proxy.source` as `generated_connector_shim`, `daemon_request_boundary`, or `transparent_connect_tls`. Transparent proxy attempts that fail before a connector operation is uniquely resolved record `sandbox.proxy.rejected` with method, upstream scheme/host/path, session id, source, and rejection reason. These events continue to omit credential bytes, raw headers, request bodies, query strings, and full upstream URLs.
+
 ## Consequences
 
 Images must be able to trust the session CA or fail before the agent starts. BYO images need documented trust-store requirements and actionable launch validation.

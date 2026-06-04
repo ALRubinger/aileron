@@ -36,12 +36,13 @@ aileron audit list             # newest events first
 aileron audit get <audit-id>   # full event by id
 ```
 
-Today, four families of events land in the log:
+Today, five families of events land in the log:
 
 - **Install consent:** Every connector and action install records artifact FQN, version, hash, signature status, and the user's decision ([ADR-0007](/adr/0007-install-consent)).
 - **Action execution:** Every invocation records which connector it called, which capability it exercised, and which binding identity satisfied it ([ADR-0003](/adr/0003-action-model), [ADR-0011](/adr/0011-local-credential-vault)). Credential bytes are never recorded.
 - **Failure:** Every failure surfaces with a stable `class`, `boundary`, retry, and `audit_id` ([ADR-0010](/adr/0010-failure-handling)). The same `audit_id` is stamped onto the agent-visible tool-result envelope, so the LLM's "what went wrong?" reaction can be traced back to a specific event.
 - **Approval lifecycle:** Three event types: `approval.requested`, `approval.approved`, `approval.denied`. Each carries the same `aileron.approval.id` so a request and its decision are trivially correlated.
+- **Sandbox HTTPS data plane:** Generated connector shims and transparent sandbox proxy requests emit proxy audit events. `connector.proxy.proxied` and `connector.proxy.rejected` identify the resolved connector operation, upstream scheme/host/path, decision, proxy source, and response status or rejection reason. `sandbox.proxy.rejected` records transparent proxy attempts that fail before a connector operation is uniquely resolved. These events never record credential bytes, request bodies, raw headers, query strings, or full upstream URLs.
 
 The schema is durable. Every payload field uses the OpenTelemetry-namespaced key shape (`aileron.connector.fqn`, `aileron.binding.name`, `aileron.failure.class`, etc.). Consumers (log shippers, trace tools, custom queries) read the same vocabulary regardless of which surface they came in through.
 
@@ -157,6 +158,24 @@ Every span carries the OTel-namespaced shape locked in for the audit payload. Wh
 | `aileron.connector.fqn` | Fully-qualified connector identifier (e.g. `github://ALRubinger/aileron-connector-google`). |
 | `aileron.connector.op` | The connector operation name (e.g. `list_recent_emails`). |
 | `aileron.connector.hash` | The content-addressed hash of the connector binary. |
+
+**Sandbox HTTPS data plane** (`connector.proxy.proxied`, `connector.proxy.rejected`, `sandbox.proxy.rejected` audit events):
+
+| Attribute | Description |
+|---|---|
+| `aileron.proxy.source` | Where the proxy attempt entered Aileron: `generated_connector_shim`, `daemon_request_boundary`, or `transparent_connect_tls`. |
+| `aileron.proxy.method` | HTTP method after daemon-side normalization. |
+| `aileron.proxy.upstream.scheme` | Upstream scheme. Currently `https` for mediated requests. |
+| `aileron.proxy.upstream.host` | Upstream host, including port when present. |
+| `aileron.proxy.upstream.path` | Upstream path only. Query strings are intentionally omitted. |
+| `aileron.proxy.upstream.status` | Upstream HTTP status for proxied requests. |
+| `aileron.proxy.reject_reason` | Rejection class for unresolved transparent proxy attempts. |
+| `aileron.connector.reject_reason` | Rejection class after a connector operation has been resolved. |
+| `aileron.connector.fqn` | Set on connector-resolved proxy events. |
+| `aileron.connector.tool` | Set on connector-resolved proxy events. |
+| `aileron.connector.operation` | Set on connector-resolved proxy events. |
+| `aileron.connector.credential` | Credential kind required by the spec, not the credential value. |
+| `aileron.session.id` | Launch session associated with the sandbox request when present. |
 
 **Approval wait** (`aileron.approval.wait`):
 

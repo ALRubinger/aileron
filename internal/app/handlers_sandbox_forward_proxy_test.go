@@ -2,12 +2,14 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -22,8 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/audit"
 	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/credential"
+	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -110,10 +114,12 @@ func TestSandboxForwardProxy_CONNECTTerminatesTLSAndFailsClosedAfterDecryptedReq
 func TestSandboxForwardProxy_CONNECTRoutesMatchedDecryptedRequestThroughProxyBoundary(t *testing.T) {
 	stateDir := t.TempDir()
 	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	auditStore := audit.NewMemStore()
 	var upstreamMethod, upstreamURL, upstreamAuth string
 	srv := &apiServer{
 		localDaemonToken:     "daemon-token",
 		sandboxProxyStateDir: stateDir,
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-transparent-proxy" }),
 		specLoader: func() ([]connectorspec.Spec, error) {
 			return []connectorspec.Spec{{
 				SchemaVersion: connectorspec.SchemaVersion,
@@ -182,6 +188,87 @@ func TestSandboxForwardProxy_CONNECTRoutesMatchedDecryptedRequestThroughProxyBou
 	}
 	if upstreamAuth != "Bearer lin_secret" {
 		t.Fatalf("upstream Authorization = %q, want bearer token", upstreamAuth)
+	}
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeConnectorProxyProxied {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeConnectorProxyProxied)
+	}
+	payload := events[0].Payload
+	if payload["aileron.proxy.source"] != sandboxProxySourceTransparentConnectTLS {
+		t.Errorf("proxy source = %v", payload["aileron.proxy.source"])
+	}
+	if payload["aileron.session.id"] != "session-123" {
+		t.Errorf("session id = %v", payload["aileron.session.id"])
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	if strings.Contains(string(payloadJSON), "lin_secret") || strings.Contains(string(payloadJSON), "query=viewer") {
+		t.Fatalf("audit payload leaked credential or query string: %s", payloadJSON)
+	}
+}
+
+func TestSandboxForwardProxy_CONNECTNoMatchAuditsUnresolvedRejection(t *testing.T) {
+	stateDir := t.TempDir()
+	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-transparent-rejected" }),
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return nil, nil
+		},
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to append CA cert")
+	}
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	client := newSandboxForwardProxyClient(t, proxyURL, roots)
+	resp, err := client.Get("https://api.example.test/v1/resource?secret=not-audited")
+	if err != nil {
+		t.Fatalf("GET through sandbox forward proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyRejected {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyRejected)
+	}
+	payload := events[0].Payload
+	if payload["aileron.proxy.source"] != sandboxProxySourceTransparentConnectTLS {
+		t.Errorf("proxy source = %v", payload["aileron.proxy.source"])
+	}
+	if payload["aileron.proxy.reject_reason"] != "operation_not_matched" {
+		t.Errorf("reject reason = %v", payload["aileron.proxy.reject_reason"])
+	}
+	if payload["aileron.proxy.upstream.path"] != "/v1/resource" {
+		t.Errorf("upstream path = %v", payload["aileron.proxy.upstream.path"])
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	if strings.Contains(string(payloadJSON), "not-audited") {
+		t.Fatalf("audit payload leaked query string: %s", payloadJSON)
 	}
 }
 
@@ -414,6 +501,24 @@ func TestMatchSandboxForwardProxyOperationSpecErrors(t *testing.T) {
 	}}
 	if _, _, err := srv.matchSandboxForwardProxyOperation(http.MethodGet, upstream); err == nil || !strings.Contains(err.Error(), "connector specs invalid") {
 		t.Fatalf("invalid specs error = %v, want invalid", err)
+	}
+}
+
+func TestSandboxForwardProxyRejectReasonHelpers(t *testing.T) {
+	if got := sandboxForwardProxyMatchErrorReason(nil); got != "" {
+		t.Fatalf("nil match error reason = %q, want empty", got)
+	}
+	if got := sandboxForwardProxyMatchErrorReason(errors.New("connector specs invalid")); got != "connector_specs_invalid" {
+		t.Fatalf("invalid match error reason = %q", got)
+	}
+	if got := sandboxForwardProxyMatchErrorReason(errors.New("connector specs unavailable")); got != "connector_specs_unavailable" {
+		t.Fatalf("unavailable match error reason = %q", got)
+	}
+	if got := sandboxForwardProxyBodyRejectReason(errors.New("sandbox proxy decrypted request body read failed")); got != "request_body_read_failed" {
+		t.Fatalf("read failure reason = %q", got)
+	}
+	if got := sandboxForwardProxyBodyRejectReason(errors.New("sandbox proxy decrypted request body exceeded size limit")); got != "request_body_too_large" {
+		t.Fatalf("size failure reason = %q", got)
 	}
 }
 
