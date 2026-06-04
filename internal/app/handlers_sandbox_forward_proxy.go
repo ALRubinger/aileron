@@ -129,24 +129,28 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn io.Writer, decrypted
 	match, ok, err := s.matchSandboxForwardProxyOperation(decrypted.Method, upstream)
 	if err != nil {
 		if errors.Is(err, errSandboxForwardProxyAmbiguousOperation) {
+			s.recordSandboxProxyUnresolvedRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "ambiguous_operation_match")
 			writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, err.Error())
 			return
 		}
+		s.recordSandboxProxyUnresolvedRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, sandboxForwardProxyMatchErrorReason(err))
 		writeSandboxForwardProxyError(conn, http.StatusInternalServerError, auth.SessionID, targetHost, err.Error())
 		return
 	}
 	if !ok {
+		s.recordSandboxProxyUnresolvedRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "operation_not_matched")
 		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy decrypted request did not match an installed connector operation")
 		return
 	}
 	body, contentType, err := readSandboxForwardProxyRequestBody(decrypted)
 	if err != nil {
+		s.recordSandboxProxyRejected(decrypted, sandboxProxySourceTransparentConnectTLS, match.connectorFQN, match.toolName, decrypted.Method, upstream, match.operation, sandboxForwardProxyBodyRejectReason(err))
 		writeSandboxForwardProxyError(conn, http.StatusRequestEntityTooLarge, auth.SessionID, targetHost, err.Error())
 		return
 	}
 
 	captured := newSandboxForwardProxyCapture()
-	result, ok := s.executeSandboxProxyRequest(captured, decrypted, match.connectorFQN, match.toolName, decrypted.Method, upstream, match.operation, body, contentType)
+	result, ok := s.executeSandboxProxyRequest(captured, decrypted, sandboxProxySourceTransparentConnectTLS, match.connectorFQN, match.toolName, decrypted.Method, upstream, match.operation, body, contentType)
 	if !ok {
 		writeSandboxForwardProxyCaptured(conn, auth.SessionID, targetHost, captured)
 		return
@@ -189,6 +193,24 @@ func (s *apiServer) matchSandboxForwardProxyOperation(method string, upstream *u
 		return sandboxForwardProxyOperationMatch{}, false, nil
 	}
 	return match, true, nil
+}
+
+func sandboxForwardProxyMatchErrorReason(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case strings.Contains(err.Error(), "invalid"):
+		return "connector_specs_invalid"
+	default:
+		return "connector_specs_unavailable"
+	}
+}
+
+func sandboxForwardProxyBodyRejectReason(err error) string {
+	if err != nil && strings.Contains(err.Error(), "read failed") {
+		return "request_body_read_failed"
+	}
+	return "request_body_too_large"
 }
 
 func sandboxForwardProxyUpstreamURL(targetHost string, decrypted *http.Request) (*url.URL, error) {

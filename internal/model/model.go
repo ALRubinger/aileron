@@ -301,4 +301,8 @@ const (
 	// never credential values.
 	EventTypeConnectorProxyRejected EventType = "connector.proxy.rejected"
 	EventTypeConnectorProxyProxied  EventType = "connector.proxy.proxied"
+
+	// Sandbox proxy event for HTTPS data-plane attempts rejected before
+	// a connector operation could be uniquely resolved.
+	EventTypeSandboxProxyRejected EventType = "sandbox.proxy.rejected"
 )

@@ -252,6 +252,9 @@ func TestRunConnectorOperation_BodylessGETProxiesThroughSandboxDataPlane(t *test
 	if payload["aileron.connector.boundary"] != "https_proxy" {
 		t.Errorf("boundary payload = %v", payload["aileron.connector.boundary"])
 	}
+	if payload["aileron.proxy.source"] != sandboxProxySourceGeneratedConnectorShim {
+		t.Errorf("proxy source payload = %v", payload["aileron.proxy.source"])
+	}
 	if payload["aileron.session.id"] != "session-123" {
 		t.Errorf("session payload = %v", payload["aileron.session.id"])
 	}
@@ -733,7 +736,7 @@ func TestRecordSandboxProxyRequest_APIKeyCredentialInjectsBearerToken(t *testing
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()
-	srv, _ := newConnectorOperationTestServer([]connectorspec.Spec{
+	srv, auditStore := newConnectorOperationTestServer([]connectorspec.Spec{
 		{
 			SchemaVersion: connectorspec.SchemaVersion,
 			Connector:     connectorspec.Connector{FQN: connectorFQN},
@@ -765,6 +768,16 @@ func TestRecordSandboxProxyRequest_APIKeyCredentialInjectsBearerToken(t *testing
 	}
 	if resp.ContentType != nil {
 		t.Errorf("content type = %q, want nil", *resp.ContentType)
+	}
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if got := events[0].Payload["aileron.proxy.source"]; got != sandboxProxySourceDaemonRequestBoundary {
+		t.Errorf("proxy source = %v, want %q", got, sandboxProxySourceDaemonRequestBoundary)
 	}
 }
 
@@ -874,6 +887,9 @@ func TestRecordSandboxProxyRequest_CredentialFailuresRejectBeforeUpstream(t *tes
 			}
 			if got := events[0].Payload["aileron.connector.reject_reason"]; got != tt.wantReason {
 				t.Errorf("reject reason = %v, want %q", got, tt.wantReason)
+			}
+			if got := events[0].Payload["aileron.proxy.source"]; got != sandboxProxySourceDaemonRequestBoundary {
+				t.Errorf("proxy source = %v, want %q", got, sandboxProxySourceDaemonRequestBoundary)
 			}
 		})
 	}
@@ -1142,6 +1158,9 @@ func TestRecordSandboxProxyRequest_RootPathMatchesOperation(t *testing.T) {
 	}
 	if payload["aileron.proxy.upstream.path"] != "/" {
 		t.Errorf("path payload = %v", payload["aileron.proxy.upstream.path"])
+	}
+	if payload["aileron.proxy.source"] != sandboxProxySourceDaemonRequestBoundary {
+		t.Errorf("proxy source payload = %v", payload["aileron.proxy.source"])
 	}
 	if _, ok := payload["upstream_url"]; ok {
 		t.Errorf("raw upstream_url should not be audited: %v", payload["upstream_url"])
