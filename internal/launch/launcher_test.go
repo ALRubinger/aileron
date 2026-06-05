@@ -260,6 +260,7 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("AILERON_TOKEN", "daemon-token")
 	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "1")
 
 	dir := t.TempDir()
@@ -299,11 +300,12 @@ func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
 	for _, want := range []string{
 		"--user\nroot\n",
 		"--volume\n" + caPath + ":/etc/aileron/proxy/ca.pem:ro\n",
+		"--env\nAILERON_TOKEN=daemon-token\n",
 		"--env\nAILERON_SANDBOX_PROXY_CA_FILE=/etc/aileron/proxy/ca.pem\n",
 		"--env\nAILERON_SANDBOX_PROXY_MODE=bootstrap\n",
-		"--env\nAILERON_SANDBOX_PROXY_URL=http://01HK0000000000000000000FAK@host.docker.internal:",
-		"--env\nHTTPS_PROXY=http://01HK0000000000000000000FAK@host.docker.internal:",
-		"--env\nHTTP_PROXY=http://01HK0000000000000000000FAK@host.docker.internal:",
+		"--env\nAILERON_SANDBOX_PROXY_URL=http://01HK0000000000000000000FAK:daemon-token@host.docker.internal:",
+		"--env\nHTTPS_PROXY=http://01HK0000000000000000000FAK:daemon-token@host.docker.internal:",
+		"--env\nHTTP_PROXY=http://01HK0000000000000000000FAK:daemon-token@host.docker.internal:",
 		"host.docker.internal",
 		"host.containers.internal",
 		"aileron-run-with-proxy-ca\ncodex\n",
