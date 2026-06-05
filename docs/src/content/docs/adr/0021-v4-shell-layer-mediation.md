@@ -32,6 +32,10 @@ This layer builds on #796's container execution substrate and should share polic
 
 The first #801 implementation slice establishes the image-side helper contract without enabling mediation. `aileron/sandbox-base` now includes `/usr/local/bin/aileron-shell-mediator` and `/etc/aileron/shell/aileron-bashrc`, and sandbox image validation has an opt-in probe for those files. Launch does not route `/bin/bash` or `/bin/sh` through the helper yet; later #801 slices wire shell routing, daemon decisions, approval result draining, bypass tests, and audit.
 
+The second #801 implementation slice adds the internal launch opt-in. When `AILERON_SANDBOX_SHELL_MEDIATION=1` is set on the host, sandbox launch validates the selected image for the shell helper contract and passes shell-mediation metadata into the container. The agent command remains unwrapped.
+
+The third #801 implementation slice establishes the daemon-side shell decision contract at `POST /v1/sandbox-shell/decide`. This first endpoint cut is allow-only and records sanitized `sandbox.shell.decided` audit events. It does not route shell execution, deny commands, create approvals, or drain approval results yet.
+
 ## Consequences
 
 Host launch remains governed by ADR-0015: Aileron audits Aileron actions, not arbitrary host commands.
