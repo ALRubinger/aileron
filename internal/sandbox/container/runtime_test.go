@@ -645,20 +645,23 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 		"ghcr.io/acme/agent:latest",
 		"/bin/sh", "-c",
 	}
-	if len(runner.args) < len(wantPrefix)+3 {
+	if len(runner.args) < len(wantPrefix)+4 {
 		t.Fatalf("args too short: %#v", runner.args)
 	}
 	if !reflect.DeepEqual(runner.args[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("args prefix = %#v, want %#v", runner.args[:len(wantPrefix)], wantPrefix)
 	}
-	if runner.args[len(runner.args)-3] != "codex" {
-		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-3])
+	if runner.args[len(runner.args)-4] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-4])
+	}
+	if runner.args[len(runner.args)-3] != "0" {
+		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-3])
 	}
 	if runner.args[len(runner.args)-2] != "0" {
-		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-2])
+		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-2])
 	}
 	if runner.args[len(runner.args)-1] != "0" {
-		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-1])
+		t.Fatalf("shell mediation validation flag = %q, want 0", runner.args[len(runner.args)-1])
 	}
 }
 
@@ -682,13 +685,16 @@ func TestValidateRequiresWgetWhenShimsAreMounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if runner.args[len(runner.args)-2] != "1" {
-		t.Fatalf("shim validation flag = %q, want 1", runner.args[len(runner.args)-2])
+	if runner.args[len(runner.args)-3] != "1" {
+		t.Fatalf("shim validation flag = %q, want 1", runner.args[len(runner.args)-3])
+	}
+	if runner.args[len(runner.args)-2] != "0" {
+		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-2])
 	}
 	if runner.args[len(runner.args)-1] != "0" {
-		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-1])
+		t.Fatalf("shell mediation validation flag = %q, want 0", runner.args[len(runner.args)-1])
 	}
-	script := runner.args[len(runner.args)-5]
+	script := runner.args[len(runner.args)-6]
 	if !strings.Contains(script, "generated Aileron connector shims require wget") {
 		t.Fatalf("validation script did not include wget requirement:\n%s", script)
 	}
@@ -722,21 +728,56 @@ func TestValidateRequiresProxyTrustHelperWhenRequested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if runner.args[len(runner.args)-3] != "codex" {
-		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-3])
+	if runner.args[len(runner.args)-4] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-4])
 	}
-	if runner.args[len(runner.args)-2] != "0" {
-		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-2])
+	if runner.args[len(runner.args)-3] != "0" {
+		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-3])
 	}
-	if runner.args[len(runner.args)-1] != "1" {
-		t.Fatalf("proxy trust validation flag = %q, want 1", runner.args[len(runner.args)-1])
+	if runner.args[len(runner.args)-2] != "1" {
+		t.Fatalf("proxy trust validation flag = %q, want 1", runner.args[len(runner.args)-2])
 	}
-	script := runner.args[len(runner.args)-5]
+	if runner.args[len(runner.args)-1] != "0" {
+		t.Fatalf("shell mediation validation flag = %q, want 0", runner.args[len(runner.args)-1])
+	}
+	script := runner.args[len(runner.args)-6]
 	if !strings.Contains(script, "aileron-install-proxy-ca --check") {
 		t.Fatalf("validation script missing proxy trust helper check:\n%s", script)
 	}
 	if !strings.Contains(script, "command -v aileron-run-with-proxy-ca") {
 		t.Fatalf("validation script missing proxy wrapper check:\n%s", script)
+	}
+}
+
+func TestValidateRequiresShellMediationHelperWhenRequested(t *testing.T) {
+	runner := &recordingRunner{}
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:                 "ghcr.io/acme/agent:latest",
+		WorkDir:               t.TempDir(),
+		Command:               []string{"codex"},
+		RequireShellMediation: true,
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if runner.args[len(runner.args)-4] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-4])
+	}
+	if runner.args[len(runner.args)-3] != "0" {
+		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-3])
+	}
+	if runner.args[len(runner.args)-2] != "0" {
+		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-2])
+	}
+	if runner.args[len(runner.args)-1] != "1" {
+		t.Fatalf("shell mediation validation flag = %q, want 1", runner.args[len(runner.args)-1])
+	}
+	script := runner.args[len(runner.args)-6]
+	if !strings.Contains(script, "command -v aileron-shell-mediator") {
+		t.Fatalf("validation script missing shell mediation helper check:\n%s", script)
+	}
+	if !strings.Contains(script, "aileron-shell-mediator --check") {
+		t.Fatalf("validation script missing shell mediation contract check:\n%s", script)
 	}
 }
 

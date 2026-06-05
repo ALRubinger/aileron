@@ -1,0 +1,10 @@
+# Aileron sandbox shell mediation rcfile.
+#
+# This file is intentionally inert until launch opts into shell mediation.
+# Later #801 slices install the DEBUG trap and result-drain hooks here.
+if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
+echo "sandbox shell mediation rcfile loaded without an implemented trap" >&2
+return 127 2>/dev/null || exit 127

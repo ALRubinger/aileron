@@ -432,7 +432,7 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	if !strings.Contains(validateCall, "/bin/sh\n-c\n") {
 		t.Fatalf("validation call did not run contract probe:\n%s", validateCall)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(validateCall), "\ncodex\n1\n0") {
+	if !strings.HasSuffix(strings.TrimSpace(validateCall), "\ncodex\n1\n0\n0") {
 		t.Fatalf("validation call did not enable shim HTTP-client validation:\n%s", validateCall)
 	}
 	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(runCall) {
