@@ -86,3 +86,5 @@ aileron sandbox check --runtime=docker --build=never --agent=claude
 ## Current Limits
 
 The support matrix covers image contents only. It does not add shell mediation or live discovery refresh. Internal HTTPS proxy/session CA bootstrap work now expects images used for that development mode to provide `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca`; the Aileron sandbox-base image includes both. Launch now authenticates standard proxy-shaped requests with proxy userinfo / `Proxy-Authorization`, but full forward-proxy transport remains tracked separately from the image support contract.
+
+The first shell-mediation image contract is also present in sandbox-base for #801 development: `/usr/local/bin/aileron-shell-mediator` and `/etc/aileron/shell/aileron-bashrc`. Launch does not enable shell mediation yet, and BYO images do not need those files unless a later shell-mediation mode explicitly validates them.

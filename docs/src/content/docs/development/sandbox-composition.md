@@ -185,7 +185,7 @@ Set `customizations.aileron.image` when your team owns the complete image:
 }
 ```
 
-In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Images that opt into internal proxy-bootstrap development must include `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers compatible with the sandbox-base contract. Later runtime launch work can extend that contract with shell mediation files.
+In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Images that opt into internal proxy-bootstrap development must include `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers compatible with the sandbox-base contract. Sandbox-base now also carries the first #801 shell-mediation helper files (`aileron-shell-mediator` and `/etc/aileron/shell/aileron-bashrc`), but launch does not enable shell mediation or require those files for BYO images yet.
 
 ## What Belongs in the Image
 

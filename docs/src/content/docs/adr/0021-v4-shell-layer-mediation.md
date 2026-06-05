@@ -30,6 +30,8 @@ Shell-layer mediation is a container-only runtime layer tracked in #801:
 
 This layer builds on #796's container execution substrate and should share policy/audit concepts with the HTTPS data plane.
 
+The first #801 implementation slice establishes the image-side helper contract without enabling mediation. `aileron/sandbox-base` now includes `/usr/local/bin/aileron-shell-mediator` and `/etc/aileron/shell/aileron-bashrc`, and sandbox image validation has an opt-in probe for those files. Launch does not route `/bin/bash` or `/bin/sh` through the helper yet; later #801 slices wire shell routing, daemon decisions, approval result draining, bypass tests, and audit.
+
 ## Consequences
 
 Host launch remains governed by ADR-0015: Aileron audits Aileron actions, not arbitrary host commands.

@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+real_shell="${AILERON_REAL_SHELL:-/bin/bash}"
+aileron_bashrc="${AILERON_SHELL_RCFILE:-/etc/aileron/shell/aileron-bashrc}"
+
+if [ "${1:-}" = "--check" ]; then
+  if [ ! -x "$real_shell" ]; then
+    echo "sandbox shell mediation requires executable real shell at $real_shell" >&2
+    exit 127
+  fi
+  if [ ! -r "$aileron_bashrc" ]; then
+    echo "sandbox shell mediation requires readable rcfile at $aileron_bashrc" >&2
+    exit 127
+  fi
+  exit 0
+fi
+
+if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
+  exec "$real_shell" "$@"
+fi
+
+echo "sandbox shell mediation is not implemented in this image cut" >&2
+exit 127
