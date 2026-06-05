@@ -41,7 +41,10 @@ const (
 	sandboxToolsFilePath = "/etc/aileron/tools.txt"
 	sandboxShimsDirPath  = "/usr/local/bin"
 	sandboxProxyCAPath   = "/etc/aileron/proxy/ca.pem"
+	sandboxShellRCPath   = "/etc/aileron/shell/aileron-bashrc"
 )
+
+const sandboxShellMediationEnv = "AILERON_SANDBOX_SHELL_MEDIATION"
 
 // LaunchConfig holds the configuration for launching an agent.
 type LaunchConfig struct {
@@ -225,13 +228,14 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 		Runtime: plan.Runtime,
 		Stdout:  io.Discard,
 	}).Validate(ctx, sandboxcontainer.ValidateOptions{
-		Runtime:           plan.Runtime,
-		Image:             plan.Image,
-		WorkDir:           config.Dir,
-		Env:               agentEnv,
-		Volumes:           mounts,
-		Command:           []string{commandName},
-		RequireProxyTrust: agentEnv["AILERON_SANDBOX_PROXY_MODE"] != "",
+		Runtime:               plan.Runtime,
+		Image:                 plan.Image,
+		WorkDir:               config.Dir,
+		Env:                   agentEnv,
+		Volumes:               mounts,
+		Command:               []string{commandName},
+		RequireProxyTrust:     agentEnv["AILERON_SANDBOX_PROXY_MODE"] != "",
+		RequireShellMediation: agentEnv[sandboxShellMediationEnv] == "1",
 	}); err != nil {
 		return err
 	}
@@ -336,6 +340,11 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		agentEnv["AILERON_APPROVAL_URL"] = agentEndpointURL + "/approvals"
 		agentEnv["AILERON_TOOLS_FILE"] = sandboxToolsFilePath
 		agentEnv["AILERON_SHIMS_DIR"] = sandboxShimsDirPath
+		if sandboxShellMediationEnabled() {
+			agentEnv[sandboxShellMediationEnv] = "1"
+			agentEnv["AILERON_SHELL_RCFILE"] = sandboxShellRCPath
+			agentEnv["AILERON_REAL_SHELL"] = "/bin/bash"
+		}
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
 		}
@@ -393,6 +402,10 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	return result, runErr
+}
+
+func sandboxShellMediationEnabled() bool {
+	return os.Getenv(sandboxShellMediationEnv) == "1"
 }
 
 // composeAgentEnv merges the agent's env map with the LLM-endpoint

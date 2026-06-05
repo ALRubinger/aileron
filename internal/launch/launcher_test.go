@@ -316,6 +316,67 @@ func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
 	}
 }
 
+func TestLaunch_SandboxShellMediationOptInValidatesAndPassesEnv(t *testing.T) {
+	t.Setenv("AILERON_SANDBOX_SHELL_MEDIATION", "1")
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' '---' >> " + argsFile + "\nprintf '%s\\n' \"$@\" >> " + argsFile + "\n"
+	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	calls := strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n")
+	if len(calls) != 2 {
+		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
+	}
+	validateCall, runCall := calls[0], calls[1]
+	validateArgs := strings.Split(strings.TrimSpace(validateCall), "\n")
+	if len(validateArgs) < 5 {
+		t.Fatalf("validation call too short:\n%s", validateCall)
+	}
+	validateArgs = validateArgs[len(validateArgs)-5:]
+	if validateArgs[0] != "aileron-validate" || validateArgs[1] != "codex" || validateArgs[4] != "1" {
+		t.Fatalf("validation call did not require shell mediation helper:\n%s", validateCall)
+	}
+	for _, want := range []string{
+		"--env\nAILERON_SANDBOX_SHELL_MEDIATION=1\n",
+		"--env\nAILERON_SHELL_RCFILE=/etc/aileron/shell/aileron-bashrc\n",
+		"--env\nAILERON_REAL_SHELL=/bin/bash\n",
+		"ghcr.io/acme/agent:latest\ncodex\n",
+	} {
+		if !strings.Contains(runCall, want) {
+			t.Fatalf("run call missing %q:\n%s", want, runCall)
+		}
+	}
+	if strings.Contains(runCall, "aileron-shell-mediator\ncodex\n") {
+		t.Fatalf("launch should not wrap the agent command yet:\n%s", runCall)
+	}
+}
+
 func TestLaunch_SandboxMountsAileronManifestStores(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
