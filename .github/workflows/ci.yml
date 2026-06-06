@@ -61,6 +61,23 @@ jobs:
         working-directory: ui
         run: pnpm check
 
+      # Sandbox shell-mediation scripts are load-bearing for #801 (they install
+      # the DEBUG trap, route the daemon call, and either halt or soft-veto on
+      # deny). shellcheck catches POSIX-vs-bash drift before it reaches the
+      # Alpine smoke test, where a misbehaving rcfile would surface as a
+      # confusing test failure rather than a clean lint error. The bashrc
+      # carries a `# shellcheck shell=bash` directive because it is sourced
+      # into bash and uses bash extensions (shopt, [[ ]]); the other two
+      # scripts are POSIX sh and shebanged accordingly. shellcheck reads the
+      # shebang/directive and picks the right dialect, so no explicit -s is
+      # needed.
+      - name: Shellcheck (sandbox shell scripts)
+        run: |
+          shellcheck \
+            images/sandbox-base/shell/aileron-bashrc \
+            images/sandbox-base/bin/aileron-shell-mediator \
+            images/sandbox-base/bin/aileron-shell-wrapper
+
   test:
     # Sharded Linux Go unit tests. The single-shot equivalent is
     # `task test:go:ci`; CI splits it into two matrix shards because

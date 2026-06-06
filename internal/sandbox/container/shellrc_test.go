@@ -320,3 +320,186 @@ func TestBashrcNonInteractiveMediationOffIsInert(t *testing.T) {
 		t.Errorf("expected no daemon requests with mediation off, got %d", got)
 	}
 }
+
+// The cases below are #801 slice 6's deny-contract additions on top of the
+// slice-5 veto behavior above. Slice 5 suppressed the about-to-run command's
+// side effect but left the shell exit code at 0 and the rest of an `&&` chain
+// running. Slice 6's contract on a denied command under the agent's real
+// `bash -c` model is:
+//
+//   - the denied command does NOT run (existing slice-5 assertion above),
+//   - the rest of `&& cmd` / `; cmd` chains does NOT run,
+//   - the bash process exits NONZERO,
+//   - stderr carries `[Aileron] denied:` but does NOT leak the denied
+//     command's text or arguments.
+//
+// Interactive shells preserve the slice-5 soft-veto contract: a human at a
+// REPL is not killed by a single denied command.
+//
+// These tests are the U1 falsification gate (see docs/plans/2026-06-05-001-
+// feat-sandbox-shell-deny-plan.md). They fail against the slice-5 rcfile and
+// pass once U3 wires the chosen halt mechanism.
+
+const denyBody = `{"status":"decided","decision":"deny","audit_id":"a","reason":"policy:rule-42:blocked"}`
+
+func TestBashrcNonInteractiveDenyHaltsChain(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, denyBody)
+
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+	res := runBashEnv(t, rc, "touch "+first+" && touch "+second, binDir, mediationEnv(srv.URL))
+
+	if _, err := os.Stat(first); err == nil {
+		t.Errorf("deny did not veto: first command's side effect at %s was created", first)
+	}
+	if _, err := os.Stat(second); err == nil {
+		t.Errorf("deny did not halt the && chain: second command's side effect at %s was created", second)
+	}
+	if res.exit == 0 {
+		t.Errorf("deny did not halt with nonzero exit: bash exited 0; stderr=%q", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "[Aileron] denied:") {
+		t.Errorf("expected [Aileron] denied: message on stderr, got: %s", res.stderr)
+	}
+}
+
+func TestBashrcNonInteractiveDenyExitsNonzero(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, denyBody)
+
+	marker := filepath.Join(t.TempDir(), "only")
+	res := runBashEnv(t, rc, "touch "+marker, binDir, mediationEnv(srv.URL))
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Errorf("deny did not veto: side-effect file created at %s", marker)
+	}
+	if res.exit == 0 {
+		t.Errorf("deny did not exit nonzero: bash exited 0; stderr=%q", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "[Aileron] denied:") {
+		t.Errorf("expected [Aileron] denied: message on stderr, got: %s", res.stderr)
+	}
+}
+
+func TestBashrcNonInteractiveDenySemicolonChainHalts(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, denyBody)
+
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+	res := runBashEnv(t, rc, "touch "+first+"; touch "+second, binDir, mediationEnv(srv.URL))
+
+	if _, err := os.Stat(first); err == nil {
+		t.Errorf("deny did not veto: first command's side effect at %s was created", first)
+	}
+	if _, err := os.Stat(second); err == nil {
+		t.Errorf("deny did not halt the `;` chain: second command's side effect at %s was created", second)
+	}
+	if res.exit == 0 {
+		t.Errorf("deny did not exit nonzero: bash exited 0; stderr=%q", res.stderr)
+	}
+}
+
+// TestBashrcNonInteractiveDenyOrRecoveryHalts records the observed behavior of
+// `denied || recover` under the chosen halt mechanism. With the C1 mechanism
+// (DEBUG trap calls `exit` under non-interactive), the whole shell is gone
+// before bash sees the `||`, so the recovery branch does NOT run. If a future
+// slice swaps to a different mechanism that propagates `||`, update this test
+// to match the new contract.
+func TestBashrcNonInteractiveDenyOrRecoveryHalts(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, denyBody)
+
+	res := runBashEnv(t, rc, "false-cmd || echo RECOVERED", binDir, mediationEnv(srv.URL))
+
+	if strings.Contains(res.stdout, "RECOVERED") {
+		t.Errorf("`||` recovery branch ran after deny: stdout=%q stderr=%q", res.stdout, res.stderr)
+	}
+	if res.exit == 0 {
+		t.Errorf("deny did not exit nonzero: bash exited 0; stderr=%q", res.stderr)
+	}
+}
+
+func TestBashrcNonInteractiveDenyDoesNotLeakCommandToStderr(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, denyBody)
+
+	// A command name and an arg-shaped value that must NOT appear on stderr.
+	// Either of these on stderr means the chosen halt mechanism is leaking the
+	// $BASH_COMMAND text via bash's own diagnostics (e.g. exit-from-trap under
+	// `set -eu` or xtrace) and the candidate has to be revised.
+	res := runBashEnv(t, rc, "denied-cmd --arg=SECRET-12345", binDir, mediationEnv(srv.URL))
+
+	if !strings.Contains(res.stderr, "[Aileron] denied:") {
+		t.Errorf("expected [Aileron] denied: on stderr, got: %s", res.stderr)
+	}
+	for _, leaked := range []string{"denied-cmd", "--arg", "SECRET-12345"} {
+		if strings.Contains(res.stderr, leaked) {
+			t.Errorf("stderr leaked $BASH_COMMAND substring %q: %s", leaked, res.stderr)
+		}
+	}
+}
+
+func TestBashrcNonInteractiveUnreachableDaemonHaltsChain(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, allowBody)
+	refused := srv.URL
+	srv.Close()
+
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+	res := runBashEnv(t, rc, "touch "+first+" && touch "+second, binDir, mediationEnv(refused))
+
+	if _, err := os.Stat(first); err == nil {
+		t.Errorf("unreachable daemon did not veto: first command's side effect at %s was created", first)
+	}
+	if _, err := os.Stat(second); err == nil {
+		t.Errorf("unreachable daemon did not halt chain: second command's side effect at %s was created", second)
+	}
+	if res.exit == 0 {
+		t.Errorf("unreachable daemon did not exit nonzero: bash exited 0; stderr=%q", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "[Aileron] mediation unavailable:") {
+		t.Errorf("expected [Aileron] mediation unavailable: on stderr, got: %s", res.stderr)
+	}
+}
+
+// TestBashrcInteractiveDenyKeepsReplAlive documents the KTD3 interactive
+// contract: a denied command in an interactive REPL suppresses the side
+// effect but the shell itself stays alive (exit 0). This passes against the
+// slice-5 rcfile and continues to pass after U3.
+func TestBashrcInteractiveDenyKeepsReplAlive(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, denyBody)
+
+	marker := filepath.Join(t.TempDir(), "created-if-not-vetoed")
+	res := runBashRC(t, rc, "touch "+marker, binDir, mediationEnv(srv.URL))
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Errorf("interactive deny did not suppress side effect: %s was created", marker)
+	}
+	if res.exit != 0 {
+		t.Errorf("interactive deny killed the REPL: exit=%d, want 0; stderr=%q", res.exit, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "[Aileron] denied:") {
+		t.Errorf("expected [Aileron] denied: on stderr, got: %s", res.stderr)
+	}
+}

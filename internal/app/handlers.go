@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sync"
 	"time"
 
@@ -119,6 +120,15 @@ type apiServer struct {
 	onVaultUnlock   func(vault.Vault)       // fires after POST /v1/vault/unlock so listener startup can resolve tokens
 	auditStateDir   string                  // scopes message-event audit log writes; "" disables audit emission for /comms/*
 	commsHTTPClient *http.Client            // outbound client for /comms/http; nil falls back to http.DefaultClient
+
+	// --- Sandbox shell mediation (#801 slice 6, ADR-0021) ---
+	// sandboxShellDenyPattern, when non-nil, is the compiled regex the
+	// daemon matches against /v1/sandbox-shell/decide commands. A match
+	// returns decision="deny". Read at startup from AILERON_SANDBOX_SHELL_DENY_PATTERN
+	// (see [loadSandboxShellDenyPattern]); the daemon refuses to start if
+	// the value is set but does not compile (R7, KTD2). nil preserves the
+	// slice-5 byte-for-byte allow path (R6).
+	sandboxShellDenyPattern *regexp.Regexp
 }
 
 // --- JSON helpers ---
@@ -236,7 +246,7 @@ func (s *apiServer) CreateIntent(w http.ResponseWriter, r *http.Request) {
 		},
 		Action:    req.Action,
 		Context:   req.Context,
-		Status:    api.PendingPolicy,
+		Status:    api.IntentStatusPendingPolicy,
 		CreatedAt: now,
 		UpdatedAt: now,
 		Decision: api.Decision{
@@ -303,7 +313,7 @@ func (s *apiServer) CreateIntent(w http.ResponseWriter, r *http.Request) {
 		}
 		apiDecision.ExecutionGrantId = &grantID
 
-		envelope.Status = api.Approved
+		envelope.Status = api.IntentStatusApproved
 		envelope.Decision = apiDecision
 		envelope.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, envelope)
@@ -331,7 +341,7 @@ func (s *apiServer) CreateIntent(w http.ResponseWriter, r *http.Request) {
 		ra := true
 		apiDecision.RequiresApproval = &ra
 
-		envelope.Status = api.PendingApproval
+		envelope.Status = api.IntentStatusPendingApproval
 		envelope.Decision = apiDecision
 		envelope.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, envelope)
@@ -354,7 +364,7 @@ func (s *apiServer) CreateIntent(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case model.DispositionDeny:
-		envelope.Status = api.Denied
+		envelope.Status = api.IntentStatusDenied
 		envelope.Decision = apiDecision
 		envelope.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, envelope)
@@ -482,7 +492,7 @@ func (s *apiServer) ApproveRequest(w http.ResponseWriter, r *http.Request, appro
 			writeError(w, http.StatusInternalServerError, "store_error", err.Error())
 			return
 		}
-		intent.Status = api.Approved
+		intent.Status = api.IntentStatusApproved
 		intent.Decision.ExecutionGrantId = &grantID
 		intent.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, intent)
@@ -508,7 +518,7 @@ func (s *apiServer) ApproveRequest(w http.ResponseWriter, r *http.Request, appro
 	})
 
 	approvedStatus := api.ApprovalStatusApproved
-	intentApproved := api.Approved
+	intentApproved := api.IntentStatusApproved
 	writeJSON(w, http.StatusOK, api.ApprovalActionResponse{
 		ApprovalId:       approvalId,
 		Status:           approvedStatus,
@@ -533,7 +543,7 @@ func (s *apiServer) DenyRequest(w http.ResponseWriter, r *http.Request, approval
 
 	// Update intent status.
 	if intent, err := s.intents.Get(ctx, apr.IntentID); err == nil {
-		intent.Status = api.Denied
+		intent.Status = api.IntentStatusDenied
 		intent.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, intent)
 	}
@@ -547,7 +557,7 @@ func (s *apiServer) DenyRequest(w http.ResponseWriter, r *http.Request, approval
 	})
 
 	deniedStatus := api.ApprovalStatusDenied
-	intentDenied := api.Denied
+	intentDenied := api.IntentStatusDenied
 	writeJSON(w, http.StatusOK, api.ApprovalActionResponse{
 		ApprovalId:   approvalId,
 		Status:       deniedStatus,
@@ -584,7 +594,7 @@ func (s *apiServer) ModifyRequest(w http.ResponseWriter, r *http.Request, approv
 			writeError(w, http.StatusInternalServerError, "store_error", err.Error())
 			return
 		}
-		intent.Status = api.Approved
+		intent.Status = api.IntentStatusApproved
 		intent.Decision.ExecutionGrantId = &grantID
 		intent.UpdatedAt = time.Now().UTC()
 		s.intents.Update(ctx, intent)
@@ -594,7 +604,7 @@ func (s *apiServer) ModifyRequest(w http.ResponseWriter, r *http.Request, approv
 	}
 
 	modifiedStatus := api.ApprovalStatusModified
-	intentApproved := api.Approved
+	intentApproved := api.IntentStatusApproved
 	writeJSON(w, http.StatusOK, api.ApprovalActionResponse{
 		ApprovalId:       approvalId,
 		Status:           modifiedStatus,
@@ -782,7 +792,7 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 	s.executions.Create(ctx, exec)
 
 	// Update intent status.
-	intent.Status = api.Executing
+	intent.Status = api.IntentStatusExecuting
 	intent.UpdatedAt = now
 	s.intents.Update(ctx, intent)
 
@@ -1995,7 +2005,7 @@ func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*
 	}
 	s.executions.Create(ctx, exec)
 
-	intent.Status = api.Executing
+	intent.Status = api.IntentStatusExecuting
 	intent.UpdatedAt = now
 	s.intents.Update(ctx, intent)
 
@@ -2144,9 +2154,9 @@ func finishExecution(s *apiServer, ctx context.Context, exec api.Execution, inte
 	s.executions.Update(ctx, exec)
 
 	if status == api.ExecutionStatusSucceeded {
-		intent.Status = api.Succeeded
+		intent.Status = api.IntentStatusSucceeded
 	} else {
-		intent.Status = api.Failed
+		intent.Status = api.IntentStatusFailed
 	}
 	intent.UpdatedAt = now
 	s.intents.Update(ctx, intent)
