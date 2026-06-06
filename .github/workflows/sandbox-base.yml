@@ -105,7 +105,22 @@ jobs:
           python3 /tmp/stub.py &
           STUB_PID=$!
           trap "kill $STUB_PID 2>/dev/null || true" EXIT
-          sleep 1
+
+          # Wait for the stub to actually answer before running assertions, so a
+          # slow or failed start surfaces here instead of as a confusing
+          # unreachable-daemon error in the allow test.
+          ready=0
+          for _ in $(seq 1 50); do
+            if curl -sf -o /dev/null --max-time 1 -X POST http://127.0.0.1:8099/ready --data '{}'; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "stub daemon failed to start on port 8099"
+            exit 1
+          fi
 
           IMG=aileron-sandbox-base:smoke
 

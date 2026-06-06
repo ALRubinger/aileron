@@ -73,10 +73,12 @@ if [ "${1:-}" = "intercept" ]; then
   endpoint="${api_url%/}/sandbox-shell/decide"
 
   # wget exits nonzero on connection failure and on non-2xx responses,
-  # which gives fail-closed-on-HTTP-error for free. Keep the token off any
-  # traced line (R6): no set -x around this call.
+  # which gives fail-closed-on-HTTP-error for free. The timeout bounds a hung
+  # daemon so a stuck connection fails closed instead of blocking the command
+  # forever. Keep the token off any traced line (R6): no set -x around this call.
   response=$(
     wget -q -O - \
+      --timeout=5 \
       --header="Authorization: Bearer ${token}" \
       --header="X-Aileron-Session-Id: ${AILERON_SESSION_ID:-}" \
       --header="Content-Type: application/json" \
