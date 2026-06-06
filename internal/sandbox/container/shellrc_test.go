@@ -82,6 +82,38 @@ func runBashRC(t *testing.T, rcfile, command, binDir string, env map[string]stri
 	return interceptResult{exit: exit, stdout: outBuf.String(), stderr: errBuf.String()}
 }
 
+// runBashEnv runs `bash -c <command>` with no --rcfile and no -i, sourcing the
+// rcfile via BASH_ENV instead. This is the agent's real invocation model: a
+// non-interactive child shell. BASH_ENV is set to rcfile so non-interactive
+// bash sources it at startup and installs the DEBUG trap before the command
+// runs. The mediator bin dir is prepended to PATH so the trap's bare
+// `aileron-shell-mediator intercept` call resolves.
+func runBashEnv(t *testing.T, rcfile, command, binDir string, env map[string]string) interceptResult {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", command)
+	baseEnv := []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BASH_ENV=" + rcfile,
+	}
+	for k, v := range env {
+		baseEnv = append(baseEnv, k+"="+v)
+	}
+	cmd.Env = baseEnv
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	exit := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !asExitError(err, &ee) {
+			t.Fatalf("running bash: %v\nstderr: %s", err, errBuf.String())
+		}
+		exit = ee.ExitCode()
+	}
+	return interceptResult{exit: exit, stdout: outBuf.String(), stderr: errBuf.String()}
+}
+
 func mediationEnv(srv string) map[string]string {
 	return map[string]string{
 		"AILERON_SANDBOX_SHELL_MEDIATION": "1",
@@ -172,6 +204,111 @@ func TestBashrcMediationOffIsInert(t *testing.T) {
 		"AILERON_SESSION_ID": "sess",
 	}
 	res := runBashRC(t, rc, "touch "+marker+"; echo off-ok", binDir, env)
+
+	if !strings.Contains(res.stdout, "off-ok") {
+		t.Errorf("command did not run with mediation off; stdout=%q stderr=%q", res.stdout, res.stderr)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("expected side-effect to occur with mediation off: %v", err)
+	}
+	if got := atomic.LoadInt32(count); got != 0 {
+		t.Errorf("expected no daemon requests with mediation off, got %d", got)
+	}
+}
+
+// The cases below exercise the agent's real invocation model: a non-interactive
+// `bash -c` child that sources the rcfile via BASH_ENV (no --rcfile, no -i).
+// This is the path #801's fifth slice routes (R3). The interactive cases above
+// proved the trap under `bash --rcfile -ic`; these prove it survives the
+// non-interactive startup the agent actually uses.
+//
+// Veto contract: a denied command does not run (its side effect is suppressed).
+// The bash exit status stays 0 because extdebug skips the command rather than
+// failing it, so these assert on the side effect and the [Aileron] veto
+// message, not on the exit code. Later #801 slices that add deny semantics own
+// any exit-status or chain-halting behavior.
+
+func TestBashrcNonInteractiveAllowRunsCommand(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, allowBody)
+
+	res := runBashEnv(t, rc, "echo mediated-ok", binDir, mediationEnv(srv.URL))
+
+	if !strings.Contains(res.stdout, "mediated-ok") {
+		t.Errorf("expected allowed command to run; stdout=%q stderr=%q", res.stdout, res.stderr)
+	}
+}
+
+func TestBashrcNonInteractiveDenyVetoesCommandSideEffect(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	denyBody := `{"status":"decided","decision":"deny","audit_id":"a","reason":"policy blocked"}`
+	srv, _, _ := stubDaemon(t, http.StatusOK, denyBody)
+
+	marker := filepath.Join(t.TempDir(), "created-if-not-vetoed")
+	res := runBashEnv(t, rc, "touch "+marker, binDir, mediationEnv(srv.URL))
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Errorf("deny did not veto under non-interactive bash: side-effect file created at %s", marker)
+	}
+	if !strings.Contains(res.stderr, "[Aileron]") {
+		t.Errorf("expected [Aileron] message on stderr, got: %s", res.stderr)
+	}
+}
+
+func TestBashrcNonInteractiveUnreachableDaemonVetoesCommand(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, _, _ := stubDaemon(t, http.StatusOK, allowBody)
+	refused := srv.URL
+	srv.Close()
+
+	marker := filepath.Join(t.TempDir(), "created-if-not-vetoed")
+	res := runBashEnv(t, rc, "touch "+marker, binDir, mediationEnv(refused))
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Errorf("unreachable daemon did not veto under non-interactive bash: file created at %s", marker)
+	}
+	if !strings.Contains(res.stderr, "[Aileron]") {
+		t.Errorf("expected [Aileron] message on stderr, got: %s", res.stderr)
+	}
+}
+
+func TestBashrcNonInteractiveHitsDaemonOncePerCommand(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, count, _ := stubDaemon(t, http.StatusOK, allowBody)
+
+	res := runBashEnv(t, rc, "echo single", binDir, mediationEnv(srv.URL))
+
+	if !strings.Contains(res.stdout, "single") {
+		t.Fatalf("command did not run; stdout=%q stderr=%q", res.stdout, res.stderr)
+	}
+	if got := atomic.LoadInt32(count); got != 1 {
+		t.Errorf("expected exactly 1 daemon request for one non-interactive command (recursion guard), got %d", got)
+	}
+}
+
+func TestBashrcNonInteractiveMediationOffIsInert(t *testing.T) {
+	requireBashTooling(t)
+	rc := bashrcPath(t)
+	binDir := installMediatorBin(t)
+	srv, count, _ := stubDaemon(t, http.StatusOK, allowBody)
+
+	marker := filepath.Join(t.TempDir(), "should-exist")
+	env := map[string]string{
+		// AILERON_SANDBOX_SHELL_MEDIATION intentionally unset: BASH_ENV still
+		// sources the rcfile, but the rcfile returns before installing the trap.
+		"AILERON_API_URL":    srv.URL,
+		"AILERON_TOKEN":      "tok",
+		"AILERON_SESSION_ID": "sess",
+	}
+	res := runBashEnv(t, rc, "touch "+marker+"; echo off-ok", binDir, env)
 
 	if !strings.Contains(res.stdout, "off-ok") {
 		t.Errorf("command did not run with mediation off; stdout=%q stderr=%q", res.stdout, res.stderr)
