@@ -36,6 +36,8 @@ The second #801 implementation slice adds the internal launch opt-in. When `AILE
 
 The third #801 implementation slice establishes the daemon-side shell decision contract at `POST /v1/sandbox-shell/decide`. This first endpoint cut is allow-only and records sanitized `sandbox.shell.decided` audit events. It does not route shell execution, deny commands, create approvals, or drain approval results yet.
 
+The fourth #801 implementation slice connects the image-side helper to that endpoint. When `AILERON_SANDBOX_SHELL_MEDIATION=1` is set, `aileron-shell-mediator intercept` POSTs the command to `POST /v1/sandbox-shell/decide` and exits zero only on a clean allow. Every other outcome fails closed, which covers a missing daemon URL or token, a network failure, a non-200 status, an unparseable body, and any decision other than allow. `aileron-bashrc` installs a bash `DEBUG` trap behind the opt-in that routes each about-to-run command through the mediator and vetoes the command when the mediator exits nonzero. The endpoint stays allow-only and launch still does not route `/bin/bash` or `/bin/sh` through the helper, so the live agent session is not yet mediated. Shell routing, deny and pending-approval policy, approval result draining with `aileron wait <id>`, and bypass and subshell-inheritance tests remain deferred to later #801 slices.
+
 ## Consequences
 
 Host launch remains governed by ADR-0015: Aileron audits Aileron actions, not arbitrary host commands.
