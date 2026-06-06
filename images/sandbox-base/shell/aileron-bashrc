@@ -1,10 +1,46 @@
 # Aileron sandbox shell mediation rcfile.
 #
-# This file is intentionally inert until launch opts into shell mediation.
-# Later #801 slices install the DEBUG trap and result-drain hooks here.
+# Inert until launch opts into shell mediation. When the opt-in is set it
+# installs a DEBUG trap that routes each about-to-run command through
+# aileron-shell-mediator before bash executes it. A nonzero mediator result
+# vetoes the command (KTD4).
 if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-echo "sandbox shell mediation rcfile loaded without an implemented trap" >&2
-return 127 2>/dev/null || exit 127
+_aileron_mediate() {
+  # Recursion guard. The DEBUG trap fires before every simple command,
+  # including the commands this handler runs. While the guard is set, allow
+  # without re-mediating so the trap never re-enters or fires a second daemon
+  # call for one top-level command (R-B).
+  if [ -n "${_AILERON_IN_TRAP:-}" ]; then
+    return 0
+  fi
+
+  # Enable extdebug here, not at rcfile top. An interactive shell that turns on
+  # extdebug during startup makes bash try to launch its debugger, fail to find
+  # bashdb, and then silently disable extdebug, which would break the veto.
+  # Enabling it inside the trap runs after startup, so it sticks, and a DEBUG
+  # trap returning nonzero under extdebug skips the about-to-run command.
+  shopt -s extdebug
+
+  # $BASH_COMMAND is the command bash is about to run. Empty contexts have
+  # nothing to decide on.
+  if [ -z "${BASH_COMMAND:-}" ]; then
+    return 0
+  fi
+
+  _AILERON_IN_TRAP=1
+  aileron-shell-mediator intercept "$BASH_COMMAND"
+  local rc=$?
+  unset _AILERON_IN_TRAP
+
+  if [ "$rc" -ne 0 ]; then
+    # The mediator already printed a [Aileron] reason on stderr; returning
+    # nonzero makes extdebug veto the command.
+    return 1
+  fi
+  return 0
+}
+
+trap '_aileron_mediate' DEBUG
