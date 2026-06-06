@@ -334,6 +334,14 @@ func TestInterceptConnectionRefusedFailsClosed(t *testing.T) {
 
 func requireSh(t *testing.T) {
 	t.Helper()
+	// The --check probe is a POSIX shell contract that resolves /bin/bash and
+	// compares PATH-resolved paths. Under Windows the test runs in Git bash,
+	// where command -v returns MSYS-translated paths (/tmp/...) that never
+	// string-match the native wrapper path (C:\...), so the comparison is not
+	// meaningful. Linux CI and the sandbox-base smoke test are the real gates.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX --check probe is not meaningful under Windows path translation")
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skipf("sh not available on host: %v", err)
 	}
