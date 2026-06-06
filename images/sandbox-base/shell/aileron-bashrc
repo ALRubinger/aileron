@@ -1,10 +1,19 @@
+# shellcheck shell=bash
 # Aileron sandbox shell mediation rcfile.
 #
 # Inert until launch opts into shell mediation. When the opt-in is set it
 # installs a DEBUG trap that routes each about-to-run command through
 # aileron-shell-mediator before bash executes it. A nonzero mediator result
-# vetoes the command (KTD4).
+# is a deny (or a fail-closed error) — the trap halts the shell with a
+# nonzero exit under non-interactive bash so `bash -c "denied && next"` does
+# NOT run `next` and the shell's exit code reflects the deny (#801 slice 6).
+# Interactive shells keep the slice-5 soft-veto contract so a human at a REPL
+# is not killed by a single denied command (KTD3).
 if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
+  # shellcheck disable=SC2317
+  # The `exit 0` is reachable when this file is executed directly (rather than
+  # sourced) — `return` fails outside a function/source context so the fallback
+  # exits cleanly. shellcheck can't see that path from a static read.
   return 0 2>/dev/null || exit 0
 fi
 
@@ -36,9 +45,24 @@ _aileron_mediate() {
   unset _AILERON_IN_TRAP
 
   if [ "$rc" -ne 0 ]; then
-    # The mediator already printed a [Aileron] reason on stderr; returning
-    # nonzero makes extdebug veto the command.
-    return 1
+    # The mediator already printed an `[Aileron]` line on stderr (R4). Slice 6
+    # splits halt behavior on the shell mode:
+    #
+    #   - Interactive (REPL with $- containing `i`): return 1 so extdebug
+    #     suppresses the about-to-run command and the prompt comes back.
+    #     A human typing in a sandbox shell should not have their REPL
+    #     killed by a single denied command.
+    #   - Non-interactive (bash -c, the agent's invocation model): `exit "$rc"`
+    #     so the rest of `&& cmd` / `; cmd` chains do NOT run AND the shell
+    #     exits with a nonzero status. This is the #801 deny contract.
+    #
+    # `exit` from inside the DEBUG trap exits the shell process; the trap's
+    # local `rc` is the mediator's own exit code (typically 1), so the shell
+    # exit code echoes the mediator decision.
+    if [[ $- == *i* ]]; then
+      return 1
+    fi
+    exit "$rc"
   fi
   return 0
 }

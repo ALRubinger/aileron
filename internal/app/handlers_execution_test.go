@@ -89,7 +89,7 @@ func seedGrantAndIntent(ctx context.Context, s *apiServer, grantID, intentID str
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    intentID,
 		WorkspaceId: "ws_1",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action: api.ActionIntent{
 			Type:    "git.push",
 			Summary: "push to main",
@@ -210,7 +210,7 @@ func TestNewExecutionGrant_IssuesCapabilityForApprovedScope(t *testing.T) {
 	intent := api.IntentEnvelope{
 		IntentId:    "int_cap",
 		WorkspaceId: "ws_1",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action: api.ActionIntent{
 			Type:    "git.issue.create",
 			Summary: "file issue",
@@ -263,7 +263,7 @@ func TestApproveRequest_IssuesGrantCapability(t *testing.T) {
 	intent := api.IntentEnvelope{
 		IntentId:    "int_approve",
 		WorkspaceId: "ws_1",
-		Status:      api.PendingApproval,
+		Status:      api.IntentStatusPendingApproval,
 		Action:      api.ActionIntent{Type: "git.push", Summary: "push"},
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -351,7 +351,7 @@ func TestModifyRequest_IssuesBoundedGrantCapability(t *testing.T) {
 	intent := api.IntentEnvelope{
 		IntentId:    "int_modify",
 		WorkspaceId: "ws_1",
-		Status:      api.PendingApproval,
+		Status:      api.IntentStatusPendingApproval,
 		Action:      api.ActionIntent{Type: "git.issue.create", Summary: "file issue"},
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
@@ -432,7 +432,7 @@ func TestNewExecutionGrant_UsesModelDomainParameters(t *testing.T) {
 	intent := api.IntentEnvelope{
 		IntentId:    "int_model_domain",
 		WorkspaceId: "ws_1",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action: api.ActionIntent{
 			Type:    "git.issue.create",
 			Summary: "file issue",
@@ -634,7 +634,7 @@ func TestRunExecution_NoConnector(t *testing.T) {
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    "int_nc",
 		WorkspaceId: "ws",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action:      api.ActionIntent{Type: "custom", Summary: "do something"},
 	})
 	s.grants.Create(ctx, api.ExecutionGrant{
@@ -660,7 +660,7 @@ func TestRunExecution_VaultError(t *testing.T) {
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    "int_ve",
 		WorkspaceId: "ws",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action:      api.ActionIntent{Type: "git.push", Summary: "push"},
 	})
 	s.grants.Create(ctx, api.ExecutionGrant{
@@ -746,7 +746,7 @@ func seedEncryptedGrantAndIntent(ctx context.Context, s *apiServer, grantID, int
 	s.intents.Create(ctx, api.IntentEnvelope{
 		IntentId:    intentID,
 		WorkspaceId: "ws_1",
-		Status:      api.Approved,
+		Status:      api.IntentStatusApproved,
 		Action: api.ActionIntent{
 			Type:    "git.push",
 			Summary: "push to main",

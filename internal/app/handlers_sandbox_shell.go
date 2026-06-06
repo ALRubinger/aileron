@@ -2,7 +2,10 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -11,14 +14,41 @@ import (
 	"github.com/ALRubinger/aileron/internal/model"
 )
 
-const sandboxShellDecisionReasonAllowOnly = "sandbox shell decision contract is allow-only in this implementation slice"
-const sandboxShellDecisionAllow = "allow"
-const sandboxShellDecisionStatusDecided = "decided"
+// sandboxShellDenyPatternEnv is the daemon-scoped env var the slice-6 deny
+// trigger reads at startup. When set to a non-empty value, the daemon
+// compiles it as a regex and refuses to start if compilation fails (KTD2).
+// When unset, the allow path is byte-for-byte unchanged from slice 5 (R6).
+const sandboxShellDenyPatternEnv = "AILERON_SANDBOX_SHELL_DENY_PATTERN"
+
+const (
+	sandboxShellDecisionStatusDecided      = "decided"
+	sandboxShellDecisionReasonAllowOnly    = "sandbox shell decision contract is allow-only in this implementation slice"
+	sandboxShellDecisionReasonAllowNoMatch = "command does not match deny pattern"
+	sandboxShellDenyReasonPrefix           = "matched deny pattern: "
+)
+
+// loadSandboxShellDenyPattern reads AILERON_SANDBOX_SHELL_DENY_PATTERN and
+// returns the compiled regex (or nil if unset). A set-but-invalid pattern
+// returns a non-nil error so app.New can refuse to start (R7 fail-closed +
+// KTD2 startup refusal).
+func loadSandboxShellDenyPattern() (*regexp.Regexp, error) {
+	raw := os.Getenv(sandboxShellDenyPatternEnv)
+	if raw == "" {
+		return nil, nil
+	}
+	re, err := regexp.Compile(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s=%q: %w", sandboxShellDenyPatternEnv, raw, err)
+	}
+	return re, nil
+}
 
 // DecideSandboxShellCommand records the daemon-side shell mediation boundary.
-// The current cut is intentionally allow-only; later #801 slices add policy,
-// deny, approval-pending, and result-drain semantics before launch routes real
-// shell execution through this endpoint.
+// Returns `allow` by default; returns `deny` when the command matches the
+// daemon's compiled AILERON_SANDBOX_SHELL_DENY_PATTERN regex (KTD2). The deny
+// reason format is `matched deny pattern: <pattern source>`; the matched
+// pattern source is also surfaced as a separate field on the response and on
+// the audit payload as `aileron.shell.matched_pattern` (KTD4).
 func (s *apiServer) DecideSandboxShellCommand(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	var req api.SandboxShellDecisionRequest
@@ -33,17 +63,39 @@ func (s *apiServer) DecideSandboxShellCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	decision, reason, matchedPattern := s.sandboxShellEvaluate(command)
 	latencyMs := time.Since(start).Milliseconds()
-	auditID := s.recordSandboxShellDecision(r, req, command, sandboxShellDecisionAllow, sandboxShellDecisionReasonAllowOnly, latencyMs)
-	writeJSON(w, http.StatusOK, api.SandboxShellDecisionResponse{
+	auditID := s.recordSandboxShellDecision(r, req, command, string(decision), reason, matchedPattern, latencyMs)
+
+	resp := api.SandboxShellDecisionResponse{
 		Status:   sandboxShellDecisionStatusDecided,
-		Decision: sandboxShellDecisionAllow,
+		Decision: decision,
 		AuditId:  auditID,
-		Reason:   ptrNonEmpty(sandboxShellDecisionReasonAllowOnly),
-	})
+		Reason:   ptrNonEmpty(reason),
+	}
+	if matchedPattern != "" {
+		resp.MatchedPattern = ptrNonEmpty(matchedPattern)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *apiServer) recordSandboxShellDecision(r *http.Request, req api.SandboxShellDecisionRequest, command, decision, reason string, latencyMs int64) string {
+// sandboxShellEvaluate is the deny-pattern evaluation seam used by the
+// handler. When no deny pattern is configured, the allow path returns the
+// slice-5 reason verbatim (R6). When configured, a match returns `deny` with
+// the KTD2 stable reason format and the pattern source; a miss returns `allow`
+// with a distinct "no match" reason so audits stay informative.
+func (s *apiServer) sandboxShellEvaluate(command string) (decision api.SandboxShellDecisionResponseDecision, reason string, matchedPattern string) {
+	if s.sandboxShellDenyPattern == nil {
+		return api.SandboxShellDecisionResponseDecisionAllow, sandboxShellDecisionReasonAllowOnly, ""
+	}
+	src := s.sandboxShellDenyPattern.String()
+	if s.sandboxShellDenyPattern.MatchString(command) {
+		return api.SandboxShellDecisionResponseDecisionDeny, sandboxShellDenyReasonPrefix + src, src
+	}
+	return api.SandboxShellDecisionResponseDecisionAllow, sandboxShellDecisionReasonAllowNoMatch, ""
+}
+
+func (s *apiServer) recordSandboxShellDecision(r *http.Request, req api.SandboxShellDecisionRequest, command, decision, reason, matchedPattern string, latencyMs int64) string {
 	if s.auditRecorder == nil {
 		if s.newID != nil {
 			return s.newID()
@@ -56,6 +108,9 @@ func (s *apiServer) recordSandboxShellDecision(r *http.Request, req api.SandboxS
 		"aileron.shell.decision":   decision,
 		"aileron.shell.reason":     reason,
 		"aileron.shell.latency_ms": latencyMs,
+	}
+	if matchedPattern != "" {
+		payload["aileron.shell.matched_pattern"] = matchedPattern
 	}
 	if cwd := strings.TrimSpace(valueOrEmpty(req.Cwd)); cwd != "" {
 		payload["aileron.shell.cwd"] = cwd

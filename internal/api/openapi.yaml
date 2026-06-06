@@ -2772,9 +2772,11 @@ paths:
       summary: Decide a sandbox shell command mediation request
       description: |
         Internal sandbox shell-mediation contract used by the container-side
-        shell helper. This first cut is allow-only and records a sanitized
-        audit event; later #801 slices add deny, approval-pending, result
-        draining, and launch shell routing.
+        shell helper. Accepts `allow` and `deny`; the deny trigger is the
+        daemon-scoped `AILERON_SANDBOX_SHELL_DENY_PATTERN` regex this slice
+        wires (see ADR-0021). Records a sanitized audit event for both
+        decisions. Later #801 slices add `pending_approval` and result
+        draining.
       operationId: decideSandboxShellCommand
       requestBody:
         required: true
@@ -6437,9 +6439,9 @@ components:
     SandboxShellDecisionResponse:
       type: object
       description: |
-        Decision returned to the sandbox shell helper. The initial daemon
-        contract only returns `allow`; future #801 slices add `deny` and
-        `pending_approval`.
+        Decision returned to the sandbox shell helper. `allow` and `deny` are
+        accepted; `pending_approval` is a future value reserved for the
+        approval-pending slice.
       required: [status, decision, audit_id]
       properties:
         status:
@@ -6447,13 +6449,23 @@ components:
           description: Currently `decided`.
         decision:
           type: string
-          description: Currently `allow`; future values include `deny` and `pending_approval`.
+          enum: [allow, deny, pending_approval]
+          description: |
+            `allow` and `deny` are accepted; `pending_approval` is a future
+            value.
         audit_id:
           type: string
           description: Audit log ID for the shell mediation decision.
         reason:
           type: string
           description: Human-readable decision reason.
+        matched_pattern:
+          type: string
+          description: |
+            Verbatim source of the regex that produced a `deny` decision.
+            Present on `deny` when the daemon's deny trigger is the
+            `AILERON_SANDBOX_SHELL_DENY_PATTERN` regex (see ADR-0021).
+            Absent on `allow`.
         approval_id:
           type: string
           description: Pending approval id when `decision = pending_approval`.
