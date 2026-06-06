@@ -13,6 +13,23 @@ if [ "${1:-}" = "--check" ]; then
     echo "sandbox shell mediation requires readable rcfile at $aileron_bashrc" >&2
     exit 127
   fi
+
+  # Routing only works if the wrapper sits ahead of the real shell on PATH, so
+  # `bash` resolves through Aileron (R1). A BYO image that requests mediation
+  # but lacks the wrapper fails here, before the agent starts (R6).
+  wrapper="${AILERON_SHELL_WRAPPER:-/usr/local/bin/bash}"
+  resolved="$(command -v bash 2>/dev/null || true)"
+  if [ "$resolved" != "$wrapper" ]; then
+    echo "sandbox shell mediation requires the bash wrapper ahead of the real shell on PATH" >&2
+    echo "command -v bash resolved to '${resolved:-not found}', want $wrapper" >&2
+    echo "extend the current aileron/sandbox-base image or disable sandbox shell mediation" >&2
+    exit 127
+  fi
+  if [ ! -x "$wrapper" ]; then
+    echo "sandbox shell mediation requires an executable bash wrapper at $wrapper" >&2
+    echo "extend the current aileron/sandbox-base image or disable sandbox shell mediation" >&2
+    exit 127
+  fi
   exit 0
 fi
 

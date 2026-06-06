@@ -332,6 +332,103 @@ func TestInterceptConnectionRefusedFailsClosed(t *testing.T) {
 	}
 }
 
+func requireSh(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("sh not available on host: %v", err)
+	}
+}
+
+// runCheck execs `sh <script> --check` with binDir prepended to PATH so
+// `command -v bash` resolves the way the validation probe resolves it in the
+// image.
+func runCheck(t *testing.T, script, binDir string, env map[string]string) interceptResult {
+	t.Helper()
+	cmd := exec.Command("sh", script, "--check")
+	pathVal := os.Getenv("PATH")
+	if binDir != "" {
+		pathVal = binDir + string(os.PathListSeparator) + pathVal
+	}
+	baseEnv := []string{"PATH=" + pathVal}
+	for k, v := range env {
+		baseEnv = append(baseEnv, k+"="+v)
+	}
+	cmd.Env = baseEnv
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	exit := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !asExitError(err, &ee) {
+			t.Fatalf("running --check: %v\nstderr: %s", err, errBuf.String())
+		}
+		exit = ee.ExitCode()
+	}
+	return interceptResult{exit: exit, stdout: outBuf.String(), stderr: errBuf.String()}
+}
+
+// installWrapperOnPath writes an executable named `bash` into a fresh dir and
+// returns the dir and the full wrapper path. The check only verifies the
+// resolved path, so the file's contents do not matter here.
+func installWrapperOnPath(t *testing.T) (binDir, wrapperPath string) {
+	t.Helper()
+	binDir = t.TempDir()
+	wrapperPath = filepath.Join(binDir, "bash")
+	if err := os.WriteFile(wrapperPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("install wrapper: %v", err)
+	}
+	return binDir, wrapperPath
+}
+
+// The --check mode is the image-validation probe. Beyond the real shell and
+// rcfile, it must confirm the bash wrapper sits ahead of the real shell on
+// PATH so routing actually works, and fail with an actionable error otherwise
+// (R6). The expected wrapper path is AILERON_SHELL_WRAPPER (default
+// /usr/local/bin/bash); the override exists so the contract is testable
+// without writing under /usr/local/bin.
+
+func TestCheckPassesWhenWrapperResolvesOnPath(t *testing.T) {
+	requireSh(t)
+	script := mediatorScriptPath(t)
+	binDir, wrapper := installWrapperOnPath(t)
+
+	res := runCheck(t, script, binDir, map[string]string{
+		"AILERON_SHELL_WRAPPER": wrapper,
+		"AILERON_REAL_SHELL":    "/bin/bash",
+		"AILERON_SHELL_RCFILE":  bashrcPath(t),
+	})
+
+	if res.exit != 0 {
+		t.Fatalf("expected --check to pass with wrapper on PATH, got %d (stderr: %s)", res.exit, res.stderr)
+	}
+}
+
+func TestCheckFailsWhenWrapperMissingFromPath(t *testing.T) {
+	requireSh(t)
+	script := mediatorScriptPath(t)
+
+	// No wrapper dir on PATH and the default wrapper path is expected, so
+	// `command -v bash` resolves to the bare real shell (or nothing). The probe
+	// must reject this before the agent starts.
+	res := runCheck(t, script, "", map[string]string{
+		"AILERON_SHELL_WRAPPER": "/usr/local/bin/bash",
+		"AILERON_REAL_SHELL":    "/bin/bash",
+		"AILERON_SHELL_RCFILE":  bashrcPath(t),
+	})
+
+	if res.exit == 0 {
+		t.Fatalf("expected --check to fail when wrapper missing from PATH; stderr: %s", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "bash wrapper") {
+		t.Errorf("expected error naming the bash wrapper, got: %s", res.stderr)
+	}
+	if !strings.Contains(res.stderr, "disable sandbox shell mediation") {
+		t.Errorf("expected actionable remediation in error, got: %s", res.stderr)
+	}
+}
+
 func wrapperScriptPath(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
