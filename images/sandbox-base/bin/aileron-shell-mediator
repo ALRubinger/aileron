@@ -16,6 +16,97 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "intercept" ]; then
+  # When mediation is off the trap is never installed; a direct intercept
+  # call still allows without contacting the daemon (R5).
+  if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
+    exit 0
+  fi
+
+  command="${2:-}"
+
+  api_url="${AILERON_API_URL:-}"
+  if [ -z "$api_url" ]; then
+    echo "[Aileron] mediation unavailable: no daemon URL" >&2
+    exit 1
+  fi
+
+  token="${AILERON_TOKEN:-}"
+  if [ -z "$token" ]; then
+    echo "[Aileron] mediation unavailable: no daemon token" >&2
+    exit 1
+  fi
+
+  # Build a JSON-escaped request body with awk so command characters
+  # (quotes, backslashes, spaces) cannot break the JSON or inject fields.
+  # Credentials and environment are never included (R6).
+  body=$(
+    AIL_COMMAND="$command" \
+    AIL_CWD="${PWD:-}" \
+    AIL_SHELL="${AILERON_REAL_SHELL:-}" \
+    AIL_PID="$$" \
+    AIL_PPID="${PPID:-0}" \
+    awk 'function esc(s,   out, i, n, c) {
+      out = ""
+      n = length(s)
+      for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == "\\") out = out "\\\\"
+        else if (c == "\"") out = out "\\\""
+        else if (c == "\n") out = out "\\n"
+        else if (c == "\t") out = out "\\t"
+        else if (c == "\r") out = out "\\r"
+        else out = out c
+      }
+      return out
+    }
+    BEGIN {
+      printf "{\"command\":\"%s\",\"cwd\":\"%s\",\"shell\":\"%s\",\"pid\":%d,\"ppid\":%d}", \
+        esc(ENVIRON["AIL_COMMAND"]), \
+        esc(ENVIRON["AIL_CWD"]), \
+        esc(ENVIRON["AIL_SHELL"]), \
+        ENVIRON["AIL_PID"] + 0, \
+        ENVIRON["AIL_PPID"] + 0
+    }'
+  )
+
+  endpoint="${api_url%/}/sandbox-shell/decide"
+
+  # wget exits nonzero on connection failure and on non-2xx responses,
+  # which gives fail-closed-on-HTTP-error for free. Keep the token off any
+  # traced line (R6): no set -x around this call.
+  response=$(
+    wget -q -O - \
+      --header="Authorization: Bearer ${token}" \
+      --header="X-Aileron-Session-Id: ${AILERON_SESSION_ID:-}" \
+      --header="Content-Type: application/json" \
+      --post-data="$body" \
+      "$endpoint"
+  ) || {
+    echo "[Aileron] mediation unavailable: decision request failed" >&2
+    exit 1
+  }
+
+  # The daemon emits this body and this helper reads it; the allow-only
+  # contract keeps the matched surface tiny. Anything that does not match
+  # both fields (including an empty body) is treated as a block (R3).
+  if printf '%s' "$response" | grep -Eq '"decision"[[:space:]]*:[[:space:]]*"allow"' \
+    && printf '%s' "$response" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"decided"'; then
+    exit 0
+  fi
+
+  reason=$(printf '%s' "$response" \
+    | grep -Eo '"reason"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -1 \
+    | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/' || true)
+  if [ -n "$reason" ]; then
+    echo "[Aileron] denied: $reason" >&2
+  else
+    echo "[Aileron] denied" >&2
+  fi
+  exit 1
+fi
+
 if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
   exec "$real_shell" "$@"
 fi
