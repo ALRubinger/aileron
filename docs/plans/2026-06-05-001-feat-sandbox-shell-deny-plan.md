@@ -1,6 +1,6 @@
 ---
 title: "feat: deny semantics for sandbox shell mediation (#801 slice 6)"
-status: active
+status: completed
 created: 2026-06-05
 type: feat
 tracking: ["#801", "#747"]
