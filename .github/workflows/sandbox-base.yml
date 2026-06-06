@@ -151,4 +151,48 @@ jobs:
             -e AILERON_TOKEN=smoke-token \
             "$IMG" aileron-shell-mediator intercept "echo hi"
 
+          # The cases above drive the mediator directly. The cases below prove
+          # the routed path the live agent session actually uses: the wrapper
+          # ahead of the real shell on PATH and the agent's non-interactive
+          # `bash -c` model (U3).
+
+          echo "== which bash resolves to the wrapper (R1) =="
+          resolved=$(docker run --rm --network host "$IMG" sh -c 'command -v bash')
+          echo "resolved=$resolved"
+          if [ "$resolved" != "/usr/local/bin/bash" ]; then
+            echo "expected bash to resolve to /usr/local/bin/bash, got '$resolved'"
+            exit 1
+          fi
+
+          echo "== routed bash -c against allow stub -> exit 0 and command runs (R2/R3) =="
+          out=$(docker run --rm --network host \
+            -e AILERON_SANDBOX_SHELL_MEDIATION=1 \
+            -e AILERON_API_URL=http://127.0.0.1:8099 \
+            -e AILERON_TOKEN=smoke-token \
+            -e AILERON_SESSION_ID=smoke-session \
+            -e AILERON_REAL_SHELL=/bin/bash \
+            "$IMG" bash -c 'echo routed-hi')
+          echo "$out"
+          if ! echo "$out" | grep -q routed-hi; then
+            echo "routed non-interactive command did not run under the allow stub"
+            exit 1
+          fi
+
+          echo "== routed bash -c with closed port -> command vetoed, fail closed (R3) =="
+          # The trap installed via BASH_ENV must veto the command when the daemon
+          # is unreachable. The extdebug veto suppresses the command rather than
+          # failing the shell, so assert on the suppressed side effect (the echo
+          # not printing), not on the exit code.
+          vout=$(docker run --rm --network host \
+            -e AILERON_SANDBOX_SHELL_MEDIATION=1 \
+            -e AILERON_API_URL=http://127.0.0.1:9099 \
+            -e AILERON_TOKEN=smoke-token \
+            -e AILERON_SESSION_ID=smoke-session \
+            -e AILERON_REAL_SHELL=/bin/bash \
+            "$IMG" bash -c 'echo should-not-print' 2>/dev/null || true)
+          if echo "$vout" | grep -q should-not-print; then
+            echo "routed command ran despite an unreachable daemon (trap not installed or not vetoing)"
+            exit 1
+          fi
+
           echo "shell mediator smoke test passed"

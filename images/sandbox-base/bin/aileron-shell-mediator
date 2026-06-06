@@ -13,6 +13,23 @@ if [ "${1:-}" = "--check" ]; then
     echo "sandbox shell mediation requires readable rcfile at $aileron_bashrc" >&2
     exit 127
   fi
+
+  # Routing only works if the wrapper sits ahead of the real shell on PATH, so
+  # `bash` resolves through Aileron (R1). A BYO image that requests mediation
+  # but lacks the wrapper fails here, before the agent starts (R6).
+  wrapper="${AILERON_SHELL_WRAPPER:-/usr/local/bin/bash}"
+  resolved="$(command -v bash 2>/dev/null || true)"
+  if [ "$resolved" != "$wrapper" ]; then
+    echo "sandbox shell mediation requires the bash wrapper ahead of the real shell on PATH" >&2
+    echo "command -v bash resolved to '${resolved:-not found}', want $wrapper" >&2
+    echo "extend the current aileron/sandbox-base image or disable sandbox shell mediation" >&2
+    exit 127
+  fi
+  if [ ! -x "$wrapper" ]; then
+    echo "sandbox shell mediation requires an executable bash wrapper at $wrapper" >&2
+    echo "extend the current aileron/sandbox-base image or disable sandbox shell mediation" >&2
+    exit 127
+  fi
   exit 0
 fi
 
@@ -109,9 +126,46 @@ if [ "${1:-}" = "intercept" ]; then
   exit 1
 fi
 
-if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
-  exec "$real_shell" "$@"
+if [ "${1:-}" = "wrap" ]; then
+  shift
+
+  # The bash/sh wrapper records the shell it stood in for. When mediation is
+  # off the wrapper must be transparent, so exec that exact real shell and add
+  # nothing: sh stays sh, bash stays bash (R7).
+  wrap_real="${AILERON_WRAP_SHELL:-/bin/bash}"
+  if [ "${AILERON_SANDBOX_SHELL_MEDIATION:-}" != "1" ]; then
+    exec "$wrap_real" "$@"
+  fi
+
+  # Mediation is on. Route every caller (including `sh`) into the trap-bearing
+  # bash so the DEBUG trap can mediate it. $real_shell is an absolute path
+  # (/bin/bash), never the bare name, so this cannot re-resolve to the wrapper
+  # on PATH and loop (R4).
+  #
+  # BASH_ENV installs the trap for non-interactive `bash -c`, the agent's real
+  # invocation model. Interactive shells ignore BASH_ENV, so those get
+  # --rcfile instead. A shell is non-interactive here when it carries -c and
+  # not -i; everything else (login, REPL, explicit -i) is interactive.
+  has_c=0
+  has_i=0
+  for arg in "$@"; do
+    case "$arg" in
+      --) break ;;
+      --*) ;;
+      -*)
+        case "$arg" in *c*) has_c=1 ;; esac
+        case "$arg" in *i*) has_i=1 ;; esac
+        ;;
+    esac
+  done
+
+  if [ "$has_c" = "1" ] && [ "$has_i" = "0" ]; then
+    BASH_ENV="$aileron_bashrc"
+    export BASH_ENV
+    exec "$real_shell" "$@"
+  fi
+  exec "$real_shell" --rcfile "$aileron_bashrc" "$@"
 fi
 
-echo "sandbox shell mediation is not implemented in this image cut" >&2
+echo "aileron-shell-mediator: unknown invocation; expected --check, intercept, or wrap" >&2
 exit 127

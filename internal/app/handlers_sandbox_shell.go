@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/audit"
@@ -19,6 +20,7 @@ const sandboxShellDecisionStatusDecided = "decided"
 // deny, approval-pending, and result-drain semantics before launch routes real
 // shell execution through this endpoint.
 func (s *apiServer) DecideSandboxShellCommand(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	var req api.SandboxShellDecisionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "invalid JSON request body")
@@ -31,7 +33,8 @@ func (s *apiServer) DecideSandboxShellCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	auditID := s.recordSandboxShellDecision(r, req, command, sandboxShellDecisionAllow, sandboxShellDecisionReasonAllowOnly)
+	latencyMs := time.Since(start).Milliseconds()
+	auditID := s.recordSandboxShellDecision(r, req, command, sandboxShellDecisionAllow, sandboxShellDecisionReasonAllowOnly, latencyMs)
 	writeJSON(w, http.StatusOK, api.SandboxShellDecisionResponse{
 		Status:   sandboxShellDecisionStatusDecided,
 		Decision: sandboxShellDecisionAllow,
@@ -40,7 +43,7 @@ func (s *apiServer) DecideSandboxShellCommand(w http.ResponseWriter, r *http.Req
 	})
 }
 
-func (s *apiServer) recordSandboxShellDecision(r *http.Request, req api.SandboxShellDecisionRequest, command, decision, reason string) string {
+func (s *apiServer) recordSandboxShellDecision(r *http.Request, req api.SandboxShellDecisionRequest, command, decision, reason string, latencyMs int64) string {
 	if s.auditRecorder == nil {
 		if s.newID != nil {
 			return s.newID()
@@ -48,10 +51,11 @@ func (s *apiServer) recordSandboxShellDecision(r *http.Request, req api.SandboxS
 		return audit.DefaultIDFn()
 	}
 	payload := map[string]any{
-		"aileron.shell.boundary": "sandbox_shell",
-		"aileron.shell.command":  command,
-		"aileron.shell.decision": decision,
-		"aileron.shell.reason":   reason,
+		"aileron.shell.boundary":   "sandbox_shell",
+		"aileron.shell.command":    command,
+		"aileron.shell.decision":   decision,
+		"aileron.shell.reason":     reason,
+		"aileron.shell.latency_ms": latencyMs,
 	}
 	if cwd := strings.TrimSpace(valueOrEmpty(req.Cwd)); cwd != "" {
 		payload["aileron.shell.cwd"] = cwd
