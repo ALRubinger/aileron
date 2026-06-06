@@ -101,6 +101,18 @@ func TestDecideSandboxShellCommand_AllowsAndAuditsSanitizedPayload(t *testing.T)
 	if payload["aileron.session.id"] != "session-123" {
 		t.Errorf("session = %v", payload["aileron.session.id"])
 	}
+	switch latency := payload["aileron.shell.latency_ms"].(type) {
+	case int64:
+		if latency < 0 {
+			t.Errorf("latency_ms = %d, want non-negative", latency)
+		}
+	case float64:
+		if latency < 0 {
+			t.Errorf("latency_ms = %v, want non-negative", latency)
+		}
+	default:
+		t.Errorf("latency_ms missing or wrong type: %v (%T)", payload["aileron.shell.latency_ms"], payload["aileron.shell.latency_ms"])
+	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
