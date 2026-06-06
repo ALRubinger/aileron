@@ -42,6 +42,7 @@ const (
 	sandboxShimsDirPath  = "/usr/local/bin"
 	sandboxProxyCAPath   = "/etc/aileron/proxy/ca.pem"
 	sandboxShellRCPath   = "/etc/aileron/shell/aileron-bashrc"
+	sandboxShellWrapper  = "/usr/local/bin/bash"
 )
 
 const sandboxShellMediationEnv = "AILERON_SANDBOX_SHELL_MEDIATION"
@@ -344,6 +345,12 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			agentEnv[sandboxShellMediationEnv] = "1"
 			agentEnv["AILERON_SHELL_RCFILE"] = sandboxShellRCPath
 			agentEnv["AILERON_REAL_SHELL"] = "/bin/bash"
+			// Activate routing for the live agent session. BASH_ENV installs the
+			// trap in the agent's non-interactive bash -c children; SHELL points
+			// $SHELL-consulting agents at the wrapper. The agent command itself
+			// stays unwrapped (R8); routing happens at the shell layer.
+			agentEnv["BASH_ENV"] = sandboxShellRCPath
+			agentEnv["SHELL"] = sandboxShellWrapper
 		}
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
