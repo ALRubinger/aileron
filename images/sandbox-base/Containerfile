@@ -26,8 +26,14 @@ COPY shell/aileron-bashrc /etc/aileron/shell/aileron-bashrc
 COPY bin/aileron-install-proxy-ca /usr/local/bin/aileron-install-proxy-ca
 COPY bin/aileron-run-with-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca
 COPY bin/aileron-shell-mediator /usr/local/bin/aileron-shell-mediator
+# Bake the shell wrapper ahead of the real shells on PATH. /usr/local/bin
+# precedes /bin in the default Alpine PATH, so `which bash` and `which sh`
+# resolve here and route through the mediator. The wrapper derives the real
+# shell from the name it is invoked as, so one script serves both.
+COPY bin/aileron-shell-wrapper /usr/local/bin/bash
+COPY bin/aileron-shell-wrapper /usr/local/bin/sh
 RUN chmod 0644 /etc/aileron/shell/aileron-bashrc \
-    && chmod 0755 /usr/local/bin/aileron-install-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca /usr/local/bin/aileron-shell-mediator
+    && chmod 0755 /usr/local/bin/aileron-install-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca /usr/local/bin/aileron-shell-mediator /usr/local/bin/bash /usr/local/bin/sh
 
 WORKDIR /home/agent/workspace
 USER agent
