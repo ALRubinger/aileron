@@ -693,6 +693,22 @@ func (s *server) commsPOST(endpoint string, body any) (commsToolResponse, error)
 
 // --- Action discovery / execution against the Aileron daemon ---
 
+// setActionAuthHeaders sets the auth + launch-session headers daemon
+// /v1/actions/* and /v1/action-approvals/* endpoints expect. Bearer
+// token always; X-Aileron-Session-Id only when a session id is
+// configured (host launch with a session, sandbox launch). The header
+// name matches the shims surface (internal/sandbox/discovery/tools.go).
+// Comms endpoints encode the session id in the path and don't take this
+// header.
+func (s *server) setActionAuthHeaders(req *http.Request) {
+	if s.aileronToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
+	}
+	if s.sessionID != "" {
+		req.Header.Set("X-Aileron-Session-Id", s.sessionID)
+	}
+}
+
 // discoverActions queries /v1/actions and returns one MCP tool def per
 // installed action plus a snake_case → manifest-name lookup map. Per
 // ADR-0008 the LLM-facing tool name is snake_case (mapped from the
@@ -706,9 +722,7 @@ func (s *server) discoverActions(ctx context.Context) ([]toolDef, map[string]str
 	if err != nil {
 		return nil, nil, err
 	}
-	if s.aileronToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
-	}
+	s.setActionAuthHeaders(req)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, nil, err
@@ -784,9 +798,7 @@ func (s *server) runActionInner(ctx context.Context, manifestName string, args m
 		return errorResult("creating request: " + err.Error())
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if s.aileronToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
-	}
+	s.setActionAuthHeaders(req)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -857,9 +869,7 @@ func (s *server) checkActionStatus(ctx context.Context, args map[string]any) too
 	if err != nil {
 		return errorResult("creating request: " + err.Error())
 	}
-	if s.aileronToken != "" {
-		req.Header.Set("Authorization", "Bearer "+s.aileronToken)
-	}
+	s.setActionAuthHeaders(req)
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
