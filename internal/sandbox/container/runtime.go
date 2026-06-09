@@ -109,6 +109,13 @@ type ValidateOptions struct {
 	Volumes           []Volume
 	Command           []string
 	RequireProxyTrust bool
+	// RequireMCPBinary asserts that aileron-mcp is present on the
+	// container's PATH and runs (smoke-checked via `aileron-mcp
+	// --version`). Set by the sandbox launcher whenever MCP wiring is
+	// active. The two-step check catches both missing-binary and the
+	// cross-arch ENOEXEC case where `command -v` succeeds but the
+	// binary fails to exec inside the container. See ADR-0024.
+	RequireMCPBinary bool
 }
 
 // Build builds the image for plan. Tier 0 builds Aileron's local sandbox-base
@@ -298,6 +305,7 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 			opts.Command[0],
 			boolArg(requiresShimHTTPClient(opts.Volumes)),
 			boolArg(opts.RequireProxyTrust),
+			boolArg(opts.RequireMCPBinary),
 		},
 	})
 	if err == nil {
@@ -365,6 +373,16 @@ if [ "${3:-0}" = "1" ]; then
     exit 127
   fi
   aileron-install-proxy-ca --check "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
+fi
+if [ "${4:-0}" = "1" ]; then
+  if ! command -v aileron-mcp >/dev/null 2>&1; then
+    echo "aileron-mcp not on PATH; sandbox MCP wiring failed (see ADR-0024)" >&2
+    exit 127
+  fi
+  if ! aileron-mcp --version >/dev/null 2>&1; then
+    echo "aileron-mcp on PATH but not executable in this container (arch mismatch or corrupt mount); sandbox MCP wiring failed" >&2
+    exit 127
+  fi
 fi
 `
 

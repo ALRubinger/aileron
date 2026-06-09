@@ -67,6 +67,42 @@ func TestSandboxDiscoveryArtifactsRejectsSpecActionShimConflict(t *testing.T) {
 	}
 }
 
+// TestSandboxDiscoveryArtifacts_RejectsAileronMCPShimCollision: a
+// connector spec attempting to register a shim named aileron-mcp
+// would clobber the launcher's bind-mount path. The reserved-name
+// guard must fail the spec load.
+func TestSandboxDiscoveryArtifacts_RejectsAileronMCPShimCollision(t *testing.T) {
+	specs := []connectorspec.Spec{{
+		SchemaVersion: connectorspec.SchemaVersion,
+		Connector:     connectorspec.Connector{FQN: "github://acme/aileron-mcp"},
+		Tools:         []connectorspec.Tool{{Name: "aileron-mcp", Operations: []connectorspec.Operation{{Name: "do"}}}},
+	}}
+
+	_, _, err := sandboxDiscoveryArtifacts(nil, specs, sandboxMCPBinName)
+	if err == nil {
+		t.Fatal("expected conflict error for aileron-mcp shim")
+	}
+	if !strings.Contains(err.Error(), `conflicts with the selected agent command`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestIsReservedSandboxCommand_AileronMCP locks in the contract that
+// the caller-provided reserved list, when it includes aileron-mcp,
+// causes the guard to fire. The launchSandbox / validateSandbox
+// callers pass sandboxMCPBinName ("aileron-mcp") to ensure this.
+func TestIsReservedSandboxCommand_AileronMCP(t *testing.T) {
+	if !isReservedSandboxCommand("aileron-mcp", []string{"claude", sandboxMCPBinName}) {
+		t.Error("expected aileron-mcp to be reserved when present in the list")
+	}
+	if !isReservedSandboxCommand("claude", []string{"claude", sandboxMCPBinName}) {
+		t.Error("expected agent command to remain reserved")
+	}
+	if isReservedSandboxCommand("gmail", []string{"claude", sandboxMCPBinName}) {
+		t.Error("non-reserved name should pass through")
+	}
+}
+
 func TestSandboxDiscoveryArtifactsRejectsSpecAgentCommandConflict(t *testing.T) {
 	specs := []connectorspec.Spec{{
 		SchemaVersion: connectorspec.SchemaVersion,

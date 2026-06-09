@@ -310,6 +310,22 @@ var httpRequestTool = toolDef{
 }
 
 func main() {
+	// --version / -v / --help / -h: print and exit. The sandbox
+	// container's validate step (ADR-0024) execs `aileron-mcp --version`
+	// to smoke-check that the host-mounted binary is actually executable
+	// inside the container — catches the cross-arch ENOEXEC case
+	// `command -v` alone would miss.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-v":
+			fmt.Println(version.Version)
+			return
+		case "--help", "-h":
+			fmt.Println("aileron-mcp — Aileron MCP server (stdio JSON-RPC). Usage: aileron-mcp [--version|--help]. Configured via env: AILERON_URL, AILERON_TOKEN, AILERON_SESSION_ID.")
+			return
+		}
+	}
+
 	// Initialize OpenTelemetry. Off by default; AILERON_OTEL_ENABLED
 	// opts in. Outbound HTTP calls inject `traceparent` so the
 	// daemon's middleware can root spans into the same trace tree

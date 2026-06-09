@@ -215,12 +215,24 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 	if commandName == "" {
 		return fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
-	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName)
+	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName, sandboxMCPBinName)
 	if err != nil {
 		return err
 	}
 	defer cleanupMounts()
 	mounts = append(mounts, extraMounts...)
+	// Resolve aileron-mcp and append its mount so the validate step
+	// can smoke-check the binary inside the container (ADR-0024).
+	selfPath, _ := os.Executable()
+	mcpBinHost, err := resolveMCPBinary(selfPath)
+	if err != nil {
+		return err
+	}
+	mounts = append(mounts, sandboxcontainer.Volume{
+		Source:   mcpBinHost,
+		Target:   sandboxMCPBinPath,
+		ReadOnly: true,
+	})
 	if err := validateSandboxImageForLaunch(ctx, plan, config, agentEnv, mounts, commandName); err != nil {
 		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
 	}
@@ -239,6 +251,7 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 		Volumes:           mounts,
 		Command:           []string{commandName},
 		RequireProxyTrust: agentEnv["AILERON_SANDBOX_PROXY_MODE"] != "",
+		RequireMCPBinary:  true,
 	}); err != nil {
 		return err
 	}
