@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
 
@@ -30,10 +31,10 @@ func TestOpenCode_Identity(t *testing.T) {
 
 func TestOpenCode_ConfigureMCP_WritesProjectJSON(t *testing.T) {
 	dir := t.TempDir()
-	args, err := agents.OpenCode{}.ConfigureMCP("/usr/local/bin/aileron-mcp", map[string]string{
+	args, _, err := agents.OpenCode{}.ConfigureMCP("/usr/local/bin/aileron-mcp", map[string]string{
 		"AILERON_URL":        "http://127.0.0.1:7000",
 		"AILERON_SESSION_ID": "sess-opencode",
-	}, dir)
+	}, dir, launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestOpenCode_ConfigureMCP_PreservesOtherKeys(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	_, err := agents.OpenCode{}.ConfigureMCP("/new/aileron-mcp", map[string]string{}, dir)
+	_, _, err := agents.OpenCode{}.ConfigureMCP("/new/aileron-mcp", map[string]string{}, dir, launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}

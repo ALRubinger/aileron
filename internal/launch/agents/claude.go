@@ -45,14 +45,19 @@ func (c Claude) LLMEndpointEnv() string { return "ANTHROPIC_BASE_URL" }
 // value is a JSON object of MCP servers; we render the one aileron-mcp
 // entry with its required env so the daemon's session-id / approval-url
 // are visible to the MCP server.
-func (c Claude) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+//
+// Mode is irrelevant for Claude: the --mcp-config JSON travels with the
+// exec command in both host and sandbox modes, and the in-container
+// agent reads mcpBin (a container-side path under ModeSandbox)
+// directly.
+func (c Claude) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	envJSON, err := json.Marshal(mcpEnv)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling MCP env: %w", err)
+		return nil, nil, fmt.Errorf("marshaling MCP env: %w", err)
 	}
 	mcpConfig := fmt.Sprintf(
 		`{"mcpServers":{%q:{"command":%q,"env":%s}}}`,
 		launch.MCPServerName, mcpBin, string(envJSON),
 	)
-	return []string{"--mcp-config", mcpConfig}, nil
+	return []string{"--mcp-config", mcpConfig}, nil, nil
 }

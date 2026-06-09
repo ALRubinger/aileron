@@ -58,6 +58,6 @@ func (a testAgent) BinaryNames() []string  { return []string{a.name} }
 func (a testAgent) Args() []string         { return nil }
 func (a testAgent) Env() map[string]string { return nil }
 func (a testAgent) LLMEndpointEnv() string { return "" }
-func (a testAgent) ConfigureMCP(string, map[string]string, string) ([]string, error) {
-	return nil, nil
+func (a testAgent) ConfigureMCP(string, map[string]string, string, launch.Mode) ([]string, []launch.MCPMount, error) {
+	return nil, nil, nil
 }

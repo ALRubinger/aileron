@@ -522,9 +522,15 @@ func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID s
 		"AILERON_SESSION_ID":   sessionID,
 		"AILERON_APPROVAL_URL": daemonURL + "/approvals",
 	}
-	extraArgs, mcpErr := config.Agent.ConfigureMCP(mcpBin, mcpEnv, config.Dir)
+	extraArgs, mcpMounts, mcpErr := config.Agent.ConfigureMCP(mcpBin, mcpEnv, config.Dir, ModeHost)
 	if mcpErr != nil {
 		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
+	}
+	if len(mcpMounts) > 0 {
+		// Host launch has no container to mount into; an agent returning
+		// mounts under ModeHost is a contract violation, not a runtime
+		// fallback. Surface it loudly rather than silently dropping.
+		return LaunchResult{}, fmt.Errorf("agent %s returned %d MCP mounts under host launch; mounts are sandbox-only", config.Agent.Name(), len(mcpMounts))
 	}
 	allArgs = append(allArgs, extraArgs...)
 
@@ -569,9 +575,16 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	// daemon. Reads from agentEnv so the URL rewrite for the runtime
 	// (host.docker.internal vs host.containers.internal) is honored.
 	mcpEnv := sandboxMCPEnv(agentEnv)
-	extraArgs, mcpErr := config.Agent.ConfigureMCP(sandboxMCPBinPath, mcpEnv, config.Dir)
+	extraArgs, mcpMounts, mcpErr := config.Agent.ConfigureMCP(sandboxMCPBinPath, mcpEnv, config.Dir, ModeSandbox)
 	if mcpErr != nil {
 		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
+	}
+	for _, m := range mcpMounts {
+		mounts = append(mounts, sandboxcontainer.Volume{
+			Source:   m.Source,
+			Target:   m.Target,
+			ReadOnly: m.ReadOnly,
+		})
 	}
 
 	command := append([]string{commandName}, config.Agent.Args()...)

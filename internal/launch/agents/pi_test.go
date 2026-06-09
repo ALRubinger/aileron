@@ -41,7 +41,7 @@ func TestPi_ConfigureMCP_EmitsMCPConfigFlag(t *testing.T) {
 	mcpEnv := map[string]string{
 		"AILERON_URL": "http://127.0.0.1:7000",
 	}
-	args, err := agents.Pi{}.ConfigureMCP("/usr/local/bin/aileron-mcp", mcpEnv, "")
+	args, _, err := agents.Pi{}.ConfigureMCP("/usr/local/bin/aileron-mcp", mcpEnv, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP returned error: %v", err)
 	}

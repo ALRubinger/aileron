@@ -19,8 +19,8 @@ func (emptyBinaryAgent) BinaryNames() []string  { return nil }
 func (emptyBinaryAgent) Args() []string         { return nil }
 func (emptyBinaryAgent) Env() map[string]string { return nil }
 func (emptyBinaryAgent) LLMEndpointEnv() string { return "" }
-func (emptyBinaryAgent) ConfigureMCP(string, map[string]string, string) ([]string, error) {
-	return nil, nil
+func (emptyBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
+	return nil, nil, nil
 }
 
 type namedBinaryAgent struct{ name string }
@@ -30,8 +30,8 @@ func (a namedBinaryAgent) BinaryNames() []string  { return []string{a.name} }
 func (a namedBinaryAgent) Args() []string         { return nil }
 func (a namedBinaryAgent) Env() map[string]string { return nil }
 func (a namedBinaryAgent) LLMEndpointEnv() string { return "" }
-func (a namedBinaryAgent) ConfigureMCP(string, map[string]string, string) ([]string, error) {
-	return nil, nil
+func (a namedBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
+	return nil, nil, nil
 }
 
 func TestFirstAgentBinaryHandlesEmptyAgent(t *testing.T) {

@@ -32,15 +32,16 @@ func (p Pi) LLMEndpointEnv() string { return "" }
 
 // ConfigureMCP returns the CLI flags that register aileron-mcp with
 // Pi. Pi accepts Claude-Code-compatible --mcp-config flag handling, so
-// the wire shape matches Claude's.
-func (p Pi) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+// the wire shape matches Claude's. Mode is irrelevant; --mcp-config
+// travels with the exec command in both host and sandbox modes.
+func (p Pi) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	envJSON, err := json.Marshal(mcpEnv)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling MCP env: %w", err)
+		return nil, nil, fmt.Errorf("marshaling MCP env: %w", err)
 	}
 	mcpConfig := fmt.Sprintf(
 		`{"mcpServers":{%q:{"command":%q,"env":%s}}}`,
 		launch.MCPServerName, mcpBin, string(envJSON),
 	)
-	return []string{"--mcp-config", mcpConfig}, nil
+	return []string{"--mcp-config", mcpConfig}, nil, nil
 }

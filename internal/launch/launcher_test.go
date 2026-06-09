@@ -55,8 +55,8 @@ func (a scriptAgent) BinaryNames() []string  { return []string{a.script} }
 func (a scriptAgent) Args() []string         { return nil }
 func (a scriptAgent) Env() map[string]string { return a.extraEnv }
 func (a scriptAgent) LLMEndpointEnv() string { return "" }
-func (a scriptAgent) ConfigureMCP(string, map[string]string, string) ([]string, error) {
-	return a.mcpArgs, nil
+func (a scriptAgent) ConfigureMCP(string, map[string]string, string, launch.Mode) ([]string, []launch.MCPMount, error) {
+	return a.mcpArgs, nil, nil
 }
 
 func TestLaunch_AgentEnvVarsFlowThrough(t *testing.T) {
@@ -1014,9 +1014,9 @@ func (claudeTestAgent) BinaryNames() []string  { return []string{"claude"} }
 func (claudeTestAgent) Args() []string         { return nil }
 func (claudeTestAgent) Env() map[string]string { return nil }
 func (claudeTestAgent) LLMEndpointEnv() string { return "" }
-func (claudeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+func (claudeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	envJSON := encodeJSON(t1, mcpEnv)
-	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil
+	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil, nil
 }
 
 type piTestAgent struct{}
@@ -1026,9 +1026,9 @@ func (piTestAgent) BinaryNames() []string  { return []string{"pi"} }
 func (piTestAgent) Args() []string         { return nil }
 func (piTestAgent) Env() map[string]string { return nil }
 func (piTestAgent) LLMEndpointEnv() string { return "" }
-func (piTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+func (piTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	envJSON := encodeJSON(t1, mcpEnv)
-	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil
+	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil, nil
 }
 
 type gooseTestAgent struct{}
@@ -1038,7 +1038,7 @@ func (gooseTestAgent) BinaryNames() []string  { return []string{"goose"} }
 func (gooseTestAgent) Args() []string         { return []string{"session"} }
 func (gooseTestAgent) Env() map[string]string { return nil }
 func (gooseTestAgent) LLMEndpointEnv() string { return "" }
-func (gooseTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+func (gooseTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	// Mirror agents/goose.go's "ENV=val ENV=val cmd" shape, deterministic order.
 	keys := []string{}
 	for k := range mcpEnv {
@@ -1050,7 +1050,7 @@ func (gooseTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ st
 		parts = append(parts, k+"="+mcpEnv[k])
 	}
 	parts = append(parts, mcpBin)
-	return []string{"--with-extension", strings.Join(parts, " ")}, nil
+	return []string{"--with-extension", strings.Join(parts, " ")}, nil, nil
 }
 
 type openCodeTestAgent struct{}
@@ -1060,14 +1060,14 @@ func (openCodeTestAgent) BinaryNames() []string  { return []string{"opencode"} }
 func (openCodeTestAgent) Args() []string         { return nil }
 func (openCodeTestAgent) Env() map[string]string { return nil }
 func (openCodeTestAgent) LLMEndpointEnv() string { return "" }
-func (openCodeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string) ([]string, error) {
+func (openCodeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	if dir == "" {
 		cwd, _ := os.Getwd()
 		dir = cwd
 	}
 	envJSON := encodeJSON(t1, mcpEnv)
 	body := `{"mcp":{"aileron":{"type":"local","command":["` + mcpBin + `"],"enabled":true,"environment":` + envJSON + `}}}` + "\n"
-	return nil, os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(body), 0o644)
+	return nil, nil, os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(body), 0o644)
 }
 
 // t1 is a tiny *testing.T-shaped stand-in used by the test stubs above
