@@ -1,8 +1,9 @@
 ---
 title: "feat: revive aileron-mcp inside the sandbox container (Path B1)"
-status: active
+status: completed
 created: 2026-06-08
 deepened: 2026-06-08
+completed: 2026-06-08
 type: feat
 tracking: ["#953", "#747"]
 adrs: ["ADR-0024", "ADR-0018", "ADR-0008", "ADR-0009"]
