@@ -73,8 +73,9 @@ func starterDockerfile(version string) string {
 # Uncomment snippets below to add tools to the Aileron sandbox.
 # Keep rarely changing snippets earlier for better layer caching.
 #
-# Aileron's base image runs as the non-root "agent" user. Switch to root
-# before installing packages, then switch back to agent before launch.
+# Aileron's base image is Alpine-based and runs as the non-root "agent"
+# user. Switch to root before installing packages, then switch back to
+# agent before launch. All snippets use apk; do not use apt-get here.
 
 # USER root
 
@@ -83,30 +84,19 @@ func starterDockerfile(version string) string {
 #     npm install -g @anthropic-ai/claude-code
 
 # --- GitHub CLI ---
-# RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-#     curl -fsSL https://github.com/cli/cli/releases/latest/download/gh_*_linux_amd64.tar.gz | \
-#       tar xz -C /usr/local --strip-components=1
+# RUN apk add --no-cache github-cli
 
-# --- Node.js (via fnm) ---
-# RUN curl -fsSL https://fnm.vercel.app/install | bash && \
-#     /root/.local/share/fnm/fnm install 20 && \
-#     ln -s /root/.local/share/fnm/aliases/default/bin/node /usr/local/bin/node && \
-#     ln -s /root/.local/share/fnm/aliases/default/bin/npm /usr/local/bin/npm
+# --- Node.js ---
+# RUN apk add --no-cache nodejs npm
 
-# --- Python (via mise) ---
-# RUN curl https://mise.run | sh && \
-#     /root/.local/bin/mise install python@3.11 && \
-#     ln -s /root/.local/share/mise/installs/python/3.11/bin/python /usr/local/bin/python
+# --- Python ---
+# RUN apk add --no-cache python3 py3-pip
 
 # --- kubectl ---
-# RUN curl -LO https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl && \
-#     install -m 0755 kubectl /usr/local/bin/
+# RUN apk add --no-cache kubectl
 
 # --- Terraform ---
-# RUN apt-get update && apt-get install -y --no-install-recommends gnupg lsb-release curl ca-certificates && \
-#     curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg && \
-#     echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
-#     apt-get update && apt-get install -y --no-install-recommends terraform
+# RUN apk add --no-cache terraform
 
 # USER agent
 `, BaseImage(version))

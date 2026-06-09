@@ -187,6 +187,17 @@ func TestInitWritesStarterDevcontainerAndDockerfile(t *testing.T) {
 	if !strings.Contains(string(dockerfile), "FROM aileron/sandbox-base:0.4.0") {
 		t.Fatalf("Dockerfile =\n%s", string(dockerfile))
 	}
+	for _, line := range strings.Split(string(dockerfile), "\n") {
+		trimmed := strings.TrimLeft(line, "# ")
+		if strings.HasPrefix(trimmed, "RUN ") && strings.Contains(trimmed, "apt-get") {
+			t.Fatalf("Dockerfile snippets must use apk against the Alpine base, not apt-get:\n%s", string(dockerfile))
+		}
+	}
+	for _, snippet := range []string{"--- Claude Code ---", "--- GitHub CLI ---", "--- Node.js ---", "--- Python ---", "--- kubectl ---", "--- Terraform ---"} {
+		if !strings.Contains(string(dockerfile), snippet) {
+			t.Fatalf("Dockerfile missing snippet %q:\n%s", snippet, string(dockerfile))
+		}
+	}
 }
 
 func TestInitDoesNotOverwriteWithoutForce(t *testing.T) {
