@@ -42,7 +42,7 @@ Today, five families of events land in the log:
 - **Action execution:** Every invocation records which connector it called, which capability it exercised, and which binding identity satisfied it ([ADR-0003](/adr/0003-action-model), [ADR-0011](/adr/0011-local-credential-vault)). Credential bytes are never recorded.
 - **Failure:** Every failure surfaces with a stable `class`, `boundary`, retry, and `audit_id` ([ADR-0010](/adr/0010-failure-handling)). The same `audit_id` is stamped onto the agent-visible tool-result envelope, so the LLM's "what went wrong?" reaction can be traced back to a specific event.
 - **Approval lifecycle:** Three event types: `approval.requested`, `approval.approved`, `approval.denied`. Each carries the same `aileron.approval.id` so a request and its decision are trivially correlated.
-- **Sandbox HTTPS data plane:** Generated connector shims and transparent sandbox proxy requests emit proxy audit events. `connector.proxy.proxied` and `connector.proxy.rejected` identify the resolved connector operation, upstream scheme/host/path, decision, proxy source, and response status or rejection reason. `sandbox.proxy.rejected` records transparent proxy attempts that fail before a connector operation is uniquely resolved. These events never record credential bytes, request bodies, raw headers, query strings, or full upstream URLs.
+- **Sandbox HTTPS data plane:** Generated connector shims and transparent sandbox proxy requests emit proxy audit events. `connector.proxy.proxied` and `connector.proxy.rejected` identify the resolved connector operation, upstream scheme/host/path, decision, proxy source, and response status or rejection reason. `sandbox.proxy.rejected` records transparent proxy attempts that fail before a connector operation is uniquely resolved. `sandbox.proxy.disabled` records launch sessions that start with the v4 HTTPS proxy not in force (operator opt-out, preflight failure, or unsupported sandbox mode). These events never record credential bytes, request bodies, raw headers, query strings, or full upstream URLs.
 
 The schema is durable. Every payload field uses the OpenTelemetry-namespaced key shape (`aileron.connector.fqn`, `aileron.binding.name`, `aileron.failure.class`, etc.). Consumers (log shippers, trace tools, custom queries) read the same vocabulary regardless of which surface they came in through.
 
@@ -163,7 +163,7 @@ Every span carries the OTel-namespaced shape locked in for the audit payload. Wh
 
 | Attribute | Description |
 |---|---|
-| `aileron.proxy.source` | Where the proxy attempt entered Aileron: `generated_connector_shim`, `daemon_request_boundary`, or `transparent_connect_tls`. |
+| `aileron.proxy.source` | Where the proxy attempt entered Aileron: `generated_connector_shim`, `daemon_request_boundary`, `transparent_connect_tls`, or `launcher` (for `sandbox.proxy.disabled`). |
 | `aileron.proxy.method` | HTTP method after daemon-side normalization. |
 | `aileron.proxy.upstream.scheme` | Upstream scheme. Currently `https` for mediated requests. |
 | `aileron.proxy.upstream.host` | Upstream host, including port when present. |
@@ -176,6 +176,20 @@ Every span carries the OTel-namespaced shape locked in for the audit payload. Wh
 | `aileron.connector.operation` | Set on connector-resolved proxy events. |
 | `aileron.connector.credential` | Credential kind required by the spec, not the credential value. |
 | `aileron.session.id` | Launch session associated with the sandbox request when present. |
+
+**`sandbox.proxy.disabled`** (launch-session start without the v4 HTTPS proxy):
+
+| Attribute | Description |
+|---|---|
+| `aileron.proxy.source` | Always `launcher`. The launcher is the only emitter for this event family. |
+| `aileron.proxy.boundary` | Always `https_proxy`. |
+| `aileron.proxy.decision` | Always `disabled`. |
+| `aileron.proxy.disabled_reason` | Why the proxy is not in force for this session: `user_opt_out` (operator passed `--sandbox-proxy=off` or `AILERON_SANDBOX_PROXY=off`), `preflight_failed` (image lacks `aileron-install-proxy-ca` / `aileron-run-with-proxy-ca`; launch was refused), or `unsupported_sandbox_mode` (sandbox runtime is `off` or not `docker`/`podman`). |
+| `aileron.sandbox.mode` | The value of `--sandbox` for the session (`docker`, `podman`, `off`, etc.). |
+| `aileron.sandbox.image` | Resolved sandbox image reference when known (omitted when the proxy was disabled before image resolution). |
+| `aileron.session.id` | Launch session id. |
+
+The event is emitted once per launch session by the `aileron launch` CLI through the daemon's `POST /v1/sandbox-proxy/disabled` endpoint. It never records credential bytes, environment variables, the BYO image's contents, or shell history. See [ADR-0019](/adr/0019-v4-https-data-plane/) for the v4 HTTPS data plane decision and the `--sandbox-proxy` flag semantics.
 
 **Approval wait** (`aileron.approval.wait`):
 
