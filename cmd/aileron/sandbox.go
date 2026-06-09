@@ -228,9 +228,25 @@ var sandboxCheckValidateFn = func(ctx context.Context, runtimeName, workDir, ima
 		Runtime: runtimeName,
 		Stdout:  io.Discard,
 	}.Validate(ctx, sandboxcontainer.ValidateOptions{
-		Runtime: runtimeName,
-		Image:   image,
-		WorkDir: workDir,
-		Command: []string{command},
+		Runtime:           runtimeName,
+		Image:             image,
+		WorkDir:           workDir,
+		Command:           []string{command},
+		RequireProxyTrust: sandboxCheckRequiresProxyTrust(runtimeName),
 	})
+}
+
+// sandboxCheckRequiresProxyTrust reports whether `sandbox check --agent` must
+// validate the v4 HTTPS proxy contract for the given runtime. Docker and
+// Podman both run the default-on proxy under aileron launch, so sandbox
+// check exercises the same contract to surface BYO image gaps before launch
+// would fail. The --sandbox-proxy=off opt-out applies to aileron launch
+// only, not to sandbox check.
+func sandboxCheckRequiresProxyTrust(runtimeName string) bool {
+	switch strings.TrimSpace(runtimeName) {
+	case "docker", "podman":
+		return true
+	default:
+		return false
+	}
 }
