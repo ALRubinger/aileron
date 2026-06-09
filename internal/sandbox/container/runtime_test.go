@@ -442,7 +442,19 @@ func TestBuilderStreamsRuntimeOutput(t *testing.T) {
 	}
 }
 
+// pinHostOSDarwin overrides the package-level hostOS indirection so a
+// test's argv expectations stay platform-independent. The Linux Docker
+// branch (--add-host=host.docker.internal:host-gateway) has its own
+// targeted tests; here we only care about the generic argv shape.
+func pinHostOSDarwin(t *testing.T) {
+	t.Helper()
+	orig := hostOS
+	hostOS = func() string { return "darwin" }
+	t.Cleanup(func() { hostOS = orig })
+}
+
 func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	runner := &recordingRunner{}
 	result, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
@@ -475,6 +487,7 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 }
 
 func TestRunCanOverrideContainerUser(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
@@ -500,6 +513,7 @@ func TestRunCanOverrideContainerUser(t *testing.T) {
 }
 
 func TestRunMountsAdditionalReadOnlyVolumes(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	extra := filepath.Join(dir, "actions")
 	if err := os.MkdirAll(extra, 0o755); err != nil {
@@ -611,6 +625,7 @@ func TestRunRejectsMissingCommand(t *testing.T) {
 }
 
 func TestValidateRunsMinimalContractProbe(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	manifest := filepath.Join(t.TempDir(), "tools.txt")
 	if err := os.WriteFile(manifest, []byte("tool\tfqn\n"), 0o600); err != nil {
