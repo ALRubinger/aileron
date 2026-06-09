@@ -56,17 +56,21 @@ func (g Goose) LLMEndpointEnv() string { return "" }
 // parser. Values containing whitespace or shell metacharacters get
 // double-quoted.
 //
-// As a side effect this removes any stale `aileron` entry from
-// `~/.config/goose/config.yaml` left by prior launches that wrote
-// to the config file. Without cleanup, a future Goose version with
-// a fixed deserializer would load the stale config entry alongside
-// the live --with-extension one and spawn aileron-mcp twice (with
-// the wrong daemon URL and session ID from the stale entry).
-func (g Goose) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
-	if err := removeStaleAileronEntry(); err != nil {
-		return nil, fmt.Errorf("cleaning stale goose config entry: %w", err)
+// As a side effect (host mode only) this removes any stale `aileron`
+// entry from `~/.config/goose/config.yaml` left by prior launches that
+// wrote to the config file. Without cleanup, a future Goose version
+// with a fixed deserializer would load the stale config entry alongside
+// the live --with-extension one and spawn aileron-mcp twice (with the
+// wrong daemon URL and session ID from the stale entry). Under sandbox
+// mode the in-container Goose never reads the host config, so the
+// cleanup is skipped to keep the host config untouched.
+func (g Goose) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, mode launch.Mode) ([]string, []launch.MCPMount, error) {
+	if mode == launch.ModeHost {
+		if err := removeStaleAileronEntry(); err != nil {
+			return nil, nil, fmt.Errorf("cleaning stale goose config entry: %w", err)
+		}
 	}
-	return []string{"--with-extension", encodeWithExtensionValue(mcpBin, mcpEnv)}, nil
+	return []string{"--with-extension", encodeWithExtensionValue(mcpBin, mcpEnv)}, nil, nil
 }
 
 // encodeWithExtensionValue builds the `ENV=val ENV=val cmd` string

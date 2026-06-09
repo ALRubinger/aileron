@@ -442,7 +442,19 @@ func TestBuilderStreamsRuntimeOutput(t *testing.T) {
 	}
 }
 
+// pinHostOSDarwin overrides the package-level hostOS indirection so a
+// test's argv expectations stay platform-independent. The Linux Docker
+// branch (--add-host=host.docker.internal:host-gateway) has its own
+// targeted tests; here we only care about the generic argv shape.
+func pinHostOSDarwin(t *testing.T) {
+	t.Helper()
+	orig := hostOS
+	hostOS = func() string { return "darwin" }
+	t.Cleanup(func() { hostOS = orig })
+}
+
 func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	runner := &recordingRunner{}
 	result, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
@@ -475,6 +487,7 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 }
 
 func TestRunCanOverrideContainerUser(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
@@ -500,6 +513,7 @@ func TestRunCanOverrideContainerUser(t *testing.T) {
 }
 
 func TestRunMountsAdditionalReadOnlyVolumes(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	extra := filepath.Join(dir, "actions")
 	if err := os.MkdirAll(extra, 0o755); err != nil {
@@ -611,6 +625,7 @@ func TestRunRejectsMissingCommand(t *testing.T) {
 }
 
 func TestValidateRunsMinimalContractProbe(t *testing.T) {
+	pinHostOSDarwin(t)
 	dir := t.TempDir()
 	manifest := filepath.Join(t.TempDir(), "tools.txt")
 	if err := os.WriteFile(manifest, []byte("tool\tfqn\n"), 0o600); err != nil {
@@ -651,14 +666,17 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 	if !reflect.DeepEqual(runner.args[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("args prefix = %#v, want %#v", runner.args[:len(wantPrefix)], wantPrefix)
 	}
-	if runner.args[len(runner.args)-3] != "codex" {
-		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-3])
+	if runner.args[len(runner.args)-4] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-4])
+	}
+	if runner.args[len(runner.args)-3] != "0" {
+		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-3])
 	}
 	if runner.args[len(runner.args)-2] != "0" {
-		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-2])
+		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-2])
 	}
 	if runner.args[len(runner.args)-1] != "0" {
-		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-1])
+		t.Fatalf("mcp binary validation flag = %q, want 0", runner.args[len(runner.args)-1])
 	}
 }
 
@@ -682,13 +700,16 @@ func TestValidateRequiresWgetWhenShimsAreMounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if runner.args[len(runner.args)-2] != "1" {
-		t.Fatalf("shim validation flag = %q, want 1", runner.args[len(runner.args)-2])
+	if runner.args[len(runner.args)-3] != "1" {
+		t.Fatalf("shim validation flag = %q, want 1", runner.args[len(runner.args)-3])
+	}
+	if runner.args[len(runner.args)-2] != "0" {
+		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-2])
 	}
 	if runner.args[len(runner.args)-1] != "0" {
-		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-1])
+		t.Fatalf("mcp binary validation flag = %q, want 0", runner.args[len(runner.args)-1])
 	}
-	script := runner.args[len(runner.args)-5]
+	script := runner.args[len(runner.args)-6]
 	if !strings.Contains(script, "generated Aileron connector shims require wget") {
 		t.Fatalf("validation script did not include wget requirement:\n%s", script)
 	}
@@ -722,16 +743,19 @@ func TestValidateRequiresProxyTrustHelperWhenRequested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if runner.args[len(runner.args)-3] != "codex" {
-		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-3])
+	if runner.args[len(runner.args)-4] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-4])
 	}
-	if runner.args[len(runner.args)-2] != "0" {
-		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-2])
+	if runner.args[len(runner.args)-3] != "0" {
+		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-3])
 	}
-	if runner.args[len(runner.args)-1] != "1" {
-		t.Fatalf("proxy trust validation flag = %q, want 1", runner.args[len(runner.args)-1])
+	if runner.args[len(runner.args)-2] != "1" {
+		t.Fatalf("proxy trust validation flag = %q, want 1", runner.args[len(runner.args)-2])
 	}
-	script := runner.args[len(runner.args)-5]
+	if runner.args[len(runner.args)-1] != "0" {
+		t.Fatalf("mcp binary validation flag = %q, want 0", runner.args[len(runner.args)-1])
+	}
+	script := runner.args[len(runner.args)-6]
 	if !strings.Contains(script, "aileron-install-proxy-ca --check") {
 		t.Fatalf("validation script missing proxy trust helper check:\n%s", script)
 	}
@@ -871,4 +895,112 @@ type runnerFunc func(context.Context, string, []string, io.Writer, io.Writer) er
 
 func (f runnerFunc) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
 	return f(ctx, name, args, stdout, stderr)
+}
+
+// --- Validate-script aileron-mcp presence (U4 / #953) ---
+
+func TestValidate_RequireMCPBinary_AppendsFourthPositional(t *testing.T) {
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:            "ghcr.io/acme/agent:latest",
+		WorkDir:          dir,
+		Command:          []string{"codex"},
+		RequireMCPBinary: true,
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if runner.args[len(runner.args)-1] != "1" {
+		t.Fatalf("mcp binary validation flag = %q, want 1", runner.args[len(runner.args)-1])
+	}
+	script := runner.args[len(runner.args)-6]
+	for _, want := range []string{
+		`if [ "${4:-0}" = "1" ]; then`,
+		"command -v aileron-mcp",
+		"aileron-mcp --version",
+		"sandbox MCP wiring failed",
+		"arch mismatch",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("validation script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestValidate_RequireMCPBinary_OmittedByDefault(t *testing.T) {
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
+		Image:   "ghcr.io/acme/agent:latest",
+		WorkDir: dir,
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if runner.args[len(runner.args)-1] != "0" {
+		t.Fatalf("mcp binary validation flag = %q, want 0 (default)", runner.args[len(runner.args)-1])
+	}
+}
+
+// --- runArgs --add-host=host.docker.internal:host-gateway (U2 / #953) ---
+
+// runOptsForGateway returns the minimal RunOptions that lets runArgs
+// compose a valid argv. Used by the host-gateway-flag tests below.
+func runOptsForGateway(t *testing.T) RunOptions {
+	t.Helper()
+	dir := t.TempDir()
+	return RunOptions{
+		Image:   "img",
+		WorkDir: dir,
+		Command: []string{"sh"},
+	}
+}
+
+func TestRunArgs_LinuxDockerAddsHostGateway(t *testing.T) {
+	orig := hostOS
+	hostOS = func() string { return "linux" }
+	defer func() { hostOS = orig }()
+
+	args, err := runArgs("docker", runOptsForGateway(t))
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--add-host host.docker.internal:host-gateway") {
+		t.Errorf("expected --add-host=host.docker.internal:host-gateway on Linux Docker; got %v", args)
+	}
+}
+
+func TestRunArgs_MacOSDockerOmitsHostGateway(t *testing.T) {
+	orig := hostOS
+	hostOS = func() string { return "darwin" }
+	defer func() { hostOS = orig }()
+
+	args, err := runArgs("docker", runOptsForGateway(t))
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	for _, a := range args {
+		if a == "host.docker.internal:host-gateway" {
+			t.Errorf("did not expect --add-host on macOS Docker; got %v", args)
+		}
+	}
+}
+
+func TestRunArgs_LinuxPodmanOmitsHostGateway(t *testing.T) {
+	orig := hostOS
+	hostOS = func() string { return "linux" }
+	defer func() { hostOS = orig }()
+
+	args, err := runArgs("podman", runOptsForGateway(t))
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	for _, a := range args {
+		if a == "host.docker.internal:host-gateway" {
+			t.Errorf("did not expect --add-host on Linux Podman; got %v", args)
+		}
+	}
 }

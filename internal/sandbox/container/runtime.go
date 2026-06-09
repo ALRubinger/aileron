@@ -12,11 +12,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 )
+
+// hostOS is a package-level indirection over runtime.GOOS so tests can
+// drive the runtime-specific argv branches without depending on the
+// test runner's OS.
+var hostOS = func() string { return goruntime.GOOS }
 
 const DefaultRuntime = "auto"
 const WorkspacePath = "/home/agent/workspace"
@@ -103,6 +109,13 @@ type ValidateOptions struct {
 	Volumes           []Volume
 	Command           []string
 	RequireProxyTrust bool
+	// RequireMCPBinary asserts that aileron-mcp is present on the
+	// container's PATH and runs (smoke-checked via `aileron-mcp
+	// --version`). Set by the sandbox launcher whenever MCP wiring is
+	// active. The two-step check catches both missing-binary and the
+	// cross-arch ENOEXEC case where `command -v` succeeds but the
+	// binary fails to exec inside the container. See ADR-0024.
+	RequireMCPBinary bool
 }
 
 // Build builds the image for plan. Tier 0 builds Aileron's local sandbox-base
@@ -253,7 +266,7 @@ func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
-	args, err := runArgs(opts)
+	args, err := runArgs(runtimeName, opts)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -292,6 +305,7 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 			opts.Command[0],
 			boolArg(requiresShimHTTPClient(opts.Volumes)),
 			boolArg(opts.RequireProxyTrust),
+			boolArg(opts.RequireMCPBinary),
 		},
 	})
 	if err == nil {
@@ -360,6 +374,16 @@ if [ "${3:-0}" = "1" ]; then
   fi
   aileron-install-proxy-ca --check "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
 fi
+if [ "${4:-0}" = "1" ]; then
+  if ! command -v aileron-mcp >/dev/null 2>&1; then
+    echo "aileron-mcp not on PATH; sandbox MCP wiring failed (see ADR-0024)" >&2
+    exit 127
+  fi
+  if ! aileron-mcp --version >/dev/null 2>&1; then
+    echo "aileron-mcp on PATH but not executable in this container (arch mismatch or corrupt mount); sandbox MCP wiring failed" >&2
+    exit 127
+  fi
+fi
 `
 
 func boolArg(value bool) string {
@@ -409,7 +433,7 @@ func resolveRuntime(name string, checkPath bool) (string, error) {
 	}
 }
 
-func runArgs(opts RunOptions) ([]string, error) {
+func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	workDir := opts.WorkDir
 	if workDir == "" {
 		workDir = "."
@@ -424,6 +448,16 @@ func runArgs(opts RunOptions) ([]string, error) {
 	}
 	if strings.TrimSpace(opts.User) != "" {
 		args = append(args, "--user", strings.TrimSpace(opts.User))
+	}
+	// Linux Docker does not configure host.docker.internal automatically
+	// (macOS / Windows Docker Desktop do). aileron-mcp inside the
+	// container reaches the daemon through AILERON_URL rewritten to
+	// host.docker.internal, so without --add-host the in-container MCP
+	// path fails with DNS-not-found on first daemon call. Podman's
+	// host.containers.internal is configured natively (no equivalent
+	// flag is needed or supported). See ADR-0024 risks section.
+	if runtimeName == "docker" && hostOS() == "linux" {
+		args = append(args, "--add-host", "host.docker.internal:host-gateway")
 	}
 	args = append(args,
 		"--workdir", WorkspacePath,

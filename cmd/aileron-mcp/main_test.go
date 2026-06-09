@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -758,6 +759,215 @@ func TestCheckActionStatus_MissingApprovalIDReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(got.Content[0].Text, "approval_id") {
 		t.Errorf("error text should name the missing arg; got %q", got.Content[0].Text)
+	}
+}
+
+// --- CLI flag handling (U4 / #953) ---
+
+func TestHandleEarlyArgs_VersionPrintsAndExits(t *testing.T) {
+	var buf strings.Builder
+	if !handleEarlyArgs([]string{"aileron-mcp", "--version"}, &buf) {
+		t.Error("--version should return true (exit signal)")
+	}
+	if !strings.Contains(buf.String(), "dev") && len(strings.TrimSpace(buf.String())) == 0 {
+		t.Errorf("--version output should be a version string; got %q", buf.String())
+	}
+	// -v alias
+	buf.Reset()
+	if !handleEarlyArgs([]string{"aileron-mcp", "-v"}, &buf) {
+		t.Error("-v should return true (exit signal)")
+	}
+	if len(strings.TrimSpace(buf.String())) == 0 {
+		t.Errorf("-v output empty; got %q", buf.String())
+	}
+}
+
+func TestHandleEarlyArgs_HelpPrintsUsageAndExits(t *testing.T) {
+	var buf strings.Builder
+	if !handleEarlyArgs([]string{"aileron-mcp", "--help"}, &buf) {
+		t.Error("--help should return true (exit signal)")
+	}
+	for _, want := range []string{"aileron-mcp", "AILERON_URL"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("--help output missing %q; got %q", want, buf.String())
+		}
+	}
+	// -h alias
+	buf.Reset()
+	if !handleEarlyArgs([]string{"aileron-mcp", "-h"}, &buf) {
+		t.Error("-h should return true (exit signal)")
+	}
+	if len(strings.TrimSpace(buf.String())) == 0 {
+		t.Errorf("-h output empty; got %q", buf.String())
+	}
+}
+
+func TestHandleEarlyArgs_UnknownFlagFallsThrough(t *testing.T) {
+	var buf strings.Builder
+	if handleEarlyArgs([]string{"aileron-mcp", "--unknown"}, &buf) {
+		t.Error("unknown flag should return false so main proceeds to stdio loop")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unknown flag should not write to out; got %q", buf.String())
+	}
+}
+
+func TestHandleEarlyArgs_NoArgsFallsThrough(t *testing.T) {
+	var buf strings.Builder
+	if handleEarlyArgs([]string{"aileron-mcp"}, &buf) {
+		t.Error("no args should return false")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("no args should not write to out; got %q", buf.String())
+	}
+}
+
+// --- Launch session id header injection (U7 / #953) ---
+
+// recordedAuthHeaders captures the auth + session-id headers seen by a
+// stubbed daemon endpoint so the U7 tests can assert their presence
+// without coupling to a specific endpoint.
+type recordedAuthHeaders struct {
+	auth    string
+	session string
+	hasAuth bool
+	hasSess bool
+}
+
+func captureAuthHandler(t *testing.T, recorded *recordedAuthHeaders, status int, body string) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		recorded.auth = r.Header.Get("Authorization")
+		recorded.session = r.Header.Get("X-Aileron-Session-Id")
+		_, recorded.hasAuth = r.Header["Authorization"]
+		_, recorded.hasSess = r.Header["X-Aileron-Session-Id"]
+		w.WriteHeader(status)
+		if body != "" {
+			_, _ = io.WriteString(w, body)
+		}
+	}
+}
+
+func TestDiscoverActions_InjectsLaunchSessionHeader(t *testing.T) {
+	var rec recordedAuthHeaders
+	srv := httptest.NewServer(captureAuthHandler(t, &rec, http.StatusOK, `{"items":[]}`))
+	defer srv.Close()
+
+	s := &server{
+		aileronURL:   srv.URL,
+		aileronToken: "tok-abc",
+		sessionID:    "sess-discover-123",
+		httpClient:   srv.Client(),
+	}
+	if _, _, err := s.discoverActions(context.Background()); err != nil {
+		t.Fatalf("discoverActions: %v", err)
+	}
+	if rec.auth != "Bearer tok-abc" {
+		t.Errorf("Authorization = %q, want Bearer tok-abc", rec.auth)
+	}
+	if rec.session != "sess-discover-123" {
+		t.Errorf("X-Aileron-Session-Id = %q, want sess-discover-123", rec.session)
+	}
+}
+
+func TestRunAction_InjectsLaunchSessionHeader(t *testing.T) {
+	var rec recordedAuthHeaders
+	content := "ok"
+	body, _ := json.Marshal(actionRunResponse{AuditID: "audit_x", Result: &content})
+	srv := httptest.NewServer(captureAuthHandler(t, &rec, http.StatusOK, string(body)))
+	defer srv.Close()
+
+	s := &server{
+		aileronURL:   srv.URL,
+		aileronToken: "tok-abc",
+		sessionID:    "sess-run-456",
+		httpClient:   srv.Client(),
+	}
+	got := s.runAction(context.Background(), "ship-update", map[string]any{"channel": "#x"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	if rec.auth != "Bearer tok-abc" {
+		t.Errorf("Authorization = %q, want Bearer tok-abc", rec.auth)
+	}
+	if rec.session != "sess-run-456" {
+		t.Errorf("X-Aileron-Session-Id = %q, want sess-run-456", rec.session)
+	}
+}
+
+func TestCheckActionStatus_InjectsLaunchSessionHeader(t *testing.T) {
+	var rec recordedAuthHeaders
+	body, _ := json.Marshal(actionApprovalResult{Status: "pending_approval"})
+	srv := httptest.NewServer(captureAuthHandler(t, &rec, http.StatusOK, string(body)))
+	defer srv.Close()
+
+	s := &server{
+		aileronURL:   srv.URL,
+		aileronToken: "tok-abc",
+		sessionID:    "sess-status-789",
+		httpClient:   srv.Client(),
+	}
+	got := s.checkActionStatus(context.Background(), map[string]any{"approval_id": "act-1"})
+	if got.IsError {
+		t.Fatalf("unexpected error: %s", got.Content[0].Text)
+	}
+	if rec.auth != "Bearer tok-abc" {
+		t.Errorf("Authorization = %q, want Bearer tok-abc", rec.auth)
+	}
+	if rec.session != "sess-status-789" {
+		t.Errorf("X-Aileron-Session-Id = %q, want sess-status-789", rec.session)
+	}
+}
+
+// TestActionEndpoints_OmitSessionHeaderWhenUnset: empty AILERON_SESSION_ID
+// must NOT result in an empty-string X-Aileron-Session-Id header.
+// Daemon middleware treats empty strings as a different signal than
+// "header absent", so we want absence, not blank.
+func TestActionEndpoints_OmitSessionHeaderWhenUnset(t *testing.T) {
+	var rec recordedAuthHeaders
+	content := "ok"
+	body, _ := json.Marshal(actionRunResponse{AuditID: "audit_x", Result: &content})
+	srv := httptest.NewServer(captureAuthHandler(t, &rec, http.StatusOK, string(body)))
+	defer srv.Close()
+
+	s := &server{
+		aileronURL:   srv.URL,
+		aileronToken: "tok-abc",
+		// sessionID intentionally empty
+		httpClient: srv.Client(),
+	}
+	_ = s.runAction(context.Background(), "ship-update", nil)
+	if !rec.hasAuth {
+		t.Error("Authorization header should still be set when token is present")
+	}
+	if rec.hasSess {
+		t.Errorf("X-Aileron-Session-Id should be absent when sessionID is empty; got %q", rec.session)
+	}
+}
+
+// TestCommsEndpoints_DoNotCarrySessionHeader: comms endpoints encode
+// the session id in the path. Setting the header on those calls is
+// redundant; assert we don't accidentally start doing it.
+func TestCommsEndpoints_DoNotCarrySessionHeader(t *testing.T) {
+	var rec recordedAuthHeaders
+	srv := httptest.NewServer(captureAuthHandler(t, &rec, http.StatusOK, `{"messages":[]}`))
+	defer srv.Close()
+
+	s := &server{
+		commsURL:        srv.URL,
+		aileronToken:    "tok-abc",
+		sessionID:       "sess-comms-1",
+		commsHTTPClient: srv.Client(),
+	}
+	var out readMessagesResponse
+	if err := s.commsGET(s.commsEndpoint("messages"), &out); err != nil {
+		t.Fatalf("commsGET: %v", err)
+	}
+	if rec.auth != "Bearer tok-abc" {
+		t.Errorf("Authorization = %q, want Bearer tok-abc", rec.auth)
+	}
+	if rec.hasSess {
+		t.Errorf("comms endpoints should not carry X-Aileron-Session-Id; got %q", rec.session)
 	}
 }
 

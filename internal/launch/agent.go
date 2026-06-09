@@ -15,6 +15,38 @@ package launch
 
 import "sort"
 
+// Mode discriminates host launch from sandbox launch in the agent
+// configuration contract. ADR-0024's sandbox MCP revival requires
+// agents that write host-side config (Codex's ~/.codex/config.toml) to
+// branch on this — for the in-container agent process, the host path
+// is irrelevant and the launcher must bind-mount a generated config
+// into the container filesystem instead.
+type Mode string
+
+const (
+	// ModeHost is the direct host-launch path: the agent process runs
+	// on the host, mcpBin is a host filesystem path, and config files
+	// the agent reads live in the host's home directory.
+	ModeHost Mode = "host"
+	// ModeSandbox is the v4 container launch path: the agent process
+	// runs inside the sandbox container, mcpBin is the container-side
+	// path (typically /usr/local/bin/aileron-mcp), and config files the
+	// agent reads must be reachable from inside the container — either
+	// in the bind-mounted workspace dir or via an additional bind mount
+	// returned by ConfigureMCP.
+	ModeSandbox Mode = "sandbox"
+)
+
+// MCPMount is a host-to-container bind mount an agent's ConfigureMCP
+// can request when running under ModeSandbox. The launcher converts
+// this into the runtime's volume argument when starting the container.
+// Agents in ModeHost should return no mounts.
+type MCPMount struct {
+	Source   string
+	Target   string
+	ReadOnly bool
+}
+
 // Agent describes a launchable AI coding agent.
 type Agent interface {
 	// Name returns the agent identifier used in CLI args (e.g. "claude").
@@ -42,14 +74,20 @@ type Agent interface {
 	// file (Codex's ~/.codex/config.toml, OpenCode's opencode.json)
 	// write the file and return nil args.
 	//
-	// mcpBin is the absolute path to the aileron-mcp binary.
+	// mcpBin is the path to the aileron-mcp binary (host path under
+	// ModeHost, container-side path under ModeSandbox).
 	// mcpEnv is the environment the MCP server needs (AILERON_URL,
 	// AILERON_SESSION_ID, etc.) — agents that write the config file
 	// must persist these in the file's env block; agents that pass via
 	// CLI must serialize them into their flag value.
 	// dir is the launch working directory (project root for agents that
 	// write per-project config like OpenCode); empty means "use cwd".
-	ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string) ([]string, error)
+	// mode is host vs sandbox; agents that materialize config to a
+	// host path under ModeHost must redirect that write to a temp host
+	// path under ModeSandbox and return a Volume bind-mounting it into
+	// the container at the path the in-container agent reads. See
+	// ADR-0024 for the contract change.
+	ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string, mode Mode) ([]string, []MCPMount, error)
 }
 
 // Registry maps agent names to their definitions.

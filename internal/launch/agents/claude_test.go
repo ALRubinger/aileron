@@ -46,9 +46,12 @@ func TestClaude_ConfigureMCP_EmitsMCPConfigFlag(t *testing.T) {
 		"AILERON_URL":        "http://127.0.0.1:7000",
 		"AILERON_SESSION_ID": "sess-abc",
 	}
-	args, err := agents.Claude{}.ConfigureMCP("/usr/local/bin/aileron-mcp", mcpEnv, "")
+	args, mounts, err := agents.Claude{}.ConfigureMCP("/usr/local/bin/aileron-mcp", mcpEnv, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP returned error: %v", err)
+	}
+	if len(mounts) != 0 {
+		t.Errorf("ConfigureMCP returned %d mounts under ModeHost; want 0", len(mounts))
 	}
 	if len(args) != 2 || args[0] != "--mcp-config" {
 		t.Fatalf("ConfigureMCP() = %v, want [--mcp-config <json>]", args)

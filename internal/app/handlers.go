@@ -1441,6 +1441,7 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 	if req.Args != nil {
 		args = *req.Args
 	}
+	sessionID := r.Header.Get("X-Aileron-Session-Id")
 
 	// Approval gate. When the action's manifest declares
 	// `[approval] required = true` the runtime registers a pending
@@ -1456,7 +1457,6 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 		if len(loaded.Manifest.Execute) > 0 {
 			connFQN = loaded.Manifest.Execute[0].Connector
 		}
-		sessionID := r.Header.Get("X-Aileron-Session-Id")
 
 		// Resolve the manifest's [approval.preview] directive
 		// (ADR-0016) ahead of registering the approval entry so the
@@ -1498,12 +1498,23 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 		return
 	}
 
+	// Non-approval synchronous path. Mint a stable invocation id so the
+	// execution.started / execution.succeeded / execution.failed events
+	// for this RunAction share a correlation key in the audit log.
+	invocationID := ""
+	if s.newID != nil {
+		invocationID = "actrun-" + s.newID()
+	}
+	s.emitActionExecutionStarted(r.Context(), name, sessionID, "", invocationID)
+
 	result, err := s.executor.Execute(r.Context(), name, args)
 	if err != nil {
+		s.emitActionExecutorError(r.Context(), name, sessionID, "", invocationID, err)
 		writeError(w, http.StatusInternalServerError, "executor_error", err.Error())
 		return
 	}
 	if result.Failure != nil {
+		s.emitActionExecutionFailure(r.Context(), name, sessionID, "", invocationID, result.Failure)
 		failure.WriteHTTP(w, result.Failure)
 		return
 	}
@@ -1515,6 +1526,7 @@ func (s *apiServer) RunAction(w http.ResponseWriter, r *http.Request, name strin
 	if s.newID != nil {
 		auditID = s.newID()
 	}
+	s.emitActionExecutionSucceeded(r.Context(), name, sessionID, "", invocationID, auditID)
 	resp := api.ActionRunResponse{AuditId: auditID}
 	if result.Content != "" {
 		content := result.Content
@@ -1596,13 +1608,16 @@ func (s *apiServer) executeApprovedAction(entry *approval.ActionApproval, name, 
 	// dispatch path that consumes EditedPayload inline; see
 	// internal/app/handlers_comms.go.)
 	_ = connFQN
-	_ = sessionID
+	s.emitActionExecutionStarted(ctx, name, sessionID, entry.ID, "")
+
 	result, err := s.executor.Execute(ctx, name, args)
 	if err != nil {
+		s.emitActionExecutorError(ctx, name, sessionID, entry.ID, "", err)
 		_ = s.actionApprovals.SetFailed(entry.ID, nil, err.Error())
 		return
 	}
 	if result.Failure != nil {
+		s.emitActionExecutionFailure(ctx, name, sessionID, entry.ID, "", result.Failure)
 		_ = s.actionApprovals.SetFailed(entry.ID, result.Failure, "")
 		return
 	}
@@ -1610,7 +1625,101 @@ func (s *apiServer) executeApprovedAction(entry *approval.ActionApproval, name, 
 	if s.newID != nil {
 		auditID = s.newID()
 	}
+	s.emitActionExecutionSucceeded(ctx, name, sessionID, entry.ID, "", auditID)
 	_ = s.actionApprovals.SetCompleted(entry.ID, auditID, result.Content)
+}
+
+// emitActionExecutionStarted appends an `execution.started` audit
+// event for an action-via-MCP invocation. Either approvalID or
+// invocationID must be non-empty so the started/finished pair carries
+// a stable correlation key. Best-effort: a nil recorder is a silent
+// no-op, matching the queue's recordRequested / recordDecided pattern.
+func (s *apiServer) emitActionExecutionStarted(ctx context.Context, actionName, sessionID, approvalID, invocationID string) {
+	if s.auditRecorder == nil {
+		return
+	}
+	payload := actionExecutionPayload(actionName, sessionID, approvalID, invocationID)
+	s.auditRecorder.RecordSuccess(ctx,
+		model.EventTypeExecutionStarted,
+		model.ActorRef{Type: model.ActorTypeService, ID: "aileron"},
+		payload)
+}
+
+// emitActionExecutionSucceeded appends an `execution.succeeded` audit
+// event for an action-via-MCP invocation. auditID is the action's own
+// audit id stamped onto the response — surfaced here so external
+// audit consumers can cross-reference the action result.
+func (s *apiServer) emitActionExecutionSucceeded(ctx context.Context, actionName, sessionID, approvalID, invocationID, auditID string) {
+	if s.auditRecorder == nil {
+		return
+	}
+	payload := actionExecutionPayload(actionName, sessionID, approvalID, invocationID)
+	if auditID != "" {
+		payload["aileron.audit.id"] = auditID
+	}
+	s.auditRecorder.RecordSuccess(ctx,
+		model.EventTypeExecutionSucceeded,
+		model.ActorRef{Type: model.ActorTypeService, ID: "aileron"},
+		payload)
+}
+
+// emitActionExecutionFailure appends an `execution.failed` audit event
+// for an action that returned a structured *failure.Failure envelope
+// (ADR-0010). The failure-class fields piggyback on the regular
+// execution payload so consumers don't need a different schema per
+// failure type.
+func (s *apiServer) emitActionExecutionFailure(ctx context.Context, actionName, sessionID, approvalID, invocationID string, f *failure.Failure) {
+	if s.auditRecorder == nil {
+		return
+	}
+	payload := actionExecutionPayload(actionName, sessionID, approvalID, invocationID)
+	if f != nil {
+		payload["aileron.failure.class"] = string(f.Class())
+		payload["aileron.failure.boundary"] = string(f.Boundary())
+		payload["aileron.failure.message"] = f.Message()
+	}
+	s.auditRecorder.RecordSuccess(ctx,
+		model.EventTypeExecutionFailed,
+		model.ActorRef{Type: model.ActorTypeService, ID: "aileron"},
+		payload)
+}
+
+// emitActionExecutorError appends an `execution.failed` audit event
+// for the case where the executor itself errored (a transport-layer
+// or runtime failure, not an ADR-0010 envelope). The error message is
+// carried verbatim so debugging signal isn't lost.
+func (s *apiServer) emitActionExecutorError(ctx context.Context, actionName, sessionID, approvalID, invocationID string, err error) {
+	if s.auditRecorder == nil {
+		return
+	}
+	payload := actionExecutionPayload(actionName, sessionID, approvalID, invocationID)
+	if err != nil {
+		payload["aileron.executor.error"] = err.Error()
+	}
+	s.auditRecorder.RecordSuccess(ctx,
+		model.EventTypeExecutionFailed,
+		model.ActorRef{Type: model.ActorTypeService, ID: "aileron"},
+		payload)
+}
+
+// actionExecutionPayload builds the OTel-namespaced payload shared by
+// every action-via-MCP execution event. Mirrors the field names the
+// action approval queue uses for its approval.* events so external
+// audit consumers see one consistent vocabulary across the lifecycle.
+func actionExecutionPayload(actionName, sessionID, approvalID, invocationID string) map[string]any {
+	payload := map[string]any{
+		"aileron.action.name": actionName,
+	}
+	if sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	if approvalID != "" {
+		payload["aileron.approval.id"] = approvalID
+	}
+	if invocationID != "" {
+		payload["aileron.invocation.id"] = invocationID
+	}
+	return payload
 }
 
 // waitForVaultUnlocked parks the calling goroutine on the vault-unlock

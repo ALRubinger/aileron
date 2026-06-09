@@ -37,11 +37,15 @@ func (o OpenCode) LLMEndpointEnv() string { return "" }
 // env stays fresh.
 //
 // Returns nil args — OpenCode reads MCP servers from the config file.
-func (o OpenCode) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string) ([]string, error) {
+// Mode is irrelevant for OpenCode: dir is the launch directory, which
+// the sandbox launcher already bind-mounts as the container's
+// workspace, so the in-container OpenCode reads the file at the same
+// relative path under both modes.
+func (o OpenCode) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string, _ launch.Mode) ([]string, []launch.MCPMount, error) {
 	if dir == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return nil, fmt.Errorf("determining working directory: %w", err)
+			return nil, nil, fmt.Errorf("determining working directory: %w", err)
 		}
 		dir = cwd
 	}
@@ -69,11 +73,11 @@ func (o OpenCode) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir stri
 
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("marshaling opencode config: %w", err)
+		return nil, nil, fmt.Errorf("marshaling opencode config: %w", err)
 	}
 	out = append(out, '\n')
 	if err := os.WriteFile(path, out, 0o644); err != nil {
-		return nil, fmt.Errorf("writing %s: %w", path, err)
+		return nil, nil, fmt.Errorf("writing %s: %w", path, err)
 	}
-	return nil, nil
+	return nil, nil, nil
 }

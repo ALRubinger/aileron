@@ -17,14 +17,16 @@ The check uses the same composition plan and minimal launch validation as `ailer
 
 ## Support Matrix
 
-| Agent | Command | Sandbox image support | Notes |
-|---|---|---|---|
-| Claude Code | `claude` | Documented recipe | First-class recipe below. Use `sandbox check --agent=claude` before launch. |
-| Codex | `codex` | Command contract only | Install the CLI in Tier 1 or BYO images; no maintained recipe yet. |
-| Goose | `goose` | Command contract only | Install the CLI in Tier 1 or BYO images; no maintained recipe yet. |
-| OpenCode | `opencode` | Command contract only | Install the CLI in Tier 1 or BYO images; no maintained recipe yet. |
-| Pi | `pi` | Command contract only | Install the CLI in Tier 1 or BYO images; no maintained recipe yet. |
-| Other agents | varies | Unsupported | Add an Aileron launch agent and an image recipe before relying on sandbox launch. |
+| Agent | Command | Sandbox image support | MCP under `--sandbox=docker` | Notes |
+|---|---|---|---|---|
+| Claude Code | `claude` | Documented recipe | ✓ via `--mcp-config` | First-class recipe below. Use `sandbox check --agent=claude` before launch. |
+| Codex | `codex` | Command contract only | ✓ via bind-mounted `config.toml` | Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` (ADR-0024). Host `~/.codex/config.toml` is never touched. |
+| Goose | `goose` | Command contract only | ✓ via `--with-extension` | Install the CLI in Tier 1 or BYO images; no maintained recipe yet. |
+| OpenCode | `opencode` | Command contract only | ✓ via workspace `opencode.json` | Launcher writes `opencode.json` into the launch directory; the workspace bind-mount makes it readable in-container. |
+| Pi | `pi` | Command contract only | ✓ via `--mcp-config` | Shares Claude's MCP wiring. |
+| Other agents | varies | Unsupported | n/a | Add an Aileron launch agent and an image recipe before relying on sandbox launch. |
+
+Under `--sandbox=docker` the launcher resolves the host-built `aileron-mcp` binary, bind-mounts it read-only at `/usr/local/bin/aileron-mcp`, builds an `mcpEnv` rewritten for the runtime (`host.docker.internal` on Docker, `host.containers.internal` on Podman), and calls each agent's `ConfigureMCP` hook. Four of the five agents (Claude, Pi, Goose, OpenCode) work without any agent-side code change because their config is either inline-with-exec (`--mcp-config`, `--with-extension`) or workspace-local (`opencode.json` in the bind-mounted workspace). Codex is the one exception — its host `~/.codex/config.toml` is irrelevant inside the container, so the launcher writes a generated `config.toml` to a host tempdir and bind-mounts it. See [ADR-0024](/adr/0024-sandbox-mcp-parity/) and the [manual walkthrough](/development/sandbox-mcp-walkthrough/) for the load-bearing flow.
 
 Tier 0 `aileron/sandbox-base` intentionally does not include agent CLIs. Use Tier 1 when you want Aileron's base runtime plus an installed agent, or Tier 2 when your team owns the full image.
 

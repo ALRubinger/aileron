@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 )
 
@@ -57,10 +58,10 @@ func TestGoose_ConfigureMCP_ReturnsWithExtensionFlag(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	args, err := agents.Goose{}.ConfigureMCP("/usr/local/bin/aileron-mcp", map[string]string{
+	args, _, err := agents.Goose{}.ConfigureMCP("/usr/local/bin/aileron-mcp", map[string]string{
 		"AILERON_URL":        "http://127.0.0.1:7000",
 		"AILERON_SESSION_ID": "sess-goose",
-	}, "")
+	}, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
@@ -97,12 +98,12 @@ func TestGoose_ConfigureMCP_EnvVarOrderIsDeterministic(t *testing.T) {
 		"AILERON_SESSION_ID":   "sess",
 		"AILERON_APPROVAL_URL": "http://127.0.0.1:7000/approvals",
 	}
-	first, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", envs, "")
+	first, _, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", envs, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP first: %v", err)
 	}
 	for i := 0; i < 20; i++ {
-		next, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", envs, "")
+		next, _, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", envs, "", launch.ModeHost)
 		if err != nil {
 			t.Fatalf("ConfigureMCP repeat: %v", err)
 		}
@@ -142,7 +143,7 @@ func TestGoose_ConfigureMCP_RemovesStaleAileronEntry(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := (agents.Goose{}).ConfigureMCP("/new/path", map[string]string{}, ""); err != nil {
+	if _, _, err := (agents.Goose{}).ConfigureMCP("/new/path", map[string]string{}, "", launch.ModeHost); err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
 
@@ -181,7 +182,7 @@ func TestGoose_ConfigureMCP_NoConfigYAMLIsFine(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	if _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, ""); err != nil {
+	if _, _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, "", launch.ModeHost); err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
 	configPath := filepath.Join(home, ".config", "goose", "config.yaml")
@@ -203,9 +204,9 @@ func TestGoose_ConfigureMCP_ShellQuotesValuesWithSpaces(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	args, err := agents.Goose{}.ConfigureMCP("/Users/me/Application Support/aileron-mcp", map[string]string{
+	args, _, err := agents.Goose{}.ConfigureMCP("/Users/me/Application Support/aileron-mcp", map[string]string{
 		"WITH SPACE": "a b",
-	}, "")
+	}, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
@@ -230,10 +231,10 @@ func TestGoose_ConfigureMCP_QuotesEmptyEnvValues(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	args, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", map[string]string{
+	args, _, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", map[string]string{
 		"EMPTY":  "",
 		"NORMAL": "value",
-	}, "")
+	}, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestGoose_ConfigureMCP_LeavesConfigUntouched_NoExtensionsKey(t *testing.T) 
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, ""); err != nil {
+	if _, _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, "", launch.ModeHost); err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
 
@@ -305,7 +306,7 @@ func TestGoose_ConfigureMCP_ToleratesMalformedConfigYAML(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	args, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{"AILERON_URL": "http://x"}, "")
+	args, _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{"AILERON_URL": "http://x"}, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP should tolerate malformed user config, got: %v", err)
 	}
@@ -329,10 +330,10 @@ func TestGoose_ConfigureMCP_EscapesQuotesAndBackslashes(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	args, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", map[string]string{
+	args, _, err := agents.Goose{}.ConfigureMCP("/bin/aileron-mcp", map[string]string{
 		"QUOTE": `a"b`,
 		"SLASH": `a\b`,
-	}, "")
+	}, "", launch.ModeHost)
 	if err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
@@ -369,7 +370,7 @@ func TestGoose_ConfigureMCP_PreservesOtherExtensionsWhenNoAileronEntry(t *testin
 	}
 	beforeMtime, _ := os.Stat(configPath)
 
-	if _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, ""); err != nil {
+	if _, _, err := (agents.Goose{}).ConfigureMCP("/bin/aileron-mcp", map[string]string{}, "", launch.ModeHost); err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
 
@@ -409,7 +410,7 @@ func TestGoose_ConfigureMCP_HonorsXDGConfigHome(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := (agents.Goose{}).ConfigureMCP("/new/path", map[string]string{}, ""); err != nil {
+	if _, _, err := (agents.Goose{}).ConfigureMCP("/new/path", map[string]string{}, "", launch.ModeHost); err != nil {
 		t.Fatalf("ConfigureMCP: %v", err)
 	}
 

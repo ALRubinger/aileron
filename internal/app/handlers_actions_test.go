@@ -18,7 +18,9 @@ import (
 	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
+	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/failure"
+	"github.com/ALRubinger/aileron/internal/model"
 )
 
 const actionsTestManifest = `+++
@@ -808,6 +810,293 @@ func TestRunAction_ApprovalPreview_NotInvokedWhenManifestOmitsBlock(t *testing.T
 	pending := srv.actionApprovals.List()
 	if len(pending) != 1 || pending[0].Preview != nil {
 		t.Errorf("entry.Preview should be nil when manifest omits the block; got %+v", pending[0].Preview)
+	}
+}
+
+// --- Audit emission on action-via-MCP path (U8 / #953) ---
+
+// audit-store helpers shared across U8 tests.
+
+// listEventsByType returns events of the given type in chronological
+// (insertion) order. The MemStore's ListEvents is newest-first; we
+// reverse so test assertions read top-down as the event lifecycle ran.
+func listEventsByType(t *testing.T, store *audit.MemStore, eventType model.EventType) []audit.Event {
+	t.Helper()
+	all, err := store.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var out []audit.Event
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].EventType == eventType {
+			out = append(out, all[i])
+		}
+	}
+	return out
+}
+
+// eventTypesForSession returns the chronological list of event types
+// stamped with the given session id.
+func eventTypesForSession(t *testing.T, store *audit.MemStore, sessionID string) []model.EventType {
+	t.Helper()
+	all, err := store.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var out []model.EventType
+	for i := len(all) - 1; i >= 0; i-- {
+		if got, _ := all[i].Payload["aileron.session.id"].(string); got == sessionID {
+			out = append(out, all[i].EventType)
+		}
+	}
+	return out
+}
+
+// TestRunAction_NoApproval_EmitsExecutionStartedAndSucceeded covers
+// R6 / R7 for the synchronous path: a non-approval action invoked via
+// /v1/actions/{name}/run lands an execution.started → execution.succeeded
+// pair stamped with the X-Aileron-Session-Id from the request.
+//
+// Regression for U8: before the fix this code path had `_ = sessionID`
+// and emitted zero events. The U5 E2E test's exclusive-event-chain
+// assertion is unimplementable without this fix.
+func TestRunAction_NoApproval_EmitsExecutionStartedAndSucceeded(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	store := audit.NewMemStore()
+	srv.auditRecorder = audit.NewRecorder(store, nil, nil)
+
+	body := bytes.NewReader([]byte(`{"args":{"channel":"#engineering"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	req.Header.Set("X-Aileron-Session-Id", "sess-u8-1")
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	chain := eventTypesForSession(t, store, "sess-u8-1")
+	want := []model.EventType{
+		model.EventTypeExecutionStarted,
+		model.EventTypeExecutionSucceeded,
+	}
+	if len(chain) != len(want) {
+		t.Fatalf("event chain = %v; want %v", chain, want)
+	}
+	for i, w := range want {
+		if chain[i] != w {
+			t.Errorf("chain[%d] = %s; want %s", i, chain[i], w)
+		}
+	}
+
+	// Verify the started event carries the action FQN.
+	started := listEventsByType(t, store, model.EventTypeExecutionStarted)
+	if len(started) != 1 {
+		t.Fatalf("started events = %d, want 1", len(started))
+	}
+	if got, _ := started[0].Payload["aileron.action.name"].(string); got != "ship-update" {
+		t.Errorf("started.action.name = %q, want ship-update", got)
+	}
+}
+
+// TestRunAction_NoApproval_OmitsSessionIDWhenAbsent: when the request
+// has no X-Aileron-Session-Id header (e.g., a CLI invocation or a
+// pre-MCP-fix client), events still emit but carry no session id field.
+// Regression so the empty-string isn't injected.
+func TestRunAction_NoApproval_OmitsSessionIDWhenAbsent(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	store := audit.NewMemStore()
+	srv.auditRecorder = audit.NewRecorder(store, nil, nil)
+
+	body := bytes.NewReader([]byte(`{"args":{"channel":"#x"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	// no X-Aileron-Session-Id header
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	events, err := store.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, e := range events {
+		if _, present := e.Payload["aileron.session.id"]; present {
+			t.Errorf("event %s carried session.id when header was absent", e.EventType)
+		}
+	}
+}
+
+// TestRunAction_NoApproval_ExecutorError_EmitsExecutionFailed pins the
+// Go-error path: when the executor returns a Go error (not an ADR-0010
+// envelope), the audit chain is execution.started → execution.failed.
+func TestRunAction_NoApproval_ExecutorError_EmitsExecutionFailed(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	srv.executor = erroringExecutor{}
+	store := audit.NewMemStore()
+	srv.auditRecorder = audit.NewRecorder(store, nil, nil)
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	req.Header.Set("X-Aileron-Session-Id", "sess-u8-err")
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	chain := eventTypesForSession(t, store, "sess-u8-err")
+	want := []model.EventType{
+		model.EventTypeExecutionStarted,
+		model.EventTypeExecutionFailed,
+	}
+	if len(chain) != len(want) || chain[0] != want[0] || chain[1] != want[1] {
+		t.Fatalf("event chain = %v; want %v", chain, want)
+	}
+	// Executor-error path carries the raw error text.
+	failed := listEventsByType(t, store, model.EventTypeExecutionFailed)
+	if got, _ := failed[0].Payload["aileron.executor.error"].(string); got == "" {
+		t.Errorf("failed event missing executor.error payload; got %+v", failed[0].Payload)
+	}
+}
+
+// TestRunAction_NoApproval_ActionSideFailure_EmitsExecutionFailed
+// pins the ADR-0010 envelope path: when the executor returns a
+// structured failure, the audit chain still ends in execution.failed
+// and the payload names the failure class.
+func TestRunAction_NoApproval_ActionSideFailure_EmitsExecutionFailed(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifest,
+	})
+	srv.executor = failingExecutor{failure: failure.BindingRequiredFailure("slack binding missing")}
+	store := audit.NewMemStore()
+	srv.auditRecorder = audit.NewRecorder(store, nil, nil)
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	req.Header.Set("X-Aileron-Session-Id", "sess-u8-bind")
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("status = %d, want 412; body=%s", rec.Code, rec.Body.String())
+	}
+	chain := eventTypesForSession(t, store, "sess-u8-bind")
+	if len(chain) < 2 || chain[len(chain)-1] != model.EventTypeExecutionFailed {
+		t.Fatalf("event chain = %v; want last entry execution.failed", chain)
+	}
+	failed := listEventsByType(t, store, model.EventTypeExecutionFailed)
+	if got, _ := failed[0].Payload["aileron.failure.class"].(string); got != "binding_required" {
+		t.Errorf("failed event class = %q; want binding_required", got)
+	}
+}
+
+// TestRunAction_Approval_FullChainEmitsApprovalAndExecutionEvents
+// covers R6's load-bearing claim: an approval-gated action invoked via
+// MCP produces the chain approval.requested → approval.approved →
+// execution.started → execution.succeeded with the session id
+// preserved across all four events.
+func TestRunAction_Approval_FullChainEmitsApprovalAndExecutionEvents(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifestApproval,
+	})
+	store := audit.NewMemStore()
+	srv.auditRecorder = audit.NewRecorder(store, nil, nil)
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	srv.actionApprovals.SetAuditRecorder(srv.auditRecorder)
+
+	body := bytes.NewReader([]byte(`{"args":{"channel":"#x"}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	req.Header.Set("X-Aileron-Session-Id", "sess-u8-approval")
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+
+	// Decide approved.
+	pending := srv.actionApprovals.List()
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+	approvalID := pending[0].ID
+	if err := srv.actionApprovals.Decide(approvalID, true, "", nil); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	// Background goroutine in executeApprovedAction emits execution
+	// events asynchronously. Poll briefly for the terminal event.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		evs := listEventsByType(t, store, model.EventTypeExecutionSucceeded)
+		if len(evs) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	chain := eventTypesForSession(t, store, "sess-u8-approval")
+	want := []model.EventType{
+		model.EventTypeApprovalRequested,
+		model.EventTypeApprovalApproved,
+		model.EventTypeExecutionStarted,
+		model.EventTypeExecutionSucceeded,
+	}
+	if len(chain) != len(want) {
+		t.Fatalf("event chain for session = %v; want %v", chain, want)
+	}
+	for i, w := range want {
+		if chain[i] != w {
+			t.Errorf("chain[%d] = %s; want %s", i, chain[i], w)
+		}
+	}
+}
+
+// TestRunAction_Approval_Denied_OmitsExecutionEvents pins R6a's deny
+// path: denying an approval emits approval.requested →
+// approval.denied with no execution.* events.
+func TestRunAction_Approval_Denied_OmitsExecutionEvents(t *testing.T) {
+	srv := newActionsTestServer(t, map[string]string{
+		"ship-update.md": actionsTestManifestApproval,
+	})
+	store := audit.NewMemStore()
+	srv.auditRecorder = audit.NewRecorder(store, nil, nil)
+	srv.actionApprovals = approval.NewActionApprovalQueue(nil, nil)
+	srv.actionApprovals.SetAuditRecorder(srv.auditRecorder)
+
+	body := bytes.NewReader([]byte(`{"args":{}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/actions/ship-update/run", body)
+	req.Header.Set("X-Aileron-Session-Id", "sess-u8-deny")
+	rec := httptest.NewRecorder()
+	srv.RunAction(rec, req, "ship-update")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+
+	pending := srv.actionApprovals.List()
+	if err := srv.actionApprovals.Decide(pending[0].ID, false, "wrong recipient", nil); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+
+	// Give the background goroutine a brief moment to exit cleanly.
+	time.Sleep(50 * time.Millisecond)
+
+	chain := eventTypesForSession(t, store, "sess-u8-deny")
+	for _, evt := range chain {
+		if strings.HasPrefix(string(evt), "execution.") {
+			t.Errorf("denied path emitted %s; want no execution.* events", evt)
+		}
+	}
+	// Sanity: still see the approval lifecycle.
+	if len(chain) < 2 {
+		t.Fatalf("expected at least approval.requested + approval.denied; got %v", chain)
 	}
 }
 

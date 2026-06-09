@@ -4,14 +4,14 @@ description: "The binaries that make up an Aileron install, the trust boundary e
 order: 2
 ---
 
-An Aileron install currently ships multiple cooperating binaries, but the v4 runtime model treats `aileron` as the product boundary. Host launch can still use `aileron-mcp` as an adapter for MCP-aware agents; sandbox launch does not revive `aileron-mcp` as the in-container runtime model. See [ADR-0018](/adr/0018-v4-single-binary-runtime/).
+An Aileron install currently ships multiple cooperating binaries, but the v4 runtime model treats `aileron` as the product boundary. `aileron-mcp` is the MCP adapter both host launch and v4 sandbox launch register with the agent; under sandbox launch it runs as a stdio subprocess of the in-container agent, reached via a read-only host-mount (see [ADR-0018](/adr/0018-v4-single-binary-runtime/) and [ADR-0024](/adr/0024-sandbox-mcp-parity/)).
 
 ## The three binaries
 
 | Binary | Source | Trust boundary | Called by |
 |---|---|---|---|
 | `aileron` | [`cmd/aileron`](https://github.com/ALRubinger/aileron/tree/main/cmd/aileron) | CLI plus user-scoped local daemon (per [ADR-0012](/adr/0012-local-daemon-architecture)). The vault, sessions, audit log, connector store, binding store, sandbox launch, and future v4 data-plane modes live behind this runtime boundary. | The user, launch flows, generated sandbox shims, and future runtime helpers. |
-| `aileron-mcp` | [`cmd/aileron-mcp`](https://github.com/ALRubinger/aileron/tree/main/cmd/aileron-mcp) | Host-launch MCP adapter. Translates an MCP `tools/call` request from the agent host into an HTTP POST to the local daemon's `/v1/actions/{name}/run`. | Host-launched MCP-aware agent hosts. Not the v4 sandbox control plane. |
+| `aileron-mcp` | [`cmd/aileron-mcp`](https://github.com/ALRubinger/aileron/tree/main/cmd/aileron-mcp) | MCP adapter for both host launch and v4 sandbox launch. Translates an MCP `tools/call` request from the agent host into an HTTP POST to the local daemon's `/v1/actions/{name}/run`. Under sandbox launch it runs in-container as a stdio subprocess of the agent (ADR-0024). | Host-launched and sandbox-launched MCP-aware agent hosts. |
 | `aileron-enclave` | [`cmd/aileron-enclave`](https://github.com/ALRubinger/aileron/tree/main/cmd/aileron-enclave) | TEE-side handler. Runs inside a confidential VM in production (Google Confidential Space, AMD SEV-SNP) and as a local dev process when `AILERON_TEE_PROVIDER=local`. Owns the long-lived credential escrow. | The daemon (`aileron`), over HTTPS, when a credential needs TEE-mediated use. Post-MVP for the default install. |
 
 ## How they cooperate
@@ -27,7 +27,7 @@ An Aileron install currently ships multiple cooperating binaries, but the v4 run
            │ + LLM gateway
            ▼
    ┌────────────────┐
-   │  aileron-mcp   │  (host launch only)
+   │  aileron-mcp   │  (host OR in sandbox container)
    └───────┬────────┘
            │
            │ HTTP /v1/actions
@@ -56,7 +56,7 @@ Per [ADR-0015](/adr/0015-launch-audit-scope), Aileron's host-launch audit bounda
 ## What runs where
 
 - **`aileron launch <agent>`** with `--sandbox=off` starts the agent host as a subprocess and wires `aileron-mcp` into its MCP transport (per [ADR-0012](/adr/0012-local-daemon-architecture)). The daemon auto-spawns on first call and stays running as long as a session is active.
-- **`aileron launch --sandbox=auto|docker|podman <agent>`** prepares the selected sandbox image, validates it, and runs the agent command in a container. It injects `AILERON_API_URL`, session metadata, `tools.txt`, and generated connector shims. It does not run `aileron-mcp` inside the container.
+- **`aileron launch --sandbox=auto|docker|podman <agent>`** prepares the selected sandbox image, validates it, and runs the agent command in a container. It bind-mounts the host-built `aileron-mcp` at `/usr/local/bin/aileron-mcp:ro` and registers it with the in-container agent (ADR-0024), and injects `AILERON_API_URL`, session metadata, `tools.txt`, and generated connector shims as a complementary non-MCP-native CLI surface.
 - **`aileron daemon start|stop|status`** controls the daemon directly. Useful for diagnostics, rare in normal use.
 - **`aileron-mcp`** can be installed standalone with `task mcp:setup` when an agent host needs the MCP server outside an `aileron launch` session.
 - **`aileron-enclave`** is post-MVP for the default install. The credential vault works without it via the local-mode path in [ADR-0011](/adr/0011-local-credential-vault). When the TEE-backed escrow lands, this binary is what runs inside Confidential Space.
