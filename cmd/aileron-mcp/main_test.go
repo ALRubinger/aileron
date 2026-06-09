@@ -762,6 +762,66 @@ func TestCheckActionStatus_MissingApprovalIDReturnsError(t *testing.T) {
 	}
 }
 
+// --- CLI flag handling (U4 / #953) ---
+
+func TestHandleEarlyArgs_VersionPrintsAndExits(t *testing.T) {
+	var buf strings.Builder
+	if !handleEarlyArgs([]string{"aileron-mcp", "--version"}, &buf) {
+		t.Error("--version should return true (exit signal)")
+	}
+	if !strings.Contains(buf.String(), "dev") && len(strings.TrimSpace(buf.String())) == 0 {
+		t.Errorf("--version output should be a version string; got %q", buf.String())
+	}
+	// -v alias
+	buf.Reset()
+	if !handleEarlyArgs([]string{"aileron-mcp", "-v"}, &buf) {
+		t.Error("-v should return true (exit signal)")
+	}
+	if len(strings.TrimSpace(buf.String())) == 0 {
+		t.Errorf("-v output empty; got %q", buf.String())
+	}
+}
+
+func TestHandleEarlyArgs_HelpPrintsUsageAndExits(t *testing.T) {
+	var buf strings.Builder
+	if !handleEarlyArgs([]string{"aileron-mcp", "--help"}, &buf) {
+		t.Error("--help should return true (exit signal)")
+	}
+	for _, want := range []string{"aileron-mcp", "AILERON_URL"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("--help output missing %q; got %q", want, buf.String())
+		}
+	}
+	// -h alias
+	buf.Reset()
+	if !handleEarlyArgs([]string{"aileron-mcp", "-h"}, &buf) {
+		t.Error("-h should return true (exit signal)")
+	}
+	if len(strings.TrimSpace(buf.String())) == 0 {
+		t.Errorf("-h output empty; got %q", buf.String())
+	}
+}
+
+func TestHandleEarlyArgs_UnknownFlagFallsThrough(t *testing.T) {
+	var buf strings.Builder
+	if handleEarlyArgs([]string{"aileron-mcp", "--unknown"}, &buf) {
+		t.Error("unknown flag should return false so main proceeds to stdio loop")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("unknown flag should not write to out; got %q", buf.String())
+	}
+}
+
+func TestHandleEarlyArgs_NoArgsFallsThrough(t *testing.T) {
+	var buf strings.Builder
+	if handleEarlyArgs([]string{"aileron-mcp"}, &buf) {
+		t.Error("no args should return false")
+	}
+	if buf.Len() != 0 {
+		t.Errorf("no args should not write to out; got %q", buf.String())
+	}
+}
+
 // --- Launch session id header injection (U7 / #953) ---
 
 // recordedAuthHeaders captures the auth + session-id headers seen by a

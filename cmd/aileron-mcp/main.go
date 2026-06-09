@@ -309,21 +309,33 @@ var httpRequestTool = toolDef{
 	},
 }
 
+// handleEarlyArgs services the few CLI flags aileron-mcp recognizes
+// before the JSON-RPC stdio loop starts (--version, --help, and the
+// short aliases). Writes to out and returns true when the caller
+// should exit. Centralized here for unit-testability.
+//
+// The sandbox container's validate step (ADR-0024) execs
+// `aileron-mcp --version` as a smoke-check that the host-mounted
+// binary is actually executable inside the container — catches the
+// cross-arch ENOEXEC case `command -v` alone would miss.
+func handleEarlyArgs(args []string, out io.Writer) bool {
+	if len(args) <= 1 {
+		return false
+	}
+	switch args[1] {
+	case "--version", "-v":
+		fmt.Fprintln(out, version.Version)
+		return true
+	case "--help", "-h":
+		fmt.Fprintln(out, "aileron-mcp — Aileron MCP server (stdio JSON-RPC). Usage: aileron-mcp [--version|--help]. Configured via env: AILERON_URL, AILERON_TOKEN, AILERON_SESSION_ID.")
+		return true
+	}
+	return false
+}
+
 func main() {
-	// --version / -v / --help / -h: print and exit. The sandbox
-	// container's validate step (ADR-0024) execs `aileron-mcp --version`
-	// to smoke-check that the host-mounted binary is actually executable
-	// inside the container — catches the cross-arch ENOEXEC case
-	// `command -v` alone would miss.
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "--version", "-v":
-			fmt.Println(version.Version)
-			return
-		case "--help", "-h":
-			fmt.Println("aileron-mcp — Aileron MCP server (stdio JSON-RPC). Usage: aileron-mcp [--version|--help]. Configured via env: AILERON_URL, AILERON_TOKEN, AILERON_SESSION_ID.")
-			return
-		}
+	if handleEarlyArgs(os.Args, os.Stdout) {
+		return
 	}
 
 	// Initialize OpenTelemetry. Off by default; AILERON_OTEL_ENABLED
