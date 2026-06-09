@@ -59,7 +59,7 @@ func TestSandboxForwardProxy_CONNECTRejectsInvalidToken(t *testing.T) {
 	}
 }
 
-func TestSandboxForwardProxy_CONNECTAuthenticatesAndFailsClosed(t *testing.T) {
+func TestSandboxForwardProxy_CONNECTAuthenticatesAndFailsClosedOnMissingSessionCA(t *testing.T) {
 	handler := newSandboxForwardProxyTestHandler(t, "daemon-token")
 	req := httptest.NewRequest(http.MethodConnect, "http://gmail.googleapis.com:443", nil)
 	req.Host = "gmail.googleapis.com:443"
@@ -68,14 +68,14 @@ func TestSandboxForwardProxy_CONNECTAuthenticatesAndFailsClosed(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
 	if got := rec.Header().Get("X-Aileron-Session-Id"); got != "session-123" {
 		t.Fatalf("X-Aileron-Session-Id = %q, want session-123", got)
 	}
-	if !strings.Contains(rec.Body.String(), "sandbox HTTPS forward proxy CONNECT transport is not available") {
-		t.Fatalf("body = %q", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "sandbox proxy session CA is unavailable") {
+		t.Fatalf("body = %q, want session CA unavailable message", rec.Body.String())
 	}
 }
 
@@ -1008,7 +1008,78 @@ func TestSignSandboxForwardProxyLeaf_IncludesIPSAN(t *testing.T) {
 	}
 }
 
-func TestSandboxForwardProxy_AbsoluteFormV1PathDoesNotHitDaemonAuth(t *testing.T) {
+func TestSandboxForwardProxy_NonCONNECTAuditsUnresolvedRejection(t *testing.T) {
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		localDaemonToken: "daemon-token",
+		auditRecorder:    audit.NewRecorder(auditStore, nil, func() string { return "audit-non-connect" }),
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/v1/resource", nil)
+	req.Header.Set("Proxy-Authorization", basicProxyAuth("session-123", "daemon-token"))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyRejected {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyRejected)
+	}
+	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != "non_connect_proxy_request_unsupported" {
+		t.Fatalf("reject reason = %v, want non_connect_proxy_request_unsupported", got)
+	}
+	if got := events[0].Payload["aileron.proxy.upstream.host"]; got != "api.example.test" {
+		t.Errorf("upstream host = %v, want api.example.test", got)
+	}
+}
+
+func TestSandboxForwardProxy_CONNECTSessionCAMissingAuditsUnresolvedRejection(t *testing.T) {
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		localDaemonToken: "daemon-token",
+		auditRecorder:    audit.NewRecorder(auditStore, nil, func() string { return "audit-ca-missing" }),
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	req := httptest.NewRequest(http.MethodConnect, "http://gmail.googleapis.com:443", nil)
+	req.Host = "gmail.googleapis.com:443"
+	req.Header.Set("Proxy-Authorization", basicProxyAuth("session-123", "daemon-token"))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyRejected {
+		t.Fatalf("event type = %q", events[0].EventType)
+	}
+	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != "session_ca_unavailable" {
+		t.Fatalf("reject reason = %v, want session_ca_unavailable", got)
+	}
+	if got := events[0].Payload["aileron.proxy.upstream.host"]; got != "gmail.googleapis.com" {
+		t.Errorf("upstream host = %v, want gmail.googleapis.com", got)
+	}
+}
+
+func TestSandboxForwardProxy_AbsoluteFormV1PathRejectsWithStructuredError(t *testing.T) {
 	handler := newSandboxForwardProxyTestHandler(t, "daemon-token")
 	req := httptest.NewRequest(http.MethodGet, "https://api.example.test/v1/resource", nil)
 	req.Header.Set("Proxy-Authorization", basicProxyAuth("session-123", "daemon-token"))
@@ -1016,11 +1087,14 @@ func TestSandboxForwardProxy_AbsoluteFormV1PathDoesNotHitDaemonAuth(t *testing.T
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
 	}
 	if got := rec.Header().Get("X-Aileron-Session-Id"); got != "session-123" {
 		t.Fatalf("X-Aileron-Session-Id = %q, want session-123", got)
+	}
+	if !strings.Contains(rec.Body.String(), "requires CONNECT for HTTPS interception") {
+		t.Fatalf("body = %q, want CONNECT-required message", rec.Body.String())
 	}
 }
 

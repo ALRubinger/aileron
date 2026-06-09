@@ -19,7 +19,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
 )
 
-const connectorOperationNotImplementedMessage = "connector operation dispatch is not implemented yet; mediated HTTPS data-plane execution is tracked by issue #896"
+const connectorOperationNotProxyableMessage = "connector operation is not proxyable through the daemon HTTPS data plane; the spec lacks a required field (method, hosts, path) or uses an unsupported HTTP method"
 const sandboxProxyMaxResponseBytes = 4 << 20
 
 const (
@@ -91,7 +91,7 @@ func (s *apiServer) RunConnectorOperation(w http.ResponseWriter, r *http.Request
 		ConnectorFqn: connectorFQN,
 		Tool:         toolName,
 		Operation:    operation.Name,
-		Message:      connectorOperationNotImplementedMessage,
+		Message:      connectorOperationNotProxyableMessage,
 	})
 }
 
@@ -539,7 +539,7 @@ func (s *apiServer) recordConnectorOperationRejected(r *http.Request, connectorF
 		"aileron.connector.boundary":      "daemon_operation_endpoint",
 		"aileron.connector.mediation":     "direct_shim_contract",
 		"aileron.connector.decision":      "rejected",
-		"aileron.connector.reject_reason": "data_plane_not_implemented",
+		"aileron.connector.reject_reason": "operation_not_proxyable",
 	}
 	if operation.Credential != "" {
 		payload["aileron.connector.credential_required"] = true

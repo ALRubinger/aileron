@@ -152,7 +152,7 @@ func TestRunConnectorOperation_RecognizedOperationAuditsAndFailsClosed(t *testin
 	if payload["aileron.connector.credential"] != "oauth2" {
 		t.Errorf("credential kind payload = %v", payload["aileron.connector.credential"])
 	}
-	if payload["aileron.connector.reject_reason"] != "data_plane_not_implemented" {
+	if payload["aileron.connector.reject_reason"] != "operation_not_proxyable" {
 		t.Errorf("reject reason payload = %v", payload["aileron.connector.reject_reason"])
 	}
 	if payload["aileron.session.id"] != "session-123" {
