@@ -16,7 +16,7 @@ order: 18
 
 Earlier launch work used `aileron-mcp` as the host-side bridge between agents and the local daemon. That remains part of the current host launch path for agents that consume MCP config.
 
-The v4 container runtime needs a different shape. The agent runs inside a sandbox image, while Aileron owns the host daemon/data plane, generated shims, approvals, credentials, and future shell mediation. Reviving `aileron-mcp` as the in-container sandbox model would split responsibilities across binaries and pull the design back toward an MCP-server-centric architecture that the v4 roadmap explicitly moved away from.
+The v4 container runtime needs a different shape. The agent runs inside a sandbox image, while Aileron owns the host daemon/data plane, generated shims, approvals, and credentials. Reviving `aileron-mcp` as the in-container sandbox model would split responsibilities across binaries and pull the design back toward an MCP-server-centric architecture that the v4 roadmap explicitly moved away from.
 
 ## Decision
 
@@ -33,7 +33,7 @@ The sandbox runtime has one authority boundary: the Aileron daemon/data plane. C
 
 Packaging can still include more than one executable artifact when the implementation needs helper binaries, but the architecture treats them as Aileron runtime modes/helpers. They do not define a second product model or a separate sidecar protocol.
 
-Docs and issues must distinguish host launch from sandbox launch. Host launch can still mention `aileron-mcp`; sandbox launch should describe `AILERON_API_URL`, generated shims, the future HTTPS proxy, and #801 shell mediation.
+Docs and issues must distinguish host launch from sandbox launch. Host launch can still mention `aileron-mcp`; sandbox launch should describe `AILERON_API_URL`, generated shims, and the future HTTPS proxy.
 
 ## Alternatives Considered
 

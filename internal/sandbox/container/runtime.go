@@ -97,13 +97,12 @@ type RunResult struct {
 // ValidateOptions configures a launch-time sandbox image validation run.
 type ValidateOptions struct {
 	Runtime               string
-	Image                 string
-	WorkDir               string
-	Env                   map[string]string
-	Volumes               []Volume
-	Command               []string
-	RequireProxyTrust     bool
-	RequireShellMediation bool
+	Image             string
+	WorkDir           string
+	Env               map[string]string
+	Volumes           []Volume
+	Command           []string
+	RequireProxyTrust bool
 }
 
 // Build builds the image for plan. Tier 0 builds Aileron's local sandbox-base
@@ -293,7 +292,6 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 			opts.Command[0],
 			boolArg(requiresShimHTTPClient(opts.Volumes)),
 			boolArg(opts.RequireProxyTrust),
-			boolArg(opts.RequireShellMediation),
 		},
 	})
 	if err == nil {
@@ -361,14 +359,6 @@ if [ "${3:-0}" = "1" ]; then
     exit 127
   fi
   aileron-install-proxy-ca --check "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
-fi
-if [ "${4:-0}" = "1" ]; then
-  if ! command -v aileron-shell-mediator >/dev/null 2>&1; then
-    echo "sandbox shell mediation requires aileron-shell-mediator in the sandbox image" >&2
-    echo "extend the current aileron/sandbox-base image or disable sandbox shell mediation" >&2
-    exit 127
-  fi
-  aileron-shell-mediator --check
 fi
 `
 

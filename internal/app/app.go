@@ -388,21 +388,10 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// --- Source connectors (read-only context retrieval) ---
 	sourceReg := source.NewRegistry()
 
-	// --- Sandbox shell mediation deny pattern (#801 slice 6, ADR-0021) ---
-	// Read AILERON_SANDBOX_SHELL_DENY_PATTERN at startup. Set-but-invalid
-	// refuses to start so the operator sees the misconfig instead of a
-	// sandbox they believe is locked down (KTD2, R7). Unset preserves the
-	// slice-5 byte-for-byte allow path (R6).
-	sandboxShellDenyPattern, err := loadSandboxShellDenyPattern()
-	if err != nil {
-		return nil, fmt.Errorf("sandbox shell deny pattern: %w", err)
-	}
-
 	server := &apiServer{
 		log:                     log,
 		registry:                registry,
 		policyEngine:            policyEngine,
-		sandboxShellDenyPattern: sandboxShellDenyPattern,
 		orchestrator:            orchestrator,
 		vault:                   v,
 		lockableVault:           lockableVault,

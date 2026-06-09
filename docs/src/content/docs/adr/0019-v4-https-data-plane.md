@@ -53,7 +53,7 @@ The tenth #896 slice proves the transparent proxy transport boundary. Authentica
 
 The eleventh #896 slice routes the first transparent proxy requests through the same credential-injection boundary. After authenticated `CONNECT` and TLS interception, the daemon matches the decrypted request by method, host, and path against installed connector specs. A unique match reuses the existing sandbox proxy executor to resolve the daemon-side credential binding, inject credentials, proxy the upstream request, and return the sanitized upstream response through the TLS tunnel. Missing or ambiguous matches, binding failures, invalid decrypted requests, and oversized request bodies fail closed. This still remains an internal proxy-bootstrap path pending broader client smoke coverage and final audit-schema work.
 
-The twelfth #896 slice adds standard-client smoke coverage for the proxy URL shape that sandbox launch emits. A normal HTTP client configured from `HTTPS_PROXY=http://<session-id>:<daemon-token>@<daemon-host>` sends `Proxy-Authorization` through `CONNECT`; the daemon authenticates that userinfo-derived header, completes TLS interception with the session CA, and reaches the same connector credential-injection path. This confirms the internal proxy-bootstrap contract for clients that honor standard proxy environment variables without adding shell interception or container-side secret injection.
+The twelfth #896 slice adds standard-client smoke coverage for the proxy URL shape that sandbox launch emits. A normal HTTP client configured from `HTTPS_PROXY=http://<session-id>:<daemon-token>@<daemon-host>` sends `Proxy-Authorization` through `CONNECT`; the daemon authenticates that userinfo-derived header, completes TLS interception with the session CA, and reaches the same connector credential-injection path. This confirms the internal proxy-bootstrap contract for clients that honor standard proxy environment variables without container-side secret injection.
 
 The first #898 audit-schema slice distinguishes the HTTPS data-plane entry source in audit payloads. Connector-resolved proxy events now include `aileron.proxy.source` as `generated_connector_shim`, `daemon_request_boundary`, or `transparent_connect_tls`. Transparent proxy attempts that fail before a connector operation is uniquely resolved record `sandbox.proxy.rejected` with method, upstream scheme/host/path, session id, source, and rejection reason. These events continue to omit credential bytes, raw headers, request bodies, query strings, and full upstream URLs.
 
@@ -63,7 +63,7 @@ Images must be able to trust the session CA or fail before the agent starts. BYO
 
 CLIs that cannot use proxy-mediated HTTPS without env-var credentials remain unsupported for sealed-credential v4 flows unless a dedicated integration is designed later.
 
-The proxy/data-plane implementation is tracked separately from shell interception. #801 can use the same policy/audit pipeline, but shell mediation is not a prerequisite for proxy-based credential injection.
+The proxy/data-plane implementation stands on its own; it never depended on shell-layer enforcement. (Container-only shell mediation was prototyped under [#801](https://github.com/ALRubinger/aileron/issues/801) and withdrawn in [#952](https://github.com/ALRubinger/aileron/issues/952); see [ADR-0021](/adr/0021-v4-shell-layer-mediation), Withdrawn.)
 
 ## Alternatives Considered
 

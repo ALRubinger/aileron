@@ -46,9 +46,9 @@ The Aileron extension block starts narrow:
 }
 ```
 
-`image` selects the BYO-image tier. `mediation` and `approval_surface` are declared here so the config surface exists before shell mediation and the approval UI add the runtime behavior.
+`image` selects the BYO-image tier. `mediation` and `approval_surface` are declared here so the config surface exists before the approval UI adds the runtime behavior. (The `mediation` slot was originally also intended to anchor container-only shell mediation; that surface was prototyped under [#801](https://github.com/ALRubinger/aileron/issues/801) and withdrawn in [#952](https://github.com/ALRubinger/aileron/issues/952). See [ADR-0021](/adr/0021-v4-shell-layer-mediation) (Withdrawn).)
 
-The Aileron-owned base image contains only the runtime substrate: shell utilities, discovery files, and the minimal HTTP client used by generated connector shims. Proxy/session bootstrap, CA installation hooks, and shell mediation files layer onto this base as those features land. The base image does not carry language runtimes or third-party development tools.
+The Aileron-owned base image contains only the runtime substrate: shell utilities, discovery files, and the minimal HTTP client used by generated connector shims. Proxy/session bootstrap and CA installation hooks layer onto this base as those features land. The base image does not carry language runtimes or third-party development tools.
 
 ## Single-binary alignment
 
@@ -88,7 +88,7 @@ Users with existing devcontainers get an upgrade path rather than a parallel Ail
 
 Aileron keeps a clear boundary: it owns mediation, credentials, approvals, audit, and runtime bootstrap; users own development tooling in the image.
 
-The first implementations establish the contract, image-build substrate, container execution path, validation, and launch-scoped discovery/action substrate. That is the #796 cut line before #801: live discovery refresh ([#897](https://github.com/ALRubinger/aileron/issues/897)), proxy/session-CA bootstrap ([#896](https://github.com/ALRubinger/aileron/issues/896)), agent image recipes ([#894](https://github.com/ALRubinger/aileron/issues/894)), and shell interception ([ADR-0021](/adr/0021-v4-shell-layer-mediation)) build on this substrate only when later runtime layers need them.
+The first implementations establish the contract, image-build substrate, container execution path, validation, and launch-scoped discovery/action substrate. That is the #796 cut line: live discovery refresh ([#897](https://github.com/ALRubinger/aileron/issues/897)), proxy/session-CA bootstrap ([#896](https://github.com/ALRubinger/aileron/issues/896)), and agent image recipes ([#894](https://github.com/ALRubinger/aileron/issues/894)) build on this substrate only when later runtime layers need them. Shell interception ([ADR-0021](/adr/0021-v4-shell-layer-mediation), Withdrawn) was an earlier candidate and is no longer planned.
 
 ## Alternatives Considered
 
@@ -110,4 +110,4 @@ The first implementations establish the contract, image-build substrate, contain
 - [ADR-0018](/adr/0018-v4-single-binary-runtime) — single-binary runtime model
 - [ADR-0019](/adr/0019-v4-https-data-plane) — HTTPS data-plane mediation
 - [ADR-0020](/adr/0020-v4-connector-specs-and-shims) — connector specs and shims
-- [ADR-0021](/adr/0021-v4-shell-layer-mediation) — shell-layer mediation
+- [ADR-0021](/adr/0021-v4-shell-layer-mediation) — shell-layer mediation (Withdrawn)

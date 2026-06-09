@@ -25,7 +25,7 @@ The v4 network model is tiered:
 - Private ranges and host-sensitive addresses should be denied by default unless explicitly opened by a documented runtime policy.
 - Regulated deployments can move to default-deny plus allowlist without changing the composition tiers.
 
-The first #796 runtime cut does not enforce this full policy. It establishes container execution and daemon-facing shims. The policy becomes load-bearing when #896 adds proxy/session CA bootstrap and when #801 adds shell mediation.
+The first #796 runtime cut does not enforce this full policy. It establishes container execution and daemon-facing shims. The policy becomes load-bearing when #896 adds proxy/session CA bootstrap.
 
 ## Consequences
 
