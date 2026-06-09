@@ -12,6 +12,7 @@ The integration test at `test/integration/sandbox_mcp_test.go` (build tag `integ
 
 - Docker or Podman installed and running.
 - A development build of the Aileron CLI and `aileron-mcp` siblings, both on `PATH`. `task build:cli && task build:mcp` produces them under `./build/`.
+- `jq` available on `PATH` (used by the audit-verification command below).
 - A Google OAuth client configured via `aileron binding setup gmail` (or any installed action you want to test).
 - The `aileron-connector-google` connector installed (`aileron connector install github://ALRubinger/aileron-connector-google`).
 - The `draft-email` action installed (`aileron action install github://ALRubinger/aileron-connector-google/actions/draft-email`).
