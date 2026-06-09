@@ -1,4 +1,38 @@
 #!/bin/sh
+#
+# aileron-install-proxy-ca — install the Aileron session CA into the in-container
+# trust store. This is the canonical implementation for aileron/sandbox-base
+# (Debian-family + Alpine bases via update-ca-certificates). BYO authors who
+# need to support other distros should write a drop-in equivalent that obeys
+# the same CLI contract; the launcher does not care about the trust-store
+# mechanism, only about the CLI shape and exit codes.
+#
+# CLI contract:
+#   aileron-install-proxy-ca --check [CA_PEM]
+#       Probe-only: verify the CA file exists and is non-empty, and that the
+#       trust-store tooling is present. Do not write anything. Exit 0 on pass.
+#   aileron-install-proxy-ca [CA_PEM]
+#       Install the CA into the in-container trust store. Must run as root.
+#
+# CA file resolution (in order):
+#   1. CA_PEM positional argument
+#   2. $AILERON_SANDBOX_PROXY_CA_FILE env var
+#   3. /etc/aileron/proxy/ca.pem (the launcher's mount path)
+#
+# Exit codes (the launcher matches on these):
+#   0    success
+#   2    CA file missing or empty
+#   126  install attempted without root
+#   127  trust-store tooling missing (update-ca-certificates / equivalent)
+#
+# Equivalent helpers for other bases:
+#   RHEL/Fedora/Amazon Linux: install to /etc/pki/ca-trust/source/anchors/
+#     and run `update-ca-trust extract`.
+#   Alpine: shipped here already — Alpine's ca-certificates package provides
+#     a compatible update-ca-certificates.
+#
+# See https://docs.withaileron.ai/development/sandbox-agent-images/#byo-image-proxy-contract
+# for the full BYO contract and ADR-0019 for the v4 HTTPS data plane decision.
 set -eu
 
 mode="install"

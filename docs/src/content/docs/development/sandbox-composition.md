@@ -191,7 +191,7 @@ Set `customizations.aileron.image` when your team owns the complete image:
 }
 ```
 
-In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Images that opt into internal proxy-bootstrap development must include `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers compatible with the sandbox-base contract.
+In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Images that participate in the v4 HTTPS proxy must include `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers that meet the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract). `aileron sandbox check --agent=...` validates both contracts for every Docker or Podman run.
 
 ## What Belongs in the Image
 

@@ -68,6 +68,40 @@ Validate a BYO image by setting `customizations.aileron.image` in `.devcontainer
 aileron sandbox check --runtime=docker --build=never --agent=claude
 ```
 
+## BYO Image Proxy Contract
+
+`aileron launch --sandbox=docker` runs the HTTPS proxy by default ([ADR-0019](/adr/0019-v4-https-data-plane/)). The launcher mounts a session-scoped CA at `/etc/aileron/proxy/ca.pem`, sets standard proxy env (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`), and runs the agent through the `aileron-run-with-proxy-ca` wrapper. For the proxy to terminate TLS without breaking the agent's HTTPS clients, the in-container trust store must include that CA before the agent starts.
+
+`aileron sandbox check --agent=<command>` validates the proxy contract for every `--runtime=docker` and `--runtime=podman` invocation. The check exits non-zero with an actionable message when the image is missing any of the required pieces below. The launch-time validation runs the same script.
+
+A BYO image meets the proxy contract by providing two helpers on `PATH`:
+
+| Helper | Purpose |
+|---|---|
+| `aileron-install-proxy-ca` | Installs the mounted CA into the in-container trust store. Must accept `--check` to dry-run the trust-store probe without writing anything, and must accept an optional positional CA file argument (default `${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}`). Exits 0 on success, 2 when the CA file is missing or empty, 126 when invoked unprivileged for an install, 127 when the underlying trust-store tooling is missing. |
+| `aileron-run-with-proxy-ca` | Entrypoint wrapper that installs the CA as root, then drops privileges to the `agent` user and executes the requested agent command. The launcher always starts the container through this wrapper when the proxy is in force. |
+
+The canonical implementations ship with the `aileron/sandbox-base` image. BYO authors who derive from another base distro can write drop-in equivalents — the launcher only cares about the CLI shape, not the trust-store mechanism. Pick the mechanism that matches the base:
+
+| Base distro | Install file at | Apply with | Notes |
+|---|---|---|---|
+| Debian / Ubuntu | `/usr/local/share/ca-certificates/aileron-sandbox-proxy-ca.crt` | `update-ca-certificates` | Requires the `ca-certificates` package. |
+| Alpine | `/usr/local/share/ca-certificates/aileron-sandbox-proxy-ca.crt` | `update-ca-certificates` | Provided by the `ca-certificates` package. The sandbox-base image's helper already works on Alpine because Alpine's `update-ca-certificates` accepts the same input directory. |
+| RHEL / Fedora / Amazon Linux | `/etc/pki/ca-trust/source/anchors/aileron-sandbox-proxy-ca.crt` | `update-ca-trust extract` | Requires the `ca-certificates` package. Write a small wrapper that mirrors the Debian helper's CLI but switches the install path and update command. |
+
+Two operational requirements apply to every equivalent helper:
+
+1. The CA must be installed as `root` once at container start, before the agent process runs. This is what `aileron-run-with-proxy-ca` guarantees by switching back to the `agent` user with `exec` after the install.
+2. The install step must be idempotent — the same helper is invoked on every container start, and the same CA is installed every time. Existing `update-ca-certificates` / `update-ca-trust` implementations are naturally idempotent.
+
+Validate a BYO image meets both the agent and proxy contracts with:
+
+```bash
+aileron sandbox check --runtime=docker --build=never --agent=claude
+```
+
+The check reports `support: ok` only when the agent command and both proxy helpers are present and the `--check` probe succeeds. To launch without the proxy — useful for images that cannot meet the contract during initial bring-up — pass `--sandbox-proxy=off` on `aileron launch`. `sandbox check` does not honor that opt-out; it always exercises the full contract so BYO authors see the same failures the launcher would see.
+
 ## Current Limits
 
-The support matrix covers image contents only. It does not add live discovery refresh. Internal HTTPS proxy/session CA bootstrap work now expects images used for that development mode to provide `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca`; the Aileron sandbox-base image includes both. Launch now authenticates standard proxy-shaped requests with proxy userinfo / `Proxy-Authorization`, but full forward-proxy transport remains tracked separately from the image support contract.
+The support matrix covers image contents only. It does not add live discovery refresh.
