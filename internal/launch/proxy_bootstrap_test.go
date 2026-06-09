@@ -9,19 +9,7 @@ import (
 	"testing"
 )
 
-func TestPrepareSandboxProxyBootstrap_DefaultOff(t *testing.T) {
-	t.Setenv(sandboxProxyBootstrapEnv, "")
-	got, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "http://host.docker.internal:48123", "")
-	if err != nil {
-		t.Fatalf("prepareSandboxProxyBootstrap: %v", err)
-	}
-	if got.Mode != "" || got.ProxyURL != "" || len(got.Mounts) != 0 {
-		t.Fatalf("bootstrap = %+v, want zero value", got)
-	}
-}
-
 func TestPrepareSandboxProxyBootstrap_GeneratesSessionCAAndMount(t *testing.T) {
-	t.Setenv(sandboxProxyBootstrapEnv, "1")
 	stateDir := t.TempDir()
 	got, err := prepareSandboxProxyBootstrap(stateDir, "session-123", "http://host.docker.internal:48123/", "daemon-token")
 	if err != nil {
@@ -65,7 +53,6 @@ func TestPrepareSandboxProxyBootstrap_GeneratesSessionCAAndMount(t *testing.T) {
 }
 
 func TestPrepareSandboxProxyBootstrap_RejectsUnsafeSessionID(t *testing.T) {
-	t.Setenv(sandboxProxyBootstrapEnv, "1")
 	for _, sessionID := range []string{"../escape", "nested/session", `nested\session`, "session:123", " session-123", "session-123 ", ".", ".."} {
 		t.Run(sessionID, func(t *testing.T) {
 			_, err := prepareSandboxProxyBootstrap(t.TempDir(), sessionID, "http://host.docker.internal:48123", "")
@@ -77,7 +64,6 @@ func TestPrepareSandboxProxyBootstrap_RejectsUnsafeSessionID(t *testing.T) {
 }
 
 func TestPrepareSandboxProxyBootstrap_RequiresAgentEndpointURL(t *testing.T) {
-	t.Setenv(sandboxProxyBootstrapEnv, "1")
 	_, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "", "")
 	if err == nil {
 		t.Fatal("expected agent endpoint URL error")
@@ -85,7 +71,6 @@ func TestPrepareSandboxProxyBootstrap_RequiresAgentEndpointURL(t *testing.T) {
 }
 
 func TestPrepareSandboxProxyBootstrap_RejectsInvalidAgentEndpointURL(t *testing.T) {
-	t.Setenv(sandboxProxyBootstrapEnv, "1")
 	_, err := prepareSandboxProxyBootstrap(t.TempDir(), "session-123", "http://", "")
 	if err == nil {
 		t.Fatal("expected invalid agent endpoint URL error")
@@ -128,6 +113,25 @@ func TestApplySandboxProxyBootstrapEnv(t *testing.T) {
 	}
 }
 
+func TestApplySandboxProxyBootstrapEnv_NoOpWhenBootstrapEmpty(t *testing.T) {
+	env := map[string]string{"NO_PROXY": "internal.example"}
+	applySandboxProxyBootstrapEnv(env, sandboxProxyBootstrap{})
+	for key := range map[string]struct{}{
+		"AILERON_SANDBOX_PROXY_MODE":    {},
+		"AILERON_SANDBOX_PROXY_URL":     {},
+		"AILERON_SANDBOX_PROXY_CA_FILE": {},
+		"HTTPS_PROXY":                   {},
+		"HTTP_PROXY":                    {},
+	} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("env[%s] should not be set when bootstrap is empty: %v", key, env)
+		}
+	}
+	if env["NO_PROXY"] != "internal.example" {
+		t.Fatalf("NO_PROXY mutated: %q", env["NO_PROXY"])
+	}
+}
+
 func TestSandboxProxyURLWithSessionAuth_NoDaemonToken(t *testing.T) {
 	got, err := sandboxProxyURLWithSessionAuth("http://host.docker.internal:48123", "session-123", "")
 	if err != nil {
@@ -141,5 +145,81 @@ func TestSandboxProxyURLWithSessionAuth_NoDaemonToken(t *testing.T) {
 func TestSandboxProxyURLWithSessionAuth_RejectsInvalidURL(t *testing.T) {
 	if _, err := sandboxProxyURLWithSessionAuth("host.docker.internal:48123", "session-123", "daemon-token"); err == nil {
 		t.Fatal("expected invalid proxy URL error")
+	}
+}
+
+// TestResolveSandboxProxyState walks the canonical resolution matrix
+// from the U3 plan. The table form keeps the precedence rules
+// (flag > env > default) and the sandbox-mode dependency obvious in
+// one place; downstream launcher behavior follows from these results
+// without a second source of truth.
+func TestResolveSandboxProxyState(t *testing.T) {
+	cases := []struct {
+		name      string
+		flag      string
+		env       string
+		mode      string
+		wantOn    bool
+		wantRefuse bool
+		wantReason string
+	}{
+		// docker/podman defaults: auto/empty/"on" → enabled.
+		{name: "docker_flag_auto_env_unset", flag: "auto", env: "", mode: "docker", wantOn: true},
+		{name: "docker_flag_empty_env_unset", flag: "", env: "", mode: "docker", wantOn: true},
+		{name: "podman_flag_empty_env_unset", flag: "", env: "", mode: "podman", wantOn: true},
+		{name: "docker_flag_on", flag: "on", env: "", mode: "docker", wantOn: true},
+		{name: "docker_env_on", flag: "", env: "on", mode: "docker", wantOn: true},
+
+		// docker/podman opt-out: flag=off or env=off → user_opt_out.
+		{name: "docker_flag_off", flag: "off", env: "", mode: "docker", wantOn: false, wantReason: sandboxProxyReasonUserOptOut},
+		{name: "docker_env_off", flag: "auto", env: "off", mode: "docker", wantOn: false, wantReason: sandboxProxyReasonUserOptOut},
+		{name: "docker_env_off_no_flag", flag: "", env: "off", mode: "docker", wantOn: false, wantReason: sandboxProxyReasonUserOptOut},
+
+		// Flag-vs-env precedence: flag wins.
+		{name: "flag_on_env_off", flag: "on", env: "off", mode: "docker", wantOn: true},
+		{name: "flag_off_env_on", flag: "off", env: "on", mode: "docker", wantOn: false, wantReason: sandboxProxyReasonUserOptOut},
+
+		// Non-container modes: auto/off → unsupported_sandbox_mode disabled.
+		{name: "off_mode_auto", flag: "auto", env: "", mode: "off", wantOn: false, wantReason: sandboxProxyReasonUnsupportedSandboxMode},
+		{name: "empty_mode_auto", flag: "auto", env: "", mode: "", wantOn: false, wantReason: sandboxProxyReasonUnsupportedSandboxMode},
+		{name: "off_mode_env_off", flag: "", env: "off", mode: "off", wantOn: false, wantReason: sandboxProxyReasonUnsupportedSandboxMode},
+
+		// Non-container modes with flag=on: refuse with unsupported_sandbox_mode.
+		{name: "off_mode_flag_on", flag: "on", env: "", mode: "off", wantOn: false, wantRefuse: true, wantReason: sandboxProxyReasonUnsupportedSandboxMode},
+		{name: "empty_mode_flag_on", flag: "on", env: "", mode: "", wantOn: false, wantRefuse: true, wantReason: sandboxProxyReasonUnsupportedSandboxMode},
+
+		// Unknown flag/env values fall back to default behavior.
+		{name: "docker_garbage_flag_auto", flag: "garbage", env: "", mode: "docker", wantOn: true},
+		{name: "docker_garbage_env_default", flag: "", env: "garbage", mode: "docker", wantOn: true},
+
+		// Legacy AILERON_SANDBOX_PROXY_BOOTSTRAP-style values are not
+		// honored by this resolver; the launcher only consults
+		// AILERON_SANDBOX_PROXY. Verified separately via the env name
+		// constant test below.
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveSandboxProxyState(tc.flag, tc.env, tc.mode)
+			if got.Enabled != tc.wantOn {
+				t.Errorf("Enabled = %v, want %v", got.Enabled, tc.wantOn)
+			}
+			if got.Refuse != tc.wantRefuse {
+				t.Errorf("Refuse = %v, want %v", got.Refuse, tc.wantRefuse)
+			}
+			if got.DisabledReason != tc.wantReason {
+				t.Errorf("DisabledReason = %q, want %q", got.DisabledReason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestResolveSandboxProxyState_EnvVarName guards the rename from
+// AILERON_SANDBOX_PROXY_BOOTSTRAP to AILERON_SANDBOX_PROXY. The new
+// name governs; the old name is no longer recognized. Verified at the
+// constant layer so a future refactor that changes the constant
+// without updating the resolver code paths still fails this test.
+func TestResolveSandboxProxyState_EnvVarName(t *testing.T) {
+	if sandboxProxyEnv != "AILERON_SANDBOX_PROXY" {
+		t.Fatalf("sandbox proxy env var = %q, want AILERON_SANDBOX_PROXY", sandboxProxyEnv)
 	}
 }

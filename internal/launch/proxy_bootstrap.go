@@ -18,7 +18,128 @@ import (
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
-const sandboxProxyBootstrapEnv = "AILERON_SANDBOX_PROXY_BOOTSTRAP"
+// sandboxProxyEnv is the environment variable the user sets to override
+// the default-on proxy bootstrap behavior for `aileron launch`. Values
+// follow the same on|off|auto tri-state as the `--sandbox-proxy` flag.
+const sandboxProxyEnv = "AILERON_SANDBOX_PROXY"
+
+// Resolution decisions for sandbox proxy bootstrap. Used both as the
+// resolution result and as the disabled-reason wire value posted to the
+// daemon (matches OpenAPI's SandboxProxyDisabledRequestReason enum).
+const (
+	sandboxProxyReasonUserOptOut            = "user_opt_out"
+	sandboxProxyReasonPreflightFailed       = "preflight_failed"
+	sandboxProxyReasonUnsupportedSandboxMode = "unsupported_sandbox_mode"
+)
+
+// sandboxProxyStateResolution describes the resolved bootstrap state for
+// a launch. The launcher consumes Enabled to decide whether to call
+// prepareSandboxProxyBootstrap, Refuse to decide whether the launch
+// should hard-fail before starting the container, and DisabledReason to
+// drive the sandbox.proxy.disabled audit event when bootstrap is off.
+type sandboxProxyStateResolution struct {
+	// Enabled is true when the launcher should generate the session
+	// CA, mount it, and run the agent through aileron-run-with-proxy-ca.
+	Enabled bool
+	// Refuse is true when the user explicitly asked for proxy bootstrap
+	// but the resolved sandbox configuration cannot satisfy it without
+	// preflight (e.g. --sandbox=off --sandbox-proxy=on). The launcher
+	// must emit a sandbox.proxy.disabled audit with DisabledReason and
+	// exit non-zero before starting the container.
+	Refuse bool
+	// DisabledReason carries the reason value posted to the daemon's
+	// /v1/sandbox-proxy/disabled endpoint when Enabled is false. Empty
+	// when Enabled is true and preflight has not yet been attempted.
+	DisabledReason string
+}
+
+// resolveSandboxProxyState computes whether sandbox proxy bootstrap is
+// active for a launch, given the user's flag, env-var, and sandbox mode
+// inputs. The precedence is flag > env > default, with `auto` (or
+// empty) deferring to the default for the sandbox mode.
+//
+// Default policy (per the U3 plan): for docker/podman sandbox modes,
+// the default is `on`. For every other mode (including the empty
+// string and `off`), bootstrap is unsupported and the resolution
+// returns Enabled=false with reason unsupported_sandbox_mode. If the
+// user explicitly asked for bootstrap against an unsupported mode the
+// resolver sets Refuse=true so the launcher can fail preflight.
+//
+// Unknown values for either input fall back to default behavior so a
+// typo in $AILERON_SANDBOX_PROXY can't accidentally bypass bootstrap.
+func resolveSandboxProxyState(flagValue, envValue, sandboxMode string) sandboxProxyStateResolution {
+	// Precedence: explicit flag > explicit env > default. "auto" (or
+	// unrecognized) on the flag defers to the env; "auto" (or
+	// unrecognized) on the env defers to the default. Empty inputs are
+	// treated the same as "auto" so the launch CLI's default flag
+	// value of "auto" is indistinguishable from the user omitting it.
+	mode := normalizeSandboxProxyTriState(flagValue)
+	if mode == "" || mode == "auto" {
+		envMode := normalizeSandboxProxyTriState(envValue)
+		if envMode != "" {
+			mode = envMode
+		}
+	}
+	if mode == "" {
+		mode = "auto"
+	}
+
+	supported := sandboxProxyModeSupportsBootstrap(sandboxMode)
+
+	switch mode {
+	case "off":
+		if !supported {
+			return sandboxProxyStateResolution{DisabledReason: sandboxProxyReasonUnsupportedSandboxMode}
+		}
+		return sandboxProxyStateResolution{DisabledReason: sandboxProxyReasonUserOptOut}
+	case "on":
+		if !supported {
+			return sandboxProxyStateResolution{
+				Refuse:         true,
+				DisabledReason: sandboxProxyReasonUnsupportedSandboxMode,
+			}
+		}
+		return sandboxProxyStateResolution{Enabled: true}
+	default: // auto
+		if !supported {
+			return sandboxProxyStateResolution{DisabledReason: sandboxProxyReasonUnsupportedSandboxMode}
+		}
+		return sandboxProxyStateResolution{Enabled: true}
+	}
+}
+
+// normalizeSandboxProxyTriState normalizes a flag or env value to one
+// of "on" / "off" / "auto", or "" when the input is empty (signalling
+// "fall through to the next source"). Unrecognized values are treated
+// as "" so the resolver falls back to the next source rather than
+// silently bypassing bootstrap.
+func normalizeSandboxProxyTriState(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return ""
+	case "on", "1", "true", "yes", "bootstrap":
+		return "on"
+	case "off", "0", "false", "no":
+		return "off"
+	case "auto":
+		return "auto"
+	default:
+		return ""
+	}
+}
+
+// sandboxProxyModeSupportsBootstrap reports whether the given
+// `--sandbox` mode supports proxy bootstrap. Only the container-runtime
+// modes do; the host-launch path (off, empty, "auto") cannot install a
+// session CA into a container that does not exist.
+func sandboxProxyModeSupportsBootstrap(sandboxMode string) bool {
+	switch strings.ToLower(strings.TrimSpace(sandboxMode)) {
+	case "docker", "podman", sandboxcontainer.DefaultRuntime:
+		return true
+	default:
+		return false
+	}
+}
 
 type sandboxProxyBootstrap struct {
 	Mode     string
@@ -29,9 +150,6 @@ type sandboxProxyBootstrap struct {
 }
 
 func prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL, daemonToken string) (sandboxProxyBootstrap, error) {
-	if !sandboxProxyBootstrapEnabled() {
-		return sandboxProxyBootstrap{}, nil
-	}
 	if strings.TrimSpace(sessionID) == "" {
 		return sandboxProxyBootstrap{}, fmt.Errorf("session id is required")
 	}
@@ -73,15 +191,6 @@ func validateProxyBootstrapSessionID(sessionID string) error {
 		return fmt.Errorf("session id %q is not a safe path segment", sessionID)
 	}
 	return nil
-}
-
-func sandboxProxyBootstrapEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(sandboxProxyBootstrapEnv))) {
-	case "1", "true", "yes", "on", "bootstrap":
-		return true
-	default:
-		return false
-	}
 }
 
 func applySandboxProxyBootstrapEnv(agentEnv map[string]string, bootstrap sandboxProxyBootstrap) {

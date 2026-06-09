@@ -201,6 +201,12 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 }
 
 func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
+	// Proxy bootstrap is default-on for --sandbox=docker|podman per the
+	// U3 plan. This test exercises the opt-out path via
+	// --sandbox-proxy=off so it can assert the rest of the container
+	// shape without coupling to the proxy bootstrap env. The default-on
+	// behavior is covered separately by
+	// TestLaunch_SandboxProxyDefaultOnForDocker.
 	dir := t.TempDir()
 	devcontainerDir := filepath.Join(dir, ".devcontainer")
 	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
@@ -223,6 +229,7 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 		Dir:            dir,
 		Args:           []string{"--ask-for-approval", "never"},
 		SandboxRuntime: "auto",
+		SandboxProxy:   "off",
 	})
 	if err != nil {
 		t.Fatalf("launch: %v", err)
@@ -253,16 +260,27 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 	}
 	for _, unwanted := range []string{"HTTPS_PROXY=", "HTTP_PROXY=", "AILERON_SANDBOX_PROXY_MODE="} {
 		if strings.Contains(args, unwanted) {
-			t.Errorf("did not expect proxy bootstrap env %q by default:\n%s", unwanted, args)
+			t.Errorf("did not expect proxy bootstrap env %q under --sandbox-proxy=off:\n%s", unwanted, args)
 		}
 	}
 }
 
-func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
+// TestLaunch_SandboxProxyDefaultOnForDocker covers the default-on flip
+// (#896 U3): `aileron launch --sandbox=docker` enables HTTPS proxy
+// bootstrap without any flag or env var. The container starts through
+// aileron-run-with-proxy-ca, the session CA lands at
+// /etc/aileron/proxy/ca.pem, and proxy env (HTTPS_PROXY, HTTP_PROXY,
+// AILERON_SANDBOX_PROXY_*) reach the agent. This was previously gated
+// by AILERON_SANDBOX_PROXY_BOOTSTRAP=1; that env var no longer
+// participates.
+func TestLaunch_SandboxProxyDefaultOnForDocker(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("AILERON_TOKEN", "daemon-token")
-	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "1")
+	// Make sure neither the new nor the legacy env vars are set so the
+	// default-on path is what's being exercised.
+	t.Setenv("AILERON_SANDBOX_PROXY", "")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "")
 
 	dir := t.TempDir()
 	devcontainerDir := filepath.Join(dir, ".devcontainer")
@@ -285,6 +303,7 @@ func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
 		Agent:          scriptAgent{script: "codex"},
 		Dir:            dir,
 		SandboxRuntime: "docker",
+		// No SandboxProxy set — exercises default-on.
 	})
 	if err != nil {
 		t.Fatalf("launch: %v", err)
@@ -313,6 +332,267 @@ func TestLaunch_SandboxProxyBootstrapEnvAndCAMount(t *testing.T) {
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("run call missing %q:\n%s", want, args)
+		}
+	}
+}
+
+// TestLaunch_SandboxProxyLegacyEnvVarIgnored guards the rename from
+// AILERON_SANDBOX_PROXY_BOOTSTRAP to AILERON_SANDBOX_PROXY (#896 U3):
+// setting only the legacy env var has no effect on the default-on
+// behavior — proxy bootstrap is still active because we're on
+// --sandbox=docker. Opt-out requires the new env var or the flag.
+func TestLaunch_SandboxProxyLegacyEnvVarIgnored(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Only set the legacy env var. The new one stays unset, so the
+	// resolver falls through to the default-on policy for docker.
+	t.Setenv("AILERON_SANDBOX_PROXY", "")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "off")
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, _ := os.ReadFile(argsFile)
+	args := string(data)
+	// The legacy env var was set to "off" but should not be honored;
+	// proxy bootstrap stays default-on.
+	if !strings.Contains(args, "--env\nAILERON_SANDBOX_PROXY_MODE=bootstrap\n") {
+		t.Fatalf("legacy AILERON_SANDBOX_PROXY_BOOTSTRAP=off should not disable bootstrap:\n%s", args)
+	}
+}
+
+// TestLaunch_SandboxProxyOffViaFlag covers the --sandbox-proxy=off
+// opt-out path: docker sandbox launches without proxy bootstrap, no
+// AILERON_SANDBOX_PROXY_MODE env, no --user root, no
+// aileron-run-with-proxy-ca prefix.
+func TestLaunch_SandboxProxyOffViaFlag(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AILERON_SANDBOX_PROXY", "")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "")
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+		SandboxProxy:   "off",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, _ := os.ReadFile(argsFile)
+	args := string(data)
+	for _, unwanted := range []string{
+		"AILERON_SANDBOX_PROXY_MODE=",
+		"HTTPS_PROXY=",
+		"aileron-run-with-proxy-ca",
+		"--user\nroot\n",
+	} {
+		if strings.Contains(args, unwanted) {
+			t.Fatalf("expected no %q under --sandbox-proxy=off:\n%s", unwanted, args)
+		}
+	}
+}
+
+// TestLaunch_SandboxProxyEnvOverridesDefault verifies
+// AILERON_SANDBOX_PROXY=off disables proxy bootstrap with no flag set,
+// honoring the env-var rename.
+func TestLaunch_SandboxProxyEnvOverridesDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AILERON_SANDBOX_PROXY", "off")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "")
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, _ := os.ReadFile(argsFile)
+	args := string(data)
+	if strings.Contains(args, "AILERON_SANDBOX_PROXY_MODE=") {
+		t.Fatalf("AILERON_SANDBOX_PROXY=off did not disable bootstrap:\n%s", args)
+	}
+}
+
+// TestLaunch_SandboxProxyFlagWinsOverEnv verifies flag > env: when
+// the flag forces "on" but env says "off", bootstrap activates.
+func TestLaunch_SandboxProxyFlagWinsOverEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AILERON_SANDBOX_PROXY", "off")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "")
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+		SandboxProxy:   "on",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, _ := os.ReadFile(argsFile)
+	args := string(data)
+	if !strings.Contains(args, "AILERON_SANDBOX_PROXY_MODE=bootstrap") {
+		t.Fatalf("flag=on env=off should keep bootstrap on:\n%s", args)
+	}
+}
+
+// TestLaunch_SandboxProxyPreflightFailureRefusesAndCitesDocs
+// covers the BYO-non-compliant path: default-on proxy bootstrap
+// requested, but the validate-time contract probe exits 127 with a
+// message matching the contract markers. Launch must surface an
+// actionable error citing the contract docs URL and the opt-out flag,
+// and never invoke the agent run command.
+func TestLaunch_SandboxProxyPreflightFailureRefusesAndCitesDocs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AILERON_SANDBOX_PROXY", "")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "")
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake docker fails with the runtime contract probe's missing-helper
+	// message to mimic a BYO image lacking aileron-install-proxy-ca.
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> " + argsFile + "\necho 'sandbox proxy bootstrap requires aileron-install-proxy-ca in the sandbox image' >&2\nexit 127\n"
+	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "codex"},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err == nil {
+		t.Fatal("expected sandbox proxy preflight failure")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"sandbox proxy bootstrap preflight failed",
+		"ghcr.io/acme/agent:latest",
+		"https://docs.withaileron.ai/development/sandbox-agent-images/#byo-image-proxy-contract",
+		"--sandbox-proxy=off",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing %q", msg, want)
+		}
+	}
+	// The agent command must not have been invoked — the run call would
+	// include "codex" after the image name in the captured argv.
+	data, _ := os.ReadFile(argsFile)
+	if strings.Contains(string(data), "ghcr.io/acme/agent:latest\naileron-run-with-proxy-ca\ncodex\n") {
+		t.Fatalf("agent run happened despite preflight failure:\n%s", data)
+	}
+}
+
+// TestLaunch_SandboxProxyRefusesUnsupportedMode verifies that
+// --sandbox-proxy=on against --sandbox=off (a mode that cannot
+// support bootstrap) refuses to launch with an actionable error.
+func TestLaunch_SandboxProxyRefusesUnsupportedMode(t *testing.T) {
+	t.Setenv("AILERON_SANDBOX_PROXY", "")
+	t.Setenv("AILERON_SANDBOX_PROXY_BOOTSTRAP", "")
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          scriptAgent{script: "/bin/sh"},
+		SandboxRuntime: "off",
+		SandboxProxy:   "on",
+	})
+	if err == nil {
+		t.Fatal("expected refuse-launch error for --sandbox-proxy=on --sandbox=off")
+	}
+	msg := err.Error()
+	for _, want := range []string{"sandbox proxy bootstrap", "--sandbox=docker", "--sandbox-proxy=off"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing %q", msg, want)
 		}
 	}
 }
@@ -433,8 +713,11 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	if !strings.Contains(validateCall, "/bin/sh\n-c\n") {
 		t.Fatalf("validation call did not run contract probe:\n%s", validateCall)
 	}
-	if !strings.HasSuffix(strings.TrimSpace(validateCall), "\ncodex\n1\n0\n1") {
-		t.Fatalf("validation call did not enable shim HTTP-client + MCP-binary validation:\n%s", validateCall)
+	// Under default-on proxy bootstrap for --sandbox=docker, the
+	// contract probe expects shim-HTTP-client=1, proxy-trust=1,
+	// MCP-binary=1 (positions 2/3/4 in the trailing argv).
+	if !strings.HasSuffix(strings.TrimSpace(validateCall), "\ncodex\n1\n1\n1") {
+		t.Fatalf("validation call did not enable shim HTTP-client + proxy-trust + MCP-binary validation:\n%s", validateCall)
 	}
 	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(runCall) {
 		t.Fatalf("run call missing container AILERON_API_URL:\n%s", runCall)
@@ -447,8 +730,8 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 			t.Fatalf("run call missing discovery hint env %q:\n%s", want, runCall)
 		}
 	}
-	if !strings.Contains(runCall, "ghcr.io/acme/agent:latest\ncodex\n") {
-		t.Fatalf("run call did not execute agent image command:\n%s", runCall)
+	if !strings.Contains(runCall, "ghcr.io/acme/agent:latest\naileron-run-with-proxy-ca\ncodex\n") {
+		t.Fatalf("run call did not execute agent image command through proxy-ca wrapper:\n%s", runCall)
 	}
 }
 
@@ -651,7 +934,10 @@ func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 		"--env\nAILERON_SANDBOX_IMAGE=aileron/sandbox-base:latest\n",
 		"--env\nAILERON_SANDBOX_TIER=base\n",
 		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
-		"aileron/sandbox-base:latest\nclaude\n--dangerously-skip-permissions\n",
+		// Default-on proxy bootstrap routes the agent through
+		// aileron-run-with-proxy-ca; the image name still precedes the
+		// agent argv but the bootstrap wrapper sits between them.
+		"aileron/sandbox-base:latest\naileron-run-with-proxy-ca\nclaude\n--dangerously-skip-permissions\n",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("expected %q in docker args:\n%s", want, args)
