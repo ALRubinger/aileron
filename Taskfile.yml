@@ -69,13 +69,25 @@ tasks:
       - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-server ./internal/server
 
   build:mcp:
-    desc: Build the Aileron MCP server binary locally
+    desc: Build the Aileron MCP server binary locally (plus a Linux variant on macOS/Windows hosts so `aileron launch --sandbox=docker` can bind-mount it into the container)
     vars:
       VERSION: dev
       COMMIT:
         sh: git rev-parse --short HEAD
+      HOST_GOOS:
+        sh: go env GOOS
+      HOST_GOARCH:
+        sh: go env GOARCH
     cmds:
       - go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp ./cmd/aileron-mcp
+      # Sandbox launch bind-mounts aileron-mcp into a Linux container. On
+      # non-Linux hosts the host-arch Mach-O / PE binary above fails with
+      # exec format error; this second build produces a sibling the
+      # launcher's resolveSandboxMCPBinary prefers for the sandbox path.
+      - |
+        if [ "{{.HOST_GOOS}}" != "linux" ]; then
+          GOOS=linux GOARCH={{.HOST_GOARCH}} go build -ldflags "-X github.com/ALRubinger/aileron/internal/version.Version={{.VERSION}} -X github.com/ALRubinger/aileron/internal/version.Commit={{.COMMIT}}" -o build/aileron-mcp-linux-{{.HOST_GOARCH}} ./cmd/aileron-mcp
+        fi
 
   build:enclave:
     desc: Build the enclave binary locally

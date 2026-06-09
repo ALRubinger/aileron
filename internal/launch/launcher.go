@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -135,6 +136,34 @@ func resolveMCPBinary(selfPath string) (string, error) {
 	)
 }
 
+// resolveSandboxMCPBinary locates an aileron-mcp binary suitable for
+// bind-mounting into a Linux sandbox container.
+//
+// The host aileron-mcp produced by `task build:mcp` (or the official
+// packages) is built for the host OS/arch. On Linux/<arch>, that binary
+// runs unchanged inside a matching-arch container. On macOS or Windows
+// hosts, mounting a Mach-O / PE binary into a Linux container produces
+// `exec format error` at validate time (see runtime.go's "arch mismatch
+// or corrupt mount" path), even when the container's arch matches the
+// host's. To make sandbox launch work off Linux without per-user manual
+// cross-compilation, `task build:mcp` also produces a Linux variant
+// suffixed with the host GOARCH (e.g. `aileron-mcp-linux-arm64`); this
+// resolver prefers that sibling when it exists and falls back to the
+// host-arch binary otherwise.
+//
+// Container platform != host GOARCH (e.g. user passes
+// `DOCKER_DEFAULT_PLATFORM=linux/amd64` on an arm64 host) remains a hard
+// error at validate time; cross-architecture launch is out of scope for
+// the local dev build path and is handled by the published per-agent
+// images on the v4 roadmap.
+func resolveSandboxMCPBinary(selfPath string) (string, error) {
+	suffixed := "aileron-mcp-linux-" + runtime.GOARCH
+	if bin, err := resolveSibling(selfPath, suffixed); err == nil {
+		return bin, nil
+	}
+	return resolveMCPBinary(selfPath)
+}
+
 func sandboxLaunchEnabled(runtimeName string) bool {
 	switch runtimeName {
 	case "", "off":
@@ -222,9 +251,11 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 	defer cleanupMounts()
 	mounts = append(mounts, extraMounts...)
 	// Resolve aileron-mcp and append its mount so the validate step
-	// can smoke-check the binary inside the container (ADR-0024).
+	// can smoke-check the binary inside the container (ADR-0024). Prefer
+	// the cross-compiled Linux variant when present so this works off a
+	// macOS/Windows host.
 	selfPath, _ := os.Executable()
-	mcpBinHost, err := resolveMCPBinary(selfPath)
+	mcpBinHost, err := resolveSandboxMCPBinary(selfPath)
 	if err != nil {
 		return err
 	}
@@ -573,8 +604,11 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	// container's well-known MCP binary path. Matches the resolution
 	// shape host launch uses and the host-mount pattern
 	// sandboxDiscoveryMounts uses for tools.txt and shims (ADR-0024).
+	// Sandbox-flavored lookup picks the cross-compiled Linux variant
+	// when present so this path works off macOS/Windows hosts without
+	// per-user cross-compilation.
 	selfPath, _ := os.Executable()
-	mcpBinHost, err := resolveMCPBinary(selfPath)
+	mcpBinHost, err := resolveSandboxMCPBinary(selfPath)
 	if err != nil {
 		return LaunchResult{}, err
 	}

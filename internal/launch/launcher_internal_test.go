@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -478,3 +479,81 @@ op = "send_email"
 
 # Send Email
 `
+
+// TestResolveSandboxMCPBinary_PrefersLinuxSibling locks in the
+// precedence the launcher relies on under --sandbox=docker|podman: when
+// `task build:mcp` on a non-Linux host produces both `aileron-mcp`
+// (host arch, unrunnable in a Linux container) and
+// `aileron-mcp-linux-<arch>` (cross-compiled), the sandbox-flavored
+// lookup must pick the Linux variant, even when both exist. This is the
+// fix for the "aileron-mcp on PATH but not executable in this container
+// (arch mismatch or corrupt mount)" failure mode.
+func TestResolveSandboxMCPBinary_PrefersLinuxSibling(t *testing.T) {
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostBin := filepath.Join(dir, "aileron-mcp")
+	if err := os.WriteFile(hostBin, []byte("host-arch binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linuxBin := filepath.Join(dir, "aileron-mcp-linux-"+runtime.GOARCH)
+	if err := os.WriteFile(linuxBin, []byte("linux/"+runtime.GOARCH+" binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveSandboxMCPBinary(selfPath)
+	if err != nil {
+		t.Fatalf("resolveSandboxMCPBinary: %v", err)
+	}
+	want, _ := filepath.Abs(linuxBin)
+	if got != want {
+		t.Fatalf("got %q, want %q (the Linux-suffixed sibling)", got, want)
+	}
+}
+
+// TestResolveSandboxMCPBinary_FallsBackToHostBinary covers the Linux
+// host case: `task build:mcp` only produces the plain binary because it
+// is already a Linux binary; the sandbox-flavored lookup must accept it.
+func TestResolveSandboxMCPBinary_FallsBackToHostBinary(t *testing.T) {
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostBin := filepath.Join(dir, "aileron-mcp")
+	if err := os.WriteFile(hostBin, []byte("host arch is linux"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveSandboxMCPBinary(selfPath)
+	if err != nil {
+		t.Fatalf("resolveSandboxMCPBinary: %v", err)
+	}
+	want, _ := filepath.Abs(hostBin)
+	if got != want {
+		t.Fatalf("got %q, want %q (fallback to plain aileron-mcp)", got, want)
+	}
+}
+
+// TestResolveSandboxMCPBinary_PropagatesMissingError ensures the
+// "aileron-mcp not found" remediation hint surfaces even on the
+// sandbox-flavored lookup, so users on a fresh checkout get the same
+// `task build:mcp` pointer the host path already gives them.
+func TestResolveSandboxMCPBinary_PropagatesMissingError(t *testing.T) {
+	dir := t.TempDir()
+	selfPath := filepath.Join(dir, "aileron")
+	if err := os.WriteFile(selfPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+
+	_, err := resolveSandboxMCPBinary(selfPath)
+	if err == nil {
+		t.Fatal("expected error when neither variant exists")
+	}
+	if !strings.Contains(err.Error(), "aileron-mcp not found") || !strings.Contains(err.Error(), "task build:mcp") {
+		t.Fatalf("error message lost the remediation hint: %v", err)
+	}
+}
