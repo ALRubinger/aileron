@@ -71,6 +71,12 @@ type LaunchConfig struct {
 	// SandboxBuildPolicy controls launch-time builds for buildable
 	// sandbox tiers. Empty defaults to auto for launch.
 	SandboxBuildPolicy string
+	// SandboxProxy controls whether the sandbox HTTPS proxy bootstrap
+	// runs for this launch. Tri-state: "on" forces bootstrap (preflight
+	// refuses launch if the image can't satisfy the BYO contract),
+	// "off" disables it, and "auto" (or empty) defers to the default
+	// for the resolved sandbox runtime (on for docker/podman).
+	SandboxProxy string
 }
 
 // LaunchResult holds the outcome of a launched agent process.
@@ -333,6 +339,15 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	client := newDaemonClient(daemonURL, daemonToken)
 
 	sandboxEnabled := sandboxLaunchEnabled(config.SandboxRuntime)
+	proxyState := resolveSandboxProxyState(config.SandboxProxy, os.Getenv(sandboxProxyEnv), config.SandboxRuntime)
+	if proxyState.Refuse {
+		// User explicitly asked for proxy bootstrap against a sandbox
+		// mode that cannot support it (e.g. --sandbox-proxy=on
+		// --sandbox=off). Record the disabled event and fail before
+		// touching the sandbox subsystem.
+		reportSandboxProxyDisabled(ctx, client, "", proxyState.DisabledReason, config.SandboxRuntime, "")
+		return LaunchResult{}, sandboxProxyRefuseError(proxyState.DisabledReason, config.SandboxRuntime)
+	}
 	var sandboxPlan SandboxLaunchPlan
 	if sandboxEnabled {
 		plan, err := prepareSandboxForLaunch(ctx, config.Dir, config.SandboxRuntime, config.SandboxBuildPolicy, os.Stdout, os.Stderr)
@@ -390,16 +405,34 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
 		}
-		proxyBootstrap, err = prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL, daemonToken)
-		if err != nil {
-			return LaunchResult{}, fmt.Errorf("prepare sandbox proxy bootstrap: %w", err)
+		if proxyState.Enabled {
+			proxyBootstrap, err = prepareSandboxProxyBootstrap(stateDir, sessionID, agentEndpointURL, daemonToken)
+			if err != nil {
+				return LaunchResult{}, fmt.Errorf("prepare sandbox proxy bootstrap: %w", err)
+			}
+			applySandboxProxyBootstrapEnv(agentEnv, proxyBootstrap)
 		}
-		applySandboxProxyBootstrapEnv(agentEnv, proxyBootstrap)
 	}
 	if sandboxEnabled {
 		if err := validateSandboxForLaunch(ctx, sandboxPlan, config, agentEnv, proxyBootstrap.Mounts...); err != nil {
+			// Preflight failure when proxy bootstrap is active — refuse
+			// to launch with an actionable error pointing at the BYO
+			// image proxy contract and the opt-out flag, and record a
+			// sandbox.proxy.disabled audit event with reason
+			// preflight_failed.
+			if proxyState.Enabled && isSandboxProxyContractFailure(err) {
+				reportSandboxProxyDisabled(ctx, client, sessionID, sandboxProxyReasonPreflightFailed, config.SandboxRuntime, sandboxPlan.Image)
+				return LaunchResult{}, sandboxProxyPreflightFailedError(sandboxPlan.Image, err)
+			}
 			return LaunchResult{}, err
 		}
+		if !proxyState.Enabled && proxyState.DisabledReason != "" {
+			reportSandboxProxyDisabled(ctx, client, sessionID, proxyState.DisabledReason, config.SandboxRuntime, sandboxPlan.Image)
+		}
+	} else if proxyState.DisabledReason != "" {
+		// Host launch path — record the unsupported-mode disabled
+		// reason so audit covers every launch path.
+		reportSandboxProxyDisabled(ctx, client, sessionID, proxyState.DisabledReason, config.SandboxRuntime, "")
 	}
 
 	sessionLog, closeSessionLog := openSessionLogger(config.Dir, config.LogLevel)

@@ -2762,6 +2762,39 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/sandbox-proxy/disabled:
+    post:
+      tags: [Connectors]
+      summary: Record a sandbox HTTPS proxy bootstrap-disabled event
+      description: |
+        Records that a sandbox launch is proceeding without the HTTPS
+        proxy bootstrap. The launcher posts this immediately before (or
+        instead of) starting the agent container so the audit log
+        captures why the proxy data-plane is not active for the session.
+
+        The endpoint is idempotent: the daemon appends one
+        `sandbox.proxy.disabled` audit event per call and returns 204.
+      operationId: recordSandboxProxyDisabled
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxProxyDisabledRequest"
+      responses:
+        "204":
+          description: Disabled event recorded.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: Audit recording failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/bindings:
     get:
       tags: [Bindings]
@@ -6376,6 +6409,39 @@ components:
           type: string
         message:
           type: string
+
+    SandboxProxyDisabledRequest:
+      type: object
+      description: |
+        Launcher-side disabled-bootstrap event payload. Posted by
+        `aileron launch` when sandbox HTTPS proxy bootstrap is not
+        active for the session — opted out, preflight failed, or
+        unsupported sandbox mode. Credential material is intentionally
+        absent from this contract.
+      required: [session_id, reason]
+      properties:
+        session_id:
+          type: string
+          description: Launch session id the disabled-bootstrap decision applies to.
+        reason:
+          type: string
+          enum: [user_opt_out, preflight_failed, unsupported_sandbox_mode]
+          description: |
+            Why proxy bootstrap is not active for this launch.
+            * `user_opt_out` — the user disabled proxy bootstrap via
+              `--sandbox-proxy=off` or `AILERON_SANDBOX_PROXY=off`.
+            * `preflight_failed` — proxy bootstrap was requested but
+              the selected sandbox image does not provide
+              `aileron-install-proxy-ca`/`aileron-run-with-proxy-ca`.
+            * `unsupported_sandbox_mode` — proxy bootstrap is not
+              available for the selected `--sandbox` mode (anything
+              other than `docker` or `podman`).
+        sandbox_mode:
+          type: string
+          description: Resolved `--sandbox` mode (e.g. `docker`, `podman`, `off`).
+        sandbox_image:
+          type: string
+          description: Resolved sandbox image reference, when known.
 
     Binding:
       type: object

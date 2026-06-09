@@ -305,4 +305,10 @@ const (
 	// Sandbox proxy event for HTTPS data-plane attempts rejected before
 	// a connector operation could be uniquely resolved.
 	EventTypeSandboxProxyRejected EventType = "sandbox.proxy.rejected"
+
+	// Sandbox proxy event for launches that proceed (or refuse to
+	// proceed) without the HTTPS data-plane bootstrap. Emitted by the
+	// launcher when proxy bootstrap is opted out, preflight fails, or
+	// the sandbox mode does not support bootstrap.
+	EventTypeSandboxProxyDisabled EventType = "sandbox.proxy.disabled"
 )

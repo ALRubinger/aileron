@@ -169,6 +169,39 @@ func TestRun_LaunchPassesSandboxOptions(t *testing.T) {
 	if captured.SandboxBuildPolicy != "never" {
 		t.Errorf("LaunchConfig.SandboxBuildPolicy = %q, want never", captured.SandboxBuildPolicy)
 	}
+	// --sandbox-proxy defaults to "auto" so the launcher's resolver can
+	// pick the docker/podman default-on policy.
+	if captured.SandboxProxy != "auto" {
+		t.Errorf("LaunchConfig.SandboxProxy = %q, want auto (default)", captured.SandboxProxy)
+	}
+}
+
+// TestRun_LaunchPropagatesSandboxProxyFlag verifies the CLI threads
+// the --sandbox-proxy flag through to LaunchConfig.SandboxProxy so the
+// launcher's resolver sees what the user typed.
+func TestRun_LaunchPropagatesSandboxProxyFlag(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() {
+		launchFn = origLaunch
+	})
+
+	for _, want := range []string{"on", "off", "auto"} {
+		t.Run(want, func(t *testing.T) {
+			var captured launch.LaunchConfig
+			launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
+				captured = cfg
+				return launch.LaunchResult{ExitCode: 0}, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"launch", "--sandbox=docker", "--sandbox-proxy=" + want, "claude"}, newTestRegistry(), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit = %d (stderr=%q)", code, stderr.String())
+			}
+			if captured.SandboxProxy != want {
+				t.Errorf("LaunchConfig.SandboxProxy = %q, want %q", captured.SandboxProxy, want)
+			}
+		})
+	}
 }
 
 func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
