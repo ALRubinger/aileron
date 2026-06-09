@@ -66,7 +66,7 @@ This ADR follows the updated sandbox runtime direction:
 - `.devcontainer/devcontainer.json`
 - `.devcontainer/Dockerfile`
 
-The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented snippets for common tools. The snippets are guidance, not a runtime resolver. Users own their container contents using normal Docker/devcontainer workflows.
+The Dockerfile extends `aileron/sandbox-base:<version>`, pre-fills the install recipe for the agent named in `--agent` (default `claude`), and ships additional tool snippets (GitHub CLI, Node.js, Python, kubectl, Terraform) commented out for users to enable as needed. The snippets are guidance, not a runtime resolver. Users own their container contents using normal Docker/devcontainer workflows.
 
 `aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan.
 

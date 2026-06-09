@@ -146,7 +146,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "sessions":
 		return runSessions(args[1:], stdout, stderr)
 	case "sandbox":
-		return runSandbox(args[1:], stdout, stderr)
+		return runSandbox(args[1:], registry, stdout, stderr)
 	case "vault":
 		return runVault(args[1:], stdout, stderr)
 	case "daemon":

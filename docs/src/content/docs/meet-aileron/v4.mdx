@@ -164,7 +164,7 @@ v4 uses `.devcontainer/devcontainer.json` as the project-local composition subst
 
 `customizations.aileron.image` selects the BYO-image tier, where Aileron uses the image as supplied and injects the runtime contract at launch: the `aileron` binary/shims, discovery files, proxy bootstrap, session CA, and shell mediation files. Runtime bootstrap supplies `HTTPS_PROXY` and `AILERON_TOKEN`; non-loopback/container daemon binds are intentionally not protected until that explicit token path exists.
 
-`aileron sandbox init` scaffolds the starter `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile`. The Dockerfile extends `aileron/sandbox-base:<version>` and includes commented snippets for common tools. Tool installation remains standard container work; Aileron does not maintain an `aileron.yaml` tool resolver.
+`aileron sandbox init` scaffolds the starter `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile`. The Dockerfile extends `aileron/sandbox-base:<version>`, pre-fills the install recipe for the agent named in `--agent` (defaults to `claude`), and ships additional tool snippets commented out for you to enable as needed. Tool installation remains standard container work; Aileron does not maintain an `aileron.yaml` tool resolver.
 
 <Alert.Root class="my-6">
   <Alert.Title>What is not in v4</Alert.Title>
