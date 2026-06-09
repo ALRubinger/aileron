@@ -57,8 +57,34 @@ func (s *apiServer) HandleSandboxForwardProxy(w http.ResponseWriter, r *http.Req
 		s.handleSandboxForwardProxyConnect(w, r, auth)
 		return
 	}
+	upstream := sandboxForwardProxyAbsoluteFormUpstream(r)
+	s.recordSandboxProxyUnresolvedRejected(r, sandboxProxySourceTransparentConnectTLS, r.Method, upstream, "non_connect_proxy_request_unsupported")
 	w.Header().Set("X-Aileron-Session-Id", auth.SessionID)
-	http.Error(w, "sandbox HTTPS forward proxy transport is not implemented yet; tracked by issue #896", http.StatusNotImplemented)
+	http.Error(w, "sandbox HTTPS forward proxy requires CONNECT for HTTPS interception; absolute-form proxy requests without CONNECT are not supported", http.StatusForbidden)
+}
+
+// sandboxForwardProxyAbsoluteFormUpstream returns a best-effort upstream
+// URL for audit emission on the non-CONNECT proxy path. Absolute-form
+// proxy requests carry the full URL on r.URL; relative-form requests
+// fall back to https://r.Host/r.URL.Path so the audit always has a
+// host and path to report.
+func sandboxForwardProxyAbsoluteFormUpstream(r *http.Request) *url.URL {
+	if r.URL != nil && r.URL.IsAbs() {
+		return r.URL
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" && r.URL != nil {
+		host = r.URL.Host
+	}
+	path := "/"
+	if r.URL != nil && r.URL.Path != "" {
+		path = r.URL.Path
+	}
+	upstream, _ := parseSandboxProxyUpstreamURL("https://" + host + path)
+	if upstream == nil {
+		upstream = &url.URL{Scheme: "https", Host: host, Path: path}
+	}
+	return upstream
 }
 
 type sandboxForwardProxyConn struct {
@@ -81,8 +107,13 @@ func (s *apiServer) handleSandboxForwardProxyConnect(w http.ResponseWriter, r *h
 	}
 	cert, err := s.sandboxForwardProxyCertificate(auth.SessionID, targetHost)
 	if err != nil {
+		upstream, _ := parseSandboxProxyUpstreamURL("https://" + targetHost + "/")
+		if upstream == nil {
+			upstream = &url.URL{Scheme: "https", Host: targetHost, Path: "/"}
+		}
+		s.recordSandboxProxyUnresolvedRejected(r, sandboxProxySourceTransparentConnectTLS, r.Method, upstream, "session_ca_unavailable")
 		w.Header().Set("X-Aileron-Session-Id", auth.SessionID)
-		http.Error(w, "sandbox HTTPS forward proxy CONNECT transport is not available; tracked by issue #896", http.StatusNotImplemented)
+		http.Error(w, "sandbox proxy session CA is unavailable for this session; the launcher's session state directory may be missing or corrupted (see ADR-0019)", http.StatusInternalServerError)
 		return
 	}
 	hijacker, ok := w.(http.Hijacker)
