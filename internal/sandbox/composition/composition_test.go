@@ -193,10 +193,64 @@ func TestInitWritesStarterDevcontainerAndDockerfile(t *testing.T) {
 			t.Fatalf("Dockerfile snippets must use apk against the Alpine base, not apt-get:\n%s", string(dockerfile))
 		}
 	}
-	for _, snippet := range []string{"--- Claude Code ---", "--- GitHub CLI ---", "--- Node.js ---", "--- Python ---", "--- kubectl ---", "--- Terraform ---"} {
+	for _, snippet := range []string{"--- GitHub CLI ---", "--- Node.js ---", "--- Python ---", "--- kubectl ---", "--- Terraform ---"} {
 		if !strings.Contains(string(dockerfile), snippet) {
-			t.Fatalf("Dockerfile missing snippet %q:\n%s", snippet, string(dockerfile))
+			t.Fatalf("Dockerfile missing menu snippet %q:\n%s", snippet, string(dockerfile))
 		}
+	}
+}
+
+func TestInitDefaultsToClaudeRecipeReadyToBuild(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(dir, DefaultDockerfilePath))
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+	body := string(dockerfile)
+	for _, want := range []string{
+		"\nUSER root\n",
+		"\nUSER agent\n",
+		"--- Claude Code ---",
+		"npm install -g @anthropic-ai/claude-code",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("default Dockerfile missing %q:\n%s", want, body)
+		}
+	}
+	// The Claude install RUN must NOT be commented out — that was the
+	// pre-#963 footgun.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "@anthropic-ai/claude-code") && strings.HasPrefix(strings.TrimSpace(line), "#") {
+			t.Fatalf("Claude install RUN should be uncommented:\n%s", body)
+		}
+	}
+}
+
+func TestInitWithUnknownAgentEmitsTODOStub(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0", Agent: "codex"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(dir, DefaultDockerfilePath))
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+	body := string(dockerfile)
+	for _, want := range []string{
+		"\nUSER root\n",
+		"\nUSER agent\n",
+		"TODO: install the codex CLI",
+		"sandbox-agent-images",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("codex Dockerfile missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "@anthropic-ai/claude-code") {
+		t.Fatalf("codex Dockerfile should not include the Claude recipe:\n%s", body)
 	}
 }
 

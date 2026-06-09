@@ -32,27 +32,10 @@ Tier 0 `aileron/sandbox-base` intentionally does not include agent CLIs. Use Tie
 
 ## Claude Code Recipe
 
-Start with the standard scaffold:
+`aileron sandbox init` scaffolds for Claude Code by default — the generated `.devcontainer/Dockerfile` already extends `aileron/sandbox-base`, switches to `USER root`, runs the Claude install, and switches back to `USER agent`. No edits required:
 
 ```bash
 aileron sandbox init
-```
-
-Edit `.devcontainer/Dockerfile`:
-
-```dockerfile
-FROM aileron/sandbox-base:latest
-
-USER root
-
-RUN apk add --no-cache \
-    git \
-    nodejs \
-    npm \
-    ripgrep \
-    && npm install -g @anthropic-ai/claude-code
-
-USER agent
 ```
 
 Build and validate:

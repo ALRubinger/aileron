@@ -246,6 +246,58 @@ func TestRunSandboxRequiresSubcommand(t *testing.T) {
 	}
 }
 
+func TestRunSandboxInitAgentFlagSelectsRecipe(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	reg := newTestRegistry()
+	reg.Register(agents.Codex{})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "init", "--agent=codex"}, reg, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "agent: codex") {
+		t.Fatalf("stdout missing agent line: %q", stdout.String())
+	}
+	body, err := os.ReadFile(filepath.Join(dir, ".devcontainer", "Dockerfile"))
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+	if !strings.Contains(string(body), "TODO: install the codex CLI") {
+		t.Fatalf("Dockerfile missing codex TODO stub:\n%s", string(body))
+	}
+}
+
+func TestRunSandboxInitAgentFlagRejectsUnknownAgent(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "init", "--agent=bogus"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("expected exit code 1, got %d", code)
+	}
+	if !strings.Contains(stderr.String(), `unknown agent: "bogus"`) {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "available agents:") {
+		t.Fatalf("stderr missing agent list: %q", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".devcontainer")); !os.IsNotExist(err) {
+		t.Fatalf("scaffold should not be written for unknown agent: stat err = %v", err)
+	}
+}
+
 func TestRunSandboxInitRejectsExtraArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"sandbox", "init", "extra"}, newTestRegistry(), &stdout, &stderr)

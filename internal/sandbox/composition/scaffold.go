@@ -7,11 +7,18 @@ import (
 	"path/filepath"
 )
 
+// DefaultAgent is the agent the scaffold targets when --agent is omitted.
+// Claude Code is the only agent with a documented Tier 1 install recipe
+// today (see docs/development/sandbox-agent-images.md); other agents emit
+// a structurally correct Dockerfile with a TODO install stub.
+const DefaultAgent = "claude"
+
 // InitOptions configures the sandbox scaffold operation.
 type InitOptions struct {
 	WorkDir string
 	Version string
 	Force   bool
+	Agent   string
 }
 
 // InitResult reports which files were written.
@@ -42,7 +49,11 @@ func Init(opts InitOptions) (InitResult, error) {
 	if err := os.WriteFile(devcontainerPath, []byte(starterDevcontainer()), 0o644); err != nil {
 		return InitResult{}, fmt.Errorf("write %s: %w", devcontainerPath, err)
 	}
-	if err := os.WriteFile(dockerfilePath, []byte(starterDockerfile(opts.Version)), 0o644); err != nil {
+	agent := opts.Agent
+	if agent == "" {
+		agent = DefaultAgent
+	}
+	if err := os.WriteFile(dockerfilePath, []byte(starterDockerfile(opts.Version, agent)), 0o644); err != nil {
 		return InitResult{}, fmt.Errorf("write %s: %w", dockerfilePath, err)
 	}
 	return InitResult{
@@ -67,37 +78,55 @@ func starterDevcontainer() string {
 `
 }
 
-func starterDockerfile(version string) string {
+func starterDockerfile(version, agent string) string {
 	return fmt.Sprintf(`FROM %s
 
-# Uncomment snippets below to add tools to the Aileron sandbox.
-# Keep rarely changing snippets earlier for better layer caching.
-#
 # Aileron's base image is Alpine-based and runs as the non-root "agent"
-# user. Switch to root before installing packages, then switch back to
-# agent before launch. All snippets use apk; do not use apt-get here.
+# user. Switch to root to install tools, then switch back to agent before
+# launch. All install snippets use apk; do not use apt-get here.
 
-# USER root
+USER root
 
-# --- Claude Code ---
-# RUN apk add --no-cache git nodejs npm ripgrep && \
-#     npm install -g @anthropic-ai/claude-code
+%s
 
-# --- GitHub CLI ---
+# Uncomment additional tool snippets below as needed. Keep rarely
+# changing snippets earlier for better layer caching.
+#
+# # --- GitHub CLI ---
 # RUN apk add --no-cache github-cli
-
-# --- Node.js ---
+#
+# # --- Node.js ---
 # RUN apk add --no-cache nodejs npm
-
-# --- Python ---
+#
+# # --- Python ---
 # RUN apk add --no-cache python3 py3-pip
-
-# --- kubectl ---
+#
+# # --- kubectl ---
 # RUN apk add --no-cache kubectl
-
-# --- Terraform ---
+#
+# # --- Terraform ---
 # RUN apk add --no-cache terraform
 
-# USER agent
-`, BaseImage(version))
+USER agent
+`, BaseImage(version), agentInstallSnippet(agent))
+}
+
+// agentInstallSnippet returns the install recipe for agent. Agents with
+// a documented Tier 1 recipe are pre-filled and uncommented; agents
+// without one get a TODO stub that still produces a buildable Dockerfile
+// once the user fills it in.
+func agentInstallSnippet(agent string) string {
+	switch agent {
+	case "claude":
+		return `# --- Claude Code ---
+RUN apk add --no-cache git nodejs npm ripgrep && \
+    npm install -g @anthropic-ai/claude-code`
+	default:
+		return fmt.Sprintf(`# --- TODO: install the %s CLI ---
+# Aileron does not yet ship a verified install recipe for %s.
+# Replace this stub with an install that puts %q on PATH and uses apk
+# against the Alpine base. See:
+#   https://docs.withaileron.ai/development/sandbox-agent-images/
+# RUN apk add --no-cache ...`, agent, agent, agent)
+	}
 }

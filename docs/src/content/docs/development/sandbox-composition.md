@@ -49,7 +49,13 @@ The generated `devcontainer.json` is deliberately small:
 }
 ```
 
-The generated Dockerfile starts from `aileron/sandbox-base:<version>` and includes commented recipes for common tools such as GitHub CLI, Node.js, Python, kubectl, and Terraform. Uncomment and edit the snippets your project needs.
+The generated Dockerfile starts from `aileron/sandbox-base:<version>`, switches to `USER root` for installs, and switches back to `USER agent` before launch. The chosen agent's install recipe is pre-filled and ready to build; additional tool snippets (GitHub CLI, Node.js, Python, kubectl, Terraform) ship commented out for you to enable as needed.
+
+By default `aileron sandbox init` scaffolds for Claude Code. Pass `--agent=<name>` to scaffold for a different agent — Aileron writes a ready-to-build recipe when one is documented, or a `TODO` install stub otherwise:
+
+```bash
+aileron sandbox init --agent=codex
+```
 
 Use `--force` only when you intentionally want to replace the existing scaffold:
 
