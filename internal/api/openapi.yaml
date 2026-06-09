@@ -69,10 +69,6 @@ tags:
       Sessions survive daemon restarts; sessions left running when the
       daemon is killed are reaped to a known-orphaned state on next
       start (EndedAt set, ExitCode left null).
-  - name: Sandboxes
-    description: |
-      Internal APIs consumed by sandboxed agent runtimes. These contracts
-      are used by container-side helpers and shims, not end users.
   - name: Hub
     description: |
       Discovery layer for community-published connectors, ratified by
@@ -2765,36 +2761,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-
-  /v1/sandbox-shell/decide:
-    post:
-      tags: [Sandboxes]
-      summary: Decide a sandbox shell command mediation request
-      description: |
-        Internal sandbox shell-mediation contract used by the container-side
-        shell helper. Accepts `allow` and `deny`; the deny trigger is the
-        daemon-scoped `AILERON_SANDBOX_SHELL_DENY_PATTERN` regex this slice
-        wires (see ADR-0021). Records a sanitized audit event for both
-        decisions. Later #801 slices add `pending_approval` and result
-        draining.
-      operationId: decideSandboxShellCommand
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/SandboxShellDecisionRequest"
-      responses:
-        "200":
-          description: Shell command decision.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SandboxShellDecisionResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
 
   /v1/bindings:
     get:
@@ -6410,65 +6376,6 @@ components:
           type: string
         message:
           type: string
-
-    SandboxShellDecisionRequest:
-      type: object
-      description: |
-        Internal request shape emitted by the sandbox shell mediation
-        helper before a shell command executes. Credential material,
-        environment variables, command output, and shell history are
-        intentionally absent from this contract.
-      required: [command]
-      properties:
-        command:
-          type: string
-          description: Shell command about to execute.
-        cwd:
-          type: string
-          description: Current working directory inside the sandbox.
-        shell:
-          type: string
-          description: Shell path invoking the mediation helper.
-        pid:
-          type: integer
-          description: Shell process id, when available.
-        ppid:
-          type: integer
-          description: Parent process id, when available.
-
-    SandboxShellDecisionResponse:
-      type: object
-      description: |
-        Decision returned to the sandbox shell helper. `allow` and `deny` are
-        accepted; `pending_approval` is a future value reserved for the
-        approval-pending slice.
-      required: [status, decision, audit_id]
-      properties:
-        status:
-          type: string
-          description: Currently `decided`.
-        decision:
-          type: string
-          enum: [allow, deny, pending_approval]
-          description: |
-            `allow` and `deny` are accepted; `pending_approval` is a future
-            value.
-        audit_id:
-          type: string
-          description: Audit log ID for the shell mediation decision.
-        reason:
-          type: string
-          description: Human-readable decision reason.
-        matched_pattern:
-          type: string
-          description: |
-            Verbatim source of the regex that produced a `deny` decision.
-            Present on `deny` when the daemon's deny trigger is the
-            `AILERON_SANDBOX_SHELL_DENY_PATTERN` regex (see ADR-0021).
-            Absent on `allow`.
-        approval_id:
-          type: string
-          description: Pending approval id when `decision = pending_approval`.
 
     Binding:
       type: object

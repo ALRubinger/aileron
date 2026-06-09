@@ -305,8 +305,4 @@ const (
 	// Sandbox proxy event for HTTPS data-plane attempts rejected before
 	// a connector operation could be uniquely resolved.
 	EventTypeSandboxProxyRejected EventType = "sandbox.proxy.rejected"
-
-	// Sandbox shell mediation event. Payload identifies the shell command
-	// decision without recording environment variables or command output.
-	EventTypeSandboxShellDecided EventType = "sandbox.shell.decided"
 )

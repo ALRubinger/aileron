@@ -588,7 +588,7 @@ func TestExecuteGrant_ExpiredGrant(t *testing.T) {
 	ctx := context.Background()
 
 	s.intents.Create(ctx, api.IntentEnvelope{
-		IntentId: "int_exp", WorkspaceId: "ws_1", Status: api.IntentStatusApproved,
+		IntentId: "int_exp", WorkspaceId: "ws_1", Status: api.Approved,
 		Action: api.ActionIntent{Type: "git.pull_request.create", Summary: "test"},
 	})
 	s.grants.Create(ctx, api.ExecutionGrant{
@@ -680,7 +680,7 @@ func TestExecuteGrant_CredentialNotFound(t *testing.T) {
 
 	// Seed grant and intent WITHOUT a vault credential.
 	s.intents.Create(ctx, api.IntentEnvelope{
-		IntentId: "int_nocred", WorkspaceId: "ws_1", Status: api.IntentStatusApproved,
+		IntentId: "int_nocred", WorkspaceId: "ws_1", Status: api.Approved,
 		Action:    api.ActionIntent{Type: "git.push", Summary: "push"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})

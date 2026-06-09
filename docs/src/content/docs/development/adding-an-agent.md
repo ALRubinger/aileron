@@ -18,7 +18,7 @@ An agent is **not** a candidate for `aileron launch` when it has no MCP support,
 
 [ADR-0015](https://docs.withaileron.ai/adr/0015-launch-audit-scope/) bounds what `aileron launch` is responsible for. The launcher resolves the daemon, routes LLM traffic, and registers `aileron-mcp`. It does **not** replace `$SHELL`, install wrapper scripts, write policy files, or audit shell commands the agent runs locally. The agent's own approval and sandbox layer keeps that boundary.
 
-Sandbox launch adds a separate runtime path defined by [ADR-0017](/adr/0017-sandbox-composition/) and [ADR-0018](/adr/0018-v4-single-binary-runtime/). It does not use `aileron-mcp` as the in-container runtime model. The first sandbox cut injects `AILERON_API_URL`, session metadata, `/etc/aileron/tools.txt`, and generated connector shims. Future shell mediation is container-only work tracked in [ADR-0021](/adr/0021-v4-shell-layer-mediation/) and #801.
+Sandbox launch adds a separate runtime path defined by [ADR-0017](/adr/0017-sandbox-composition/) and [ADR-0018](/adr/0018-v4-single-binary-runtime/). It does not use `aileron-mcp` as the in-container runtime model. The first sandbox cut injects `AILERON_API_URL`, session metadata, `/etc/aileron/tools.txt`, and generated connector shims. Container-only shell mediation was prototyped under [#801](https://github.com/ALRubinger/aileron/issues/801) and withdrawn in [#952](https://github.com/ALRubinger/aileron/issues/952); see [ADR-0021](/adr/0021-v4-shell-layer-mediation/) (Withdrawn).
 
 ## The `Agent` interface
 
@@ -226,4 +226,4 @@ The host agent's own approval and sandbox layer (Claude Code's allowedTools, Cod
 
 For sandbox launch, the agent command must exist in the selected image. If `BinaryNames()` returns `["claude"]`, then `claude` must be on `PATH` inside the Tier 0/Tier 1/Tier 2 image before launch validation passes. The support matrix and image recipes are tracked in [#894](https://github.com/ALRubinger/aileron/issues/894).
 
-If a future contribution proposes reintroducing host shell interception under a new name, point them here first. Container-only shell mediation belongs in #801.
+If a future contribution proposes reintroducing host shell interception under a new name, point them here first. Container-only shell mediation was prototyped under #801 and withdrawn in #952; any return is gated on a fresh ADR.

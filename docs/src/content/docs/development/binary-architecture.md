@@ -51,7 +51,7 @@ An Aileron install currently ships multiple cooperating binaries, but the v4 run
 
 The daemon is the trust pivot. Vault unlock happens in its process; nothing outside it ever sees the master key. The other binaries are thin clients that hand requests to the daemon and surface the daemon's structured responses back to whoever called them.
 
-Per [ADR-0015](/adr/0015-launch-audit-scope), Aileron's host-launch audit boundary is the actions Aileron executes (connector installs, action invocations, binding lifecycle, gateway-routed LLM requests). Commands the host-launched agent runs locally through its own exec tool — `git`, `go test`, `rm` — are outside this boundary. Container-only shell mediation is separate v4 work in [ADR-0021](/adr/0021-v4-shell-layer-mediation/).
+Per [ADR-0015](/adr/0015-launch-audit-scope), Aileron's host-launch audit boundary is the actions Aileron executes (connector installs, action invocations, binding lifecycle, gateway-routed LLM requests). Commands the host-launched agent runs locally through its own exec tool — `git`, `go test`, `rm` — are outside this boundary. Container-only shell mediation was prototyped under [#801](https://github.com/ALRubinger/aileron/issues/801) and withdrawn in [#952](https://github.com/ALRubinger/aileron/issues/952); see [ADR-0021](/adr/0021-v4-shell-layer-mediation/) (Withdrawn).
 
 ## What runs where
 

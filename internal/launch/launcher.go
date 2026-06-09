@@ -41,11 +41,7 @@ const (
 	sandboxToolsFilePath = "/etc/aileron/tools.txt"
 	sandboxShimsDirPath  = "/usr/local/bin"
 	sandboxProxyCAPath   = "/etc/aileron/proxy/ca.pem"
-	sandboxShellRCPath   = "/etc/aileron/shell/aileron-bashrc"
-	sandboxShellWrapper  = "/usr/local/bin/bash"
 )
-
-const sandboxShellMediationEnv = "AILERON_SANDBOX_SHELL_MEDIATION"
 
 // LaunchConfig holds the configuration for launching an agent.
 type LaunchConfig struct {
@@ -231,12 +227,11 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 	}).Validate(ctx, sandboxcontainer.ValidateOptions{
 		Runtime:               plan.Runtime,
 		Image:                 plan.Image,
-		WorkDir:               config.Dir,
-		Env:                   agentEnv,
-		Volumes:               mounts,
-		Command:               []string{commandName},
-		RequireProxyTrust:     agentEnv["AILERON_SANDBOX_PROXY_MODE"] != "",
-		RequireShellMediation: agentEnv[sandboxShellMediationEnv] == "1",
+		WorkDir:           config.Dir,
+		Env:               agentEnv,
+		Volumes:           mounts,
+		Command:           []string{commandName},
+		RequireProxyTrust: agentEnv["AILERON_SANDBOX_PROXY_MODE"] != "",
 	}); err != nil {
 		return err
 	}
@@ -341,17 +336,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		agentEnv["AILERON_APPROVAL_URL"] = agentEndpointURL + "/approvals"
 		agentEnv["AILERON_TOOLS_FILE"] = sandboxToolsFilePath
 		agentEnv["AILERON_SHIMS_DIR"] = sandboxShimsDirPath
-		if sandboxShellMediationEnabled() {
-			agentEnv[sandboxShellMediationEnv] = "1"
-			agentEnv["AILERON_SHELL_RCFILE"] = sandboxShellRCPath
-			agentEnv["AILERON_REAL_SHELL"] = "/bin/bash"
-			// Activate routing for the live agent session. BASH_ENV installs the
-			// trap in the agent's non-interactive bash -c children; SHELL points
-			// $SHELL-consulting agents at the wrapper. The agent command itself
-			// stays unwrapped (R8); routing happens at the shell layer.
-			agentEnv["BASH_ENV"] = sandboxShellRCPath
-			agentEnv["SHELL"] = sandboxShellWrapper
-		}
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
 		}
@@ -409,10 +393,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 
 	sessionLog.Info("session ended", "exit_code", result.ExitCode)
 	return result, runErr
-}
-
-func sandboxShellMediationEnabled() bool {
-	return os.Getenv(sandboxShellMediationEnv) == "1"
 }
 
 // composeAgentEnv merges the agent's env map with the LLM-endpoint
@@ -770,7 +750,7 @@ func exitResult(err error) (LaunchResult, error) {
 
 // buildEnv creates the environment for the child process: the parent
 // environment plus the agent's extra env vars. Per ADR-0015 no shim env
-// vars (SHELL, AILERON_REAL_SHELL, AILERON_AGENT, etc.) are injected.
+// vars (SHELL, AILERON_AGENT, etc.) are injected.
 func buildEnv(agentEnv map[string]string) []string {
 	managed := make(map[string]bool, len(agentEnv))
 	for k := range agentEnv {

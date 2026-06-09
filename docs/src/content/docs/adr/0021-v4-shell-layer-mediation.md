@@ -6,13 +6,15 @@ order: 21
 
 <div class="meta">
 <table>
-  <tr><th>Status</th><td>Proposed</td></tr>
+  <tr><th>Status</th><td>Withdrawn</td></tr>
   <tr><th>Date</th><td>2026-06-01</td></tr>
   <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/801">#801</a>, <a href="https://github.com/ALRubinger/aileron/issues/747">#747</a></td></tr>
 </table>
 </div>
 
 ## Context
+
+> **Withdrawn 2026-06-08 ([#952](https://github.com/ALRubinger/aileron/issues/952)).** Slices 1–6 of [#801](https://github.com/ALRubinger/aileron/issues/801) shipped the image helper, daemon endpoint, launcher routing, and deny semantics described below; the strategic call in [#747](https://github.com/ALRubinger/aileron/issues/747) is that the surface has no named user. The four bypass paths this ADR acknowledges (env strip, recursion-guard tampering, interactive-shell spawn, `eval`/`command`/`exec`/function indirection) are better addressed by container isolation, git, the HTTPS proxy ([#896](https://github.com/ALRubinger/aileron/issues/896)), and tool-level HITL at the MCP/action boundary. Anything in this space that returns later returns under a fresh ADR. The body below is retained verbatim as historical record.
 
 [ADR-0015](/adr/0015-launch-audit-scope) removed host shell interception because host-launched agents do not reliably honor shell overrides and Aileron should not mutate the user's shell.
 
