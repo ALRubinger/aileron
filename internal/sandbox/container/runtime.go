@@ -12,11 +12,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 )
+
+// hostOS is a package-level indirection over runtime.GOOS so tests can
+// drive the runtime-specific argv branches without depending on the
+// test runner's OS.
+var hostOS = func() string { return goruntime.GOOS }
 
 const DefaultRuntime = "auto"
 const WorkspacePath = "/home/agent/workspace"
@@ -253,7 +259,7 @@ func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	if err != nil {
 		return RunResult{}, err
 	}
-	args, err := runArgs(opts)
+	args, err := runArgs(runtimeName, opts)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -409,7 +415,7 @@ func resolveRuntime(name string, checkPath bool) (string, error) {
 	}
 }
 
-func runArgs(opts RunOptions) ([]string, error) {
+func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	workDir := opts.WorkDir
 	if workDir == "" {
 		workDir = "."
@@ -424,6 +430,16 @@ func runArgs(opts RunOptions) ([]string, error) {
 	}
 	if strings.TrimSpace(opts.User) != "" {
 		args = append(args, "--user", strings.TrimSpace(opts.User))
+	}
+	// Linux Docker does not configure host.docker.internal automatically
+	// (macOS / Windows Docker Desktop do). aileron-mcp inside the
+	// container reaches the daemon through AILERON_URL rewritten to
+	// host.docker.internal, so without --add-host the in-container MCP
+	// path fails with DNS-not-found on first daemon call. Podman's
+	// host.containers.internal is configured natively (no equivalent
+	// flag is needed or supported). See ADR-0024 risks section.
+	if runtimeName == "docker" && hostOS() == "linux" {
+		args = append(args, "--add-host", "host.docker.internal:host-gateway")
 	}
 	args = append(args,
 		"--workdir", WorkspacePath,

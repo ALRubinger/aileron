@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -826,6 +827,269 @@ func TestSessionLogPath_EmptyDirFallsBackToCWD(t *testing.T) {
 	if got != want {
 		t.Errorf("SessionLogPath(\"\") = %q, want %q", got, want)
 	}
+}
+
+// --- Sandbox MCP wiring (U2 / #953) ---
+
+// setupSandboxDockerCaptureLaunch is the shared scaffolding for the
+// sandbox-MCP wiring tests: writes a BYO-image devcontainer.json,
+// installs a fake docker that captures argv, and launches the supplied
+// agent under SandboxRuntime=docker. Returns the resulting docker
+// argv as a single string for substring assertions.
+func setupSandboxDockerCaptureLaunch(t *testing.T, dir string, agent launch.Agent) string {
+	t.Helper()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argsFile+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Prepend the fake docker dir to PATH while keeping the rest (TestMain
+	// stamped the fake aileron-mcp dir into PATH already; we keep both).
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          agent,
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	return string(data)
+}
+
+// TestLaunch_Sandbox_MountsAileronMCPBinary verifies the host-built
+// aileron-mcp binary is bind-mounted into the container at
+// /usr/local/bin/aileron-mcp:ro. Covers R1.
+func TestLaunch_Sandbox_MountsAileronMCPBinary(t *testing.T) {
+	dir := t.TempDir()
+	args := setupSandboxDockerCaptureLaunch(t, dir, claudeTestAgent{})
+
+	// The fake aileron-mcp is planted on PATH by TestMain at <tmp>/aileron-mcp;
+	// docker volume looks like SOURCE:/usr/local/bin/aileron-mcp:ro.
+	if !regexp.MustCompile(`--volume\n[^\n]*/aileron-mcp:/usr/local/bin/aileron-mcp:ro\n`).MatchString(args) {
+		t.Errorf("expected aileron-mcp read-only bind mount; got:\n%s", args)
+	}
+}
+
+// TestLaunch_Sandbox_Claude_ConfigureMCPArgs covers R2 / R4 for Claude
+// Code: --mcp-config arrives in the agent argv with the container-side
+// binary path and the rewritten daemon URL.
+func TestLaunch_Sandbox_Claude_ConfigureMCPArgs(t *testing.T) {
+	dir := t.TempDir()
+	args := setupSandboxDockerCaptureLaunch(t, dir, claudeTestAgent{})
+
+	wants := []string{
+		"--mcp-config\n",
+		`"command":"/usr/local/bin/aileron-mcp"`,
+		`"AILERON_URL":"http://host.docker.internal:`,
+		`"AILERON_SESSION_ID":"01HK0000000000000000000FAK"`,
+	}
+	for _, want := range wants {
+		if !strings.Contains(args, want) {
+			t.Errorf("missing %q in docker args:\n%s", want, args)
+		}
+	}
+}
+
+// TestLaunch_Sandbox_Pi_ConfigureMCPArgs is the same shape as Claude
+// (Pi shares the --mcp-config mechanism). Covers R4 for Pi.
+func TestLaunch_Sandbox_Pi_ConfigureMCPArgs(t *testing.T) {
+	dir := t.TempDir()
+	args := setupSandboxDockerCaptureLaunch(t, dir, piTestAgent{})
+
+	for _, want := range []string{
+		"--mcp-config\n",
+		`"command":"/usr/local/bin/aileron-mcp"`,
+		`"AILERON_URL":"http://host.docker.internal:`,
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("missing %q in docker args:\n%s", want, args)
+		}
+	}
+}
+
+// TestLaunch_Sandbox_Goose_ConfigureMCPArgs covers R4 for Goose:
+// --with-extension carries env + the container-side aileron-mcp path.
+func TestLaunch_Sandbox_Goose_ConfigureMCPArgs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate goose config writes
+	dir := t.TempDir()
+	args := setupSandboxDockerCaptureLaunch(t, dir, gooseTestAgent{})
+
+	for _, want := range []string{
+		"--with-extension\n",
+		"AILERON_URL=http://host.docker.internal:",
+		"/usr/local/bin/aileron-mcp",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("missing %q in docker args:\n%s", want, args)
+		}
+	}
+}
+
+// TestLaunch_Sandbox_OpenCode_WritesWorkspaceConfig covers R4 for
+// OpenCode: opencode.json lands in the launch dir (= workspace bind
+// mount) with the aileron MCP server entry pointing at the
+// container-side binary path.
+func TestLaunch_Sandbox_OpenCode_WritesWorkspaceConfig(t *testing.T) {
+	dir := t.TempDir()
+	_ = setupSandboxDockerCaptureLaunch(t, dir, openCodeTestAgent{})
+
+	data, err := os.ReadFile(filepath.Join(dir, "opencode.json"))
+	if err != nil {
+		t.Fatalf("read opencode.json: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		`"aileron"`,
+		`"/usr/local/bin/aileron-mcp"`,
+		"host.docker.internal",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("missing %q in opencode.json:\n%s", want, content)
+		}
+	}
+}
+
+// TestLaunch_Sandbox_AileronMCPMissing_FailsLoud covers R1's hard-error
+// path: a sandbox launch with docker available but no aileron-mcp on
+// the host fails with the same shape the host-launch path produces.
+// HOME is repointed away from the test runner's real home so a
+// developer-installed aileron-mcp doesn't accidentally satisfy
+// resolveMCPBinary's sibling lookup.
+func TestLaunch_Sandbox_AileronMCPMissing_FailsLoud(t *testing.T) {
+	// Install a fake docker so the runtime resolution succeeds, but no
+	// aileron-mcp in the same dir — and the empty PATH prevents the
+	// fallback PATH lookup from finding TestMain's planted fake.
+	binDir := t.TempDir()
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("HOME", t.TempDir())
+
+	dir := t.TempDir()
+	devcontainerDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devcontainerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devcontainerDir, "devcontainer.json"), []byte(`{"customizations":{"aileron":{"image":"ghcr.io/acme/agent:latest"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:          claudeTestAgent{},
+		Dir:            dir,
+		SandboxRuntime: "docker",
+	})
+	if err == nil {
+		t.Fatal("expected error when aileron-mcp is unresolvable under sandbox, got nil")
+	}
+	if !strings.Contains(err.Error(), "aileron-mcp") {
+		t.Errorf("error message does not mention aileron-mcp: %q", err.Error())
+	}
+}
+
+// --- Real-agent stubs (avoid pulling internal/launch/agents into a
+// _test package by reimplementing the surface; the actual ConfigureMCP
+// behavior is covered by tests in internal/launch/agents/.) ---
+
+type claudeTestAgent struct{}
+
+func (claudeTestAgent) Name() string           { return "claude" }
+func (claudeTestAgent) BinaryNames() []string  { return []string{"claude"} }
+func (claudeTestAgent) Args() []string         { return nil }
+func (claudeTestAgent) Env() map[string]string { return nil }
+func (claudeTestAgent) LLMEndpointEnv() string { return "" }
+func (claudeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+	envJSON := encodeJSON(t1, mcpEnv)
+	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil
+}
+
+type piTestAgent struct{}
+
+func (piTestAgent) Name() string           { return "pi" }
+func (piTestAgent) BinaryNames() []string  { return []string{"pi"} }
+func (piTestAgent) Args() []string         { return nil }
+func (piTestAgent) Env() map[string]string { return nil }
+func (piTestAgent) LLMEndpointEnv() string { return "" }
+func (piTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+	envJSON := encodeJSON(t1, mcpEnv)
+	return []string{"--mcp-config", `{"mcpServers":{"aileron":{"command":"` + mcpBin + `","env":` + envJSON + `}}}`}, nil
+}
+
+type gooseTestAgent struct{}
+
+func (gooseTestAgent) Name() string           { return "goose" }
+func (gooseTestAgent) BinaryNames() []string  { return []string{"goose"} }
+func (gooseTestAgent) Args() []string         { return []string{"session"} }
+func (gooseTestAgent) Env() map[string]string { return nil }
+func (gooseTestAgent) LLMEndpointEnv() string { return "" }
+func (gooseTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string) ([]string, error) {
+	// Mirror agents/goose.go's "ENV=val ENV=val cmd" shape, deterministic order.
+	keys := []string{}
+	for k := range mcpEnv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := []string{}
+	for _, k := range keys {
+		parts = append(parts, k+"="+mcpEnv[k])
+	}
+	parts = append(parts, mcpBin)
+	return []string{"--with-extension", strings.Join(parts, " ")}, nil
+}
+
+type openCodeTestAgent struct{}
+
+func (openCodeTestAgent) Name() string           { return "opencode" }
+func (openCodeTestAgent) BinaryNames() []string  { return []string{"opencode"} }
+func (openCodeTestAgent) Args() []string         { return nil }
+func (openCodeTestAgent) Env() map[string]string { return nil }
+func (openCodeTestAgent) LLMEndpointEnv() string { return "" }
+func (openCodeTestAgent) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string) ([]string, error) {
+	if dir == "" {
+		cwd, _ := os.Getwd()
+		dir = cwd
+	}
+	envJSON := encodeJSON(t1, mcpEnv)
+	body := `{"mcp":{"aileron":{"type":"local","command":["` + mcpBin + `"],"enabled":true,"environment":` + envJSON + `}}}` + "\n"
+	return nil, os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(body), 0o644)
+}
+
+// t1 is a tiny *testing.T-shaped stand-in used by the test stubs above
+// to forward fatal failures. The real agent definitions use t.Fatal
+// for marshal errors, which are unreachable for our env maps; the
+// indirection here just keeps the stub body terse.
+var t1 = &struct{ Fatal func(...any) }{Fatal: func(args ...any) { panic(args) }}
+
+// encodeJSON renders a stable JSON object literal for {string: string}
+// maps with sorted keys, so the test stubs produce deterministic argv
+// content without depending on encoding/json's map ordering quirks.
+func encodeJSON(_ any, m map[string]string) string {
+	keys := []string{}
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := []string{}
+	for _, k := range keys {
+		parts = append(parts, `"`+k+`":"`+m[k]+`"`)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }
 
 const sandboxDiscoveryActionManifest = `+++

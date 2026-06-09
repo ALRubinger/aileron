@@ -872,3 +872,64 @@ type runnerFunc func(context.Context, string, []string, io.Writer, io.Writer) er
 func (f runnerFunc) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
 	return f(ctx, name, args, stdout, stderr)
 }
+
+// --- runArgs --add-host=host.docker.internal:host-gateway (U2 / #953) ---
+
+// runOptsForGateway returns the minimal RunOptions that lets runArgs
+// compose a valid argv. Used by the host-gateway-flag tests below.
+func runOptsForGateway(t *testing.T) RunOptions {
+	t.Helper()
+	dir := t.TempDir()
+	return RunOptions{
+		Image:   "img",
+		WorkDir: dir,
+		Command: []string{"sh"},
+	}
+}
+
+func TestRunArgs_LinuxDockerAddsHostGateway(t *testing.T) {
+	orig := hostOS
+	hostOS = func() string { return "linux" }
+	defer func() { hostOS = orig }()
+
+	args, err := runArgs("docker", runOptsForGateway(t))
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--add-host host.docker.internal:host-gateway") {
+		t.Errorf("expected --add-host=host.docker.internal:host-gateway on Linux Docker; got %v", args)
+	}
+}
+
+func TestRunArgs_MacOSDockerOmitsHostGateway(t *testing.T) {
+	orig := hostOS
+	hostOS = func() string { return "darwin" }
+	defer func() { hostOS = orig }()
+
+	args, err := runArgs("docker", runOptsForGateway(t))
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	for _, a := range args {
+		if a == "host.docker.internal:host-gateway" {
+			t.Errorf("did not expect --add-host on macOS Docker; got %v", args)
+		}
+	}
+}
+
+func TestRunArgs_LinuxPodmanOmitsHostGateway(t *testing.T) {
+	orig := hostOS
+	hostOS = func() string { return "linux" }
+	defer func() { hostOS = orig }()
+
+	args, err := runArgs("podman", runOptsForGateway(t))
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	for _, a := range args {
+		if a == "host.docker.internal:host-gateway" {
+			t.Errorf("did not expect --add-host on Linux Podman; got %v", args)
+		}
+	}
+}

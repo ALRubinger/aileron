@@ -41,6 +41,13 @@ const (
 	sandboxToolsFilePath = "/etc/aileron/tools.txt"
 	sandboxShimsDirPath  = "/usr/local/bin"
 	sandboxProxyCAPath   = "/etc/aileron/proxy/ca.pem"
+	// sandboxMCPBinPath is where the launcher bind-mounts the host-built
+	// aileron-mcp binary inside the container. The agent's MCP client
+	// execs this path as its stdio child. See ADR-0024.
+	sandboxMCPBinPath = "/usr/local/bin/aileron-mcp"
+	// sandboxMCPBinName is the basename of the in-container MCP binary;
+	// reserved so no future shim mount can collide with it.
+	sandboxMCPBinName = "aileron-mcp"
 )
 
 // LaunchConfig holds the configuration for launching an agent.
@@ -534,13 +541,41 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	if commandName == "" {
 		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
-	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName)
+	// Reserve both the agent's own binary name AND aileron-mcp so no
+	// connector-spec shim can clobber either at the mount layer.
+	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName, sandboxMCPBinName)
 	if err != nil {
 		return LaunchResult{}, err
 	}
 	defer cleanupMounts()
 	mounts = append(mounts, extraMounts...)
+
+	// Resolve aileron-mcp on the host and bind-mount it read-only at the
+	// container's well-known MCP binary path. Matches the resolution
+	// shape host launch uses and the host-mount pattern
+	// sandboxDiscoveryMounts uses for tools.txt and shims (ADR-0024).
+	selfPath, _ := os.Executable()
+	mcpBinHost, err := resolveMCPBinary(selfPath)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	mounts = append(mounts, sandboxcontainer.Volume{
+		Source:   mcpBinHost,
+		Target:   sandboxMCPBinPath,
+		ReadOnly: true,
+	})
+
+	// Build the MCP env the in-container aileron-mcp needs to reach the
+	// daemon. Reads from agentEnv so the URL rewrite for the runtime
+	// (host.docker.internal vs host.containers.internal) is honored.
+	mcpEnv := sandboxMCPEnv(agentEnv)
+	extraArgs, mcpErr := config.Agent.ConfigureMCP(sandboxMCPBinPath, mcpEnv, config.Dir)
+	if mcpErr != nil {
+		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
+	}
+
 	command := append([]string{commandName}, config.Agent.Args()...)
+	command = append(command, extraArgs...)
 	command = append(command, config.Args...)
 	user := ""
 	if sandboxProxyBootstrapActive(agentEnv) {
@@ -565,6 +600,25 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		return exitResult(err)
 	}
 	return LaunchResult{ExitCode: 0}, nil
+}
+
+// sandboxMCPEnv builds the env block aileron-mcp reads when it runs as
+// an in-container stdio subprocess of the agent. Sources values from
+// agentEnv so the URL rewrite for the container runtime
+// (host.docker.internal on Docker, host.containers.internal on Podman)
+// is preserved and no second source-of-truth for the daemon URL is
+// introduced. AILERON_TOKEN is the post-mount credential per ADR-0024.
+func sandboxMCPEnv(agentEnv map[string]string) map[string]string {
+	mcpEnv := map[string]string{
+		"AILERON_URL":          agentEnv["AILERON_URL"],
+		"AILERON_COMMS_URL":    agentEnv["AILERON_COMMS_URL"],
+		"AILERON_SESSION_ID":   agentEnv["AILERON_SESSION_ID"],
+		"AILERON_APPROVAL_URL": agentEnv["AILERON_APPROVAL_URL"],
+	}
+	if token := agentEnv["AILERON_TOKEN"]; token != "" {
+		mcpEnv["AILERON_TOKEN"] = token
+	}
+	return mcpEnv
 }
 
 func sandboxProxyBootstrapActive(agentEnv map[string]string) bool {
