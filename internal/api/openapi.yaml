@@ -623,6 +623,96 @@ paths:
               schema:
                 $ref: "#/components/schemas/LocalVaultStatusResponse"
 
+  /v1/vault/agents/{name}/credentials:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: |
+          Agent identifier (e.g. "claude", "codex"). The daemon scopes
+          the underlying vault path to `agents/<name>/oauth` — the path
+          is namespace-locked at the routing layer, so arbitrary vault
+          paths are unreachable through this endpoint per ADR-0025.
+    get:
+      tags: [Vault]
+      summary: Read the per-agent credential envelope from the local vault
+      description: |
+        Returns the credential envelope (`{value: base64, metadata: {...}}`)
+        the launcher renders into the sandbox container at the agent's
+        documented file path (e.g. `/home/agent/.claude/.credentials.json`
+        for Claude Code). The daemon owns the unlocked vault per
+        ADR-0011/0012; the launcher must not open the vault file itself.
+
+        Error codes are surfaced in the response body so the launcher
+        discriminates by code rather than status alone:
+          - `vault_not_found` (404) — no entry at `agents/<name>/oauth`;
+            the launcher proceeds with the in-container-login bootstrap
+            path per ADR-0025.
+          - `vault_locked` (423) — the local vault is locked; the
+            launcher surfaces a clear unlock instruction to the user.
+      operationId: getAgentCredentials
+      security: []
+      responses:
+        "200":
+          description: Credential envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCredentials"
+        "404":
+          description: No credential entry at the agent's vault path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    put:
+      tags: [Vault]
+      summary: Write the per-agent credential envelope to the local vault
+      description: |
+        Writes the credential envelope to the local vault at
+        `agents/<name>/oauth`. Called by the launcher in two places:
+
+          - On clean container exit, Capture reads the in-container
+            credential file and PUTs the bytes back so the next launch
+            renders silently. This is the in-container seeding path
+            (see ADR-0025).
+          - From a per-binding pre-launch refresh hook (Codex today),
+            when the launcher rotates the access token against the
+            vendor's auth server before starting the container. The
+            AE6 invariant requires the rotated bundle to be in vault
+            before container start.
+
+        Returns 423 with body code `vault_locked` when the vault is
+        locked, so the launcher discriminates by code rather than
+        status alone.
+      operationId: putAgentCredentials
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCredentials"
+      responses:
+        "204":
+          description: Credential written
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "423":
+          description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/sessions:
     post:
       tags: [Sessions]
@@ -7331,6 +7421,47 @@ components:
             connection — the daemon derives the KEK locally via Argon2id.
             Distinct from `UnlockVaultRequest`, which carries a
             client-derived KEK for the cloud-tier multi-tenant flow.
+
+    AgentCredentials:
+      type: object
+      required: [value]
+      description: |
+        Per-agent credential envelope persisted under `agents/<name>/oauth`
+        in the local vault. The launcher renders `value` into a file the
+        in-container agent reads (e.g. Claude's `.credentials.json`,
+        Codex's `auth.json`) and captures the file bytes back through
+        the same envelope on clean exit. See ADR-0025.
+      properties:
+        value:
+          type: string
+          format: byte
+          description: |
+            Base64-encoded credential bytes. The launcher writes these
+            verbatim into the agent's in-container credential file.
+        metadata:
+          $ref: "#/components/schemas/AgentCredentialsMetadata"
+
+    AgentCredentialsMetadata:
+      type: object
+      description: |
+        Non-secret metadata stored alongside the credential bytes. Mirrors
+        the `vault.Metadata` shape.
+      properties:
+        type:
+          type: string
+          description: |
+            Credential classification (e.g. `oauth_refresh_token`,
+            `api_key`). Matches the agent's binding declaration.
+        environment:
+          type: string
+          description: |
+            Optional environment label (e.g. `personal`, `work`).
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Arbitrary key/value pairs for organization.
 
     TeeStatus:
       type: object
