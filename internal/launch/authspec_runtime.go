@@ -147,8 +147,12 @@ func prepareAuthSpec(
 	// groups maps a container parent directory (e.g. /home/agent/.claude)
 	// to a host-side subdirectory under hostRoot. The launcher mounts
 	// each host subdir at the corresponding parent so multiple files
-	// under the same parent share one mount.
+	// under the same parent share one mount. File-mount bindings
+	// (MountAsFile = true) still allocate a group dir for their
+	// host-side scratch area, but the group dir is NOT mounted into
+	// the container — the file mount lands directly at ContainerPath.
 	groups := map[string]string{}
+	fileMountOnlyGroups := map[string]bool{}
 	ensureGroup := func(containerParent string) (string, error) {
 		if hostDir, ok := groups[containerParent]; ok {
 			return hostDir, nil
@@ -166,6 +170,7 @@ func prepareAuthSpec(
 			return "", fmt.Errorf("auth spec: mkdir %s: %w", hostDir, err)
 		}
 		groups[containerParent] = hostDir
+		fileMountOnlyGroups[containerParent] = true
 		return hostDir, nil
 	}
 
@@ -183,12 +188,19 @@ func prepareAuthSpec(
 	// Render file bindings: GET vault entry, run optional pre-launch
 	// refresh, Render bytes, write to the host-side subdir under the
 	// group dir for the binding's container parent. Track for capture.
+	fileMounts := []sandboxcontainer.Volume{}
 	for i, fb := range spec.FileBindings {
 		containerParent := path.Dir(fb.ContainerPath)
 		hostDir, err := ensureGroup(containerParent)
 		if err != nil {
 			cleanup()
 			return prep, err
+		}
+		// A dir-mount binding cancels the file-mount-only state for
+		// the group: the parent gets mounted, all other files in the
+		// group ride along.
+		if !fb.MountAsFile {
+			fileMountOnlyGroups[containerParent] = false
 		}
 		secret, getErr := daemon.GetAgentCredentials(ctx, vaultBindingTail(fb.VaultPath))
 		emptyVault := errors.Is(getErr, ErrAgentCredentialsNotFound)
@@ -221,6 +233,7 @@ func prepareAuthSpec(
 		// vault before returning a successful Secret per AE6.
 		if fb.PreLaunchRefresh != nil {
 			refreshed, refreshErr := fb.PreLaunchRefresh(secret, RefreshDeps{
+				Ctx:        ctx,
 				HTTPClient: http.DefaultClient,
 				PutAgentCredentials: func(s vault.Secret) error {
 					return daemon.PutAgentCredentials(ctx, vaultBindingTail(fb.VaultPath), s)
@@ -252,6 +265,18 @@ func prepareAuthSpec(
 			VaultName: vaultBindingTail(fb.VaultPath),
 			Capture:   fb.Capture,
 		})
+		// MountAsFile bindings get an individual file mount at
+		// ContainerPath. The mount is writable so Capture can read
+		// back any in-container update the agent makes; for v1, no
+		// agent that uses MountAsFile actually rotates in-container,
+		// but writable keeps the API future-proof.
+		if fb.MountAsFile {
+			fileMounts = append(fileMounts, sandboxcontainer.Volume{
+				Source:   hostPath,
+				Target:   fb.ContainerPath,
+				ReadOnly: false,
+			})
+		}
 	}
 
 	// Static files land regardless of vault state. They co-locate
@@ -307,6 +332,13 @@ func prepareAuthSpec(
 		if p == "/home/agent" {
 			continue
 		}
+		// Skip groups whose every file binding requested MountAsFile
+		// — the individual file mounts added to fileMounts cover them
+		// and a parent-dir mount would conflict with any sibling
+		// mount the agent's ConfigureMCP installs (Codex's config.toml).
+		if fileMountOnlyGroups[p] {
+			continue
+		}
 		prep.Mounts = append(prep.Mounts, sandboxcontainer.Volume{
 			Source: groups[p],
 			Target: p,
@@ -318,6 +350,7 @@ func prepareAuthSpec(
 			ReadOnly: false,
 		})
 	}
+	prep.Mounts = append(prep.Mounts, fileMounts...)
 	prep.Mounts = append(prep.Mounts, staticFileMounts...)
 
 	if len(captureTargets) > 0 {

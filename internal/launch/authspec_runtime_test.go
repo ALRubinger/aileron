@@ -647,6 +647,38 @@ func TestPrepareAuthSpec_ValidationErrorReturnsBeforeFS(t *testing.T) {
 	}
 }
 
+func TestPrepareAuthSpec_MountAsFileSkipsParentDirMount(t *testing.T) {
+	// Codex's auth.json needs a file mount, not a parent-dir mount,
+	// so the read-only config.toml mount that ConfigureMCP installs
+	// at the same parent directory can coexist. MountAsFile = true
+	// must produce exactly one volume targeting the binding's
+	// ContainerPath, and zero volumes targeting the parent dir.
+	daemon := newFakeDaemon()
+	daemon.seed("codex", []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r"}}`))
+	spec := AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/codex/oauth",
+			ContainerPath: "/home/agent/.codex/auth.json",
+			Mode:          0o600,
+			MountAsFile:   true,
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+		}},
+	}
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if len(prep.Mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1 file mount", len(prep.Mounts))
+	}
+	if prep.Mounts[0].Target != "/home/agent/.codex/auth.json" {
+		t.Errorf("mount target = %q, want /home/agent/.codex/auth.json (file mount)", prep.Mounts[0].Target)
+	}
+}
+
 func TestVaultBindingTail(t *testing.T) {
 	tests := []struct {
 		in, want string

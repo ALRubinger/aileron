@@ -1,6 +1,7 @@
 package launch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -112,6 +113,22 @@ type FileBinding struct {
 	// rotated bundle is in vault before the container starts. A
 	// failed persist aborts the launch.
 	PreLaunchRefresh func(vault.Secret, RefreshDeps) (vault.Secret, error)
+
+	// MountAsFile selects file-mount vs parent-dir mount strategy.
+	//
+	// When false (default), the launcher bind-mounts the binding's
+	// container parent directory writable so the in-container agent
+	// can rotate the credential via a tmpfile-and-rename dance
+	// inside that directory (Claude Code's pattern for
+	// .credentials.json).
+	//
+	// When true, the launcher bind-mounts only the binding's
+	// individual file at ContainerPath. Use this when the agent
+	// does not rotate the file in-container and the binding's
+	// parent directory is also the target of another mount that
+	// must coexist (Codex's ModeSandbox keeps config.toml mounted
+	// via ConfigureMCP; we mount auth.json beside it as a file).
+	MountAsFile bool
 }
 
 // StaticFile declares in-container state that is constant per agent
@@ -136,6 +153,10 @@ type StaticFile struct {
 // rotated secret back through the daemon. The launcher fills it in
 // before invoking the hook.
 type RefreshDeps struct {
+	// Ctx is the launch context, propagated so HTTP refresh
+	// requests honor cancellation when the user kills the launch.
+	Ctx context.Context
+
 	// HTTPClient drives the refresh POST against the vendor's token
 	// URL. Tests inject httptest-backed clients; production uses a
 	// shared client with a sane timeout.
