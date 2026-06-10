@@ -61,3 +61,4 @@ func (a testAgent) LLMEndpointEnv() string { return "" }
 func (a testAgent) ConfigureMCP(string, map[string]string, string, launch.Mode) ([]string, []launch.MCPMount, error) {
 	return nil, nil, nil
 }
+func (a testAgent) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }

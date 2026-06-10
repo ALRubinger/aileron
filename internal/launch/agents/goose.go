@@ -187,3 +187,9 @@ func gooseConfigDir() (string, error) {
 	}
 	return filepath.Join(home, ".config", "goose"), nil
 }
+
+// AuthSpec returns Goose's vault-backed credential descriptor.
+// Goose has no per-agent vault binding today, so it returns the
+// zero value; the launcher treats that as a no-op. A future v1.x
+// issue would fill this in for Goose sandbox launches.
+func (g Goose) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }

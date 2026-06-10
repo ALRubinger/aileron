@@ -81,3 +81,9 @@ func (o OpenCode) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir stri
 	}
 	return nil, nil, nil
 }
+
+// AuthSpec returns OpenCode's vault-backed credential descriptor.
+// OpenCode has no per-agent vault binding today, so it returns the
+// zero value; the launcher treats that as a no-op. A future v1.x
+// issue would fill this in for OpenCode sandbox launches.
+func (o OpenCode) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }

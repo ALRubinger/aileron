@@ -72,6 +72,13 @@ func (c Codex) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, m
 	return c.configureHostMCP(mcpBin, mcpEnv)
 }
 
+// AuthSpec returns Codex's vault-backed credential descriptor.
+// U5 fills this in with the real FileBinding shape plus the
+// PreLaunchRefresh hook against auth.openai.com; the placeholder
+// keeps the package compiling while U1 lands the interface change.
+// See ADR-0025.
+func (c Codex) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+
 func (c Codex) configureHostMCP(mcpBin string, mcpEnv map[string]string) ([]string, []launch.MCPMount, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
