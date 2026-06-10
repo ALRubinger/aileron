@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -114,7 +115,10 @@ func TestSandboxForwardProxy_PassthroughGetEchoesUpstreamResponse(t *testing.T) 
 		t.Fatalf("GET through passthrough: %v", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, string(body))
@@ -135,7 +139,10 @@ func TestSandboxForwardProxy_PassthroughGetEchoesUpstreamResponse(t *testing.T) 
 		t.Errorf("X-Upstream-Marker = %q, want passthrough-test (upstream header preserved)", got)
 	}
 
-	events, _ := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	events, err := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1; events=%+v", len(events), events)
 	}
@@ -177,7 +184,10 @@ func TestSandboxForwardProxy_PassthroughPostForwardsRequestBody(t *testing.T) {
 		t.Fatalf("POST through passthrough: %v", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", resp.StatusCode, string(body))
@@ -192,7 +202,10 @@ func TestSandboxForwardProxy_PassthroughPostForwardsRequestBody(t *testing.T) {
 		t.Errorf("response body = %q", string(body))
 	}
 
-	events, _ := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	events, err := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
@@ -212,7 +225,10 @@ func TestSandboxForwardProxy_PassthroughRecordsUpstreamErrorStatusVerbatim(t *te
 		t.Fatalf("GET through passthrough: %v", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
 
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
@@ -221,7 +237,10 @@ func TestSandboxForwardProxy_PassthroughRecordsUpstreamErrorStatusVerbatim(t *te
 		t.Errorf("body = %q, want upstream body verbatim", string(body))
 	}
 
-	events, _ := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	events, err := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
@@ -231,6 +250,162 @@ func TestSandboxForwardProxy_PassthroughRecordsUpstreamErrorStatusVerbatim(t *te
 	}
 	if got := evt.Payload["aileron.proxy.upstream.status"]; got != http.StatusServiceUnavailable {
 		t.Errorf("upstream status = %v, want 503", got)
+	}
+}
+
+func TestSandboxForwardProxy_PassthroughForwardsAllMethodsVerbatim(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			var observed string
+			setup := newPassthroughIntegrationSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				observed = r.Method
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req, err := http.NewRequest(method, "https://"+setup.logicalHost+"/anything", strings.NewReader(""))
+			if err != nil {
+				t.Fatalf("new request: %v", err)
+			}
+			resp, err := setup.client.Do(req)
+			if err != nil {
+				t.Fatalf("%s through passthrough: %v", method, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if observed != method {
+				t.Errorf("upstream method = %q, want %q", observed, method)
+			}
+
+			events, err := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			if got := events[0].Payload["aileron.proxy.method"]; got != method {
+				t.Errorf("audit method = %v, want %q", got, method)
+			}
+		})
+	}
+}
+
+func TestSandboxForwardProxy_PassthroughRefusesPrivateIPLiteralTarget(t *testing.T) {
+	stateDir := t.TempDir()
+	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-ssrf" }),
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return nil, nil
+		},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			t.Fatalf("passthrough must not dial upstream for private IP literal target; got %s", req.URL)
+			return nil, nil
+		})},
+	}
+	proxy := httptest.NewServer(srv.sandboxForwardProxyMiddleware(http.NotFoundHandler()))
+	defer proxy.Close()
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		t.Fatal("failed to append CA cert")
+	}
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatalf("parse proxy URL: %v", err)
+	}
+	client := newSandboxForwardProxyClient(t, proxyURL, roots)
+	// curl-style request to the cloud-metadata IMDS endpoint. Under
+	// Model A this would have been the SSRF exfil path; the IP-literal
+	// filter must refuse it at the passthrough boundary.
+	resp, err := client.Get("https://169.254.169.254/latest/meta-data/iam/security-credentials/")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyRejected {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyRejected)
+	}
+	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != "passthrough_target_not_allowed" {
+		t.Errorf("reject_reason = %v, want passthrough_target_not_allowed", got)
+	}
+}
+
+func TestSandboxForwardProxyTargetIsPrivateIPLiteral_Classification(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"169.254.169.254", true},
+		{"169.254.169.254:443", true},
+		{"127.0.0.1", true},
+		{"10.0.0.5", true},
+		{"172.16.5.10", true},
+		{"192.168.1.1", true},
+		{"100.64.1.1", true},
+		{"[::1]", true},
+		{"[fe80::1]", true},
+		{"[fc00::1]", true},
+		{"8.8.8.8", false},
+		{"1.1.1.1", false},
+		{"100.63.255.255", false},
+		{"100.128.0.0", false},
+		{"api.example.test", false},
+		{"github.com", false},
+	}
+	for _, c := range cases {
+		if got := sandboxForwardProxyTargetIsPrivateIPLiteral(c.host); got != c.want {
+			t.Errorf("sandboxForwardProxyTargetIsPrivateIPLiteral(%q) = %v, want %v", c.host, got, c.want)
+		}
+	}
+}
+
+func TestSandboxForwardProxy_PassthroughResponseTooLargeRejects(t *testing.T) {
+	// Upstream returns ~5 MiB; the daemon caps response body at 4 MiB
+	// and emits passthrough_upstream_response_too_large.
+	big := bytes.Repeat([]byte("a"), 5<<20)
+	setup := newPassthroughIntegrationSetup(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(big)
+	}))
+
+	resp, err := setup.client.Get("https://" + setup.logicalHost + "/large")
+	if err != nil {
+		t.Fatalf("GET through passthrough: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+
+	events, err := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyRejected {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyRejected)
+	}
+	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != "passthrough_upstream_response_too_large" {
+		t.Errorf("reject_reason = %v, want passthrough_upstream_response_too_large", got)
 	}
 }
 
@@ -250,13 +425,21 @@ func TestSandboxForwardProxy_PassthroughDoesNotLeakCredentialShapedURL(t *testin
 		t.Fatalf("GET through passthrough: %v", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatalf("discard response body: %v", err)
+	}
 
-	events, _ := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	events, err := setup.auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	payloadJSON, _ := json.Marshal(events[0].Payload)
+	payloadJSON, err := json.Marshal(events[0].Payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
 	for _, forbidden := range []string{"Bearer", "lin_secret", "token="} {
 		if strings.Contains(string(payloadJSON), forbidden) {
 			t.Errorf("audit payload contains forbidden substring %q: %s", forbidden, string(payloadJSON))

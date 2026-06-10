@@ -193,8 +193,30 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn io.Writer, decrypted
 // through the established TLS connection. Used when the request did
 // not uniquely match an installed connector operation under the
 // credential-injection-only model (ADR-0019). No credential is
-// injected. The audit event is sandbox.proxy.passthrough.
+// injected by the proxy. The audit event is sandbox.proxy.passthrough.
+//
+// The in-container client's own request body is forwarded as-is with
+// no size cap. Passthrough is byte-for-byte; the daemon streams the
+// body straight to the upstream. Resource budgets (concurrent
+// connections, CPU, network) are operator-managed at the container
+// runtime layer, not the proxy. The matched/credentialed path
+// separately caps the buffered body at sandboxForwardProxyMaxRequestBytes
+// because that path re-issues the request after credential injection.
+//
+// IP-literal targets in loopback, link-local, RFC1918, IPv6 ULA, or
+// carrier-grade NAT space are refused at the passthrough boundary.
+// Under Model A, an unfiltered passthrough would let an in-container
+// client coerce the daemon into dialing 169.254.169.254 (cloud
+// metadata) or other host-local addresses, exfiltrating data the
+// agent should never see. Hostnames that resolve to private IPs are
+// not blocked at this layer (DNS-rebinding is out of scope for this
+// control; container-level network hardening is the deeper defense).
 func (s *apiServer) passthroughSandboxForwardProxy(conn io.Writer, decrypted *http.Request, auth sandboxProxyAuth, targetHost string, upstream *url.URL) {
+	if sandboxForwardProxyTargetIsPrivateIPLiteral(targetHost) {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_target_not_allowed")
+		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy passthrough refuses private, loopback, or link-local IP literals")
+		return
+	}
 	var reqBody io.Reader
 	if decrypted.Body != nil {
 		reqBody = decrypted.Body
@@ -231,6 +253,35 @@ func (s *apiServer) passthroughSandboxForwardProxy(conn io.Writer, decrypted *ht
 
 	s.recordSandboxProxyPassthrough(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, resp.StatusCode)
 	writeSandboxForwardProxyPassthroughResponse(conn, auth.SessionID, targetHost, resp, body)
+}
+
+// sandboxForwardProxyTargetIsPrivateIPLiteral reports whether the
+// CONNECT target host is an IP literal in a private, loopback,
+// link-local, IPv6 ULA, or carrier-grade NAT range. These targets are
+// refused at the passthrough boundary because the daemon runs on the
+// host network namespace, so passthrough to such addresses lets an
+// in-container client reach the host VM's cloud metadata endpoint
+// (e.g. 169.254.169.254) or arbitrary internal infrastructure, both
+// of which are credential-leak risks. Hostnames that resolve to
+// private IPs are not blocked here; DNS-rebinding protection lives
+// at a different layer.
+func sandboxForwardProxyTargetIsPrivateIPLiteral(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsPrivate() {
+		return true
+	}
+	// Carrier-grade NAT (RFC 6598) is not classified by IsPrivate.
+	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+		return true
+	}
+	return false
 }
 
 func copyPassthroughRequestHeaders(dst, src http.Header) {

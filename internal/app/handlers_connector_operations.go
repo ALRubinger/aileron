@@ -644,6 +644,7 @@ func (s *apiServer) recordSandboxProxyPassthrough(r *http.Request, source, metho
 	}
 	payload := map[string]any{
 		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.mediation":       "https_proxy",
 		"aileron.proxy.source":          source,
 		"aileron.proxy.decision":        "passthrough",
 		"aileron.proxy.method":          method,

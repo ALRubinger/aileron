@@ -82,15 +82,27 @@ func TestSandboxForwardProxy_CONNECTAuthenticatesAndFailsClosedOnMissingSessionC
 func TestSandboxForwardProxy_CONNECTPassthroughReturns502WhenUpstreamUnreachable(t *testing.T) {
 	stateDir := t.TempDir()
 	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
-	handler := newSandboxForwardProxyTestHandlerWithStateDir(t, "daemon-token", stateDir)
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-unreachable" }),
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return nil, nil
+		},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("simulated upstream unreachable")
+		})},
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
 
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
 		t.Fatal("failed to append CA cert")
 	}
-	proxyURL, err := url.Parse(srv.URL)
+	proxyURL, err := url.Parse(proxy.URL)
 	if err != nil {
 		t.Fatalf("parse proxy URL: %v", err)
 	}
@@ -108,6 +120,20 @@ func TestSandboxForwardProxy_CONNECTPassthroughReturns502WhenUpstreamUnreachable
 	}
 	if got := resp.Header.Get("X-Aileron-Proxy-Upstream-Host"); got != "api.example.test" {
 		t.Fatalf("X-Aileron-Proxy-Upstream-Host = %q, want api.example.test", got)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyRejected {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyRejected)
+	}
+	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != "passthrough_upstream_unreachable" {
+		t.Errorf("reject_reason = %v, want passthrough_upstream_unreachable", got)
 	}
 }
 
@@ -276,6 +302,7 @@ func TestSandboxForwardProxy_CONNECTNoMatchPassesThroughToUpstream(t *testing.T)
 	stateDir := t.TempDir()
 	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
 	auditStore := audit.NewMemStore()
+	var upstreamAuth string
 	srv := &apiServer{
 		localDaemonToken:     "daemon-token",
 		sandboxProxyStateDir: stateDir,
@@ -284,6 +311,7 @@ func TestSandboxForwardProxy_CONNECTNoMatchPassesThroughToUpstream(t *testing.T)
 			return nil, nil
 		},
 		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamAuth = req.Header.Get("Authorization")
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -315,6 +343,9 @@ func TestSandboxForwardProxy_CONNECTNoMatchPassesThroughToUpstream(t *testing.T)
 	}
 	if string(body) != `{"ok":true}` {
 		t.Errorf("body = %q, want upstream body verbatim", string(body))
+	}
+	if upstreamAuth != "" {
+		t.Errorf("upstream Authorization = %q, want empty (no credential injected on no-match)", upstreamAuth)
 	}
 
 	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})

@@ -101,14 +101,14 @@ curl --silent --show-error -i https://example.com/
 
 Expected:
 
-- HTTP 403 with a plain-text body: `sandbox proxy decrypted request did not match an installed connector operation`.
-- A `sandbox.proxy.rejected` audit event. Confirm:
+- The upstream's actual HTTP response. `example.com` returns 200 with its example page; an unreachable upstream returns 502 from the proxy.
+- A `sandbox.proxy.passthrough` audit event. Confirm:
 
   ```bash
   aileron audit list --limit 5
   ```
 
-  Look for `aileron.proxy.reject_reason: "operation_not_matched"`. The full URL is not in the payload, only the upstream host.
+  Look for `aileron.proxy.decision: "passthrough"` and `aileron.proxy.upstream.host: "example.com"`. The full URL is not in the payload, only the upstream host, path, and method. Under the credential-injection-only model (ADR-0019) the proxy does not inject a credential on unmatched requests, and it does not refuse them. Container-level egress hardening lives at a different layer.
 
 ## gh (GitHub CLI)
 
@@ -146,7 +146,7 @@ Expected:
 - 200 with the authenticated user's JSON.
 - `connector.proxy.proxied` audit, `aileron.proxy.upstream.host: "api.github.com"`.
 
-### Failure case
+### Unmatched case
 
 ```bash
 gh repo list --json id  # unmatched if no `repos` operation is in the spec
@@ -154,8 +154,8 @@ gh repo list --json id  # unmatched if no `repos` operation is in the spec
 
 Expected:
 
-- `gh` reports an HTTP 403 from upstream.
-- `sandbox.proxy.rejected` audit, reason `operation_not_matched`.
+- `gh` reports the upstream's actual response. Without an installed credential the GitHub API returns 401; `gh` surfaces that to the user.
+- `sandbox.proxy.passthrough` audit, `aileron.proxy.upstream.host: "api.github.com"`. The proxy does not inject a credential and does not refuse the request.
 
 ## aws (AWS CLI)
 
@@ -195,7 +195,7 @@ Expected:
 - 200 with the calling identity.
 - `connector.proxy.proxied` audit, `aileron.proxy.upstream.host: "sts.us-east-1.amazonaws.com"`.
 
-### Failure case
+### Unmatched case
 
 ```bash
 aws ec2 describe-instances  # unmatched if no ec2 operation is in the spec
@@ -203,8 +203,8 @@ aws ec2 describe-instances  # unmatched if no ec2 operation is in the spec
 
 Expected:
 
-- 403 from the proxy.
-- `sandbox.proxy.rejected` audit, reason `operation_not_matched`.
+- `aws` reports the EC2 endpoint's actual response. Without an installed credential the request returns a SigV4 authentication error.
+- `sandbox.proxy.passthrough` audit, `aileron.proxy.upstream.host: "ec2.us-east-1.amazonaws.com"`. The proxy does not inject a credential and does not refuse the request.
 
 ## What "no credential leak" means in practice
 

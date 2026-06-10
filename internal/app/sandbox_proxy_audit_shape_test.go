@@ -156,6 +156,7 @@ var (
 		eventType: "sandbox.proxy.passthrough",
 		requiredFields: []string{
 			"aileron.proxy.boundary",
+			"aileron.proxy.mediation",
 			"aileron.proxy.source",
 			"aileron.proxy.decision",
 			"aileron.proxy.method",

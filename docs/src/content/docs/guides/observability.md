@@ -170,7 +170,7 @@ Every span carries the OTel-namespaced shape locked in for the audit payload. Wh
 | `aileron.proxy.upstream.host` | Upstream host, including port when present. |
 | `aileron.proxy.upstream.path` | Upstream path only. Query strings are intentionally omitted. |
 | `aileron.proxy.upstream.status` | Upstream HTTP status for proxied and passthrough requests. |
-| `aileron.proxy.reject_reason` | Rejection class for `sandbox.proxy.rejected`. Narrow protocol-level set: `non_connect_proxy_request_unsupported`, `session_ca_unavailable`, `connector_specs_invalid`, `connector_specs_unavailable`, `passthrough_upstream_unreachable`, `passthrough_upstream_request_invalid`, `passthrough_upstream_read_failed`, `passthrough_upstream_response_too_large`. |
+| `aileron.proxy.reject_reason` | Rejection class for `sandbox.proxy.rejected`. Narrow protocol-level set: `non_connect_proxy_request_unsupported`, `session_ca_unavailable`, `connector_specs_invalid`, `connector_specs_unavailable`, `passthrough_target_not_allowed`, `passthrough_upstream_unreachable`, `passthrough_upstream_request_invalid`, `passthrough_upstream_read_failed`, `passthrough_upstream_response_too_large`. |
 | `aileron.connector.reject_reason` | Rejection class after a connector operation has been resolved. |
 | `aileron.connector.fqn` | Set on connector-resolved proxy events. |
 | `aileron.connector.tool` | Set on connector-resolved proxy events. |
@@ -179,6 +179,8 @@ Every span carries the OTel-namespaced shape locked in for the audit payload. Wh
 | `aileron.session.id` | Launch session associated with the sandbox request when present. |
 
 The proxy mediates credential injection at the TLS boundary. It is not an egress allowlist. Cooperative HTTPS requests whose decrypted target does not uniquely match an installed connector spec are forwarded to the upstream unmodified and recorded as `sandbox.proxy.passthrough`. `sandbox.proxy.rejected` is reserved for protocol-level failures. See [ADR-0019](/adr/0019-v4-https-data-plane/) for the full credential-injection-only model and the threat-model scope.
+
+Migration note: operators who previously queried `sandbox.proxy.rejected` with reason `operation_not_matched` or `ambiguous_operation_match` to surface "agent attempted unknown upstream" should switch to querying `sandbox.proxy.passthrough`. Those two reject reasons are no longer emitted in production. The cooperative-passthrough behavior records the same operational signal as a new event family.
 
 **`sandbox.proxy.disabled`** (launch-session start without the v4 HTTPS proxy):
 
