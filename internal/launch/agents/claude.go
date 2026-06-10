@@ -62,8 +62,42 @@ func (c Claude) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, 
 	return []string{"--mcp-config", mcpConfig}, nil, nil
 }
 
-// AuthSpec returns Claude's vault-backed credential descriptor.
-// U4 fills this in with the real FileBinding + StaticFile shape;
-// the placeholder keeps the package compiling while U1 lands the
-// interface change. See ADR-0025.
-func (c Claude) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+// AuthSpec returns Claude's vault-backed credential descriptor per
+// ADR-0025.
+//
+//   - One FileBinding at agents/claude/oauth renders
+//     /home/agent/.claude/.credentials.json (mode 0600). Render is
+//     byte-identity over the vault payload; Capture validates the
+//     envelope before persisting back. Claude rotates the access
+//     token mid-session via a tmpfile + rename dance inside
+//     /home/agent/.claude/, so the launcher bind-mounts the parent
+//     dir writable.
+//   - One StaticFile at /home/agent/.claude.json (mode 0644) writes
+//     the onboarding stub so Claude does not paint the theme picker
+//     on every launch. The launcher mounts this as an individual
+//     file mount so the workspace at /home/agent/ is not masked.
+//
+// v1 ships FileBinding only — no EnvBinding (R19). v4 milestone
+// scope (#747) lists env-var credential injection as out of scope;
+// the file path delivers equivalent silent-first-launch UX without
+// breaching the scope boundary.
+func (c Claude) AuthSpec() launch.AuthSpec {
+	return launch.AuthSpec{
+		FileBindings: []launch.FileBinding{{
+			VaultPath:     claudeVaultPath,
+			ContainerPath: claudeCredentialsContainerPath,
+			Mode:          0o600,
+			// Required=false so an empty vault triggers the in-
+			// container-login bootstrap path documented in ADR-0025
+			// rather than failing the launch.
+			Required: false,
+			Render:   claudeRender,
+			Capture:  claudeCapture,
+		}},
+		StaticFiles: []launch.StaticFile{{
+			ContainerPath: claudeOnboardingContainerPath,
+			Mode:          0o644,
+			Content:       claudeOnboardingStub,
+		}},
+	}
+}
