@@ -1,0 +1,422 @@
+package launch
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/vault"
+)
+
+// authSpecDaemon is the subset of *daemonClient the auth-spec
+// runtime depends on. Defined as an interface so tests substitute a
+// fake without spinning up an httptest server for every scenario.
+type authSpecDaemon interface {
+	GetAgentCredentials(ctx context.Context, name string) (vault.Secret, error)
+	PutAgentCredentials(ctx context.Context, name string, secret vault.Secret) error
+}
+
+// authSpecPrep is the output of prepareAuthSpec — everything the
+// launcher needs to wire AuthSpec into the sandbox lifecycle without
+// the launcher knowing per-agent shape.
+type authSpecPrep struct {
+	// EnvAdditions merge into the agent's env via composeAgentEnv.
+	EnvAdditions map[string]string
+
+	// Mounts append to the sandbox volume list. The launcher passes
+	// these alongside proxy bootstrap mounts so the auth-spec dir
+	// appears inside the container at the binding's parent path
+	// (e.g. /home/agent/.claude/).
+	Mounts []sandboxcontainer.Volume
+
+	// CaptureFn fires on clean container exit (and on graceful
+	// shutdown). The launcher calls this AFTER launchSandbox returns
+	// nil, never on a non-nil error — forcible termination keeps the
+	// prior vault entry intact per R15.
+	CaptureFn func(ctx context.Context)
+
+	// Cleanup removes the host-side transient directory. Deferred at
+	// Launch scope so capture runs first, cleanup second; not folded
+	// into launchSandbox's existing defer because the order matters.
+	Cleanup func()
+
+	// HasBindings reports whether the prep produced any auth-spec
+	// state. False means the agent shipped an empty AuthSpec{} and
+	// the launcher should treat the prep as a no-op (Goose, Pi,
+	// OpenCode in v1). Useful for skipping the bootstrap-UX status
+	// line on agents that have nothing to seed.
+	HasBindings bool
+}
+
+// prepareAuthSpec materializes the agent's AuthSpec into the
+// container before launch: EnvBindings populate envAdditions, file
+// bindings render to a writable per-agent transient directory which
+// the launcher bind-mounts at the binding's parent in-container
+// path, StaticFiles land in the same directory unconditionally.
+//
+// The directory is `0700` so OAuth bytes never leak through a
+// shared host's process umask. Capture runs on clean container exit
+// and snapshots the post-run file bytes back to the daemon's vault;
+// the launcher's caller chooses whether to invoke CaptureFn (the
+// rule is "Builder.Run returned nil OR graceful shutdown stopped
+// the container cleanly").
+//
+// The plan calls for a freshness comparison (only PUT when the
+// captured envelope is newer than the current vault entry). v1
+// ships last-writer-wins per the Risks section — concurrent launch
+// races against the same agent are not in the v1 ICP, and the
+// refresh token survives the race because both writers exchanged
+// the same upstream token. A Fresher hook on FileBinding is a
+// clean follow-up if real users surface the concern.
+func prepareAuthSpec(
+	ctx context.Context,
+	agentName string,
+	spec AuthSpec,
+	daemon authSpecDaemon,
+	sessionLog *slog.Logger,
+	stderr io.Writer,
+) (authSpecPrep, error) {
+	prep := authSpecPrep{
+		EnvAdditions: map[string]string{},
+		Cleanup:      func() {},
+		CaptureFn:    func(context.Context) {},
+	}
+
+	if len(spec.EnvBindings) == 0 && len(spec.FileBindings) == 0 && len(spec.StaticFiles) == 0 {
+		return prep, nil
+	}
+	if err := validateAuthSpec(spec); err != nil {
+		return prep, fmt.Errorf("auth spec: %w", err)
+	}
+	prep.HasBindings = true
+
+	// Render env bindings first. They don't touch the host FS and
+	// don't need the transient dir, so a Required-but-missing env
+	// binding fails fast before any mount setup.
+	for i, eb := range spec.EnvBindings {
+		secret, err := daemon.GetAgentCredentials(ctx, vaultBindingTail(eb.VaultPath))
+		switch {
+		case errors.Is(err, ErrAgentCredentialsNotFound):
+			if eb.Required {
+				return prep, fmt.Errorf("auth spec: env binding %d at %q is required but the vault is empty — seed with `aileron vault put %s`",
+					i, eb.VaultPath, eb.VaultPath)
+			}
+			continue
+		case err != nil:
+			return prep, fmt.Errorf("auth spec: get env binding %d %q: %w", i, eb.VaultPath, err)
+		}
+		rendered, err := eb.Render(secret)
+		if err != nil {
+			return prep, fmt.Errorf("auth spec: render env binding %d %q: %w", i, eb.VaultPath, err)
+		}
+		for k, v := range rendered {
+			prep.EnvAdditions[k] = v
+		}
+	}
+
+	// One transient dir per agent. Group file bindings and static
+	// files by their parent container directory so we mount the
+	// parent (matches Claude's tmpfile-and-rename dance inside
+	// .claude/, and lets Codex co-locate auth.json + config.toml).
+	hostRoot, err := os.MkdirTemp("", "aileron-agent-auth-"+agentName+"-*")
+	if err != nil {
+		return prep, fmt.Errorf("auth spec: create transient dir: %w", err)
+	}
+	if err := os.Chmod(hostRoot, 0o700); err != nil {
+		_ = os.RemoveAll(hostRoot)
+		return prep, fmt.Errorf("auth spec: chmod transient dir: %w", err)
+	}
+	cleanupOnce := false
+	cleanup := func() {
+		if cleanupOnce {
+			return
+		}
+		cleanupOnce = true
+		_ = os.RemoveAll(hostRoot)
+	}
+	prep.Cleanup = cleanup
+
+	// groups maps a container parent directory (e.g. /home/agent/.claude)
+	// to a host-side subdirectory under hostRoot. The launcher mounts
+	// each host subdir at the corresponding parent so multiple files
+	// under the same parent share one mount.
+	groups := map[string]string{}
+	ensureGroup := func(containerParent string) (string, error) {
+		if hostDir, ok := groups[containerParent]; ok {
+			return hostDir, nil
+		}
+		// Mirror the container parent's directory structure inside
+		// hostRoot so debugging the transient dir lines up with the
+		// in-container view. Strip the leading slash so
+		// filepath.Join doesn't reset to absolute.
+		rel := containerParent
+		for len(rel) > 0 && rel[0] == '/' {
+			rel = rel[1:]
+		}
+		hostDir := filepath.Join(hostRoot, rel)
+		if err := os.MkdirAll(hostDir, 0o700); err != nil {
+			return "", fmt.Errorf("auth spec: mkdir %s: %w", hostDir, err)
+		}
+		groups[containerParent] = hostDir
+		return hostDir, nil
+	}
+
+	// Track file bindings whose host-side files exist after a clean
+	// run, plus the metadata captureFn needs to write back. Captured
+	// here so CaptureFn closes over the prepared state and doesn't
+	// re-traverse the spec.
+	type fileCapture struct {
+		HostPath  string
+		VaultName string // last segment of VaultPath
+		Capture   func([]byte) (vault.Secret, error)
+	}
+	var captureTargets []fileCapture
+
+	// Render file bindings: GET vault entry, run optional pre-launch
+	// refresh, Render bytes, write to the host-side subdir under the
+	// group dir for the binding's container parent. Track for capture.
+	for i, fb := range spec.FileBindings {
+		containerParent := path.Dir(fb.ContainerPath)
+		hostDir, err := ensureGroup(containerParent)
+		if err != nil {
+			cleanup()
+			return prep, err
+		}
+		secret, getErr := daemon.GetAgentCredentials(ctx, vaultBindingTail(fb.VaultPath))
+		emptyVault := errors.Is(getErr, ErrAgentCredentialsNotFound)
+		switch {
+		case emptyVault:
+			if fb.Required {
+				cleanup()
+				return prep, fmt.Errorf("auth spec: file binding %d at %q is required but the vault is empty — seed with `aileron vault put %s`",
+					i, fb.VaultPath, fb.VaultPath)
+			}
+			// Required=false on empty vault: the in-container agent
+			// performs its own login (paste-the-code OAuth fallback
+			// for Claude, device-auth for Codex). Capture on clean
+			// exit seeds the vault. No file written for this binding,
+			// but the group dir still exists for StaticFiles or
+			// other file bindings under the same parent.
+			captureTargets = append(captureTargets, fileCapture{
+				HostPath:  filepath.Join(hostDir, path.Base(fb.ContainerPath)),
+				VaultName: vaultBindingTail(fb.VaultPath),
+				Capture:   fb.Capture,
+			})
+			continue
+		case getErr != nil:
+			cleanup()
+			return prep, fmt.Errorf("auth spec: get file binding %d %q: %w", i, fb.VaultPath, getErr)
+		}
+
+		// Pre-launch refresh runs only when the binding declares one
+		// (Codex today). The hook persists the rotated secret to the
+		// vault before returning a successful Secret per AE6.
+		if fb.PreLaunchRefresh != nil {
+			refreshed, refreshErr := fb.PreLaunchRefresh(secret, RefreshDeps{
+				HTTPClient: http.DefaultClient,
+				PutAgentCredentials: func(s vault.Secret) error {
+					return daemon.PutAgentCredentials(ctx, vaultBindingTail(fb.VaultPath), s)
+				},
+			})
+			if refreshErr != nil {
+				cleanup()
+				return prep, fmt.Errorf("auth spec: pre-launch refresh %q: %w", fb.VaultPath, refreshErr)
+			}
+			secret = refreshed
+		}
+
+		rendered, renderErr := fb.Render(secret)
+		if renderErr != nil {
+			cleanup()
+			return prep, fmt.Errorf("auth spec: render file binding %d %q: %w", i, fb.VaultPath, renderErr)
+		}
+		hostPath := filepath.Join(hostDir, path.Base(fb.ContainerPath))
+		mode := fb.Mode
+		if mode == 0 {
+			mode = 0o600
+		}
+		if err := os.WriteFile(hostPath, rendered, mode); err != nil {
+			cleanup()
+			return prep, fmt.Errorf("auth spec: write %s: %w", hostPath, err)
+		}
+		captureTargets = append(captureTargets, fileCapture{
+			HostPath:  hostPath,
+			VaultName: vaultBindingTail(fb.VaultPath),
+			Capture:   fb.Capture,
+		})
+	}
+
+	// Static files land regardless of vault state. They co-locate
+	// with file bindings under the same parent so the group dir for
+	// /home/agent/.claude/ holds both .credentials.json (file
+	// binding) and any future per-agent state.
+	//
+	// Claude's onboarding stub at /home/agent/.claude.json is a
+	// special case: its parent /home/agent/ is also the workspace
+	// mount point in v4. We bind-mount /home/agent/.claude.json as
+	// a file mount instead of a directory mount to avoid masking
+	// the workspace dir.
+	staticFileMounts := []sandboxcontainer.Volume{}
+	for _, sf := range spec.StaticFiles {
+		containerParent := path.Dir(sf.ContainerPath)
+		hostDir, err := ensureGroup(containerParent)
+		if err != nil {
+			cleanup()
+			return prep, err
+		}
+		hostPath := filepath.Join(hostDir, path.Base(sf.ContainerPath))
+		mode := sf.Mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := os.WriteFile(hostPath, sf.Content, mode); err != nil {
+			cleanup()
+			return prep, fmt.Errorf("auth spec: write static %s: %w", hostPath, err)
+		}
+		// Static files at /home/agent/<file> get an individual file
+		// mount so the parent dir (the workspace mount) is not masked.
+		if containerParent == "/home/agent" {
+			staticFileMounts = append(staticFileMounts, sandboxcontainer.Volume{
+				Source:   hostPath,
+				Target:   sf.ContainerPath,
+				ReadOnly: true,
+			})
+		}
+	}
+
+	// Build mount list: one mount per group except for static files
+	// directly under /home/agent (those use individual file mounts).
+	// Sort parents so the mount order is deterministic for tests.
+	parents := make([]string, 0, len(groups))
+	for p := range groups {
+		parents = append(parents, p)
+	}
+	sort.Strings(parents)
+	for _, p := range parents {
+		// Skip the /home/agent group — its only legitimate residents
+		// are individual file mounts (Claude's .claude.json today);
+		// mounting the dir would mask the workspace.
+		if p == "/home/agent" {
+			continue
+		}
+		prep.Mounts = append(prep.Mounts, sandboxcontainer.Volume{
+			Source: groups[p],
+			Target: p,
+			// Writable: Claude rotates its OAuth credentials mid-
+			// session by rewriting .credentials.json via tmpfile +
+			// rename, which requires write access to the parent
+			// directory. Capture on clean exit reads the updated
+			// file back.
+			ReadOnly: false,
+		})
+	}
+	prep.Mounts = append(prep.Mounts, staticFileMounts...)
+
+	if len(captureTargets) > 0 {
+		prep.CaptureFn = func(captureCtx context.Context) {
+			for _, target := range captureTargets {
+				bytes, err := os.ReadFile(target.HostPath)
+				if err != nil {
+					// The file may not exist — agent never wrote it,
+					// or the in-container login didn't complete.
+					// Skip silently; the prior vault entry (if any)
+					// remains usable.
+					if os.IsNotExist(err) {
+						continue
+					}
+					captureWarn(sessionLog, stderr, agentName, target.HostPath,
+						fmt.Errorf("read for capture: %w", err))
+					continue
+				}
+				if len(bytes) == 0 {
+					continue
+				}
+				captured, err := target.Capture(bytes)
+				if err != nil {
+					// Schema validation lives inside the binding's
+					// Capture func. A parse failure here means the
+					// in-container agent left bytes that don't match
+					// the documented envelope — log and skip the PUT
+					// so the vault isn't overwritten with garbage.
+					captureWarn(sessionLog, stderr, agentName, target.HostPath,
+						fmt.Errorf("schema-validate captured bytes: %w (skipping vault write so a partial-write or schema-drift session does not clobber the prior entry; inspect %s or re-login)",
+							err, target.HostPath))
+					continue
+				}
+				if err := daemon.PutAgentCredentials(captureCtx, target.VaultName, captured); err != nil {
+					captureWarn(sessionLog, stderr, agentName, target.HostPath,
+						fmt.Errorf("persist captured credential: %w (rerun the launch to retry)",
+							err))
+					continue
+				}
+				sessionLog.Info("captured agent credentials to vault",
+					"agent", agentName, "vault_path", "agents/"+target.VaultName,
+					"source", target.HostPath)
+			}
+		}
+	}
+
+	return prep, nil
+}
+
+// captureWarn emits a one-line stderr warning per R13 with recovery
+// information, and mirrors the same content into the session log so
+// the post-mortem has the full context.
+func captureWarn(log *slog.Logger, stderr io.Writer, agentName, hostPath string, err error) {
+	log.Warn("auth spec capture failed",
+		"agent", agentName, "host_path", hostPath, "error", err)
+	if stderr != nil {
+		fmt.Fprintf(stderr, "[launcher] capture for %s failed: %v\n", agentName, err)
+	}
+}
+
+// vaultBindingTail extracts the agent identifier from a binding's
+// vault path (e.g. `agents/claude/oauth` → `claude`). The daemon's
+// per-agent credential endpoints scope by name, so the launcher
+// passes only the agent identifier and the daemon reconstructs the
+// canonical vault path internally.
+//
+// The convention "agents/<name>/<purpose>" is documented in ADR-0025
+// and pinned by the spec's namespace-scoped path. Bindings that
+// don't follow it (or that use the agent name in a different slot)
+// will misroute through this helper — that is by design: the
+// non-conventional shape should surface as an early failure rather
+// than silently land in the wrong vault path.
+func vaultBindingTail(vaultPath string) string {
+	// Expected shape is "agents/<name>/<purpose>"; return <name>.
+	// Trim leading slashes for defensive parsing.
+	for len(vaultPath) > 0 && vaultPath[0] == '/' {
+		vaultPath = vaultPath[1:]
+	}
+	// Split on `/`. We want segment 1 (the agent name).
+	first := -1
+	for i := 0; i < len(vaultPath); i++ {
+		if vaultPath[i] == '/' {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return vaultPath
+	}
+	tail := vaultPath[first+1:]
+	second := -1
+	for i := 0; i < len(tail); i++ {
+		if tail[i] == '/' {
+			second = i
+			break
+		}
+	}
+	if second < 0 {
+		return tail
+	}
+	return tail[:second]
+}

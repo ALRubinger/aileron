@@ -459,12 +459,55 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	cancelProbe()
 	printStartupBanner(os.Stderr, daemonURL, sessionID, SessionLogPath(config.Dir), ok && locked)
 
+	// Materialize the agent's AuthSpec into the container before
+	// launchSandbox runs. EnvBindings merge into agentEnv (the in-
+	// container agent inherits them); FileBindings + StaticFiles
+	// produce writable bind-mounts that hold the rendered files.
+	// Capture on clean exit snapshots in-container rotations back
+	// to the vault. See ADR-0025.
+	//
+	// AuthSpec applies under sandbox launch only in v1 — host-launch
+	// parity is a separate, smaller PR per the plan's scope boundary.
+	var authPrep authSpecPrep
+	if sandboxEnabled {
+		prep, err := prepareAuthSpec(ctx, config.Agent.Name(), config.Agent.AuthSpec(),
+			client, sessionLog, os.Stderr)
+		if err != nil {
+			return LaunchResult{}, fmt.Errorf("prepare agent auth spec: %w", err)
+		}
+		authPrep = prep
+		defer authPrep.Cleanup()
+		for k, v := range authPrep.EnvAdditions {
+			agentEnv[k] = v
+		}
+		proxyBootstrap.Mounts = append(proxyBootstrap.Mounts, authPrep.Mounts...)
+		if authPrep.HasBindings && len(authPrep.EnvAdditions) == 0 && len(authPrep.Mounts) == 0 {
+			// Spec had bindings but none rendered: empty vault and
+			// no Required entries. Print the bootstrap UX line per
+			// R30 so the user sees why the agent is about to prompt
+			// for login.
+			fmt.Fprintf(os.Stderr, "[launcher] no credentials in vault for %s — agent will prompt for login\n",
+				config.Agent.Name())
+		}
+	}
+
 	var result LaunchResult
 	var runErr error
 	if sandboxEnabled {
 		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv, proxyBootstrap.Mounts...)
 	} else {
 		result, runErr = launchHost(ctx, config, daemonURL, sessionID, agentEnv)
+	}
+
+	// Capture fires on clean container exit only (R15). Forcible
+	// termination (Builder.Run returned a non-nil error from
+	// SIGKILL, runtime crash, etc.) skips Capture so the prior
+	// vault entry is retained — the next launch self-heals via the
+	// agent's own refresh or a manual `aileron vault put`.
+	if sandboxEnabled && runErr == nil && authPrep.CaptureFn != nil {
+		captureCtx, cancelCapture := context.WithTimeout(context.Background(), daemonHTTPTimeout)
+		authPrep.CaptureFn(captureCtx)
+		cancelCapture()
 	}
 
 	endCtx, cancelEnd := context.WithTimeout(context.Background(), daemonHTTPTimeout)
