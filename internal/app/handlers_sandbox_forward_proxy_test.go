@@ -79,18 +79,30 @@ func TestSandboxForwardProxy_CONNECTAuthenticatesAndFailsClosedOnMissingSessionC
 	}
 }
 
-func TestSandboxForwardProxy_CONNECTTerminatesTLSAndFailsClosedAfterDecryptedRequest(t *testing.T) {
+func TestSandboxForwardProxy_CONNECTPassthroughReturns502WhenUpstreamUnreachable(t *testing.T) {
 	stateDir := t.TempDir()
 	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
-	handler := newSandboxForwardProxyTestHandlerWithStateDir(t, "daemon-token", stateDir)
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		localDaemonToken:     "daemon-token",
+		sandboxProxyStateDir: stateDir,
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-unreachable" }),
+		specLoader: func() ([]connectorspec.Spec, error) {
+			return nil, nil
+		},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errors.New("simulated upstream unreachable")
+		})},
+	}
+	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
 
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
 		t.Fatal("failed to append CA cert")
 	}
-	proxyURL, err := url.Parse(srv.URL)
+	proxyURL, err := url.Parse(proxy.URL)
 	if err != nil {
 		t.Fatalf("parse proxy URL: %v", err)
 	}
@@ -100,14 +112,28 @@ func TestSandboxForwardProxy_CONNECTTerminatesTLSAndFailsClosedAfterDecryptedReq
 		t.Fatalf("GET through sandbox forward proxy: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
 	}
 	if got := resp.Header.Get("X-Aileron-Session-Id"); got != "session-123" {
 		t.Fatalf("X-Aileron-Session-Id = %q, want session-123", got)
 	}
 	if got := resp.Header.Get("X-Aileron-Proxy-Upstream-Host"); got != "api.example.test" {
 		t.Fatalf("X-Aileron-Proxy-Upstream-Host = %q, want api.example.test", got)
+	}
+
+	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyRejected {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyRejected)
+	}
+	if got := events[0].Payload["aileron.proxy.reject_reason"]; got != "passthrough_upstream_unreachable" {
+		t.Errorf("reject_reason = %v, want passthrough_upstream_unreachable", got)
 	}
 }
 
@@ -272,17 +298,26 @@ func TestSandboxForwardProxy_CONNECTAuthenticatesWithProxyURLUserinfo(t *testing
 	}
 }
 
-func TestSandboxForwardProxy_CONNECTNoMatchAuditsUnresolvedRejection(t *testing.T) {
+func TestSandboxForwardProxy_CONNECTNoMatchPassesThroughToUpstream(t *testing.T) {
 	stateDir := t.TempDir()
 	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
 	auditStore := audit.NewMemStore()
+	var upstreamAuth string
 	srv := &apiServer{
 		localDaemonToken:     "daemon-token",
 		sandboxProxyStateDir: stateDir,
-		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-transparent-rejected" }),
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-transparent-passthrough" }),
 		specLoader: func() ([]connectorspec.Spec, error) {
 			return nil, nil
 		},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamAuth = req.Header.Get("Authorization")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			}, nil
+		})},
 	}
 	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
 	proxy := httptest.NewServer(handler)
@@ -302,8 +337,15 @@ func TestSandboxForwardProxy_CONNECTNoMatchAuditsUnresolvedRejection(t *testing.
 		t.Fatalf("GET through sandbox forward proxy: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, string(body))
+	}
+	if string(body) != `{"ok":true}` {
+		t.Errorf("body = %q, want upstream body verbatim", string(body))
+	}
+	if upstreamAuth != "" {
+		t.Errorf("upstream Authorization = %q, want empty (no credential injected on no-match)", upstreamAuth)
 	}
 
 	events, err := auditStore.ListEvents(context.Background(), audit.EventFilter{})
@@ -313,18 +355,21 @@ func TestSandboxForwardProxy_CONNECTNoMatchAuditsUnresolvedRejection(t *testing.
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if events[0].EventType != model.EventTypeSandboxProxyRejected {
-		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyRejected)
+	if events[0].EventType != model.EventTypeSandboxProxyPassthrough {
+		t.Fatalf("event type = %q, want %q", events[0].EventType, model.EventTypeSandboxProxyPassthrough)
 	}
 	payload := events[0].Payload
 	if payload["aileron.proxy.source"] != sandboxProxySourceTransparentConnectTLS {
 		t.Errorf("proxy source = %v", payload["aileron.proxy.source"])
 	}
-	if payload["aileron.proxy.reject_reason"] != "operation_not_matched" {
-		t.Errorf("reject reason = %v", payload["aileron.proxy.reject_reason"])
+	if payload["aileron.proxy.decision"] != "passthrough" {
+		t.Errorf("decision = %v, want passthrough", payload["aileron.proxy.decision"])
 	}
 	if payload["aileron.proxy.upstream.path"] != "/v1/resource" {
 		t.Errorf("upstream path = %v", payload["aileron.proxy.upstream.path"])
+	}
+	if payload["aileron.proxy.upstream.status"] != http.StatusOK {
+		t.Errorf("upstream status = %v, want 200", payload["aileron.proxy.upstream.status"])
 	}
 	payloadJSON, _ := json.Marshal(payload)
 	if strings.Contains(string(payloadJSON), "not-audited") {
@@ -389,12 +434,15 @@ func TestSandboxForwardProxy_CONNECTMatchedRequestReturnsCapturedProxyRejection(
 	}
 }
 
-func TestSandboxForwardProxy_CONNECTRejectsAmbiguousOperationMatch(t *testing.T) {
+func TestSandboxForwardProxy_CONNECTAmbiguousMatchPassesThroughWithoutCredential(t *testing.T) {
 	stateDir := t.TempDir()
 	caPEM := writeSandboxProxyTestCA(t, stateDir, "session-123")
+	auditStore := audit.NewMemStore()
+	var upstreamAuth string
 	srv := &apiServer{
 		localDaemonToken:     "daemon-token",
 		sandboxProxyStateDir: stateDir,
+		auditRecorder:        audit.NewRecorder(auditStore, nil, func() string { return "audit-ambiguous-passthrough" }),
 		specLoader: func() ([]connectorspec.Spec, error) {
 			return []connectorspec.Spec{{
 				SchemaVersion: connectorspec.SchemaVersion,
@@ -417,6 +465,14 @@ func TestSandboxForwardProxy_CONNECTRejectsAmbiguousOperationMatch(t *testing.T)
 				}},
 			}}, nil
 		},
+		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			upstreamAuth = req.Header.Get("Authorization")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"ambiguous":"passes-through"}`)),
+			}, nil
+		})},
 	}
 	handler := srv.sandboxForwardProxyMiddleware(http.NotFoundHandler())
 	proxy := httptest.NewServer(handler)
@@ -436,16 +492,24 @@ func TestSandboxForwardProxy_CONNECTRejectsAmbiguousOperationMatch(t *testing.T)
 		t.Fatalf("GET through sandbox forward proxy: %v", err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response body: %v", err)
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, string(body))
+	}
+	if string(body) != `{"ambiguous":"passes-through"}` {
+		t.Errorf("body = %q, want upstream body verbatim", string(body))
+	}
+	if upstreamAuth != "" {
+		t.Errorf("upstream Authorization = %q, want empty (no credential injected on ambiguous match)", upstreamAuth)
 	}
 
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body=%s", resp.StatusCode, string(body))
+	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if !strings.Contains(string(body), "matched multiple connector operations") {
-		t.Fatalf("body = %s, want ambiguous-match rejection", string(body))
+	if events[0].EventType != model.EventTypeSandboxProxyPassthrough {
+		t.Fatalf("event type = %q, want passthrough on ambiguous match", events[0].EventType)
 	}
 }
 

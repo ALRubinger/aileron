@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -1320,5 +1321,89 @@ func TestRunConnectorOperation_NoRecorderReturnsFallbackAuditID(t *testing.T) {
 	}
 	if resp.AuditId != "audit-fallback" {
 		t.Fatalf("audit_id = %q, want fallback", resp.AuditId)
+	}
+}
+
+func TestRecordSandboxProxyPassthrough_EmitsDocumentedShape(t *testing.T) {
+	srv, store := newConnectorOperationTestServer(nil)
+
+	req := httptest.NewRequest(http.MethodConnect, "/", nil)
+	req.Header.Set("X-Aileron-Session-Id", "session-passthrough-test")
+	upstream, _ := url.Parse("https://api.unknown.test/v1/resource?token=ignored")
+
+	id := srv.recordSandboxProxyPassthrough(req, sandboxProxySourceTransparentConnectTLS, http.MethodGet, upstream, http.StatusOK)
+	if id == "" {
+		t.Fatal("recordSandboxProxyPassthrough returned empty id")
+	}
+
+	events, err := store.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	evt := events[0]
+	if evt.EventType != model.EventTypeSandboxProxyPassthrough {
+		t.Fatalf("event type = %q, want %q", evt.EventType, model.EventTypeSandboxProxyPassthrough)
+	}
+
+	wantFields := map[string]any{
+		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.source":          sandboxProxySourceTransparentConnectTLS,
+		"aileron.proxy.decision":        "passthrough",
+		"aileron.proxy.method":          "GET",
+		"aileron.proxy.upstream.scheme": "https",
+		"aileron.proxy.upstream.host":   "api.unknown.test",
+		"aileron.proxy.upstream.path":   "/v1/resource",
+		"aileron.proxy.upstream.status": http.StatusOK,
+		"aileron.session.id":            "session-passthrough-test",
+	}
+	for k, want := range wantFields {
+		if got := evt.Payload[k]; got != want {
+			t.Errorf("payload[%q] = %v, want %v", k, got, want)
+		}
+	}
+
+	payloadJSON, _ := json.Marshal(evt.Payload)
+	for _, forbidden := range []string{"Bearer ", "Authorization", "token=ignored"} {
+		if strings.Contains(string(payloadJSON), forbidden) {
+			t.Errorf("payload leaks forbidden substring %q: %s", forbidden, string(payloadJSON))
+		}
+	}
+}
+
+func TestRecordSandboxProxyPassthrough_OmitsSessionIDWhenAbsent(t *testing.T) {
+	srv, store := newConnectorOperationTestServer(nil)
+
+	req := httptest.NewRequest(http.MethodConnect, "/", nil)
+	upstream, _ := url.Parse("https://api.unknown.test/")
+
+	srv.recordSandboxProxyPassthrough(req, sandboxProxySourceTransparentConnectTLS, http.MethodGet, upstream, http.StatusOK)
+
+	events, _ := store.ListEvents(context.Background(), audit.EventFilter{})
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if _, ok := events[0].Payload["aileron.session.id"]; ok {
+		t.Errorf("aileron.session.id present when X-Aileron-Session-Id header was empty: %v", events[0].Payload)
+	}
+}
+
+func TestRecordSandboxProxyPassthrough_RecordsNon2xxUpstreamStatus(t *testing.T) {
+	srv, store := newConnectorOperationTestServer(nil)
+
+	req := httptest.NewRequest(http.MethodConnect, "/", nil)
+	req.Header.Set("X-Aileron-Session-Id", "session-status-test")
+	upstream, _ := url.Parse("https://api.unknown.test/missing")
+
+	srv.recordSandboxProxyPassthrough(req, sandboxProxySourceTransparentConnectTLS, http.MethodGet, upstream, http.StatusNotFound)
+
+	events, _ := store.ListEvents(context.Background(), audit.EventFilter{})
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if got := events[0].Payload["aileron.proxy.upstream.status"]; got != http.StatusNotFound {
+		t.Errorf("aileron.proxy.upstream.status = %v, want %d", got, http.StatusNotFound)
 	}
 }

@@ -302,9 +302,20 @@ const (
 	EventTypeConnectorProxyRejected EventType = "connector.proxy.rejected"
 	EventTypeConnectorProxyProxied  EventType = "connector.proxy.proxied"
 
-	// Sandbox proxy event for HTTPS data-plane attempts rejected before
-	// a connector operation could be uniquely resolved.
+	// Sandbox proxy event for HTTPS data-plane attempts rejected at the
+	// protocol layer (non-CONNECT request, session CA unavailable,
+	// connector specs invalid/unavailable, upstream unreachable during
+	// passthrough). Match-failure cases (no spec matched, ambiguous
+	// match) are not rejections under the credential-injection-only
+	// model; see EventTypeSandboxProxyPassthrough and ADR-0019.
 	EventTypeSandboxProxyRejected EventType = "sandbox.proxy.rejected"
+
+	// Sandbox proxy event for cooperative HTTPS requests whose upstream
+	// no installed connector spec matched (or matched ambiguously).
+	// The request is forwarded to the upstream unmodified and the
+	// response is streamed back to the in-container client. No
+	// credential is injected. See ADR-0019.
+	EventTypeSandboxProxyPassthrough EventType = "sandbox.proxy.passthrough"
 
 	// Sandbox proxy event for launches that proceed (or refuse to
 	// proceed) without the HTTPS data-plane bootstrap. Emitted by the
