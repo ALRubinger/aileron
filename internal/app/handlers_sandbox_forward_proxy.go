@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -58,7 +59,7 @@ func (s *apiServer) HandleSandboxForwardProxy(w http.ResponseWriter, r *http.Req
 		return
 	}
 	upstream := sandboxForwardProxyAbsoluteFormUpstream(r)
-	s.recordSandboxProxyUnresolvedRejected(r, sandboxProxySourceTransparentConnectTLS, r.Method, upstream, "non_connect_proxy_request_unsupported")
+	s.recordSandboxProxyProtocolRejected(r, sandboxProxySourceTransparentConnectTLS, r.Method, upstream, "non_connect_proxy_request_unsupported")
 	w.Header().Set("X-Aileron-Session-Id", auth.SessionID)
 	http.Error(w, "sandbox HTTPS forward proxy requires CONNECT for HTTPS interception; absolute-form proxy requests without CONNECT are not supported", http.StatusForbidden)
 }
@@ -111,7 +112,7 @@ func (s *apiServer) handleSandboxForwardProxyConnect(w http.ResponseWriter, r *h
 		if upstream == nil {
 			upstream = &url.URL{Scheme: "https", Host: targetHost, Path: "/"}
 		}
-		s.recordSandboxProxyUnresolvedRejected(r, sandboxProxySourceTransparentConnectTLS, r.Method, upstream, "session_ca_unavailable")
+		s.recordSandboxProxyProtocolRejected(r, sandboxProxySourceTransparentConnectTLS, r.Method, upstream, "session_ca_unavailable")
 		w.Header().Set("X-Aileron-Session-Id", auth.SessionID)
 		http.Error(w, "sandbox proxy session CA is unavailable for this session; the launcher's session state directory may be missing or corrupted (see ADR-0019)", http.StatusInternalServerError)
 		return
@@ -160,17 +161,15 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn io.Writer, decrypted
 	match, ok, err := s.matchSandboxForwardProxyOperation(decrypted.Method, upstream)
 	if err != nil {
 		if errors.Is(err, errSandboxForwardProxyAmbiguousOperation) {
-			s.recordSandboxProxyUnresolvedRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "ambiguous_operation_match")
-			writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, err.Error())
+			s.passthroughSandboxForwardProxy(conn, decrypted, auth, targetHost, upstream)
 			return
 		}
-		s.recordSandboxProxyUnresolvedRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, sandboxForwardProxyMatchErrorReason(err))
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, sandboxForwardProxyMatchErrorReason(err))
 		writeSandboxForwardProxyError(conn, http.StatusInternalServerError, auth.SessionID, targetHost, err.Error())
 		return
 	}
 	if !ok {
-		s.recordSandboxProxyUnresolvedRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "operation_not_matched")
-		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy decrypted request did not match an installed connector operation")
+		s.passthroughSandboxForwardProxy(conn, decrypted, auth, targetHost, upstream)
 		return
 	}
 	body, contentType, err := readSandboxForwardProxyRequestBody(decrypted)
@@ -187,6 +186,123 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn io.Writer, decrypted
 		return
 	}
 	writeSandboxForwardProxyResponse(conn, auth.SessionID, targetHost, result.UpstreamStatus, derefString(result.ContentType), result.BodyBase64)
+}
+
+// passthroughSandboxForwardProxy forwards a decrypted CONNECT/TLS
+// request to its upstream unmodified and streams the response back
+// through the established TLS connection. Used when the request did
+// not uniquely match an installed connector operation under the
+// credential-injection-only model (ADR-0019). No credential is
+// injected. The audit event is sandbox.proxy.passthrough.
+func (s *apiServer) passthroughSandboxForwardProxy(conn io.Writer, decrypted *http.Request, auth sandboxProxyAuth, targetHost string, upstream *url.URL) {
+	var reqBody io.Reader
+	if decrypted.Body != nil {
+		reqBody = decrypted.Body
+	}
+	upstreamReq, err := http.NewRequestWithContext(decrypted.Context(), decrypted.Method, upstream.String(), reqBody)
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_upstream_request_invalid")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy passthrough upstream request is invalid")
+		return
+	}
+	upstreamReq.ContentLength = decrypted.ContentLength
+	copyPassthroughRequestHeaders(upstreamReq.Header, decrypted.Header)
+
+	client := sandboxProxyHTTPClient(s.sandboxProxyClient)
+	resp, err := client.Do(upstreamReq)
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_upstream_unreachable")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy passthrough upstream unreachable")
+		return
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, sandboxProxyMaxResponseBytes+1))
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_upstream_read_failed")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy passthrough upstream response read failed")
+		return
+	}
+	if len(body) > sandboxProxyMaxResponseBytes {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_upstream_response_too_large")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy passthrough upstream response exceeded size limit")
+		return
+	}
+
+	s.recordSandboxProxyPassthrough(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, resp.StatusCode)
+	writeSandboxForwardProxyPassthroughResponse(conn, auth.SessionID, targetHost, resp, body)
+}
+
+func copyPassthroughRequestHeaders(dst, src http.Header) {
+	for k, vs := range src {
+		if isSandboxForwardProxyHopByHopRequestHeader(k) {
+			continue
+		}
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
+	}
+}
+
+func isSandboxForwardProxyHopByHopRequestHeader(name string) bool {
+	switch http.CanonicalHeaderKey(name) {
+	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade",
+		"X-Aileron-Session-Id",
+		"Host":
+		return true
+	}
+	return false
+}
+
+func isSandboxForwardProxyHopByHopResponseHeader(name string) bool {
+	switch http.CanonicalHeaderKey(name) {
+	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade",
+		"Content-Length":
+		return true
+	}
+	return false
+}
+
+func writeSandboxForwardProxyPassthroughResponse(conn io.Writer, sessionID, targetHost string, resp *http.Response, body []byte) {
+	sessionID = sandboxForwardProxyHeaderValue(sessionID)
+	targetHost = sandboxForwardProxyHeaderValue(targetHost)
+
+	var sb strings.Builder
+	statusText := resp.Status
+	if i := strings.IndexByte(statusText, ' '); i >= 0 {
+		statusText = strings.TrimSpace(statusText[i+1:])
+	}
+	if statusText == "" {
+		statusText = http.StatusText(resp.StatusCode)
+	}
+	fmt.Fprintf(&sb, "HTTP/1.1 %d %s\r\n", resp.StatusCode, statusText)
+
+	for _, k := range sortedHeaderKeys(resp.Header) {
+		if isSandboxForwardProxyHopByHopResponseHeader(k) {
+			continue
+		}
+		for _, v := range resp.Header.Values(k) {
+			fmt.Fprintf(&sb, "%s: %s\r\n", k, sandboxForwardProxyHeaderValue(v))
+		}
+	}
+
+	fmt.Fprintf(&sb, "Connection: close\r\nX-Aileron-Session-Id: %s\r\nX-Aileron-Proxy-Upstream-Host: %s\r\nContent-Length: %d\r\n\r\n", sessionID, targetHost, len(body))
+
+	_, _ = io.WriteString(conn, sb.String())
+	if len(body) > 0 {
+		_, _ = conn.Write(body)
+	}
+}
+
+func sortedHeaderKeys(h http.Header) []string {
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type sandboxForwardProxyOperationMatch struct {

@@ -635,7 +635,41 @@ func (s *apiServer) recordSandboxProxyProxied(r *http.Request, source, connector
 	)
 }
 
-func (s *apiServer) recordSandboxProxyUnresolvedRejected(r *http.Request, source, method string, upstream *url.URL, reason string) string {
+func (s *apiServer) recordSandboxProxyPassthrough(r *http.Request, source, method string, upstream *url.URL, upstreamStatus int) string {
+	if s.auditRecorder == nil {
+		if s.newID != nil {
+			return s.newID()
+		}
+		return audit.DefaultIDFn()
+	}
+	payload := map[string]any{
+		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.source":          source,
+		"aileron.proxy.decision":        "passthrough",
+		"aileron.proxy.method":          method,
+		"aileron.proxy.upstream.scheme": upstream.Scheme,
+		"aileron.proxy.upstream.host":   upstream.Host,
+		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
+		"aileron.proxy.upstream.status": upstreamStatus,
+	}
+	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	return s.auditRecorder.RecordSuccess(
+		r.Context(),
+		model.EventTypeSandboxProxyPassthrough,
+		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
+		payload,
+	)
+}
+
+// recordSandboxProxyProtocolRejected emits sandbox.proxy.rejected for
+// protocol-level failures only: non-CONNECT proxy requests, session CA
+// unavailable, connector specs invalid/unavailable, and passthrough
+// upstream failures. Match-failure outcomes (no spec matched,
+// ambiguous match) are passthrough under the credential-injection-only
+// model and are recorded by recordSandboxProxyPassthrough instead.
+func (s *apiServer) recordSandboxProxyProtocolRejected(r *http.Request, source, method string, upstream *url.URL, reason string) string {
 	if s.auditRecorder == nil {
 		if s.newID != nil {
 			return s.newID()

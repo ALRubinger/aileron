@@ -55,6 +55,20 @@ The eleventh #896 slice routes the first transparent proxy requests through the 
 
 The twelfth #896 slice adds standard-client smoke coverage for the proxy URL shape that sandbox launch emits. A normal HTTP client configured from `HTTPS_PROXY=http://<session-id>:<daemon-token>@<daemon-host>` sends `Proxy-Authorization` through `CONNECT`; the daemon authenticates that userinfo-derived header, completes TLS interception with the session CA, and reaches the same connector credential-injection path. This confirms the internal proxy-bootstrap contract for clients that honor standard proxy environment variables without container-side secret injection.
 
+### Credential injection only (Model A)
+
+The proxy mediates credential injection at the TLS boundary. It is not an egress allowlist.
+
+Cooperative HTTPS requests whose decrypted target does not uniquely match an installed connector spec operation are forwarded to the upstream unmodified. No credential is added. The full request and response stream through the established TLS connection so the in-container client sees the upstream's exact status, headers, and body. These forwarded calls record `sandbox.proxy.passthrough` audit events with the upstream host, path, method, and response status.
+
+`sandbox.proxy.rejected` is reserved for protocol-level failures: non-CONNECT proxy requests, missing session CA material, connector specs invalid or unavailable, and upstream-reachability failures during passthrough. Match-failure outcomes such as no spec matched or ambiguous match are passthrough, not rejection.
+
+The product claim is "sealed credentials" full stop. The agent never sees raw secret bytes, the daemon controls every credentialed call. The proxy is cooperative with the in-container client and is not a hard egress boundary. A hostile in-container process can still bypass the proxy by opening raw TCP sockets to an external host; container-level network hardening (network namespaces, egress firewalls) lives at a different layer and is out of scope for this ADR.
+
+### Threat model scope
+
+The HTTPS data plane assumes the in-container client cooperates with `HTTPS_PROXY`. Common third-party CLIs (`gh`, `aws`, `curl`, etc.) honor `HTTPS_PROXY` by default, so the cooperative model covers the dominant case. Hostile or proxy-bypassing client behavior is not in scope for this control. The sealing claim covers credentials, not exfiltration; an exfiltration threat is a different control and a different ADR.
+
 The first #898 audit-schema slice distinguishes the HTTPS data-plane entry source in audit payloads. Connector-resolved proxy events now include `aileron.proxy.source` as `generated_connector_shim`, `daemon_request_boundary`, or `transparent_connect_tls`. Transparent proxy attempts that fail before a connector operation is uniquely resolved record `sandbox.proxy.rejected` with method, upstream scheme/host/path, session id, source, and rejection reason. These events continue to omit credential bytes, raw headers, request bodies, query strings, and full upstream URLs.
 
 The finishing #896 work flips the v4 HTTPS proxy from opt-in to **default on** for `aileron launch --sandbox=docker` (and `--sandbox=podman`). The v4 product claim — credentialed third-party CLIs run in the container without raw credentials — only holds while the proxy is on, so the claim must hold out of the box. A new `--sandbox-proxy=auto|on|off` flag and `AILERON_SANDBOX_PROXY` env var control the policy explicitly. The flag takes precedence over the env var, which takes precedence over the default. `auto` (the default) behaves identically to `on` for Docker/Podman. `off` disables the bootstrap and records a `sandbox.proxy.disabled` audit event with reason `user_opt_out`. The previous `AILERON_SANDBOX_PROXY_BOOTSTRAP` env var is removed (pre-MVP policy: no backwards-compat shims).
@@ -77,10 +91,13 @@ The proxy/data-plane implementation stands on its own; it never depended on shel
 
 **Only generated shims, no proxy.** Insufficient for third-party CLIs users expect to run inside the sandbox.
 
+**Model B: proxy as egress allowlist (rejected).** An earlier shape of this ADR refused unmatched HTTPS upstreams at the proxy boundary and emitted `sandbox.proxy.rejected reason=operation_not_matched`. That shape claimed two things: credential sealing AND that the proxy was a hard egress boundary against unknown upstreams. The second claim was unenforceable against the threats it appeared to address (a hostile in-container process can open raw TCP sockets and bypass the proxy entirely), and it created visible friction for legitimate calls (a CLI hitting `httpbin.org` or a package index got an opaque proxy 403). The credential-sealing claim sharpens when the egress promise is dropped. See [the credential-injection-only requirements brainstorm](https://github.com/ALRubinger/aileron/blob/main/docs/brainstorms/2026-06-10-v4-proxy-credential-injection-only-requirements.md) for the full reasoning.
+
 ## References
 
 - [Issue #896](https://github.com/ALRubinger/aileron/issues/896) — HTTPS proxy/data-plane implementation
 - [Issue #898](https://github.com/ALRubinger/aileron/issues/898) — runtime audit-schema cross-cut
+- [Credential-injection-only requirements brainstorm](https://github.com/ALRubinger/aileron/blob/main/docs/brainstorms/2026-06-10-v4-proxy-credential-injection-only-requirements.md) — Model A pivot rationale, threat-model framing, and the work split that drives this amendment
 - [ADR-0017](/adr/0017-sandbox-composition) — current sandbox runtime cut
 - [ADR-0018](/adr/0018-v4-single-binary-runtime) — single-binary runtime model
 - [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract) — the two helpers the proxy bootstrap requires from the in-container trust store
