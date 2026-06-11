@@ -88,6 +88,16 @@ type Agent interface {
 	// the container at the path the in-container agent reads. See
 	// ADR-0024 for the contract change.
 	ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir string, mode Mode) ([]string, []MCPMount, error)
+	// AuthSpec returns the agent's declarative description of its
+	// credential bindings. The launcher consumes the spec to render
+	// vault entries into the container at launch (env vars, files in
+	// a writable bind-mount) and to snapshot in-container rotations
+	// back to the vault on clean exit. See [AuthSpec] for the
+	// lifecycle and ADR-0025 for the design.
+	//
+	// Agents that have no vault-backed credentials return the zero
+	// value AuthSpec{}; the launcher treats that as a no-op.
+	AuthSpec() AuthSpec
 }
 
 // Registry maps agent names to their definitions.

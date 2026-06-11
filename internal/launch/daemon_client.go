@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 // daemonHTTPTimeout caps the launch process's HTTP calls to the
@@ -131,6 +134,152 @@ func (c *daemonClient) LocalVaultLocked(ctx context.Context) (locked bool, ok bo
 		return false, false
 	}
 	return body.Locked, true
+}
+
+// ErrAgentCredentialsNotFound is the typed Go error the daemon
+// client surfaces when the daemon returns
+// `{error: {code: "vault_not_found"}}`. The launcher discriminates
+// this from a locked vault so the in-container-login bootstrap path
+// fires only on a genuinely empty vault entry, never on a locked
+// vault the user just needs to unlock. ADR-0025.
+var ErrAgentCredentialsNotFound = errors.New("daemon: agent credentials not found")
+
+// agentCredentialsBody mirrors the OpenAPI AgentCredentials schema.
+// The launcher's daemon client decodes into this rather than the
+// generated api.AgentCredentials shape so the launch package stays
+// independent of `internal/api/gen` (the generated package brings
+// in the full server-side type tree, which the launcher doesn't
+// otherwise depend on).
+type agentCredentialsBody struct {
+	Value    []byte                       `json:"value"`
+	Metadata *agentCredentialsMetadataDTO `json:"metadata,omitempty"`
+}
+
+type agentCredentialsMetadataDTO struct {
+	Type        string            `json:"type,omitempty"`
+	Environment string            `json:"environment,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+}
+
+// GetAgentCredentials fetches the per-agent credential envelope at
+// `agents/<name>/oauth` through the daemon's HTTP surface. The
+// daemon's `vault_not_found` error code surfaces as
+// [ErrAgentCredentialsNotFound]; a locked vault surfaces as
+// [vault.ErrCredentialUnavailable]. Callers wrap typed checks with
+// `errors.Is`.
+func (c *daemonClient) GetAgentCredentials(ctx context.Context, name string) (vault.Secret, error) {
+	endpoint := c.baseURL + "/v1/vault/agents/" + url.PathEscape(name) + "/credentials"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return vault.Secret{}, err
+	}
+	c.authorize(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return vault.Secret{}, fmt.Errorf("get agent credentials: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var body agentCredentialsBody
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return vault.Secret{}, fmt.Errorf("decode agent credentials: %w", err)
+		}
+		secret := vault.Secret{Value: body.Value}
+		if body.Metadata != nil {
+			secret.Metadata = vault.Metadata{
+				Type:        body.Metadata.Type,
+				Environment: body.Metadata.Environment,
+				Labels:      body.Metadata.Labels,
+			}
+		}
+		return secret, nil
+	case http.StatusNotFound:
+		// Discriminate by body code, not status alone, so a future
+		// 404 envelope shape change doesn't silently re-route the
+		// in-container-login fallthrough.
+		if classifyVaultError(resp) == "vault_not_found" {
+			return vault.Secret{}, ErrAgentCredentialsNotFound
+		}
+		return vault.Secret{}, httpStatusError(resp, "GET agent credentials")
+	case http.StatusLocked:
+		if classifyVaultError(resp) == "vault_locked" {
+			return vault.Secret{}, vault.ErrCredentialUnavailable
+		}
+		return vault.Secret{}, httpStatusError(resp, "GET agent credentials")
+	default:
+		return vault.Secret{}, httpStatusError(resp, "GET agent credentials")
+	}
+}
+
+// PutAgentCredentials writes the per-agent credential envelope back
+// to the daemon's vault. Used by the launcher's Capture pass on
+// clean container exit and by Codex's pre-launch refresh hook (the
+// rotated bundle must be in vault before container start per AE6).
+func (c *daemonClient) PutAgentCredentials(ctx context.Context, name string, secret vault.Secret) error {
+	body := agentCredentialsBody{Value: secret.Value}
+	if secret.Metadata.Type != "" || secret.Metadata.Environment != "" || len(secret.Metadata.Labels) > 0 {
+		body.Metadata = &agentCredentialsMetadataDTO{
+			Type:        secret.Metadata.Type,
+			Environment: secret.Metadata.Environment,
+			Labels:      secret.Metadata.Labels,
+		}
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal agent credentials: %w", err)
+	}
+	endpoint := c.baseURL + "/v1/vault/agents/" + url.PathEscape(name) + "/credentials"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.authorize(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("put agent credentials: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusLocked:
+		if classifyVaultError(resp) == "vault_locked" {
+			return vault.ErrCredentialUnavailable
+		}
+		return httpStatusError(resp, "PUT agent credentials")
+	default:
+		return httpStatusError(resp, "PUT agent credentials")
+	}
+}
+
+// classifyVaultError peeks at the response body for the daemon's
+// named error code (`vault_not_found`, `vault_locked`). Returns the
+// empty string when the body can't be decoded. Consumes the body —
+// callers that fall through to `httpStatusError` must hand it a
+// fresh response; in this file the switch arms call exactly one of
+// the two and return immediately.
+func classifyVaultError(resp *http.Response) string {
+	// Buffer the body so a future `httpStatusError` re-decode still
+	// sees content. Bodies on the daemon's error path are small JSON
+	// envelopes; reading them whole is cheap.
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(raw))
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return ""
+	}
+	return env.Error.Code
 }
 
 func (c *daemonClient) authorize(req *http.Request) {

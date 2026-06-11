@@ -23,6 +23,7 @@ func (emptyBinaryAgent) LLMEndpointEnv() string { return "" }
 func (emptyBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
 	return nil, nil, nil
 }
+func (emptyBinaryAgent) AuthSpec() AuthSpec { return AuthSpec{} }
 
 type namedBinaryAgent struct{ name string }
 
@@ -34,6 +35,7 @@ func (a namedBinaryAgent) LLMEndpointEnv() string { return "" }
 func (a namedBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
 	return nil, nil, nil
 }
+func (a namedBinaryAgent) AuthSpec() AuthSpec { return AuthSpec{} }
 
 func TestFirstAgentBinaryHandlesEmptyAgent(t *testing.T) {
 	if got := firstAgentBinary(emptyBinaryAgent{}); got != "" {

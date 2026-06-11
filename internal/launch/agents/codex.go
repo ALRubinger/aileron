@@ -72,6 +72,44 @@ func (c Codex) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, m
 	return c.configureHostMCP(mcpBin, mcpEnv)
 }
 
+// AuthSpec returns Codex's vault-backed credential descriptor per
+// ADR-0025.
+//
+// A single FileBinding at agents/codex/oauth renders
+// /home/agent/.codex/auth.json (mode 0600) with the chatgpt-mode
+// envelope. The binding uses a parent-dir mount at /home/agent/.codex/
+// (MountAsFile = false). The first-launch bootstrap requires this:
+// when the vault is empty the launcher writes no file, the in-
+// container Codex login writes auth.json into the mounted dir, and
+// Capture reads the result back. A file-mount strategy would have no
+// host-side inode to bind, so the login would write into the
+// container overlay FS and Capture would see nothing.
+//
+// ConfigureMCP under ModeSandbox still installs a read-only file
+// mount at /home/agent/.codex/config.toml. Container runtimes apply
+// mounts in declaration order; the file mount lands after the
+// auth-spec dir mount and overlays config.toml at its specific path
+// without masking auth.json.
+//
+// The PreLaunchRefresh hook exchanges the refresh token for a new
+// access token against auth.openai.com before the container starts,
+// persists the rotated bundle to vault, and hands Render the new
+// secret. AE6 invariant: the rotated bundle is in vault before
+// container start; a failed persist aborts the launch.
+func (c Codex) AuthSpec() launch.AuthSpec {
+	return launch.AuthSpec{
+		FileBindings: []launch.FileBinding{{
+			VaultPath:        codexVaultPath,
+			ContainerPath:    codexAuthContainerPath,
+			Mode:             0o600,
+			Required:         false,
+			Render:           codexRender,
+			Capture:          codexCapture,
+			PreLaunchRefresh: codexPreLaunchRefresh,
+		}},
+	}
+}
+
 func (c Codex) configureHostMCP(mcpBin string, mcpEnv map[string]string) ([]string, []launch.MCPMount, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -104,7 +142,11 @@ func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]s
 	// Sandbox mode emits only our [mcp_servers.aileron] block — no
 	// merge with a host-side config. The empty-string baseline mirrors
 	// what mergeCodexMCPBlock produces when called with no prior file.
-	body := mergeCodexMCPBlock("", mcpBin, mcpEnv)
+	// Sandbox mode also emits `cli_auth_credentials_store = "file"`
+	// as a top-level key so the in-container Codex resolves auth
+	// from auth.json — the AuthSpec FileBinding writes auth.json
+	// into the same directory at launch (R22).
+	body := mergeCodexSandboxConfig(mcpBin, mcpEnv)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		return nil, nil, fmt.Errorf("writing codex sandbox config: %w", err)
 	}
@@ -114,6 +156,20 @@ func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]s
 		ReadOnly: true,
 	}
 	return nil, []launch.MCPMount{mount}, nil
+}
+
+// mergeCodexSandboxConfig is the ModeSandbox variant of the merge.
+// In addition to the [mcp_servers.aileron] block, it prepends
+// `cli_auth_credentials_store = "file"` as a top-level key so the
+// in-container Codex CLI reads auth.json instead of trying to use
+// the macOS Keychain / Linux secret-tool keyring (which do not
+// exist inside the sandbox). The host config is never touched
+// under ModeSandbox.
+func mergeCodexSandboxConfig(mcpBin string, mcpEnv map[string]string) string {
+	// Start with the top-level key, then append the [mcp_servers.*]
+	// block via the existing merge over an empty baseline.
+	return `cli_auth_credentials_store = "file"` + "\n" +
+		mergeCodexMCPBlock("", mcpBin, mcpEnv)
 }
 
 // mergeCodexMCPBlock replaces existing [mcp_servers.aileron] and

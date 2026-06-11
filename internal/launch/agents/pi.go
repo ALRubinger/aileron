@@ -45,3 +45,9 @@ func (p Pi) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ la
 	)
 	return []string{"--mcp-config", mcpConfig}, nil, nil
 }
+
+// AuthSpec returns Pi's vault-backed credential descriptor. Pi has
+// no per-agent vault binding today, so it returns the zero value;
+// the launcher treats that as a no-op. A future v1.x issue would
+// fill this in for Pi sandbox launches.
+func (p Pi) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }

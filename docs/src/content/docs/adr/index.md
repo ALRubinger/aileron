@@ -32,6 +32,7 @@ This section holds the architecture decision records (ADRs) that define Aileron'
 - [ADR-0022: v4 Tiered Network Policy](/adr/0022-v4-tiered-network-policy) — *Proposed.* The v4 container runtime separates credentialed proxy-mediated traffic, direct uncredentialed egress, and denied private-network traffic.
 - [ADR-0023: v4 Vault-Centric Encryption Schema](/adr/0023-v4-vault-centric-encryption) — *Proposed.* v4 stores credentials under vault keys that are wrapped per member, allowing personal and future shared vaults to use the same storage model.
 - [ADR-0024: Sandbox MCP Parity (Path B1)](/adr/0024-sandbox-mcp-parity) — *Accepted.* Sandbox launch revives `aileron-mcp` as a stdio subprocess of the in-container agent, reached via a read-only host-mounted binary; the daemon is reached over HTTPS via `host.docker.internal`. Aileron is one MCP server, not an MCP gateway.
+- [ADR-0025: Vault-backed Agent Authentication Injection](/adr/0025-vault-backed-agent-auth) — *Accepted.* The `Agent` interface gains an `AuthSpec` descriptor with Render (vault to in-container bytes/env) and Capture (in-container bytes to vault) bindings. The launcher reaches the vault through a new daemon endpoint, snapshots in-container rotations on clean exit, and seeds the vault via the agent's own interactive login on first launch. Claude and Codex ship per-agent specs; Codex pre-launch refresh persists rotated tokens before container start.
 
 ## The sequence
 
