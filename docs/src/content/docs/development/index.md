@@ -20,6 +20,7 @@ If you're looking for end-user docs, the [Getting Started](/getting-started/) gu
 - [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/) — verify the v4 HTTPS proxy works with `curl`, `gh`, and `aws`; success and failure cases with expected audit events.
 - [Submitting Changes](/development/submitting-changes/) — branch and PR conventions, commit message format, ADR amendments, what gets reviewed.
 - [Adding an Agent](/development/adding-an-agent/) — how to wire a new AI coding agent into `aileron launch` via the `Agent` SPI.
+- [Sandbox Agent Auth](/development/sandbox-agent-auth/) — vault-backed credential injection for `aileron launch <agent> --sandbox=docker`: vault path scheme, per-agent envelope schemas, the in-container-login-then-snapshot flow, manual seeding via `aileron vault put`, and the recovery path.
 
 ## A note on the docs site versus the repo
 

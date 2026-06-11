@@ -486,7 +486,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			// no Required entries. Print the bootstrap UX line per
 			// R30 so the user sees why the agent is about to prompt
 			// for login.
-			fmt.Fprintf(os.Stderr, "[launcher] no credentials in vault for %s — agent will prompt for login\n",
+			fmt.Fprintf(os.Stderr, "[launcher] no credentials in vault for %s; agent will prompt for login\n",
 				config.Agent.Name())
 		}
 	}
