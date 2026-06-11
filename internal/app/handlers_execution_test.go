@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/model"
+	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
@@ -851,4 +853,194 @@ func TestRunExecution_EncryptedCredential_DecryptsWithKEK(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 (decrypted + executed), got %d: %s", w.Code, w.Body.String())
 	}
+}
+
+// failingIntentStore wraps a real IntentStore and injects configured errors on
+// Get and/or Update, letting tests exercise the store-failure paths in the
+// approval-action handlers without polluting the production store with hooks.
+type failingIntentStore struct {
+	inner      store.IntentStore
+	failGet    error
+	failUpdate error
+}
+
+func (f *failingIntentStore) Create(ctx context.Context, intent api.IntentEnvelope) error {
+	return f.inner.Create(ctx, intent)
+}
+
+func (f *failingIntentStore) Get(ctx context.Context, intentID string) (api.IntentEnvelope, error) {
+	if f.failGet != nil {
+		return api.IntentEnvelope{}, f.failGet
+	}
+	return f.inner.Get(ctx, intentID)
+}
+
+func (f *failingIntentStore) List(ctx context.Context, filter store.IntentFilter) ([]api.IntentEnvelope, error) {
+	return f.inner.List(ctx, filter)
+}
+
+func (f *failingIntentStore) Update(ctx context.Context, intent api.IntentEnvelope) error {
+	if f.failUpdate != nil {
+		return f.failUpdate
+	}
+	return f.inner.Update(ctx, intent)
+}
+
+// newApprovalActionServer builds a server with an in-memory approval
+// orchestrator and a seeded pending-approval intent, then requests an approval
+// and returns the server plus the requested approval record.
+func newApprovalActionServer(t *testing.T, ctx context.Context, intentID, actionType string) (*apiServer, approval.Approval) {
+	t.Helper()
+	s := newExecutionServer()
+	s.approvals = mem.NewApprovalStore()
+	s.orchestrator = approval.NewInMemoryOrchestrator(s.approvals, func() string { return "approval-id" })
+	s.vault.Put(ctx, "connectors/github/default", []byte("ciphertext"), vault.Metadata{Type: "api_key"})
+	intent := api.IntentEnvelope{
+		IntentId:    intentID,
+		WorkspaceId: "ws_1",
+		Status:      api.PendingApproval,
+		Action:      api.ActionIntent{Type: actionType, Summary: "summary"},
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	if err := s.intents.Create(ctx, intent); err != nil {
+		t.Fatalf("Create intent: %v", err)
+	}
+	apr, err := s.orchestrator.Request(ctx, approval.ApprovalRequest{
+		IntentID:    intent.IntentId,
+		WorkspaceID: intent.WorkspaceId,
+		Rationale:   "test",
+	})
+	if err != nil {
+		t.Fatalf("Request approval: %v", err)
+	}
+	return s, apr
+}
+
+func assertStoreError(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp api.Error
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if resp.Error.Code != "store_error" {
+		t.Fatalf("error code = %q, want store_error", resp.Error.Code)
+	}
+}
+
+// R1/R5 success counterpart: Deny with a healthy store returns 200 and the
+// persisted intent reflects the denied status.
+func TestDenyRequest_Success(t *testing.T) {
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s, apr := newApprovalActionServer(t, ctx, "int_deny_ok", "git.push")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/deny", strings.NewReader(`{"reason":"nope"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.DenyRequest(w, req, apr.ApprovalID)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp api.ApprovalActionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.IntentStatus == nil || *resp.IntentStatus != api.Denied {
+		t.Fatalf("intent status = %v, want denied", resp.IntentStatus)
+	}
+	intent, err := s.intents.Get(ctx, "int_deny_ok")
+	if err != nil {
+		t.Fatalf("Get intent: %v", err)
+	}
+	if intent.Status != api.Denied {
+		t.Fatalf("persisted intent status = %q, want denied", intent.Status)
+	}
+}
+
+// R1: a Get failure in Deny returns 500 store_error and does not report the
+// intent as denied. This is the core regression — it fails before U2's fix.
+func TestDenyRequest_GetFailure(t *testing.T) {
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s, apr := newApprovalActionServer(t, ctx, "int_deny_getfail", "git.push")
+	s.intents = &failingIntentStore{inner: s.intents, failGet: errors.New("boom")}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/deny", strings.NewReader(`{"reason":"nope"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.DenyRequest(w, req, apr.ApprovalID)
+
+	assertStoreError(t, w)
+
+	// R3: orchestrator-side approval mutation is not rolled back.
+	stored, err := s.approvals.Get(ctx, apr.ApprovalID)
+	if err != nil {
+		t.Fatalf("Get approval: %v", err)
+	}
+	if stored.Status != api.ApprovalStatusDenied {
+		t.Fatalf("approval status = %q, want denied (state must survive the 500)", stored.Status)
+	}
+}
+
+// R2: an Update failure in Deny (Get succeeds) returns 500 store_error.
+func TestDenyRequest_UpdateFailure(t *testing.T) {
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s, apr := newApprovalActionServer(t, ctx, "int_deny_updfail", "git.push")
+	s.intents = &failingIntentStore{inner: s.intents, failUpdate: errors.New("boom")}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/deny", strings.NewReader(`{"reason":"nope"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.DenyRequest(w, req, apr.ApprovalID)
+
+	assertStoreError(t, w)
+
+	// R3: approval mutation is not rolled back.
+	stored, err := s.approvals.Get(ctx, apr.ApprovalID)
+	if err != nil {
+		t.Fatalf("Get approval: %v", err)
+	}
+	if stored.Status != api.ApprovalStatusDenied {
+		t.Fatalf("approval status = %q, want denied (state must survive the 500)", stored.Status)
+	}
+}
+
+// R2: an Update failure in Approve (after grant creation) returns 500 store_error.
+func TestApproveRequest_UpdateFailure(t *testing.T) {
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s, apr := newApprovalActionServer(t, ctx, "int_approve_updfail", "git.push")
+	s.intents = &failingIntentStore{inner: s.intents, failUpdate: errors.New("boom")}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/approve", strings.NewReader(`{}`))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.ApproveRequest(w, req, apr.ApprovalID)
+
+	assertStoreError(t, w)
+}
+
+// R2: an Update failure in Modify (after grant creation) returns 500 store_error.
+func TestModifyRequest_UpdateFailure(t *testing.T) {
+	ctx := setTestUserClaims(context.Background(), "usr_a")
+	s, apr := newApprovalActionServer(t, ctx, "int_modify_updfail", "git.issue.create")
+	s.intents = &failingIntentStore{inner: s.intents, failUpdate: errors.New("boom")}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/approvals/"+apr.ApprovalID+"/modify", strings.NewReader(`{"modifications":{"issue_title":"approved"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	s.ModifyRequest(w, req, apr.ApprovalID)
+
+	assertStoreError(t, w)
 }

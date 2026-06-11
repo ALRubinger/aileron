@@ -50,7 +50,7 @@ type apiServer struct {
 	orchestrator         *approval.InMemoryOrchestrator
 	vault                vault.Vault
 	notifier             notify.Notifier
-	intents              *mem.IntentStore
+	intents              store.IntentStore
 	approvals            *mem.ApprovalStore
 	policies             *mem.PolicyStore
 	grants               *mem.GrantStore
@@ -485,7 +485,10 @@ func (s *apiServer) ApproveRequest(w http.ResponseWriter, r *http.Request, appro
 		intent.Status = api.Approved
 		intent.Decision.ExecutionGrantId = &grantID
 		intent.UpdatedAt = time.Now().UTC()
-		s.intents.Update(ctx, intent)
+		if err := s.intents.Update(ctx, intent); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+			return
+		}
 	} else {
 		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
@@ -532,10 +535,16 @@ func (s *apiServer) DenyRequest(w http.ResponseWriter, r *http.Request, approval
 	}
 
 	// Update intent status.
-	if intent, err := s.intents.Get(ctx, apr.IntentID); err == nil {
-		intent.Status = api.Denied
-		intent.UpdatedAt = time.Now().UTC()
-		s.intents.Update(ctx, intent)
+	intent, err := s.intents.Get(ctx, apr.IntentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	intent.Status = api.Denied
+	intent.UpdatedAt = time.Now().UTC()
+	if err := s.intents.Update(ctx, intent); err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
 	}
 
 	s.emitTraceEvent(ctx, apr.IntentID, apr.WorkspaceID, "", api.TraceEvent{
@@ -587,7 +596,10 @@ func (s *apiServer) ModifyRequest(w http.ResponseWriter, r *http.Request, approv
 		intent.Status = api.Approved
 		intent.Decision.ExecutionGrantId = &grantID
 		intent.UpdatedAt = time.Now().UTC()
-		s.intents.Update(ctx, intent)
+		if err := s.intents.Update(ctx, intent); err != nil {
+			writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+			return
+		}
 	} else {
 		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
