@@ -290,6 +290,54 @@ func TestCodex_PreLaunchRefresh_StripsProviderBodyFromError(t *testing.T) {
 	}
 }
 
+func TestCodex_PreLaunchRefresh_FreshnessDecisionAcrossExpiresAtShapes(t *testing.T) {
+	// Three production shapes the refresh decision must handle:
+	// future expiry (skip refresh), past expiry (refresh), empty
+	// expires_at (refresh defensively because Codex CLI does not
+	// populate the field today and a missing timestamp is
+	// indistinguishable from "we don't know"), and malformed
+	// expires_at (refresh defensively; rotated envelope overwrites
+	// the bad value).
+	tests := []struct {
+		name        string
+		expiresAt   string
+		wantRefresh bool
+	}{
+		{"future-expiry skips refresh", time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339), false},
+		{"past-expiry triggers refresh", "2020-01-01T00:00:00Z", true},
+		{"empty-expires-at triggers refresh", "", true},
+		{"malformed-expires-at triggers refresh", "not-a-timestamp", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			envelope := []byte(fmt.Sprintf(
+				`{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r","expires_at":%q}}`,
+				tc.expiresAt))
+			refreshed := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				refreshed = true
+				_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "new", "expires_in": 3600})
+			}))
+			defer srv.Close()
+
+			spec := agents.Codex{}.AuthSpec()
+			_, err := spec.FileBindings[0].PreLaunchRefresh(
+				vault.Secret{Value: envelope},
+				launch.RefreshDeps{
+					Ctx:                 context.Background(),
+					HTTPClient:          redirectClient(srv.URL),
+					PutAgentCredentials: func(s vault.Secret) error { return nil },
+				})
+			if err != nil {
+				t.Fatalf("PreLaunchRefresh: %v", err)
+			}
+			if refreshed != tc.wantRefresh {
+				t.Errorf("refresh fired = %v, want %v", refreshed, tc.wantRefresh)
+			}
+		})
+	}
+}
+
 func TestCodex_PreLaunchRefresh_MalformedEnvelopeFailsEarly(t *testing.T) {
 	spec := agents.Codex{}.AuthSpec()
 	_, err := spec.FileBindings[0].PreLaunchRefresh(
