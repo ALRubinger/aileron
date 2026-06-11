@@ -36,7 +36,7 @@ func TestAuthSpec_ZeroValueIsValid(t *testing.T) {
 // the launcher merges."
 func TestEnvBinding_RenderRoundTrip(t *testing.T) {
 	binding := EnvBinding{
-		VaultPath: "agents/example/api-key",
+		VaultPath: "agents/example/oauth",
 		Required:  true,
 		Render: func(s vault.Secret) (map[string]string, error) {
 			return map[string]string{"EXAMPLE_API_KEY": string(s.Value)}, nil
@@ -131,7 +131,7 @@ func TestValidateAuthSpec_RejectsBindingsWithoutRender(t *testing.T) {
 		{
 			name: "env binding missing render",
 			spec: AuthSpec{
-				EnvBindings: []EnvBinding{{VaultPath: "agents/example/k"}},
+				EnvBindings: []EnvBinding{{VaultPath: "agents/example/oauth"}},
 			},
 			wantErr: ErrAuthSpecRenderNil,
 		},
@@ -192,7 +192,7 @@ func TestValidateAuthSpec_RejectsBindingsWithoutRender(t *testing.T) {
 func TestValidateAuthSpec_AcceptsCompleteSpec(t *testing.T) {
 	spec := AuthSpec{
 		EnvBindings: []EnvBinding{{
-			VaultPath: "agents/example/api-key",
+			VaultPath: "agents/example/oauth",
 			Render:    func(vault.Secret) (map[string]string, error) { return nil, nil },
 		}},
 		FileBindings: []FileBinding{{

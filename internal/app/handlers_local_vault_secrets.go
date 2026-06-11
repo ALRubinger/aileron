@@ -32,7 +32,7 @@ func (s *apiServer) GetAgentCredentials(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if s.vault == nil {
-		writeError(w, http.StatusServiceUnavailable, "no_vault",
+		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
 		return
 	}
@@ -67,7 +67,7 @@ func (s *apiServer) PutAgentCredentials(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if s.vault == nil {
-		writeError(w, http.StatusServiceUnavailable, "no_vault",
+		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
 		return
 	}

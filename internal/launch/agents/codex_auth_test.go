@@ -21,8 +21,9 @@ import (
 
 // Codex AuthSpec contract (U5):
 //
-//   - AuthSpec ships one FileBinding (auth.json) with MountAsFile=true
-//     and a PreLaunchRefresh hook.
+//   - AuthSpec ships one FileBinding (auth.json) with a parent-dir
+//     mount strategy so first-launch bootstrap can seed the vault,
+//     plus a PreLaunchRefresh hook.
 //   - Render/Capture are byte-identity over a valid chatgpt-mode
 //     envelope.
 //   - PreLaunchRefresh with a still-fresh access token is a no-op:
@@ -58,8 +59,8 @@ func TestCodex_AuthSpec_Shape(t *testing.T) {
 	if fb.Mode != 0o600 {
 		t.Errorf("Mode = %v, want 0600", fb.Mode)
 	}
-	if !fb.MountAsFile {
-		t.Errorf("MountAsFile = false; Codex must mount auth.json as a file so config.toml mount coexists")
+	if fb.MountAsFile {
+		t.Errorf("MountAsFile = true; first-launch bootstrap with an empty vault requires a parent-dir mount so the in-container login can write auth.json")
 	}
 	if fb.PreLaunchRefresh == nil {
 		t.Errorf("PreLaunchRefresh is nil; Codex must declare a refresh hook")

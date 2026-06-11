@@ -11,10 +11,30 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
+	"time"
 
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
+
+// preLaunchRefreshTimeout caps how long the launcher waits for the
+// vendor's token endpoint to respond during a pre-launch refresh. A
+// slow or hostile auth.openai.com response must not hang every
+// sandbox launch; 15s is conservative (well above the median Codex
+// refresh) and short enough that the user sees the failure and can
+// recover. Comment kept here rather than at the call site so the
+// rationale travels with the constant.
+const preLaunchRefreshTimeout = 15 * time.Second
+
+// preLaunchRefreshHTTPClient returns the shared HTTP client used by
+// per-binding PreLaunchRefresh hooks. The bare http.DefaultClient
+// has no timeout, which would leave launches hung on a slow vendor
+// response — RefreshDeps's documented "sane timeout" comes from
+// here, not from the caller.
+func preLaunchRefreshHTTPClient() *http.Client {
+	return &http.Client{Timeout: preLaunchRefreshTimeout}
+}
 
 // authSpecDaemon is the subset of *daemonClient the auth-spec
 // runtime depends on. Defined as an interface so tests substitute a
@@ -54,6 +74,17 @@ type authSpecPrep struct {
 	// OpenCode in v1). Useful for skipping the bootstrap-UX status
 	// line on agents that have nothing to seed.
 	HasBindings bool
+
+	// RenderedAnyCredential reports whether any FileBinding or
+	// EnvBinding actually rendered content from the vault. False
+	// means every binding was a vault miss (the agent will need to
+	// log in inside the container) and the launcher should print
+	// the R30 bootstrap UX status line. HasBindings can still be
+	// true for an empty-vault launch when a StaticFile lands; the
+	// dedicated flag avoids the false negative the
+	// `len(EnvAdditions)==0 && len(Mounts)==0` gate produced when
+	// any mount existed for a static-only reason.
+	RenderedAnyCredential bool
 }
 
 // prepareAuthSpec materializes the agent's AuthSpec into the
@@ -120,6 +151,7 @@ func prepareAuthSpec(
 		for k, v := range rendered {
 			prep.EnvAdditions[k] = v
 		}
+		prep.RenderedAnyCredential = true
 	}
 
 	// One transient dir per agent. Group file bindings and static
@@ -234,7 +266,7 @@ func prepareAuthSpec(
 		if fb.PreLaunchRefresh != nil {
 			refreshed, refreshErr := fb.PreLaunchRefresh(secret, RefreshDeps{
 				Ctx:        ctx,
-				HTTPClient: http.DefaultClient,
+				HTTPClient: preLaunchRefreshHTTPClient(),
 				PutAgentCredentials: func(s vault.Secret) error {
 					return daemon.PutAgentCredentials(ctx, vaultBindingTail(fb.VaultPath), s)
 				},
@@ -260,6 +292,7 @@ func prepareAuthSpec(
 			cleanup()
 			return prep, fmt.Errorf("auth spec: write %s: %w", hostPath, err)
 		}
+		prep.RenderedAnyCredential = true
 		captureTargets = append(captureTargets, fileCapture{
 			HostPath:  hostPath,
 			VaultName: vaultBindingTail(fb.VaultPath),
@@ -391,7 +424,7 @@ func prepareAuthSpec(
 					continue
 				}
 				sessionLog.Info("captured agent credentials to vault",
-					"agent", agentName, "vault_path", "agents/"+target.VaultName,
+					"agent", agentName, "vault_path", "agents/"+target.VaultName+"/oauth",
 					"source", target.HostPath)
 			}
 		}
@@ -417,39 +450,18 @@ func captureWarn(log *slog.Logger, stderr io.Writer, agentName, hostPath string,
 // passes only the agent identifier and the daemon reconstructs the
 // canonical vault path internally.
 //
-// The convention "agents/<name>/<purpose>" is documented in ADR-0025
-// and pinned by the spec's namespace-scoped path. Bindings that
-// don't follow it (or that use the agent name in a different slot)
-// will misroute through this helper — that is by design: the
-// non-conventional shape should surface as an early failure rather
-// than silently land in the wrong vault path.
+// validateAuthSpec rejects bindings whose VaultPath does not follow
+// the documented `agents/<name>/oauth` scheme, so this helper does
+// not need to defend against malformed input on the live path; the
+// fallbacks below cover the test paths that probe edge cases.
 func vaultBindingTail(vaultPath string) string {
-	// Expected shape is "agents/<name>/<purpose>"; return <name>.
-	// Trim leading slashes for defensive parsing.
-	for len(vaultPath) > 0 && vaultPath[0] == '/' {
-		vaultPath = vaultPath[1:]
+	parts := strings.SplitN(strings.TrimLeft(vaultPath, "/"), "/", 3)
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	default:
+		return parts[1]
 	}
-	// Split on `/`. We want segment 1 (the agent name).
-	first := -1
-	for i := 0; i < len(vaultPath); i++ {
-		if vaultPath[i] == '/' {
-			first = i
-			break
-		}
-	}
-	if first < 0 {
-		return vaultPath
-	}
-	tail := vaultPath[first+1:]
-	second := -1
-	for i := 0; i < len(tail); i++ {
-		if tail[i] == '/' {
-			second = i
-			break
-		}
-	}
-	if second < 0 {
-		return tail
-	}
-	return tail[:second]
 }

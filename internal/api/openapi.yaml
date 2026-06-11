@@ -661,6 +661,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgentCredentials"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
           description: No credential entry at the agent's vault path
           content:
@@ -669,6 +671,18 @@ paths:
                 $ref: "#/components/schemas/Error"
         "423":
           description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Vault read failed for a reason other than missing entry or locked vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
           content:
             application/json:
               schema:
@@ -708,6 +722,18 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "423":
           description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Vault write failed for a reason other than a locked vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
           content:
             application/json:
               schema:

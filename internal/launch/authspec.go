@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strings"
 
 	"github.com/ALRubinger/aileron/internal/vault"
 )
@@ -186,6 +187,35 @@ var ErrAuthSpecCaptureNil = errors.New("authspec: file binding has nil Capture")
 // ContainerPath is empty.
 var ErrAuthSpecEmptyPath = errors.New("authspec: binding has empty path")
 
+// ErrAuthSpecBadVaultPath is returned when a binding's VaultPath
+// does not follow the documented `agents/<name>/<purpose>` scheme.
+// The daemon endpoint scopes by name and stores at the canonical
+// `agents/<name>/oauth` path; bindings that use a different shape
+// would silently misroute today, so validation rejects them up
+// front.
+var ErrAuthSpecBadVaultPath = errors.New("authspec: vault path does not match agents/<name>/<purpose>")
+
+// vaultPathConforms reports whether a binding's VaultPath follows
+// the ADR-0025 namespace scheme. The daemon's per-agent endpoint
+// translates `{name}` to `agents/<name>/oauth`; until v1 ships a
+// way for the launcher to read arbitrary purposes from the daemon,
+// every binding must use that exact suffix or the round-trip
+// through the daemon would silently misroute.
+func vaultPathConforms(p string) bool {
+	p = strings.TrimLeft(p, "/")
+	parts := strings.Split(p, "/")
+	if len(parts) != 3 {
+		return false
+	}
+	if parts[0] != "agents" {
+		return false
+	}
+	if parts[1] == "" || parts[2] != "oauth" {
+		return false
+	}
+	return true
+}
+
 // validateAuthSpec checks that all bindings in a spec have the
 // callbacks the launcher requires. Called by the launcher before
 // resolving any vault paths so invalid specs surface as a launch
@@ -195,6 +225,9 @@ func validateAuthSpec(spec AuthSpec) error {
 		if eb.VaultPath == "" {
 			return fmt.Errorf("%w: EnvBindings[%d]", ErrAuthSpecEmptyPath, i)
 		}
+		if !vaultPathConforms(eb.VaultPath) {
+			return fmt.Errorf("%w: EnvBindings[%d] %q", ErrAuthSpecBadVaultPath, i, eb.VaultPath)
+		}
 		if eb.Render == nil {
 			return fmt.Errorf("%w: EnvBindings[%d] %q", ErrAuthSpecRenderNil, i, eb.VaultPath)
 		}
@@ -202,6 +235,9 @@ func validateAuthSpec(spec AuthSpec) error {
 	for i, fb := range spec.FileBindings {
 		if fb.VaultPath == "" || fb.ContainerPath == "" {
 			return fmt.Errorf("%w: FileBindings[%d]", ErrAuthSpecEmptyPath, i)
+		}
+		if !vaultPathConforms(fb.VaultPath) {
+			return fmt.Errorf("%w: FileBindings[%d] %q", ErrAuthSpecBadVaultPath, i, fb.VaultPath)
 		}
 		if fb.Render == nil {
 			return fmt.Errorf("%w: FileBindings[%d] %q", ErrAuthSpecRenderNil, i, fb.VaultPath)

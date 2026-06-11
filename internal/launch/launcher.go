@@ -481,11 +481,13 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			agentEnv[k] = v
 		}
 		proxyBootstrap.Mounts = append(proxyBootstrap.Mounts, authPrep.Mounts...)
-		if authPrep.HasBindings && len(authPrep.EnvAdditions) == 0 && len(authPrep.Mounts) == 0 {
-			// Spec had bindings but none rendered: empty vault and
-			// no Required entries. Print the bootstrap UX line per
-			// R30 so the user sees why the agent is about to prompt
-			// for login.
+		if authPrep.HasBindings && !authPrep.RenderedAnyCredential {
+			// Spec declared bindings but every one was a vault miss
+			// (empty vault, no Required entries). Print the
+			// bootstrap UX line per R30 so the user sees why the
+			// agent is about to prompt for login. A static-file
+			// mount (Claude's onboarding stub) does not count as a
+			// rendered credential.
 			fmt.Fprintf(os.Stderr, "[launcher] no credentials in vault for %s; agent will prompt for login\n",
 				config.Agent.Name())
 		}

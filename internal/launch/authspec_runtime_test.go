@@ -462,7 +462,7 @@ func TestPrepareAuthSpec_EnvBindingMerges(t *testing.T) {
 	daemon.seed("example", []byte("sekret"))
 	spec := AuthSpec{
 		EnvBindings: []EnvBinding{{
-			VaultPath: "agents/example/api-key",
+			VaultPath: "agents/example/oauth",
 			Required:  true,
 			Render: func(s vault.Secret) (map[string]string, error) {
 				return map[string]string{"EXAMPLE_API_KEY": string(s.Value)}, nil
@@ -518,7 +518,7 @@ func TestPrepareAuthSpec_CapturePutFailureSurfacesWarning(t *testing.T) {
 func TestPrepareAuthSpec_EnvBindingRequiredMissingErrors(t *testing.T) {
 	spec := AuthSpec{
 		EnvBindings: []EnvBinding{{
-			VaultPath: "agents/example/api-key",
+			VaultPath: "agents/example/oauth",
 			Required:  true,
 			Render: func(s vault.Secret) (map[string]string, error) {
 				return map[string]string{"X": string(s.Value)}, nil
@@ -538,7 +538,7 @@ func TestPrepareAuthSpec_EnvBindingRequiredMissingErrors(t *testing.T) {
 func TestPrepareAuthSpec_EnvBindingOptionalMissingContinues(t *testing.T) {
 	spec := AuthSpec{
 		EnvBindings: []EnvBinding{{
-			VaultPath: "agents/example/api-key",
+			VaultPath: "agents/example/oauth",
 			Required:  false,
 			Render: func(s vault.Secret) (map[string]string, error) {
 				return map[string]string{"X": string(s.Value)}, nil
@@ -561,7 +561,7 @@ func TestPrepareAuthSpec_EnvBindingGetErrorPropagates(t *testing.T) {
 	daemon.getErrors["example"] = errors.New("network down")
 	spec := AuthSpec{
 		EnvBindings: []EnvBinding{{
-			VaultPath: "agents/example/api-key",
+			VaultPath: "agents/example/oauth",
 			Required:  false,
 			Render:    func(s vault.Secret) (map[string]string, error) { return nil, nil },
 		}},
@@ -580,7 +580,7 @@ func TestPrepareAuthSpec_EnvBindingRenderErrorPropagates(t *testing.T) {
 	daemon.seed("example", []byte("v"))
 	spec := AuthSpec{
 		EnvBindings: []EnvBinding{{
-			VaultPath: "agents/example/api-key",
+			VaultPath: "agents/example/oauth",
 			Required:  true,
 			Render:    func(s vault.Secret) (map[string]string, error) { return nil, errors.New("bad shape") },
 		}},
@@ -647,6 +647,129 @@ func TestPrepareAuthSpec_ValidationErrorReturnsBeforeFS(t *testing.T) {
 	}
 }
 
+func TestPrepareAuthSpec_EmptyVaultFirstLaunchProducesWritableParentMount(t *testing.T) {
+	// Regression test for the Codex first-launch bootstrap bug: an
+	// empty vault with Required=false must still produce a writable
+	// parent-dir mount so the in-container login can write the
+	// credential file and Capture can read it on clean exit. Before
+	// the fix, MountAsFile=true skipped the parent-dir mount AND the
+	// emptyVault continue skipped the per-file mount, leaving the
+	// in-container login writing into the container overlay FS.
+	daemon := newFakeDaemon() // empty vault
+	spec := AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/codex/oauth",
+			ContainerPath: "/home/agent/.codex/auth.json",
+			Mode:          0o600,
+			Required:      false,
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+		}},
+	}
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if len(prep.Mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1 (parent dir mount for first-launch bootstrap)", len(prep.Mounts))
+	}
+	mount := prep.Mounts[0]
+	if mount.Target != "/home/agent/.codex" {
+		t.Errorf("mount target = %q, want /home/agent/.codex (parent dir, not file)", mount.Target)
+	}
+	if mount.ReadOnly {
+		t.Errorf("mount is read-only; in-container login needs write access to seed auth.json")
+	}
+	// Simulate the in-container login writing auth.json.
+	loginBytes := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"a","refresh_token":"r"}}`)
+	hostPath := filepath.Join(mount.Source, "auth.json")
+	if err := os.WriteFile(hostPath, loginBytes, 0o600); err != nil {
+		t.Fatalf("simulate login write: %v", err)
+	}
+	prep.CaptureFn(context.Background())
+	if len(daemon.puts) != 1 {
+		t.Fatalf("daemon.puts = %d, want 1 (capture should PUT the seeded login)", len(daemon.puts))
+	}
+	if !bytes.Equal(daemon.puts[0].Secret.Value, loginBytes) {
+		t.Errorf("seeded value = %q, want %q", daemon.puts[0].Secret.Value, loginBytes)
+	}
+}
+
+func TestPrepareAuthSpec_RejectsNonConformingVaultPath(t *testing.T) {
+	// Bindings whose VaultPath does not follow agents/<name>/oauth
+	// would silently misroute through the daemon API today (the
+	// daemon endpoint scopes by name and stores at /oauth only).
+	// Validation must reject them up front rather than letting them
+	// write to the wrong vault path.
+	spec := AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/example/api-key",
+			ContainerPath: "/x",
+			Render:        func(vault.Secret) ([]byte, error) { return nil, nil },
+			Capture:       func([]byte) (vault.Secret, error) { return vault.Secret{}, nil },
+		}},
+	}
+	_, err := prepareAuthSpec(context.Background(), "example", spec, newFakeDaemon(),
+		newTestLogger(), nil)
+	if !errors.Is(err, ErrAuthSpecBadVaultPath) {
+		t.Fatalf("err = %v, want ErrAuthSpecBadVaultPath", err)
+	}
+}
+
+func TestPrepareAuthSpec_R30BootstrapLineFiresOnEmptyVault(t *testing.T) {
+	// RenderedAnyCredential must be false when no FileBinding or
+	// EnvBinding rendered anything, even if a StaticFile produced a
+	// mount. The launcher uses this signal for the R30 status line.
+	spec := AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/claude/oauth",
+			ContainerPath: "/home/agent/.claude/.credentials.json",
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+		}},
+		StaticFiles: []StaticFile{{
+			ContainerPath: "/home/agent/.claude.json",
+			Mode:          0o644,
+			Content:       []byte(`{}`),
+		}},
+	}
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
+		newTestLogger(), nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+	if !prep.HasBindings {
+		t.Errorf("HasBindings = false, want true")
+	}
+	if prep.RenderedAnyCredential {
+		t.Errorf("RenderedAnyCredential = true on empty vault; the R30 status line would not fire")
+	}
+}
+
+func TestPrepareAuthSpec_RenderedAnyCredentialIsTrueOnHit(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte(`{"claudeAiOauth":{"accessToken":"a"}}`))
+	spec := AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/claude/oauth",
+			ContainerPath: "/home/agent/.claude/.credentials.json",
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+		}},
+	}
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+	if !prep.RenderedAnyCredential {
+		t.Errorf("RenderedAnyCredential = false on vault hit")
+	}
+}
+
 func TestPrepareAuthSpec_MountAsFileSkipsParentDirMount(t *testing.T) {
 	// Codex's auth.json needs a file mount, not a parent-dir mount,
 	// so the read-only config.toml mount that ConfigureMCP installs
@@ -686,7 +809,7 @@ func TestVaultBindingTail(t *testing.T) {
 		{"agents/claude/oauth", "claude"},
 		{"agents/codex/oauth", "codex"},
 		{"/agents/claude/oauth", "claude"},
-		{"agents/example/api-key", "example"},
+		{"agents/example/oauth", "example"},
 		{"orphan", "orphan"},
 	}
 	for _, tc := range tests {

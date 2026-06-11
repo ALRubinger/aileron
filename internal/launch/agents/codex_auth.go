@@ -178,15 +178,31 @@ func codexPreLaunchRefresh(s vault.Secret, deps launch.RefreshDeps) (vault.Secre
 		// refresh again.
 		rotatedRefresh = env.Tokens.RefreshToken
 	}
-	env.Tokens.AccessToken = resp.AccessToken
-	env.Tokens.RefreshToken = rotatedRefresh
+
+	// Mutate the envelope through a generic map so any forward-
+	// compatible fields OpenAI adds (under the existing keys or as
+	// new top-level keys) survive the round trip. Re-marshaling the
+	// typed `codexAuthEnvelope` would silently drop anything not
+	// represented in the Go struct, which is a real risk because the
+	// Capture path otherwise preserves raw bytes byte-for-byte.
+	var raw map[string]any
+	if err := json.Unmarshal(s.Value, &raw); err != nil {
+		return vault.Secret{}, fmt.Errorf("codex pre-launch refresh: re-parse envelope: %w", err)
+	}
+	tokens, _ := raw["tokens"].(map[string]any)
+	if tokens == nil {
+		tokens = map[string]any{}
+	}
+	tokens["access_token"] = resp.AccessToken
+	tokens["refresh_token"] = rotatedRefresh
 	if resp.ExpiresIn > 0 {
-		env.Tokens.ExpiresAt = time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second).
+		tokens["expires_at"] = time.Now().Add(time.Duration(resp.ExpiresIn) * time.Second).
 			UTC().Format(time.RFC3339)
 	}
-	env.LastRefresh = time.Now().UTC().Format(time.RFC3339)
+	raw["tokens"] = tokens
+	raw["last_refresh"] = time.Now().UTC().Format(time.RFC3339)
 
-	newBytes, err := json.Marshal(env)
+	newBytes, err := json.Marshal(raw)
 	if err != nil {
 		return vault.Secret{}, fmt.Errorf("codex pre-launch refresh: marshal envelope: %w", err)
 	}
@@ -196,13 +212,14 @@ func codexPreLaunchRefresh(s vault.Secret, deps launch.RefreshDeps) (vault.Secre
 	}
 
 	// Persist BEFORE returning so the AE6 invariant holds. If the
-	// daemon PUT fails, we abort the launch — running the container
-	// against a token rotated upstream but not persisted locally
-	// would orphan the new refresh token (the prior one is
-	// invalidated by the rotation, so retrying without persistence
-	// would dead-end).
+	// daemon PUT fails, we abort the launch and the vault is now
+	// stale relative to the vendor: the prior refresh token may have
+	// been invalidated by the rotation, leaving the user's only
+	// recovery path a fresh in-container login. We surface that
+	// recovery path explicitly rather than implying retry will
+	// succeed.
 	if err := deps.PutAgentCredentials(newSecret); err != nil {
-		return vault.Secret{}, fmt.Errorf("codex pre-launch refresh: persist rotated bundle to vault: %w (the refresh token is still valid for retry against the vendor, but the next launch will not see the new bundle; re-run `aileron launch codex` once the vault is reachable)",
+		return vault.Secret{}, fmt.Errorf("codex pre-launch refresh: persist rotated bundle to vault: %w (the vendor rotated the refresh token but the new bundle did not reach the vault, so the next launch cannot refresh again; recover with `aileron secret set agents/codex/oauth` and a fresh login, or delete the vault entry and re-run `aileron launch codex --sandbox=docker`)",
 			err)
 	}
 	return newSecret, nil

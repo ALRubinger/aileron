@@ -77,10 +77,19 @@ func (c Codex) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, m
 //
 // A single FileBinding at agents/codex/oauth renders
 // /home/agent/.codex/auth.json (mode 0600) with the chatgpt-mode
-// envelope. The binding uses MountAsFile = true: the launcher
-// mounts auth.json as a single file rather than mounting the
-// parent /home/agent/.codex/ directory, so Codex's read-only
-// config.toml mount installed by ConfigureMCP stays unmasked.
+// envelope. The binding uses a parent-dir mount at /home/agent/.codex/
+// (MountAsFile = false). The first-launch bootstrap requires this:
+// when the vault is empty the launcher writes no file, the in-
+// container Codex login writes auth.json into the mounted dir, and
+// Capture reads the result back. A file-mount strategy would have no
+// host-side inode to bind, so the login would write into the
+// container overlay FS and Capture would see nothing.
+//
+// ConfigureMCP under ModeSandbox still installs a read-only file
+// mount at /home/agent/.codex/config.toml. Container runtimes apply
+// mounts in declaration order; the file mount lands after the
+// auth-spec dir mount and overlays config.toml at its specific path
+// without masking auth.json.
 //
 // The PreLaunchRefresh hook exchanges the refresh token for a new
 // access token against auth.openai.com before the container starts,
@@ -94,7 +103,6 @@ func (c Codex) AuthSpec() launch.AuthSpec {
 			ContainerPath:    codexAuthContainerPath,
 			Mode:             0o600,
 			Required:         false,
-			MountAsFile:      true,
 			Render:           codexRender,
 			Capture:          codexCapture,
 			PreLaunchRefresh: codexPreLaunchRefresh,
