@@ -43,6 +43,12 @@ type Runner interface {
 	Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error
 }
 
+// DefaultRunner returns the production Runner that shells out to the
+// container runtime executable (docker/podman). Callers outside this
+// package use it to drive runtime commands (e.g. image inspection)
+// through the same code path the Builder uses internally.
+func DefaultRunner() Runner { return execRunner{} }
+
 type execRunner struct{}
 
 func (execRunner) Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error {
