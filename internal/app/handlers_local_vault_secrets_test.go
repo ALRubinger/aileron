@@ -381,6 +381,30 @@ func TestListAgentCredentials_EmptyVaultReturnsEmptyArray(t *testing.T) {
 	}
 }
 
+func TestListAgentCredentials_LockedVaultReturnsEmptyOK(t *testing.T) {
+	// A locked LockableVault (no inner) returns an empty slice from List
+	// rather than ErrCredentialUnavailable, because listing never
+	// decrypts a stored value (see vault.LockableVault.List). Unlike
+	// Get/Put/Delete, List does NOT yield 423 on a locked vault — it
+	// returns 200 with an empty agents array. Pin that contract so a
+	// future change cannot quietly add a 423 path to list.
+	lv := vault.NewLockableVault()
+	s := newAgentCredentialsServer(t, lv)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.AgentCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if got.Agents == nil {
+		t.Fatal("agents must be a non-nil (empty) array")
+	}
+	if len(got.Agents) != 0 {
+		t.Errorf("agents = %v, want empty on locked vault", got.Agents)
+	}
+}
+
 func TestListAgentCredentials_FiltersNonAgentPaths(t *testing.T) {
 	v := vault.NewMemVault()
 	s := newAgentCredentialsServer(t, v)
