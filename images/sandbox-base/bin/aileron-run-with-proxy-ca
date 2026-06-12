@@ -12,4 +12,12 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 aileron-install-proxy-ca "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
-exec su -p -s /bin/sh agent -c 'exec "$@"' aileron-agent "$@"
+
+# Drop to the unprivileged agent user and exec the command directly.
+# su-exec execs argv without a shell and without option parsing, so a
+# command carrying `--`-prefixed flags (e.g. `claude --allowedTools ...`)
+# reaches the agent intact. BusyBox `su -c` is unusable here: its getopt
+# scans the whole argv and rejects the inner command's long flags
+# ("su: unrecognized option: allowedTools"). Direct exec also keeps the
+# agent as tini's child for clean signal forwarding.
+exec su-exec agent "$@"
