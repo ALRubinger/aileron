@@ -2,6 +2,7 @@ package agents_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -63,8 +64,36 @@ func TestClaude_AuthSpec_Shape(t *testing.T) {
 	if sf.Mode != 0o644 {
 		t.Errorf("StaticFile mode = %v, want 0644", sf.Mode)
 	}
-	if string(sf.Content) != `{"hasCompletedOnboarding":true,"installMethod":"native"}` {
-		t.Errorf("StaticFile content drift: %q", sf.Content)
+	assertOnboardingStub(t, sf.Content)
+}
+
+// assertOnboardingStub verifies the three contractual flags the stub
+// must carry to make a sandbox launch silent: onboarding completed,
+// installMethod matching the devcontainer's npm-global install (so
+// `/doctor` is clean), and the workspace pre-trusted (so the folder
+// trust dialog does not fire). Parsed semantically rather than matched
+// as a string so field ordering or additive fields do not break it.
+func assertOnboardingStub(t *testing.T, content []byte) {
+	t.Helper()
+	var stub struct {
+		HasCompletedOnboarding bool   `json:"hasCompletedOnboarding"`
+		InstallMethod          string `json:"installMethod"`
+		Projects               map[string]struct {
+			HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(content, &stub); err != nil {
+		t.Fatalf("onboarding stub is not valid JSON: %v (content=%q)", err, content)
+	}
+	if !stub.HasCompletedOnboarding {
+		t.Errorf("hasCompletedOnboarding = false; the theme picker will paint on every launch")
+	}
+	if stub.InstallMethod != "global" {
+		t.Errorf("installMethod = %q, want \"global\" to match the devcontainer's `npm install -g`; a mismatch makes /doctor report the CLI missing", stub.InstallMethod)
+	}
+	const workspace = "/home/agent/workspace"
+	if !stub.Projects[workspace].HasTrustDialogAccepted {
+		t.Errorf("projects[%q].hasTrustDialogAccepted = false; the folder trust dialog will block every launch", workspace)
 	}
 }
 
@@ -164,15 +193,13 @@ func TestClaude_AuthSpec_RoundTrip(t *testing.T) {
 }
 
 func TestClaude_OnboardingStub_Constant(t *testing.T) {
-	// The onboarding stub must be the documented content per R18 /
-	// AE4. A drift here means Claude paints the theme picker on
-	// every launch and the user notices.
+	// The onboarding stub must carry the flags that make a launch silent
+	// per R18 / AE4: drift here means Claude paints the theme picker,
+	// reports itself broken via /doctor, or blocks on the folder trust
+	// dialog on every launch.
 	spec := agents.Claude{}.AuthSpec()
 	sf := spec.StaticFiles[0]
-	const want = `{"hasCompletedOnboarding":true,"installMethod":"native"}`
-	if string(sf.Content) != want {
-		t.Errorf("onboarding stub drift: got %q, want %q", sf.Content, want)
-	}
+	assertOnboardingStub(t, sf.Content)
 }
 
 // errIsMalformed pins the error sentinel pattern in Claude's

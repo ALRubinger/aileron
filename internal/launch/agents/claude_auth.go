@@ -54,13 +54,60 @@ type claudeAiOauth struct {
 // and the user's recovery options (inspect, re-login, etc.) per R13.
 var errClaudeEnvelopeMalformed = errors.New("claude: credentials envelope is malformed")
 
-// claudeOnboardingStub is the constant payload written to
-// /home/agent/.claude.json on every launch. {"hasCompletedOnboarding":
-// true, "installMethod": "native"} short-circuits Claude's first-run
-// wizard so the user does not pay the theme-picker tax on every
-// sandbox launch. Kept as a package-level constant so the schema is
-// visible in one place when Anthropic adds new onboarding fields.
-var claudeOnboardingStub = []byte(`{"hasCompletedOnboarding":true,"installMethod":"native"}`)
+// claudeWorkspacePath is the container directory the launcher runs
+// Claude in (the bind-mounted project workspace). It must match
+// container.WorkspacePath and the runtime `--workdir`; it is hardcoded
+// here to keep the agents package free of an import on the container
+// package, mirroring how the credential/onboarding paths above are
+// spelled out literally.
+const claudeWorkspacePath = "/home/agent/workspace"
+
+// claudeOnboardingStub is the payload written to /home/agent/.claude.json
+// on every launch. It short-circuits three first-run interruptions so a
+// vault-rendered sandbox launch is silent end-to-end:
+//
+//   - hasCompletedOnboarding skips the theme picker / first-run wizard.
+//   - installMethod "global" matches the devcontainer's
+//     `npm install -g @anthropic-ai/claude-code`. Claude's `/doctor`
+//     uses installMethod to decide where to verify the binary; "native"
+//     made it look for ~/.local/bin/claude (the native-installer path,
+//     which the npm install never creates) and report the CLI as
+//     "missing or broken". "global" verifies the PATH-resolved global
+//     binary the devcontainer actually installs.
+//   - projects[workspace].hasTrustDialogAccepted pre-accepts the folder
+//     trust dialog ("Is this a project you trust?") for the bind-mounted
+//     workspace, so the agent does not block on it on every launch. The
+//     sandbox container is the trust boundary, so pre-accepting inside
+//     it is safe.
+//
+// Built from a typed value rather than a string literal so the nested
+// shape stays valid as Anthropic adds onboarding fields.
+var claudeOnboardingStub = mustMarshalOnboardingStub()
+
+func mustMarshalOnboardingStub() []byte {
+	type projectTrust struct {
+		HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
+	}
+	stub := struct {
+		HasCompletedOnboarding bool                    `json:"hasCompletedOnboarding"`
+		InstallMethod          string                  `json:"installMethod"`
+		Projects               map[string]projectTrust `json:"projects"`
+	}{
+		HasCompletedOnboarding: true,
+		InstallMethod:          "global",
+		Projects: map[string]projectTrust{
+			claudeWorkspacePath: {HasTrustDialogAccepted: true},
+		},
+	}
+	b, err := json.Marshal(stub)
+	if err != nil {
+		// The shape is a fixed literal; marshaling it cannot fail at
+		// runtime. Panic so a refactor that breaks it surfaces in tests
+		// rather than silently shipping an empty onboarding file.
+		panic("claude: marshaling onboarding stub: " + err.Error())
+	}
+	return b
+}
 
 // claudeRender writes the vault's stored bytes into the in-container
 // credentials file verbatim. We validate the envelope on the way
