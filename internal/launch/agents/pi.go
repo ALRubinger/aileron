@@ -46,8 +46,25 @@ func (p Pi) ConfigureMCP(mcpBin string, mcpEnv map[string]string, _ string, _ la
 	return []string{"--mcp-config", mcpConfig}, nil, nil
 }
 
-// AuthSpec returns Pi's vault-backed credential descriptor. Pi has
-// no per-agent vault binding today, so it returns the zero value;
-// the launcher treats that as a no-op. A future v1.x issue would
-// fill this in for Pi sandbox launches.
-func (p Pi) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+// AuthSpec returns Pi's vault-backed credential descriptor. Pi keeps
+// its provider credentials in a dedicated `auth.json` under
+// `~/.pi/agent/`, written by `/login` and loaded on startup. That is a
+// rotatable on-disk credential file (separate from settings.json), so
+// the binding is a FileBinding with byte-identity Render/Capture.
+// Required is false so an unseeded vault falls through to Pi's
+// in-container `/login` bootstrap, which Capture then snapshots on
+// clean exit. MountAsFile is false (the default): Pi's ConfigureMCP
+// passes MCP config via a CLI flag, not a file mount, so no sibling
+// mount needs to coexist with auth.json.
+func (p Pi) AuthSpec() launch.AuthSpec {
+	return launch.AuthSpec{
+		FileBindings: []launch.FileBinding{{
+			VaultPath:     piVaultPath,
+			ContainerPath: piAuthContainerPath,
+			Mode:          0o600,
+			Required:      false,
+			Render:        piRender,
+			Capture:       piCapture,
+		}},
+	}
+}

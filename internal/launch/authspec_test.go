@@ -10,9 +10,9 @@ import (
 
 // TestAuthSpec_ZeroValueIsValid pins the no-op-agent contract: the
 // zero-value AuthSpec is a legal return from Agent.AuthSpec() and
-// must not panic on field access. Goose, Pi, and OpenCode all ship
-// with this shape in v1, so the contract is load-bearing for the
-// launcher's default code path.
+// must not panic on field access. An agent with no bindable
+// credential ships this shape, so the contract is load-bearing for
+// the launcher's default code path.
 func TestAuthSpec_ZeroValueIsValid(t *testing.T) {
 	spec := AuthSpec{}
 	if len(spec.EnvBindings) != 0 {

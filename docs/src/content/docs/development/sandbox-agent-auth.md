@@ -12,12 +12,19 @@ This page is for operators and contributors. It documents the per-agent envelope
 
 Per-agent credentials live under the namespace `agents/<name>/<purpose>`:
 
-| Path                  | Owner | Envelope schema                                                                                |
-|-----------------------|-------|------------------------------------------------------------------------------------------------|
-| `agents/claude/oauth` | Claude Code  | `{"claudeAiOauth":{"accessToken":...,"refreshToken":...,"expiresAt":...,"scopes":[...]}}` |
-| `agents/codex/oauth`  | OpenAI Codex | `{"auth_mode":"chatgpt","tokens":{"access_token":...,"refresh_token":...,"id_token":...,"account_id":...},"last_refresh":"..."}` |
+| Path                    | Owner | Binding | Envelope / secret shape                                                                                |
+|-------------------------|-------|---------|--------------------------------------------------------------------------------------------------------|
+| `agents/claude/oauth`   | Claude Code  | FileBinding | `{"claudeAiOauth":{"accessToken":...,"refreshToken":...,"expiresAt":...,"scopes":[...]}}` |
+| `agents/codex/oauth`    | OpenAI Codex | FileBinding | `{"auth_mode":"chatgpt","tokens":{"access_token":...,"refresh_token":...,"id_token":...,"account_id":...},"last_refresh":"..."}` |
+| `agents/goose/oauth`    | Goose        | EnvBinding  | Raw provider API key (opaque bytes), rendered into `ANTHROPIC_API_KEY` |
+| `agents/opencode/oauth` | OpenCode     | FileBinding | `{"<provider>":{...credential...},...}` — `auth.json` keyed by provider name |
+| `agents/pi/oauth`       | Pi           | FileBinding | `{"<provider>":{"type":"api_key","key":...},...}` — `auth.json` keyed by provider name |
 
-Other agents (Goose, OpenCode, Pi) ship a zero-value `AuthSpec{}` in v1: they continue to prompt for login on every sandbox launch. Per-agent specs for those three are tracked as follow-up issues.
+Two binding shapes appear in the table. A **FileBinding** backs a rotatable on-disk credential file: the launcher renders the vault bytes into the file before launch and snapshots the (possibly rotated) file back via Capture on clean exit. An **EnvBinding** backs a static credential read from the environment: the launcher renders the stored secret into one or more env vars at launch and has nothing to capture, because an env-key agent does not rewrite a credential file in-container.
+
+Goose authenticates with a provider API key (resolved from `<PROVIDER>_API_KEY` or its keyring), so its binding is an EnvBinding rendering the stored key into `ANTHROPIC_API_KEY` (Goose's default provider under launch; seed the matching key for a different provider). OpenCode and Pi each persist provider credentials in a standalone `auth.json` (OpenCode under `~/.local/share/opencode/`, Pi under `~/.pi/agent/`), so both use a byte-identity FileBinding. Pi's `auth.json` is the dedicated credential file, distinct from `settings.json`, so the binding never snapshots non-credential session state.
+
+The vault path's third segment is the literal `oauth` for every agent even when the stored secret is an API key, not an OAuth bundle. The daemon's per-agent endpoint and `vaultPathConforms` (in `internal/launch/authspec.go`) require exactly `agents/<name>/oauth`; any other shape fails launch validation.
 
 The daemon's HTTP surface scopes the path at the routing layer. `GET/PUT /v1/vault/agents/{name}/credentials` translates `{name}` internally to `agents/<name>/oauth`. Other vault paths are unreachable through this endpoint.
 
@@ -44,8 +51,12 @@ then starts the container with the bind-mount empty. The in-container agent perf
 
 - **Claude Code:** paste-the-code OAuth fallback in the terminal.
 - **Codex CLI:** device-auth flow against `auth.openai.com`.
+- **OpenCode:** `opencode auth login` writes `auth.json`.
+- **Pi:** `/login` writes `auth.json`.
 
 When the container exits cleanly, Capture reads the file the agent wrote and PUTs the bytes to the vault. Every later launch renders silently.
+
+Goose's EnvBinding has no Capture (there is no credential file to snapshot), so first-launch seeding for Goose is by manual `aileron vault put agents/goose/oauth` rather than by an in-container login that Capture stores.
 
 ## Manual seeding
 
