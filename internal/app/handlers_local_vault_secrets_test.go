@@ -538,7 +538,10 @@ func newAuditingAgentCredentialsServer(t *testing.T, v vault.Vault) (*apiServer,
 func assertNoCredentialLeak(t *testing.T, events []audit.Event, logBuf *bytes.Buffer) {
 	t.Helper()
 	for _, e := range events {
-		raw, _ := json.Marshal(e.Payload)
+		raw, err := json.Marshal(e.Payload)
+		if err != nil {
+			t.Fatalf("marshal event payload: %v", err)
+		}
 		for _, forbidden := range vaultCredentialForbidden {
 			if strings.Contains(string(raw), forbidden) {
 				t.Errorf("audit payload leaked %q: %s", forbidden, string(raw))
@@ -639,6 +642,19 @@ func TestGetAgentCredentials_MissingEntryEmitsFailureEvent(t *testing.T) {
 	events := listVaultCredentialEvents(t, store)
 	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialRead)
 	assertFailureClass(t, ev, "vault_not_found")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestGetAgentCredentials_LockedVaultEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewLockableVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/codex/credentials", nil)
+	s.GetAgentCredentials(rec, req, "codex")
+	assertStatus(t, rec, http.StatusLocked)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialRead)
+	assertFailureClass(t, ev, "vault_locked")
 	assertNoCredentialLeak(t, events, logBuf)
 }
 
