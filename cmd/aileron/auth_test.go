@@ -182,6 +182,40 @@ func TestRunAuth_HostNotAuthenticated(t *testing.T) {
 	}
 }
 
+// TestRunAuth_ExtractError covers the non-ErrNotAuthenticated extract
+// failure branch: a credential file that exists but is unreadable
+// surfaces the underlying read error rather than the login-recovery
+// message. Skipped when running as root (chmod 000 does not deny root)
+// and on Windows (POSIX perms do not apply).
+func TestRunAuth_ExtractError(t *testing.T) {
+	skipIfClaudeKeychainOnly(t) // darwin Claude path ignores the HOME fixture
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file permissions do not gate reads on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 does not deny root")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	path := filepath.Join(home, ".claude", ".credentials.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"t"}}`), 0o000); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"claude", "--import-from-host"}, authTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "error reading host credentials") {
+		t.Errorf("stderr = %q, want extract-error message", stderr.String())
+	}
+}
+
 func TestRunAuth_MalformedEnvelope(t *testing.T) {
 	// A file present but failing the agent's Capture (Codex envelope
 	// missing the required refresh_token). Codex reads its file on every

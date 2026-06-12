@@ -5,7 +5,6 @@ package hostimport
 import (
 	"bytes"
 	"errors"
-	"os"
 	"os/exec"
 )
 
@@ -40,14 +39,23 @@ func extract(agent string, opts Options) ([]byte, error) {
 		return readKeychain(service, opts.KeychainPath)
 	case AgentCodex:
 		// Prefer the file when the Codex CLI wrote one; fall back to the
-		// keyring service only when the file is absent.
+		// keyring service only when the file is absent. Read directly
+		// rather than stat-then-read so a file that exists but is
+		// unreadable surfaces its real error instead of silently falling
+		// back to the keychain (and so there is no TOCTOU window).
 		path, err := defaultCredentialPath(agent)
 		if err != nil {
 			return nil, err
 		}
 		if path != "" {
-			if _, statErr := os.Stat(path); statErr == nil {
-				return readCredentialFile(path)
+			data, readErr := readCredentialFile(path)
+			if readErr == nil {
+				return data, nil
+			}
+			// Only the absent/empty case (ErrNotAuthenticated) falls
+			// through to the keychain; any other read error propagates.
+			if !errors.Is(readErr, ErrNotAuthenticated) {
+				return nil, readErr
 			}
 		}
 		service := opts.KeychainService

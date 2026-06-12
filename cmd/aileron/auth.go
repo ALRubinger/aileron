@@ -65,15 +65,15 @@ func runAuthImport(agentName string, registry *launch.Registry, stdout, stderr i
 
 	raw, err := hostimport.Extract(agentName, hostimport.Options{})
 	if err != nil {
-		switch {
-		case errors.Is(err, hostimport.ErrNotAuthenticated):
+		if errors.Is(err, hostimport.ErrNotAuthenticated) {
 			fmt.Fprintf(stderr, "error: no host credentials found for %s\n", agentName)
 			fmt.Fprintf(stderr, "log in first, then re-run; or use interactive in-container login: aileron launch %s --sandbox=docker\n", agentName)
-		case errors.Is(err, hostimport.ErrLinuxKeyringUnsupported):
-			fmt.Fprintf(stderr, "error: %v\n", err)
-		default:
-			fmt.Fprintf(stderr, "error reading host credentials: %v\n", err)
+			return 1
 		}
+		// Any other extraction error (including the Linux-keyring
+		// deferral, whose message already names the recovery paths) is
+		// surfaced verbatim.
+		fmt.Fprintf(stderr, "error reading host credentials: %v\n", err)
 		return 1
 	}
 

@@ -73,6 +73,61 @@ func TestExtract_KeychainReturnsBytes(t *testing.T) {
 	}
 }
 
+// TestExtract_ClaudeDefaultServiceName exercises the default-service
+// branch: when Options.KeychainService is empty, Claude reads the
+// DefaultClaudeKeychainService name. The read still targets the
+// throwaway keychain (KeychainPath set), so the real login-keychain
+// item is never touched — we seed the throwaway keychain under the
+// default service name.
+func TestExtract_ClaudeDefaultServiceName(t *testing.T) {
+	keychain := newTestKeychain(t)
+	want := []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`)
+	addGenericPassword(t, keychain, DefaultClaudeKeychainService, want)
+
+	got, err := Extract(AgentClaude, Options{KeychainPath: keychain})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("Extract = %q, want %q", got, want)
+	}
+}
+
+// TestExtract_CodexDefaultServiceName exercises the Codex
+// default-service branch the same way, with an empty HOME so the file
+// is absent and the keyring fallback fires.
+func TestExtract_CodexDefaultServiceName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no ~/.codex/auth.json
+	keychain := newTestKeychain(t)
+	want := []byte(`{"auth_mode":"chatgpt","tokens":{"refresh_token":"r"}}`)
+	addGenericPassword(t, keychain, DefaultCodexKeychainService, want)
+
+	got, err := Extract(AgentCodex, Options{KeychainPath: keychain})
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("Extract = %q, want %q", got, want)
+	}
+}
+
+// TestExtract_KeychainEmptyPassword maps a stored-but-empty keychain
+// item to ErrNotAuthenticated, covering the empty-output guard in
+// readKeychain.
+func TestExtract_KeychainEmptyPassword(t *testing.T) {
+	keychain := newTestKeychain(t)
+	const service = "hostimport-test-empty"
+	addGenericPassword(t, keychain, service, []byte(""))
+
+	_, err := Extract(AgentClaude, Options{
+		KeychainService: service,
+		KeychainPath:    keychain,
+	})
+	if !errors.Is(err, ErrNotAuthenticated) {
+		t.Errorf("Extract(empty password): err = %v, want ErrNotAuthenticated", err)
+	}
+}
+
 // TestExtract_KeychainMissingItem maps an absent keychain item to
 // ErrNotAuthenticated.
 func TestExtract_KeychainMissingItem(t *testing.T) {
