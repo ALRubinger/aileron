@@ -5,26 +5,27 @@ import (
 	"errors"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"testing"
 )
 
-// nonZeroExitError returns a real *exec.ExitError from a command that
-// exits non-zero, portably across Unix and Windows. readKeychain maps
-// such errors to ErrNotAuthenticated.
-func nonZeroExitError(t *testing.T) error {
+// exitWithCode returns a real *exec.ExitError for the given exit code,
+// portably across Unix and Windows, so tests can drive readKeychain's
+// exit-code branch without a real `security` binary.
+func exitWithCode(t *testing.T, code int) *exec.ExitError {
 	t.Helper()
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/c", "exit 44")
+		cmd = exec.Command("cmd", "/c", "exit "+strconv.Itoa(code))
 	} else {
-		cmd = exec.Command("sh", "-c", "exit 44")
+		cmd = exec.Command("sh", "-c", "exit "+strconv.Itoa(code))
 	}
 	err := cmd.Run()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
 		t.Skipf("could not produce an *exec.ExitError on %s: %v", runtime.GOOS, err)
 	}
-	return err
+	return exitErr
 }
 
 // stubSecurity swaps securityRunner for the duration of a test and
@@ -84,16 +85,49 @@ func TestReadKeychain_AppendsKeychainPath(t *testing.T) {
 	}
 }
 
-// TestReadKeychain_NonZeroExitIsNotAuthenticated maps a `security`
-// non-zero exit (absent item) to ErrNotAuthenticated.
-func TestReadKeychain_NonZeroExitIsNotAuthenticated(t *testing.T) {
-	exitErr := nonZeroExitError(t)
+// TestReadKeychain_ItemNotFoundIsNotAuthenticated maps the absent-item
+// exit code (44) to ErrNotAuthenticated.
+func TestReadKeychain_ItemNotFoundIsNotAuthenticated(t *testing.T) {
+	exitErr := exitWithCode(t, keychainItemNotFoundExit)
 	stubSecurity(t, func(args ...string) ([]byte, error) {
 		return nil, exitErr
 	})
 	_, err := readKeychain("svc", "")
 	if !errors.Is(err, ErrNotAuthenticated) {
-		t.Errorf("readKeychain (exit err): err = %v, want ErrNotAuthenticated", err)
+		t.Errorf("readKeychain (exit 44): err = %v, want ErrNotAuthenticated", err)
+	}
+}
+
+// TestReadKeychain_NotFoundStderrIsNotAuthenticated maps a non-44 exit
+// whose stderr says the item "could not be found" to ErrNotAuthenticated,
+// covering the stderr-substring fallback.
+func TestReadKeychain_NotFoundStderrIsNotAuthenticated(t *testing.T) {
+	exitErr := exitWithCode(t, 1)
+	exitErr.Stderr = []byte("security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.")
+	stubSecurity(t, func(args ...string) ([]byte, error) {
+		return nil, exitErr
+	})
+	_, err := readKeychain("svc", "")
+	if !errors.Is(err, ErrNotAuthenticated) {
+		t.Errorf("readKeychain (not-found stderr): err = %v, want ErrNotAuthenticated", err)
+	}
+}
+
+// TestReadKeychain_OtherExitPropagates confirms a non-44 exit without a
+// not-found stderr (e.g. a locked keychain or permission denial) is NOT
+// masked as ErrNotAuthenticated; the operator must see the real failure.
+func TestReadKeychain_OtherExitPropagates(t *testing.T) {
+	exitErr := exitWithCode(t, 51) // errSecInteractionNotAllowed-style failure
+	exitErr.Stderr = []byte("security: User interaction is not allowed.")
+	stubSecurity(t, func(args ...string) ([]byte, error) {
+		return nil, exitErr
+	})
+	_, err := readKeychain("svc", "")
+	if errors.Is(err, ErrNotAuthenticated) {
+		t.Errorf("readKeychain masked a non-not-found exit as ErrNotAuthenticated: %v", err)
+	}
+	if err == nil {
+		t.Error("readKeychain: want the real exit error, got nil")
 	}
 }
 

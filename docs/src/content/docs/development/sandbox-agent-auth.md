@@ -87,7 +87,7 @@ aileron vault list
 
 `aileron auth <agent> --import-from-host` seeds the vault from an already-authenticated host install. It reads the host `claude` or `codex` credential state, validates it against the same schema the launcher's Capture pass enforces, and writes it through the daemon to `agents/<agent>/oauth`. Operators who already ran `claude` or `codex` login on the host skip the per-machine in-container login.
 
-```
+```bash
 aileron auth claude --import-from-host
 aileron auth codex --import-from-host
 ```
