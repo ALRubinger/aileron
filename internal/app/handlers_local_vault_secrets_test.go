@@ -971,6 +971,23 @@ func TestDeleteAgentCredentials_GetErrorEmitsFailureEvent(t *testing.T) {
 	assertNoCredentialLeak(t, events, logBuf)
 }
 
+// GET 500-branch auditing: a generic vault Get error on the read path emits
+// a vault_get_failed failure event and never leaks credential bytes to the
+// audit payload or the session log.
+
+func TestGetAgentCredentials_GetErrorEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, getErrVault{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	s.GetAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusInternalServerError)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialRead)
+	assertFailureClass(t, ev, "vault_get_failed")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
 func TestDeleteAgentCredentials_DeleteErrorEmitsFailureEvent(t *testing.T) {
 	// deleteErrVault.Get returns a secret value before Delete fails, so
 	// this also reinforces the Unit 2 guard: the loaded secret must not
