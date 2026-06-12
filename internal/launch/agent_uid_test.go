@@ -312,6 +312,56 @@ func TestChownHooksDelegateToRuntimeOnLinux(t *testing.T) {
 	}
 }
 
+// TestAgentDirChownHookSurfacesResolverError covers the forward-hook
+// closure's resolver-error branch (agent_uid.go): when
+// resolveAgentUIDCached fails inside the closure (e.g. a transient
+// inspect / `id -u` failure on a live launch), the closure must
+// propagate that error — so prepareAuthSpec warns and continues — and
+// must NOT attempt a chown. Linux-only, where the hook is non-nil.
+func TestAgentDirChownHookSurfacesResolverError(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skipf("chown hooks are only non-nil on Linux; GOOS=%s", goruntime.GOOS)
+	}
+
+	// Unique image so the failure never lands in (or reads from) a cache
+	// entry shared with another test; the cleanup evicts it regardless.
+	img := "img:resolverr-" + t.Name()
+	t.Cleanup(func() {
+		agentUIDCacheMu.Lock()
+		delete(agentUIDCache, agentUIDCacheKey{runtime: "docker", image: img})
+		agentUIDCacheMu.Unlock()
+	})
+
+	// The first (inspect) call fails, so the resolver returns an error
+	// before any UID is known and the closure must bail out.
+	runner := &fakeUIDRunner{
+		outputs: []string{"no such image\n"},
+		errs:    []error{errors.New("exit status 1")},
+	}
+	hook := newAgentDirChownHook(context.Background(), runner, "docker", img)
+	if hook == nil {
+		t.Fatal("expected non-nil forward hook on Linux")
+	}
+
+	err := hook("/host/transient")
+	if err == nil {
+		t.Fatal("expected the closure to surface the resolver error")
+	}
+	if !strings.Contains(err.Error(), "inspect") {
+		t.Fatalf("error should name the failing resolver step (inspect), got %v", err)
+	}
+	// Only the inspect call may have run; a resolver failure must not be
+	// followed by a chown run.
+	if len(runner.calls) != 1 {
+		t.Fatalf("resolver failure must not trigger a chown; got %d calls: %v", len(runner.calls), runner.calls)
+	}
+	for _, call := range runner.calls {
+		if got := strings.Join(call, " "); strings.Contains(got, "--entrypoint chown") {
+			t.Fatalf("no chown run may be issued after a resolver failure; saw %q", got)
+		}
+	}
+}
+
 func TestChownTreeViaRuntimeRunsPrivilegedChown(t *testing.T) {
 	// The host launcher is unprivileged, so the chown is delegated to a
 	// root container that bind-mounts the tree. Assert the argv encodes

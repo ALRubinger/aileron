@@ -76,6 +76,16 @@ func TestAuthSpecBindMountWritable(t *testing.T) {
 		t.Fatalf("sandbox-base image resolved agent UID 0 (root); the image's USER directive should select the non-root `agent` user — the bind-mount writability contract is meaningless as root")
 	}
 	hostUID := os.Getuid()
+	if hostUID == 0 {
+		// Negative control guard. The container still runs as the non-root
+		// image `agent` user (runAsAgent does not pass --user 0), so the
+		// EPERM the test reproduces fires even when the host runner is root;
+		// a root host does NOT bypass the in-container DAC check. We skip
+		// because a root host does not model the unprivileged operator the
+		// AuthSpec lifecycle targets — the negative control's value is
+		// reproducing the operator's reality, and a root runner is not it.
+		t.Skipf("host runner is root (UID 0); the negative control runs the container as the non-root image `agent` user so EPERM still fires regardless of host root, but a root host does not model the unprivileged operator the AuthSpec lifecycle targets, so the control is run only on a non-root host")
+	}
 	if hostUID == agentUID {
 		t.Skipf("host UID %d equals container agent UID %d; the EPERM mismatch this test guards cannot occur in this environment", hostUID, agentUID)
 	}
