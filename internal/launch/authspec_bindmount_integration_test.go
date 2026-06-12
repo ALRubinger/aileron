@@ -116,12 +116,6 @@ func TestAuthSpecBindMountWritable(t *testing.T) {
 		if err := chownTreeViaRuntime(ctx, runner, rt, authSpecBindMountTestImage, hostRoot, agentUID); err != nil {
 			t.Fatalf("apply chown fix (recursive chown to agent UID %d via runtime): %v", agentUID, err)
 		}
-		// The chown and the agent's in-container writes leave the tree owned
-		// by the agent UID; restore it to the test-runner UID (again via the
-		// privileged runtime path) so t.TempDir's cleanup can remove it.
-		t.Cleanup(func() {
-			_ = chownTreeViaRuntime(ctx, runner, rt, authSpecBindMountTestImage, hostRoot, os.Getuid())
-		})
 		stdout, stderr, runErr := runAsAgent(ctx, rt, hostRoot, containerParent, writeCmd)
 		if runErr != nil {
 			t.Fatalf("in-container write FAILED even WITH the chown-to-agent-UID fix (host UID %d, agent UID %d): %v\nstderr: %s\nThis is the regression #988 guards: the AuthSpec writable bind mount must be chowned to the resolved image agent UID so the agent can rotate credentials.", hostUID, agentUID, runErr, strings.TrimSpace(stderr))
@@ -129,12 +123,21 @@ func TestAuthSpecBindMountWritable(t *testing.T) {
 		if got := strings.TrimSpace(stdout); got != "rotated" {
 			t.Fatalf("in-container read-back = %q, want %q", got, "rotated")
 		}
+		// The agent rotated the file as the agent UID, so it is now owned by
+		// that UID (mode 0600). Reclaim ownership to the test-runner UID via
+		// the privileged runtime path, exactly as capture-on-exit does,
+		// before the host-side read. Without this the unprivileged read
+		// fails with EPERM and the rotation would be silently lost. This
+		// also restores ownership so t.TempDir's cleanup can remove the tree.
+		if err := chownTreeViaRuntime(ctx, runner, rt, authSpecBindMountTestImage, hostRoot, os.Getuid()); err != nil {
+			t.Fatalf("reclaim ownership to host UID %d before capture read: %v", os.Getuid(), err)
+		}
 		// Host-side file must reflect the in-container write so the
 		// launcher's capture-on-exit can snapshot it back to the vault.
 		hostFile := filepath.Join(hostRoot, filepath.Base(containerFile))
 		hostBytes, err := os.ReadFile(hostFile)
 		if err != nil {
-			t.Fatalf("read host-side file after in-container write: %v", err)
+			t.Fatalf("read host-side file after reclaim: %v", err)
 		}
 		if got := strings.TrimSpace(string(hostBytes)); got != "rotated" {
 			t.Fatalf("host-side file = %q after in-container rotation, want %q", got, "rotated")
