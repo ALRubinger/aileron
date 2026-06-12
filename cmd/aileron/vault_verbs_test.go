@@ -232,6 +232,41 @@ func TestRunVaultList_EmptyMessage(t *testing.T) {
 	}
 }
 
+func TestRunVaultList_EmptyJSONIsEmptyArray(t *testing.T) {
+	// Mirror `aileron secret list --json`: empty must be parseable JSON.
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"agents":[]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if strings.TrimSpace(stdout.String()) != "[]" {
+		t.Errorf("stdout = %q, want []", stdout.String())
+	}
+}
+
+func TestRunVaultDelete_OverlapPathRejectedNoPanic(t *testing.T) {
+	// Regression: "agents/oauth" passes both HasPrefix and HasSuffix but
+	// the prefix and suffix overlap. The validator must reject it
+	// cleanly, not slice out of range.
+	called := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"delete", "agents/oauth", "--yes"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for overlap path")
+	}
+	if called {
+		t.Errorf("HTTP issued for rejected overlap path")
+	}
+}
+
 func TestRunVaultList_RejectsNonAgentsPrefix(t *testing.T) {
 	called := false
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {

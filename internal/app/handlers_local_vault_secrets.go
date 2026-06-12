@@ -26,7 +26,11 @@ func agentCredentialVaultPath(name string) string {
 func agentNameFromVaultPath(path string) (string, bool) {
 	const prefix = "agents/"
 	const suffix = "/oauth"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+	// Guard the length before slicing: "agents/oauth" passes both
+	// HasPrefix and HasSuffix but the prefix and suffix overlap, so
+	// path[len(prefix):len(path)-len(suffix)] would slice out of range.
+	if len(path) < len(prefix)+len(suffix) ||
+		!strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
 		return "", false
 	}
 	name := path[len(prefix) : len(path)-len(suffix)]

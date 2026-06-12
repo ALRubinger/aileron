@@ -99,7 +99,11 @@ func runVault(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 func agentOAuthPathName(arg string) (string, error) {
 	const prefix = "agents/"
 	const suffix = "/oauth"
-	if !strings.HasPrefix(arg, prefix) || !strings.HasSuffix(arg, suffix) {
+	// Guard the length before slicing: "agents/oauth" passes both
+	// HasPrefix and HasSuffix (the prefix and suffix overlap) but would
+	// slice out of range.
+	if len(arg) < len(prefix)+len(suffix) ||
+		!strings.HasPrefix(arg, prefix) || !strings.HasSuffix(arg, suffix) {
 		return "", fmt.Errorf("path must be agents/<name>/oauth (got %q)", arg)
 	}
 	name := arg[len(prefix) : len(arg)-len(suffix)]
@@ -292,6 +296,9 @@ func runVaultList(args []string, stdout, stderr io.Writer) int {
 
 	if len(out.Agents) == 0 {
 		if *asJSON {
+			// Mirror `aileron secret list --json`: emit an empty array
+			// so scripts get parseable JSON for the empty case.
+			fmt.Fprintln(stdout, "[]")
 			return 0
 		}
 		fmt.Fprintln(stdout, "No agent credentials stored.")

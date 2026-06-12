@@ -479,6 +479,7 @@ func TestAgentNameFromVaultPath(t *testing.T) {
 		{"agents/claude/oauth", "claude", true},
 		{"agents/codex/oauth", "codex", true},
 		{"agents//oauth", "", false},         // empty name
+		{"agents/oauth", "", false},          // prefix+suffix overlap; must not panic
 		{"agents/a/b/oauth", "", false},      // nested name not allowed
 		{"some/other/path", "", false},       // wrong prefix
 		{"agents/claude/refresh", "", false}, // wrong suffix
