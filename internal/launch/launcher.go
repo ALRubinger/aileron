@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -493,23 +494,47 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		}
 	}
 
+	// captureOnce wraps the AuthSpec Capture so the clean-exit gate
+	// and the SIGINT/SIGTERM salvage path inside launchSandbox can
+	// each request a Capture, but the in-container rotations are
+	// written back to the vault exactly once even when a signal races
+	// a clean exit (R15, ADR-0025). A nil CaptureFn (host launch, or
+	// an agent with an empty AuthSpec) makes this a safe no-op.
+	var captureGuard sync.Once
+	captureOnce := func() {
+		if authPrep.CaptureFn == nil {
+			return
+		}
+		captureGuard.Do(func() {
+			captureCtx, cancelCapture := context.WithTimeout(context.Background(), daemonHTTPTimeout)
+			authPrep.CaptureFn(captureCtx)
+			cancelCapture()
+		})
+	}
+
+	// containerName makes the sandbox container addressable so the
+	// salvage path can `<runtime> stop` it on a signal. Deterministic
+	// per session so the run and the signal handler agree without a
+	// shared variable.
+	containerName := "aileron-sbx-" + sessionID
+
 	var result LaunchResult
 	var runErr error
 	if sandboxEnabled {
-		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv, proxyBootstrap.Mounts...)
+		result, runErr = launchSandbox(ctx, sandboxPlan, config, agentEnv, containerName, captureOnce, sessionLog, proxyBootstrap.Mounts...)
 	} else {
 		result, runErr = launchHost(ctx, config, daemonURL, sessionID, agentEnv)
 	}
 
-	// Capture fires on clean container exit only (R15). Forcible
-	// termination (Builder.Run returned a non-nil error from
-	// SIGKILL, runtime crash, etc.) skips Capture so the prior
-	// vault entry is retained — the next launch self-heals via the
-	// agent's own refresh or a manual `aileron vault put`.
-	if sandboxEnabled && runErr == nil && authPrep.CaptureFn != nil {
-		captureCtx, cancelCapture := context.WithTimeout(context.Background(), daemonHTTPTimeout)
-		authPrep.CaptureFn(captureCtx)
-		cancelCapture()
+	// Capture fires on clean container exit (R15) and on the
+	// graceful-shutdown salvage path inside launchSandbox. Forcible
+	// termination that does not route through the signal handler
+	// (SIGKILL, runtime crash) skips Capture so the prior vault entry
+	// is retained — the next launch self-heals via the agent's own
+	// refresh or a manual `aileron vault put`. captureOnce dedupes a
+	// signal-then-clean-exit race so the write lands exactly once.
+	if sandboxEnabled && runErr == nil {
+		captureOnce()
 	}
 
 	endCtx, cancelEnd := context.WithTimeout(context.Background(), daemonHTTPTimeout)
@@ -664,7 +689,7 @@ func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID s
 	return launchDirect(cmd, config)
 }
 
-func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, extraMounts ...sandboxcontainer.Volume) (LaunchResult, error) {
+func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, containerName string, captureOnce func(), sessionLog *slog.Logger, extraMounts ...sandboxcontainer.Volume) (LaunchResult, error) {
 	commandName := firstAgentBinary(config.Agent)
 	if commandName == "" {
 		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
@@ -720,11 +745,8 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		user = "root"
 		command = append([]string{"aileron-run-with-proxy-ca"}, command...)
 	}
-	_, err = sandboxcontainer.Builder{
-		Runtime: plan.Runtime,
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
-	}.Run(ctx, sandboxcontainer.RunOptions{
+
+	runOpts := sandboxcontainer.RunOptions{
 		Runtime: plan.Runtime,
 		Image:   plan.Image,
 		WorkDir: config.Dir,
@@ -733,11 +755,105 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		Command: command,
 		User:    user,
 		TTY:     term.IsTerminal(int(os.Stdin.Fd())),
-	})
+		Name:    containerName,
+	}
+
+	// Graceful-shutdown salvage (ADR-0025, R13/R15): the one-shot
+	// container runs in the foreground, so a Ctrl-C (SIGINT) or a
+	// SIGTERM reaches the container process group and the runtime
+	// force-kills it before the clean-exit Capture gate runs. Without
+	// intervention any in-container OAuth rotation written to the
+	// host-side bind-mount would never reach the vault. We install a
+	// signal handler that, on the first SIGINT/SIGTERM, best-effort
+	// stops the named container with a bounded grace window then runs
+	// the same captureOnce the clean-exit gate uses. SIGKILL stays
+	// uncatchable and intentionally bypasses this path.
+	sigCh := make(chan os.Signal, 1)
+	sandboxSignalNotify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	salvageDone := make(chan struct{})
+	go func() {
+		defer close(salvageDone)
+		sig, ok := <-sigCh
+		if !ok {
+			// Channel closed by the clean-exit path below; no signal
+			// arrived. The container exited on its own and the clean-
+			// exit gate owns Capture, so there is nothing to salvage.
+			return
+		}
+		// A SIGINT/SIGTERM is tearing the foreground container down
+		// before the clean-exit Capture gate can run. Best-effort stop
+		// the named container with a bounded grace window, then salvage
+		// the credential files via the same once-guarded Capture. The
+		// stop and Capture use Background-derived bounded contexts so a
+		// cancelled parent ctx does not abort the salvage work itself.
+		if sessionLog != nil {
+			sessionLog.Info("sandbox graceful shutdown", "signal", sig.String(), "container", containerName)
+		}
+		stopCtx, cancelStop := context.WithTimeout(context.Background(), sandboxStopGrace+daemonHTTPTimeout)
+		if err := sandboxStopContainer(stopCtx, plan.Runtime, containerName, sandboxStopGraceSeconds, os.Stdout, os.Stderr); err != nil {
+			fmt.Fprintf(os.Stderr, "[launcher] graceful stop of sandbox container %s failed: %v; salvaging credentials anyway\n", containerName, err)
+			if sessionLog != nil {
+				sessionLog.Warn("sandbox graceful stop failed", "container", containerName, "error", err)
+			}
+		}
+		cancelStop()
+		captureOnce()
+	}()
+
+	_, err = sandboxRunContainer(ctx, plan.Runtime, os.Stdout, os.Stderr, runOpts)
+
+	// Stop signal delivery and drain the salvage goroutine before
+	// returning so no post-return signal is caught and no goroutine
+	// leaks (mirrors launchDirect's signal.Stop discipline). Closing
+	// sigCh unblocks the goroutine on the clean-exit path; if a signal
+	// already landed the goroutine is mid-salvage and salvageDone closes
+	// once Capture completes.
+	sandboxSignalStop(sigCh)
+	close(sigCh)
+	<-salvageDone
+
 	if err != nil {
 		return exitResult(err)
 	}
 	return LaunchResult{ExitCode: 0}, nil
+}
+
+// sandboxStopGraceSeconds is the bounded SIGTERM-to-SIGKILL grace window
+// passed to `<runtime> stop --time`. Fixed at 10s per ADR-0025.
+const sandboxStopGraceSeconds = 10
+
+// sandboxStopGrace mirrors sandboxStopGraceSeconds as a Duration for the
+// host-side context budget around the stop call.
+const sandboxStopGrace = sandboxStopGraceSeconds * time.Second
+
+// sandboxRunContainer runs the sandbox container. It is a package
+// variable so tests inject a fake that blocks until a simulated signal
+// fires, exercising the salvage path without an OS signal or a real
+// container runtime.
+var sandboxRunContainer = func(ctx context.Context, runtimeName string, stdout, stderr io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
+	return sandboxcontainer.Builder{
+		Runtime: runtimeName,
+		Stdout:  stdout,
+		Stderr:  stderr,
+	}.Run(ctx, opts)
+}
+
+// sandboxStopContainer issues the graceful stop. A package variable so
+// tests observe the stop call (and inject failures) deterministically.
+var sandboxStopContainer = func(ctx context.Context, runtimeName, name string, graceSeconds int, stdout, stderr io.Writer) error {
+	return sandboxcontainer.StopContainer(ctx, nil, runtimeName, name, graceSeconds, stdout, stderr)
+}
+
+// sandboxSignalNotify and sandboxSignalStop wrap signal.Notify/Stop so
+// tests drive the salvage path by sending on the injected channel
+// instead of raising a real OS signal at the test runner. Defaults
+// forward to the os/signal package unchanged.
+var sandboxSignalNotify = func(ch chan<- os.Signal, sigs ...os.Signal) {
+	signal.Notify(ch, sigs...)
+}
+
+var sandboxSignalStop = func(ch chan<- os.Signal) {
+	signal.Stop(ch)
 }
 
 // sandboxMCPEnv builds the env block aileron-mcp reads when it runs as

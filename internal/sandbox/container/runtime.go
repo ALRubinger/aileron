@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
@@ -86,6 +87,12 @@ type RunOptions struct {
 	Command []string
 	User    string
 	TTY     bool
+	// Name, when non-empty, is passed as `--name <Name>` so the
+	// container is addressable for a later `stop` (the AuthSpec
+	// graceful-shutdown salvage path; see ADR-0025). An anonymous
+	// container cannot be stopped by name, so the launcher generates a
+	// deterministic per-session name and reuses it for StopContainer.
+	Name string
 }
 
 // Volume describes an additional host bind mount for a sandbox container.
@@ -276,6 +283,31 @@ func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	return RunResult{Runtime: runtimeName}, nil
 }
 
+// StopContainer issues `<runtimeName> stop --time <graceSeconds> <name>`
+// through runner so the AuthSpec salvage path can request a graceful
+// container shutdown on SIGINT/SIGTERM (see ADR-0025). graceSeconds is
+// the runtime's own SIGTERM-to-SIGKILL grace window. An empty name is a
+// no-op so callers never have to special-case an anonymous container,
+// and a nil runner falls back to the real runtime so the launcher path
+// works without wiring. The runner's error is returned verbatim; the
+// caller treats a stop failure as non-fatal and proceeds to Capture.
+func StopContainer(ctx context.Context, runner Runner, runtimeName, name string, graceSeconds int, stdout, stderr io.Writer) error {
+	if strings.TrimSpace(name) == "" {
+		return nil
+	}
+	if runner == nil {
+		runner = execRunner{}
+	}
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	args := []string{"stop", "--time", strconv.Itoa(graceSeconds), name}
+	return runner.Run(ctx, runtimeName, args, stdout, stderr)
+}
+
 // Validate checks that an image can satisfy the minimal launch-time sandbox
 // runtime contract: shell command execution, the mounted workspace as CWD, a
 // writable workspace mount, and the requested agent command on PATH.
@@ -445,6 +477,9 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	args := []string{"run", "--rm", "-i"}
 	if opts.TTY {
 		args = append(args, "-t")
+	}
+	if name := strings.TrimSpace(opts.Name); name != "" {
+		args = append(args, "--name", name)
 	}
 	if strings.TrimSpace(opts.User) != "" {
 		args = append(args, "--user", strings.TrimSpace(opts.User))

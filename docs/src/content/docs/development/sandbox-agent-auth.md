@@ -107,7 +107,7 @@ A second race lives between Capture and the operator: if you run `aileron vault 
 
 Capture stays non-fatal. A vault-write failure or schema-validation failure surfaces as a one-line stderr warning that names the file path and the recovery option, and skips that binding's PUT. The session completes normally; the prior vault entry is retained.
 
-Capture also stays bound to clean container exit. A SIGINT to `aileron launch` propagates as a forcible container kill: the container's `Builder.Run` returns a non-nil error, Capture is skipped, and any in-container credential rotation is lost. The prior vault entry remains usable. The next launch self-heals via the agent's own refresh (Claude) or the pre-launch refresh hook (Codex). A graceful-shutdown salvage path that stops the container cleanly on signal and runs Capture is a tracked follow-up.
+Capture also runs on graceful shutdown. A SIGINT or SIGTERM to `aileron launch` would otherwise propagate as a forcible container kill before the clean-exit Capture gate ran, losing any in-container credential rotation. The launcher names the container `aileron-sbx-<sessionID>`, installs a signal handler around the run, and on the first SIGINT/SIGTERM best-effort stops the named container with a bounded 10-second grace window then runs the same Capture. A `sync.Once` guards Capture so a signal that races a clean exit writes the rotation back exactly once. A failed stop is non-fatal and Capture still runs. SIGKILL stays uncatchable and runtime crashes still skip Capture; in those cases the prior vault entry is retained and the next launch self-heals via the agent's own refresh (Claude) or the pre-launch refresh hook (Codex).
 
 ## Adding a per-agent spec
 
