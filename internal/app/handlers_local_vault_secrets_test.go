@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
@@ -240,6 +241,257 @@ func TestPutAgentCredentials_MalformedJSONRejected(t *testing.T) {
 	s.PutAgentCredentials(rec, req, "claude")
 	assertStatus(t, rec, http.StatusBadRequest)
 	assertErrorCode(t, rec, "invalid_request")
+}
+
+// DELETE + list contract (ADR-0025, #981):
+//
+//   - DELETE removes an entry a prior PUT wrote; a subsequent GET 404s.
+//   - DELETE on a missing entry returns 404 `vault_not_found` (the
+//     idempotent-Delete regression: the handler must existence-check
+//     before deleting, not rely on Delete's nil return).
+//   - DELETE while the vault is locked returns 423 `vault_locked`.
+//   - DELETE with an empty name returns 400; with no vault wired, 503.
+//   - GET /v1/vault/agents lists agent names + metadata only, never the
+//     credential value; filters out non-agent paths; works empty; 503
+//     when no vault is wired.
+
+func TestDeleteAgentCredentials_RoundTrip(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+
+	putReq := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader([]byte(`{"value":"YWJj"}`)))
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	s.PutAgentCredentials(putRec, putReq, "claude")
+	assertStatus(t, putRec, http.StatusNoContent)
+
+	delRec := httptest.NewRecorder()
+	delReq := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(delRec, delReq, "claude")
+	assertStatus(t, delRec, http.StatusNoContent)
+
+	getRec := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	s.GetAgentCredentials(getRec, getReq, "claude")
+	assertStatus(t, getRec, http.StatusNotFound)
+}
+
+func TestDeleteAgentCredentials_MissingEntryReturnsNotFound(t *testing.T) {
+	// Regression for the idempotent-Delete pitfall: MemVault.Delete
+	// returns nil whether or not the path existed, so a handler that
+	// trusts Delete's return would 204 on a miss. The contract is 404.
+	s := newAgentCredentialsServer(t, vault.NewMemVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusNotFound)
+	assertErrorCode(t, rec, "vault_not_found")
+}
+
+func TestDeleteAgentCredentials_LockedVaultReturns423(t *testing.T) {
+	lv := vault.NewLockableVault()
+	s := newAgentCredentialsServer(t, lv)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/codex/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "codex")
+	assertStatus(t, rec, http.StatusLocked)
+	assertErrorCode(t, rec, "vault_locked")
+}
+
+func TestDeleteAgentCredentials_EmptyAgentNameRejected(t *testing.T) {
+	s := newAgentCredentialsServer(t, vault.NewMemVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents//credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "")
+	assertStatus(t, rec, http.StatusBadRequest)
+	assertErrorCode(t, rec, "invalid_request")
+}
+
+func TestDeleteAgentCredentials_NoVaultReturnsServiceUnavailable(t *testing.T) {
+	s := &apiServer{log: slog.Default()}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusServiceUnavailable)
+}
+
+func TestListAgentCredentials_RoundTripMetadataOnly(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+
+	for _, name := range []string{"claude", "codex"} {
+		body := api.AgentCredentials{
+			Value:    []byte(`SECRETBYTES`),
+			Metadata: &api.AgentCredentialsMetadata{Type: strPtr("oauth_refresh_token")},
+		}
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/"+name+"/credentials",
+			bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.PutAgentCredentials(rec, req, name)
+		assertStatus(t, rec, http.StatusNoContent)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	// The raw body must not leak credential bytes (ADR-0011).
+	if strings.Contains(rec.Body.String(), "SECRETBYTES") ||
+		strings.Contains(rec.Body.String(), "value") {
+		t.Fatalf("list body leaked credential material: %s", rec.Body.String())
+	}
+
+	var got api.AgentCredentialsList
+	mustDecode(t, rec.Body, &got)
+	names := map[string]bool{}
+	for _, a := range got.Agents {
+		names[a.Name] = true
+		if a.Metadata == nil || a.Metadata.Type == nil || *a.Metadata.Type != "oauth_refresh_token" {
+			t.Errorf("agent %s metadata = %v, want type oauth_refresh_token", a.Name, a.Metadata)
+		}
+	}
+	if !names["claude"] || !names["codex"] {
+		t.Errorf("listed names = %v, want claude and codex", names)
+	}
+}
+
+func TestListAgentCredentials_EmptyVaultReturnsEmptyArray(t *testing.T) {
+	s := newAgentCredentialsServer(t, vault.NewMemVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.AgentCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if got.Agents == nil {
+		t.Fatal("agents must be a non-nil (empty) array")
+	}
+	if len(got.Agents) != 0 {
+		t.Errorf("agents = %v, want empty", got.Agents)
+	}
+}
+
+func TestListAgentCredentials_FiltersNonAgentPaths(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+	// Seed a non-agent path directly (a secret-style key) plus one agent.
+	if err := v.Put(context.Background(), "some/other/path", []byte("x"), vault.Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Put(context.Background(), "agents/claude/oauth", []byte("y"), vault.Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.AgentCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if len(got.Agents) != 1 || got.Agents[0].Name != "claude" {
+		t.Errorf("agents = %v, want only claude", got.Agents)
+	}
+}
+
+func TestListAgentCredentials_NoVaultReturnsServiceUnavailable(t *testing.T) {
+	s := &apiServer{log: slog.Default()}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusServiceUnavailable)
+}
+
+// getErrVault returns a generic (non-NotFound, non-Unavailable) error
+// from Get so the DeleteAgentCredentials existence check hits its 500
+// branch. Delete/List/Put are unreachable in that test.
+type getErrVault struct{ vault.Vault }
+
+func (getErrVault) Get(context.Context, string) (vault.Secret, error) {
+	return vault.Secret{}, errGeneric
+}
+
+// deleteErrVault succeeds on the existence Get (returns a stored
+// secret) but fails the Delete with a generic error, exercising the
+// vault_delete_failed 500 branch.
+type deleteErrVault struct{ vault.Vault }
+
+func (deleteErrVault) Get(context.Context, string) (vault.Secret, error) {
+	return vault.Secret{Value: []byte("x")}, nil
+}
+func (deleteErrVault) Delete(context.Context, string) error { return errGeneric }
+
+// listErrVault fails List with a generic error for the
+// vault_list_failed 500 branch.
+type listErrVault struct{ vault.Vault }
+
+func (listErrVault) List(context.Context) ([]vault.Entry, error) {
+	return nil, errGeneric
+}
+
+var errGeneric = errGenericErr{}
+
+type errGenericErr struct{}
+
+func (errGenericErr) Error() string { return "boom" }
+
+func TestDeleteAgentCredentials_GetErrorReturns500(t *testing.T) {
+	s := newAgentCredentialsServer(t, getErrVault{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusInternalServerError)
+	assertErrorCode(t, rec, "vault_get_failed")
+}
+
+func TestDeleteAgentCredentials_DeleteErrorReturns500(t *testing.T) {
+	s := newAgentCredentialsServer(t, deleteErrVault{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusInternalServerError)
+	assertErrorCode(t, rec, "vault_delete_failed")
+}
+
+func TestListAgentCredentials_ListErrorReturns500(t *testing.T) {
+	s := newAgentCredentialsServer(t, listErrVault{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents", nil)
+	s.ListAgentCredentials(rec, req)
+	assertStatus(t, rec, http.StatusInternalServerError)
+	assertErrorCode(t, rec, "vault_list_failed")
+}
+
+func TestAgentNameFromVaultPath(t *testing.T) {
+	cases := []struct {
+		path     string
+		wantName string
+		wantOK   bool
+	}{
+		{"agents/claude/oauth", "claude", true},
+		{"agents/codex/oauth", "codex", true},
+		{"agents//oauth", "", false},         // empty name
+		{"agents/oauth", "", false},          // prefix+suffix overlap; must not panic
+		{"agents/a/b/oauth", "", false},      // nested name not allowed
+		{"some/other/path", "", false},       // wrong prefix
+		{"agents/claude/refresh", "", false}, // wrong suffix
+		{"agents/claude/oauth/extra", "", false},
+	}
+	for _, c := range cases {
+		gotName, gotOK := agentNameFromVaultPath(c.path)
+		if gotOK != c.wantOK || gotName != c.wantName {
+			t.Errorf("agentNameFromVaultPath(%q) = (%q,%v), want (%q,%v)",
+				c.path, gotName, gotOK, c.wantName, c.wantOK)
+		}
+	}
 }
 
 func strPtr(s string) *string { return &s }

@@ -150,7 +150,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 	case "sandbox":
 		return runSandbox(args[1:], registry, stdout, stderr)
 	case "vault":
-		return runVault(args[1:], stdout, stderr)
+		return runVault(args[1:], os.Stdin, stdout, stderr)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr)
 	case "stop":

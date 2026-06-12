@@ -738,6 +738,85 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+    delete:
+      tags: [Vault]
+      summary: Delete the per-agent credential envelope from the local vault
+      description: |
+        Removes the credential envelope stored at `agents/<name>/oauth`.
+        This is the recovery path documented in ADR-0025: deleting the
+        entry makes the next launch fall through to the in-container
+        login bootstrap, re-seeding a fresh credential on clean exit.
+
+        Error codes are surfaced in the response body so the operator CLI
+        discriminates by code rather than status alone:
+          - `vault_not_found` (404) — no entry at `agents/<name>/oauth`.
+          - `vault_locked` (423) — the local vault is locked; unlock it
+            before deleting agent credentials.
+      operationId: deleteAgentCredentials
+      security: []
+      responses:
+        "204":
+          description: Credential deleted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No credential entry at the agent's vault path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Vault delete failed for a reason other than missing entry or locked vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/vault/agents:
+    get:
+      tags: [Vault]
+      summary: List per-agent credential entries in the local vault
+      description: |
+        Returns the agent names that have a credential envelope stored at
+        `agents/<name>/oauth`, with their plaintext metadata only. The
+        credential `value` is never included.
+
+        Per ADR-0011 listing works on a locked vault — metadata is stored
+        in plaintext and the operation never decrypts a credential — so no
+        `vault_locked` (423) response is defined.
+      operationId: listAgentCredentials
+      security: []
+      responses:
+        "200":
+          description: Agent credential entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCredentialsList"
+        "500":
+          description: Vault list failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/sessions:
     post:
@@ -7500,6 +7579,35 @@ components:
             type: string
           description: |
             Arbitrary key/value pairs for organization.
+
+    AgentCredentialsList:
+      type: object
+      required: [agents]
+      description: |
+        The set of per-agent credential entries stored in the local
+        vault. Metadata only — the credential `value` is never listed
+        (ADR-0011).
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentCredentialSummary"
+
+    AgentCredentialSummary:
+      type: object
+      required: [name]
+      description: |
+        A single agent credential entry: the agent name plus its
+        plaintext metadata. Mirrors the `vault.Entry` shape with the
+        `agents/<name>/oauth` path reduced to its agent name.
+      properties:
+        name:
+          type: string
+          description: |
+            Agent identifier (e.g. "claude", "codex"), derived from the
+            `agents/<name>/oauth` vault path.
+        metadata:
+          $ref: "#/components/schemas/AgentCredentialsMetadata"
 
     TeeStatus:
       type: object

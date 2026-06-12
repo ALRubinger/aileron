@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -16,6 +17,27 @@ import (
 // scheme: `agents/<name>/<purpose>`).
 func agentCredentialVaultPath(name string) string {
 	return "agents/" + name + "/oauth"
+}
+
+// agentNameFromVaultPath is the inverse of agentCredentialVaultPath:
+// it extracts the agent name from an `agents/<name>/oauth` vault path.
+// It returns false for any path that does not match the scheme so the
+// list filter ignores non-agent entries (secrets, bindings, etc.).
+func agentNameFromVaultPath(path string) (string, bool) {
+	const prefix = "agents/"
+	const suffix = "/oauth"
+	// Guard the length before slicing: "agents/oauth" passes both
+	// HasPrefix and HasSuffix but the prefix and suffix overlap, so
+	// path[len(prefix):len(path)-len(suffix)] would slice out of range.
+	if len(path) < len(prefix)+len(suffix) ||
+		!strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	name := path[len(prefix) : len(path)-len(suffix)]
+	if name == "" || strings.Contains(name, "/") {
+		return "", false
+	}
+	return name, true
 }
 
 // GetAgentCredentials returns the per-agent credential envelope for
@@ -98,15 +120,108 @@ func (s *apiServer) PutAgentCredentials(w http.ResponseWriter, r *http.Request, 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// DeleteAgentCredentials removes the per-agent credential envelope at
+// `agents/<name>/oauth`. This is the operator-facing recovery path
+// behind `aileron vault delete`: dropping the entry makes the next
+// launch fall through to the in-container login bootstrap per ADR-0025.
+//
+// The store-layer Delete is idempotent across every implementation
+// (it returns nil whether or not the path existed), so this handler
+// performs an explicit existence check via Get before deleting. That
+// is the only way to honor the 404-on-miss contract while reusing the
+// existing store primitive. A locked vault makes Get return
+// ErrCredentialUnavailable, which yields 423 before any delete.
+func (s *apiServer) DeleteAgentCredentials(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "agent name is required")
+		return
+	}
+	if s.vault == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
+			"daemon is not configured with a vault")
+		return
+	}
+
+	path := agentCredentialVaultPath(name)
+	_, err := s.vault.Get(r.Context(), path)
+	if vault.IsNotFound(err) {
+		writeError(w, http.StatusNotFound, "vault_not_found",
+			"no credential entry for agent "+name)
+		return
+	}
+	if errors.Is(err, vault.ErrCredentialUnavailable) {
+		writeError(w, http.StatusLocked, "vault_locked",
+			"unlock the vault before deleting agent credentials")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "vault_get_failed", err.Error())
+		return
+	}
+
+	if err := s.vault.Delete(r.Context(), path); err != nil {
+		if errors.Is(err, vault.ErrCredentialUnavailable) {
+			writeError(w, http.StatusLocked, "vault_locked",
+				"unlock the vault before deleting agent credentials")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "vault_delete_failed", err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ListAgentCredentials returns the agent names that have a credential
+// envelope stored, with plaintext metadata only — never the credential
+// value (ADR-0011). It works on a locked vault because List never
+// decrypts a stored value (see vault.Vault.List).
+func (s *apiServer) ListAgentCredentials(w http.ResponseWriter, r *http.Request) {
+	if s.vault == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
+			"daemon is not configured with a vault")
+		return
+	}
+
+	entries, err := s.vault.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "vault_list_failed", err.Error())
+		return
+	}
+
+	list := api.AgentCredentialsList{Agents: []api.AgentCredentialSummary{}}
+	for _, e := range entries {
+		name, ok := agentNameFromVaultPath(e.Path)
+		if !ok {
+			continue
+		}
+		list.Agents = append(list.Agents, api.AgentCredentialSummary{
+			Name:     name,
+			Metadata: agentMetadataToWire(e.Metadata),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, list)
+}
+
 // agentCredentialsResponse builds the JSON envelope returned by GET.
 // oapi-codegen's []byte field is base64-encoded by encoding/json
 // (the standard library default for byte slices), so the wire
 // shape matches the spec's `format: byte` declaration.
 func agentCredentialsResponse(s vault.Secret) api.AgentCredentials {
-	resp := api.AgentCredentials{Value: s.Value}
-	meta := s.Metadata
+	return api.AgentCredentials{
+		Value:    s.Value,
+		Metadata: agentMetadataToWire(s.Metadata),
+	}
+}
+
+// agentMetadataToWire maps a vault.Metadata into the wire-shaped
+// optional-pointer struct shared by the GET envelope and the list
+// summary. Returns nil when every field is empty so a credential with
+// no metadata serializes without an empty `metadata` object.
+func agentMetadataToWire(meta vault.Metadata) *api.AgentCredentialsMetadata {
 	if meta.Type == "" && meta.Environment == "" && len(meta.Labels) == 0 {
-		return resp
+		return nil
 	}
 	respMeta := api.AgentCredentialsMetadata{}
 	if meta.Type != "" {
@@ -124,8 +239,7 @@ func agentCredentialsResponse(s vault.Secret) api.AgentCredentials {
 		}
 		respMeta.Labels = &labels
 	}
-	resp.Metadata = &respMeta
-	return resp
+	return &respMeta
 }
 
 // agentCredentialsMetadataFromRequest is the inverse of

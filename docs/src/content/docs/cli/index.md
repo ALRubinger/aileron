@@ -97,6 +97,17 @@ Approval-gated actions return an approval-pending message instead of running imm
 | `aileron sync --bind-all` | Like `sync`, but additionally pre-binds every required capability before exiting. Useful for fresh-machine setup. | [ADR-0006](/adr/0006-capability-binding-ux) |
 | `aileron sync --yes` | Headless mode. Auto-approves install consent for every new connector encountered. Per-command flag; no global config. | [ADR-0007](/adr/0007-install-consent) |
 
+## Vault
+
+| Command | Purpose | Ratified by |
+|---|---|---|
+| `aileron vault init [--passphrase-file <path>]` | Create the local file vault. Deliberate first-run flow; refuses to overwrite an existing vault. | [ADR-0011](/adr/0011-local-credential-vault) |
+| `aileron vault put agents/<name>/oauth --from-file <path>` | Write a per-agent credential envelope from a file, bytes verbatim. Daemon-backed; agents namespace only. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
+| `aileron vault delete agents/<name>/oauth [--yes]` | Delete a per-agent credential envelope. Confirms first unless `--yes`. Daemon-backed; agents namespace only. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
+| `aileron vault list [--json]` | List agents with a stored credential entry, metadata only. The credential value is never listed. | [ADR-0025](/adr/0025-vault-backed-agent-auth) |
+
+The `put`, `delete`, and `list` verbs talk to the running daemon and operate only on the `agents/<name>/oauth` namespace. They never open the vault file directly and reject any other path. See [Sandbox Agent Auth](/development/sandbox-agent-auth/) for the seeding and recovery flows.
+
 ## Utility
 
 | Command | Purpose | Ratified by |
