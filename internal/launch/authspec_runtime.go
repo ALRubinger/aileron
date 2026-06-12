@@ -100,13 +100,24 @@ type authSpecPrep struct {
 // rule is "Builder.Run returned nil OR graceful shutdown stopped
 // the container cleanly").
 //
-// The plan calls for a freshness comparison (only PUT when the
-// captured envelope is newer than the current vault entry). v1
-// ships last-writer-wins per the Risks section — concurrent launch
-// races against the same agent are not in the v1 ICP, and the
-// refresh token survives the race because both writers exchanged
-// the same upstream token. A Fresher hook on FileBinding is a
-// clean follow-up if real users surface the concern.
+// Capture decides whether to PUT using a presence-aware, three-way
+// branch keyed on whether the vault entry was present at render time
+// versus at capture time (see ADR-0025's freshness-comparison
+// section):
+//
+//   - absent@render, absent@capture → first-login seed → PUT.
+//   - present@render, absent@capture → the operator ran
+//     `aileron vault delete` mid-session → honor the delete, skip PUT.
+//   - present@render, present@capture → run the binding's Fresher
+//     hook; PUT only when the captured envelope is strictly newer.
+//
+// A FileBinding with a nil Fresher preserves last-writer-wins: the
+// present/present branch PUTs unconditionally. This was the behavior
+// before the hook existed (concurrent launch races against the same
+// agent are not in the v1 ICP, and the refresh token survives the
+// race because both writers exchanged the same upstream token).
+// Agents that rotate their credential in-container (Claude, Codex)
+// supply a Fresher so a stale capture cannot clobber a newer entry.
 // chownTransientDir, when non-nil, is invoked once after every
 // FileBinding and StaticFile has been written to the transient host
 // directory and before the mount list is returned. It receives
@@ -233,6 +244,15 @@ func prepareAuthSpec(
 		HostPath  string
 		VaultName string // last segment of VaultPath
 		Capture   func([]byte) (vault.Secret, error)
+		// PresentAtRender records whether the vault entry existed when
+		// the launcher rendered this binding. It is the only correct
+		// disambiguator between a first-login seed (absent@render) and
+		// a deliberate mid-session delete (present@render) when the
+		// capture-time GET returns not-found.
+		PresentAtRender bool
+		// Fresher is the binding's optional freshness hook; nil
+		// preserves last-writer-wins. See FileBinding.Fresher.
+		Fresher func(captured, current vault.Secret) (bool, error)
 	}
 	var captureTargets []fileCapture
 
@@ -269,9 +289,11 @@ func prepareAuthSpec(
 			// but the group dir still exists for StaticFiles or
 			// other file bindings under the same parent.
 			captureTargets = append(captureTargets, fileCapture{
-				HostPath:  filepath.Join(hostDir, path.Base(fb.ContainerPath)),
-				VaultName: vaultBindingTail(fb.VaultPath),
-				Capture:   fb.Capture,
+				HostPath:        filepath.Join(hostDir, path.Base(fb.ContainerPath)),
+				VaultName:       vaultBindingTail(fb.VaultPath),
+				Capture:         fb.Capture,
+				PresentAtRender: false,
+				Fresher:         fb.Fresher,
 			})
 			continue
 		case getErr != nil:
@@ -313,9 +335,11 @@ func prepareAuthSpec(
 		}
 		prep.RenderedAnyCredential = true
 		captureTargets = append(captureTargets, fileCapture{
-			HostPath:  hostPath,
-			VaultName: vaultBindingTail(fb.VaultPath),
-			Capture:   fb.Capture,
+			HostPath:        hostPath,
+			VaultName:       vaultBindingTail(fb.VaultPath),
+			Capture:         fb.Capture,
+			PresentAtRender: true,
+			Fresher:         fb.Fresher,
 		})
 		// MountAsFile bindings get an individual file mount at
 		// ContainerPath. The mount is writable so Capture can read
@@ -462,6 +486,55 @@ func prepareAuthSpec(
 						fmt.Errorf("schema-validate captured bytes: %w (skipping vault write so a partial-write or schema-drift session does not clobber the prior entry; inspect %s or re-login)",
 							err, target.HostPath))
 					continue
+				}
+				// Decide whether to PUT via the presence-aware,
+				// three-way branch (ADR-0025). Read the current vault
+				// entry: absent-now plus present-at-render means the
+				// operator deleted the entry mid-session and we must
+				// honor the delete; absent-now plus absent-at-render is
+				// a first-login seed and must PUT.
+				current, getErr := daemon.GetAgentCredentials(captureCtx, target.VaultName)
+				absentNow := errors.Is(getErr, ErrAgentCredentialsNotFound)
+				switch {
+				case getErr != nil && !absentNow:
+					// A genuine GET failure (or a cancelled context on
+					// shutdown). Either way we cannot make the freshness
+					// decision safely, so retain the prior entry rather
+					// than blind-PUT and risk clobbering a newer one.
+					if errors.Is(getErr, context.Canceled) || errors.Is(getErr, context.DeadlineExceeded) {
+						captureWarn(sessionLog, stderr, agentName, target.HostPath,
+							fmt.Errorf("capture GET cancelled: %w; skipping freshness-gated PUT to avoid clobbering the vault entry on shutdown", getErr))
+						continue
+					}
+					captureWarn(sessionLog, stderr, agentName, target.HostPath,
+						fmt.Errorf("read current vault entry for freshness check: %w (skipping PUT so the prior entry is retained; rerun the launch to retry)", getErr))
+					continue
+				case absentNow && target.PresentAtRender:
+					// present@render, absent@capture: the operator ran
+					// `aileron vault delete` mid-session. Honor it.
+					captureWarn(sessionLog, stderr, agentName, target.HostPath,
+						errors.New("vault entry deleted mid-session; honoring the delete and skipping capture so the credential is not silently resurrected"))
+					continue
+				case absentNow && !target.PresentAtRender:
+					// absent@render, absent@capture: first-login seed.
+					// PUT unconditionally even when Fresher is non-nil —
+					// there is no prior entry to compare against.
+				default:
+					// present@render, present@capture: gate on Fresher.
+					// nil Fresher preserves last-writer-wins.
+					if target.Fresher != nil {
+						fresher, ferr := target.Fresher(captured, current)
+						if ferr != nil {
+							captureWarn(sessionLog, stderr, agentName, target.HostPath,
+								fmt.Errorf("freshness comparison failed: %w (skipping PUT so the prior vault entry is retained; inspect %s or re-login)", ferr, target.HostPath))
+							continue
+						}
+						if !fresher {
+							captureWarn(sessionLog, stderr, agentName, target.HostPath,
+								errors.New("captured credential is not newer than the vault entry; skipping write so a stale capture does not clobber a fresher rotation"))
+							continue
+						}
+					}
 				}
 				if err := daemon.PutAgentCredentials(captureCtx, target.VaultName, captured); err != nil {
 					captureWarn(sessionLog, stderr, agentName, target.HostPath,

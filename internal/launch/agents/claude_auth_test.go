@@ -3,6 +3,7 @@ package agents_test
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -189,4 +190,52 @@ func TestClaude_Capture_ErrorWrapsSentinel(t *testing.T) {
 	if errors.Is(err, nil) {
 		t.Fatal("Capture error must be non-nil for malformed envelope")
 	}
+}
+
+func TestClaude_Fresher(t *testing.T) {
+	fresher := agents.Claude{}.AuthSpec().FileBindings[0].Fresher
+	if fresher == nil {
+		t.Fatal("Claude binding must supply a Fresher so a stale concurrent capture cannot clobber a fresher rotation")
+	}
+	env := func(token string, expiresAt int64) vault.Secret {
+		if expiresAt == 0 {
+			return vault.Secret{Value: []byte(`{"claudeAiOauth":{"accessToken":"` + token + `"}}`)}
+		}
+		return vault.Secret{Value: []byte(`{"claudeAiOauth":{"accessToken":"` + token + `","expiresAt":` + itoa(expiresAt) + `}}`)}
+	}
+	tests := []struct {
+		name              string
+		captured, current vault.Secret
+		want              bool
+	}{
+		{"newer expiresAt is fresher", env("a", 200), env("a", 100), true},
+		{"older expiresAt is not fresher", env("a", 100), env("a", 200), false},
+		{"equal non-zero expiresAt is not fresher", env("a", 100), env("a", 100), false},
+		{"both-zero same token is not fresher", env("a", 0), env("a", 0), false},
+		{"both-zero different token is a rotation without expiry, treat as fresher", env("new", 0), env("old", 0), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := fresher(tt.captured, tt.current)
+			if err != nil {
+				t.Fatalf("fresher: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("fresher = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	// A malformed envelope on either side must error so the launcher
+	// retains the prior entry rather than clobbering it.
+	if _, err := fresher(vault.Secret{Value: []byte("not json")}, env("a", 100)); err == nil {
+		t.Error("expected error for malformed captured envelope")
+	}
+	if _, err := fresher(env("a", 100), vault.Secret{Value: []byte("not json")}); err == nil {
+		t.Error("expected error for malformed current envelope")
+	}
+}
+
+func itoa(n int64) string {
+	return strconv.FormatInt(n, 10)
 }

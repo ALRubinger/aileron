@@ -105,6 +105,7 @@ func (c Codex) AuthSpec() launch.AuthSpec {
 			Required:         false,
 			Render:           codexRender,
 			Capture:          codexCapture,
+			Fresher:          codexFresher,
 			PreLaunchRefresh: codexPreLaunchRefresh,
 		}},
 	}
