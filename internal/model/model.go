@@ -322,4 +322,15 @@ const (
 	// launcher when proxy bootstrap is opted out, preflight fails, or
 	// the sandbox mode does not support bootstrap.
 	EventTypeSandboxProxyDisabled EventType = "sandbox.proxy.disabled"
+
+	// Per-agent vault credential events (ADR-0010 + ADR-0011). Emitted
+	// on each verb at /v1/vault/agents/{name}/credentials so a loopback
+	// process that reads, overwrites, or removes an OAuth bundle leaves
+	// an audit signal. The payload carries the agent name, the requester
+	// actor, a recorder-stamped timestamp, and on failure an
+	// `aileron.failure.class` error class. The credential bytes NEVER
+	// appear in the payload — only metadata about the operation.
+	EventTypeVaultCredentialRead   EventType = "vault.credential.read"
+	EventTypeVaultCredentialWrite  EventType = "vault.credential.write"
+	EventTypeVaultCredentialDelete EventType = "vault.credential.delete"
 )

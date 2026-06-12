@@ -1,13 +1,88 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
+
+// vaultCredentialSessionHeader is the optional request header the
+// launcher may set to attribute a per-agent credential operation to a
+// specific launch session. When absent the requester is resolved to the
+// loopback service actor. This stays consistent with the
+// `X-Aileron-Session-Id` convention used by the connector-operations and
+// sandbox-proxy handlers, and requires no OpenAPI/wire-shape change.
+const vaultCredentialSessionHeader = "X-Aileron-Session-Id"
+
+// vaultCredentialLoopbackActorID is the actor ID used when no session
+// header is present. ADR-0011 per-agent credential verbs are reachable
+// only over the daemon loopback, so an unattributed request is recorded
+// as a loopback service actor rather than minting a new ActorType.
+const vaultCredentialLoopbackActorID = "loopback"
+
+// vaultCredentialActor resolves the requester for a per-agent
+// credential operation. When the optional session header is present it
+// attributes the operation to that launch session; otherwise it falls
+// back to the loopback service actor. The returned sessionID is empty
+// unless the header supplied one, so callers can decide whether to
+// stamp `aileron.session.id` into the payload.
+func vaultCredentialActor(r *http.Request) (actor model.ActorRef, sessionID string) {
+	if r != nil {
+		sessionID = strings.TrimSpace(r.Header.Get(vaultCredentialSessionHeader))
+	}
+	if sessionID != "" {
+		return model.ActorRef{Type: model.ActorTypeService, ID: sessionID}, sessionID
+	}
+	return model.ActorRef{Type: model.ActorTypeService, ID: vaultCredentialLoopbackActorID}, ""
+}
+
+// emitVaultCredentialEvent records an audit event and a session-log line
+// for a per-agent credential verb (ADR-0010 + ADR-0011). errClass is
+// empty on the success path and carries the handler's error code (e.g.
+// `vault_locked`, `vault_not_found`) on failure. The credential bytes
+// are never passed to this function, so they cannot reach the payload or
+// the log line. The audit call is a no-op when no recorder is wired, but
+// the slog line always fires so a nil-recorder daemon still leaves a
+// session-log signal.
+func (s *apiServer) emitVaultCredentialEvent(ctx context.Context, eventType model.EventType, name string, actor model.ActorRef, sessionID, errClass string) {
+	logArgs := []any{
+		"event", string(eventType),
+		"agent", name,
+		"actor", actor.ID,
+	}
+	if sessionID != "" {
+		logArgs = append(logArgs, "session", sessionID)
+	}
+	if errClass != "" {
+		logArgs = append(logArgs, "error_class", errClass)
+	}
+	if s.log != nil {
+		if errClass != "" {
+			s.log.Info("vault agent credential operation failed", logArgs...)
+		} else {
+			s.log.Info("vault agent credential operation", logArgs...)
+		}
+	}
+
+	if s.auditRecorder == nil {
+		return
+	}
+	payload := map[string]any{
+		"aileron.vault.agent": name,
+	}
+	if sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	if errClass != "" {
+		payload["aileron.failure.class"] = errClass
+	}
+	s.auditRecorder.RecordSuccess(ctx, eventType, actor, payload)
+}
 
 // agentCredentialVaultPath is the canonical vault path scheme for
 // per-agent OAuth/credential envelopes. The HTTP path uses the
@@ -49,32 +124,40 @@ func agentNameFromVaultPath(path string) (string, bool) {
 // future status-code change would not silently re-route the
 // fallthrough-to-in-container-login path documented in ADR-0025.
 func (s *apiServer) GetAgentCredentials(w http.ResponseWriter, r *http.Request, name string) {
+	ctx := r.Context()
+	actor, sessionID := vaultCredentialActor(r)
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "agent name is required")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "no_local_vault")
 		return
 	}
 
-	secret, err := s.vault.Get(r.Context(), agentCredentialVaultPath(name))
+	secret, err := s.vault.Get(ctx, agentCredentialVaultPath(name))
 	if vault.IsNotFound(err) {
 		writeError(w, http.StatusNotFound, "vault_not_found",
 			"no credential entry for agent "+name)
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "vault_not_found")
 		return
 	}
 	if errors.Is(err, vault.ErrCredentialUnavailable) {
 		writeError(w, http.StatusLocked, "vault_locked",
 			"unlock the vault before reading agent credentials")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "vault_locked")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "vault_get_failed", err.Error())
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "vault_get_failed")
 		return
 	}
 
+	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialRead, name, actor, sessionID, "")
 	writeJSON(w, http.StatusOK, agentCredentialsResponse(secret))
 }
 
@@ -84,39 +167,48 @@ func (s *apiServer) GetAgentCredentials(w http.ResponseWriter, r *http.Request, 
 // token against the vendor's auth server and persists the new
 // bundle before starting the container per AE6).
 func (s *apiServer) PutAgentCredentials(w http.ResponseWriter, r *http.Request, name string) {
+	ctx := r.Context()
+	actor, sessionID := vaultCredentialActor(r)
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "agent name is required")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "no_local_vault")
 		return
 	}
 
 	var req api.AgentCredentials
 	if err := decodeBody(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "invalid_request")
 		return
 	}
 	if len(req.Value) == 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"value is required and must be non-empty")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "invalid_request")
 		return
 	}
 
 	meta := agentCredentialsMetadataFromRequest(req.Metadata)
-	err := s.vault.Put(r.Context(), agentCredentialVaultPath(name), req.Value, meta)
+	err := s.vault.Put(ctx, agentCredentialVaultPath(name), req.Value, meta)
 	if errors.Is(err, vault.ErrCredentialUnavailable) {
 		writeError(w, http.StatusLocked, "vault_locked",
 			"unlock the vault before writing agent credentials")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "vault_locked")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "vault_put_failed", err.Error())
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "vault_put_failed")
 		return
 	}
 
+	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialWrite, name, actor, sessionID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -132,43 +224,53 @@ func (s *apiServer) PutAgentCredentials(w http.ResponseWriter, r *http.Request, 
 // existing store primitive. A locked vault makes Get return
 // ErrCredentialUnavailable, which yields 423 before any delete.
 func (s *apiServer) DeleteAgentCredentials(w http.ResponseWriter, r *http.Request, name string) {
+	ctx := r.Context()
+	actor, sessionID := vaultCredentialActor(r)
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "agent name is required")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "invalid_request")
 		return
 	}
 	if s.vault == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
 			"daemon is not configured with a vault")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "no_local_vault")
 		return
 	}
 
 	path := agentCredentialVaultPath(name)
-	_, err := s.vault.Get(r.Context(), path)
+	_, err := s.vault.Get(ctx, path)
 	if vault.IsNotFound(err) {
 		writeError(w, http.StatusNotFound, "vault_not_found",
 			"no credential entry for agent "+name)
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_not_found")
 		return
 	}
 	if errors.Is(err, vault.ErrCredentialUnavailable) {
 		writeError(w, http.StatusLocked, "vault_locked",
 			"unlock the vault before deleting agent credentials")
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_locked")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "vault_get_failed", err.Error())
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_get_failed")
 		return
 	}
 
-	if err := s.vault.Delete(r.Context(), path); err != nil {
+	if err := s.vault.Delete(ctx, path); err != nil {
 		if errors.Is(err, vault.ErrCredentialUnavailable) {
 			writeError(w, http.StatusLocked, "vault_locked",
 				"unlock the vault before deleting agent credentials")
+			s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_locked")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "vault_delete_failed", err.Error())
+		s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "vault_delete_failed")
 		return
 	}
 
+	s.emitVaultCredentialEvent(ctx, model.EventTypeVaultCredentialDelete, name, actor, sessionID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
+	"github.com/ALRubinger/aileron/internal/audit"
+	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -495,3 +497,312 @@ func TestAgentNameFromVaultPath(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// Audit + session-log contract for the per-agent credential verbs
+// (#985, ADR-0010 + ADR-0011):
+//
+//   - GET/PUT/DELETE each emit one audit event with the verb's
+//     EventType, carrying `aileron.vault.agent` and never the bytes.
+//   - The success path emits no `aileron.failure.class`; each error
+//     branch emits the verb's EventType plus the error-code class.
+//   - The credential value never appears in the audit payload JSON or
+//     the captured slog buffer (the core leak-prevention assertion).
+//   - A nil recorder never panics and still fires the slog line.
+//   - The optional X-Aileron-Session-Id header attributes the operation
+//     to that session; absent, the actor is the loopback service ref.
+
+// vaultCredentialSecret is the credential body the audit tests PUT. The
+// distinctive substrings below must never surface in any audit payload
+// or session log line.
+const vaultCredentialSecret = `{"claudeAiOauth":{"accessToken":"tok-SUPERSECRET","refreshToken":"rt-SUPERSECRET"}}`
+
+var vaultCredentialForbidden = []string{"tok-SUPERSECRET", "rt-SUPERSECRET", "accessToken"}
+
+// newAuditingAgentCredentialsServer builds a server with a real
+// in-memory audit store and a slog logger that writes into logBuf, so a
+// test can assert on both the recorded events and the session log.
+func newAuditingAgentCredentialsServer(t *testing.T, v vault.Vault) (*apiServer, *audit.MemStore, *bytes.Buffer) {
+	t.Helper()
+	store := audit.NewMemStore()
+	logBuf := &bytes.Buffer{}
+	s := &apiServer{
+		log:           slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		vault:         v,
+		auditRecorder: audit.NewRecorder(store, nil, func() string { return "vault-cred-audit-id" }),
+	}
+	return s, store, logBuf
+}
+
+// assertNoCredentialLeak fails if any forbidden substring appears in the
+// marshaled event payloads or the captured session log.
+func assertNoCredentialLeak(t *testing.T, events []audit.Event, logBuf *bytes.Buffer) {
+	t.Helper()
+	for _, e := range events {
+		raw, _ := json.Marshal(e.Payload)
+		for _, forbidden := range vaultCredentialForbidden {
+			if strings.Contains(string(raw), forbidden) {
+				t.Errorf("audit payload leaked %q: %s", forbidden, string(raw))
+			}
+		}
+	}
+	logStr := logBuf.String()
+	for _, forbidden := range vaultCredentialForbidden {
+		if strings.Contains(logStr, forbidden) {
+			t.Errorf("session log leaked %q: %s", forbidden, logStr)
+		}
+	}
+}
+
+// putAuditableCredential PUTs the distinctive secret for agent name.
+func putAuditableCredential(t *testing.T, s *apiServer, name string) {
+	t.Helper()
+	body := api.AgentCredentials{Value: []byte(vaultCredentialSecret)}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/"+name+"/credentials",
+		bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.PutAgentCredentials(rec, req, name)
+	assertStatus(t, rec, http.StatusNoContent)
+}
+
+func listVaultCredentialEvents(t *testing.T, store *audit.MemStore) []audit.Event {
+	t.Helper()
+	events, err := store.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	return events
+}
+
+func TestGetAgentCredentials_SuccessEmitsReadEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	putAuditableCredential(t, s, "claude")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	s.GetAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusOK)
+
+	events := listVaultCredentialEvents(t, store)
+	read := requireSingleEvent(t, events, model.EventTypeVaultCredentialRead)
+	if read.Payload["aileron.vault.agent"] != "claude" {
+		t.Errorf("agent = %v, want claude", read.Payload["aileron.vault.agent"])
+	}
+	if _, ok := read.Payload["aileron.failure.class"]; ok {
+		t.Errorf("success event must not carry aileron.failure.class: %v", read.Payload)
+	}
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestPutAgentCredentials_SuccessEmitsWriteEventWithoutSecret(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	putAuditableCredential(t, s, "claude")
+
+	events := listVaultCredentialEvents(t, store)
+	write := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	if write.Payload["aileron.vault.agent"] != "claude" {
+		t.Errorf("agent = %v, want claude", write.Payload["aileron.vault.agent"])
+	}
+	// Core leak-prevention assertion: the PUT body never reaches audit
+	// or the session log.
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestDeleteAgentCredentials_SuccessEmitsDeleteEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	putAuditableCredential(t, s, "claude")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusNoContent)
+
+	events := listVaultCredentialEvents(t, store)
+	del := requireSingleEvent(t, events, model.EventTypeVaultCredentialDelete)
+	if del.Payload["aileron.vault.agent"] != "claude" {
+		t.Errorf("agent = %v, want claude", del.Payload["aileron.vault.agent"])
+	}
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestGetAgentCredentials_MissingEntryEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	s.GetAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusNotFound)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialRead)
+	assertFailureClass(t, ev, "vault_not_found")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestPutAgentCredentials_LockedVaultEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewLockableVault())
+	body := api.AgentCredentials{Value: []byte(vaultCredentialSecret)}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	s.PutAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusLocked)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	assertFailureClass(t, ev, "vault_locked")
+	// Even a rejected PUT must not leak the body it tried to store.
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestDeleteAgentCredentials_LockedVaultEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewLockableVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/codex/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "codex")
+	assertStatus(t, rec, http.StatusLocked)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialDelete)
+	assertFailureClass(t, ev, "vault_locked")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestDeleteAgentCredentials_MissingEntryEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusNotFound)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialDelete)
+	assertFailureClass(t, ev, "vault_not_found")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestVaultCredentials_NilRecorderDoesNotPanic(t *testing.T) {
+	// newAgentCredentialsServer leaves auditRecorder nil. Every verb
+	// must still return the correct status and fire the slog line.
+	v := vault.NewMemVault()
+	s := newAgentCredentialsServer(t, v)
+	logBuf := &bytes.Buffer{}
+	s.log = slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	putAuditableCredential(t, s, "claude")
+
+	getRec := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/v1/vault/agents/claude/credentials", nil)
+	s.GetAgentCredentials(getRec, getReq, "claude")
+	assertStatus(t, getRec, http.StatusOK)
+
+	delRec := httptest.NewRecorder()
+	delReq := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(delRec, delReq, "claude")
+	assertStatus(t, delRec, http.StatusNoContent)
+
+	// The slog line fired even with no recorder, and never leaked.
+	if !strings.Contains(logBuf.String(), "vault.credential.read") {
+		t.Errorf("expected a read session-log line; got %s", logBuf.String())
+	}
+	assertNoCredentialLeak(t, nil, logBuf)
+}
+
+func TestVaultCredentials_SessionHeaderAttributesActor(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+
+	body := api.AgentCredentials{Value: []byte(vaultCredentialSecret)}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Aileron-Session-Id", "sess-123")
+	rec := httptest.NewRecorder()
+	s.PutAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusNoContent)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	if ev.Actor.Type != model.ActorTypeService || ev.Actor.ID != "sess-123" {
+		t.Errorf("actor = %+v, want service/sess-123", ev.Actor)
+	}
+	if ev.Payload["aileron.session.id"] != "sess-123" {
+		t.Errorf("session id = %v, want sess-123", ev.Payload["aileron.session.id"])
+	}
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestVaultCredentials_NoSessionHeaderUsesLoopbackActor(t *testing.T) {
+	s, store, _ := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	putAuditableCredential(t, s, "claude")
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	if ev.Actor.Type != model.ActorTypeService || ev.Actor.ID != "loopback" {
+		t.Errorf("actor = %+v, want service/loopback", ev.Actor)
+	}
+	if _, ok := ev.Payload["aileron.session.id"]; ok {
+		t.Errorf("no session header => payload must omit aileron.session.id: %v", ev.Payload)
+	}
+}
+
+// requireSingleEvent asserts exactly one event of the given type is
+// present and returns it.
+func requireSingleEvent(t *testing.T, events []audit.Event, want model.EventType) audit.Event {
+	t.Helper()
+	var matches []audit.Event
+	for _, e := range events {
+		if e.EventType == want {
+			matches = append(matches, e)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("events of type %q = %d, want 1 (all events: %+v)", want, len(matches), events)
+	}
+	return matches[0]
+}
+
+// putErrVault fails Put with a generic (non-Unavailable) error so the
+// PutAgentCredentials vault_put_failed 500 branch — and its failure
+// emission — is exercised.
+type putErrVault struct{ vault.Vault }
+
+func (putErrVault) Put(context.Context, string, []byte, vault.Metadata) error { return errGeneric }
+
+func TestPutAgentCredentials_PutErrorEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, putErrVault{})
+	body := api.AgentCredentials{Value: []byte(vaultCredentialSecret)}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/claude/credentials",
+		bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	s.PutAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusInternalServerError)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	assertFailureClass(t, ev, "vault_put_failed")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func assertFailureClass(t *testing.T, e audit.Event, want string) {
+	t.Helper()
+	if got := e.Payload["aileron.failure.class"]; got != want {
+		t.Errorf("aileron.failure.class = %v, want %q", got, want)
+	}
+}
