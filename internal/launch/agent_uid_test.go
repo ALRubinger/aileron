@@ -3,7 +3,9 @@ package launch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	goruntime "runtime"
 	"strings"
 	"testing"
@@ -228,6 +230,85 @@ func TestNewAgentDirChownHookNilOnNonLinux(t *testing.T) {
 	}
 	if h := newAgentDirChownHook(context.Background(), &fakeUIDRunner{}, "docker", ""); h != nil {
 		t.Error("hook must be nil when image is empty")
+	}
+}
+
+func TestNewTransientReclaimHookNilConditions(t *testing.T) {
+	hook := newTransientReclaimHook(context.Background(), &fakeUIDRunner{}, "docker", "img")
+	if goruntime.GOOS == "linux" {
+		if hook == nil {
+			t.Fatal("reclaim hook must be non-nil on Linux for a concrete runtime+image")
+		}
+	} else if hook != nil {
+		t.Fatalf("reclaim hook must be nil on %s (the chown is only needed on Linux)", goruntime.GOOS)
+	}
+	if h := newTransientReclaimHook(context.Background(), &fakeUIDRunner{}, "", "img"); h != nil {
+		t.Error("reclaim hook must be nil when runtime is empty")
+	}
+	if h := newTransientReclaimHook(context.Background(), &fakeUIDRunner{}, "docker", ""); h != nil {
+		t.Error("reclaim hook must be nil when image is empty")
+	}
+}
+
+// TestChownHooksDelegateToRuntimeOnLinux drives both the forward chown
+// hook and the reclaim hook (Linux-only, where they are non-nil) and
+// asserts they delegate to the privileged runtime chown rather than a
+// host-side os.Chown — the whole point of the fix.
+func TestChownHooksDelegateToRuntimeOnLinux(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skipf("chown hooks are only non-nil on Linux; GOOS=%s", goruntime.GOOS)
+	}
+
+	// Forward hook: a numeric image user resolves without an id -u run,
+	// then the closure delegates the chown to the runtime as the agent UID.
+	img := "img:chownhook-" + t.Name()
+	t.Cleanup(func() {
+		agentUIDCacheMu.Lock()
+		delete(agentUIDCache, agentUIDCacheKey{runtime: "docker", image: img})
+		agentUIDCacheMu.Unlock()
+	})
+	runner := &fakeUIDRunner{outputs: []string{"1000\n"}}
+	hook := newAgentDirChownHook(context.Background(), runner, "docker", img)
+	if hook == nil {
+		t.Fatal("expected non-nil forward hook on Linux")
+	}
+	if err := hook("/host/transient"); err != nil {
+		t.Fatalf("forward chown hook: %v", err)
+	}
+	last := strings.Join(runner.calls[len(runner.calls)-1], " ")
+	if !strings.Contains(last, "--entrypoint chown") || !strings.Contains(last, "-R 1000 /mnt") {
+		t.Errorf("forward hook must delegate to the runtime chown as the agent UID; last call %q", last)
+	}
+
+	// A root image (empty USER) resolves to UID 0, so the chown is skipped
+	// entirely (root already owns host-created files) — no chown run.
+	rootImg := "img:roothook-" + t.Name()
+	t.Cleanup(func() {
+		agentUIDCacheMu.Lock()
+		delete(agentUIDCache, agentUIDCacheKey{runtime: "docker", image: rootImg})
+		agentUIDCacheMu.Unlock()
+	})
+	rootRunner := &fakeUIDRunner{outputs: []string{"\n"}}
+	rootHook := newAgentDirChownHook(context.Background(), rootRunner, "docker", rootImg)
+	if err := rootHook("/host/transient"); err != nil {
+		t.Fatalf("root-image chown hook: %v", err)
+	}
+	if len(rootRunner.calls) != 1 {
+		t.Errorf("root image must only inspect (UID 0 skips the chown), got %d calls: %v", len(rootRunner.calls), rootRunner.calls)
+	}
+
+	// Reclaim hook: chowns back to the host operator's UID via the runtime.
+	reclaimRunner := &fakeUIDRunner{}
+	reclaim := newTransientReclaimHook(context.Background(), reclaimRunner, "docker", img)
+	if reclaim == nil {
+		t.Fatal("expected non-nil reclaim hook on Linux")
+	}
+	if err := reclaim("/host/transient"); err != nil {
+		t.Fatalf("reclaim hook: %v", err)
+	}
+	rc := strings.Join(reclaimRunner.calls[0], " ")
+	if !strings.Contains(rc, "--entrypoint chown") || !strings.Contains(rc, fmt.Sprintf("-R %d /mnt", os.Getuid())) {
+		t.Errorf("reclaim hook must chown back to the host UID via the runtime; call %q", rc)
 	}
 }
 
