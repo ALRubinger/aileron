@@ -83,7 +83,25 @@ func (o OpenCode) ConfigureMCP(mcpBin string, mcpEnv map[string]string, dir stri
 }
 
 // AuthSpec returns OpenCode's vault-backed credential descriptor.
-// OpenCode has no per-agent vault binding today, so it returns the
-// zero value; the launcher treats that as a no-op. A future v1.x
-// issue would fill this in for OpenCode sandbox launches.
-func (o OpenCode) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+// OpenCode persists its provider credentials in a standalone
+// `auth.json` under the XDG data dir, written by `opencode auth login`
+// and loaded on startup. That is a rotatable on-disk credential file,
+// so the binding is a FileBinding with byte-identity Render/Capture.
+// Required is false so an unseeded vault falls through to OpenCode's
+// in-container `auth login` bootstrap, which Capture then snapshots on
+// clean exit. MountAsFile is false (the default): OpenCode's
+// ConfigureMCP writes a project-local `opencode.json` in the workspace
+// mount, not under the data dir, so no sibling mount needs to coexist
+// with auth.json.
+func (o OpenCode) AuthSpec() launch.AuthSpec {
+	return launch.AuthSpec{
+		FileBindings: []launch.FileBinding{{
+			VaultPath:     opencodeVaultPath,
+			ContainerPath: opencodeAuthContainerPath,
+			Mode:          0o600,
+			Required:      false,
+			Render:        opencodeRender,
+			Capture:       opencodeCapture,
+		}},
+	}
+}

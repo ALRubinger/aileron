@@ -188,8 +188,20 @@ func gooseConfigDir() (string, error) {
 	return filepath.Join(home, ".config", "goose"), nil
 }
 
-// AuthSpec returns Goose's vault-backed credential descriptor.
-// Goose has no per-agent vault binding today, so it returns the
-// zero value; the launcher treats that as a no-op. A future v1.x
-// issue would fill this in for Goose sandbox launches.
-func (g Goose) AuthSpec() launch.AuthSpec { return launch.AuthSpec{} }
+// AuthSpec returns Goose's vault-backed credential descriptor. Goose
+// authenticates with a provider API key (read from a `<PROVIDER>_API_KEY`
+// env var or its keyring), not a rotatable on-disk credential file, so
+// the binding is an EnvBinding: the stored key is rendered into the
+// container env at launch. There is no Capture (an env-key binding has
+// nothing to snapshot back) and no PreLaunchRefresh (a static API key
+// does not rotate). Required is false so an unseeded vault falls through
+// to Goose's normal provider-key resolution instead of hard-failing.
+func (g Goose) AuthSpec() launch.AuthSpec {
+	return launch.AuthSpec{
+		EnvBindings: []launch.EnvBinding{{
+			VaultPath: gooseVaultPath,
+			Required:  false,
+			Render:    gooseRender,
+		}},
+	}
+}
