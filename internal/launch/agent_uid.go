@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	goruntime "runtime"
 	"strconv"
 	"strings"
@@ -98,6 +99,32 @@ func newAgentDirChownHook(ctx context.Context, runner sandboxcontainer.Runner, r
 			return nil
 		}
 		return chownTreeViaRuntime(ctx, runner, runtime, image, dir, uid)
+	}
+}
+
+// newTransientReclaimHook returns the hook prepareAuthSpec invokes
+// before capture-on-exit reads the transient tree. It is the symmetric
+// counterpart to newAgentDirChownHook: that hook chowns the tree to the
+// agent UID so the in-container agent can rotate its credentials over
+// the writable bind mount; this hook chowns the tree back to the host
+// operator's UID once the container has exited, so the launcher (running
+// as that operator) can read the rotated file for the vault PUT.
+//
+// Without this reclaim, a rotated credential is left owned by the agent
+// UID with mode 0600 on rootful Docker Linux, and the host-side capture
+// read fails with EPERM — the rotation is silently dropped, defeating
+// the durability the AuthSpec lifecycle exists to provide. Like the
+// forward hook it is Linux-only and nil without a concrete runtime+image.
+func newTransientReclaimHook(ctx context.Context, runner sandboxcontainer.Runner, runtime, image string) func(dir string) error {
+	if goruntime.GOOS != "linux" {
+		return nil
+	}
+	if strings.TrimSpace(runtime) == "" || strings.TrimSpace(image) == "" {
+		return nil
+	}
+	hostUID := os.Getuid()
+	return func(dir string) error {
+		return chownTreeViaRuntime(ctx, runner, runtime, image, dir, hostUID)
 	}
 }
 

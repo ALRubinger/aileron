@@ -132,6 +132,7 @@ func prepareAuthSpec(
 	sessionLog *slog.Logger,
 	stderr io.Writer,
 	chownTransientDir func(dir string) error,
+	reclaimTransientDir func(dir string) error,
 ) (authSpecPrep, error) {
 	prep := authSpecPrep{
 		EnvAdditions: map[string]string{},
@@ -420,6 +421,19 @@ func prepareAuthSpec(
 
 	if len(captureTargets) > 0 {
 		prep.CaptureFn = func(captureCtx context.Context) {
+			// The agent rotated its credentials in-container as the agent
+			// UID; reclaim ownership of the tree to the host operator
+			// before reading so the vault PUT can read the rotated file.
+			// On rootful Docker Linux the file is otherwise agent-owned
+			// and mode 0600, so a host-side read fails with EPERM and the
+			// rotation is lost. Non-fatal: warn and still attempt the
+			// reads (a same-UID environment needs no reclaim).
+			if reclaimTransientDir != nil {
+				if err := reclaimTransientDir(hostRoot); err != nil {
+					captureWarn(sessionLog, stderr, agentName, hostRoot,
+						fmt.Errorf("reclaim transient auth dir ownership to host UID before capture: %w; a credential the agent rotated as its own UID may be unreadable for the vault PUT", err))
+				}
+			}
 			for _, target := range captureTargets {
 				bytes, err := os.ReadFile(target.HostPath)
 				if err != nil {

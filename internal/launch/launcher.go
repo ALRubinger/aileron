@@ -480,8 +480,14 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		// translation. See ADR-0025 and issue #988.
 		chownHook := newAgentDirChownHook(ctx, sandboxcontainer.DefaultRunner(),
 			sandboxPlan.Runtime, sandboxPlan.Image)
+		// The symmetric counterpart: after the container exits, chown the
+		// transient tree back to the host operator so capture-on-exit can
+		// read a credential the agent rotated as the agent UID. Without it,
+		// rotations are silently dropped on rootful Docker Linux.
+		reclaimHook := newTransientReclaimHook(ctx, sandboxcontainer.DefaultRunner(),
+			sandboxPlan.Runtime, sandboxPlan.Image)
 		prep, err := prepareAuthSpec(ctx, config.Agent.Name(), config.Agent.AuthSpec(),
-			client, sessionLog, os.Stderr, chownHook)
+			client, sessionLog, os.Stderr, chownHook, reclaimHook)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare agent auth spec: %w", err)
 		}
