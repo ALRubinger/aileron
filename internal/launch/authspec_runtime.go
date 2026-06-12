@@ -524,12 +524,20 @@ func prepareAuthSpec(
 					// nil Fresher preserves last-writer-wins.
 					if target.Fresher != nil {
 						fresher, ferr := target.Fresher(captured, current)
-						if ferr != nil {
+						switch {
+						case errors.Is(ferr, ErrCurrentEnvelopeMalformed):
+							// The captured envelope parsed but the current
+							// vault entry did not. A corrupt entry is unusable
+							// (Render rejects it next launch), so overwrite it
+							// with the valid capture rather than retaining the
+							// corruption. Fall through to the PUT.
+							captureWarn(sessionLog, stderr, agentName, target.HostPath,
+								fmt.Errorf("current vault entry is malformed: %w; overwriting with the freshly captured credential", ferr))
+						case ferr != nil:
 							captureWarn(sessionLog, stderr, agentName, target.HostPath,
 								fmt.Errorf("freshness comparison failed: %w (skipping PUT so the prior vault entry is retained; inspect %s or re-login)", ferr, target.HostPath))
 							continue
-						}
-						if !fresher {
+						case !fresher:
 							captureWarn(sessionLog, stderr, agentName, target.HostPath,
 								errors.New("captured credential is not newer than the vault entry; skipping write so a stale capture does not clobber a fresher rotation"))
 							continue

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -109,32 +110,38 @@ func claudeCapture(b []byte) (vault.Secret, error) {
 // including both-zero — are NOT strictly newer, so we return false.
 // The one carve-out: if the captured envelope's expiresAt is 0 while
 // the access tokens differ, a real rotation happened that simply did
-// not populate expiresAt. Dropping that write would lose the
-// rotation, so we treat it as fresher. A parse failure on either side
-// returns an error; the launcher then retains the prior entry rather
-// than risk clobbering it with an envelope it cannot reason about.
+// not populate expiresAt. This is checked before the timestamp ordering
+// so the carve-out also fires when the current entry carries a non-zero
+// timestamp (an in-session rotation that dropped expiresAt must not lose
+// to a stale-but-timestamped vault entry). Dropping that write would
+// lose the rotation, so we treat it as fresher. A parse failure of the captured
+// side returns a plain error and the launcher retains the prior entry; a
+// parse failure of the current side wraps
+// [launch.ErrCurrentEnvelopeMalformed] so the launcher overwrites the
+// corrupt entry with the valid capture (ADR-0025).
 func claudeFresher(captured, current vault.Secret) (bool, error) {
 	var capEnv, curEnv claudeCredentialEnvelope
 	if err := json.Unmarshal(captured.Value, &capEnv); err != nil {
 		return false, fmt.Errorf("%w: parse captured: %v", errClaudeEnvelopeMalformed, err)
 	}
 	if err := json.Unmarshal(current.Value, &curEnv); err != nil {
-		return false, fmt.Errorf("%w: parse current: %v", errClaudeEnvelopeMalformed, err)
+		return false, fmt.Errorf("%w: parse current: %v", launch.ErrCurrentEnvelopeMalformed, err)
 	}
 	capExp := capEnv.ClaudeAiOauth.ExpiresAt
 	curExp := curEnv.ClaudeAiOauth.ExpiresAt
+	// A captured envelope with no expiresAt (0) but a different access
+	// token is a real rotation that simply did not stamp expiresAt;
+	// treat it as fresher before the timestamp ordering so it wins even
+	// when the current entry carries a non-zero timestamp.
+	if capExp == 0 &&
+		capEnv.ClaudeAiOauth.AccessToken != curEnv.ClaudeAiOauth.AccessToken {
+		return true, nil
+	}
 	if capExp > curExp {
 		return true, nil
 	}
-	if capExp == curExp {
-		// Both-zero (or genuinely equal) timestamps are not strictly
-		// newer — except a real rotation that left expiresAt unset.
-		if capExp == 0 &&
-			capEnv.ClaudeAiOauth.AccessToken != curEnv.ClaudeAiOauth.AccessToken {
-			return true, nil
-		}
-		return false, nil
-	}
+	// Equal timestamps (including both-zero with identical tokens) are
+	// not strictly newer.
 	return false, nil
 }
 

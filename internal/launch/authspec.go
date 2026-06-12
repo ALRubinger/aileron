@@ -11,6 +11,14 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
+// ErrCurrentEnvelopeMalformed is wrapped by a Fresher when the freshly
+// captured credential parses but the current vault entry does not. The
+// capture path treats it as "captured wins": a corrupt current entry is
+// already unusable (Render rejects it on the next launch), so a valid
+// fresh capture overwrites it rather than being skipped. See ADR-0025's
+// freshness-comparison section.
+var ErrCurrentEnvelopeMalformed = errors.New("launch: current vault credential envelope is malformed")
+
 // AuthSpec is an agent's declarative description of its credential
 // bindings. The launcher consumes the spec around the agent's
 // container lifecycle:
@@ -119,6 +127,14 @@ type FileBinding struct {
 	// vault entry — a comparison the launcher cannot make safely must
 	// never clobber the stored credential. See ADR-0025's
 	// freshness-comparison section.
+	//
+	// The one carve-out: if the freshly captured envelope parses but the
+	// *current* vault entry does not, the Fresher must wrap
+	// [ErrCurrentEnvelopeMalformed]. A corrupt current entry is unusable
+	// (Render rejects it on the next launch), so CaptureFn treats that
+	// signal as "captured wins" and overwrites it rather than retaining
+	// the corruption. A parse failure of the *captured* envelope still
+	// returns a plain error so garbage is never written.
 	Fresher func(captured, current vault.Secret) (bool, error)
 
 	// PreLaunchRefresh, when non-nil, runs before Render. It

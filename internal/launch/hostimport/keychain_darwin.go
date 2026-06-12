@@ -41,6 +41,14 @@ func extract(agent string, opts Options) ([]byte, error) {
 		// rather than stat-then-read so a file that exists but is
 		// unreadable surfaces its real error instead of silently falling
 		// back to the keychain (and so there is no TOCTOU window).
+		//
+		// Accepted gap (ADR-0025): a stale auth.json masks a fresher
+		// Keychain entry, because we never read the Keychain when the file
+		// exists. Comparing the two on every import would force the macOS
+		// access dialog each time and defeat the non-interactive file read.
+		// The gap fails loud, not silent: a stale file with an expired,
+		// unrefreshable token surfaces a clear re-login error rather than a
+		// wrong credential. Recovery is to remove the stale file.
 		path, err := defaultCredentialPath(agent)
 		if err != nil {
 			return nil, err
