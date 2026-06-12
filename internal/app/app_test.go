@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -94,6 +95,114 @@ func TestNewHandler_LocalDaemonTokenProtectsV1(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status with token = %d, want 200", resp.StatusCode)
+	}
+}
+
+// TestNewHandler_LocalDaemonToken_ExemptsLLMGateway covers the
+// regression where the daemon's bearer-auth middleware was rejecting
+// requests to the LLM gateway (`/v1/messages`, `/v1/chat/completions`)
+// because the agent's own provider OAuth bearer in the Authorization
+// header didn't match the daemon's token. The gateway is a transparent
+// passthrough that forwards the agent's headers to upstream unchanged,
+// so daemon-token gating provides no security benefit and breaks every
+// in-container agent that uses subscription OAuth.
+//
+// The contract: a POST to a gateway endpoint must reach the reverse
+// proxy and be forwarded to upstream regardless of what the agent put
+// in the Authorization header. The middleware's 401 envelope (carrying
+// `code=unauthorized`, `message=missing or invalid daemon token`) must
+// not fire. Upstream behavior is irrelevant to this test — we run a
+// recording fake upstream and assert that the request reached it.
+func TestNewHandler_LocalDaemonToken_ExemptsLLMGateway(t *testing.T) {
+	// Recording fake upstream — every successful proxy pass lands here.
+	// 200 + no-op body keeps the response shape uninteresting; we only
+	// care that the request hit this handler (proves middleware bypass).
+	hits := make(chan *http.Request, 8)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits <- r
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	t.Setenv("AILERON_ANTHROPIC_BASE_URL", upstream.URL)
+	t.Setenv("AILERON_OPENAI_BASE_URL", upstream.URL)
+
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	handler, err := NewHandlerWithConfig(log, Config{
+		Vault:            vault.NewMemVault(),
+		LocalDaemonToken: "tok_test",
+	})
+	if err != nil {
+		t.Fatalf("NewHandlerWithConfig: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	cases := []struct {
+		path    string
+		auth    string // value for Authorization header; empty omits the header
+		comment string
+	}{
+		{"/v1/messages", "", "no auth (catches gateway-not-configured-style 401 from middleware)"},
+		{"/v1/messages", "Bearer sk-ant-oat01-fake-agent-oauth", "agent-supplied provider OAuth"},
+		{"/v1/chat/completions", "", "no auth"},
+		{"/v1/chat/completions", "Bearer sk-fake-openai-key", "agent-supplied provider key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path+"/"+tc.comment, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, srv.URL+tc.path,
+				strings.NewReader(`{"model":"x","messages":[]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if tc.auth != "" {
+				req.Header.Set("Authorization", tc.auth)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("POST %s: %v", tc.path, err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			// The middleware's specific failure envelope must not appear,
+			// regardless of upstream behavior.
+			if bytes.Contains(body, []byte("missing or invalid daemon token")) {
+				t.Fatalf("middleware fired on %s (regression): body=%s", tc.path, string(body))
+			}
+			select {
+			case got := <-hits:
+				if got.URL.Path != tc.path {
+					t.Errorf("upstream received path %q, want %q", got.URL.Path, tc.path)
+				}
+				if tc.auth != "" && got.Header.Get("Authorization") != tc.auth {
+					t.Errorf("upstream Authorization = %q, want passthrough %q", got.Header.Get("Authorization"), tc.auth)
+				}
+			default:
+				t.Fatalf("upstream never received the request — middleware probably blocked %s (status=%d body=%s)", tc.path, resp.StatusCode, string(body))
+			}
+		})
+	}
+}
+
+// TestLocalDaemonAuthSkip_Contract pins the exact set of /v1/* paths
+// that bypass the daemon-token middleware: health, the cookie handshake,
+// and the two LLM gateway endpoints. Anything else under /v1/ requires
+// auth. A change here that adds a path needs a separate review of the
+// trust model.
+func TestLocalDaemonAuthSkip_Contract(t *testing.T) {
+	exempt := []string{"/v1/health", "/v1/auth/handshake", "/v1/messages", "/v1/chat/completions"}
+	for _, p := range exempt {
+		if !localDaemonAuthSkip(p) {
+			t.Errorf("%s must be exempt from daemon-token auth", p)
+		}
+	}
+	gated := []string{"/v1/status", "/v1/actions", "/v1/bindings", "/v1/messages/count_tokens", "/v1/audit"}
+	for _, p := range gated {
+		if localDaemonAuthSkip(p) {
+			t.Errorf("%s must require daemon-token auth", p)
+		}
 	}
 }
 

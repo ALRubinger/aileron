@@ -149,6 +149,22 @@ func localDaemonAuthSkip(path string) bool {
 	switch path {
 	case "/v1/health", "/v1/auth/handshake":
 		return true
+	case "/v1/messages", "/v1/chat/completions":
+		// The LLM gateway is a transparent passthrough: the reverse
+		// proxy forwards the agent's own `x-api-key` /
+		// `Authorization` headers to upstream Anthropic / OpenAI
+		// unchanged (see newGatewayProxy in handlers_gateway.go), and
+		// the daemon never substitutes credentials of its own. Gating
+		// these paths on the daemon's bearer token would reject every
+		// in-container agent whose Authorization header carries its
+		// own provider OAuth token (the daemon would compare it to
+		// its own daemon token, see a mismatch, and 401 before the
+		// proxy ever runs). That 401 is also indistinguishable to the
+		// agent from an upstream auth failure, which sends users
+		// chasing the wrong root cause. The gateway adds no upstream
+		// credentials of its own, so daemon-token gating provides no
+		// security benefit here — exempt it.
+		return true
 	default:
 		return false
 	}
