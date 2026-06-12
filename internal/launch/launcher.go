@@ -773,9 +773,23 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	// stops the named container with a bounded grace window then runs
 	// the same captureOnce the clean-exit gate uses. SIGKILL stays
 	// uncatchable and intentionally bypasses this path.
+	//
+	// Cleanup discipline is borrowed from launchDirect (signal.Stop +
+	// close + drain) — but NOT its signal-*forwarding* behavior.
+	// launchDirect forwards the caught signal to the child
+	// (cmd.Process.Signal(sig)); the salvage path does the opposite,
+	// catching the signal and issuing a graceful stop itself, so the
+	// forward-to-child loop is intentionally not reused here.
 	sigCh := make(chan os.Signal, 1)
 	sandboxSignalNotify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	salvageDone := make(chan struct{})
+	// signalFired records whether the goroutine read a real signal (vs.
+	// observing the clean-exit close below). It makes the "the drain
+	// below only blocks on salvage when a signal actually fired" intent
+	// explicit: on a clean exit the goroutine takes the channel-closed
+	// branch and returns immediately, so <-salvageDone is bounded and
+	// never waits on Capture.
+	var signalFired bool
 	go func() {
 		defer close(salvageDone)
 		sig, ok := <-sigCh
@@ -783,8 +797,10 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 			// Channel closed by the clean-exit path below; no signal
 			// arrived. The container exited on its own and the clean-
 			// exit gate owns Capture, so there is nothing to salvage.
+			// signalFired stays false; the drain returns at once.
 			return
 		}
+		signalFired = true
 		// A SIGINT/SIGTERM is tearing the foreground container down
 		// before the clean-exit Capture gate can run. Best-effort stop
 		// the named container with a bounded grace window, then salvage
@@ -809,13 +825,22 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 
 	// Stop signal delivery and drain the salvage goroutine before
 	// returning so no post-return signal is caught and no goroutine
-	// leaks (mirrors launchDirect's signal.Stop discipline). Closing
-	// sigCh unblocks the goroutine on the clean-exit path; if a signal
-	// already landed the goroutine is mid-salvage and salvageDone closes
-	// once Capture completes.
+	// leaks (mirrors launchDirect's signal.Stop discipline — only the
+	// cleanup shape transfers, not launchDirect's forward-to-child
+	// behavior). The drain is bounded: closing sigCh unblocks the
+	// goroutine on the clean-exit path (signalFired stays false) and it
+	// returns without running salvage, so <-salvageDone completes at
+	// once. Only when a signal actually fired (signalFired true) does the
+	// drain wait, and only until the goroutine's stop+Capture finish — so
+	// no truncated-mid-PUT race and no hang on the clean path.
 	sandboxSignalStop(sigCh)
 	close(sigCh)
 	<-salvageDone
+	// Reading signalFired here is safe: the goroutine's only write to it
+	// happens-before it closes salvageDone, which this receive observes.
+	if signalFired && sessionLog != nil {
+		sessionLog.Info("sandbox salvage completed", "container", containerName)
+	}
 
 	if err != nil {
 		return exitResult(err)
@@ -1055,6 +1080,12 @@ func launchDirect(cmd *exec.Cmd, config LaunchConfig) (LaunchResult, error) {
 		return LaunchResult{}, fmt.Errorf("failed to start %s: %w", config.Agent.Name(), err)
 	}
 
+	// Host launch FORWARDS the caught signal to the child so the agent's
+	// own Ctrl-C handling runs unchanged. This is the opposite of the
+	// sandbox salvage path (launchSandbox), which CATCHES the signal and
+	// issues a graceful `docker stop` itself. Only launchDirect's cleanup
+	// discipline (signal.Stop + close) is reused there, never this
+	// forward-to-child loop. See ADR-0025 and issue #999.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {

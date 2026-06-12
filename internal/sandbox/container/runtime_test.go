@@ -994,11 +994,66 @@ func TestStopContainerIssuesStopWithGrace(t *testing.T) {
 }
 
 func TestStopContainerReturnsRunnerErrorVerbatim(t *testing.T) {
-	wantErr := errors.New("no such container")
+	// A genuine error whose stderr does not match the already-gone
+	// signature is returned verbatim — only the auto-removal race is
+	// suppressed, not real failures.
+	wantErr := errors.New("permission denied")
 	runner := &callRecordingRunner{errs: []error{wantErr}}
 	err := StopContainer(context.Background(), runner, "podman", "aileron-sbx-y", 10, io.Discard, io.Discard)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("StopContainer error = %v, want %v", err, wantErr)
+	}
+}
+
+// stderrWritingRunner writes a fixed string to the stderr writer and
+// then returns errReturn, modeling a container runtime that prints a
+// diagnostic to stderr and exits non-zero.
+type stderrWritingRunner struct {
+	stderrText string
+	errReturn  error
+}
+
+func (r *stderrWritingRunner) Run(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
+	_, _ = io.WriteString(stderr, r.stderrText)
+	return r.errReturn
+}
+
+func TestStopContainerSuppressesAlreadyGone(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"docker no such container", "Error response from daemon: No such container: aileron-sbx-x\n"},
+		{"is not running", "Error: container aileron-sbx-x is not running\n"},
+		{"already stopped", "Error: container already stopped\n"},
+		{"mixed case", "ERROR RESPONSE FROM DAEMON: NO SUCH CONTAINER\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var userStderr bytes.Buffer
+			runner := &stderrWritingRunner{stderrText: tc.stderr, errReturn: errors.New("exit status 1")}
+			if err := StopContainer(context.Background(), runner, "docker", "aileron-sbx-x", 10, io.Discard, &userStderr); err != nil {
+				t.Fatalf("StopContainer = %v, want nil (already-gone suppressed)", err)
+			}
+			// The runtime's stderr still reaches the caller's writer so
+			// the user sees the runtime output; only the returned error
+			// is suppressed.
+			if !strings.Contains(userStderr.String(), strings.TrimSpace(tc.stderr)[:5]) {
+				t.Fatalf("expected runtime stderr teed to caller; got %q", userStderr.String())
+			}
+		})
+	}
+}
+
+func TestStopContainerGenuineStderrErrorReturned(t *testing.T) {
+	wantErr := errors.New("exit status 1")
+	runner := &stderrWritingRunner{
+		stderrText: "Error response from daemon: permission denied while trying to connect to the Docker daemon socket\n",
+		errReturn:  wantErr,
+	}
+	err := StopContainer(context.Background(), runner, "docker", "aileron-sbx-x", 10, io.Discard, io.Discard)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("StopContainer error = %v, want %v (genuine error not suppressed)", err, wantErr)
 	}
 }
 
