@@ -46,6 +46,27 @@ func (r *callRecordingRunner) Run(_ context.Context, name string, args []string,
 	return err
 }
 
+func TestInteractiveTTYRun(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"run with tty", []string{"run", "--rm", "-i", "-t", "img", "claude"}, true},
+		{"run without tty", []string{"run", "--rm", "-i", "img", "claude"}, false},
+		{"build with tag flag is not a tty run", []string{"build", "-t", "img", "-f", "Dockerfile", "."}, false},
+		{"image inspect", []string{"image", "inspect", "img"}, false},
+		{"empty args", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := interactiveTTYRun(tc.args); got != tc.want {
+				t.Fatalf("interactiveTTYRun(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildBaseImageUsesLocalContainerfile(t *testing.T) {
 	dir := t.TempDir()
 	containerfile := filepath.Join(dir, "images", "sandbox-base", "Containerfile")

@@ -27,3 +27,24 @@ func setRuntimeChildPgid(cmd *exec.Cmd) {
 	}
 	cmd.SysProcAttr.Setpgid = true
 }
+
+// setRuntimeChildForeground promotes the runtime child's new process
+// group to the foreground of the controlling terminal so an interactive
+// `docker run -t` can put the terminal into raw mode. Without it the
+// child sits in the background group set by setRuntimeChildPgid and the
+// raw-mode tcsetattr fails with SIGTTOU/EINTR.
+//
+// The Go runtime performs the tcsetpgrp(Ctty) handoff in the child with
+// SIGTTOU masked. Ctty is the child's stdin (fd 0), which execRunner
+// wires to the host terminal. Callers gate this on a real stdin
+// terminal; setting Foreground without a controlling terminal would make
+// the exec fail. Setpgid is required for Foreground, so it is forced on
+// here too. See ADR-0025 and issue #1014.
+func setRuntimeChildForeground(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	cmd.SysProcAttr.Foreground = true
+	cmd.SysProcAttr.Ctty = 0
+}
