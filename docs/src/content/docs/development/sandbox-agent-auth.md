@@ -85,7 +85,22 @@ The bytes must match the envelope schema in the table above when set manually. R
 aileron vault list
 ```
 
-The `aileron auth <agent> --import-from-host` subcommand is intentionally not in v1. The host-import surface (Linux file read, macOS Keychain shell-out, Windows file read) is deferred to a follow-up. The in-container login path covers bootstrap.
+`aileron auth <agent> --import-from-host` seeds the vault from an already-authenticated host install. It reads the host `claude` or `codex` credential state, validates it against the same schema the launcher's Capture pass enforces, and writes it through the daemon to `agents/<agent>/oauth`. Operators who already ran `claude` or `codex` login on the host skip the per-machine in-container login.
+
+```bash
+aileron auth claude --import-from-host
+aileron auth codex --import-from-host
+```
+
+The command reads the credential from the location each agent's CLI writes per operating system.
+
+- Linux. Claude reads `~/.claude/.credentials.json`. Codex reads `~/.codex/auth.json`. A Linux keyring install (libsecret) is not supported in v1; the command returns a clear error naming the file-mode and interactive-login recovery paths.
+- macOS. Claude reads the Keychain item under the `Claude Code-credentials` service. Codex prefers `~/.codex/auth.json` when it exists and otherwise reads the `Codex Auth` Keychain service. The first real Keychain read shows a macOS access dialog; approve it once so the command can read the item.
+- Windows. Claude reads `%USERPROFILE%\.claude\.credentials.json`. Codex reads `%USERPROFILE%\.codex\auth.json`.
+
+Only `claude` and `codex` accept `--import-from-host`. Other agents return a clear unsupported error. The bytes are read verbatim and validated through the agent's Capture before the PUT, so a malformed or partial envelope fails with the same error the launcher reports rather than landing a broken credential in the vault.
+
+When the host install is not authenticated (the file is absent or empty, or the Keychain item is missing), the command reports that no host credentials were found and names the recovery path: log in on the host first, or run the interactive in-container login with `aileron launch <agent> --sandbox=docker`.
 
 ## Recovery
 

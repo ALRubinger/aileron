@@ -151,6 +151,8 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		return runSandbox(args[1:], registry, stdout, stderr)
 	case "vault":
 		return runVault(args[1:], os.Stdin, stdout, stderr)
+	case "auth":
+		return runAuth(args[1:], registry, stdout, stderr)
 	case "daemon":
 		return runDaemon(args[1:], stdout, stderr)
 	case "stop":
@@ -175,6 +177,7 @@ func usage(w io.Writer, registry *launch.Registry) {
 	fmt.Fprintln(w, "  aileron launch [--sandbox=<runtime>] [--sandbox-build=<policy>] <agent> [args...]")
 	fmt.Fprintln(w, "                                      Launch an AI coding agent connected to the Aileron daemon")
 	fmt.Fprintln(w, "  aileron vault init                 Create the local encrypted vault with a passphrase")
+	fmt.Fprintln(w, "  aileron auth <agent> --import-from-host  Seed the vault from an authenticated host install (claude|codex)")
 	fmt.Fprintln(w, "  aileron secret set <name>          Store a secret in the encrypted vault")
 	fmt.Fprintln(w, "  aileron secret list                List stored secret names")
 	fmt.Fprintln(w, "  aileron binding list               List credential bindings (metadata only — no unlock)")

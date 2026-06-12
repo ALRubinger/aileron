@@ -146,7 +146,11 @@ jobs:
         shell: bash
         run: |
           set -e
-          (cd internal && go test -race -coverprofile=coverage-darwin-internal.txt ./sandbox/...)
+          # launch/hostimport carries the darwin-tagged Keychain shell-out
+          # (keychain_darwin.go) for `aileron auth <agent> --import-from-host`
+          # (#986). It only compiles and runs on macOS, so it joins the
+          # sandbox package in this job's glob to get real CI coverage.
+          (cd internal && go test -race -coverprofile=coverage-darwin-internal.txt ./sandbox/... ./launch/hostimport/...)
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v6
@@ -196,7 +200,11 @@ jobs:
           # test broke. Without it, `go test` only reports `FAIL pkg`
           # at the package level when no test prints anything, which
           # hides syscall-level hangs that don't produce stdout.
-          (cd internal && go test -v -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/... ./sandbox/...)
+          # launch/hostimport's file_other.go is the Windows credential-file
+          # read for `aileron auth <agent> --import-from-host` (#986). The
+          # file-mode test runs here so %USERPROFILE% path resolution is
+          # verified on a real Windows runner.
+          (cd internal && go test -v -race -coverprofile=coverage-windows-internal.txt ./daemon/discovery/... ./daemon/spawn/... ./sandbox/... ./launch/hostimport/...)
           # cmd/aileron's full suite is gated behind #577 on Windows.
           # Run only the helpers with a Windows-specific implementation.
           (cd cmd/aileron && go test -race -coverprofile=coverage-windows-aileron.txt -run 'TestSignalDaemonStop' .)
