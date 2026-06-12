@@ -822,3 +822,167 @@ func assertFailureClass(t *testing.T, e audit.Event, want string) {
 		t.Errorf("aileron.failure.class = %v, want %q", got, want)
 	}
 }
+
+// X-Aileron-Session-Id is untrusted (the loopback endpoint is reachable
+// by any local process). The handler must sanitize it before it reaches
+// the audit actor ID, the `aileron.session.id` payload, or the slog
+// line: bound the length, restrict to a safe charset, and strip control
+// bytes so a forged header cannot inject extra log fields or bloat the
+// record. When sanitization empties the value, the actor falls back to
+// the loopback service ref.
+
+func putWithSessionHeader(t *testing.T, s *apiServer, name, header string) {
+	t.Helper()
+	body := api.AgentCredentials{Value: []byte(vaultCredentialSecret)}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/vault/agents/"+name+"/credentials",
+		bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Aileron-Session-Id", header)
+	rec := httptest.NewRecorder()
+	s.PutAgentCredentials(rec, req, name)
+	assertStatus(t, rec, http.StatusNoContent)
+}
+
+func TestSanitizeSessionID(t *testing.T) {
+	long := strings.Repeat("a", maxSessionIDLen+50)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"whitespace only", "   \t\n", ""},
+		{"normal value unchanged", "sess-123", "sess-123"},
+		{"allowed punctuation kept", "a-b_c.d", "a-b_c.d"},
+		{"trims surrounding space", "  sess-123  ", "sess-123"},
+		{"strips CR/LF injection", "sess-123\r\nactor=admin", "sess-123actoradmin"},
+		{"strips control bytes", "se\x00ss\x07", "sess"},
+		{"strips disallowed punctuation", "a=b c/d", "abcd"},
+		{"only-disallowed becomes empty", "=/ \t\n@", ""},
+		{"truncates to cap", long, strings.Repeat("a", maxSessionIDLen)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sanitizeSessionID(c.in); got != c.want {
+				t.Errorf("sanitizeSessionID(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestVaultCredentials_ForgedSessionHeaderIsSanitized(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	// A forged header injects a CR/LF plus a fake log field. After
+	// sanitization only the allow-listed bytes survive, concatenated.
+	putWithSessionHeader(t, s, "claude", "sess-1\r\nactor=admin")
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	const wantID = "sess-1actoradmin"
+	if ev.Actor.ID != wantID {
+		t.Errorf("actor ID = %q, want %q", ev.Actor.ID, wantID)
+	}
+	if ev.Payload["aileron.session.id"] != wantID {
+		t.Errorf("session id = %v, want %q", ev.Payload["aileron.session.id"], wantID)
+	}
+	// No raw CR/LF or a second forged log line reached the buffer/payload.
+	if strings.Contains(logBuf.String(), "\nactor=admin") {
+		t.Errorf("slog buffer contains an injected log line: %q", logBuf.String())
+	}
+	raw, err := json.Marshal(ev.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(string(raw), "\r\n") {
+		t.Errorf("audit payload contains raw control bytes: %s", string(raw))
+	}
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestVaultCredentials_OverLengthSessionHeaderTruncated(t *testing.T) {
+	s, store, _ := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	header := strings.Repeat("x", maxSessionIDLen+25)
+	putWithSessionHeader(t, s, "claude", header)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	want := strings.Repeat("x", maxSessionIDLen)
+	if ev.Actor.ID != want {
+		t.Errorf("actor ID len = %d, want %d", len(ev.Actor.ID), maxSessionIDLen)
+	}
+	if ev.Payload["aileron.session.id"] != want {
+		t.Errorf("session id len = %d, want %d", len(ev.Payload["aileron.session.id"].(string)), maxSessionIDLen)
+	}
+}
+
+func TestVaultCredentials_AllDisallowedSessionHeaderFallsBackToLoopback(t *testing.T) {
+	s, store, _ := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	// Header of only-disallowed chars sanitizes to empty -> loopback.
+	putWithSessionHeader(t, s, "claude", "=/@ \t")
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialWrite)
+	if ev.Actor.Type != model.ActorTypeService || ev.Actor.ID != "loopback" {
+		t.Errorf("actor = %+v, want service/loopback", ev.Actor)
+	}
+	if _, ok := ev.Payload["aileron.session.id"]; ok {
+		t.Errorf("sanitized-empty header must omit aileron.session.id: %v", ev.Payload)
+	}
+}
+
+// DELETE existence-check guard (acceptance item 2): the secret loaded by
+// the existence Get is discarded and must never surface in the audit
+// payload or session log, even though it is decrypted in memory.
+
+func TestDeleteAgentCredentials_LoadedSecretNeverLogged(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, vault.NewMemVault())
+	putAuditableCredential(t, s, "claude")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusNoContent)
+
+	events := listVaultCredentialEvents(t, store)
+	requireSingleEvent(t, events, model.EventTypeVaultCredentialDelete)
+	// The existence Get decrypted the stored secret; assert that none of
+	// its bytes reached either surface even though it was loaded.
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+// DELETE 500-branch auditing (acceptance items 1 & 3): both 500 branches
+// emit a failure event with the right class and never leak credential
+// bytes to the payload or slog.
+
+func TestDeleteAgentCredentials_GetErrorEmitsFailureEvent(t *testing.T) {
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, getErrVault{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusInternalServerError)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialDelete)
+	assertFailureClass(t, ev, "vault_get_failed")
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
+func TestDeleteAgentCredentials_DeleteErrorEmitsFailureEvent(t *testing.T) {
+	// deleteErrVault.Get returns a secret value before Delete fails, so
+	// this also reinforces the Unit 2 guard: the loaded secret must not
+	// leak on the vault_delete_failed path.
+	s, store, logBuf := newAuditingAgentCredentialsServer(t, deleteErrVault{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/v1/vault/agents/claude/credentials", nil)
+	s.DeleteAgentCredentials(rec, req, "claude")
+	assertStatus(t, rec, http.StatusInternalServerError)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultCredentialDelete)
+	assertFailureClass(t, ev, "vault_delete_failed")
+	assertNoCredentialLeak(t, events, logBuf)
+}

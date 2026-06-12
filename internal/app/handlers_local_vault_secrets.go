@@ -25,15 +25,61 @@ const vaultCredentialSessionHeader = "X-Aileron-Session-Id"
 // as a loopback service actor rather than minting a new ActorType.
 const vaultCredentialLoopbackActorID = "loopback"
 
+// maxSessionIDLen caps the length of an accepted X-Aileron-Session-Id
+// after sanitization. The header is untrusted (the loopback endpoint is
+// reachable by any local process, so the value can be forged), and it
+// flows into both the audit actor ID and the `aileron.session.id`
+// payload. A bound prevents an unbounded attacker-controlled string from
+// bloating audit records.
+const maxSessionIDLen = 128
+
+// sanitizeSessionID treats the X-Aileron-Session-Id header as untrusted
+// input. It trims surrounding whitespace, restricts the value to a safe
+// allow-list (ASCII alphanumerics plus `-`, `_`, `.`), and truncates to
+// maxSessionIDLen. Disallowed bytes — including CR/LF and other control
+// characters that could forge extra slog fields or audit-record lines —
+// are dropped. The result is empty when the input is absent or contains
+// no allow-listed characters, which the caller treats as "no session"
+// (falling back to the loopback service actor). Truncation happens after
+// filtering so a long run of disallowed bytes cannot crowd out the
+// allowed suffix.
+func sanitizeSessionID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range raw {
+		if b.Len() >= maxSessionIDLen {
+			break
+		}
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.':
+			b.WriteRune(c)
+		default:
+			// Drop anything else (whitespace, control bytes, punctuation,
+			// non-ASCII) so no CR/LF or other injection reaches the slog
+			// line or the audit payload.
+		}
+	}
+	return b.String()
+}
+
 // vaultCredentialActor resolves the requester for a per-agent
 // credential operation. When the optional session header is present it
 // attributes the operation to that launch session; otherwise it falls
-// back to the loopback service actor. The returned sessionID is empty
-// unless the header supplied one, so callers can decide whether to
-// stamp `aileron.session.id` into the payload.
+// back to the loopback service actor. The header is untrusted, so it is
+// sanitized at this single read site (the only place it enters the audit
+// surface); both the actor ID and the returned sessionID derive from the
+// already-bounded value. The returned sessionID is empty unless the
+// header supplied an allow-listed value, so callers can decide whether
+// to stamp `aileron.session.id` into the payload.
 func vaultCredentialActor(r *http.Request) (actor model.ActorRef, sessionID string) {
 	if r != nil {
-		sessionID = strings.TrimSpace(r.Header.Get(vaultCredentialSessionHeader))
+		sessionID = sanitizeSessionID(r.Header.Get(vaultCredentialSessionHeader))
 	}
 	if sessionID != "" {
 		return model.ActorRef{Type: model.ActorTypeService, ID: sessionID}, sessionID
@@ -239,6 +285,12 @@ func (s *apiServer) DeleteAgentCredentials(w http.ResponseWriter, r *http.Reques
 	}
 
 	path := agentCredentialVaultPath(name)
+	// The existence check decrypts the stored credential, but the secret
+	// is intentionally discarded with `_`: DELETE binds only the agent
+	// name, never the loaded value. emitVaultCredentialEvent takes only
+	// `name`, so the decrypted bytes can never reach an audit payload or
+	// session-log line (ADR-0011: no plaintext credential in any record).
+	// Do not bind or log this Get result.
 	_, err := s.vault.Get(ctx, path)
 	if vault.IsNotFound(err) {
 		writeError(w, http.StatusNotFound, "vault_not_found",
