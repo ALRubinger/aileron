@@ -500,17 +500,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// written back to the vault exactly once even when a signal races
 	// a clean exit (R15, ADR-0025). A nil CaptureFn (host launch, or
 	// an agent with an empty AuthSpec) makes this a safe no-op.
-	var captureGuard sync.Once
-	captureOnce := func() {
-		if authPrep.CaptureFn == nil {
-			return
-		}
-		captureGuard.Do(func() {
-			captureCtx, cancelCapture := context.WithTimeout(context.Background(), daemonHTTPTimeout)
-			authPrep.CaptureFn(captureCtx)
-			cancelCapture()
-		})
-	}
+	captureOnce := newSalvageCapture(authPrep.CaptureFn)
 
 	// containerName makes the sandbox container addressable so the
 	// salvage path can `<runtime> stop` it on a signal. Deterministic
@@ -816,6 +806,26 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 		return exitResult(err)
 	}
 	return LaunchResult{ExitCode: 0}, nil
+}
+
+// newSalvageCapture builds the once-guarded Capture wrapper shared by
+// the clean-exit gate and the SIGINT/SIGTERM salvage path. A nil
+// captureFn (host launch or an empty AuthSpec) yields a no-op; otherwise
+// the first call runs captureFn with a fresh bounded context and any
+// later call is dropped so a signal-then-clean-exit race writes the
+// rotation back to the vault exactly once.
+func newSalvageCapture(captureFn func(context.Context)) func() {
+	if captureFn == nil {
+		return func() {}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), daemonHTTPTimeout)
+			captureFn(ctx)
+			cancel()
+		})
+	}
 }
 
 // sandboxStopGraceSeconds is the bounded SIGTERM-to-SIGKILL grace window

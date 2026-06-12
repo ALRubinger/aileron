@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -108,7 +109,10 @@ func runSalvageLaunchSandbox(t *testing.T, captureOnce func()) (LaunchResult, er
 	t.Helper()
 	plan := SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}
 	cfg := LaunchConfig{Agent: namedBinaryAgent{name: "claude"}}
-	return launchSandbox(context.Background(), plan, cfg, map[string]string{}, "aileron-sbx-test", captureOnce, nil)
+	// A real (discarding) logger exercises the sessionLog != nil
+	// branches the production launcher always takes.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return launchSandbox(context.Background(), plan, cfg, map[string]string{}, "aileron-sbx-test", captureOnce, logger)
 }
 
 // TestLaunchSandboxSignalSalvagesCapture is the core regression: a
@@ -119,7 +123,7 @@ func runSalvageLaunchSandbox(t *testing.T, captureOnce func()) (LaunchResult, er
 func TestLaunchSandboxSignalSalvagesCapture(t *testing.T) {
 	h := newSignalTestHarness(t)
 	var captures atomic.Int32
-	once := newCaptureOnce(func() { captures.Add(1) })
+	once := newSalvageCapture(func(context.Context) { captures.Add(1) })
 
 	go h.deliverSignal()
 	_, err := runSalvageLaunchSandbox(t, once)
@@ -145,7 +149,7 @@ func TestLaunchSandboxSignalSalvagesCapture(t *testing.T) {
 func TestLaunchSandboxCleanExitDoesNotStopOrCapture(t *testing.T) {
 	h := newSignalTestHarness(t)
 	var captures atomic.Int32
-	once := newCaptureOnce(func() { captures.Add(1) })
+	once := newSalvageCapture(func(context.Context) { captures.Add(1) })
 
 	go h.cleanExit()
 	res, err := runSalvageLaunchSandbox(t, once)
@@ -170,7 +174,7 @@ func TestLaunchSandboxCleanExitDoesNotStopOrCapture(t *testing.T) {
 func TestLaunchSandboxSignalThenCleanRaceCapturesOnce(t *testing.T) {
 	h := newSignalTestHarness(t)
 	var captures atomic.Int32
-	once := newCaptureOnce(func() { captures.Add(1) })
+	once := newSalvageCapture(func(context.Context) { captures.Add(1) })
 
 	go h.deliverSignal()
 	_, _ = runSalvageLaunchSandbox(t, once)
@@ -187,7 +191,7 @@ func TestLaunchSandboxSignalFailedStopStillCaptures(t *testing.T) {
 	h := newSignalTestHarness(t)
 	h.stopErr = errors.New("stop failed")
 	var captures atomic.Int32
-	once := newCaptureOnce(func() { captures.Add(1) })
+	once := newSalvageCapture(func(context.Context) { captures.Add(1) })
 
 	go h.deliverSignal()
 	_, err := runSalvageLaunchSandbox(t, once)
@@ -200,11 +204,11 @@ func TestLaunchSandboxSignalFailedStopStillCaptures(t *testing.T) {
 }
 
 // TestLaunchSandboxSignalNilCaptureIsNoOp verifies a nil-Capture salvage
-// path (captureOnce wraps a nil CaptureFn) is a safe no-op.
+// path (newSalvageCapture(nil)) is a safe no-op that still stops the
+// container.
 func TestLaunchSandboxSignalNilCaptureIsNoOp(t *testing.T) {
 	h := newSignalTestHarness(t)
-	// captureOnce that does nothing models a nil CaptureFn.
-	noop := func() {}
+	noop := newSalvageCapture(nil)
 
 	go h.deliverSignal()
 	_, err := runSalvageLaunchSandbox(t, noop)
@@ -216,12 +220,28 @@ func TestLaunchSandboxSignalNilCaptureIsNoOp(t *testing.T) {
 	}
 }
 
-// newCaptureOnce mirrors the sync.Once wrapper Launch builds around the
-// AuthSpec CaptureFn so the salvage path and the clean-exit gate share
-// the exactly-once guard.
-func newCaptureOnce(fn func()) func() {
-	var once sync.Once
-	return func() { once.Do(fn) }
+// TestNewSalvageCaptureNilIsNoOp covers the nil-CaptureFn guard
+// directly: the wrapper is callable and does nothing.
+func TestNewSalvageCaptureNilIsNoOp(t *testing.T) {
+	newSalvageCapture(nil)() // must not panic
+}
+
+// TestNewSalvageCaptureFiresOnce covers the exactly-once dedup that
+// protects the signal-then-clean-exit race.
+func TestNewSalvageCaptureFiresOnce(t *testing.T) {
+	var n atomic.Int32
+	once := newSalvageCapture(func(ctx context.Context) {
+		if ctx == nil {
+			t.Error("expected a non-nil bounded context")
+		}
+		n.Add(1)
+	})
+	once()
+	once()
+	once()
+	if n.Load() != 1 {
+		t.Fatalf("CaptureFn fired %d times, want exactly 1", n.Load())
+	}
 }
 
 // guard against an accidentally unbounded test if a seam is misnamed.
@@ -229,7 +249,7 @@ func TestLaunchSandboxSalvageDoesNotHang(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		h := newSignalTestHarness(t)
-		once := newCaptureOnce(func() {})
+		once := newSalvageCapture(func(context.Context) {})
 		go h.deliverSignal()
 		_, _ = runSalvageLaunchSandbox(t, once)
 		close(done)
