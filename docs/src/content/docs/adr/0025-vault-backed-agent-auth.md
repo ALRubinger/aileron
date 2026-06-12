@@ -8,7 +8,7 @@ order: 25
 <table>
   <tr><th>Status</th><td>Accepted</td></tr>
   <tr><th>Date</th><td>2026-06-10</td></tr>
-  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/969">#969</a>, <a href="https://github.com/ALRubinger/aileron/issues/747">#747</a></td></tr>
+  <tr><th>Tracking</th><td><a href="https://github.com/ALRubinger/aileron/issues/969">#969</a>, <a href="https://github.com/ALRubinger/aileron/issues/747">#747</a>, <a href="https://github.com/ALRubinger/aileron/issues/983">#983</a></td></tr>
 </table>
 </div>
 
@@ -46,7 +46,7 @@ The daemon's new endpoints are namespace-scoped at the routing layer: `{name}` t
 
 **Seeding is exclusively in-container in v1.** First launch with an empty vault prints `[launcher] no credentials in vault for <agent>. agent will prompt for login` to stderr and starts the container with the writable bind-mount empty. The in-container agent performs its normal interactive login (paste-the-code OAuth fallback for Claude, device-auth for Codex). Capture on clean exit seeds the vault. Every subsequent launch renders silently. Host-side credential import is deferred to a follow-up; the brainstorm closes that scope in v1.
 
-**Sandbox-only in v1.** Host-launch parity for `AuthSpec` is architecturally clean to extend later. It is not part of this decision.
+**Sandbox-only in v1.** Host launch (`aileron launch <agent>` with no sandbox flag) is deliberately not vault-backed. Host launch already resolves a working install's credentials from the host user's own `~/.claude/` and `~/.codex/`. `prepareAuthSpec` runs only on the sandbox path and is intentionally not wired into host launch. Intervening on the host path risks breaking a working install, so the host path stays untouched in v1. Vault-backed host auth would render vault entries into host paths and capture rotations back to the vault. That work warrants a separate PR with explicit user testing, and is deferred. The host-parity question was evaluated under issue [#983](https://github.com/ALRubinger/aileron/issues/983): three options were weighed, extending `AuthSpec` to host launch, a hybrid, and documenting the sandbox-only stance. Documenting the sandbox-only stance was chosen for v1. Host-launch parity for `AuthSpec` stays architecturally clean to extend later, and is not part of this decision.
 
 ## Consequences
 
@@ -70,6 +70,7 @@ The daemon's new endpoints are namespace-scoped at the routing layer: `{name}` t
 
 - The vault entry holds a usable OAuth credential. The daemon already protects this surface per [ADR-0011](/adr/0011-local-credential-vault); the new endpoints inherit the same posture without widening it.
 - The writable host-side transient directory is chmod 0700, so OAuth bytes do not leak through a shared host's default umask. The launcher removes it on Launch exit.
+- Host launch's credentials stay entirely host-resolved and are untouched by the vault path. The vault-to-container conduit exists only on the sandbox path, so a host launch reads the same `~/.claude/` and `~/.codex/` files it always has.
 
 ## Alternatives Considered
 
