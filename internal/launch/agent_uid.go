@@ -63,6 +63,15 @@ func resolveAgentUIDCached(ctx context.Context, runner sandboxcontainer.Runner, 
 // agent owns both the mounted parent directory and the rendered
 // credential files, enabling the in-container tmpfile+rename rotation
 // over the writable bind mount.
+//
+// Note on capture-on-exit: after the agent rotates a credential
+// in-container, the resulting file is owned by the agent UID regardless
+// of this hook (the agent writes it). The host-side capture read is
+// therefore subject to the same ownership on rootful Docker whether or
+// not this chown ran; the hook does not introduce a new capture-read
+// failure mode for rotated files. An un-rotated seed file chowned here
+// is at worst re-readable only by root/agent, but its capture would
+// merely re-PUT identical bytes, so a skipped read is harmless.
 func newAgentDirChownHook(ctx context.Context, runner sandboxcontainer.Runner, runtime, image string) func(dir string) error {
 	if goruntime.GOOS != "linux" {
 		return nil
