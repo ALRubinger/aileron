@@ -46,8 +46,14 @@ type fakeDaemon struct {
 	store     map[string]vault.Secret
 	getErrors map[string]error
 	putErrors map[string]error
-	puts      []putRecord
-	gets      []string
+	// getSeq, when populated for a name, supplies a per-call error
+	// sequence consumed in order. A nil entry means "no error, use the
+	// store" for that call. This lets a scenario make the render GET
+	// succeed and the capture GET cancel/fail without affecting the
+	// other. getSeq takes precedence over getErrors for that name.
+	getSeq map[string][]error
+	puts   []putRecord
+	gets   []string
 }
 
 type putRecord struct {
@@ -60,6 +66,7 @@ func newFakeDaemon() *fakeDaemon {
 		store:     map[string]vault.Secret{},
 		getErrors: map[string]error{},
 		putErrors: map[string]error{},
+		getSeq:    map[string][]error{},
 	}
 }
 
@@ -69,10 +76,31 @@ func (f *fakeDaemon) seed(name string, value []byte) {
 	f.store[name] = vault.Secret{Value: value, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}
 }
 
+// deleteEntry simulates an operator running `aileron vault delete`
+// mid-session: the entry vanishes from the store so a subsequent GET
+// returns ErrAgentCredentialsNotFound.
+func (f *fakeDaemon) deleteEntry(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.store, name)
+}
+
 func (f *fakeDaemon) GetAgentCredentials(_ context.Context, name string) (vault.Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.gets = append(f.gets, name)
+	if seq, ok := f.getSeq[name]; ok && len(seq) > 0 {
+		err := seq[0]
+		f.getSeq[name] = seq[1:]
+		if err != nil {
+			return vault.Secret{}, err
+		}
+		s, ok := f.store[name]
+		if !ok {
+			return vault.Secret{}, ErrAgentCredentialsNotFound
+		}
+		return s, nil
+	}
 	if err, ok := f.getErrors[name]; ok {
 		return vault.Secret{}, err
 	}
@@ -293,7 +321,9 @@ func TestPrepareAuthSpec_CaptureOnCleanExitPersistsRotatedFile(t *testing.T) {
 			ContainerPath: "/home/agent/.claude/.credentials.json",
 			Mode:          0o600,
 			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
-			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}, nil },
+			Capture: func(b []byte) (vault.Secret, error) {
+				return vault.Secret{Value: b, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}, nil
+			},
 		}},
 	}
 	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
@@ -975,6 +1005,165 @@ func TestPrepareAuthSpec_ReclaimHookErrorIsNonFatal(t *testing.T) {
 	}
 	if len(daemon.puts) != 1 {
 		t.Fatalf("capture must still attempt the PUT after a non-fatal reclaim error; puts=%d", len(daemon.puts))
+	}
+}
+
+// freshnessSpec builds a single-FileBinding AuthSpec with byte-identity
+// Render/Capture and the supplied Fresher, for exercising CaptureFn's
+// presence-aware PUT decision.
+func freshnessSpec(fresher func(captured, current vault.Secret) (bool, error)) AuthSpec {
+	return AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/claude/oauth",
+			ContainerPath: "/home/agent/.claude/.credentials.json",
+			Mode:          0o600,
+			Required:      false,
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+			Fresher:       fresher,
+		}},
+	}
+}
+
+func captureHostPath(prep authSpecPrep) string {
+	return filepath.Join(prep.Mounts[0].Source, ".credentials.json")
+}
+
+// P0 regression (see #1010): a first login seeds an empty vault, so the
+// capture-time GET returns NotFound just like a deliberate delete. The
+// entry was ABSENT at render, so this must PUT (seed) — even with a
+// non-nil Fresher that would otherwise gate the write. Skipping it would
+// silently lose every first-login credential.
+func TestPrepareAuthSpec_FirstLoginSeedWithFresherStillPuts(t *testing.T) {
+	daemon := newFakeDaemon() // empty vault → absent at render
+	// A Fresher that always reports "not fresher" — proves the first-login
+	// branch never consults it (there is no prior entry to compare).
+	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return false, nil })
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if err := os.WriteFile(captureHostPath(prep), []byte("seeded-on-first-login"), 0o600); err != nil {
+		t.Fatalf("simulate first-login write: %v", err)
+	}
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != 1 {
+		t.Fatalf("first-login seed must PUT even with a non-nil Fresher; puts=%d", len(daemon.puts))
+	}
+	if got := string(daemon.puts[0].Secret.Value); got != "seeded-on-first-login" {
+		t.Errorf("seeded value = %q, want seeded-on-first-login", got)
+	}
+}
+
+func TestPrepareAuthSpec_DeliberateDeleteMidSessionSkipsPut(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte("old")) // present at render
+	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return true, nil })
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if err := os.WriteFile(captureHostPath(prep), []byte("rotated"), 0o600); err != nil {
+		t.Fatalf("simulate rotation: %v", err)
+	}
+	daemon.deleteEntry("claude") // operator deletes mid-session
+
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != 0 {
+		t.Fatalf("a mid-session delete (present@render, absent@capture) must be honored; puts=%d", len(daemon.puts))
+	}
+}
+
+func TestPrepareAuthSpec_StaleCaptureNotFresherSkipsPut(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte("current")) // present at render and capture
+	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return false, nil })
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+	if err := os.WriteFile(captureHostPath(prep), []byte("stale-rotation"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != 0 {
+		t.Fatalf("a not-fresher capture must not clobber the vault; puts=%d", len(daemon.puts))
+	}
+}
+
+func TestPrepareAuthSpec_FresherTruePuts(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte("current"))
+	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return true, nil })
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+	if err := os.WriteFile(captureHostPath(prep), []byte("fresh-rotation"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != 1 || string(daemon.puts[0].Secret.Value) != "fresh-rotation" {
+		t.Fatalf("a strictly-fresher capture must PUT; puts=%d", len(daemon.puts))
+	}
+}
+
+func TestPrepareAuthSpec_FresherErrorSkipsPut(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte("current"))
+	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return false, errors.New("malformed envelope") })
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+	if err := os.WriteFile(captureHostPath(prep), []byte("rotation"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != 0 {
+		t.Fatalf("a Fresher error must retain the prior entry (skip PUT); puts=%d", len(daemon.puts))
+	}
+}
+
+// On a SIGINT/SIGTERM salvage the captureCtx may already be cancelled.
+// A cancelled freshness GET must skip the PUT with a distinct
+// cancellation path rather than clobber or blind-PUT.
+func TestPrepareAuthSpec_CaptureGetCancelledSkipsPut(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte("current"))
+	// Render GET succeeds (store hit); capture GET returns context.Canceled.
+	daemon.getSeq["claude"] = []error{nil, context.Canceled}
+	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return true, nil })
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+	if err := os.WriteFile(captureHostPath(prep), []byte("rotation"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != 0 {
+		t.Fatalf("a cancelled capture GET must skip the freshness-gated PUT; puts=%d", len(daemon.puts))
 	}
 }
 

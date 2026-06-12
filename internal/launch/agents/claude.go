@@ -93,6 +93,7 @@ func (c Claude) AuthSpec() launch.AuthSpec {
 			Required: false,
 			Render:   claudeRender,
 			Capture:  claudeCapture,
+			Fresher:  claudeFresher,
 		}},
 		StaticFiles: []launch.StaticFile{{
 			ContainerPath: claudeOnboardingContainerPath,

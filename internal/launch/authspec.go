@@ -104,6 +104,23 @@ type FileBinding struct {
 	// failure mode and recovery path.
 	Capture func([]byte) (vault.Secret, error)
 
+	// Fresher, when non-nil, gates the capture-time vault write on a
+	// freshness comparison. CaptureFn calls it with the secret the
+	// agent just rotated (captured) and the entry currently in the
+	// vault (current); it must return true iff captured is strictly
+	// newer than current. Only a true result triggers the PUT.
+	//
+	// A nil Fresher preserves last-writer-wins: every clean capture
+	// PUTs unconditionally. This is the behavior all agents had before
+	// the hook existed, so leaving Fresher nil is the safe default for
+	// agents that never rotate their credential in-container.
+	//
+	// Returning a non-nil error skips the PUT and retains the prior
+	// vault entry — a comparison the launcher cannot make safely must
+	// never clobber the stored credential. See ADR-0025's
+	// freshness-comparison section.
+	Fresher func(captured, current vault.Secret) (bool, error)
+
 	// PreLaunchRefresh, when non-nil, runs before Render. It
 	// receives the resolved vault secret plus the daemon-backed
 	// dependencies needed to refresh and persist a rotated token,

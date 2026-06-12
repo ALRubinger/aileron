@@ -453,3 +453,58 @@ type urlParts struct {
 // readFile reads a host path; tiny indirection kept for clarity at
 // the call site.
 func readFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func TestCodex_Fresher(t *testing.T) {
+	fresher := agents.Codex{}.AuthSpec().FileBindings[0].Fresher
+	if fresher == nil {
+		t.Fatal("Codex binding must supply a Fresher so a stale concurrent capture cannot clobber a fresher rotation")
+	}
+	// A valid chatgpt-mode envelope; expiresAt / lastRefresh optional.
+	env := func(token, expiresAt, lastRefresh string) vault.Secret {
+		tokens := `"access_token":"` + token + `","refresh_token":"r"`
+		if expiresAt != "" {
+			tokens += `,"expires_at":"` + expiresAt + `"`
+		}
+		body := `{"auth_mode":"chatgpt","tokens":{` + tokens + `}`
+		if lastRefresh != "" {
+			body += `,"last_refresh":"` + lastRefresh + `"`
+		}
+		body += `}`
+		return vault.Secret{Value: []byte(body)}
+	}
+	t0 := "2026-06-01T00:00:00Z"
+	t1 := "2026-06-02T00:00:00Z"
+	tests := []struct {
+		name              string
+		captured, current vault.Secret
+		want              bool
+	}{
+		{"newer expires_at is fresher", env("a", t1, ""), env("a", t0, ""), true},
+		{"older expires_at is not fresher", env("a", t0, ""), env("a", t1, ""), false},
+		{"equal expires_at is not fresher", env("a", t0, ""), env("a", t0, ""), false},
+		{"last_refresh fallback when no expires_at", env("a", "", t1), env("a", "", t0), true},
+		{"no timestamps, different token is a rotation, treat as fresher", env("new", "", ""), env("old", "", ""), true},
+		{"no timestamps, same token is not fresher", env("a", "", ""), env("a", "", ""), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := fresher(tt.captured, tt.current)
+			if err != nil {
+				t.Fatalf("fresher: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("fresher = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	// A malformed (non-chatgpt) envelope must error so the launcher
+	// retains the prior entry.
+	bad := vault.Secret{Value: []byte(`{"auth_mode":"api_key","tokens":{"access_token":"a"}}`)}
+	if _, err := fresher(bad, env("a", t0, "")); err == nil {
+		t.Error("expected error for malformed captured envelope")
+	}
+	if _, err := fresher(env("a", t0, ""), bad); err == nil {
+		t.Error("expected error for malformed current envelope")
+	}
+}

@@ -97,6 +97,47 @@ func claudeCapture(b []byte) (vault.Secret, error) {
 	}, nil
 }
 
+// claudeFresher reports whether the captured Claude credential
+// envelope is strictly newer than the one currently in the vault,
+// comparing `claudeAiOauth.expiresAt`. The launcher's CaptureFn
+// calls this in the present@render/present@capture branch so a
+// stale capture (e.g. a second concurrent launch that did not
+// rotate) cannot clobber a fresher rotation.
+//
+// Tie-break hardening for the `expiresAt,omitempty` risk: Anthropic
+// leaves expiresAt absent (0) on some envelopes. Equal timestamps —
+// including both-zero — are NOT strictly newer, so we return false.
+// The one carve-out: if the captured envelope's expiresAt is 0 while
+// the access tokens differ, a real rotation happened that simply did
+// not populate expiresAt. Dropping that write would lose the
+// rotation, so we treat it as fresher. A parse failure on either side
+// returns an error; the launcher then retains the prior entry rather
+// than risk clobbering it with an envelope it cannot reason about.
+func claudeFresher(captured, current vault.Secret) (bool, error) {
+	var capEnv, curEnv claudeCredentialEnvelope
+	if err := json.Unmarshal(captured.Value, &capEnv); err != nil {
+		return false, fmt.Errorf("%w: parse captured: %v", errClaudeEnvelopeMalformed, err)
+	}
+	if err := json.Unmarshal(current.Value, &curEnv); err != nil {
+		return false, fmt.Errorf("%w: parse current: %v", errClaudeEnvelopeMalformed, err)
+	}
+	capExp := capEnv.ClaudeAiOauth.ExpiresAt
+	curExp := curEnv.ClaudeAiOauth.ExpiresAt
+	if capExp > curExp {
+		return true, nil
+	}
+	if capExp == curExp {
+		// Both-zero (or genuinely equal) timestamps are not strictly
+		// newer — except a real rotation that left expiresAt unset.
+		if capExp == 0 &&
+			capEnv.ClaudeAiOauth.AccessToken != curEnv.ClaudeAiOauth.AccessToken {
+			return true, nil
+		}
+		return false, nil
+	}
+	return false, nil
+}
+
 // validateClaudeEnvelope checks the JSON parses and carries a
 // non-empty `claudeAiOauth.accessToken`. We intentionally tolerate
 // extra fields and absent optional fields (Anthropic may add new

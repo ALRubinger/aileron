@@ -130,6 +130,62 @@ func parseCodexEnvelope(b []byte) (codexAuthEnvelope, error) {
 	return env, nil
 }
 
+// codexFresher reports whether the captured Codex auth envelope is
+// strictly newer than the one currently in the vault. The freshness
+// timestamp is `tokens.expires_at` (RFC3339) when present, falling
+// back to the top-level `last_refresh` when expires_at is empty —
+// upstream Codex does not always populate expires_at, but it does
+// stamp last_refresh after a rotation. Each side independently uses
+// its own best-available timestamp; comparing a captured expires_at
+// against a current last_refresh (or vice versa) is acceptable
+// because both are monotonic proxies for "when this bundle was
+// minted."
+//
+// captured strictly after current → fresher (true). Equal → false.
+// If neither side yields a parseable timestamp but the access tokens
+// differ, a real rotation happened without a usable freshness signal;
+// we treat it as fresher rather than drop the write. A parse failure
+// of either envelope returns an error so the launcher retains the
+// prior entry.
+func codexFresher(captured, current vault.Secret) (bool, error) {
+	capEnv, err := parseCodexEnvelope(captured.Value)
+	if err != nil {
+		return false, fmt.Errorf("freshness parse captured: %w", err)
+	}
+	curEnv, err := parseCodexEnvelope(current.Value)
+	if err != nil {
+		return false, fmt.Errorf("freshness parse current: %w", err)
+	}
+	capTime, capOK := codexFreshnessTime(capEnv)
+	curTime, curOK := codexFreshnessTime(curEnv)
+	if capOK && curOK {
+		return capTime.After(curTime), nil
+	}
+	// One or both sides lack a parseable timestamp. Don't drop a real
+	// rotation: if the access tokens differ, treat captured as fresher.
+	if capEnv.Tokens.AccessToken != curEnv.Tokens.AccessToken {
+		return true, nil
+	}
+	return false, nil
+}
+
+// codexFreshnessTime returns the envelope's best-available freshness
+// timestamp: tokens.expires_at when parseable, else last_refresh. The
+// bool reports whether any timestamp parsed.
+func codexFreshnessTime(env codexAuthEnvelope) (time.Time, bool) {
+	if env.Tokens.ExpiresAt != "" {
+		if t, err := time.Parse(time.RFC3339, env.Tokens.ExpiresAt); err == nil {
+			return t, true
+		}
+	}
+	if env.LastRefresh != "" {
+		if t, err := time.Parse(time.RFC3339, env.LastRefresh); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // codexPreLaunchRefresh checks whether the stored access token is
 // within codexRefreshLeeway of expiry. If so, it exchanges the
 // refresh token for a new bundle via [credential.DoRefresh],
