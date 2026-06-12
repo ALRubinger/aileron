@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/audit"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
@@ -66,10 +68,6 @@ func (s sandboxProxyEventShape) validate(t *testing.T, payload map[string]any) {
 // plane" section. When that documentation changes, this struct must
 // change with it. The accompanying tests below stress every emission
 // site by name.
-//
-// The sandbox.proxy.disabled shape lands in a follow-up once the
-// new daemon endpoint from PR #970 (issue #896 Section B) is on main;
-// the documentation already describes it.
 var (
 	connectorProxyProxiedShape = sandboxProxyEventShape{
 		eventType: "connector.proxy.proxied",
@@ -172,6 +170,24 @@ var (
 			"lin_secret", "Bearer ", "Authorization",
 		},
 	}
+
+	sandboxProxyDisabledShape = sandboxProxyEventShape{
+		eventType: "sandbox.proxy.disabled",
+		requiredFields: []string{
+			"aileron.proxy.source",
+			"aileron.proxy.boundary",
+			"aileron.proxy.decision",
+			"aileron.proxy.disabled_reason",
+			"aileron.sandbox.mode",
+			"aileron.session.id",
+		},
+		allowedFields: []string{
+			"aileron.sandbox.image",
+		},
+		forbiddenSubstrs: []string{
+			"lin_secret", "Bearer ", "Authorization",
+		},
+	}
 )
 
 func TestSandboxProxyAuditShape_ConnectorProxyProxiedConforms(t *testing.T) {
@@ -254,4 +270,128 @@ func TestSandboxProxyAuditShape_SandboxProxyPassthroughConforms(t *testing.T) {
 		t.Fatalf("event type = %q", events[0].EventType)
 	}
 	sandboxProxyPassthroughShape.validate(t, events[0].Payload)
+}
+
+// TestSandboxProxyAuditShape_SandboxProxyDisabledConforms pins the
+// sandbox.proxy.disabled family (gate A). RecordSandboxProxyDisabled is
+// the daemon endpoint the launcher posts to once per launch session
+// when the v4 HTTPS proxy is not in force. Each disabled_reason enum is
+// exercised as a subtest; every emission must conform to the documented
+// field contract.
+func TestSandboxProxyAuditShape_SandboxProxyDisabledConforms(t *testing.T) {
+	reasons := []api.SandboxProxyDisabledRequestReason{
+		api.UserOptOut,
+		api.PreflightFailed,
+		api.UnsupportedSandboxMode,
+	}
+	for _, reason := range reasons {
+		t.Run(string(reason), func(t *testing.T) {
+			auditStore := audit.NewMemStore()
+			srv := &apiServer{
+				auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-shape-disabled" }),
+			}
+			mode := "docker"
+			image := "ghcr.io/acme/sandbox:latest"
+			body, err := json.Marshal(api.SandboxProxyDisabledRequest{
+				Reason:       reason,
+				SessionId:    "session-shape-test",
+				SandboxMode:  &mode,
+				SandboxImage: &image,
+			})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/disabled", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			srv.RecordSandboxProxyDisabled(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204", rec.Code)
+			}
+			events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+			if len(events) != 1 {
+				t.Fatalf("events = %d, want 1", len(events))
+			}
+			if events[0].EventType != model.EventTypeSandboxProxyDisabled {
+				t.Fatalf("event type = %q", events[0].EventType)
+			}
+			sandboxProxyDisabledShape.validate(t, events[0].Payload)
+			if got := events[0].Payload["aileron.proxy.disabled_reason"]; got != string(reason) {
+				t.Errorf("disabled_reason = %v, want %q", got, reason)
+			}
+		})
+	}
+}
+
+// TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies is the
+// cross-family no-credential-leak sweep (gate E): the single most
+// load-bearing invariant for the credential-sealing claim. It drives
+// every sandbox/data-plane audit emitter with inputs that carry
+// credential-shaped substrings — an Authorization: Bearer header, a
+// secret-shaped header, and a query string on the upstream URL — and
+// asserts no emitter's serialized payload echoes any of them. Host and
+// path are surfaced; query strings, headers, and credential bytes are
+// not.
+func TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies(t *testing.T) {
+	const (
+		bearer    = "Bearer test-token"
+		linSecret = "lin_secret_xyz"
+		query     = "token=value"
+	)
+	forbidden := []string{bearer, linSecret, query, "?" + query, "test-token"}
+
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-leak-sweep" }),
+	}
+
+	poison := func(req *http.Request) *http.Request {
+		req.Header.Set("X-Aileron-Session-Id", "session-leak-sweep")
+		req.Header.Set("Authorization", bearer)
+		req.Header.Set("X-Aileron-Upstream-Secret", linSecret)
+		return req
+	}
+
+	// Upstream URL carries credential-shaped query parameters; the
+	// recorders must surface host + path only, never the raw query.
+	upstream, err := url.Parse("https://api.example.test/v1/resource?" + query + "&secret=" + linSecret)
+	if err != nil {
+		t.Fatalf("parse upstream: %v", err)
+	}
+	op := discovery.SpecOperationHelp{
+		Name: "viewer.get", Method: "GET", Path: "/v1/resource", Credential: "api_key",
+		Hosts: []string{"api.example.test"},
+	}
+	const fqn = "github://acme/aileron-connector-linear"
+
+	proxyReq := poison(httptest.NewRequest(http.MethodConnect, "/", nil))
+	srv.recordSandboxProxyProxied(proxyReq, sandboxProxySourceTransparentConnectTLS, fqn, "linear", "GET", upstream, op, 200)
+	srv.recordSandboxProxyRejected(proxyReq, sandboxProxySourceTransparentConnectTLS, fqn, "linear", "GET", upstream, op, "upstream_transport_failed")
+	srv.recordSandboxProxyProtocolRejected(proxyReq, sandboxProxySourceTransparentConnectTLS, "GET", upstream, "session_ca_unavailable")
+	srv.recordSandboxProxyPassthrough(proxyReq, sandboxProxySourceTransparentConnectTLS, "GET", upstream, 200)
+	srv.recordConnectorOperationRejected(proxyReq, fqn, "linear", op)
+
+	mode := "docker"
+	disabledBody, err := json.Marshal(api.SandboxProxyDisabledRequest{
+		Reason:      api.UserOptOut,
+		SessionId:   "session-leak-sweep",
+		SandboxMode: &mode,
+	})
+	if err != nil {
+		t.Fatalf("marshal disabled request: %v", err)
+	}
+	disabledReq := poison(httptest.NewRequest(http.MethodPost, "/v1/sandbox-proxy/disabled", bytes.NewReader(disabledBody)))
+	srv.RecordSandboxProxyDisabled(httptest.NewRecorder(), disabledReq)
+
+	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if len(events) != 6 {
+		t.Fatalf("events = %d, want 6 (one per emitter)", len(events))
+	}
+	for _, ev := range events {
+		payloadJSON, _ := json.Marshal(ev.Payload)
+		for _, f := range forbidden {
+			if strings.Contains(string(payloadJSON), f) {
+				t.Errorf("[%s] payload leaks credential-shaped substring %q: %s", ev.EventType, f, string(payloadJSON))
+			}
+		}
+	}
 }

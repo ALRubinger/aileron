@@ -196,6 +196,20 @@ Migration note: operators who previously queried `sandbox.proxy.rejected` with r
 
 The event is emitted once per launch session by the `aileron launch` CLI through the daemon's `POST /v1/sandbox-proxy/disabled` endpoint. It never records credential bytes, environment variables, the BYO image's contents, or shell history. See [ADR-0019](/adr/0019-v4-https-data-plane/) for the v4 HTTPS data plane decision and the `--sandbox-proxy` flag semantics.
 
+#### Redaction rules
+
+Every sandbox HTTPS data-plane audit event is built from a fixed field set. The recorders copy only the fields named in the tables above into the payload. The following inputs are never recorded in any event family, and the no-leak invariant is enforced in code, not by convention alone.
+
+| Redacted input | Rule | Rationale |
+|---|---|---|
+| Credential bytes | The resolved secret for any binding kind (`oauth2`, `api_key`, or any future kind) is injected at the TLS boundary and never enters an audit payload. The event records `aileron.connector.credential`, the credential *kind*, never the value. | The credential-sealing claim depends on the agent and the audit log never seeing the secret. |
+| `Authorization:` header values | Inbound request headers are read only for `X-Aileron-Session-Id`. The `Authorization` header, and any other request header, is never copied into a payload. | The daemon injects `Authorization: Bearer <token>` on the *outbound* request; that header must not echo back into the log. |
+| Query strings | `aileron.proxy.upstream.path` carries the upstream path only. The `?...` query is dropped by `sandboxProxyUpstreamPath`, which returns `EscapedPath()`. | Query strings routinely carry tokens (`?token=...`, `?api_key=...`); recording them would defeat credential sealing. |
+| Full upstream URLs | An event records the upstream scheme, host, and path as separate fields. It never records the assembled URL. | The host and path are operationally useful and contain no secret; the assembled URL would reintroduce the query string. |
+| Request and response bodies, raw headers | Neither the request body nor the upstream response body is recorded. Only `aileron.proxy.upstream.status` captures the response. | Bodies and raw headers carry user data and credentials with no audit value. |
+
+This redaction contract is pinned in code by the cross-family no-leak sweep in [`internal/app/sandbox_proxy_audit_shape_test.go`](https://github.com/ALRubinger/aileron/blob/main/internal/app/sandbox_proxy_audit_shape_test.go) (`TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies`). The sweep drives every emitter with credential-shaped inputs (an `Authorization: Bearer` header, a secret-shaped header, and a query string on the upstream URL) and asserts no serialized payload contains them. That test is the authoritative definition of the no-leak rule; this prose summarizes it.
+
 **Approval wait** (`aileron.approval.wait`):
 
 | Attribute | Description |
