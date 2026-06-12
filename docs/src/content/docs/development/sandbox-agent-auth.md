@@ -21,8 +21,8 @@ Per-agent credentials live under the namespace `agents/<name>/<purpose>`:
 | `agents/claude/oauth`   | Claude Code  | FileBinding | `{"claudeAiOauth":{"accessToken":...,"refreshToken":...,"expiresAt":...,"scopes":[...]}}` |
 | `agents/codex/oauth`    | OpenAI Codex | FileBinding | `{"auth_mode":"chatgpt","tokens":{"access_token":...,"refresh_token":...,"id_token":...,"account_id":...},"last_refresh":"..."}` |
 | `agents/goose/oauth`    | Goose        | EnvBinding  | Raw provider API key (opaque bytes), rendered into `ANTHROPIC_API_KEY` |
-| `agents/opencode/oauth` | OpenCode     | FileBinding | `{"<provider>":{...credential...},...}` — `auth.json` keyed by provider name |
-| `agents/pi/oauth`       | Pi           | FileBinding | `{"<provider>":{"type":"api_key","key":...},...}` — `auth.json` keyed by provider name |
+| `agents/opencode/oauth` | OpenCode     | FileBinding | `{"<provider>":{...credential...},...}` (`auth.json` keyed by provider name) |
+| `agents/pi/oauth`       | Pi           | FileBinding | `{"<provider>":{"type":"api_key","key":...},...}` (`auth.json` keyed by provider name) |
 
 Two binding shapes appear in the table. A **FileBinding** backs a rotatable on-disk credential file: the launcher renders the vault bytes into the file before launch and snapshots the (possibly rotated) file back via Capture on clean exit. An **EnvBinding** backs a static credential read from the environment: the launcher renders the stored secret into one or more env vars at launch and has nothing to capture, because an env-key agent does not rewrite a credential file in-container.
 
