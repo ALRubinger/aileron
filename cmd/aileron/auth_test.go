@@ -145,6 +145,22 @@ func TestRunAuth_MissingImportFlag(t *testing.T) {
 	}
 }
 
+// TestRunAuth_FlagBeforeAgentRejected pins the contract that the agent
+// name must be the first positional and flags follow it (auth.go:35-37).
+// Invoking `aileron auth --import-from-host claude` makes the flag string
+// the agent name, leaving --import-from-host unset, so the command fails
+// with the "is required" error rather than silently importing claude.
+func TestRunAuth_FlagBeforeAgentRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"--import-from-host", "claude"}, authTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "--import-from-host is required") {
+		t.Errorf("stderr = %q, want the flag-required error (flags must follow the agent name)", stderr.String())
+	}
+}
+
 func TestRunAuth_NoArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runAuth(nil, authTestRegistry(), &stdout, &stderr)

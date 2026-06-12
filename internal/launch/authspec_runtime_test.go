@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -1139,6 +1140,37 @@ func TestPrepareAuthSpec_FresherErrorSkipsPut(t *testing.T) {
 
 	if len(daemon.puts) != 0 {
 		t.Fatalf("a Fresher error must retain the prior entry (skip PUT); puts=%d", len(daemon.puts))
+	}
+}
+
+// #1017 regression: when the captured envelope parses but the current
+// vault entry is corrupt, the Fresher wraps ErrCurrentEnvelopeMalformed.
+// A corrupt entry is unusable (Render rejects it next launch), so the
+// valid fresh capture must overwrite it rather than be skipped — the
+// opposite of the generic Fresher-error path above.
+func TestPrepareAuthSpec_CurrentMalformedOverwritesWithCapture(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte("corrupt-not-json")) // present at render and capture
+	stderr := &bytes.Buffer{}
+	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) {
+		return false, fmt.Errorf("%w: parse current: bad", ErrCurrentEnvelopeMalformed)
+	})
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+	if err := os.WriteFile(captureHostPath(prep), []byte("valid-fresh-capture"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	prep.CaptureFn(context.Background())
+
+	if len(daemon.puts) != 1 || string(daemon.puts[0].Secret.Value) != "valid-fresh-capture" {
+		t.Fatalf("a malformed current entry must be overwritten by the valid capture; puts=%d", len(daemon.puts))
+	}
+	if !strings.Contains(stderr.String(), "current vault entry is malformed") {
+		t.Errorf("expected an overwrite warning on stderr; got %q", stderr.String())
 	}
 }
 

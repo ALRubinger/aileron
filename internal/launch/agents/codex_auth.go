@@ -144,9 +144,11 @@ func parseCodexEnvelope(b []byte) (codexAuthEnvelope, error) {
 // captured strictly after current → fresher (true). Equal → false.
 // If neither side yields a parseable timestamp but the access tokens
 // differ, a real rotation happened without a usable freshness signal;
-// we treat it as fresher rather than drop the write. A parse failure
-// of either envelope returns an error so the launcher retains the
-// prior entry.
+// we treat it as fresher rather than drop the write. A parse failure of
+// the captured envelope returns a plain error so the launcher retains
+// the prior entry; a parse failure of the current envelope wraps
+// [launch.ErrCurrentEnvelopeMalformed] so the launcher overwrites the
+// corrupt entry with the valid capture (ADR-0025).
 func codexFresher(captured, current vault.Secret) (bool, error) {
 	capEnv, err := parseCodexEnvelope(captured.Value)
 	if err != nil {
@@ -154,7 +156,7 @@ func codexFresher(captured, current vault.Secret) (bool, error) {
 	}
 	curEnv, err := parseCodexEnvelope(current.Value)
 	if err != nil {
-		return false, fmt.Errorf("freshness parse current: %w", err)
+		return false, fmt.Errorf("%w: freshness parse current: %v", launch.ErrCurrentEnvelopeMalformed, err)
 	}
 	capTime, capOK := codexFreshnessTime(capEnv)
 	curTime, curOK := codexFreshnessTime(curEnv)

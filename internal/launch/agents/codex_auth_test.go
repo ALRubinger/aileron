@@ -498,13 +498,20 @@ func TestCodex_Fresher(t *testing.T) {
 		})
 	}
 
-	// A malformed (non-chatgpt) envelope must error so the launcher
-	// retains the prior entry.
+	// A malformed (non-chatgpt) *captured* envelope must return a plain
+	// error so the launcher retains the prior entry and never writes
+	// garbage. It must NOT wrap ErrCurrentEnvelopeMalformed.
 	bad := vault.Secret{Value: []byte(`{"auth_mode":"api_key","tokens":{"access_token":"a"}}`)}
 	if _, err := fresher(bad, env("a", t0, "")); err == nil {
 		t.Error("expected error for malformed captured envelope")
+	} else if errors.Is(err, launch.ErrCurrentEnvelopeMalformed) {
+		t.Error("malformed captured envelope must not wrap ErrCurrentEnvelopeMalformed")
 	}
+	// A malformed *current* envelope must wrap ErrCurrentEnvelopeMalformed
+	// so the launcher overwrites the corrupt entry with the valid capture.
 	if _, err := fresher(env("a", t0, ""), bad); err == nil {
 		t.Error("expected error for malformed current envelope")
+	} else if !errors.Is(err, launch.ErrCurrentEnvelopeMalformed) {
+		t.Errorf("malformed current envelope must wrap ErrCurrentEnvelopeMalformed, got %v", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
@@ -110,16 +111,18 @@ func claudeCapture(b []byte) (vault.Secret, error) {
 // The one carve-out: if the captured envelope's expiresAt is 0 while
 // the access tokens differ, a real rotation happened that simply did
 // not populate expiresAt. Dropping that write would lose the
-// rotation, so we treat it as fresher. A parse failure on either side
-// returns an error; the launcher then retains the prior entry rather
-// than risk clobbering it with an envelope it cannot reason about.
+// rotation, so we treat it as fresher. A parse failure of the captured
+// side returns a plain error and the launcher retains the prior entry; a
+// parse failure of the current side wraps
+// [launch.ErrCurrentEnvelopeMalformed] so the launcher overwrites the
+// corrupt entry with the valid capture (ADR-0025).
 func claudeFresher(captured, current vault.Secret) (bool, error) {
 	var capEnv, curEnv claudeCredentialEnvelope
 	if err := json.Unmarshal(captured.Value, &capEnv); err != nil {
 		return false, fmt.Errorf("%w: parse captured: %v", errClaudeEnvelopeMalformed, err)
 	}
 	if err := json.Unmarshal(current.Value, &curEnv); err != nil {
-		return false, fmt.Errorf("%w: parse current: %v", errClaudeEnvelopeMalformed, err)
+		return false, fmt.Errorf("%w: parse current: %v", launch.ErrCurrentEnvelopeMalformed, err)
 	}
 	capExp := capEnv.ClaudeAiOauth.ExpiresAt
 	curExp := curEnv.ClaudeAiOauth.ExpiresAt

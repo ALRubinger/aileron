@@ -43,6 +43,15 @@ The launcher's sandbox path performs four steps around `sandboxcontainer.Builder
 
 Codex's binding also declares a `PreLaunchRefresh` hook that runs between the GET and Render. The hook exchanges the refresh token for a new access token against `auth.openai.com`, persists the rotated bundle through the daemon, and hands Render the new Secret. A failed persist aborts the launch; the rotated bundle must be in vault before container start.
 
+### Verification status of the in-container read
+
+Step 3 (the in-container agent reading the rendered credential) is **not** covered by an automated end-to-end test today. CI verifies the host side only: per-agent unit tests assert each binding's `ContainerPath` and the Render/Capture byte round-trip, and the `prepareAuthSpec` tests cover the host-side reclaim, read, and freshness-gated PUT. No automated test starts a real container, has the agent read the rendered file, and asserts it authenticates. That gap is tracked in [issue #1025](https://github.com/ALRubinger/aileron/issues/1025). Until it closes, verify the path manually after changing any binding's container path, mount strategy, or Render/Capture:
+
+1. Seed a vault entry: `aileron auth <agent> --import-from-host` (or `aileron vault put agents/<agent>/oauth --from-file ...`).
+2. Launch sandboxed: `aileron launch <agent> --sandbox=docker`.
+3. Confirm the agent starts **without** prompting for login. A login prompt means the in-container read failed (wrong path, mount mode, or envelope).
+4. Trigger or wait for an in-container credential rotation, exit the container cleanly, and re-run the launch. The second launch should also start silently, proving Capture round-tripped the rotation back to the vault.
+
 ## First launch: in-container login seeds the vault
 
 When the vault has no entry for an agent, the launcher prints
@@ -97,6 +106,8 @@ The command reads the credential from the location each agent's CLI writes per o
 - Linux. Claude reads `~/.claude/.credentials.json`. Codex reads `~/.codex/auth.json`. A Linux keyring install (libsecret) is not supported in v1; the command returns a clear error naming the file-mode and interactive-login recovery paths.
 - macOS. Claude reads the Keychain item under the `Claude Code-credentials` service. Codex prefers `~/.codex/auth.json` when it exists and otherwise reads the `Codex Auth` Keychain service. The first real Keychain read shows a macOS access dialog; approve it once so the command can read the item.
 - Windows. Claude reads `%USERPROFILE%\.claude\.credentials.json`. Codex reads `%USERPROFILE%\.codex\auth.json`.
+
+On macOS the file-first precedence for Codex is deliberate and has a known, accepted gap: if a stale `~/.codex/auth.json` lingers while a fresher credential lives in the `Codex Auth` Keychain, the import reads the stale file and never consults the Keychain. Aileron does not actively detect this, because comparing the two sources on every import would force the macOS Keychain access dialog each time and defeat the non-interactive read the file path exists to provide. The gap fails loud rather than silent: a stale file with an expired-and-unrefreshable token surfaces a clear error pointing at re-login, not a silently-wrong credential. The recovery is to remove the stale `~/.codex/auth.json` (or re-run `codex login`) so the import reads the current source.
 
 Only `claude` and `codex` accept `--import-from-host`. Other agents return a clear unsupported error. The bytes are read verbatim and validated through the agent's Capture before the PUT, so a malformed or partial envelope fails with the same error the launcher reports rather than landing a broken credential in the vault.
 

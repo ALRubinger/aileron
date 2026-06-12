@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ALRubinger/aileron/internal/launch"
 	"github.com/ALRubinger/aileron/internal/launch/agents"
 	"github.com/ALRubinger/aileron/internal/vault"
 )
@@ -226,13 +227,20 @@ func TestClaude_Fresher(t *testing.T) {
 		})
 	}
 
-	// A malformed envelope on either side must error so the launcher
-	// retains the prior entry rather than clobbering it.
+	// A malformed *captured* envelope returns a plain error so the
+	// launcher retains the prior entry and never writes garbage; it must
+	// not wrap ErrCurrentEnvelopeMalformed.
 	if _, err := fresher(vault.Secret{Value: []byte("not json")}, env("a", 100)); err == nil {
 		t.Error("expected error for malformed captured envelope")
+	} else if errors.Is(err, launch.ErrCurrentEnvelopeMalformed) {
+		t.Error("malformed captured envelope must not wrap ErrCurrentEnvelopeMalformed")
 	}
+	// A malformed *current* envelope wraps ErrCurrentEnvelopeMalformed so
+	// the launcher overwrites the corrupt entry with the valid capture.
 	if _, err := fresher(env("a", 100), vault.Secret{Value: []byte("not json")}); err == nil {
 		t.Error("expected error for malformed current envelope")
+	} else if !errors.Is(err, launch.ErrCurrentEnvelopeMalformed) {
+		t.Errorf("malformed current envelope must wrap ErrCurrentEnvelopeMalformed, got %v", err)
 	}
 }
 
