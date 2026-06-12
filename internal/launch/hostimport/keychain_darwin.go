@@ -3,9 +3,7 @@
 package hostimport
 
 import (
-	"bytes"
 	"errors"
-	"os/exec"
 )
 
 // extract resolves the host credential bytes on macOS.
@@ -66,44 +64,4 @@ func extract(agent string, opts Options) ([]byte, error) {
 	default:
 		return nil, ErrNotAuthenticated
 	}
-}
-
-// readKeychain shells out to `security find-generic-password -s
-// <service> -w` to read a generic-password item's password bytes. When
-// keychainPath is non-empty it is appended so the read targets a
-// throwaway test keychain rather than the login keychain.
-//
-// The -w flag prints the password followed by a trailing newline; the
-// stored credential bytes must not carry that newline, so it is
-// trimmed. A missing item exits non-zero (the password "could not be
-// found"); that maps to ErrNotAuthenticated. An empty password maps to
-// ErrNotAuthenticated for the same reason a zero-byte file does.
-func readKeychain(service, keychainPath string) ([]byte, error) {
-	args := []string{"find-generic-password", "-s", service, "-w"}
-	if keychainPath != "" {
-		args = append(args, keychainPath)
-	}
-	cmd := exec.Command("/usr/bin/security", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		// security exits non-zero when the item is absent (exit 44,
-		// "could not be found"). Treat any non-zero exit as "no usable
-		// credential" so the caller surfaces the recovery path rather
-		// than a raw exec error.
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, ErrNotAuthenticated
-		}
-		return nil, err
-	}
-	// -w appends a single trailing newline after the password. Trim only
-	// that trailing newline; the credential JSON itself never ends in a
-	// bare \n the keychain added, and inner newlines are preserved.
-	out := bytes.TrimSuffix(stdout.Bytes(), []byte("\n"))
-	if len(out) == 0 {
-		return nil, ErrNotAuthenticated
-	}
-	return out, nil
 }
