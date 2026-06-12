@@ -214,6 +214,8 @@ func TestClaude_Fresher(t *testing.T) {
 		{"equal non-zero expiresAt is not fresher", env("a", 100), env("a", 100), false},
 		{"both-zero same token is not fresher", env("a", 0), env("a", 0), false},
 		{"both-zero different token is a rotation without expiry, treat as fresher", env("new", 0), env("old", 0), true},
+		{"captured zero-expiry with different token beats a timestamped current", env("new", 0), env("old", 100), true},
+		{"captured zero-expiry with same token does not beat a timestamped current", env("a", 0), env("a", 100), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
