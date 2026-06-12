@@ -49,23 +49,42 @@ When the container exits cleanly, Capture reads the file the agent wrote and PUT
 
 ## Manual seeding
 
-The CLI surface for direct vault path management (`aileron vault put`, `aileron vault delete`, `aileron vault list`) is not in v1. Today the only vault writes are:
+`aileron vault put` writes a per-agent credential envelope directly. It is a daemon-backed command, so the daemon must be running and the vault unlocked.
 
-- `aileron secret set <name>` stores a value at any path via interactive prompt. The path scheme is yours; pass `agents/claude/oauth` to populate Claude's envelope. The interactive prompt is hidden input, which makes pasting a multi-line JSON envelope awkward; the in-container login path is easier in practice.
-- The launcher's Capture pass on clean container exit. This is the primary v1 path.
+```
+aileron vault put agents/claude/oauth --from-file ./claude-credentials.json
+```
+
+`--from-file` reads the file bytes verbatim. There is no trailing-newline munging and no hidden multi-line prompt, so a credential file copied from another machine lands byte-for-byte. This is easier than `aileron secret set`, whose hidden interactive prompt makes pasting a multi-line JSON envelope awkward.
+
+The other vault writes are:
+
+- `aileron secret set <name>` stores a value at any path via interactive prompt. The path scheme is yours; pass `agents/claude/oauth` to populate Claude's envelope.
+- The launcher's Capture pass on clean container exit. This is the primary path.
 
 The bytes must match the envelope schema in the table above when set manually. Render validates on the way in; a malformed envelope fails the launch with a clear error before the container starts.
 
-The `aileron auth <agent> --import-from-host` subcommand is intentionally not in v1. The host-import surface (Linux file read, macOS Keychain shell-out, Windows file read) is deferred to a follow-up. The in-container login path covers bootstrap. Operator-facing `aileron vault put/delete/list` subcommands plus a daemon DELETE endpoint are tracked as a follow-up; today, only the daemon's GET and PUT routes exist, and they are reached only through the launcher.
+`aileron vault list` shows which agents currently have an entry, metadata only. The credential value is never listed.
+
+```
+aileron vault list
+```
+
+The `aileron auth <agent> --import-from-host` subcommand is intentionally not in v1. The host-import surface (Linux file read, macOS Keychain shell-out, Windows file read) is deferred to a follow-up. The in-container login path covers bootstrap.
 
 ## Recovery
 
-To re-login from scratch (vault entry stale, refresh token revoked, or just starting over) in v1, the recovery path is whichever of these you can execute:
+To re-login from scratch (vault entry stale, refresh token revoked, or just starting over), the recovery path is whichever of these you can execute:
 
+- Delete the agent's entry with `aileron vault delete agents/<agent>/oauth`. The next launch finds no entry, falls through to the in-container login bootstrap, and re-seeds a fresh credential on clean exit. This is a daemon-backed command, so the daemon must be running.
+
+  ```
+  aileron vault delete agents/claude/oauth
+  ```
+
+  The command confirms before deleting. Pass `--yes` to skip the prompt in scripts.
 - Use the in-container agent's logout flow (`/logout` in Claude Code, the Codex CLI's equivalent), then exit cleanly. Capture overwrites the vault entry with the agent's logged-out state, and the next launch prompts for login again.
 - Delete the local vault file at the path printed by `aileron vault init`, which clears all stored secrets. Use this only when no other vault entries matter to you.
-
-The `aileron vault delete agents/<agent>/oauth` flow lands in a follow-up alongside the operator CLI surface.
 
 If the Codex pre-launch refresh fails because the refresh token was revoked upstream, the launcher exits with a message naming the recovery options above.
 
@@ -73,7 +92,7 @@ If the Codex pre-launch refresh fails because the refresh token was revoked upst
 
 v1 uses last-writer-wins for the Capture-side PUT. Two simultaneous `aileron launch codex --sandbox=docker` invocations against the same agent can race; refresh tokens survive the race because both writers exchanged the same upstream token. Concurrent launches against the same agent are not in the v1 ICP. A freshness-comparison hook on FileBinding is a clean follow-up if the concern surfaces.
 
-A second race lives between Capture and the operator: if you delete the vault entry while a sandbox session is still running, the session's clean exit will re-write the entry with whatever credential bytes the in-container agent left behind. The vault-delete CLI lands in a follow-up; until then, recover by exiting the running container first or by letting the in-container agent log out before exit.
+A second race lives between Capture and the operator: if you run `aileron vault delete agents/<agent>/oauth` while a sandbox session is still running, the session's clean exit will re-write the entry with whatever credential bytes the in-container agent left behind. Exit the running container first, or let the in-container agent log out before exit, so your delete is the last writer.
 
 Capture stays non-fatal. A vault-write failure or schema-validation failure surfaces as a one-line stderr warning that names the file path and the recovery option, and skips that binding's PUT. The session completes normally; the prior vault entry is retained.
 
