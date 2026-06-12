@@ -184,7 +184,7 @@ func TestDaemonAPIBaseURLAppendsV1(t *testing.T) {
 func TestLaunchSandboxRejectsAgentWithoutBinary(t *testing.T) {
 	_, err := launchSandbox(nil, SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
 		Agent: emptyBinaryAgent{},
-	}, nil)
+	}, nil, "aileron-sbx-test", func() {}, nil)
 	if err == nil {
 		t.Fatal("expected missing container command error")
 	}

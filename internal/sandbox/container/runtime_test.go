@@ -958,6 +958,60 @@ func runOptsForGateway(t *testing.T) RunOptions {
 	}
 }
 
+func TestRunArgs_IncludesNameWhenSet(t *testing.T) {
+	opts := runOptsForGateway(t)
+	opts.Name = "aileron-sbx-x"
+	args, err := runArgs("docker", opts)
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	if !strings.Contains(strings.Join(args, " "), "--name aileron-sbx-x") {
+		t.Errorf("expected --name aileron-sbx-x in args; got %v", args)
+	}
+}
+
+func TestRunArgs_OmitsNameWhenEmpty(t *testing.T) {
+	args, err := runArgs("docker", runOptsForGateway(t))
+	if err != nil {
+		t.Fatalf("runArgs: %v", err)
+	}
+	for _, a := range args {
+		if a == "--name" {
+			t.Errorf("did not expect --name when Name is empty; got %v", args)
+		}
+	}
+}
+
+func TestStopContainerIssuesStopWithGrace(t *testing.T) {
+	runner := &recordingRunner{}
+	if err := StopContainer(context.Background(), runner, "docker", "aileron-sbx-x", 10, io.Discard, io.Discard); err != nil {
+		t.Fatalf("StopContainer: %v", err)
+	}
+	want := []string{"stop", "--time", "10", "aileron-sbx-x"}
+	if runner.name != "docker" || !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("runner = %s %#v, want docker %#v", runner.name, runner.args, want)
+	}
+}
+
+func TestStopContainerReturnsRunnerErrorVerbatim(t *testing.T) {
+	wantErr := errors.New("no such container")
+	runner := &callRecordingRunner{errs: []error{wantErr}}
+	err := StopContainer(context.Background(), runner, "podman", "aileron-sbx-y", 10, io.Discard, io.Discard)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("StopContainer error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestStopContainerEmptyNameIsNoOp(t *testing.T) {
+	runner := &callRecordingRunner{errs: []error{errors.New("must not run")}}
+	if err := StopContainer(context.Background(), runner, "docker", "", 10, io.Discard, io.Discard); err != nil {
+		t.Fatalf("StopContainer empty name = %v, want nil", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("expected no runner calls for empty name; got %v", runner.calls)
+	}
+}
+
 func TestRunArgs_LinuxDockerAddsHostGateway(t *testing.T) {
 	orig := hostOS
 	hostOS = func() string { return "linux" }
