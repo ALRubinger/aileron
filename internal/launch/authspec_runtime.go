@@ -107,6 +107,23 @@ type authSpecPrep struct {
 // refresh token survives the race because both writers exchanged
 // the same upstream token. A Fresher hook on FileBinding is a
 // clean follow-up if real users surface the concern.
+// chownTransientDir, when non-nil, is invoked once after every
+// FileBinding and StaticFile has been written to the transient host
+// directory and before the mount list is returned. It receives
+// hostRoot and is expected to recursively change ownership of the tree
+// to the resolved in-container agent UID. On rootful-Docker Linux the
+// host operator's UID owns the transient dir, but the container runs as
+// the image's `agent` system user; a writable bind mount preserves host
+// ownership, so the agent's mid-session credential rewrite (Claude's
+// tmpfile+rename of .credentials.json) fails with EPERM without this
+// chown. The launcher supplies a Linux-only closure; on macOS/Windows
+// (where the Docker Desktop file-sharing shim translates UIDs) it is
+// nil and the chown is skipped. A nil hook is a no-op.
+//
+// Resolver failures are surfaced as a non-fatal warning and launch
+// proceeds (the prior behavior); the hook returns an error only so the
+// launcher can decide warn-vs-abort. prepareAuthSpec treats a hook
+// error as non-fatal.
 func prepareAuthSpec(
 	ctx context.Context,
 	agentName string,
@@ -114,6 +131,8 @@ func prepareAuthSpec(
 	daemon authSpecDaemon,
 	sessionLog *slog.Logger,
 	stderr io.Writer,
+	chownTransientDir func(dir string) error,
+	reclaimTransientDir func(dir string) error,
 ) (authSpecPrep, error) {
 	prep := authSpecPrep{
 		EnvAdditions: map[string]string{},
@@ -350,6 +369,20 @@ func prepareAuthSpec(
 		}
 	}
 
+	// Chown the transient tree to the in-container agent UID now that
+	// every file is written and before the dir is mounted. On Linux
+	// rootful Docker this is the fix that lets the agent rewrite its
+	// credentials through the writable bind mount; on other platforms
+	// the hook is nil. A resolver/chown failure is non-fatal: warn with
+	// a permanent diagnostic naming the UID mismatch and the chown fix,
+	// then proceed so a transient lookup hiccup never aborts a launch.
+	if chownTransientDir != nil {
+		if err := chownTransientDir(hostRoot); err != nil {
+			captureWarn(sessionLog, stderr, agentName, hostRoot,
+				fmt.Errorf("chown transient auth dir to image agent UID: %w; the agent runs as a non-root system user while the host operator owns this bind-mounted dir (host UID vs resolved agent UID mismatch), so in-container credential rotation may fail with EPERM — the remedy is the chown-to-agent-UID fix on the AuthSpec bind mount", err))
+		}
+	}
+
 	// Build mount list: one mount per group except for static files
 	// directly under /home/agent (those use individual file mounts).
 	// Sort parents so the mount order is deterministic for tests.
@@ -388,6 +421,19 @@ func prepareAuthSpec(
 
 	if len(captureTargets) > 0 {
 		prep.CaptureFn = func(captureCtx context.Context) {
+			// The agent rotated its credentials in-container as the agent
+			// UID; reclaim ownership of the tree to the host operator
+			// before reading so the vault PUT can read the rotated file.
+			// On rootful Docker Linux the file is otherwise agent-owned
+			// and mode 0600, so a host-side read fails with EPERM and the
+			// rotation is lost. Non-fatal: warn and still attempt the
+			// reads (a same-UID environment needs no reclaim).
+			if reclaimTransientDir != nil {
+				if err := reclaimTransientDir(hostRoot); err != nil {
+					captureWarn(sessionLog, stderr, agentName, hostRoot,
+						fmt.Errorf("reclaim transient auth dir ownership to host UID before capture: %w; a credential the agent rotated as its own UID may be unreadable for the vault PUT", err))
+				}
+			}
 			for _, target := range captureTargets {
 				bytes, err := os.ReadFile(target.HostPath)
 				if err != nil {

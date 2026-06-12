@@ -100,7 +100,7 @@ func newTestLogger() *slog.Logger {
 
 func TestPrepareAuthSpec_EmptySpecIsNoOp(t *testing.T) {
 	prep, err := prepareAuthSpec(context.Background(), "claude", AuthSpec{},
-		newFakeDaemon(), newTestLogger(), nil)
+		newFakeDaemon(), newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestPrepareAuthSpec_FileBindingRendersFromVault(t *testing.T) {
 		}},
 	}
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestPrepareAuthSpec_StaticFileLandsRegardlessOfVault(t *testing.T) {
 		}},
 	}
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestPrepareAuthSpec_RequiredVaultMissingFailsLaunch(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil)
+		newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for required+empty vault")
 	}
@@ -261,7 +261,7 @@ func TestPrepareAuthSpec_EmptyVaultOptionalBindingDoesNotRender(t *testing.T) {
 		}},
 	}
 	prep, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil)
+		newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestPrepareAuthSpec_CaptureOnCleanExitPersistsRotatedFile(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b, Metadata: vault.Metadata{Type: "oauth_refresh_token"}}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestPrepareAuthSpec_CaptureSchemaFailureSkipsPut(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{}, errors.New("schema drift") },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestPrepareAuthSpec_PreLaunchRefreshPersistsBeforeRender(t *testing.T) {
 			},
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestPrepareAuthSpec_PreLaunchRefreshErrorAbortsLaunch(t *testing.T) {
 			},
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil)
+	_, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when PreLaunchRefresh fails")
 	}
@@ -441,7 +441,7 @@ func TestPrepareAuthSpec_CleanupRemovesTransientDir(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestPrepareAuthSpec_EnvBindingMerges(t *testing.T) {
 			},
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -493,7 +493,7 @@ func TestPrepareAuthSpec_CapturePutFailureSurfacesWarning(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), stderr, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestPrepareAuthSpec_EnvBindingRequiredMissingErrors(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "example", spec, newFakeDaemon(),
-		newTestLogger(), nil)
+		newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error on required env binding with empty vault")
 	}
@@ -546,7 +546,7 @@ func TestPrepareAuthSpec_EnvBindingOptionalMissingContinues(t *testing.T) {
 		}},
 	}
 	prep, err := prepareAuthSpec(context.Background(), "example", spec, newFakeDaemon(),
-		newTestLogger(), nil)
+		newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestPrepareAuthSpec_EnvBindingGetErrorPropagates(t *testing.T) {
 			Render:    func(s vault.Secret) (map[string]string, error) { return nil, nil },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil)
+	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when GET fails with non-NotFound")
 	}
@@ -585,7 +585,7 @@ func TestPrepareAuthSpec_EnvBindingRenderErrorPropagates(t *testing.T) {
 			Render:    func(s vault.Secret) (map[string]string, error) { return nil, errors.New("bad shape") },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil)
+	_, err := prepareAuthSpec(context.Background(), "example", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when Render fails")
 	}
@@ -602,7 +602,7 @@ func TestPrepareAuthSpec_FileBindingRenderErrorPropagates(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when Render fails")
 	}
@@ -619,7 +619,7 @@ func TestPrepareAuthSpec_FileBindingGetErrorPropagates(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	_, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when GET fails with non-NotFound")
 	}
@@ -638,7 +638,7 @@ func TestPrepareAuthSpec_ValidationErrorReturnsBeforeFS(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil)
+		newTestLogger(), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected validation error for nil Render")
 	}
@@ -666,7 +666,7 @@ func TestPrepareAuthSpec_EmptyVaultFirstLaunchProducesWritableParentMount(t *tes
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -712,7 +712,7 @@ func TestPrepareAuthSpec_RejectsNonConformingVaultPath(t *testing.T) {
 		}},
 	}
 	_, err := prepareAuthSpec(context.Background(), "example", spec, newFakeDaemon(),
-		newTestLogger(), nil)
+		newTestLogger(), nil, nil, nil)
 	if !errors.Is(err, ErrAuthSpecBadVaultPath) {
 		t.Fatalf("err = %v, want ErrAuthSpecBadVaultPath", err)
 	}
@@ -736,7 +736,7 @@ func TestPrepareAuthSpec_R30BootstrapLineFiresOnEmptyVault(t *testing.T) {
 		}},
 	}
 	prep, err := prepareAuthSpec(context.Background(), "claude", spec, newFakeDaemon(),
-		newTestLogger(), nil)
+		newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -760,7 +760,7 @@ func TestPrepareAuthSpec_RenderedAnyCredentialIsTrueOnHit(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestPrepareAuthSpec_MountAsFileSkipsParentDirMount(t *testing.T) {
 			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
 		}},
 	}
-	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil)
+	prep, err := prepareAuthSpec(context.Background(), "codex", spec, daemon, newTestLogger(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -799,6 +799,182 @@ func TestPrepareAuthSpec_MountAsFileSkipsParentDirMount(t *testing.T) {
 	}
 	if prep.Mounts[0].Target != "/home/agent/.codex/auth.json" {
 		t.Errorf("mount target = %q, want /home/agent/.codex/auth.json (file mount)", prep.Mounts[0].Target)
+	}
+}
+
+// claudeFileBindingSpec is a minimal AuthSpec that renders one file
+// binding into the transient dir, used by the chown-hook wiring tests.
+func claudeFileBindingSpec() AuthSpec {
+	return AuthSpec{
+		FileBindings: []FileBinding{{
+			VaultPath:     "agents/claude/oauth",
+			ContainerPath: "/home/agent/.claude/.credentials.json",
+			Mode:          0o600,
+			Required:      true,
+			Render:        func(s vault.Secret) ([]byte, error) { return s.Value, nil },
+			Capture:       func(b []byte) (vault.Secret, error) { return vault.Secret{Value: b}, nil },
+		}},
+	}
+}
+
+func TestPrepareAuthSpec_ChownHookInvokedWithHostRootAfterFilesExist(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`))
+
+	var gotDir string
+	var sawFile bool
+	hook := func(dir string) error {
+		gotDir = dir
+		// The rendered credential file must already be on disk when the
+		// chown runs so the recursive chown covers it. The transient
+		// root mirrors the container parent path beneath it.
+		if _, err := os.Stat(filepath.Join(dir, "home", "agent", ".claude", ".credentials.json")); err == nil {
+			sawFile = true
+		}
+		return nil
+	}
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
+		daemon, newTestLogger(), nil, hook, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if gotDir == "" {
+		t.Fatal("chown hook was never invoked")
+	}
+	if len(prep.Mounts) == 0 {
+		t.Fatal("expected at least one mount")
+	}
+	// The hook must receive the transient root: the group dir mounted
+	// into the container lives under it, so a recursive chown of the
+	// root covers both the mounted parent and its rendered files.
+	mountSource := prep.Mounts[0].Source
+	rel, err := filepath.Rel(gotDir, mountSource)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		t.Errorf("hook dir %q is not an ancestor of mount source %q; the chown must cover the mounted dir", gotDir, mountSource)
+	}
+	if !sawFile {
+		t.Error("chown hook ran before the credential file was written; it must run after so the chown covers rendered files")
+	}
+}
+
+func TestPrepareAuthSpec_NilChownHookLeavesFilesIntact(t *testing.T) {
+	daemon := newFakeDaemon()
+	envelope := []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`)
+	daemon.seed("claude", envelope)
+
+	// A nil hook is the non-Linux path: prep must still succeed and the
+	// rendered file must be present and unchanged.
+	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
+		daemon, newTestLogger(), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	if len(prep.Mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1", len(prep.Mounts))
+	}
+	got, err := os.ReadFile(filepath.Join(prep.Mounts[0].Source, ".credentials.json"))
+	if err != nil {
+		t.Fatalf("read rendered file: %v", err)
+	}
+	if !bytes.Equal(got, envelope) {
+		t.Errorf("rendered bytes = %q, want %q", got, envelope)
+	}
+}
+
+func TestPrepareAuthSpec_ChownHookErrorIsNonFatal(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`))
+
+	stderr := &bytes.Buffer{}
+	hook := func(string) error { return errors.New("resolve agent uid: boom") }
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
+		daemon, newTestLogger(), stderr, hook, nil)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec must not fail on chown hook error, got %v", err)
+	}
+	defer prep.Cleanup()
+
+	if len(prep.Mounts) != 1 {
+		t.Fatalf("Mounts = %d, want 1 (prep proceeds despite hook error)", len(prep.Mounts))
+	}
+	// The permanent diagnostic must name the UID mismatch and the
+	// chown-to-agent-UID remedy so a regression is attributable.
+	warned := stderr.String()
+	if !strings.Contains(warned, "chown") || !strings.Contains(warned, "UID") {
+		t.Errorf("warning %q must name the chown fix and UID mismatch", warned)
+	}
+}
+
+func TestPrepareAuthSpec_ReclaimHookRunsBeforeCaptureRead(t *testing.T) {
+	envelope := []byte(`{"claudeAiOauth":{"accessToken":"old"}}`)
+	rotated := []byte(`{"claudeAiOauth":{"accessToken":"new"}}`)
+	daemon := newFakeDaemon()
+	daemon.seed("claude", envelope)
+
+	var reclaimedDir string
+	reclaim := func(dir string) error { reclaimedDir = dir; return nil }
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
+		daemon, newTestLogger(), nil, nil, reclaim)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	// Simulate the agent rotating the credential in-container.
+	hostPath := filepath.Join(prep.Mounts[0].Source, ".credentials.json")
+	if err := os.WriteFile(hostPath, rotated, 0o600); err != nil {
+		t.Fatalf("simulate rotation: %v", err)
+	}
+
+	prep.CaptureFn(context.Background())
+
+	if reclaimedDir == "" {
+		t.Fatal("reclaim hook was never invoked; capture must reclaim ownership before reading the rotated file")
+	}
+	// The reclaim must cover the mounted dir: its source lives under the
+	// transient root the hook received, so a recursive chown back to the
+	// host UID makes the rotated file readable for the PUT.
+	rel, err := filepath.Rel(reclaimedDir, prep.Mounts[0].Source)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		t.Errorf("reclaim dir %q is not an ancestor of mount source %q", reclaimedDir, prep.Mounts[0].Source)
+	}
+	if len(daemon.puts) != 1 || !bytes.Equal(daemon.puts[0].Secret.Value, rotated) {
+		t.Fatalf("rotated bytes must be captured after reclaim; puts=%d", len(daemon.puts))
+	}
+}
+
+func TestPrepareAuthSpec_ReclaimHookErrorIsNonFatal(t *testing.T) {
+	daemon := newFakeDaemon()
+	daemon.seed("claude", []byte(`{"claudeAiOauth":{"accessToken":"tok"}}`))
+
+	stderr := &bytes.Buffer{}
+	reclaim := func(string) error { return errors.New("chown via runtime: boom") }
+
+	prep, err := prepareAuthSpec(context.Background(), "claude", claudeFileBindingSpec(),
+		daemon, newTestLogger(), stderr, nil, reclaim)
+	if err != nil {
+		t.Fatalf("prepareAuthSpec: %v", err)
+	}
+	defer prep.Cleanup()
+
+	// A reclaim failure must not abort capture: the read is still
+	// attempted (it succeeds here because the test owns the file), and the
+	// warning names the reclaim step so a regression is attributable.
+	prep.CaptureFn(context.Background())
+
+	warned := stderr.String()
+	if !strings.Contains(warned, "reclaim") {
+		t.Errorf("warning %q must name the reclaim step", warned)
+	}
+	if len(daemon.puts) != 1 {
+		t.Fatalf("capture must still attempt the PUT after a non-fatal reclaim error; puts=%d", len(daemon.puts))
 	}
 }
 

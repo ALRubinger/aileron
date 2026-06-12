@@ -471,8 +471,23 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	// parity is a separate, smaller PR per the plan's scope boundary.
 	var authPrep authSpecPrep
 	if sandboxEnabled {
+		// On Linux the host operator (UID typically 1000) owns the
+		// transient auth dir, but the sandbox container runs as the
+		// image's `agent` system user, so writable bind-mounted
+		// credential files would be agent-unwritable. The hook chowns
+		// the transient tree to the image's resolved agent UID; it is
+		// nil on macOS/Windows where the Docker Desktop shim handles UID
+		// translation. See ADR-0025 and issue #988.
+		chownHook := newAgentDirChownHook(ctx, sandboxcontainer.DefaultRunner(),
+			sandboxPlan.Runtime, sandboxPlan.Image)
+		// The symmetric counterpart: after the container exits, chown the
+		// transient tree back to the host operator so capture-on-exit can
+		// read a credential the agent rotated as the agent UID. Without it,
+		// rotations are silently dropped on rootful Docker Linux.
+		reclaimHook := newTransientReclaimHook(ctx, sandboxcontainer.DefaultRunner(),
+			sandboxPlan.Runtime, sandboxPlan.Image)
 		prep, err := prepareAuthSpec(ctx, config.Agent.Name(), config.Agent.AuthSpec(),
-			client, sessionLog, os.Stderr)
+			client, sessionLog, os.Stderr, chownHook, reclaimHook)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare agent auth spec: %w", err)
 		}
