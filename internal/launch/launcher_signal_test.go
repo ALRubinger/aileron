@@ -1,11 +1,13 @@
 package launch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/vault"
 )
 
 // signalTestHarness swaps the launchSandbox test seams for fakes and
@@ -241,6 +244,126 @@ func TestNewSalvageCaptureFiresOnce(t *testing.T) {
 	once()
 	if n.Load() != 1 {
 		t.Fatalf("CaptureFn fired %d times, want exactly 1", n.Load())
+	}
+}
+
+// buildSalvageCaptureFn constructs a CaptureFn shaped exactly like the
+// one prepareAuthSpec produces: it reclaims the transient dir ownership
+// (recording the call order), reads the host-side credential file, and
+// PUTs the bytes to the daemon. This lets the salvage regression assert
+// the real flush behavior — reclaim-before-read plus an end-to-end PUT —
+// without re-running prepareAuthSpec's full machinery.
+func buildSalvageCaptureFn(daemon authSpecDaemon, hostPath, vaultName string, order *[]string) func(context.Context) {
+	// reclaim mirrors prepareAuthSpec's reclaimTransientDir hook (#1005):
+	// ownership is reclaimed to the host operator before the read so the
+	// vault PUT can read a file the agent rotated as the agent UID.
+	reclaim := func(string) {
+		*order = append(*order, "reclaim")
+	}
+	return func(ctx context.Context) {
+		reclaim(filepath.Dir(hostPath))
+		b, err := os.ReadFile(hostPath)
+		if err != nil {
+			return
+		}
+		*order = append(*order, "read")
+		_ = daemon.PutAgentCredentials(ctx, vaultName, vault.Secret{
+			Value:    b,
+			Metadata: vault.Metadata{Type: "oauth_refresh_token"},
+		})
+	}
+}
+
+// TestLaunchSandboxSignalFlushesCaptureToVault is the end-to-end salvage
+// regression: a mid-session SIGINT must land the agent's rotated
+// credential in the vault, not merely run a closure. It writes a host
+// credential file (models the in-container rotation landing on the bind
+// mount), wraps a prepareAuthSpec-shaped CaptureFn in newSalvageCapture,
+// drives launchSandbox through the signal harness, delivers a synthetic
+// SIGINT, and asserts the fake daemon received exactly one PUT carrying
+// the file's bytes — with reclaim run before the read.
+func TestLaunchSandboxSignalFlushesCaptureToVault(t *testing.T) {
+	hostDir := t.TempDir()
+	hostPath := filepath.Join(hostDir, ".credentials.json")
+	want := []byte(`{"access_token":"rotated-by-agent","refresh_token":"r2"}`)
+	if err := os.WriteFile(hostPath, want, 0o600); err != nil {
+		t.Fatalf("seed host credential: %v", err)
+	}
+
+	daemon := newFakeDaemon()
+	var order []string
+	captureFn := buildSalvageCaptureFn(daemon, hostPath, "claude", &order)
+	once := newSalvageCapture(captureFn)
+
+	h := newSignalTestHarness(t)
+	go h.deliverSignal()
+	_, err := runSalvageLaunchSandbox(t, once)
+	if err == nil {
+		t.Fatal("expected non-nil run error after force-kill")
+	}
+
+	if h.stopCalls.Load() != 1 {
+		t.Fatalf("stop issued %d times, want 1", h.stopCalls.Load())
+	}
+	if name, _ := h.stopName.Load().(string); name != "aileron-sbx-test" {
+		t.Fatalf("stop targeted %q, want aileron-sbx-test", name)
+	}
+
+	daemon.mu.Lock()
+	puts := append([]putRecord(nil), daemon.puts...)
+	daemon.mu.Unlock()
+	if len(puts) != 1 {
+		t.Fatalf("daemon received %d PUTs, want exactly 1", len(puts))
+	}
+	if puts[0].Name != "claude" {
+		t.Fatalf("PUT name = %q, want claude", puts[0].Name)
+	}
+	if !bytes.Equal(puts[0].Secret.Value, want) {
+		t.Fatalf("PUT bytes = %q, want %q", puts[0].Secret.Value, want)
+	}
+	// Reclaim-before-read invariant (#1005): the salvage path's
+	// captureOnce must reclaim ownership before reading the host file.
+	if len(order) < 2 || order[0] != "reclaim" || order[1] != "read" {
+		t.Fatalf("call order = %v, want reclaim before read", order)
+	}
+}
+
+// TestLaunchSandboxCleanExitFlushesCaptureOnce verifies the clean-exit
+// path flushes the rotated credential exactly once through the caller's
+// gate (newSalvageCapture), and the salvage path does not double-fire
+// it. launchSandbox itself must not Capture on a clean exit; the caller
+// invokes once() after a nil run error.
+func TestLaunchSandboxCleanExitFlushesCaptureOnce(t *testing.T) {
+	hostDir := t.TempDir()
+	hostPath := filepath.Join(hostDir, ".credentials.json")
+	want := []byte(`{"access_token":"clean-exit","refresh_token":"r3"}`)
+	if err := os.WriteFile(hostPath, want, 0o600); err != nil {
+		t.Fatalf("seed host credential: %v", err)
+	}
+
+	daemon := newFakeDaemon()
+	var order []string
+	once := newSalvageCapture(buildSalvageCaptureFn(daemon, hostPath, "claude", &order))
+
+	h := newSignalTestHarness(t)
+	go h.cleanExit()
+	if _, err := runSalvageLaunchSandbox(t, once); err != nil {
+		t.Fatalf("clean exit returned error: %v", err)
+	}
+	// launchSandbox must not have Captured on clean exit.
+	daemon.mu.Lock()
+	if n := len(daemon.puts); n != 0 {
+		daemon.mu.Unlock()
+		t.Fatalf("launchSandbox PUT %d times on clean exit; the caller's gate owns it", n)
+	}
+	daemon.mu.Unlock()
+	// The caller's clean-exit gate fires the same wrapper.
+	once()
+	daemon.mu.Lock()
+	puts := len(daemon.puts)
+	daemon.mu.Unlock()
+	if puts != 1 {
+		t.Fatalf("daemon received %d PUTs after caller gate, want exactly 1", puts)
 	}
 }
 

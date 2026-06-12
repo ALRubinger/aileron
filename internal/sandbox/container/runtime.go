@@ -56,6 +56,14 @@ func (execRunner) Run(ctx context.Context, name string, args []string, stdout, s
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	// Put the runtime child in its own process group so a terminal
+	// Ctrl-C (SIGINT to the foreground process group) reaches only
+	// aileron, not `docker`/`podman` directly. This keeps aileron's
+	// AuthSpec salvage handler the sole owner of teardown — an orderly
+	// `docker stop --time` followed by Capture — instead of racing a
+	// concurrent runtime-initiated kill. No-op on Windows. See ADR-0025
+	// and issue #999.
+	setRuntimeChildPgid(cmd)
 	return cmd.Run()
 }
 
@@ -295,8 +303,17 @@ func (b Builder) Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 // the runtime's own SIGTERM-to-SIGKILL grace window. An empty name is a
 // no-op so callers never have to special-case an anonymous container,
 // and a nil runner falls back to the real runtime so the launcher path
-// works without wiring. The runner's error is returned verbatim; the
-// caller treats a stop failure as non-fatal and proceeds to Capture.
+// works without wiring.
+//
+// On a normal Ctrl-C the launcher runs containers with `--rm`, so the
+// runtime often auto-removes the container before this salvage stop
+// runs. The resulting "No such container" / "is not running" stop error
+// is benign: the container is already gone, which is exactly what the
+// stop wanted. To avoid alarming the user with a spurious warning on the
+// common clean-Ctrl-C path, StopContainer tees the runtime's stderr into
+// a buffer and treats an already-gone signature as success (returns
+// nil). Genuine errors (permission denied, daemon unreachable) are
+// returned verbatim so the caller can still warn.
 func StopContainer(ctx context.Context, runner Runner, runtimeName, name string, graceSeconds int, stdout, stderr io.Writer) error {
 	if strings.TrimSpace(name) == "" {
 		return nil
@@ -310,8 +327,34 @@ func StopContainer(ctx context.Context, runner Runner, runtimeName, name string,
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	var stderrBuf bytes.Buffer
+	teedStderr := io.MultiWriter(stderr, &stderrBuf)
 	args := []string{"stop", "--time", strconv.Itoa(graceSeconds), name}
-	return runner.Run(ctx, runtimeName, args, stdout, stderr)
+	err := runner.Run(ctx, runtimeName, args, stdout, teedStderr)
+	if err != nil && isContainerAlreadyGone(stderrBuf.String()) {
+		return nil
+	}
+	return err
+}
+
+// isContainerAlreadyGone reports whether a container-runtime stop error's
+// stderr indicates the target container was already removed or stopped.
+// Matched case-insensitively against the signatures Docker and Podman
+// emit for a missing or non-running container, so the `--rm`
+// auto-removal race on a clean Ctrl-C does not surface as a warning. See
+// StopContainer and issue #999.
+func isContainerAlreadyGone(stderr string) bool {
+	lowered := strings.ToLower(stderr)
+	for _, signature := range []string{
+		"no such container",
+		"is not running",
+		"already stopped",
+	} {
+		if strings.Contains(lowered, signature) {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate checks that an image can satisfy the minimal launch-time sandbox
