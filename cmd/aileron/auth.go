@@ -86,11 +86,9 @@ func runAuthImport(agentName string, registry *launch.Registry, stdout, stderr i
 		return 1
 	}
 
-	body, err := json.Marshal(agentCredentialsBody{Value: secret.Value})
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
+	// Marshaling a struct with a single []byte field cannot fail, so the
+	// error is discarded here (matching runBindingSetup's precedent).
+	body, _ := json.Marshal(agentCredentialsBody{Value: secret.Value})
 	status, respBody, err := vaultDoRequest(http.MethodPut,
 		"/vault/agents/"+agentName+"/credentials", body)
 	if err != nil {

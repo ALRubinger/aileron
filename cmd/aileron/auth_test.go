@@ -214,6 +214,99 @@ func TestRunAuth_DaemonLocked(t *testing.T) {
 	}
 }
 
+func TestRunAuth_DaemonUnexpectedStatus(t *testing.T) {
+	// An unexpected daemon status maps to the default "server returned"
+	// branch with the body echoed for diagnosis.
+	seedHostCredential(t, "codex", []byte(`{"auth_mode":"chatgpt","tokens":{"refresh_token":"r"}}`))
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"codex", "--import-from-host"}, authTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "server returned 500") || !strings.Contains(stderr.String(), "boom") {
+		t.Errorf("stderr = %q, want server-returned-500 with body", stderr.String())
+	}
+}
+
+// fakeAuthAgent is a stand-in registered under a supported name so the
+// command's defensive AuthSpec guards (missing binding, nil Capture)
+// can be exercised without depending on the real agent definitions
+// staying misconfigured.
+type fakeAuthAgent struct {
+	name string
+	spec launch.AuthSpec
+}
+
+func (f fakeAuthAgent) Name() string          { return f.name }
+func (f fakeAuthAgent) BinaryNames() []string { return []string{f.name} }
+func (f fakeAuthAgent) Args() []string        { return nil }
+func (f fakeAuthAgent) Env() map[string]string {
+	return nil
+}
+func (f fakeAuthAgent) LLMEndpointEnv() string { return "" }
+func (f fakeAuthAgent) ConfigureMCP(string, map[string]string, string, launch.Mode) ([]string, []launch.MCPMount, error) {
+	return nil, nil, nil
+}
+func (f fakeAuthAgent) AuthSpec() launch.AuthSpec { return f.spec }
+
+// TestRunAuth_BindingMissingCapture covers the defensive guard that
+// rejects an agent whose oauth FileBinding declares no Capture
+// validator, rather than nil-dereferencing it.
+func TestRunAuth_BindingMissingCapture(t *testing.T) {
+	r := launch.NewRegistry()
+	r.Register(fakeAuthAgent{
+		name: "claude",
+		spec: launch.AuthSpec{FileBindings: []launch.FileBinding{{
+			VaultPath:     "agents/claude/oauth",
+			ContainerPath: "/x",
+			Capture:       nil,
+		}}},
+	})
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"claude", "--import-from-host"}, r, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "no Capture validator") {
+		t.Errorf("stderr = %q, want nil-Capture guard", stderr.String())
+	}
+}
+
+// TestRunAuth_BindingPathMissing covers the guard that fires when a
+// supported, registered agent has no binding at agents/<name>/oauth.
+func TestRunAuth_BindingPathMissing(t *testing.T) {
+	r := launch.NewRegistry()
+	r.Register(fakeAuthAgent{name: "codex", spec: launch.AuthSpec{}})
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"codex", "--import-from-host"}, r, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "no credential binding at agents/codex/oauth") {
+		t.Errorf("stderr = %q, want missing-binding guard", stderr.String())
+	}
+}
+
+// TestRunAuth_UnknownAgentNotRegistered exercises the registry-miss
+// branch: a supported name (codex) that is nonetheless absent from the
+// registry surfaces a clear "unknown agent" error before any host read.
+func TestRunAuth_UnknownAgentNotRegistered(t *testing.T) {
+	empty := launch.NewRegistry() // codex not registered
+	var stdout, stderr bytes.Buffer
+	code := runAuth([]string{"codex", "--import-from-host"}, empty, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "unknown agent") {
+		t.Errorf("stderr = %q, want unknown-agent error", stderr.String())
+	}
+}
+
 func TestRunAuth_DaemonNoVault(t *testing.T) {
 	seedHostCredential(t, "codex", []byte(`{"auth_mode":"chatgpt","tokens":{"refresh_token":"r"}}`))
 	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
