@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/term"
+
 	"github.com/ALRubinger/aileron/internal/sandbox/composition"
 )
 
@@ -63,8 +65,50 @@ func (execRunner) Run(ctx context.Context, name string, args []string, stdout, s
 	// `docker stop --time` followed by Capture — instead of racing a
 	// concurrent runtime-initiated kill. No-op on Windows. See ADR-0025
 	// and issue #999.
-	setRuntimeChildPgid(cmd)
+	configureRuntimeChild(cmd, args, stdinIsTerminal())
 	return cmd.Run()
+}
+
+// configureRuntimeChild sets the process-group attributes for a runtime
+// child. It always isolates the child into its own process group so a
+// terminal Ctrl-C reaches aileron rather than docker/podman directly
+// (ADR-0025, issue #999). For an interactive container `run -t` on a
+// real terminal it additionally hands the child the controlling
+// terminal's foreground process group — without that the runtime's
+// raw-mode tcsetattr runs from a background group and fails with
+// SIGTTOU/EINTR ("unable to set IO streams as raw terminal: interrupted
+// system call"). The stdinTTY gate keeps non-interactive / CI
+// invocations on the background-isolation path, where promoting a child
+// to foreground without a controlling terminal would fail the exec.
+func configureRuntimeChild(cmd *exec.Cmd, args []string, stdinTTY bool) {
+	setRuntimeChildPgid(cmd)
+	if stdinTTY && interactiveTTYRun(args) {
+		setRuntimeChildForeground(cmd)
+	}
+}
+
+// stdinIsTerminal reports whether the process's stdin is a real
+// terminal. Package-level so tests can drive the foreground branch in
+// execRunner.Run without a controlling TTY.
+var stdinIsTerminal = func() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// interactiveTTYRun reports whether args describe an interactive
+// container `run` that allocates a pseudo-TTY (`-t`). Only such a run
+// needs the runtime child to own the terminal's foreground process
+// group. Image builds (`build -t <tag>`) and non-TTY runs do not — the
+// `run` verb gate keeps the `-t` build-tag flag from matching.
+func interactiveTTYRun(args []string) bool {
+	if len(args) == 0 || args[0] != "run" {
+		return false
+	}
+	for _, a := range args {
+		if a == "-t" {
+			return true
+		}
+	}
+	return false
 }
 
 // Builder builds the image required by a sandbox composition plan.
