@@ -4,8 +4,28 @@ import (
 	"bytes"
 	"errors"
 	"os/exec"
+	"runtime"
 	"testing"
 )
+
+// nonZeroExitError returns a real *exec.ExitError from a command that
+// exits non-zero, portably across Unix and Windows. readKeychain maps
+// such errors to ErrNotAuthenticated.
+func nonZeroExitError(t *testing.T) error {
+	t.Helper()
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/c", "exit 44")
+	} else {
+		cmd = exec.Command("sh", "-c", "exit 44")
+	}
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Skipf("could not produce an *exec.ExitError on %s: %v", runtime.GOOS, err)
+	}
+	return err
+}
 
 // stubSecurity swaps securityRunner for the duration of a test and
 // restores it afterward, so the keychain output-parsing logic can be
@@ -67,13 +87,7 @@ func TestReadKeychain_AppendsKeychainPath(t *testing.T) {
 // TestReadKeychain_NonZeroExitIsNotAuthenticated maps a `security`
 // non-zero exit (absent item) to ErrNotAuthenticated.
 func TestReadKeychain_NonZeroExitIsNotAuthenticated(t *testing.T) {
-	// A real *exec.ExitError from a guaranteed-failing command.
-	exitErr := exec.Command("/usr/bin/false").Run()
-	if exitErr == nil {
-		// /usr/bin/false missing (unusual); synthesize via a command
-		// that exits non-zero.
-		exitErr = exec.Command("/bin/sh", "-c", "exit 44").Run()
-	}
+	exitErr := nonZeroExitError(t)
 	stubSecurity(t, func(args ...string) ([]byte, error) {
 		return nil, exitErr
 	})
