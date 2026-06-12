@@ -107,12 +107,21 @@ func TestAuthSpecBindMountWritable(t *testing.T) {
 	})
 
 	// Positive case: with the chown fix, the agent owns the tree and the
-	// write succeeds; the host-side file reflects it.
+	// write succeeds; the host-side file reflects it. The chown runs the
+	// same way production does (chownTreeViaRuntime): a root container
+	// bind-mounts the tree and chowns it, because the unprivileged
+	// test-runner UID cannot chown host files to the foreign agent UID.
 	t.Run("with_chown_fix_write_succeeds", func(t *testing.T) {
 		hostRoot := newTransientAuthDir(t, containerParent)
-		if err := chownTree(hostRoot, agentUID); err != nil {
-			t.Fatalf("apply chown fix (recursive chown to agent UID %d): %v", agentUID, err)
+		if err := chownTreeViaRuntime(ctx, runner, rt, authSpecBindMountTestImage, hostRoot, agentUID); err != nil {
+			t.Fatalf("apply chown fix (recursive chown to agent UID %d via runtime): %v", agentUID, err)
 		}
+		// The chown and the agent's in-container writes leave the tree owned
+		// by the agent UID; restore it to the test-runner UID (again via the
+		// privileged runtime path) so t.TempDir's cleanup can remove it.
+		t.Cleanup(func() {
+			_ = chownTreeViaRuntime(ctx, runner, rt, authSpecBindMountTestImage, hostRoot, os.Getuid())
+		})
 		stdout, stderr, runErr := runAsAgent(ctx, rt, hostRoot, containerParent, writeCmd)
 		if runErr != nil {
 			t.Fatalf("in-container write FAILED even WITH the chown-to-agent-UID fix (host UID %d, agent UID %d): %v\nstderr: %s\nThis is the regression #988 guards: the AuthSpec writable bind mount must be chowned to the resolved image agent UID so the agent can rotate credentials.", hostUID, agentUID, runErr, strings.TrimSpace(stderr))

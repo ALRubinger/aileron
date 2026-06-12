@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"strings"
@@ -53,16 +50,24 @@ func resolveAgentUIDCached(ctx context.Context, runner sandboxcontainer.Runner, 
 // newAgentDirChownHook returns the chownTransientDir hook prepareAuthSpec
 // invokes after rendering the transient auth directory. The hook only
 // performs work on Linux: the macOS/Windows Docker Desktop file-sharing
-// shim translates UIDs at the boundary, so a host-side os.Chown to a
-// foreign in-container UID would be both pointless and (for a non-root
-// host user) likely to fail. On non-Linux hosts the returned hook is
-// nil and prepareAuthSpec skips the chown entirely.
+// shim translates UIDs at the boundary, so chowning the host tree to a
+// foreign in-container UID would be both pointless and unnecessary. On
+// non-Linux hosts the returned hook is nil and prepareAuthSpec skips the
+// chown entirely.
 //
 // On Linux the hook resolves the image's agent UID (cached per
 // runtime+image) and recursively chowns the transient tree to it so the
 // agent owns both the mounted parent directory and the rendered
 // credential files, enabling the in-container tmpfile+rename rotation
 // over the writable bind mount.
+//
+// The chown runs through the container runtime as root, not via a
+// host-side os.Chown. `aileron launch` runs as the unprivileged host
+// operator, and changing a file's owner to a different UID requires
+// CAP_CHOWN; on rootful Docker a host-side chown to the agent UID fails
+// with EPERM. The chown is therefore delegated to a short-lived root
+// container that bind-mounts the tree, where the runtime daemon holds
+// the privilege. See chownTreeViaRuntime.
 //
 // Note on capture-on-exit: after the agent rotates a credential
 // in-container, the resulting file is owned by the agent UID regardless
@@ -88,28 +93,49 @@ func newAgentDirChownHook(ctx context.Context, runner sandboxcontainer.Runner, r
 			return err
 		}
 		// Root (UID 0) already owns files created by a rootful host
-		// process; the recursive walk would be a no-op, so skip it.
+		// process; the chown would be a no-op, so skip the container run.
 		if uid == 0 {
 			return nil
 		}
-		return chownTree(dir, uid)
+		return chownTreeViaRuntime(ctx, runner, runtime, image, dir, uid)
 	}
 }
 
-// chownTree recursively changes the owning UID of dir and everything
-// beneath it to uid, leaving the GID (-1) and file modes untouched. It
-// mirrors the placement of the existing 0700 chmod on the transient
-// root in prepareAuthSpec.
-func chownTree(dir string, uid int) error {
-	return filepath.WalkDir(dir, func(path string, _ fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if err := os.Chown(path, uid, -1); err != nil {
-			return fmt.Errorf("chown %s to uid %d: %w", path, uid, err)
-		}
-		return nil
-	})
+// chownTreeViaRuntime recursively changes the owning UID of dir (and
+// everything beneath it) to uid by running a short-lived root container
+// that bind-mounts dir at /mnt and invokes `chown -R <uid> /mnt`. The
+// GID and file modes are left untouched.
+//
+// This indirection exists because the host launcher is unprivileged:
+// os.Chown to a foreign UID needs CAP_CHOWN and fails with EPERM on
+// rootful Docker Linux. The container runtime daemon runs as root, so
+// the chown is delegated to it. The sandbox image doubles as the helper
+// image so no extra pull is needed, and --entrypoint overrides the
+// image's entrypoint with chown directly.
+func chownTreeViaRuntime(ctx context.Context, runner sandboxcontainer.Runner, runtime, image, dir string, uid int) error {
+	if runner == nil {
+		return fmt.Errorf("chown via runtime: runner is required")
+	}
+	if strings.TrimSpace(runtime) == "" {
+		return fmt.Errorf("chown via runtime: runtime is required")
+	}
+	if strings.TrimSpace(image) == "" {
+		return fmt.Errorf("chown via runtime: image is required")
+	}
+	var out bytes.Buffer
+	args := []string{
+		"run", "--rm",
+		"--user", "0",
+		"--entrypoint", "chown",
+		"--volume", dir + ":/mnt",
+		image,
+		"-R", strconv.Itoa(uid), "/mnt",
+	}
+	if err := runner.Run(ctx, runtime, args, &out, &out); err != nil {
+		return fmt.Errorf("chown %s to uid %d via %s root container: %w (%s)",
+			dir, uid, runtime, err, strings.TrimSpace(out.String()))
+	}
+	return nil
 }
 
 // resolveAgentUID returns the numeric UID of the container image's

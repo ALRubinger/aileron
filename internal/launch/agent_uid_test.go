@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
-	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"testing"
@@ -233,26 +231,56 @@ func TestNewAgentDirChownHookNilOnNonLinux(t *testing.T) {
 	}
 }
 
-func TestChownTreeToOwnUIDIsNoOp(t *testing.T) {
-	// chownTree to the current process UID is a privilege-free no-op that
-	// still exercises the recursive walk and os.Chown call on every node.
-	root := t.TempDir()
-	sub := filepath.Join(root, "a", "b")
-	if err := os.MkdirAll(sub, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
+func TestChownTreeViaRuntimeRunsPrivilegedChown(t *testing.T) {
+	// The host launcher is unprivileged, so the chown is delegated to a
+	// root container that bind-mounts the tree. Assert the argv encodes
+	// that contract: a one-shot run as --user 0 with chown as the
+	// entrypoint and the tree mounted at /mnt.
+	runner := &fakeUIDRunner{}
+	if err := chownTreeViaRuntime(context.Background(), runner, "docker", "img:test", "/host/transient", 405); err != nil {
+		t.Fatalf("chownTreeViaRuntime: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(sub, "f"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected exactly 1 runtime call, got %d: %v", len(runner.calls), runner.calls)
 	}
-	if err := chownTree(root, os.Getuid()); err != nil {
-		t.Fatalf("chownTree to own uid: %v", err)
+	got := strings.Join(runner.calls[0], " ")
+	for _, want := range []string{
+		"docker run --rm",
+		"--user 0",
+		"--entrypoint chown",
+		"--volume /host/transient:/mnt",
+		"img:test",
+		"-R 405 /mnt",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("chown argv missing %q; got %q", want, got)
+		}
 	}
 }
 
-func TestChownTreeMissingDirErrors(t *testing.T) {
-	err := chownTree(filepath.Join(t.TempDir(), "does-not-exist"), os.Getuid())
+func TestChownTreeViaRuntimeRunnerErrorPropagates(t *testing.T) {
+	runner := &fakeUIDRunner{
+		outputs: []string{"chown: /mnt: Operation not permitted\n"},
+		errs:    []error{errors.New("exit status 1")},
+	}
+	err := chownTreeViaRuntime(context.Background(), runner, "docker", "img:test", "/host/transient", 405)
 	if err == nil {
-		t.Fatal("expected error walking a missing directory")
+		t.Fatal("expected error when the runtime chown fails")
+	}
+	if !strings.Contains(err.Error(), "chown") || !strings.Contains(err.Error(), "405") {
+		t.Fatalf("error should name the chown target uid, got %v", err)
+	}
+}
+
+func TestChownTreeViaRuntimeValidatesInputs(t *testing.T) {
+	if err := chownTreeViaRuntime(context.Background(), nil, "docker", "img", "/d", 1); err == nil {
+		t.Fatal("expected error for nil runner")
+	}
+	if err := chownTreeViaRuntime(context.Background(), &fakeUIDRunner{}, "", "img", "/d", 1); err == nil {
+		t.Fatal("expected error for empty runtime")
+	}
+	if err := chownTreeViaRuntime(context.Background(), &fakeUIDRunner{}, "docker", "", "/d", 1); err == nil {
+		t.Fatal("expected error for empty image")
 	}
 }
 
