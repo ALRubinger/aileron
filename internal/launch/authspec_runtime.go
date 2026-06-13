@@ -538,8 +538,17 @@ func prepareAuthSpec(
 								fmt.Errorf("freshness comparison failed: %w (skipping PUT so the prior vault entry is retained; inspect %s or re-login)", ferr, target.HostPath))
 							continue
 						case !fresher:
-							captureWarn(sessionLog, stderr, agentName, target.HostPath,
-								errors.New("captured credential is not newer than the vault entry; skipping write so a stale capture does not clobber a fresher rotation"))
+							// Not a failure: the freshness gate is doing its
+							// job. On a re-launch where the agent did not rotate
+							// its credential, the captured copy is not newer than
+							// the vault entry, so skipping the write is the
+							// correct steady-state outcome (and the common case
+							// on every clean exit after the first login). Record
+							// it in the session log for post-mortems, but do NOT
+							// print to stderr — the user should not see a
+							// "capture failed" line for normal operation.
+							sessionLog.Info("skipping credential capture: not newer than vault entry (freshness gate held)",
+								"agent", agentName, "host_path", target.HostPath)
 							continue
 						}
 					}
