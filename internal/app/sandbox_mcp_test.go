@@ -52,6 +52,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ALRubinger/aileron/internal/action"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/approval"
 	"github.com/ALRubinger/aileron/internal/audit"
@@ -392,11 +393,27 @@ type jsonrpcResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// request sends a JSON-RPC request, then reads JSON-RPC frames from
-// stdout until it finds one whose id matches. Notifications (id=0) and
-// unrelated responses are skipped.
+// request sends a JSON-RPC request and fails the test on any transport
+// error. It wraps requestErr for the common case where an error is
+// fatal to the test.
 func (p *mcpProcess) request(method string, params any) jsonrpcResponse {
 	p.t.Helper()
+	resp, err := p.requestErr(method, params)
+	if err != nil {
+		p.t.Fatalf("%v", err)
+	}
+	return resp
+}
+
+// requestErr sends a JSON-RPC request, then reads JSON-RPC frames from
+// stdout until it finds one whose id matches. Notifications (id=0) and
+// unrelated responses are skipped. It returns an error instead of
+// failing the test so callers running in a separate goroutine (the
+// concurrency variant) do not call t.Fatalf off the test goroutine.
+// Each mcpProcess has its own reader, so distinct processes may run
+// requestErr concurrently; a single process must not (the reader is not
+// demultiplexed).
+func (p *mcpProcess) requestErr(method string, params any) (jsonrpcResponse, error) {
 	p.mu.Lock()
 	p.nextID++
 	id := p.nextID
@@ -405,17 +422,17 @@ func (p *mcpProcess) request(method string, params any) jsonrpcResponse {
 	req := jsonrpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 	data, err := json.Marshal(req)
 	if err != nil {
-		p.t.Fatalf("marshal request: %v", err)
+		return jsonrpcResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
 	if _, err := p.stdin.Write(append(data, '\n')); err != nil {
-		p.t.Fatalf("write request %s: %v", method, err)
+		return jsonrpcResponse{}, fmt.Errorf("write request %s: %w", method, err)
 	}
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		line, err := p.reader.ReadString('\n')
 		if err != nil {
-			p.t.Fatalf("read response (method=%s): %v", method, err)
+			return jsonrpcResponse{}, fmt.Errorf("read response (method=%s): %w", method, err)
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -427,11 +444,10 @@ func (p *mcpProcess) request(method string, params any) jsonrpcResponse {
 			continue
 		}
 		if resp.ID == id {
-			return resp
+			return resp, nil
 		}
 	}
-	p.t.Fatalf("timed out waiting for response to %s", method)
-	return jsonrpcResponse{}
+	return jsonrpcResponse{}, fmt.Errorf("timed out waiting for response to %s", method)
 }
 
 // notify sends a JSON-RPC notification (no id, no response expected).
@@ -843,6 +859,180 @@ func TestSandboxMCP_NeverApproved_StaysPendingNoExecution(t *testing.T) {
 	stillPending := h.srv.actionApprovals.List()
 	if len(stillPending) != 1 || stillPending[0].ID != entry.ID {
 		t.Fatalf("approval entry should remain pending and unchanged; got %d entries", len(stillPending))
+	}
+}
+
+// recordingExecutor is an action.Executor double that records every
+// Execute call's name and args under a mutex, so the concurrency variant
+// can assert exactly-two executions with the right per-call inputs. It
+// always succeeds, mirroring StubExecutor's no-error contract.
+type recordingExecutor struct {
+	mu    sync.Mutex
+	calls []recordedCall
+}
+
+type recordedCall struct {
+	name string
+	args map[string]any
+}
+
+func (e *recordingExecutor) Execute(_ context.Context, name string, args map[string]any) (action.Result, error) {
+	e.mu.Lock()
+	e.calls = append(e.calls, recordedCall{name: name, args: args})
+	e.mu.Unlock()
+	return action.Result{Content: `{"recorded":true}`}, nil
+}
+
+func (e *recordingExecutor) recordedRecipients() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, 0, len(e.calls))
+	for _, c := range e.calls {
+		if to, _ := c.args["to"].(string); to != "" {
+			out = append(out, to)
+		}
+	}
+	return out
+}
+
+// eventChainForApproval returns the chronological event types correlated
+// to a single approval id. Both approval.* and execution.* events stamp
+// the same aileron.approval.id payload key (see action_queue.go
+// recordRequested/recordDecided and handlers.go actionExecutionPayload),
+// so this isolates one call's chain even when several share a session.
+func eventChainForApproval(t *testing.T, store *audit.MemStore, approvalID string) []model.EventType {
+	t.Helper()
+	all, err := store.ListEvents(context.Background(), audit.EventFilter{})
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	out := make([]model.EventType, 0, len(all))
+	for i := len(all) - 1; i >= 0; i-- {
+		if got, _ := all[i].Payload["aileron.approval.id"].(string); got == approvalID {
+			out = append(out, all[i].EventType)
+		}
+	}
+	return out
+}
+
+// waitForApprovalChain polls until the given approval's chain contains
+// the terminal event, or the deadline expires.
+func waitForApprovalChain(t *testing.T, store *audit.MemStore, approvalID string, terminal model.EventType, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, e := range eventChainForApproval(t, store, approvalID) {
+			if e == terminal {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s on approval %q; chain so far: %v",
+		terminal, approvalID, eventChainForApproval(t, store, approvalID))
+}
+
+// TestSandboxMCP_Concurrency_DistinctApprovalsAttributedCorrectly covers
+// R6c: two concurrent draft_email calls produce two distinct approval
+// ids; approving them in reverse order emits the correct, isolated
+// per-approval event chain for each; and the executor runs exactly twice
+// with the two distinct recipients. Host transport, Docker-free. Genuine
+// concurrency uses two separate aileron-mcp processes (one per call)
+// since a single process's stdio reader is not demultiplexed.
+func TestSandboxMCP_Concurrency_DistinctApprovalsAttributedCorrectly(t *testing.T) {
+	h := newDaemonHarness(t, draftEmailManifestApproval)
+	rec := &recordingExecutor{}
+	h.srv.executor = rec
+
+	const sessionID = "sess-concurrency"
+	p1 := h.spawnMCP(t, transportHost, sessionID, "")
+	p2 := h.spawnMCP(t, transportHost, sessionID, "")
+	initializeMCP(t, p1)
+	initializeMCP(t, p2)
+
+	// Fire both tools/call requests concurrently. requestErr returns an
+	// error rather than calling t.Fatalf so neither goroutine touches the
+	// test goroutine's failure path.
+	type callOutcome struct {
+		resp jsonrpcResponse
+		err  error
+	}
+	results := make([]callOutcome, 2)
+	recipients := []string{"erin@example.com", "frank@example.com"}
+	var wg sync.WaitGroup
+	for i, p := range []*mcpProcess{p1, p2} {
+		wg.Add(1)
+		go func(i int, p *mcpProcess) {
+			defer wg.Done()
+			resp, err := p.requestErr("tools/call", map[string]any{
+				"name": "draft_email",
+				"arguments": map[string]any{
+					"to":      recipients[i],
+					"subject": "concurrent",
+					"body":    "body",
+				},
+			})
+			results[i] = callOutcome{resp: resp, err: err}
+		}(i, p)
+	}
+	wg.Wait()
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("concurrent tools/call %d: %v", i, r.err)
+		}
+		if r.resp.Error != nil {
+			t.Fatalf("concurrent tools/call %d: %d %s", i, r.resp.Error.Code, r.resp.Error.Message)
+		}
+	}
+
+	// Both calls registered a pending approval; ids must be distinct.
+	pending := h.srv.actionApprovals.List()
+	if len(pending) != 2 {
+		t.Fatalf("pending approvals = %d; want 2", len(pending))
+	}
+	if pending[0].ID == pending[1].ID {
+		t.Fatalf("concurrent calls collapsed to one approval id %q; want two distinct ids", pending[0].ID)
+	}
+
+	// Approve in reverse registration order. Each approval's chain must
+	// be its own complete, isolated sequence regardless of order.
+	if err := h.srv.actionApprovals.Decide(pending[1].ID, true, "", nil); err != nil {
+		t.Fatalf("Decide pending[1]: %v", err)
+	}
+	if err := h.srv.actionApprovals.Decide(pending[0].ID, true, "", nil); err != nil {
+		t.Fatalf("Decide pending[0]: %v", err)
+	}
+
+	wantChain := []model.EventType{
+		model.EventTypeApprovalRequested,
+		model.EventTypeApprovalApproved,
+		model.EventTypeExecutionStarted,
+		model.EventTypeExecutionSucceeded,
+	}
+	for _, entry := range pending {
+		waitForApprovalChain(t, h.auditStore, entry.ID, model.EventTypeExecutionSucceeded, 5*time.Second)
+		chain := eventChainForApproval(t, h.auditStore, entry.ID)
+		if len(chain) != len(wantChain) {
+			t.Fatalf("approval %q chain = %v; want %v", entry.ID, chain, wantChain)
+		}
+		for i, w := range wantChain {
+			if chain[i] != w {
+				t.Errorf("approval %q chain[%d] = %s; want %s", entry.ID, i, chain[i], w)
+			}
+		}
+	}
+
+	// The executor ran exactly twice, once per call, with the two
+	// distinct recipients — proving per-call args were not crossed.
+	got := rec.recordedRecipients()
+	if len(got) != 2 {
+		t.Fatalf("executor recorded %d calls; want 2 (%v)", len(got), got)
+	}
+	gotSet := map[string]bool{got[0]: true, got[1]: true}
+	for _, want := range recipients {
+		if !gotSet[want] {
+			t.Errorf("executor did not receive a call for %q; recorded %v", want, got)
+		}
 	}
 }
 
