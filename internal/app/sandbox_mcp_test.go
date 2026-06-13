@@ -12,25 +12,29 @@
 //
 //	task test:integration:sandbox
 //
-// Docker availability: the plan's preferred execution mode is to run
-// `aileron-mcp` inside a sandbox container reaching the daemon via
-// `host.docker.internal`. This implementation uses the plan's
-// explicitly-approved fallback: `aileron-mcp` runs as a HOST subprocess
-// of the test, pointing AILERON_URL at the in-process daemon's
-// loopback address. The load-bearing R6/R7 assertions (round-trip
-// + exclusive audit-event chain stamped with the launch session id)
-// are identical regardless of whether the binary runs on the host or
-// in a container; the container variant is deferred as a follow-up.
+// Transports (#960): the round-trip runs over two transports selected by
+// spawnMCP. The HOST transport runs `aileron-mcp` as a subprocess of the
+// test reaching the daemon over loopback — the always-on, Docker-free
+// path. The CONTAINER transport runs it inside a sandbox container via
+// `docker run -i` (binary bind-mounted read-only, daemon reached through
+// `host.docker.internal`, `--add-host` on Linux); it is Docker-gated and
+// skips when Docker or the linux cross-build is unavailable. The
+// load-bearing R6/R7 assertions (round-trip + exclusive audit-event
+// chain stamped with the launch session id) are identical across
+// transports, so the in-container variant asserts the same chain.
 //
-// TODO(#953):
-//   - Promote to the in-container variant (bind-mount aileron-mcp at
-//     /usr/local/bin/aileron-mcp:ro, run via docker run -i with
-//     --add-host=host.docker.internal:host-gateway on Linux, daemon
-//     bound to 0.0.0.0:0).
-//   - Add R6b (never-approved) and R6c (concurrency) variants. R6b
-//     needs a poll-on-demand assertion via the check_action_status
-//     tool; R6c needs two parallel tools/call requests with distinct
-//     approval_ids.
+// Variants covered here:
+//   - R6/R7 no-approval and approval round-trips (host + in-container).
+//   - R6a denied path (no execution.* after denial).
+//   - R6b never-approved: check_action_status stays pending, no
+//     execution.* events, queue entry unchanged.
+//   - R6c concurrency: two parallel calls yield distinct approval ids
+//     with correctly attributed, isolated per-approval event chains.
+//
+// Still deferred (tracked separately, not by this file):
+//   - Per-agent E2E beyond aileron-mcp (Codex/Goose/OpenCode/Pi as MCP
+//     client) — unit coverage + the manual recipe (#962) cover those.
+//   - Wiring this tag into a CI job — separate follow-up once stable.
 package app
 
 import (
