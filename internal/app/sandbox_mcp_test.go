@@ -39,12 +39,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -117,13 +119,50 @@ Drafts and sends an email; user must approve before delivery.
 `
 
 // mcpBinaryPath is resolved once by TestMain so each test reuses the
-// same compiled binary.
+// same compiled binary. It targets the host platform and is used by the
+// host-subprocess transport.
 var mcpBinaryPath string
+
+// mcpBinaryPathLinux is a linux/<host-arch> cross-build of aileron-mcp,
+// resolved by TestMain only when Docker is available. The in-container
+// transport bind-mounts this binary — a host-platform build (e.g. a
+// darwin binary on macOS) cannot execute inside the linux sandbox image.
+var mcpBinaryPathLinux string
+
+// sandboxBaseImage is the container image the in-container transport
+// runs aileron-mcp inside. A small glibc image with /bin/sh; distroless
+// static images omit the shell aileron-mcp's process path may rely on.
+const sandboxBaseImage = "debian:bookworm-slim"
+
+// dockerAvailable reports whether a `docker` CLI is on PATH. The
+// in-container variant is skipped (not failed) when it is absent.
+func dockerAvailable() bool {
+	_, err := exec.LookPath("docker")
+	return err == nil
+}
+
+// skipWithoutDocker skips the calling test when Docker is unavailable,
+// so the host-transport, never-approved, and concurrency variants still
+// run on machines and CI lanes without Docker.
+func skipWithoutDocker(t *testing.T) {
+	t.Helper()
+	if !dockerAvailable() {
+		t.Skip("docker not on PATH; skipping in-container variant")
+	}
+}
 
 // TestMain builds the aileron-mcp binary from source so the
 // integration test exercises the real production binary, not a mock.
 // Skips the whole package if `go build` fails (no Go toolchain in
 // the test environment is the only realistic failure mode).
+//
+// When Docker is available it also (a) cross-builds a linux binary for
+// the in-container transport and (b) pre-pulls the sandbox base image,
+// so the per-test container run does not pay a first-touch pull (which
+// is also where registry rate-limiting bites on shared CI runners).
+// Both are best-effort: a failure logs and leaves mcpBinaryPathLinux
+// unset, and the in-container variant skips with a clear reason rather
+// than hanging mid-test.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "aileron-mcp-integration-*")
 	if err != nil {
@@ -145,6 +184,25 @@ func TestMain(m *testing.M) {
 	}
 	mcpBinaryPath = bin
 
+	if dockerAvailable() {
+		linuxBin := filepath.Join(dir, "aileron-mcp-linux")
+		build := exec.Command("go", "build", "-o", linuxBin, "github.com/ALRubinger/aileron/cmd/aileron-mcp")
+		// Match the container's default platform: Docker Desktop runs the
+		// host architecture, so a linux/<host-arch> build executes natively.
+		build.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
+		build.Stderr = os.Stderr
+		if err := build.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "TestMain: cross-build linux aileron-mcp (in-container variant will skip): %v\n", err)
+		} else {
+			mcpBinaryPathLinux = linuxBin
+		}
+		pull := exec.Command("docker", "pull", sandboxBaseImage)
+		pull.Stderr = os.Stderr
+		if err := pull.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "TestMain: pre-pull %s (in-container variant may pull on demand or skip): %v\n", sandboxBaseImage, err)
+		}
+	}
+
 	os.Exit(m.Run())
 }
 
@@ -158,6 +216,12 @@ type daemonHarness struct {
 	auditStore *audit.MemStore
 	httpServer *httptest.Server
 	mcpProcess *mcpProcess
+	// loopbackURL is the daemon URL the host transport uses
+	// (127.0.0.1:<port>). containerURL is the same daemon reached from
+	// inside a container via host.docker.internal:<port>. Both resolve
+	// to the one listener bound on 0.0.0.0 below.
+	loopbackURL  string
+	containerURL string
 }
 
 func newDaemonHarness(t *testing.T, manifest string) *daemonHarness {
@@ -173,32 +237,86 @@ func newDaemonHarness(t *testing.T, manifest string) *daemonHarness {
 
 	mux := http.NewServeMux()
 	api.HandlerFromMux(srv, mux)
-	httpSrv := httptest.NewServer(mux)
+
+	// Bind on 0.0.0.0 (not the httptest default of 127.0.0.1) so a
+	// sandbox container can reach the daemon via host.docker.internal.
+	// The host transport still connects over loopback to the same port.
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatalf("listen 0.0.0.0: %v", err)
+	}
+	httpSrv := httptest.NewUnstartedServer(mux)
+	httpSrv.Listener.Close()
+	httpSrv.Listener = ln
+	httpSrv.Start()
 	t.Cleanup(httpSrv.Close)
 
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	return &daemonHarness{
-		srv:        srv,
-		auditStore: store,
-		httpServer: httpSrv,
+		srv:          srv,
+		auditStore:   store,
+		httpServer:   httpSrv,
+		loopbackURL:  "http://127.0.0.1:" + port,
+		containerURL: "http://host.docker.internal:" + port,
 	}
 }
 
-// spawnMCP starts an aileron-mcp host subprocess pointed at this
-// harness's daemon URL. Returns a handle the test uses to send/receive
-// JSON-RPC messages.
-func (h *daemonHarness) spawnMCP(t *testing.T, sessionID, token string) *mcpProcess {
+// mcpTransport selects where aileron-mcp runs for a given spawn.
+type mcpTransport int
+
+const (
+	// transportHost runs aileron-mcp as a host subprocess reaching the
+	// daemon over loopback — the fast, Docker-free path.
+	transportHost mcpTransport = iota
+	// transportContainer runs aileron-mcp inside a sandbox container via
+	// `docker run -i`, reaching the daemon through host.docker.internal.
+	transportContainer
+)
+
+// spawnMCP starts an aileron-mcp process pointed at this harness's
+// daemon and returns a handle for JSON-RPC over its stdio. The transport
+// selects host-subprocess vs in-container execution; both yield an
+// identical *mcpProcess so every downstream helper is transport-agnostic.
+func (h *daemonHarness) spawnMCP(t *testing.T, transport mcpTransport, sessionID, token string) *mcpProcess {
 	t.Helper()
-	if mcpBinaryPath == "" {
-		t.Fatal("mcpBinaryPath unset; TestMain did not run")
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, mcpBinaryPath)
-	cmd.Env = append(os.Environ(),
-		"AILERON_URL="+h.httpServer.URL,
-		"AILERON_TOKEN="+token,
-		"AILERON_SESSION_ID="+sessionID,
-		"AILERON_OTEL_ENABLED=false",
-	)
+
+	var cmd *exec.Cmd
+	switch transport {
+	case transportContainer:
+		if mcpBinaryPathLinux == "" {
+			cancel()
+			t.Skip("linux aileron-mcp cross-build unavailable; skipping in-container variant")
+		}
+		args := []string{"run", "-i", "--rm"}
+		// macOS/Windows Docker Desktop provide host.docker.internal
+		// natively; rootful Linux Docker needs this explicit mapping.
+		if runtime.GOOS == "linux" {
+			args = append(args, "--add-host=host.docker.internal:host-gateway")
+		}
+		args = append(args,
+			"-v", mcpBinaryPathLinux+":/usr/local/bin/aileron-mcp:ro",
+			"-e", "AILERON_URL="+h.containerURL,
+			"-e", "AILERON_TOKEN="+token,
+			"-e", "AILERON_SESSION_ID="+sessionID,
+			"-e", "AILERON_OTEL_ENABLED=false",
+			sandboxBaseImage,
+			"/usr/local/bin/aileron-mcp",
+		)
+		cmd = exec.CommandContext(ctx, "docker", args...)
+	default:
+		if mcpBinaryPath == "" {
+			cancel()
+			t.Fatal("mcpBinaryPath unset; TestMain did not run")
+		}
+		cmd = exec.CommandContext(ctx, mcpBinaryPath)
+		cmd.Env = append(os.Environ(),
+			"AILERON_URL="+h.loopbackURL,
+			"AILERON_TOKEN="+token,
+			"AILERON_SESSION_ID="+sessionID,
+			"AILERON_OTEL_ENABLED=false",
+		)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -441,7 +559,7 @@ func TestSandboxMCP_NoApproval_RoundTripsAndEmitsAuditChain(t *testing.T) {
 	h := newDaemonHarness(t, draftEmailManifestNoApproval)
 
 	const sessionID = "sess-no-approval"
-	p := h.spawnMCP(t, sessionID, "")
+	p := h.spawnMCP(t, transportHost, sessionID, "")
 
 	initializeMCP(t, p)
 	tools := listTools(t, p)
@@ -485,7 +603,7 @@ func TestSandboxMCP_Approval_RoundTripsWithApprovedDecide(t *testing.T) {
 	h := newDaemonHarness(t, draftEmailManifestApproval)
 
 	const sessionID = "sess-approval-approved"
-	p := h.spawnMCP(t, sessionID, "")
+	p := h.spawnMCP(t, transportHost, sessionID, "")
 
 	initializeMCP(t, p)
 	tools := listTools(t, p)
@@ -554,7 +672,7 @@ func TestSandboxMCP_Denied(t *testing.T) {
 	h := newDaemonHarness(t, draftEmailManifestApproval)
 
 	const sessionID = "sess-approval-denied"
-	p := h.spawnMCP(t, sessionID, "")
+	p := h.spawnMCP(t, transportHost, sessionID, "")
 
 	initializeMCP(t, p)
 	_ = listTools(t, p)
