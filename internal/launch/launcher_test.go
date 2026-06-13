@@ -250,6 +250,10 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 		"--env\nAILERON_TOOLS_FILE=/etc/aileron/tools.txt\n",
 		"--env\nAILERON_SHIMS_DIR=/usr/local/bin\n",
 		"--env\nAILERON_URL=http://host.docker.internal:",
+		// Sandbox launch disables the in-container auto-updater: the
+		// image's npm-global prefix is root-owned and the image is the
+		// versioning unit, so a self-update would fail and be pointless.
+		"--env\nDISABLE_AUTOUPDATER=1\n",
 		"ghcr.io/acme/agent:latest\ncodex\n--ask-for-approval\nnever\n",
 	} {
 		if !strings.Contains(args, want) {

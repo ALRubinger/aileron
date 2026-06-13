@@ -403,6 +403,16 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		agentEnv["AILERON_APPROVAL_URL"] = agentEndpointURL + "/approvals"
 		agentEnv["AILERON_TOOLS_FILE"] = sandboxToolsFilePath
 		agentEnv["AILERON_SHIMS_DIR"] = sandboxShimsDirPath
+		// Disable Claude Code's in-container auto-updater. The sandbox
+		// image installs the agent into a root-owned global prefix
+		// (`npm install -g`), so the non-root agent user's update write
+		// fails with "no write permission to npm prefix". Self-updating
+		// inside an ephemeral container is also pointless — the image is
+		// the unit of versioning, so a successful update would be lost on
+		// the next launch anyway. The var is Claude-specific; other
+		// agents ignore it. Host launch is unaffected (this block is
+		// sandbox-only), so a user's own writable install still updates.
+		agentEnv["DISABLE_AUTOUPDATER"] = "1"
 		if daemonToken != "" {
 			agentEnv["AILERON_TOKEN"] = daemonToken
 		}
