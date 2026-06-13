@@ -773,6 +773,79 @@ func TestSandboxMCP_Denied(t *testing.T) {
 	}
 }
 
+// TestSandboxMCP_NeverApproved_StaysPendingNoExecution covers R6b: an
+// [approval]-gated action whose approval is never decided must stay
+// pending across polls, emit no execution.* events, and leave the
+// approval queue unchanged. The contract is transport-independent, so
+// this runs on the host transport (Docker-free).
+func TestSandboxMCP_NeverApproved_StaysPendingNoExecution(t *testing.T) {
+	h := newDaemonHarness(t, draftEmailManifestApproval)
+
+	const sessionID = "sess-never-approved"
+	p := h.spawnMCP(t, transportHost, sessionID, "")
+
+	initializeMCP(t, p)
+	_ = listTools(t, p)
+
+	result := callTool(t, p, "draft_email", map[string]any{
+		"to":      "dave@example.com",
+		"subject": "never decided",
+		"body":    "pending forever",
+	})
+	if isErr, _ := result["isError"].(bool); isErr {
+		t.Fatalf("tools/call returned isError=true: %v", result)
+	}
+
+	pending := h.srv.actionApprovals.List()
+	if len(pending) != 1 {
+		t.Fatalf("pending approvals = %d; want 1", len(pending))
+	}
+	entry := pending[0]
+
+	// Poll check_action_status twice, 100ms apart. Decide is never
+	// called: each poll must report a non-terminal (pending) status.
+	for i := 0; i < 2; i++ {
+		statusResult := callTool(t, p, "check_action_status", map[string]any{"approval_id": entry.ID})
+		text := strings.ToLower(firstTextContent(statusResult))
+		if !strings.Contains(text, "pending") {
+			t.Fatalf("poll %d: check_action_status = %q; want a pending status", i, text)
+		}
+		for _, terminal := range []string{"completed", "denied", "failed"} {
+			if strings.Contains(text, terminal) {
+				t.Fatalf("poll %d: undecided approval reported terminal status %q in %q", i, terminal, text)
+			}
+		}
+		if i == 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// The audit chain must be exactly approval.requested — no execution.*
+	// events fire for an action that was never approved.
+	chain := eventChainForSession(t, h.auditStore, sessionID)
+	for _, evt := range chain {
+		if strings.HasPrefix(string(evt), "execution.") {
+			t.Errorf("never-approved path emitted %s; expected no execution.* events", evt)
+		}
+	}
+	want := []model.EventType{model.EventTypeApprovalRequested}
+	if len(chain) != len(want) {
+		t.Fatalf("event chain = %v; want %v", chain, want)
+	}
+	if chain[0] != want[0] {
+		t.Errorf("chain[0] = %s; want %s", chain[0], want[0])
+	}
+
+	// The entry must still be pending and unchanged — polling must not
+	// mutate queue state. No explicit delete is needed: newDaemonHarness
+	// gives each test a fresh in-memory queue, so the undecided entry
+	// cannot leak into another test.
+	stillPending := h.srv.actionApprovals.List()
+	if len(stillPending) != 1 || stillPending[0].ID != entry.ID {
+		t.Fatalf("approval entry should remain pending and unchanged; got %d entries", len(stillPending))
+	}
+}
+
 // firstTextContent extracts the first text-typed content entry from an
 // MCP tool result payload. Returns the empty string when no text
 // content is present.
