@@ -1088,7 +1088,8 @@ func TestPrepareAuthSpec_StaleCaptureNotFresherSkipsPut(t *testing.T) {
 	daemon.seed("claude", []byte("current")) // present at render and capture
 	spec := freshnessSpec(func(_, _ vault.Secret) (bool, error) { return false, nil })
 
-	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), nil, nil, nil)
+	var stderr bytes.Buffer
+	prep, err := prepareAuthSpec(context.Background(), "claude", spec, daemon, newTestLogger(), &stderr, nil, nil)
 	if err != nil {
 		t.Fatalf("prepareAuthSpec: %v", err)
 	}
@@ -1100,6 +1101,13 @@ func TestPrepareAuthSpec_StaleCaptureNotFresherSkipsPut(t *testing.T) {
 
 	if len(daemon.puts) != 0 {
 		t.Fatalf("a not-fresher capture must not clobber the vault; puts=%d", len(daemon.puts))
+	}
+	// The not-newer outcome is the freshness gate working as designed, not
+	// a failure. It must NOT surface a "capture failed" line on stderr —
+	// the common steady-state on every clean exit after the first login
+	// would otherwise alarm the user with a benign no-op.
+	if strings.Contains(stderr.String(), "failed") {
+		t.Errorf("not-newer capture must not print a failure to stderr; got %q", stderr.String())
 	}
 }
 
