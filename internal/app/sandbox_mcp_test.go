@@ -593,6 +593,55 @@ func TestSandboxMCP_NoApproval_RoundTripsAndEmitsAuditChain(t *testing.T) {
 	}
 }
 
+// TestSandboxMCP_InContainer_NoApproval_RoundTripsAndEmitsAuditChain is
+// the in-container counterpart of the no-approval round-trip (R1): it
+// runs aileron-mcp inside a real sandbox container reaching the daemon
+// via host.docker.internal, and asserts the identical R6/R7 audit chain.
+// The R6/R7 contract is transport-independent, so the assertion set
+// matches the host variant exactly — the only added surface under test
+// is container networking and the read-only binary bind-mount. Skips
+// when Docker is unavailable.
+func TestSandboxMCP_InContainer_NoApproval_RoundTripsAndEmitsAuditChain(t *testing.T) {
+	skipWithoutDocker(t)
+	h := newDaemonHarness(t, draftEmailManifestNoApproval)
+
+	const sessionID = "sess-in-container"
+	p := h.spawnMCP(t, transportContainer, sessionID, "")
+
+	initializeMCP(t, p)
+	tools := listTools(t, p)
+	if !containsTool(tools, "draft_email") {
+		t.Fatalf("tools/list missing draft_email; got %v", toolNames(tools))
+	}
+
+	result := callTool(t, p, "draft_email", map[string]any{
+		"to":      "alice@example.com",
+		"subject": "hello from container",
+		"body":    "test body",
+	})
+	if isErr, _ := result["isError"].(bool); isErr {
+		t.Fatalf("in-container tools/call draft_email returned isError=true: %v", result)
+	}
+
+	want := []model.EventType{
+		model.EventTypeExecutionStarted,
+		model.EventTypeExecutionSucceeded,
+	}
+	// Container start + networking add latency over the host subprocess;
+	// give the round-trip a wider window than the host variant's 5s.
+	waitForChain(t, h.auditStore, sessionID, model.EventTypeExecutionSucceeded, 30*time.Second)
+
+	chain := eventChainForSession(t, h.auditStore, sessionID)
+	if len(chain) != len(want) {
+		t.Fatalf("in-container event chain = %v; want %v", chain, want)
+	}
+	for i, w := range want {
+		if chain[i] != w {
+			t.Errorf("chain[%d] = %s; want %s", i, chain[i], w)
+		}
+	}
+}
+
 // TestSandboxMCP_Approval_RoundTripsWithApprovedDecide covers R6's
 // load-bearing approval claim: an MCP tools/call against an
 // [approval]-gated action returns the 202 pending response, registers
