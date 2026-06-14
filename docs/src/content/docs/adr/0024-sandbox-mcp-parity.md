@@ -20,7 +20,7 @@ That decision is reversed here. Operating the v4 sandbox without MCP parity left
 
 The path forward considered two architectural candidates ([#953](https://github.com/ALRubinger/aileron/issues/953) body):
 
-- **(a) Host-reached.** `aileron-mcp` runs on the host; the container reaches it via `host.docker.internal:<port>` (Docker) or `host.containers.internal:<port>` (Podman). Cheap only if `aileron-mcp` already speaks TCP, which it does not — it is strictly stdio MCP today. Option (a) requires a net-new stdio↔TCP bridge subprocess inside the container.
+- **(a) Host-reached.** `aileron-mcp` runs on the host; the container reaches it via the Docker host alias `host.docker.internal:<port>`. Cheap only if `aileron-mcp` already speaks TCP, which it does not — it is strictly stdio MCP today. Option (a) requires a net-new stdio↔TCP bridge subprocess inside the container.
 - **(b) In-container subprocess.** `aileron-mcp` is exec'd as a stdio subprocess of the agent process inside the container. It reaches the daemon over HTTPS via the already-rewritten `AILERON_URL` and authenticates with the already-injected `AILERON_TOKEN`.
 
 The sandbox launcher already plumbs `AILERON_URL` and `AILERON_TOKEN` into the container env (the speculative wiring that landed for [#796](https://github.com/ALRubinger/aileron/issues/796)). The `sandboxDiscoveryMounts` pattern — which host-builds tooling and read-only-mounts it into the container under `/etc/aileron/` and `/usr/local/bin/` — is the established shape for bringing host-built artifacts into the container at launch time. Option (b) reuses both directly.
@@ -38,6 +38,8 @@ Under `aileron launch --sandbox=docker <agent>`, the launcher revives `aileron-m
 - The user's own MCP servers (registered through their devcontainer.json or agent-side `mcp.json`) coexist independently. Aileron does NOT aggregate, route, or proxy them. The container MCP model is B1 (Aileron is one MCP server), not B2 (Aileron is an MCP gateway).
 
 The trust contract from [ADR-0009](/adr/0009-user-channel) is preserved: the agent is never in the approval path. Approval surfaces (webapp `review_url`, CLI `aileron approval approve <id>`) reach the user on the host as they do under host launch. The daemon emits the same `execution.started` / `execution.succeeded` / `execution.failed` and `approval.requested` / `approval.approved` / `approval.denied` events for actions invoked via the MCP path, stamped with the launch session id.
+
+v4 is Docker-only, so the container host alias is `host.docker.internal`. Podman is deferred to a later track, not rejected, and its `host.containers.internal` alias is the deferred re-add path for when Podman returns. The runtime abstraction seam is preserved, so re-adding Podman is re-enabling it in `resolveRuntime` and the support matrix. See [ADR-0014](/adr/0014-spawn-sandbox-technology) and umbrella issue [#1050](https://github.com/ALRubinger/aileron/issues/1050) for the descope rationale.
 
 ## Consequences
 
