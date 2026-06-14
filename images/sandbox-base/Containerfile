@@ -1,4 +1,4 @@
-FROM alpine:3.23
+FROM alpine:3.24
 
 LABEL org.opencontainers.image.title="Aileron sandbox base"
 LABEL org.opencontainers.image.description="Minimal sandbox substrate for Aileron-managed agent containers."

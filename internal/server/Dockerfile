@@ -23,7 +23,7 @@ RUN if [ "$COVERAGE" = "true" ]; then \
     cd internal && go build -o /aileron-server ./server; \
   fi
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 RUN addgroup -S aileron && adduser -S aileron -G aileron
 
