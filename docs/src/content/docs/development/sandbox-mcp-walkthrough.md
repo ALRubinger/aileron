@@ -10,7 +10,7 @@ The integration test at `test/integration/sandbox_mcp_test.go` (build tag `integ
 
 ## What you need
 
-- Docker or Podman installed and running.
+- Docker installed and running.
 - A development build of the Aileron CLI and `aileron-mcp` siblings, both on `PATH`. `task build:cli && task build:mcp` produces them under `./build/`.
 - `jq` available on `PATH` (used by the audit-verification command below).
 - A Google OAuth client configured via `aileron binding setup gmail` (or any installed action you want to test).
@@ -114,7 +114,7 @@ Linux Docker does not configure `host.docker.internal` automatically. The launch
 docker run --rm --add-host=host.docker.internal:host-gateway alpine getent hosts host.docker.internal
 ```
 
-macOS and Windows Docker Desktop handle this automatically. Podman uses `host.containers.internal` natively (no flag needed).
+macOS and Windows Docker Desktop handle this automatically. Podman's native `host.containers.internal` alias is the deferred re-add path; Podman is planned but not yet supported in v4 ([ADR-0014](/adr/0014-spawn-sandbox-technology/)).
 
 ## Sources
 
