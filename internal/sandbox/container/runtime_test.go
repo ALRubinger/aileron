@@ -318,6 +318,53 @@ func TestResolveRuntimeRejectsUnsupportedRuntime(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unsupported runtime error")
 	}
+	if want := `unsupported sandbox runtime "nerdctl" (want auto or docker)`; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestResolveRuntimeRejectsPodman is the regression test for #1051: v4
+// is Docker-only, so an explicit podman runtime fails fast with the
+// decided message regardless of whether podman is on PATH. The Runner
+// seam and runtimeName parameterization are preserved for a future
+// re-add, but resolution must reject podman today.
+func TestResolveRuntimeRejectsPodman(t *testing.T) {
+	const want = "podman runtime is not supported yet (v4 is Docker-only); see ADR-0014"
+	// checkPath=true (PATH lookup would otherwise gate docker).
+	if _, err := resolveRuntime("podman", true); err == nil || err.Error() != want {
+		t.Fatalf("resolveRuntime(podman, true) error = %v, want %q", err, want)
+	}
+	// checkPath=false: still rejected even when path checks are skipped.
+	if _, err := resolveRuntime("podman", false); err == nil || err.Error() != want {
+		t.Fatalf("resolveRuntime(podman, false) error = %v, want %q", err, want)
+	}
+	// ResolveRuntime is the exported chokepoint used by the CLI paths.
+	if _, err := ResolveRuntime("podman"); err == nil || err.Error() != want {
+		t.Fatalf("ResolveRuntime(podman) error = %v, want %q", err, want)
+	}
+}
+
+// TestResolveRuntimeAutoEmptyResolvesDocker pins that both "" and "auto"
+// resolve to docker only (the candidate list dropped podman for #1051).
+func TestResolveRuntimeAutoEmptyResolvesDocker(t *testing.T) {
+	dir := t.TempDir()
+	name := "docker"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	for _, in := range []string{"", DefaultRuntime} {
+		got, err := ResolveRuntime(in)
+		if err != nil {
+			t.Fatalf("ResolveRuntime(%q): %v", in, err)
+		}
+		if got != "docker" {
+			t.Fatalf("ResolveRuntime(%q) = %q, want docker", in, got)
+		}
+	}
 }
 
 func TestResolveRuntimeReportsMissingExplicitRuntime(t *testing.T) {
@@ -353,6 +400,9 @@ func TestResolveRuntimeAutoReportsMissingRuntime(t *testing.T) {
 	_, err := ResolveRuntime(DefaultRuntime)
 	if err == nil {
 		t.Fatal("expected missing runtime error")
+	}
+	if want := "no container runtime found on PATH; install Docker, or pass --runtime"; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -614,7 +664,7 @@ func TestRunRejectsIncompleteAdditionalVolume(t *testing.T) {
 
 func TestRunAddsTTYWhenRequested(t *testing.T) {
 	runner := &recordingRunner{}
-	_, err := Builder{Runtime: "podman", Runner: runner}.Run(context.Background(), RunOptions{
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
 		Image:   "aileron/sandbox-base:test",
 		Command: []string{"claude"},
 		TTY:     true,
@@ -1020,7 +1070,7 @@ func TestStopContainerReturnsRunnerErrorVerbatim(t *testing.T) {
 	// suppressed, not real failures.
 	wantErr := errors.New("permission denied")
 	runner := &callRecordingRunner{errs: []error{wantErr}}
-	err := StopContainer(context.Background(), runner, "podman", "aileron-sbx-y", 10, io.Discard, io.Discard)
+	err := StopContainer(context.Background(), runner, "docker", "aileron-sbx-y", 10, io.Discard, io.Discard)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("StopContainer error = %v, want %v", err, wantErr)
 	}
@@ -1119,18 +1169,23 @@ func TestRunArgs_MacOSDockerOmitsHostGateway(t *testing.T) {
 	}
 }
 
-func TestRunArgs_LinuxPodmanOmitsHostGateway(t *testing.T) {
+// TestRunArgs_LinuxNonDockerOmitsHostGateway exercises the negative
+// branch of the runtime seam: the --add-host injection is gated on
+// runtimeName == "docker", so any other runtime threaded through the
+// preserved runtimeName parameter omits it. v4 is Docker-only, but the
+// gate must stay runtime-aware for a future re-added runtime.
+func TestRunArgs_LinuxNonDockerOmitsHostGateway(t *testing.T) {
 	orig := hostOS
 	hostOS = func() string { return "linux" }
 	defer func() { hostOS = orig }()
 
-	args, err := runArgs("podman", runOptsForGateway(t))
+	args, err := runArgs("nondocker", runOptsForGateway(t))
 	if err != nil {
 		t.Fatalf("runArgs: %v", err)
 	}
 	for _, a := range args {
 		if a == "host.docker.internal:host-gateway" {
-			t.Errorf("did not expect --add-host on Linux Podman; got %v", args)
+			t.Errorf("did not expect --add-host on Linux non-docker runtime; got %v", args)
 		}
 	}
 }

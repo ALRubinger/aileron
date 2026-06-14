@@ -84,16 +84,16 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 		launchFlags := flag.NewFlagSet("launch", flag.ContinueOnError)
 		launchFlags.SetOutput(stderr)
 		logLevel := launchFlags.String("log-level", "info", "Log level: trace, debug, info, warn, error")
-		sandboxRuntime := launchFlags.String("sandbox", "off", "Prepare sandbox image with runtime: off, auto, docker, or podman")
+		sandboxRuntime := launchFlags.String("sandbox", "off", "Prepare sandbox image with runtime: off, auto, or docker")
 		sandboxBuild := launchFlags.String("sandbox-build", "auto", "Sandbox build policy during launch: auto, always, or never")
-		sandboxProxy := launchFlags.String("sandbox-proxy", "auto", "Sandbox HTTPS proxy bootstrap: auto, on, or off (auto = on for --sandbox=docker|podman)")
+		sandboxProxy := launchFlags.String("sandbox-proxy", "auto", "Sandbox HTTPS proxy bootstrap: auto, on, or off (auto = on for --sandbox=docker)")
 		if err := launchFlags.Parse(args[1:]); err != nil {
 			return 1
 		}
 		launchArgs := launchFlags.Args()
 
 		if len(launchArgs) < 1 {
-			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--sandbox=off|auto|docker|podman] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] <agent> [args...]")
+			fmt.Fprintln(stderr, "usage: aileron launch [--log-level=<level>] [--sandbox=off|auto|docker] [--sandbox-build=auto|always|never] [--sandbox-proxy=auto|on|off] <agent> [args...]")
 			fmt.Fprintf(stderr, "agents: %s\n", strings.Join(registry.Names(), ", "))
 			return 1
 		}

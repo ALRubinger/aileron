@@ -108,13 +108,13 @@ func runSandboxPlan(args []string, stdout, stderr io.Writer) int {
 func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sandbox build", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto, docker, or podman")
+	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto or docker")
 	tag := flags.String("tag", "", "Override the image tag to build")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker|podman] [--tag=<image>]")
+		fmt.Fprintln(stderr, "usage: aileron sandbox build [--runtime=auto|docker] [--tag=<image>]")
 		return 1
 	}
 	cwd, err := os.Getwd()
@@ -152,14 +152,14 @@ func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sandbox check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto, docker, or podman")
+	runtimeName := flags.String("runtime", sandboxcontainer.DefaultRuntime, "Container runtime: auto or docker")
 	buildPolicy := flags.String("build", sandboxcontainer.BuildPolicyAuto, "Build policy: auto, always, or never")
 	agent := flags.String("agent", "", "Agent command to validate in the sandbox image")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() > 1 || (*agent != "" && flags.NArg() != 0) {
-		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker|podman] [--build=auto|always|never] [--agent=<command>] [command]")
+		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [command]")
 		return 1
 	}
 	command := *agent
@@ -167,7 +167,7 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 		command = flags.Arg(0)
 	}
 	if command == "" {
-		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker|podman] [--build=auto|always|never] [--agent=<command>] [command]")
+		fmt.Fprintln(stderr, "usage: aileron sandbox check [--runtime=auto|docker] [--build=auto|always|never] [--agent=<command>] [command]")
 		return 1
 	}
 	cwd, err := os.Getwd()
@@ -237,14 +237,14 @@ var sandboxCheckValidateFn = func(ctx context.Context, runtimeName, workDir, ima
 }
 
 // sandboxCheckRequiresProxyTrust reports whether `sandbox check --agent` must
-// validate the v4 HTTPS proxy contract for the given runtime. Docker and
-// Podman both run the default-on proxy under aileron launch, so sandbox
-// check exercises the same contract to surface BYO image gaps before launch
-// would fail. The --sandbox-proxy=off opt-out applies to aileron launch
-// only, not to sandbox check.
+// validate the v4 HTTPS proxy contract for the given runtime. Docker runs
+// the default-on proxy under aileron launch, so sandbox check exercises the
+// same contract to surface BYO image gaps before launch would fail. The
+// --sandbox-proxy=off opt-out applies to aileron launch only, not to sandbox
+// check.
 func sandboxCheckRequiresProxyTrust(runtimeName string) bool {
 	switch strings.TrimSpace(runtimeName) {
-	case "docker", "podman":
+	case "docker":
 		return true
 	default:
 		return false

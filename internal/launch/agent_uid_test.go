@@ -22,7 +22,7 @@ import (
 //   - Non-integer `id -u` output is a parse error.
 
 // fakeUIDRunner records the argv of each Run call and returns canned
-// stdout per invocation, in order. It substitutes for Docker/Podman so
+// stdout per invocation, in order. It substitutes for Docker so
 // the resolver is testable without a container runtime.
 type fakeUIDRunner struct {
 	// outputs is consumed FIFO; each entry is the stdout written for the
@@ -81,7 +81,7 @@ func TestResolveAgentUIDUserGroupForm(t *testing.T) {
 
 func TestResolveAgentUIDNamedUser(t *testing.T) {
 	runner := &fakeUIDRunner{outputs: []string{"agent\n", "405\n"}}
-	uid, err := resolveAgentUID(context.Background(), runner, "podman", "img:test")
+	uid, err := resolveAgentUID(context.Background(), runner, "docker", "img:test")
 	if err != nil {
 		t.Fatalf("resolveAgentUID: %v", err)
 	}

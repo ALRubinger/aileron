@@ -6642,10 +6642,10 @@ components:
               `aileron-install-proxy-ca`/`aileron-run-with-proxy-ca`.
             * `unsupported_sandbox_mode` — proxy bootstrap is not
               available for the selected `--sandbox` mode (anything
-              other than `docker` or `podman`).
+              other than `docker`).
         sandbox_mode:
           type: string
-          description: Resolved `--sandbox` mode (e.g. `docker`, `podman`, `off`).
+          description: Resolved `--sandbox` mode (e.g. `docker`, `off`).
         sandbox_image:
           type: string
           description: Resolved sandbox image reference, when known.

@@ -14,7 +14,7 @@ func TestSandboxCheckRequiresProxyTrust(t *testing.T) {
 		wantTrust bool
 	}{
 		{name: "docker requires proxy trust", runtime: "docker", wantTrust: true},
-		{name: "podman requires proxy trust", runtime: "podman", wantTrust: true},
+		{name: "podman does not require proxy trust (Docker-only)", runtime: "podman", wantTrust: false},
 		{name: "docker with whitespace requires proxy trust", runtime: "  docker  ", wantTrust: true},
 		{name: "empty runtime does not require proxy trust", runtime: "", wantTrust: false},
 		{name: "unknown runtime does not require proxy trust", runtime: "containerd", wantTrust: false},
@@ -70,7 +70,7 @@ func TestSandboxCheckValidateFnPassesRequireProxyTrust(t *testing.T) {
 // TestSandboxCheckValidateOptionsWiring is a compile-time guarantee that the
 // ValidateOptions struct still carries RequireProxyTrust; the runtime
 // behavior is exercised by TestSandboxCheckRequiresProxyTrust and the
-// docker/podman launch path in internal/sandbox/container.
+// docker launch path in internal/sandbox/container.
 func TestSandboxCheckValidateOptionsWiring(t *testing.T) {
 	var opts sandboxcontainer.ValidateOptions
 	opts.RequireProxyTrust = true

@@ -7,7 +7,7 @@ import (
 	"syscall"
 )
 
-// setRuntimeChildPgid places the container-runtime child (docker/podman)
+// setRuntimeChildPgid places the container-runtime child (docker)
 // in its own process group so a terminal Ctrl-C does not reach it
 // directly.
 //

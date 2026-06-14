@@ -40,13 +40,15 @@ const (
 )
 
 // Runner executes a container runtime command. It exists so build planning can
-// be tested without Docker or Podman on the host.
+// be tested without Docker on the host. The interface keeps the runtime
+// seam (the runtimeName parameter threaded through Build/Run/StopContainer)
+// abstract so a second runtime can be re-added as a localized change.
 type Runner interface {
 	Run(ctx context.Context, name string, args []string, stdout, stderr io.Writer) error
 }
 
 // DefaultRunner returns the production Runner that shells out to the
-// container runtime executable (docker/podman). Callers outside this
+// container runtime executable (docker). Callers outside this
 // package use it to drive runtime commands (e.g. image inspection)
 // through the same code path the Builder uses internally.
 func DefaultRunner() Runner { return execRunner{} }
@@ -60,7 +62,7 @@ func (execRunner) Run(ctx context.Context, name string, args []string, stdout, s
 	cmd.Stderr = stderr
 	// Put the runtime child in its own process group so a terminal
 	// Ctrl-C (SIGINT to the foreground process group) reaches only
-	// aileron, not `docker`/`podman` directly. This keeps aileron's
+	// aileron, not `docker` directly. This keeps aileron's
 	// AuthSpec salvage handler the sole owner of teardown — an orderly
 	// `docker stop --time` followed by Capture — instead of racing a
 	// concurrent runtime-initiated kill. No-op on Windows. See ADR-0025
@@ -71,7 +73,7 @@ func (execRunner) Run(ctx context.Context, name string, args []string, stdout, s
 
 // configureRuntimeChild sets the process-group attributes for a runtime
 // child. It always isolates the child into its own process group so a
-// terminal Ctrl-C reaches aileron rather than docker/podman directly
+// terminal Ctrl-C reaches aileron rather than docker directly
 // (ADR-0025, issue #999). For an interactive container `run -t` on a
 // real terminal it additionally hands the child the controlling
 // terminal's foreground process group — without that the runtime's
@@ -383,8 +385,8 @@ func StopContainer(ctx context.Context, runner Runner, runtimeName, name string,
 
 // isContainerAlreadyGone reports whether a container-runtime stop error's
 // stderr indicates the target container was already removed or stopped.
-// Matched case-insensitively against the signatures Docker and Podman
-// emit for a missing or non-running container, so the `--rm`
+// Matched case-insensitively against the signatures Docker
+// emits for a missing or non-running container, so the `--rm`
 // auto-removal race on a clean Ctrl-C does not surface as a warning. See
 // StopContainer and issue #999.
 func isContainerAlreadyGone(stderr string) bool {
@@ -535,26 +537,31 @@ func ResolveRuntime(name string) (string, error) {
 func resolveRuntime(name string, checkPath bool) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || name == DefaultRuntime {
-		for _, candidate := range []string{"docker", "podman"} {
+		for _, candidate := range []string{"docker"} {
 			if _, err := exec.LookPath(candidate); err == nil {
 				return candidate, nil
 			}
 		}
-		return "", fmt.Errorf("no container runtime found on PATH; install Docker or Podman, or pass --runtime")
+		return "", fmt.Errorf("no container runtime found on PATH; install Docker, or pass --runtime")
 	}
 	switch name {
-	case "docker", "podman":
+	case "docker":
 		if checkPath {
 			if _, err := exec.LookPath(name); err != nil {
 				return "", fmt.Errorf("%s not found on PATH", name)
 			}
 		}
 		return name, nil
+	case "podman":
+		// v4 is Docker-only. The Runner seam and runtimeName parameter
+		// are preserved so Podman can be re-added later, but resolution
+		// fails fast today regardless of whether podman is on PATH.
+		return "", fmt.Errorf("podman runtime is not supported yet (v4 is Docker-only); see ADR-0014")
 	default:
 		if !checkPath {
 			return name, nil
 		}
-		return "", fmt.Errorf("unsupported sandbox runtime %q (want auto, docker, or podman)", name)
+		return "", fmt.Errorf("unsupported sandbox runtime %q (want auto or docker)", name)
 	}
 }
 
@@ -581,9 +588,8 @@ func runArgs(runtimeName string, opts RunOptions) ([]string, error) {
 	// (macOS / Windows Docker Desktop do). aileron-mcp inside the
 	// container reaches the daemon through AILERON_URL rewritten to
 	// host.docker.internal, so without --add-host the in-container MCP
-	// path fails with DNS-not-found on first daemon call. Podman's
-	// host.containers.internal is configured natively (no equivalent
-	// flag is needed or supported). See ADR-0024 risks section.
+	// path fails with DNS-not-found on first daemon call. See ADR-0024
+	// risks section.
 	if runtimeName == "docker" && hostOS() == "linux" {
 		args = append(args, "--add-host", "host.docker.internal:host-gateway")
 	}

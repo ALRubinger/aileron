@@ -202,7 +202,7 @@ func TestLaunch_AgentMCPArgs_Appended(t *testing.T) {
 }
 
 func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
-	// Proxy bootstrap is default-on for --sandbox=docker|podman per the
+	// Proxy bootstrap is default-on for --sandbox=docker per the
 	// U3 plan. This test exercises the opt-out path via
 	// --sandbox-proxy=off so it can assert the rest of the container
 	// shape without coupling to the proxy bootstrap env. The default-on
@@ -332,7 +332,6 @@ func TestLaunch_SandboxProxyDefaultOnForDocker(t *testing.T) {
 		"--env\nHTTPS_PROXY=http://01HK0000000000000000000FAK:daemon-token@host.docker.internal:",
 		"--env\nHTTP_PROXY=http://01HK0000000000000000000FAK:daemon-token@host.docker.internal:",
 		"host.docker.internal",
-		"host.containers.internal",
 		"aileron-run-with-proxy-ca\ncodex\n",
 	} {
 		if !strings.Contains(args, want) {

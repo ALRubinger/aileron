@@ -65,9 +65,9 @@ type LaunchConfig struct {
 	LogLevel slog.Level
 	// SandboxRuntime selects the container runtime used to run the
 	// agent in the prepared sandbox image. Empty or "off" preserves
-	// today's direct host launch path. "auto", "docker", and "podman"
-	// prepare the composition-selected image and execute the agent in a
-	// one-shot container.
+	// today's direct host launch path. "auto" and "docker" prepare the
+	// composition-selected image and execute the agent in a one-shot
+	// container.
 	SandboxRuntime string
 	// SandboxBuildPolicy controls launch-time builds for buildable
 	// sandbox tiers. Empty defaults to auto for launch.
@@ -76,7 +76,7 @@ type LaunchConfig struct {
 	// runs for this launch. Tri-state: "on" forces bootstrap (preflight
 	// refuses launch if the image can't satisfy the BYO contract),
 	// "off" disables it, and "auto" (or empty) defers to the default
-	// for the resolved sandbox runtime (on for docker/podman).
+	// for the resolved sandbox runtime (on for docker).
 	SandboxProxy string
 }
 
@@ -182,10 +182,10 @@ func sandboxLaunchEnabled(runtimeName string) bool {
 
 func validateSandboxRuntime(runtimeName string) error {
 	switch runtimeName {
-	case "", "off", sandboxcontainer.DefaultRuntime, "docker", "podman":
+	case "", "off", sandboxcontainer.DefaultRuntime, "docker":
 		return nil
 	default:
-		return fmt.Errorf("unsupported sandbox runtime %q (want off, auto, docker, or podman)", runtimeName)
+		return fmt.Errorf("unsupported sandbox runtime %q (want off, auto, or docker)", runtimeName)
 	}
 }
 
@@ -599,12 +599,9 @@ func containerURLForRuntime(rawURL, runtimeName string) string {
 	if !isLoopbackHost(host) {
 		return rawURL
 	}
-	switch runtimeName {
-	case "podman":
-		host = "host.containers.internal"
-	default:
-		host = "host.docker.internal"
-	}
+	// runtimeName is retained as the runtime seam; v4 is Docker-only, so
+	// the loopback host always rewrites to host.docker.internal.
+	host = "host.docker.internal"
 	if port != "" {
 		parsed.Host = net.JoinHostPort(host, port)
 	} else {
@@ -738,7 +735,7 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 
 	// Build the MCP env the in-container aileron-mcp needs to reach the
 	// daemon. Reads from agentEnv so the URL rewrite for the runtime
-	// (host.docker.internal vs host.containers.internal) is honored.
+	// (host.docker.internal) is honored.
 	mcpEnv := sandboxMCPEnv(agentEnv)
 	extraArgs, mcpMounts, mcpErr := config.Agent.ConfigureMCP(sandboxMCPBinPath, mcpEnv, config.Dir, ModeSandbox)
 	if mcpErr != nil {
@@ -919,8 +916,8 @@ var sandboxSignalStop = func(ch chan<- os.Signal) {
 // sandboxMCPEnv builds the env block aileron-mcp reads when it runs as
 // an in-container stdio subprocess of the agent. Sources values from
 // agentEnv so the URL rewrite for the container runtime
-// (host.docker.internal on Docker, host.containers.internal on Podman)
-// is preserved and no second source-of-truth for the daemon URL is
+// (host.docker.internal on Docker) is preserved and no second
+// source-of-truth for the daemon URL is
 // introduced. AILERON_TOKEN is the post-mount credential per ADR-0024.
 func sandboxMCPEnv(agentEnv map[string]string) map[string]string {
 	mcpEnv := map[string]string{

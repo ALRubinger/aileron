@@ -97,7 +97,7 @@ func sandboxProxyRefuseError(reason, sandboxMode string) error {
 			mode = "off"
 		}
 		return fmt.Errorf(
-			"sandbox proxy bootstrap requested but --sandbox=%s does not support it; rerun with --sandbox=docker or --sandbox=podman, or pass --sandbox-proxy=off to disable bootstrap",
+			"sandbox proxy bootstrap requested but --sandbox=%s does not support it; rerun with --sandbox=docker, or pass --sandbox-proxy=off to disable bootstrap",
 			mode,
 		)
 	default:

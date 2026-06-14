@@ -85,7 +85,7 @@ func TestRecordSandboxProxyDisabled_PreflightFailed(t *testing.T) {
 	rec := recordSandboxProxyDisabledRequest(t, srv, `{
 		"session_id": "01HKABC",
 		"reason": "preflight_failed",
-		"sandbox_mode": "podman",
+		"sandbox_mode": "docker",
 		"sandbox_image": "ghcr.io/acme/agent:latest"
 	}`)
 	if rec.Code != http.StatusNoContent {

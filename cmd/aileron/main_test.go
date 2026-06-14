@@ -170,7 +170,7 @@ func TestRun_LaunchPassesSandboxOptions(t *testing.T) {
 		t.Errorf("LaunchConfig.SandboxBuildPolicy = %q, want never", captured.SandboxBuildPolicy)
 	}
 	// --sandbox-proxy defaults to "auto" so the launcher's resolver can
-	// pick the docker/podman default-on policy.
+	// pick the docker default-on policy.
 	if captured.SandboxProxy != "auto" {
 		t.Errorf("LaunchConfig.SandboxProxy = %q, want auto (default)", captured.SandboxProxy)
 	}
@@ -516,8 +516,8 @@ func TestRunSandboxBuildReportsComplete(t *testing.T) {
 	origBuild := sandboxBuildFn
 	t.Cleanup(func() { sandboxBuildFn = origBuild })
 	sandboxBuildFn = func(_ context.Context, runtimeName string, buildStdout, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
-		if runtimeName != "podman" {
-			t.Fatalf("runtimeName = %q, want podman", runtimeName)
+		if runtimeName != "docker" {
+			t.Fatalf("runtimeName = %q, want docker", runtimeName)
 		}
 		if opts.Tag != "ghcr.io/acme/sandbox:test" {
 			t.Fatalf("Tag = %q", opts.Tag)
@@ -537,12 +537,12 @@ func TestRunSandboxBuildReportsComplete(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"sandbox", "build", "--runtime=podman", "--tag=ghcr.io/acme/sandbox:test"}, newTestRegistry(), &stdout, &stderr)
+	code := run([]string{"sandbox", "build", "--runtime=docker", "--tag=ghcr.io/acme/sandbox:test"}, newTestRegistry(), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"tier: base", "runtime: podman", "image: ghcr.io/acme/sandbox:test", "build: complete"} {
+	for _, want := range []string{"tier: base", "runtime: docker", "image: ghcr.io/acme/sandbox:test", "build: complete"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout = %q, missing %q", out, want)
 		}
@@ -7120,5 +7120,29 @@ func TestPreviewSuiteRefs_NonOKSurfacesDaemonError(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("err = %q, want substring %q", got, want)
 		}
+	}
+}
+
+
+// TestRunSandboxBuildRejectsPodman is the CLI-surface regression test for
+// #1051: passing --runtime=podman to `sandbox build` must surface the
+// decided Docker-only message through the real build path (no stubbing),
+// and must not exit 0. resolveRuntime rejects podman before any container
+// shell-out, so the test is hermetic.
+func TestRunSandboxBuildRejectsPodman(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"sandbox", "build", "--runtime=podman"}, newTestRegistry(), &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for --runtime=podman; stdout=%q", stdout.String())
+	}
+	if want := "podman runtime is not supported yet (v4 is Docker-only); see ADR-0014"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want substring %q", stderr.String(), want)
 	}
 }
