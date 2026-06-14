@@ -95,12 +95,14 @@ Use `sandbox build` to build the image selected by the plan:
 aileron sandbox build
 ```
 
-Aileron detects Docker or Podman from `PATH`. You can choose explicitly:
+Aileron detects Docker from `PATH`. You can choose it explicitly:
 
 ```bash
-aileron sandbox build --runtime=podman
+aileron sandbox build --runtime=docker
 aileron sandbox build --runtime=docker --tag=ghcr.io/acme/agent-dev:local
 ```
+
+Docker is the only supported sandbox runtime in v4. Podman is planned but not yet supported ([ADR-0014](/adr/0014-spawn-sandbox-technology/)); passing `--runtime=podman` fails with `podman runtime is not supported yet (v4 is Docker-only); see ADR-0014`.
 
 Build behavior by tier:
 
@@ -120,7 +122,7 @@ Use `sandbox check` to validate that the selected image can run an agent command
 
 ```bash
 aileron sandbox check --runtime=docker --agent=claude
-aileron sandbox check --runtime=podman --build=never --agent=codex
+aileron sandbox check --runtime=docker --build=never --agent=codex
 ```
 
 `sandbox check` uses the same composition plan, build policy, and minimal image validation as sandbox launch. It reports the selected tier, runtime, image, command, and `support: ok` when the command is available. Agent-specific image recipes and support status live in the [sandbox agent image matrix](/development/sandbox-agent-images/).
@@ -132,10 +134,10 @@ Use `--sandbox` on `aileron launch` to have launch prepare the composition-selec
 ```bash
 aileron launch --sandbox=auto claude
 aileron launch --sandbox=docker codex
-aileron launch --sandbox=podman goose
+aileron launch --sandbox=docker goose
 ```
 
-`auto` detects Docker or Podman from `PATH`. `docker` and `podman` select a runtime explicitly. The default is `--sandbox=off`, which preserves the current direct host launch path.
+`auto` detects Docker from `PATH`. `docker` selects the runtime explicitly. The default is `--sandbox=off`, which preserves the current direct host launch path. Podman is planned but not yet supported ([ADR-0014](/adr/0014-spawn-sandbox-technology/)); passing `--sandbox=podman` fails with `podman runtime is not supported yet (v4 is Docker-only); see ADR-0014`.
 
 Launch uses `--sandbox-build=auto` by default. Build policy options are:
 
@@ -149,16 +151,16 @@ Examples:
 
 ```bash
 aileron launch --sandbox=docker --sandbox-build=always claude
-aileron launch --sandbox=podman --sandbox-build=never codex
+aileron launch --sandbox=docker --sandbox-build=never codex
 ```
 
 `aileron sandbox build` remains the explicit manual build command and always invokes the selected runtime build for Tier 0/Tier 1.
 
-The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_API_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, discovery hints (`AILERON_TOOLS_FILE`, `AILERON_SHIMS_DIR`), and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). `AILERON_API_URL` points at the daemon's `/v1` API and is the stable endpoint for sandbox-side execution shims. For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker and `host.containers.internal` for Podman.
+The project directory is mounted at `/home/agent/workspace`, and the agent starts there. Launch passes session-scoped Aileron daemon env into the container, including `AILERON_URL`, `AILERON_API_URL`, `AILERON_COMMS_URL`, `AILERON_SESSION_ID`, `AILERON_APPROVAL_URL`, discovery hints (`AILERON_TOOLS_FILE`, `AILERON_SHIMS_DIR`), and the sandbox image metadata (`AILERON_SANDBOX_IMAGE`, `AILERON_SANDBOX_TIER`, `AILERON_SANDBOX_RUNTIME`). `AILERON_API_URL` points at the daemon's `/v1` API and is the stable endpoint for sandbox-side execution shims. For local daemon URLs, launch rewrites the container-facing host to `host.docker.internal` for Docker. Podman's `host.containers.internal` alias is the deferred re-add path, not yet supported.
 
-The HTTPS proxy bootstrap is default-on for `--sandbox=docker` and `--sandbox=podman`. Sandbox launch generates a session-local CA, mounts the public CA at `/etc/aileron/proxy/ca.pem`, and sets standard proxy env (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`) plus Aileron metadata (`AILERON_SANDBOX_PROXY_MODE`, `AILERON_SANDBOX_PROXY_URL`, `AILERON_SANDBOX_PROXY_CA_FILE`). The proxy URL uses standard proxy userinfo so clients can send `Proxy-Authorization`; it carries the launch session id and, when present, the local daemon token. Images used with this mode must provide `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` (see the [BYO image proxy contract](/development/sandbox-agent-images/#byo-image-proxy-contract)); the current sandbox-base image includes both and launch validation checks both before the agent starts. The container starts through `aileron-run-with-proxy-ca`, installs the mounted CA as root, then drops back to the `agent` user before executing the requested agent command.
+The HTTPS proxy bootstrap is default-on for `--sandbox=docker`. Sandbox launch generates a session-local CA, mounts the public CA at `/etc/aileron/proxy/ca.pem`, and sets standard proxy env (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`) plus Aileron metadata (`AILERON_SANDBOX_PROXY_MODE`, `AILERON_SANDBOX_PROXY_URL`, `AILERON_SANDBOX_PROXY_CA_FILE`). The proxy URL uses standard proxy userinfo so clients can send `Proxy-Authorization`; it carries the launch session id and, when present, the local daemon token. Images used with this mode must provide `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` (see the [BYO image proxy contract](/development/sandbox-agent-images/#byo-image-proxy-contract)); the current sandbox-base image includes both and launch validation checks both before the agent starts. The container starts through `aileron-run-with-proxy-ca`, installs the mounted CA as root, then drops back to the `agent` user before executing the requested agent command.
 
-Use `--sandbox-proxy=auto|on|off` (default `auto`) or `AILERON_SANDBOX_PROXY=auto|on|off` to control bootstrap. The flag wins over the env var; the env var wins over the default. `auto` resolves to `on` for `docker`/`podman` and to `off` for every other `--sandbox` mode. `on` forces bootstrap; if the selected sandbox mode cannot support bootstrap (e.g. `--sandbox=off`), launch refuses with an actionable error before the container starts. `off` skips bootstrap for the session, and the daemon records a `sandbox.proxy.disabled` audit event with reason `user_opt_out`.
+Use `--sandbox-proxy=auto|on|off` (default `auto`) or `AILERON_SANDBOX_PROXY=auto|on|off` to control bootstrap. The flag wins over the env var; the env var wins over the default. `auto` resolves to `on` for `docker` and to `off` for every other `--sandbox` mode. `on` forces bootstrap; if the selected sandbox mode cannot support bootstrap (e.g. `--sandbox=off`), launch refuses with an actionable error before the container starts. `off` skips bootstrap for the session, and the daemon records a `sandbox.proxy.disabled` audit event with reason `user_opt_out`.
 
 When bootstrap is requested but the selected image lacks the BYO contract helpers, launch fails preflight before the container starts, prints an actionable error citing the contract docs and the `--sandbox-proxy=off` opt-out, and records a `sandbox.proxy.disabled` audit event with reason `preflight_failed`. Non-container sandbox modes record reason `unsupported_sandbox_mode`. Tip: pre-existing pipelines that set `AILERON_SANDBOX_PROXY_BOOTSTRAP` should switch to `AILERON_SANDBOX_PROXY`; the former is no longer honored.
 
@@ -197,7 +199,7 @@ Set `customizations.aileron.image` when your team owns the complete image:
 }
 ```
 
-In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Images that participate in the v4 HTTPS proxy must include `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers that meet the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract). `aileron sandbox check --agent=...` validates both contracts for every Docker or Podman run.
+In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, generated discovery files, and connector shims. Images that participate in the v4 HTTPS proxy must include `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers that meet the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract). `aileron sandbox check --agent=...` validates both contracts for every Docker run.
 
 ## What Belongs in the Image
 

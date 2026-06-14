@@ -4,7 +4,7 @@ description: "How to wire a new AI coding agent into `aileron launch`."
 order: 6
 ---
 
-`aileron launch <agent>` runs a supported AI coding agent under the Aileron daemon. With `--sandbox=off`, host launch wires the agent to the daemon and current MCP/gateway path. With `--sandbox=auto|docker|podman`, sandbox launch prepares a container image, validates that the agent command exists inside it, and runs the agent in the container with Aileron's session env and generated discovery/action shims. Adding a new agent means writing one Go file under `internal/launch/agents/`, registering it in `cmd/aileron/main.go`, documenting whether its command is available in sandbox images, and shipping tests.
+`aileron launch <agent>` runs a supported AI coding agent under the Aileron daemon. With `--sandbox=off`, host launch wires the agent to the daemon and current MCP/gateway path. With `--sandbox=auto|docker`, sandbox launch prepares a container image, validates that the agent command exists inside it, and runs the agent in the container with Aileron's session env and generated discovery/action shims. Adding a new agent means writing one Go file under `internal/launch/agents/`, registering it in `cmd/aileron/main.go`, documenting whether its command is available in sandbox images, and shipping tests.
 
 ## When `aileron launch` is the right answer
 

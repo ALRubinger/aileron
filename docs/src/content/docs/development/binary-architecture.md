@@ -56,7 +56,7 @@ Per [ADR-0015](/adr/0015-launch-audit-scope), Aileron's host-launch audit bounda
 ## What runs where
 
 - **`aileron launch <agent>`** with `--sandbox=off` starts the agent host as a subprocess and wires `aileron-mcp` into its MCP transport (per [ADR-0012](/adr/0012-local-daemon-architecture)). The daemon auto-spawns on first call and stays running as long as a session is active.
-- **`aileron launch --sandbox=auto|docker|podman <agent>`** prepares the selected sandbox image, validates it, and runs the agent command in a container. It bind-mounts the host-built `aileron-mcp` at `/usr/local/bin/aileron-mcp:ro` and registers it with the in-container agent (ADR-0024), and injects `AILERON_API_URL`, session metadata, `tools.txt`, and generated connector shims as a complementary non-MCP-native CLI surface.
+- **`aileron launch --sandbox=auto|docker <agent>`** prepares the selected sandbox image, validates it, and runs the agent command in a container. It bind-mounts the host-built `aileron-mcp` at `/usr/local/bin/aileron-mcp:ro` and registers it with the in-container agent (ADR-0024), and injects `AILERON_API_URL`, session metadata, `tools.txt`, and generated connector shims as a complementary non-MCP-native CLI surface.
 - **`aileron daemon start|stop|status`** controls the daemon directly. Useful for diagnostics, rare in normal use.
 - **`aileron-mcp`** can be installed standalone with `task mcp:setup` when an agent host needs the MCP server outside an `aileron launch` session.
 - **`aileron-enclave`** is post-MVP for the default install. The credential vault works without it via the local-mode path in [ADR-0011](/adr/0011-local-credential-vault). When the TEE-backed escrow lands, this binary is what runs inside Confidential Space.

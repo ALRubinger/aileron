@@ -14,7 +14,7 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 
 | Command | Purpose | Ratified by |
 |---|---|---|
-| `aileron launch [--sandbox=off\|auto\|docker\|podman] [--sandbox-build=auto\|always\|never]` | Launch an AI coding agent connected to the Aileron daemon. `--sandbox` prepares the project sandbox image and runs the agent command inside it; `off` preserves direct host launch. | [ADR-0011](/adr/0011-local-credential-vault), [ADR-0017](/adr/0017-sandbox-composition) |
+| `aileron launch [--sandbox=off\|auto\|docker] [--sandbox-build=auto\|always\|never]` | Launch an AI coding agent connected to the Aileron daemon. `--sandbox` prepares the project sandbox image and runs the agent command inside it; `off` preserves direct host launch. | [ADR-0011](/adr/0011-local-credential-vault), [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron status` | Report the running runtime: version, listen address, action count, connector count, binding count, vault state. Read-only; safe to run frequently. | — |
 
 ## Sandbox composition
@@ -23,8 +23,10 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 |---|---|---|
 | `aileron sandbox init [--agent=<name>] [--force]` | Scaffold `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile` for sandbox composition. The Dockerfile extends `aileron/sandbox-base:<version>`, pre-fills the install recipe for `--agent` (defaults to `claude`), and ships additional tool snippets commented out. | [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron sandbox plan` | Inspect the normalized composition tier and image Aileron infers from the current project. | [ADR-0017](/adr/0017-sandbox-composition) |
-| `aileron sandbox build` | Build the Tier 0 sandbox-base image or Tier 1 devcontainer image with Docker or Podman. Tier 2 BYO images are reported without build or injection. | [ADR-0017](/adr/0017-sandbox-composition) |
-| `aileron sandbox check [--runtime=auto\|docker\|podman] [--build=auto\|always\|never] --agent=<command>` | Validate that the selected sandbox image can launch an agent command before starting a session. | [ADR-0017](/adr/0017-sandbox-composition) |
+| `aileron sandbox build` | Build the Tier 0 sandbox-base image or Tier 1 devcontainer image with Docker. Tier 2 BYO images are reported without build or injection. | [ADR-0017](/adr/0017-sandbox-composition) |
+| `aileron sandbox check [--runtime=auto\|docker] [--build=auto\|always\|never] --agent=<command>` | Validate that the selected sandbox image can launch an agent command before starting a session. | [ADR-0017](/adr/0017-sandbox-composition) |
+
+Docker is the only supported sandbox runtime in v4. Podman is planned but not yet supported ([ADR-0014](/adr/0014-spawn-sandbox-technology/)); passing `--sandbox=podman` or `--runtime=podman` fails with `podman runtime is not supported yet (v4 is Docker-only); see ADR-0014`.
 
 See [Sandbox Composition](/development/sandbox-composition/) for the full workflow and [Sandbox Agent Images](/development/sandbox-agent-images/) for the support matrix and recipes.
 

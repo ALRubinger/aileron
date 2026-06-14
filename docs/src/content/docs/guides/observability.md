@@ -189,8 +189,8 @@ Migration note: operators who previously queried `sandbox.proxy.rejected` with r
 | `aileron.proxy.source` | Always `launcher`. The launcher is the only emitter for this event family. |
 | `aileron.proxy.boundary` | Always `https_proxy`. |
 | `aileron.proxy.decision` | Always `disabled`. |
-| `aileron.proxy.disabled_reason` | Why the proxy is not in force for this session: `user_opt_out` (operator passed `--sandbox-proxy=off` or `AILERON_SANDBOX_PROXY=off`), `preflight_failed` (image lacks `aileron-install-proxy-ca` / `aileron-run-with-proxy-ca`; launch was refused), or `unsupported_sandbox_mode` (sandbox runtime is `off` or not `docker`/`podman`). |
-| `aileron.sandbox.mode` | The value of `--sandbox` for the session (`docker`, `podman`, `off`, etc.). |
+| `aileron.proxy.disabled_reason` | Why the proxy is not in force for this session: `user_opt_out` (operator passed `--sandbox-proxy=off` or `AILERON_SANDBOX_PROXY=off`), `preflight_failed` (image lacks `aileron-install-proxy-ca` / `aileron-run-with-proxy-ca`; launch was refused), or `unsupported_sandbox_mode` (the resolved sandbox mode does not support proxy bootstrap, e.g. `off`). |
+| `aileron.sandbox.mode` | The value of `--sandbox` for the session (`docker`, `off`, etc.). |
 | `aileron.sandbox.image` | Resolved sandbox image reference when known (omitted when the proxy was disabled before image resolution). |
 | `aileron.session.id` | Launch session id. |
 

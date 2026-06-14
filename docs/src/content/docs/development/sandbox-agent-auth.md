@@ -10,7 +10,7 @@ This page is for operators and contributors. It documents the per-agent envelope
 
 ## Host launch is not vault-backed in v1
 
-Vault-backed credential injection applies only to `aileron launch <agent> --sandbox=docker` (and `--sandbox=podman`). A plain `aileron launch <agent>` host launch is not vault-backed in v1. Host launch lets the agent find its own credentials in the host user's home directory (`~/.claude/`, `~/.codex/`). `prepareAuthSpec` does not run on the host path, so the `AuthSpec` lifecycle is sandbox-only. Host-side vault-backed auth is a deliberately deferred follow-up that needs its own PR and explicit user testing. See [ADR-0025](/adr/0025-vault-backed-agent-auth) for the decision record.
+Vault-backed credential injection applies only to `aileron launch <agent> --sandbox=docker`. A plain `aileron launch <agent>` host launch is not vault-backed in v1. Host launch lets the agent find its own credentials in the host user's home directory (`~/.claude/`, `~/.codex/`). `prepareAuthSpec` does not run on the host path, so the `AuthSpec` lifecycle is sandbox-only. Host-side vault-backed auth is a deliberately deferred follow-up that needs its own PR and explicit user testing. See [ADR-0025](/adr/0025-vault-backed-agent-auth) for the decision record.
 
 ## Vault path scheme
 
