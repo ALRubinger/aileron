@@ -173,6 +173,12 @@ Connector install checks the sandbox is available on the running platform when `
 
 If, somehow, both upstream checks were bypassed by a runtime bug, the kernel boundary would still refuse the unauthorized read, write, or network call. Defense in depth is structural, not optional.
 
+### v4 container runtime is Docker-only (Podman deferred)
+
+This ADR's spawn sandbox confines a single subprocess the runtime forks per invocation. That is a different layer from the v4 agent-container runtime, which runs the whole agent inside a long-lived container ([ADR-0017](/adr/0017-sandbox-composition)). The container-based subprocess isolation rejected below concerns the spawn layer only and does not bear on the v4 runtime choice.
+
+For the v4 agent-container runtime, Docker is the only supported runtime. Podman is deferred to a later track, not rejected. The runtime abstraction seam is preserved: the `Runner` interface and the `runtimeName` parameter are threaded through the build and run paths, and runtime resolution lives in `resolveRuntime`. An explicit `--runtime=podman` fails fast today with `podman runtime is not supported yet (v4 is Docker-only); see ADR-0014`, and `auto` resolves to Docker only. Re-adding Podman is a localized change: re-enable it in `resolveRuntime` and add it back to the support matrix. The descope rationale is tracked in umbrella issue [#1050](https://github.com/ALRubinger/aileron/issues/1050).
+
 ## Alternatives Considered
 
 ### Pure-Go process isolation without OS primitives (rejected)
