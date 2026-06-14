@@ -106,7 +106,7 @@ func TestApplySandboxProxyBootstrapEnv(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
 	}
-	for _, want := range []string{"internal.example", "localhost", "127.0.0.1", "::1", "host.docker.internal", "host.containers.internal"} {
+	for _, want := range []string{"internal.example", "localhost", "127.0.0.1", "::1", "host.docker.internal"} {
 		if !strings.Contains(env["NO_PROXY"], want) {
 			t.Fatalf("NO_PROXY = %q, missing %q", env["NO_PROXY"], want)
 		}
@@ -163,14 +163,13 @@ func TestResolveSandboxProxyState(t *testing.T) {
 		wantRefuse bool
 		wantReason string
 	}{
-		// docker/podman defaults: auto/empty/"on" → enabled.
+		// docker defaults: auto/empty/"on" → enabled.
 		{name: "docker_flag_auto_env_unset", flag: "auto", env: "", mode: "docker", wantOn: true},
 		{name: "docker_flag_empty_env_unset", flag: "", env: "", mode: "docker", wantOn: true},
-		{name: "podman_flag_empty_env_unset", flag: "", env: "", mode: "podman", wantOn: true},
 		{name: "docker_flag_on", flag: "on", env: "", mode: "docker", wantOn: true},
 		{name: "docker_env_on", flag: "", env: "on", mode: "docker", wantOn: true},
 
-		// docker/podman opt-out: flag=off or env=off → user_opt_out.
+		// docker opt-out: flag=off or env=off → user_opt_out.
 		{name: "docker_flag_off", flag: "off", env: "", mode: "docker", wantOn: false, wantReason: sandboxProxyReasonUserOptOut},
 		{name: "docker_env_off", flag: "auto", env: "off", mode: "docker", wantOn: false, wantReason: sandboxProxyReasonUserOptOut},
 		{name: "docker_env_off_no_flag", flag: "", env: "off", mode: "docker", wantOn: false, wantReason: sandboxProxyReasonUserOptOut},

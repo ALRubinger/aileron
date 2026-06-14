@@ -58,7 +58,7 @@ type sandboxProxyStateResolution struct {
 // inputs. The precedence is flag > env > default, with `auto` (or
 // empty) deferring to the default for the sandbox mode.
 //
-// Default policy (per the U3 plan): for docker/podman sandbox modes,
+// Default policy (per the U3 plan): for the docker sandbox mode,
 // the default is `on`. For every other mode (including the empty
 // string and `off`), bootstrap is unsupported and the resolution
 // returns Enabled=false with reason unsupported_sandbox_mode. If the
@@ -134,7 +134,7 @@ func normalizeSandboxProxyTriState(value string) string {
 // session CA into a container that does not exist.
 func sandboxProxyModeSupportsBootstrap(sandboxMode string) bool {
 	switch strings.ToLower(strings.TrimSpace(sandboxMode)) {
-	case "docker", "podman", sandboxcontainer.DefaultRuntime:
+	case "docker", sandboxcontainer.DefaultRuntime:
 		return true
 	default:
 		return false
@@ -222,7 +222,7 @@ func mergeNoProxy(existing, proxyURL string) string {
 	for _, value := range strings.Split(existing, ",") {
 		add(value)
 	}
-	for _, value := range []string{"localhost", "127.0.0.1", "::1", "host.docker.internal", "host.containers.internal"} {
+	for _, value := range []string{"localhost", "127.0.0.1", "::1", "host.docker.internal"} {
 		add(value)
 	}
 	if parsed, err := url.Parse(proxyURL); err == nil {

@@ -11,7 +11,7 @@ import (
 
 // TestSetRuntimeChildPgidSetsPgid asserts the Unix helper places the
 // runtime child in its own process group so a terminal SIGINT does not
-// reach docker/podman directly (issue #999, ADR-0025).
+// reach docker directly (issue #999, ADR-0025).
 func TestSetRuntimeChildPgidSetsPgid(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", ":")
 	setRuntimeChildPgid(cmd)

@@ -136,10 +136,13 @@ func TestContainerURLForRuntimeRewritesLoopbackAliases(t *testing.T) {
 			want:    "http://host.docker.internal:48123",
 		},
 		{
-			name:    "podman localhost",
+			// v4 is Docker-only: any non-docker runtime threaded
+			// through the preserved runtimeName seam still rewrites
+			// the loopback host to host.docker.internal.
+			name:    "non-docker runtime rewrites to docker host",
 			rawURL:  "http://127.0.0.1:48123",
-			runtime: "podman",
-			want:    "http://host.containers.internal:48123",
+			runtime: "nondocker",
+			want:    "http://host.docker.internal:48123",
 		},
 		{
 			name:    "non-loopback unchanged",
@@ -483,7 +486,7 @@ op = "send_email"
 `
 
 // TestResolveSandboxMCPBinary_PrefersLinuxSibling locks in the
-// precedence the launcher relies on under --sandbox=docker|podman: when
+// precedence the launcher relies on under --sandbox=docker: when
 // `task build:mcp` on a non-Linux host produces both `aileron-mcp`
 // (host arch, unrunnable in a Linux container) and
 // `aileron-mcp-linux-<arch>` (cross-compiled), the sandbox-flavored
@@ -557,5 +560,50 @@ func TestResolveSandboxMCPBinary_PropagatesMissingError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "aileron-mcp not found") || !strings.Contains(err.Error(), "task build:mcp") {
 		t.Fatalf("error message lost the remediation hint: %v", err)
+	}
+}
+
+
+// TestValidateSandboxRuntimeRejectsPodman is the launch-path regression
+// test for #1051: --sandbox=podman must fail validation with the
+// Docker-only message. The runtime seam (the runtimeName parameter)
+// stays, but podman is no longer an accepted launch surface.
+func TestValidateSandboxRuntimeRejectsPodman(t *testing.T) {
+	err := validateSandboxRuntime("podman")
+	if err == nil {
+		t.Fatal("expected error for --sandbox=podman")
+	}
+	if want := `unsupported sandbox runtime "podman" (want off, auto, or docker)`; err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestValidateSandboxRuntimeAcceptsDockerOnlySurface pins the accepted
+// launch runtimes after Podman removal.
+func TestValidateSandboxRuntimeAcceptsDockerOnlySurface(t *testing.T) {
+	for _, in := range []string{"", "off", sandboxcontainer.DefaultRuntime, "docker"} {
+		if err := validateSandboxRuntime(in); err != nil {
+			t.Fatalf("validateSandboxRuntime(%q) = %v, want nil", in, err)
+		}
+	}
+}
+
+// TestSandboxProxyModeSupportsBootstrapDockerOnly confirms proxy
+// bootstrap support tracks the Docker-only surface: docker and auto are
+// supported; podman is not.
+func TestSandboxProxyModeSupportsBootstrapDockerOnly(t *testing.T) {
+	for _, c := range []struct {
+		mode string
+		want bool
+	}{
+		{"docker", true},
+		{sandboxcontainer.DefaultRuntime, true},
+		{"podman", false},
+		{"off", false},
+		{"", false},
+	} {
+		if got := sandboxProxyModeSupportsBootstrap(c.mode); got != c.want {
+			t.Fatalf("sandboxProxyModeSupportsBootstrap(%q) = %v, want %v", c.mode, got, c.want)
+		}
 	}
 }
