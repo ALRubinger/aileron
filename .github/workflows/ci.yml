@@ -532,6 +532,21 @@ jobs:
         env:
           AILERON_SANDBOX_BASE_CONTEXT: ${{ github.workspace }}/images/sandbox-base
 
+      - name: Run sandbox MCP integration tests (#962 — Linux automated column)
+        # Exercises the aileron-mcp <-> daemon round-trip behind the sandbox
+        # MCP parity work (#953, ADR-0024) over BOTH transports: the host
+        # subprocess (Docker-free) and a real container (docker run against
+        # debian:bookworm-slim with the cross-built linux aileron-mcp bind-
+        # mounted read-only, reaching the in-process daemon via
+        # host.docker.internal). Asserts tools/list exposes draft_email and
+        # the contractual audit-event chain. The ubuntu runner has Docker, so
+        # the container variants run here; they self-skip only if Docker or
+        # the linux cross-build is unavailable. Per-agent MCP registration is
+        # covered separately by TestSandboxMCPRegistration_Matrix in the unit
+        # suite. Additive step so a failure is attributable to this contract.
+        run: go test -tags=integration_sandbox -race -run TestSandboxMCP ./app/...
+        working-directory: internal
+
       - name: Stop server to flush coverage data
         if: ${{ !cancelled() }}
         run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml stop server

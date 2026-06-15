@@ -19,7 +19,7 @@ The integration test at `internal/app/sandbox_mcp_test.go` (build tag `integrati
 
 ## What to validate (agents and runtimes)
 
-v4 closes when the full round-trip is verified for every supported agent on every supported Docker runtime. The only thing that varies per agent is how `aileron-mcp` is registered (see ADR-0024). Everything after registration is identical across agents.
+The per-agent bar is **"the agent sees `aileron` and its `draft_email` tool"**. The only thing that varies per agent is how `aileron-mcp` is registered (see ADR-0024). Everything after registration is identical across agents.
 
 | Agent | Identifier | MCP registration mechanism |
 |---|---|---|
@@ -31,7 +31,16 @@ v4 closes when the full round-trip is verified for every supported agent on ever
 
 Supported runtimes are Docker on macOS, Linux, and Windows. Docker Desktop on Windows runs Linux containers through the WSL2 backend, which is the same `sandbox-base` image used on macOS and Linux. The launcher adds `--add-host=host.docker.internal:host-gateway` on Linux only. macOS and Windows Docker Desktop resolve `host.docker.internal` automatically.
 
-Run the validation script below once per cell of the agent-by-runtime matrix. Record each result in issue [#962](https://github.com/ALRubinger/aileron/issues/962).
+### Linux is automated
+
+The Linux column is covered in CI, so you do not run it by hand:
+
+- `TestSandboxMCPRegistration_Matrix` (`internal/launch/agents`) asserts, per agent, that the `ModeSandbox` registration references the `aileron-mcp` binary and carries every daemon env var. It runs in the standard unit suite.
+- `TestSandboxMCP` (`internal/app`, build tag `integration_sandbox`) runs the `aileron-mcp` to daemon round-trip over both a host subprocess and a real Docker container, asserts `tools/list` exposes `draft_email`, and checks the `approval.requested → approval.approved → execution.started → execution.succeeded` audit chain. It runs in the CI integration job on Linux.
+
+### macOS and Windows are a light manual smoke
+
+GitHub-hosted macOS and Windows runners cannot run Linux Docker containers, so those two columns are not automatable in CI. The container itself is the same Linux image on all three operating systems, and the host-side launcher code is unit-tested on macOS and Windows already, so the residual risk is only host Docker networking (`host.docker.internal` resolution). Cover it with a **light manual smoke** per agent rather than a full Gmail round-trip: launch the agent, confirm it lists `aileron` with `draft_email`, then exit. Record each in issue [#962](https://github.com/ALRubinger/aileron/issues/962). A full round-trip (through to a real Gmail draft and approval) on at least one agent per OS is the optional gold-standard check; the steps below walk through it.
 
 ## Run
 
@@ -96,15 +105,15 @@ Verify the draft landed in Gmail's draft folder. That is the upstream contract u
 
 ## Record the result
 
-A cell of the matrix passes when, for that agent on that runtime: the agent invoked `mcp__aileron__draft_email`, the approval surfaced and you approved it, the draft appeared in Gmail, and the audit assertion above printed `PASS`. Record each cell in issue [#962](https://github.com/ALRubinger/aileron/issues/962) (its body, not a comment) with the environment (OS, arch, Docker version, Aileron CLI commit, agent version), the outcome, any deviations, and rough time spent.
+The **Linux column is automated** (the tests above), so those cells are green when CI is green; you do not hand-run them. For **macOS and Windows**, the per-agent bar is the light smoke: the agent listed `aileron` with `draft_email`. Record those cells in issue [#962](https://github.com/ALRubinger/aileron/issues/962) (its body, not a comment) with the environment (OS, arch, Docker version, Aileron CLI commit, agent version) and any deviations. If you also run the optional full round-trip, note that the audit assertion above printed `PASS` and the draft landed in Gmail.
 
-| Agent ↓ / Runtime → | macOS Docker | Linux Docker | Windows Docker |
+| Agent ↓ / Runtime → | macOS Docker (manual smoke) | Linux Docker (CI) | Windows Docker (manual smoke) |
 |---|---|---|---|
-| Claude | ☐ | ☐ | ☐ |
-| Pi | ☐ | ☐ | ☐ |
-| Goose | ☐ | ☐ | ☐ |
-| OpenCode | ☐ | ☐ | ☐ |
-| Codex | ☐ | ☐ | ☐ |
+| Claude | ☐ | automated | ☐ |
+| Pi | ☐ | automated | ☐ |
+| Goose | ☐ | automated | ☐ |
+| OpenCode | ☐ | automated | ☐ |
+| Codex | ☐ | automated | ☐ |
 
 Codex is the highest-risk cell on any runtime because it is the only agent whose MCP registration uses a bind-mounted `config.toml` rather than a CLI flag or workspace file. Validate it deliberately and read the Codex troubleshooting note below.
 
