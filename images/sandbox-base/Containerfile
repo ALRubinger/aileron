@@ -30,10 +30,8 @@ RUN apk add --no-cache \
 
 RUN addgroup -S agent && adduser -S -G agent -h /home/agent agent \
     && mkdir -p /etc/aileron/proxy /opt/aileron/manifests /home/agent/workspace \
-    && touch /etc/aileron/tools.txt \
     && chown -R agent:agent /home/agent
 
-COPY profile.d/aileron-tools.sh /etc/profile.d/aileron-tools.sh
 COPY bin/aileron-install-proxy-ca /usr/local/bin/aileron-install-proxy-ca
 COPY bin/aileron-run-with-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca
 RUN chmod 0755 /usr/local/bin/aileron-install-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca

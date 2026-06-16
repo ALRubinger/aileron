@@ -103,8 +103,12 @@ jobs:
             AILERON_VERSION=${{ steps.ver.outputs.version }}
             AILERON_COMMIT=${{ github.sha }}
 
-      # Image-fidelity smoke: the bash substrate plus the baked-MCP invariants
-      # (#957) -- the binary runs and the version label is present.
+      # Image-fidelity smoke against the published (baked) image: the bash
+      # substrate, the baked-MCP invariants (#957, the binary runs and the
+      # version label is present), and the #959 invariants (no tools.txt or
+      # tools profile banner survives, the proxy CA path is intact for
+      # bootstrap). Earlier matrices exercised the #801 shell-mediation
+      # surface that #952 fully removed.
       - name: Smoke test image
         run: |
           set -euo pipefail
@@ -133,4 +137,17 @@ jobs:
           fi
           echo "ai.aileron.mcp.version label: $label"
 
+          # #959: the tools.txt manifest and its profile banner are gone.
+          docker run --rm "$IMG" sh -c '[ ! -e /etc/aileron/tools.txt ]'
+          docker run --rm "$IMG" sh -c '[ ! -e /etc/profile.d/aileron-tools.sh ]'
+          login_out=$(docker run --rm "$IMG" bash -lc 'true' 2>&1 || true)
+          if printf '%s' "$login_out" | grep -qi 'tools manifest'; then
+            echo "login shell still prints a stale tools manifest banner: $login_out"
+            exit 1
+          fi
+          # The proxy CA path must survive the tools.txt removal: the
+          # directory exists and the installer helper is present so a
+          # bootstrap launch can write /etc/aileron/proxy/ca.pem.
+          docker run --rm "$IMG" sh -c '[ -d /etc/aileron/proxy ]'
+          docker run --rm "$IMG" sh -c '[ -x /usr/local/bin/aileron-install-proxy-ca ]'
           echo "sandbox-base smoke test passed"
