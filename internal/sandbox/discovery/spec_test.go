@@ -1,98 +1,43 @@
 package discovery
 
 import (
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 )
 
-func TestSpecToolsTextRendersConnectorOperations(t *testing.T) {
-	got, err := SpecToolsText(testSpecs())
+func TestSpecConnectorToolsDerivesOperations(t *testing.T) {
+	tools, err := SpecConnectorTools(testSpecs())
 	if err != nil {
-		t.Fatalf("SpecToolsText: %v", err)
+		t.Fatalf("SpecConnectorTools: %v", err)
 	}
-	want := "google\tgithub://acme/aileron-connector-google -- Aileron connector operations: gmail.messages.search, gmail.messages.send\n"
-	if string(got) != want {
-		t.Fatalf("tools.txt = %q, want %q", got, want)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %#v, want one tool", tools)
 	}
-}
-
-func TestSpecShimScriptsRenderHelpAndDispatch(t *testing.T) {
-	scripts, err := SpecShimScripts(testSpecs())
-	if err != nil {
-		t.Fatalf("SpecShimScripts: %v", err)
+	tool := tools[0]
+	if tool.Name != "google" || tool.FQN != "github://acme/aileron-connector-google" {
+		t.Fatalf("tool = %#v, want google connector", tool)
 	}
-	script := string(scripts["google"])
-	for _, want := range []string{
-		"#!/bin/sh\n",
-		"Aileron connector shim: google\n",
-		"Connector: github://acme/aileron-connector-google\n",
-		"gmail.messages.send - Send a Gmail message\n",
-		"target: POST /gmail/v1/users/me/messages/send\n",
-		"policy: credential=oauth2 approval=required idempotency=not_idempotent\n",
-		"--to <string> (required) - recipient",
-		"/connector-operations/run",
-		"X-Aileron-Session-Id: $AILERON_SESSION_ID",
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("script missing %q:\n%s", want, script)
-		}
+	if tool.Description != "Google APIs" {
+		t.Fatalf("description = %q, want %q", tool.Description, "Google APIs")
 	}
-}
-
-func TestSpecShimScriptExecutesOperationThroughDaemonAPI(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("generated shim execution is POSIX shell behavior")
+	if len(tool.Operations) != 2 {
+		t.Fatalf("operations = %#v, want two", tool.Operations)
 	}
-	scripts, err := SpecShimScripts(testSpecs())
-	if err != nil {
-		t.Fatalf("SpecShimScripts: %v", err)
+	// Operations are sorted by name.
+	if tool.Operations[0].Name != "gmail.messages.search" || tool.Operations[1].Name != "gmail.messages.send" {
+		t.Fatalf("operation order = %q, %q; want search before send", tool.Operations[0].Name, tool.Operations[1].Name)
 	}
-	dir := t.TempDir()
-	shimPath := filepath.Join(dir, "google")
-	if err := os.WriteFile(shimPath, scripts["google"], 0o755); err != nil {
-		t.Fatal(err)
+	send := tool.Operations[1]
+	if send.Method != "POST" || send.Path != "/gmail/v1/users/me/messages/send" {
+		t.Fatalf("send target = %s %s", send.Method, send.Path)
 	}
-	capturePath := filepath.Join(dir, "wget-args.txt")
-	wgetPath := filepath.Join(dir, "wget")
-	if err := os.WriteFile(wgetPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+capturePath+"\nprintf '{\"ok\":true}\\n'\n"), 0o755); err != nil {
-		t.Fatal(err)
+	if send.Approval != "required" || send.Credential != "oauth2" || send.Idempotency != "not_idempotent" {
+		t.Fatalf("send policy = %#v", send)
 	}
-
-	cmd := exec.Command("/bin/sh", shimPath, "gmail.messages.send", "--args", `{"to":"a@example.com"}`, "--json")
-	cmd.Env = append(os.Environ(),
-		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"AILERON_API_URL=http://host.docker.internal:48123/v1",
-		"AILERON_TOKEN=test-token",
-		"AILERON_SESSION_ID=sess-sandbox",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("shim execution failed: %v\n%s", err, out)
-	}
-	if got := string(out); got != "{\"ok\":true}\n" {
-		t.Fatalf("shim output = %q", got)
-	}
-	captured, err := os.ReadFile(capturePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := string(captured)
-	for _, want := range []string{
-		"--header\nContent-Type: application/json\n",
-		"--header\nAuthorization: Bearer test-token\n",
-		"--header\nX-Aileron-Session-Id: sess-sandbox\n",
-		"--post-data\n{\"connector_fqn\":\"github://acme/aileron-connector-google\",\"tool\":\"google\",\"operation\":\"gmail.messages.send\",\"args\":{\"to\":\"a@example.com\"}}\n",
-		"http://host.docker.internal:48123/v1/connector-operations/run\n",
-	} {
-		if !strings.Contains(args, want) {
-			t.Fatalf("wget args missing %q:\n%s", want, args)
-		}
+	if len(send.Inputs) != 1 || send.Inputs[0].Name != "to" || !send.Inputs[0].Required {
+		t.Fatalf("send inputs = %#v, want required 'to'", send.Inputs)
 	}
 }
 
