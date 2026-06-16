@@ -1189,3 +1189,58 @@ func TestRunArgs_LinuxNonDockerOmitsHostGateway(t *testing.T) {
 		}
 	}
 }
+
+// --- BakedMCPVersion image-label detection (U3 / #957) ---
+
+func TestBakedMCPVersion(t *testing.T) {
+	cases := []struct {
+		name   string
+		stdout string
+		runErr error
+		want   string
+	}{
+		{name: "baked", stdout: "0.0.42\n", want: "0.0.42"},
+		{name: "trailing and leading whitespace", stdout: "  0.0.42  \n", want: "0.0.42"},
+		{name: "unlabeled empty", stdout: "\n", want: ""},
+		{name: "no labels sentinel", stdout: "<no value>\n", want: ""},
+		{name: "inspect error not baked", stdout: "", runErr: errors.New("no such image"), want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := runnerFunc(func(_ context.Context, _ string, _ []string, stdout, _ io.Writer) error {
+				if tc.runErr != nil {
+					return tc.runErr
+				}
+				_, _ = io.WriteString(stdout, tc.stdout)
+				return nil
+			})
+			got := BakedMCPVersion(context.Background(), runner, "docker", "img:test")
+			if got != tc.want {
+				t.Fatalf("BakedMCPVersion = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBakedMCPVersion_InspectArgs(t *testing.T) {
+	var gotName string
+	var gotArgs []string
+	runner := runnerFunc(func(_ context.Context, name string, args []string, stdout, _ io.Writer) error {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		_, _ = io.WriteString(stdout, "0.0.1\n")
+		return nil
+	})
+	BakedMCPVersion(context.Background(), runner, "docker", "ghcr.io/acme/base:latest")
+	if gotName != "docker" {
+		t.Fatalf("runtime name = %q, want docker", gotName)
+	}
+	want := []string{
+		"image", "inspect",
+		"--format", `{{ index .Config.Labels "ai.aileron.mcp.version" }}`,
+		"ghcr.io/acme/base:latest",
+	}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("inspect args = %v, want %v", gotArgs, want)
+	}
+}
