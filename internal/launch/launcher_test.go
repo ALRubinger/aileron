@@ -739,11 +739,11 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	if !strings.Contains(validateCall, "/bin/sh\n-c\n") {
 		t.Fatalf("validation call did not run contract probe:\n%s", validateCall)
 	}
-	// Under default-on proxy bootstrap for --sandbox=docker, the
-	// contract probe expects shim-HTTP-client=1, proxy-trust=1,
-	// MCP-binary=1 (positions 2/3/4 in the trailing argv).
-	if !strings.HasSuffix(strings.TrimSpace(validateCall), "\ncodex\n1\n1\n1") {
-		t.Fatalf("validation call did not enable shim HTTP-client + proxy-trust + MCP-binary validation:\n%s", validateCall)
+	// After the shim slot was retired (#959), under default-on proxy
+	// bootstrap for --sandbox=docker the contract probe expects
+	// proxy-trust=1, MCP-binary=1 (positions 2/3 in the trailing argv).
+	if !strings.HasSuffix(strings.TrimSpace(validateCall), "\ncodex\n1\n1") {
+		t.Fatalf("validation call did not enable proxy-trust + MCP-binary validation:\n%s", validateCall)
 	}
 	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(runCall) {
 		t.Fatalf("run call missing container AILERON_API_URL:\n%s", runCall)

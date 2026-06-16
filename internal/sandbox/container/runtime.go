@@ -464,7 +464,6 @@ func (b Builder) Validate(ctx context.Context, opts ValidateOptions) error {
 			validationScript,
 			"aileron-validate",
 			opts.Command[0],
-			boolArg(requiresShimHTTPClient(opts.Volumes)),
 			boolArg(opts.RequireProxyTrust),
 			boolArg(opts.RequireMCPBinary),
 		},
@@ -504,25 +503,7 @@ if ! command -v "$1" >/dev/null 2>&1; then
   echo "agent image recipes: ` + AgentImagesDocsURL + `" >&2
   exit 127
 fi
-if [ "${2:-0}" = "1" ] && ! command -v wget >/dev/null 2>&1; then
-  echo "generated Aileron connector shims require wget in the sandbox image" >&2
-  echo "install wget in the sandbox image or launch with --sandbox=off" >&2
-  exit 127
-fi
 if [ "${2:-0}" = "1" ]; then
-  wget_help="$(wget --help 2>&1 || true)"
-  for flag in "--header" "--post-data" "-T" "-t" "-O"; do
-    case "$wget_help" in
-      *"$flag"*) ;;
-      *)
-        echo "generated Aileron connector shims require wget support for $flag" >&2
-        echo "install GNU wget or an equivalent wget implementation in the sandbox image" >&2
-        exit 127
-        ;;
-    esac
-  done
-fi
-if [ "${3:-0}" = "1" ]; then
   if ! command -v aileron-install-proxy-ca >/dev/null 2>&1; then
     echo "sandbox proxy bootstrap requires aileron-install-proxy-ca in the sandbox image" >&2
     echo "extend the current aileron/sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
@@ -535,7 +516,7 @@ if [ "${3:-0}" = "1" ]; then
   fi
   aileron-install-proxy-ca --check "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"
 fi
-if [ "${4:-0}" = "1" ]; then
+if [ "${3:-0}" = "1" ]; then
   if ! command -v aileron-mcp >/dev/null 2>&1; then
     echo "aileron-mcp not on PATH; sandbox MCP wiring failed (see ADR-0024)" >&2
     exit 127
@@ -552,15 +533,6 @@ func boolArg(value bool) string {
 		return "1"
 	}
 	return "0"
-}
-
-func requiresShimHTTPClient(volumes []Volume) bool {
-	for _, volume := range volumes {
-		if strings.HasPrefix(volume.Target, "/usr/local/bin/") {
-			return true
-		}
-	}
-	return false
 }
 
 // ResolveRuntime returns the container runtime executable to use.

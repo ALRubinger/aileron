@@ -698,10 +698,6 @@ func TestRunRejectsMissingCommand(t *testing.T) {
 func TestValidateRunsMinimalContractProbe(t *testing.T) {
 	pinHostOSDarwin(t)
 	dir := t.TempDir()
-	manifest := filepath.Join(t.TempDir(), "tools.txt")
-	if err := os.WriteFile(manifest, []byte("tool\tfqn\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	runner := &recordingRunner{}
 	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
 		Image:   "ghcr.io/acme/agent:latest",
@@ -709,11 +705,6 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 		Env: map[string]string{
 			"HTTPS_PROXY": "http://host.docker.internal:48123",
 		},
-		Volumes: []Volume{{
-			Source:   manifest,
-			Target:   "/etc/aileron/tools.txt",
-			ReadOnly: true,
-		}},
 		Command: []string{"codex"},
 	})
 	if err != nil {
@@ -726,66 +717,26 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 		"run", "--rm", "-i",
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
-		"--volume", manifest + ":/etc/aileron/tools.txt:ro",
 		"--env", "HTTPS_PROXY=http://host.docker.internal:48123",
 		"ghcr.io/acme/agent:latest",
 		"/bin/sh", "-c",
 	}
-	if len(runner.args) < len(wantPrefix)+4 {
+	if len(runner.args) < len(wantPrefix)+3 {
 		t.Fatalf("args too short: %#v", runner.args)
 	}
 	if !reflect.DeepEqual(runner.args[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("args prefix = %#v, want %#v", runner.args[:len(wantPrefix)], wantPrefix)
 	}
-	if runner.args[len(runner.args)-4] != "codex" {
-		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-4])
-	}
-	if runner.args[len(runner.args)-3] != "0" {
-		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-3])
-	}
-	if runner.args[len(runner.args)-2] != "0" {
-		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-2])
-	}
-	if runner.args[len(runner.args)-1] != "0" {
-		t.Fatalf("mcp binary validation flag = %q, want 0", runner.args[len(runner.args)-1])
-	}
-}
-
-func TestValidateRequiresWgetWhenShimsAreMounted(t *testing.T) {
-	dir := t.TempDir()
-	shim := filepath.Join(t.TempDir(), "google")
-	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runner := &recordingRunner{}
-	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
-		Image:   "ghcr.io/acme/agent:latest",
-		WorkDir: dir,
-		Volumes: []Volume{{
-			Source:   shim,
-			Target:   "/usr/local/bin/google",
-			ReadOnly: true,
-		}},
-		Command: []string{"codex"},
-	})
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if runner.args[len(runner.args)-3] != "1" {
-		t.Fatalf("shim validation flag = %q, want 1", runner.args[len(runner.args)-3])
+	// After the shim slot was retired (#959) the trailing positional args
+	// are: agent command ($1), proxy-trust flag ($2), MCP-binary flag ($3).
+	if runner.args[len(runner.args)-3] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-3])
 	}
 	if runner.args[len(runner.args)-2] != "0" {
 		t.Fatalf("proxy trust validation flag = %q, want 0", runner.args[len(runner.args)-2])
 	}
 	if runner.args[len(runner.args)-1] != "0" {
 		t.Fatalf("mcp binary validation flag = %q, want 0", runner.args[len(runner.args)-1])
-	}
-	script := runner.args[len(runner.args)-6]
-	if !strings.Contains(script, "generated Aileron connector shims require wget") {
-		t.Fatalf("validation script did not include wget requirement:\n%s", script)
-	}
-	if !strings.Contains(script, `"--post-data"`) {
-		t.Fatalf("validation script did not include wget flag probe:\n%s", script)
 	}
 }
 
@@ -814,11 +765,8 @@ func TestValidateRequiresProxyTrustHelperWhenRequested(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if runner.args[len(runner.args)-4] != "codex" {
-		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-4])
-	}
-	if runner.args[len(runner.args)-3] != "0" {
-		t.Fatalf("shim validation flag = %q, want 0", runner.args[len(runner.args)-3])
+	if runner.args[len(runner.args)-3] != "codex" {
+		t.Fatalf("validation command = %q, want codex", runner.args[len(runner.args)-3])
 	}
 	if runner.args[len(runner.args)-2] != "1" {
 		t.Fatalf("proxy trust validation flag = %q, want 1", runner.args[len(runner.args)-2])
@@ -826,7 +774,7 @@ func TestValidateRequiresProxyTrustHelperWhenRequested(t *testing.T) {
 	if runner.args[len(runner.args)-1] != "0" {
 		t.Fatalf("mcp binary validation flag = %q, want 0", runner.args[len(runner.args)-1])
 	}
-	script := runner.args[len(runner.args)-6]
+	script := runner.args[len(runner.args)-5]
 	if !strings.Contains(script, "aileron-install-proxy-ca --check") {
 		t.Fatalf("validation script missing proxy trust helper check:\n%s", script)
 	}
@@ -853,62 +801,6 @@ func TestValidateReportsActionableRuntimeFailure(t *testing.T) {
 		"validate sandbox image ghcr.io/acme/agent:latest",
 		"agent command not found in sandbox image: codex",
 		AgentImagesDocsURL,
-	} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("error %q does not contain %q", msg, want)
-		}
-	}
-}
-
-func TestValidateReportsMissingWgetForShimImages(t *testing.T) {
-	runner := runnerFunc(func(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
-		_, _ = stderr.Write([]byte("generated Aileron connector shims require wget in the sandbox image\n"))
-		return errors.New("exit status 127")
-	})
-	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
-		Image:   "ghcr.io/acme/agent:latest",
-		WorkDir: t.TempDir(),
-		Volumes: []Volume{{
-			Source: filepath.Join(t.TempDir(), "google"),
-			Target: "/usr/local/bin/google",
-		}},
-		Command: []string{"codex"},
-	})
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	msg := err.Error()
-	for _, want := range []string{
-		"validate sandbox image ghcr.io/acme/agent:latest",
-		"generated Aileron connector shims require wget in the sandbox image",
-	} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("error %q does not contain %q", msg, want)
-		}
-	}
-}
-
-func TestValidateReportsUnsupportedWgetForShimImages(t *testing.T) {
-	runner := runnerFunc(func(_ context.Context, _ string, _ []string, _, stderr io.Writer) error {
-		_, _ = stderr.Write([]byte("generated Aileron connector shims require wget support for --post-data\n"))
-		return errors.New("exit status 127")
-	})
-	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
-		Image:   "ghcr.io/acme/agent:latest",
-		WorkDir: t.TempDir(),
-		Volumes: []Volume{{
-			Source: filepath.Join(t.TempDir(), "google"),
-			Target: "/usr/local/bin/google",
-		}},
-		Command: []string{"codex"},
-	})
-	if err == nil {
-		t.Fatal("expected validation error")
-	}
-	msg := err.Error()
-	for _, want := range []string{
-		"validate sandbox image ghcr.io/acme/agent:latest",
-		"generated Aileron connector shims require wget support for --post-data",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q does not contain %q", msg, want)
@@ -970,7 +862,7 @@ func (f runnerFunc) Run(ctx context.Context, name string, args []string, stdout,
 
 // --- Validate-script aileron-mcp presence (U4 / #953) ---
 
-func TestValidate_RequireMCPBinary_AppendsFourthPositional(t *testing.T) {
+func TestValidate_RequireMCPBinary_AppendsThirdPositional(t *testing.T) {
 	dir := t.TempDir()
 	runner := &recordingRunner{}
 	err := Builder{Runtime: "docker", Runner: runner}.Validate(context.Background(), ValidateOptions{
@@ -985,9 +877,9 @@ func TestValidate_RequireMCPBinary_AppendsFourthPositional(t *testing.T) {
 	if runner.args[len(runner.args)-1] != "1" {
 		t.Fatalf("mcp binary validation flag = %q, want 1", runner.args[len(runner.args)-1])
 	}
-	script := runner.args[len(runner.args)-6]
+	script := runner.args[len(runner.args)-5]
 	for _, want := range []string{
-		`if [ "${4:-0}" = "1" ]; then`,
+		`if [ "${3:-0}" = "1" ]; then`,
 		"command -v aileron-mcp",
 		"aileron-mcp --version",
 		"sandbox MCP wiring failed",
