@@ -13,20 +13,17 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/ALRubinger/aileron/internal/action"
-	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/daemon/discovery"
 	"github.com/ALRubinger/aileron/internal/daemon/spawn"
 	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
-	sandboxdiscovery "github.com/ALRubinger/aileron/internal/sandbox/discovery"
 	"github.com/ALRubinger/aileron/internal/version"
 	"golang.org/x/term"
 )
@@ -40,16 +37,11 @@ import (
 const MCPServerName = "aileron"
 
 const (
-	sandboxToolsFilePath = "/etc/aileron/tools.txt"
-	sandboxShimsDirPath  = "/usr/local/bin"
-	sandboxProxyCAPath   = "/etc/aileron/proxy/ca.pem"
+	sandboxProxyCAPath = "/etc/aileron/proxy/ca.pem"
 	// sandboxMCPBinPath is where the launcher bind-mounts the host-built
 	// aileron-mcp binary inside the container. The agent's MCP client
 	// execs this path as its stdio child. See ADR-0024.
 	sandboxMCPBinPath = "/usr/local/bin/aileron-mcp"
-	// sandboxMCPBinName is the basename of the in-container MCP binary;
-	// reserved so no future shim mount can collide with it.
-	sandboxMCPBinName = "aileron-mcp"
 )
 
 // LaunchConfig holds the configuration for launching an agent.
@@ -251,11 +243,10 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 	if commandName == "" {
 		return fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
-	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName, sandboxMCPBinName)
+	mounts, err := sandboxRuntimeMounts()
 	if err != nil {
 		return err
 	}
-	defer cleanupMounts()
 	mounts = append(mounts, extraMounts...)
 	// Unbaked image: resolve aileron-mcp on the host and append its mount so
 	// the validate step can smoke-check the binary inside the container
@@ -421,8 +412,6 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 		agentEnv["AILERON_COMMS_URL"] = agentEndpointURL
 		agentEnv["AILERON_SESSION_ID"] = sessionID
 		agentEnv["AILERON_APPROVAL_URL"] = agentEndpointURL + "/approvals"
-		agentEnv["AILERON_TOOLS_FILE"] = sandboxToolsFilePath
-		agentEnv["AILERON_SHIMS_DIR"] = sandboxShimsDirPath
 		// Disable Claude Code's in-container auto-updater. The sandbox
 		// image installs the agent into a root-owned global prefix
 		// (`npm install -g`), so the non-root agent user's update write
@@ -685,9 +674,8 @@ func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID s
 		return LaunchResult{}, fmt.Errorf("agent %q: %w", config.Agent.Name(), err)
 	}
 
-	// Resolve aileron-mcp up front for the host launch path. Sandbox
-	// launch does not revive aileron-mcp as the container runtime model;
-	// container-side shims/proxy bootstrap land in later #796/#801 slices.
+	// Resolve aileron-mcp up front for the host launch path. The sandbox
+	// path resolves its own (cross-compiled) aileron-mcp in launchSandbox.
 	selfPath, _ := os.Executable()
 	mcpBin, err := resolveMCPBinary(selfPath)
 	if err != nil {
@@ -726,22 +714,17 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	if commandName == "" {
 		return LaunchResult{}, fmt.Errorf("agent %q has no container command", config.Agent.Name())
 	}
-	// Reserve both the agent's own binary name AND aileron-mcp so no
-	// connector-spec shim can clobber either at the mount layer.
-	mounts, cleanupMounts, err := sandboxRuntimeMounts(commandName, sandboxMCPBinName)
+	mounts, err := sandboxRuntimeMounts()
 	if err != nil {
 		return LaunchResult{}, err
 	}
-	defer cleanupMounts()
 	mounts = append(mounts, extraMounts...)
 
 	// Unbaked image: resolve aileron-mcp on the host and bind-mount it
 	// read-only at the container's well-known MCP binary path. Matches the
-	// resolution shape host launch uses and the host-mount pattern
-	// sandboxDiscoveryMounts uses for tools.txt and shims (ADR-0024).
-	// Sandbox-flavored lookup picks the cross-compiled Linux variant
-	// when present so this path works off macOS/Windows hosts without
-	// per-user cross-compilation.
+	// resolution shape host launch uses (ADR-0024). Sandbox-flavored lookup
+	// picks the cross-compiled Linux variant when present so this path works
+	// off macOS/Windows hosts without per-user cross-compilation.
 	//
 	// Baked image (issue #957): the published image carries aileron-mcp at
 	// sandboxMCPBinPath, so skip host resolution (a missing host binary is
@@ -963,7 +946,7 @@ func sandboxProxyBootstrapActive(agentEnv map[string]string) bool {
 	return strings.TrimSpace(agentEnv["AILERON_SANDBOX_PROXY_MODE"]) != ""
 }
 
-func sandboxRuntimeMounts(reservedNames ...string) ([]sandboxcontainer.Volume, func(), error) {
+func sandboxRuntimeMounts() ([]sandboxcontainer.Volume, error) {
 	candidates := []sandboxcontainer.Volume{
 		{
 			Source:   action.DefaultDir(),
@@ -984,124 +967,7 @@ func sandboxRuntimeMounts(reservedNames ...string) ([]sandboxcontainer.Volume, f
 		}
 		mounts = append(mounts, candidate)
 	}
-	discoveryMounts, cleanup, err := sandboxDiscoveryMounts(reservedNames...)
-	if err != nil {
-		return nil, cleanup, err
-	}
-	mounts = append(mounts, discoveryMounts...)
-	return mounts, cleanup, nil
-}
-
-func sandboxDiscoveryMounts(reservedNames ...string) ([]sandboxcontainer.Volume, func(), error) {
-	cleanup := func() {}
-	store := action.NewStore(action.DefaultDir())
-	if _, err := store.Load(); err != nil {
-		return nil, cleanup, nil
-	}
-	actions := store.List()
-	specs, err := connectorspec.LoadInstalled(cstore.DefaultRoot())
-	if err != nil {
-		return nil, cleanup, fmt.Errorf("load sandbox connector specs: %w", err)
-	}
-	toolsText, shimScripts, err := sandboxDiscoveryArtifacts(actions, specs, reservedNames...)
-	if err != nil {
-		return nil, cleanup, err
-	}
-	if len(toolsText) == 0 && len(shimScripts) == 0 {
-		return nil, cleanup, nil
-	}
-
-	dir, err := os.MkdirTemp("", "aileron-sandbox-discovery-*")
-	if err != nil {
-		return nil, cleanup, fmt.Errorf("create sandbox discovery tempdir: %w", err)
-	}
-	cleanup = func() { _ = os.RemoveAll(dir) }
-
-	mounts := []sandboxcontainer.Volume{}
-	if len(toolsText) > 0 {
-		path := filepath.Join(dir, "tools.txt")
-		if err := os.WriteFile(path, toolsText, 0o644); err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("write sandbox tools manifest: %w", err)
-		}
-		if err := os.Chmod(path, 0o644); err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("chmod sandbox tools manifest: %w", err)
-		}
-		mounts = append(mounts, sandboxcontainer.Volume{
-			Source:   path,
-			Target:   sandboxToolsFilePath,
-			ReadOnly: true,
-		})
-	}
-
-	names := make([]string, 0, len(shimScripts))
-	for name := range shimScripts {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if isReservedSandboxCommand(name, reservedNames) {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, shimScripts[name], 0o755); err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("write sandbox shim %s: %w", name, err)
-		}
-		if err := os.Chmod(path, 0o755); err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("chmod sandbox shim %s: %w", name, err)
-		}
-		mounts = append(mounts, sandboxcontainer.Volume{
-			Source:   path,
-			Target:   sandboxShimsDirPath + "/" + name,
-			ReadOnly: true,
-		})
-	}
-	return mounts, cleanup, nil
-}
-
-func sandboxDiscoveryArtifacts(actions []action.LoadedAction, specs []connectorspec.Spec, reservedNames ...string) ([]byte, map[string][]byte, error) {
-	var toolsText []byte
-	if actionTools := sandboxdiscovery.ToolsText(actions); len(actionTools) > 0 {
-		toolsText = append(toolsText, actionTools...)
-	}
-	specTools, err := sandboxdiscovery.SpecToolsText(specs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("render sandbox connector tools: %w", err)
-	}
-	if len(specTools) > 0 {
-		toolsText = append(toolsText, specTools...)
-	}
-
-	shimScripts := sandboxdiscovery.ShimScripts(actions)
-	if shimScripts == nil {
-		shimScripts = map[string][]byte{}
-	}
-	specShims, err := sandboxdiscovery.SpecShimScripts(specs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("render sandbox connector shims: %w", err)
-	}
-	for name, script := range specShims {
-		if isReservedSandboxCommand(name, reservedNames) {
-			return nil, nil, fmt.Errorf("sandbox connector shim %q conflicts with the selected agent command", name)
-		}
-		if _, ok := shimScripts[name]; ok {
-			return nil, nil, fmt.Errorf("sandbox connector shim %q conflicts with an installed action shim", name)
-		}
-		shimScripts[name] = script
-	}
-	return toolsText, shimScripts, nil
-}
-
-func isReservedSandboxCommand(name string, reservedNames []string) bool {
-	for _, reserved := range reservedNames {
-		if name == reserved {
-			return true
-		}
-	}
-	return false
+	return mounts, nil
 }
 
 // launchDirect runs the agent with direct stdin/stdout/stderr passthrough.

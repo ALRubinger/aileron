@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ALRubinger/aileron/internal/action"
-	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
@@ -45,82 +43,6 @@ func TestFirstAgentBinaryHandlesEmptyAgent(t *testing.T) {
 	}
 	if got := firstAgentBinary(namedBinaryAgent{name: "codex"}); got != "codex" {
 		t.Fatalf("firstAgentBinary = %q, want codex", got)
-	}
-}
-
-func TestSandboxDiscoveryArtifactsRejectsSpecActionShimConflict(t *testing.T) {
-	actions := []action.LoadedAction{{
-		Manifest: &action.Manifest{
-			Name: "send-email",
-			Requires: action.Requires{
-				Connectors: []action.RequiresConnector{{Name: "github://acme/aileron-connector-google"}},
-			},
-		},
-	}}
-	specs := []connectorspec.Spec{{
-		SchemaVersion: connectorspec.SchemaVersion,
-		Connector:     connectorspec.Connector{FQN: "github://acme/google"},
-		Tools:         []connectorspec.Tool{{Name: "google", Operations: []connectorspec.Operation{{Name: "search"}}}},
-	}}
-
-	_, _, err := sandboxDiscoveryArtifacts(actions, specs)
-	if err == nil {
-		t.Fatal("expected conflict error")
-	}
-	if !strings.Contains(err.Error(), `conflicts with an installed action shim`) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-// TestSandboxDiscoveryArtifacts_RejectsAileronMCPShimCollision: a
-// connector spec attempting to register a shim named aileron-mcp
-// would clobber the launcher's bind-mount path. The reserved-name
-// guard must fail the spec load.
-func TestSandboxDiscoveryArtifacts_RejectsAileronMCPShimCollision(t *testing.T) {
-	specs := []connectorspec.Spec{{
-		SchemaVersion: connectorspec.SchemaVersion,
-		Connector:     connectorspec.Connector{FQN: "github://acme/aileron-mcp"},
-		Tools:         []connectorspec.Tool{{Name: "aileron-mcp", Operations: []connectorspec.Operation{{Name: "do"}}}},
-	}}
-
-	_, _, err := sandboxDiscoveryArtifacts(nil, specs, sandboxMCPBinName)
-	if err == nil {
-		t.Fatal("expected conflict error for aileron-mcp shim")
-	}
-	if !strings.Contains(err.Error(), `conflicts with the selected agent command`) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-// TestIsReservedSandboxCommand_AileronMCP locks in the contract that
-// the caller-provided reserved list, when it includes aileron-mcp,
-// causes the guard to fire. The launchSandbox / validateSandbox
-// callers pass sandboxMCPBinName ("aileron-mcp") to ensure this.
-func TestIsReservedSandboxCommand_AileronMCP(t *testing.T) {
-	if !isReservedSandboxCommand("aileron-mcp", []string{"claude", sandboxMCPBinName}) {
-		t.Error("expected aileron-mcp to be reserved when present in the list")
-	}
-	if !isReservedSandboxCommand("claude", []string{"claude", sandboxMCPBinName}) {
-		t.Error("expected agent command to remain reserved")
-	}
-	if isReservedSandboxCommand("gmail", []string{"claude", sandboxMCPBinName}) {
-		t.Error("non-reserved name should pass through")
-	}
-}
-
-func TestSandboxDiscoveryArtifactsRejectsSpecAgentCommandConflict(t *testing.T) {
-	specs := []connectorspec.Spec{{
-		SchemaVersion: connectorspec.SchemaVersion,
-		Connector:     connectorspec.Connector{FQN: "github://acme/claude"},
-		Tools:         []connectorspec.Tool{{Name: "claude", Operations: []connectorspec.Operation{{Name: "search"}}}},
-	}}
-
-	_, _, err := sandboxDiscoveryArtifacts(nil, specs, "claude")
-	if err == nil {
-		t.Fatal("expected conflict error")
-	}
-	if !strings.Contains(err.Error(), `conflicts with the selected agent command`) {
-		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -233,9 +155,12 @@ func TestValidateSandboxPassesRuntimeMounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validateSandbox: %v", err)
 	}
-	for _, target := range []string{"/opt/aileron/manifests/actions", "/etc/aileron/tools.txt", "/usr/local/bin/google"} {
-		if !hasMountTarget(got, target) {
-			t.Fatalf("validateSandbox mounts = %#v, want target %s", got, target)
+	if !hasMountTarget(got, "/opt/aileron/manifests/actions") {
+		t.Fatalf("validateSandbox mounts = %#v, want manifests mount", got)
+	}
+	for _, absent := range []string{"/etc/aileron/tools.txt", "/usr/local/bin/google"} {
+		if hasMountTarget(got, absent) {
+			t.Fatalf("validateSandbox mounts = %#v, should not include retired shim surface %s", got, absent)
 		}
 	}
 }
@@ -428,36 +353,9 @@ func TestNormalizeLaunchBuildPolicy(t *testing.T) {
 	}
 }
 
-func TestSandboxRuntimeMountsReportsToolsTempDirError(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	actionsDir := filepath.Join(home, ".aileron", "actions")
-	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionsDir, "send-email.md"), []byte(validActionManifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tmpFile := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(tmpFile, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", tmpFile)
-
-	_, cleanup, err := sandboxRuntimeMounts()
-	defer cleanup()
-	if err == nil {
-		t.Fatal("expected tempdir error")
-	}
-	if !strings.Contains(err.Error(), "create sandbox discovery tempdir") {
-		t.Fatalf("error = %v, want discovery tempdir context", err)
-	}
-}
-
 func TestSandboxRuntimeMountsSkipsMissingStores(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	got, cleanup, err := sandboxRuntimeMounts()
-	defer cleanup()
+	got, err := sandboxRuntimeMounts()
 	if err != nil {
 		t.Fatalf("sandboxRuntimeMounts: %v", err)
 	}
@@ -477,8 +375,7 @@ func TestSandboxRuntimeMountsIncludesExistingStores(t *testing.T) {
 		}
 	}
 
-	mounts, cleanup, err := sandboxRuntimeMounts()
-	defer cleanup()
+	mounts, err := sandboxRuntimeMounts()
 	if err != nil {
 		t.Fatalf("sandboxRuntimeMounts: %v", err)
 	}
@@ -493,72 +390,11 @@ func TestSandboxRuntimeMountsIncludesExistingStores(t *testing.T) {
 	}
 }
 
-func TestSandboxRuntimeMountsIncludesGeneratedToolsText(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	actionsDir := filepath.Join(home, ".aileron", "actions")
-	if err := os.MkdirAll(actionsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	actionPath := filepath.Join(actionsDir, "send-email.md")
-	if err := os.WriteFile(actionPath, []byte(validActionManifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	mounts, cleanup, err := sandboxRuntimeMounts()
-	defer cleanup()
-	if err != nil {
-		t.Fatalf("sandboxRuntimeMounts: %v", err)
-	}
-	var toolsMount *sandboxcontainer.Volume
-	for i := range mounts {
-		if mounts[i].Target == "/etc/aileron/tools.txt" {
-			toolsMount = &mounts[i]
-			break
-		}
-	}
-	if toolsMount == nil {
-		t.Fatalf("tools.txt mount missing from %#v", mounts)
-	}
-	if !toolsMount.ReadOnly {
-		t.Fatalf("tools.txt mount should be read-only: %#v", toolsMount)
-	}
-	if info, err := os.Stat(toolsMount.Source); err != nil || info.Mode().Perm() != 0o644 {
-		t.Fatalf("tools.txt mode = %v, %v; want 0644", info, err)
-	}
-	data, err := os.ReadFile(toolsMount.Source)
-	if err != nil {
-		t.Fatalf("read tools.txt: %v", err)
-	}
-	if !strings.Contains(string(data), "google\tgithub://ALRubinger/aileron-connector-google") {
-		t.Fatalf("tools.txt did not include google connector:\n%s", data)
-	}
-	var shimMount *sandboxcontainer.Volume
-	for i := range mounts {
-		if mounts[i].Target == "/usr/local/bin/google" {
-			shimMount = &mounts[i]
-			break
-		}
-	}
-	if shimMount == nil {
-		t.Fatalf("google shim mount missing from %#v", mounts)
-	}
-	if !shimMount.ReadOnly {
-		t.Fatalf("google shim mount should be read-only: %#v", shimMount)
-	}
-	if info, err := os.Stat(shimMount.Source); err != nil || info.Mode().Perm() != 0o755 {
-		t.Fatalf("google shim mode = %v, %v; want 0755", info, err)
-	}
-	shim, err := os.ReadFile(shimMount.Source)
-	if err != nil {
-		t.Fatalf("read google shim: %v", err)
-	}
-	if !strings.Contains(string(shim), "Aileron connector shim: google") {
-		t.Fatalf("google shim did not include help text:\n%s", shim)
-	}
-}
-
-func TestSandboxRuntimeMountsSkipsReservedShimNames(t *testing.T) {
+// TestSandboxRuntimeMountsOmitsRetiredShimSurface pins the #959 removal:
+// even with installed actions present, the runtime mounts expose only the
+// read-only manifests directories. No tools.txt manifest and no
+// /usr/local/bin shim are emitted; aileron-mcp is the sole tool surface.
+func TestSandboxRuntimeMountsOmitsRetiredShimSurface(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	actionsDir := filepath.Join(home, ".aileron", "actions")
@@ -569,16 +405,20 @@ func TestSandboxRuntimeMountsSkipsReservedShimNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mounts, cleanup, err := sandboxRuntimeMounts("google")
-	defer cleanup()
+	mounts, err := sandboxRuntimeMounts()
 	if err != nil {
 		t.Fatalf("sandboxRuntimeMounts: %v", err)
 	}
-	if hasMountTarget(mounts, "/usr/local/bin/google") {
-		t.Fatalf("reserved google shim should not be mounted: %#v", mounts)
+	if !hasMountTarget(mounts, "/opt/aileron/manifests/actions") {
+		t.Fatalf("mounts = %#v, want manifests mount", mounts)
 	}
-	if !hasMountTarget(mounts, "/etc/aileron/tools.txt") {
-		t.Fatalf("tools.txt should still be mounted: %#v", mounts)
+	if hasMountTarget(mounts, "/etc/aileron/tools.txt") {
+		t.Fatalf("mounts = %#v, retired tools.txt should not be emitted", mounts)
+	}
+	for _, mount := range mounts {
+		if strings.HasPrefix(mount.Target, "/usr/local/bin/") {
+			t.Fatalf("mounts = %#v, retired shim mount %s should not be emitted", mounts, mount.Target)
+		}
 	}
 }
 

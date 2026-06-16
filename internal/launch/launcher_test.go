@@ -263,8 +263,6 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 		"--env\nAILERON_SANDBOX_IMAGE=ghcr.io/acme/agent:latest\n",
 		"--env\nAILERON_SANDBOX_TIER=byo_image\n",
 		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
-		"--env\nAILERON_TOOLS_FILE=/etc/aileron/tools.txt\n",
-		"--env\nAILERON_SHIMS_DIR=/usr/local/bin\n",
 		"--env\nAILERON_URL=http://host.docker.internal:",
 		// Sandbox launch disables the in-container auto-updater: the
 		// image's npm-global prefix is root-owned and the image is the
@@ -279,9 +277,15 @@ func TestLaunch_SandboxBYOImageRunsContainer(t *testing.T) {
 	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(args) {
 		t.Errorf("expected container AILERON_API_URL /v1 env in docker args:\n%s", args)
 	}
-	for _, unwanted := range []string{"HTTPS_PROXY=", "HTTP_PROXY=", "AILERON_SANDBOX_PROXY_MODE="} {
+	// The shim surface is retired (#959): no tools.txt/shim env vars and no
+	// shim mounts are emitted; aileron-mcp is the sole tool surface.
+	for _, unwanted := range []string{
+		"HTTPS_PROXY=", "HTTP_PROXY=", "AILERON_SANDBOX_PROXY_MODE=",
+		"AILERON_TOOLS_FILE=", "AILERON_SHIMS_DIR=",
+		"/etc/aileron/tools.txt", "/usr/local/bin/google",
+	} {
 		if strings.Contains(args, unwanted) {
-			t.Errorf("did not expect proxy bootstrap env %q under --sandbox-proxy=off:\n%s", unwanted, args)
+			t.Errorf("did not expect retired/proxy artifact %q under --sandbox-proxy=off:\n%s", unwanted, args)
 		}
 	}
 }
@@ -714,6 +718,8 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
 	}
 	validateCall, runCall := calls[0], calls[1]
+	// The shim surface is retired (#959): neither call mounts a tools.txt
+	// manifest or a /usr/local/bin shim. aileron-mcp is the sole tool path.
 	for _, call := range []struct {
 		name string
 		args string
@@ -721,12 +727,12 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 		{name: "validation", args: validateCall},
 		{name: "run", args: runCall},
 	} {
-		for _, want := range []string{
+		for _, unwanted := range []string{
 			":/etc/aileron/tools.txt:ro\n",
 			":/usr/local/bin/google:ro\n",
 		} {
-			if !strings.Contains(call.args, want) {
-				t.Fatalf("%s call missing %q:\n%s", call.name, want, call.args)
+			if strings.Contains(call.args, unwanted) {
+				t.Fatalf("%s call should not mount retired shim surface %q:\n%s", call.name, unwanted, call.args)
 			}
 		}
 	}
@@ -742,12 +748,9 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	if !regexp.MustCompile(`--env\nAILERON_API_URL=http://host\.docker\.internal:[0-9]+/v1\n`).MatchString(runCall) {
 		t.Fatalf("run call missing container AILERON_API_URL:\n%s", runCall)
 	}
-	for _, want := range []string{
-		"--env\nAILERON_TOOLS_FILE=/etc/aileron/tools.txt\n",
-		"--env\nAILERON_SHIMS_DIR=/usr/local/bin\n",
-	} {
-		if !strings.Contains(runCall, want) {
-			t.Fatalf("run call missing discovery hint env %q:\n%s", want, runCall)
+	for _, unwanted := range []string{"AILERON_TOOLS_FILE=", "AILERON_SHIMS_DIR="} {
+		if strings.Contains(runCall, unwanted) {
+			t.Fatalf("run call should not set retired shim env %q:\n%s", unwanted, runCall)
 		}
 	}
 	if !strings.Contains(runCall, "ghcr.io/acme/agent:latest\naileron-run-with-proxy-ca\ncodex\n") {
@@ -755,7 +758,12 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	}
 }
 
-func TestLaunch_SandboxDiscoveryMountsConnectorSpecShims(t *testing.T) {
+// TestLaunch_SandboxConnectorSpecPresentEmitsNoShim is the end-to-end
+// guard for #959: an installed connector spec no longer produces a
+// /usr/local/bin shim or a tools.txt mount. The connectors manifest
+// directory is still mounted read-only for the data plane, and
+// aileron-mcp remains the sole tool surface.
+func TestLaunch_SandboxConnectorSpecPresentEmitsNoShim(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	specDir := filepath.Join(home, ".aileron", "store", "connectors", "sha256", "abc123")
@@ -816,18 +824,21 @@ func TestLaunch_SandboxDiscoveryMountsConnectorSpecShims(t *testing.T) {
 		{name: "validation", args: calls[0]},
 		{name: "run", args: calls[1]},
 	} {
-		for _, want := range []string{
+		for _, unwanted := range []string{
 			":/etc/aileron/tools.txt:ro\n",
 			":/usr/local/bin/google:ro\n",
 		} {
-			if !strings.Contains(call.args, want) {
-				t.Fatalf("%s call missing %q:\n%s", call.name, want, call.args)
+			if strings.Contains(call.args, unwanted) {
+				t.Fatalf("%s call should not mount retired shim surface %q:\n%s", call.name, unwanted, call.args)
 			}
+		}
+		if !regexp.MustCompile(`--volume\n[^\n]*/aileron-mcp:/usr/local/bin/aileron-mcp:ro\n`).MatchString(call.args) {
+			t.Fatalf("%s call missing aileron-mcp mount:\n%s", call.name, call.args)
 		}
 	}
 }
 
-func TestLaunch_SandboxScaffoldBuildsAndRunsWithDiscoveryMounts(t *testing.T) {
+func TestLaunch_SandboxScaffoldBuildsAndRuns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	actionsDir := filepath.Join(home, ".aileron", "actions")
@@ -889,13 +900,15 @@ func TestLaunch_SandboxScaffoldBuildsAndRunsWithDiscoveryMounts(t *testing.T) {
 		{name: "validation", args: validateCall},
 		{name: "run", args: runCall},
 	} {
-		for _, want := range []string{
+		if !strings.Contains(call.args, image+"\n") {
+			t.Fatalf("%s call missing image %q:\n%s", call.name, image, call.args)
+		}
+		for _, unwanted := range []string{
 			":/etc/aileron/tools.txt:ro\n",
 			":/usr/local/bin/google:ro\n",
-			image + "\n",
 		} {
-			if !strings.Contains(call.args, want) {
-				t.Fatalf("%s call missing %q:\n%s", call.name, want, call.args)
+			if strings.Contains(call.args, unwanted) {
+				t.Fatalf("%s call should not mount retired shim surface %q:\n%s", call.name, unwanted, call.args)
 			}
 		}
 	}
@@ -906,12 +919,15 @@ func TestLaunch_SandboxScaffoldBuildsAndRunsWithDiscoveryMounts(t *testing.T) {
 		"--env\nAILERON_SANDBOX_IMAGE=" + image + "\n",
 		"--env\nAILERON_SANDBOX_TIER=devcontainer\n",
 		"--env\nAILERON_SANDBOX_RUNTIME=docker\n",
-		"--env\nAILERON_TOOLS_FILE=/etc/aileron/tools.txt\n",
-		"--env\nAILERON_SHIMS_DIR=/usr/local/bin\n",
 		"codex\n--ask-for-approval\nnever\n",
 	} {
 		if !strings.Contains(runCall, want) {
 			t.Fatalf("run call missing %q:\n%s", want, runCall)
+		}
+	}
+	for _, unwanted := range []string{"AILERON_TOOLS_FILE=", "AILERON_SHIMS_DIR="} {
+		if strings.Contains(runCall, unwanted) {
+			t.Fatalf("run call should not set retired shim env %q:\n%s", unwanted, runCall)
 		}
 	}
 }
