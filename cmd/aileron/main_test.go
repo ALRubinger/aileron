@@ -228,6 +228,7 @@ func TestRun_LaunchFlagsAfterAgentName(t *testing.T) {
 		{"split before and after", []string{"launch", "--sandbox=docker", "claude", "--sandbox-build=never"}, "docker", "never", ""},
 		{"unknown agent args forward", []string{"launch", "claude", "--model", "opus", "--sandbox=docker"}, "docker", "auto", "--model opus"},
 		{"double dash forwards through", []string{"launch", "claude", "--", "--sandbox=docker"}, "off", "auto", "--sandbox=docker"},
+		{"bare dash forwards to agent", []string{"launch", "claude", "-"}, "off", "auto", "-"},
 	}
 
 	for _, tc := range cases {
@@ -252,6 +253,50 @@ func TestRun_LaunchFlagsAfterAgentName(t *testing.T) {
 				t.Errorf("agent Args = %q, want %q", got, tc.wantArgs)
 			}
 		})
+	}
+}
+
+// TestRun_LaunchTrailingFlagMissingValue verifies that an aileron launch
+// flag placed after the agent name with no value fails fast with a clear
+// message instead of launching with a bogus value.
+func TestRun_LaunchTrailingFlagMissingValue(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() { launchFn = origLaunch })
+	launchFn = func(_ context.Context, _ launch.LaunchConfig) (launch.LaunchResult, error) {
+		t.Fatal("launch should not run when a trailing flag is missing its value")
+		return launch.LaunchResult{}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"launch", "claude", "--sandbox"}, newTestRegistry(), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "needs a value") {
+		t.Errorf("stderr = %q, want it to mention the missing value", stderr.String())
+	}
+}
+
+// TestParseLaunchFlagToken covers the dash/flag token classifier across
+// non-flags, bare dashes, and both inline-value and value-less flag forms.
+func TestParseLaunchFlagToken(t *testing.T) {
+	cases := []struct {
+		arg, name, value string
+		hasValue         bool
+	}{
+		{"claude", "", "", false},
+		{"-", "", "", false},
+		{"--", "", "", false},
+		{"--sandbox", "sandbox", "", false},
+		{"--sandbox=docker", "sandbox", "docker", true},
+		{"-sandbox=docker", "sandbox", "docker", true},
+		{"--log-level=debug", "log-level", "debug", true},
+	}
+	for _, tc := range cases {
+		name, value, hasValue := parseLaunchFlagToken(tc.arg)
+		if name != tc.name || value != tc.value || hasValue != tc.hasValue {
+			t.Errorf("parseLaunchFlagToken(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.arg, name, value, hasValue, tc.name, tc.value, tc.hasValue)
+		}
 	}
 }
 
