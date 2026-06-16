@@ -37,6 +37,13 @@ import Bot from '@lucide/svelte/icons/bot';
   </p>
 </div>
 
+<Alert.Root class="my-6">
+  <Alert.Title>Architecture note (2026-06-15)</Alert.Title>
+  <Alert.Description>
+    This page describes the agent's in-container tool surface as Aileron-curated connector shims on <code>$PATH</code> with "no MCP server from Aileron." That has since changed. <a href="/adr/0024-sandbox-mcp-parity/">ADR-0024</a> revived <code>aileron-mcp</code> as the in-container tool surface, and <a href="https://github.com/ALRubinger/aileron/issues/959">#959</a> retired the connector-shim/<code>tools.txt</code> surface entirely. <code>aileron-mcp</code> is now the sole in-container tool surface; the HTTPS proxy / credential-mediation data plane described here is unchanged. The shim-centric passages below are historical and pending a fuller refresh.
+  </Alert.Description>
+</Alert.Root>
+
 ## What this makes possible
 
 Concrete scenarios teams and organizations can run on Aileron:

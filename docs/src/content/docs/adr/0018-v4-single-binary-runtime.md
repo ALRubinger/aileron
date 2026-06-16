@@ -12,6 +12,8 @@ order: 18
 </table>
 </div>
 
+> **Forward pointer, 2026-06-15:** This ADR's original framing rejected reviving `aileron-mcp` in-container and leaned on container-side generated shims. [ADR-0024](/adr/0024-sandbox-mcp-parity) reversed the MCP decision, and [#959](https://github.com/ALRubinger/aileron/issues/959) retired the generated shim surface. `aileron-mcp` is now the sole in-container tool surface. Passages below that describe generated shims are historical.
+
 ## Context
 
 Earlier launch work used `aileron-mcp` as the host-side bridge between agents and the local daemon. That remains part of the current host launch path for agents that consume MCP config.

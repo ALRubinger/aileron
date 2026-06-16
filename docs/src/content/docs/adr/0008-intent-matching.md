@@ -1,6 +1,6 @@
 ---
 title: "ADR-0008: Action Exposure to Agents"
-description: "MCP is the canonical action-exposure surface under both host launch and v4 sandbox launch; generated HTTPS shims remain a complementary non-MCP-native CLI surface."
+description: "MCP is the canonical action-exposure surface under both host launch and v4 sandbox launch; the generated HTTPS shim surface was retired in #959, leaving MCP as the sole container tool surface."
 order: 8
 ---
 
@@ -15,7 +15,7 @@ order: 8
 
 ## Context
 
-> **Revision note, 2026-06-08:** This ADR is now accurate for BOTH the host-launch integration path and the v4 sandbox-launch path. Under sandbox launch, `aileron-mcp` runs in-container as a stdio subprocess of the agent and reaches the daemon over HTTPS via the existing `AILERON_URL` rewrite; see [ADR-0024](/adr/0024-sandbox-mcp-parity) for the sandbox-revival decision. Generated HTTPS shims (see [ADR-0020](/adr/0020-v4-connector-specs-and-shims)) and the Aileron data plane (see [ADR-0019](/adr/0019-v4-https-data-plane)) remain as a complementary non-MCP-native CLI surface for bash callers and non-MCP-native agents. This revision supersedes the prior 2026-06-01 revision note, which claimed sandbox launch did not revive `aileron-mcp`.
+> **Revision note, 2026-06-15:** This ADR is accurate for BOTH the host-launch integration path and the v4 sandbox-launch path. Under sandbox launch, `aileron-mcp` runs in-container as a stdio subprocess of the agent and reaches the daemon over HTTPS via the existing `AILERON_URL` rewrite; see [ADR-0024](/adr/0024-sandbox-mcp-parity) for the sandbox-revival decision. MCP is the sole in-container tool surface: [#959](https://github.com/ALRubinger/aileron/issues/959) retired the generated HTTPS shim surface (see [ADR-0020](/adr/0020-v4-connector-specs-and-shims)), and the connector-spec loading it described is retained for the Aileron data plane (see [ADR-0019](/adr/0019-v4-https-data-plane)). This note supersedes the prior 2026-06-08 note, which kept the shim surface as a complementary non-MCP-native CLI path.
 
 [ADR-0003](/adr/0003-action-model) establishes that actions are atomic, declaratively-defined units that the agent invokes. It defers a load-bearing question: *how does an agent see and call an installed action?*
 

@@ -12,6 +12,8 @@ order: 20
 </table>
 </div>
 
+> **Forward pointer, 2026-06-15:** This ADR records the original v4 decision to render generated HTTPS shims from connector specs. The rendered shim surface was retired in [#959](https://github.com/ALRubinger/aileron/issues/959); `aileron-mcp` ([ADR-0024](/adr/0024-sandbox-mcp-parity)) is now the sole in-container tool surface. The connector-spec format and loading this ADR defines are retained for HTTPS data-plane operation validation. This ADR is left as the historical record of the shim decision.
+
 ## Context
 
 The first sandbox runtime cut generates static `tools.txt` and connector shim scripts from installed action manifests. That proves the discovery and execution shape, but the v4 runtime needs a durable connector package contract for richer operations, help text, approval metadata, idempotency, and audit shape.
