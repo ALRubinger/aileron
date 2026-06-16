@@ -721,7 +721,7 @@ func TestValidateRunsMinimalContractProbe(t *testing.T) {
 		"ghcr.io/acme/agent:latest",
 		"/bin/sh", "-c",
 	}
-	if len(runner.args) < len(wantPrefix)+3 {
+	if len(runner.args) < len(wantPrefix)+5 {
 		t.Fatalf("args too short: %#v", runner.args)
 	}
 	if !reflect.DeepEqual(runner.args[:len(wantPrefix)], wantPrefix) {
