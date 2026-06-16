@@ -1,10 +1,10 @@
 ---
 title: "Sandbox Connector Specs"
-description: "How installed connector specs become sandbox-visible tools and generated HTTPS shims."
+description: "How installed connector specs drive data-plane operation validation in sandboxed launch sessions."
 order: 8
 ---
 
-Sandbox connector specs are the machine-readable contract Aileron uses to expose installed connector operations inside sandboxed launch sessions.
+Sandbox connector specs are the machine-readable contract Aileron uses to validate and mediate connector operations inside sandboxed launch sessions.
 
 When a connector package is installed, Aileron looks for:
 
@@ -12,7 +12,7 @@ When a connector package is installed, Aileron looks for:
 ~/.aileron/store/connectors/sha256/<hash>/aileron.connector.v1.json
 ```
 
-At launch time, Aileron reads those installed specs, renders `/etc/aileron/tools.txt`, and mounts generated command shims under `/usr/local/bin`. The shims are HTTPS clients that call the local Aileron daemon through `AILERON_API_URL`.
+At launch time, Aileron reads those installed specs and derives the connector tools and operations the daemon uses to validate requests on the HTTPS data plane. The agent reaches connector operations through `aileron-mcp` ([ADR-0024](/adr/0024-sandbox-mcp-parity/)), which is the sole in-container tool surface; the generated `tools.txt`/shim surface was retired in [#959](https://github.com/ALRubinger/aileron/issues/959).
 
 ## Schema
 
@@ -66,24 +66,11 @@ Required fields:
 | `operations[].inputs[].name` | Optional, but when present must be unique within the operation and use the same restricted character set. |
 | `operations[].audit[].name` | Optional, but when present must be unique within the operation and use the same restricted character set. |
 
-Optional operation metadata such as `summary`, `description`, `method`, `path`, `hosts`, `idempotency`, `approval`, `credential`, `inputs`, and `audit` is rendered into shim help and is available to the data-plane work that follows.
+Optional operation metadata such as `summary`, `description`, `method`, `path`, `hosts`, `idempotency`, `approval`, `credential`, `inputs`, and `audit` is carried into the derived operation help the daemon uses for data-plane validation.
 
-## Generated Tools
+## Data-Plane Operation Contract
 
-For each tool, launch writes one `tools.txt` entry:
-
-```text
-google  github://acme/aileron-connector-google -- Aileron connector operations: gmail.messages.search
-```
-
-It also writes a command shim:
-
-```bash
-google --help
-google gmail.messages.search --args '{"q":"from:alice@example.com"}' --json
-```
-
-The shim posts this payload to `${AILERON_API_URL%/}/connector-operations/run`:
+The daemon resolves connector operations against installed specs at the `/v1/connector-operations/run` data-plane endpoint. A request names the connector, tool, and operation, and carries the operation args:
 
 ```json
 {
@@ -96,16 +83,8 @@ The shim posts this payload to `${AILERON_API_URL%/}/connector-operations/run`:
 }
 ```
 
-The endpoint is the stable sandbox-side contract for generated connector-operation shims.
-
-In the current daemon cut, `/v1/connector-operations/run` resolves the connector, tool, and operation against installed specs. `GET`, `DELETE`, and `HEAD` operations with spec-declared method, path, and upstream hosts are mediated through the sandbox HTTPS proxy boundary with shim args encoded as query parameters. `POST`, `PATCH`, and `PUT` operations send shim args upstream as an `application/json` request body. The proxy boundary resolves any spec-declared credential binding in the daemon, injects supported credentials at the upstream request boundary, returns a sanitized response, and audits `connector.proxy.proxied` without credential bytes, query strings, or request body values. Unknown connector operations are rejected before any execution attempt. Full forward-proxy integration for arbitrary HTTPS clients remains tracked in [#896](https://github.com/ALRubinger/aileron/issues/896).
+`GET`, `DELETE`, and `HEAD` operations with spec-declared method, path, and upstream hosts are mediated through the sandbox HTTPS proxy boundary with args encoded as query parameters. `POST`, `PATCH`, and `PUT` operations send args upstream as an `application/json` request body. The proxy boundary resolves any spec-declared credential binding in the daemon, injects supported credentials at the upstream request boundary, returns a sanitized response, and audits `connector.proxy.proxied` without credential bytes, query strings, or request body values. Unknown connector operations are rejected before any execution attempt. Full forward-proxy integration for arbitrary HTTPS clients remains tracked in [#896](https://github.com/ALRubinger/aileron/issues/896).
 
 ## Conflict Handling
 
-Sandbox launch fails with an actionable error when:
-
-- two installed connector specs resolve to the same tool command
-- a connector spec tool command conflicts with an installed action shim
-- a connector spec tool command conflicts with the selected agent command, such as `claude`
-
-Installed action shims still come from action manifests. Spec-backed shims do not replace action dispatch; they add the connector-operation contract needed for direct, typed operations.
+Spec loading fails with an actionable error when two installed connector specs resolve to the same tool name. The tool-name sanitizer normalizes each `tools[].name` before the comparison, so two specs whose names normalize to the same value are reported as a conflict.

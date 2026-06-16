@@ -62,7 +62,6 @@ A BYO image must provide:
 - `/bin/sh`
 - a writable `/home/agent/workspace` bind mount when launched by Docker
 - the requested agent command on `PATH`
-- `wget` when Aileron mounts generated connector shims
 
 Validate a BYO image by setting `customizations.aileron.image` in `.devcontainer/devcontainer.json` and running:
 

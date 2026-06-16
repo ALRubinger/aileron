@@ -12,11 +12,13 @@ order: 24
 </table>
 </div>
 
+> **Revision note, 2026-06-15:** This ADR originally left the shims-on-`PATH` + `tools.txt` surface in place as a "complementary non-MCP-native CLI path," which created the deliberate dual surface recorded under "Negative — surface duplication." [#959](https://github.com/ALRubinger/aileron/issues/959) resolves that open surface choice by retiring the shim surface entirely. `aileron-mcp` is now the sole in-container tool surface. The two reasons shims were once load-bearing, BYOCLI tool-catalog cost and shim-based credential mediation, are both gone, and all five launch agents are MCP-capable. Passages below that describe shims as a live complementary surface are superseded by this note.
+
 ## Context
 
 [ADR-0008](/adr/0008-intent-matching) ratifies MCP as the canonical action-exposure surface under host launch. [ADR-0018](/adr/0018-v4-single-binary-runtime) codified that the v4 sandbox runtime would NOT revive `aileron-mcp` in-container, on the basis that container-side generated HTTPS shims plus the data-plane direction in [ADR-0019](/adr/0019-v4-https-data-plane) and [ADR-0020](/adr/0020-v4-connector-specs-and-shims) would carry the load.
 
-That decision is reversed here. Operating the v4 sandbox without MCP parity left the in-container agent with a degraded tool surface compared to host launch: agents that consume MCP server registrations natively (Claude, Pi, Goose, OpenCode, Codex) see Aileron's action catalog as bash-callable shims, not as first-class function-call targets the LLM can pick by description. The cost is paid in prompt context, in tool-selection quality, and in user-visible asymmetry between `aileron launch <agent>` and `aileron launch --sandbox=docker <agent>`. The shims surface stays as a complementary non-MCP-native CLI path for bash callers (see KTD6 in the implementation plan).
+That decision is reversed here. Operating the v4 sandbox without MCP parity left the in-container agent with a degraded tool surface compared to host launch: agents that consume MCP server registrations natively (Claude, Pi, Goose, OpenCode, Codex) see Aileron's action catalog as bash-callable shims, not as first-class function-call targets the LLM can pick by description. The cost is paid in prompt context, in tool-selection quality, and in user-visible asymmetry between `aileron launch <agent>` and `aileron launch --sandbox=docker <agent>`. This ADR originally kept the shims surface as a complementary non-MCP-native CLI path; [#959](https://github.com/ALRubinger/aileron/issues/959) later retired it, leaving `aileron-mcp` as the sole surface (see the revision note above).
 
 The path forward considered two architectural candidates ([#953](https://github.com/ALRubinger/aileron/issues/953) body):
 
@@ -34,7 +36,7 @@ Under `aileron launch --sandbox=docker <agent>`, the launcher revives `aileron-m
 - `mcpEnv` carries the daemon URLs rewritten for the container runtime (`AILERON_URL`, `AILERON_COMMS_URL`, `AILERON_APPROVAL_URL`) plus the launch-scoped `AILERON_SESSION_ID` and `AILERON_TOKEN`.
 - The agent registers `aileron-mcp` per its native mechanism: Claude / Pi via `--mcp-config` JSON, Goose via `--with-extension`, OpenCode via `opencode.json` written into the launch directory (which is the workspace bind-mount), Codex via a temp `config.toml` bind-mounted into the container at `/home/agent/.codex/config.toml`. Codex's host `~/.codex/config.toml` is never touched in sandbox mode.
 - The sandbox container's validate step asserts `aileron-mcp` is present on `PATH` and executes (`aileron-mcp --version` smoke-checks for cross-arch mismatch).
-- The reserved-sandbox-command guard reserves `aileron-mcp` so no future shim can collide with the MCP binary path.
+- The reserved-sandbox-command guard reserved `aileron-mcp` so no connector shim could collide with the MCP binary path. With the shim surface retired in [#959](https://github.com/ALRubinger/aileron/issues/959), that guard was removed; `aileron-mcp` is the only mount under `/usr/local/bin/` that launch emits.
 - The user's own MCP servers (registered through their devcontainer.json or agent-side `mcp.json`) coexist independently. Aileron does NOT aggregate, route, or proxy them. The container MCP model is B1 (Aileron is one MCP server), not B2 (Aileron is an MCP gateway).
 
 The trust contract from [ADR-0009](/adr/0009-user-channel) is preserved: the agent is never in the approval path. Approval surfaces (webapp `review_url`, CLI `aileron approval approve <id>`) reach the user on the host as they do under host launch. The daemon emits the same `execution.started` / `execution.succeeded` / `execution.failed` and `approval.requested` / `approval.approved` / `approval.denied` events for actions invoked via the MCP path, stamped with the launch session id.
@@ -64,9 +66,9 @@ Two surfaces widen, named here so the threat model is documented rather than red
 - Cross-arch hosts (e.g., arm64 host bind-mounting into amd64 container) fail at validate time, not at first MCP call. The validate step runs `aileron-mcp --version` for exactly this reason.
 - Sealed customer-operated runtimes that do not ship the Aileron CLI on the host cannot host-mount. The image-bake path is the next iteration (see "Future considerations").
 
-### Negative — surface duplication
+### Negative — surface duplication (resolved by #959)
 
-For MCP-capable agents, the shims surface (`/usr/local/bin/<shim>` + `tools.txt`) and the MCP catalog (`mcp__aileron__<tool>`) expose the same action operations. The agent sees both. The "MCP catalog is O(1) in N connectors" framing is partially undone for MCP-capable agents because they pay context-window cost for both surfaces. The duplication is deliberate today (shims serve bash callers and non-MCP-native agents); gating shim emission on MCP-capability is a candidate follow-up.
+As originally shipped, the shims surface (`/usr/local/bin/<shim>` + `tools.txt`) and the MCP catalog (`mcp__aileron__<tool>`) exposed the same action operations to MCP-capable agents. The agent saw both, so the "MCP catalog is O(1) in N connectors" framing was partially undone by the context-window cost of carrying two surfaces. [#959](https://github.com/ALRubinger/aileron/issues/959) resolves this by retiring the shim surface entirely rather than capability-gating it, leaving `aileron-mcp` as the sole surface. The reversal condition is documented under "Future considerations": re-introducing arbitrary-CLI wrapping (BYOCLI) would revive the case for a non-MCP-native CLI surface.
 
 ## Alternatives Considered
 
@@ -108,7 +110,7 @@ The Codex sandbox `config.toml` generated by `ConfigureMCP` under `ModeSandbox` 
 
 - **Token scoping.** The current launch-scoped `AILERON_TOKEN` gives the holder full daemon-action authority. A per-route caveat token (e.g., `cap = actions:run, sessions:<id>`) would narrow the blast radius of a token leak from the in-container `aileron-mcp` process. Out of scope here; named so it is recorded.
 - **Image-bake for sealed runtimes.** Shipped for the published image in [#957](https://github.com/ALRubinger/aileron/issues/957); local Tier 0 stays unbaked. See "Alternatives Considered" → image-bake deferred.
-- **Gating shim emission on MCP-capability.** When the launched agent is MCP-capable, the shims surface duplicates LLM-facing affordances. A follow-up can suppress shim emission for MCP-capable agents while keeping it for bash callers and non-MCP-native agents.
+- **Shim surface resolution (done).** This was filed as a follow-up to suppress shim emission for MCP-capable agents. [#959](https://github.com/ALRubinger/aileron/issues/959) resolved it more directly by retiring the shim surface outright, since every launch agent is MCP-capable and BYOCLI is gone. The reversal condition: re-introducing arbitrary-CLI wrapping would revive the case for a non-MCP-native CLI surface.
 - **Codex multi-config-file workaround.** Whether Codex reads additional `~/.codex/*.toml` files beyond `config.toml` is unverified at the time of this ADR. If Codex supports a multi-file config, users wanting Codex+sandbox with extra MCP servers gain a clean merge path; if not, the manual recipe documents the limitation and recommends pre-merge of entries.
 
 ## References
@@ -121,4 +123,4 @@ The Codex sandbox `config.toml` generated by `ConfigureMCP` under `ModeSandbox` 
 - [ADR-0009](/adr/0009-user-channel) — Agent never in the trust path; preserved unchanged across host and sandbox
 - [ADR-0017](/adr/0017-sandbox-composition) — Sandbox composition via devcontainer.json
 - [ADR-0018](/adr/0018-v4-single-binary-runtime) — The "no `aileron-mcp` in sandbox" decision amended here
-- [ADR-0020](/adr/0020-v4-connector-specs-and-shims) — Generated HTTPS shims; complementary to the MCP catalog
+- [ADR-0020](/adr/0020-v4-connector-specs-and-shims) — Generated HTTPS shims; the rendered shim surface was retired in [#959](https://github.com/ALRubinger/aileron/issues/959), and the connector-spec loading it described is retained for data-plane operation validation

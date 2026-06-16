@@ -12,6 +12,8 @@ order: 19
 </table>
 </div>
 
+> **Forward pointer, 2026-06-15:** Where this ADR describes generated connector shims as data-plane clients, note that the rendered shim surface was retired in [#959](https://github.com/ALRubinger/aileron/issues/959). The HTTPS data plane and credential injection this ADR defines are unchanged; `aileron-mcp` ([ADR-0024](/adr/0024-sandbox-mcp-parity)) is now the sole in-container tool surface and the data plane's caller.
+
 ## Context
 
 The #796 cut line gives sandboxed agents a static runtime surface: session env, `/etc/aileron/tools.txt`, generated connector shims, and `AILERON_API_URL` calls back to the daemon.

@@ -16,7 +16,7 @@ If you're looking for end-user docs, the [Getting Started](/getting-started/) gu
 - [Running Tests](/development/running-tests/) — unit, integration, race, coverage. What CI runs, and how to reproduce a CI failure locally.
 - [Sandbox Composition](/development/sandbox-composition/) — how Aileron uses devcontainer.json, `aileron/sandbox-base`, and `aileron sandbox` to define the agent container image.
 - [Sandbox Agent Images](/development/sandbox-agent-images/) — which agent commands are supported by the selected sandbox image and how to check them before launch.
-- [Sandbox Connector Specs](/development/sandbox-connector-specs/) — how installed connector specs become sandbox-visible tools and generated HTTPS shims.
+- [Sandbox Connector Specs](/development/sandbox-connector-specs/) — how installed connector specs drive data-plane operation validation in sandboxed launch sessions.
 - [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/) — verify the v4 HTTPS proxy works with `curl`, `gh`, and `aws`; success and failure cases with expected audit events.
 - [Submitting Changes](/development/submitting-changes/) — branch and PR conventions, commit message format, ADR amendments, what gets reviewed.
 - [Adding an Agent](/development/adding-an-agent/) — how to wire a new AI coding agent into `aileron launch` via the `Agent` SPI.
