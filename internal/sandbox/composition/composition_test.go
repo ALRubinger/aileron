@@ -229,7 +229,7 @@ func TestInitDefaultsToClaudeRecipeReadyToBuild(t *testing.T) {
 	}
 }
 
-func TestInitWithUnknownAgentEmitsTODOStub(t *testing.T) {
+func TestInitWithCodexRecipeReadyToBuild(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0", Agent: "codex"}); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -242,8 +242,8 @@ func TestInitWithUnknownAgentEmitsTODOStub(t *testing.T) {
 	for _, want := range []string{
 		"\nUSER root\n",
 		"\nUSER agent\n",
-		"TODO: install the codex CLI",
-		"sandbox-agent-images",
+		"--- Codex ---",
+		"npm install -g @openai/codex",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("codex Dockerfile missing %q:\n%s", want, body)
@@ -251,6 +251,37 @@ func TestInitWithUnknownAgentEmitsTODOStub(t *testing.T) {
 	}
 	if strings.Contains(body, "@anthropic-ai/claude-code") {
 		t.Fatalf("codex Dockerfile should not include the Claude recipe:\n%s", body)
+	}
+	// The Codex install RUN must NOT be commented out.
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "@openai/codex") && strings.HasPrefix(strings.TrimSpace(line), "#") {
+			t.Fatalf("Codex install RUN should be uncommented:\n%s", body)
+		}
+	}
+}
+
+func TestInitWithUnknownAgentEmitsTODOStub(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0", Agent: "frobnicate"}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	dockerfile, err := os.ReadFile(filepath.Join(dir, DefaultDockerfilePath))
+	if err != nil {
+		t.Fatalf("read Dockerfile: %v", err)
+	}
+	body := string(dockerfile)
+	for _, want := range []string{
+		"\nUSER root\n",
+		"\nUSER agent\n",
+		"TODO: install the frobnicate CLI",
+		"sandbox-agent-images",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("frobnicate Dockerfile missing %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "@anthropic-ai/claude-code") {
+		t.Fatalf("frobnicate Dockerfile should not include the Claude recipe:\n%s", body)
 	}
 }
 
