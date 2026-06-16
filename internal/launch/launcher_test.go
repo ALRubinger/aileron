@@ -14,6 +14,22 @@ import (
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
+// dropBakedInspectCalls removes the baked-MCP image-label detection calls
+// (`docker image inspect --format '{{ ... ai.aileron.mcp.version }}'`) the
+// launcher issues to choose between the host-mount and baked paths (#957).
+// validateSandbox and launchSandbox each issue one; the surrounding contract
+// assertions care only about the build/validate/run calls.
+func dropBakedInspectCalls(calls []string) []string {
+	out := make([]string, 0, len(calls))
+	for _, c := range calls {
+		if strings.Contains(c, sandboxcontainer.MCPVersionLabel) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 func TestResolveBinary_Found(t *testing.T) {
 	path, err := launch.ResolveBinary([]string{"echo"})
 	if err != nil {
@@ -693,7 +709,7 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read docker args: %v", err)
 	}
-	calls := strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n")
+	calls := dropBakedInspectCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
 	if len(calls) != 2 {
 		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
 	}
@@ -789,7 +805,7 @@ func TestLaunch_SandboxDiscoveryMountsConnectorSpecShims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docker args: %v", err)
 	}
-	calls := strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n")
+	calls := dropBakedInspectCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
 	if len(calls) != 2 {
 		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
 	}
@@ -850,7 +866,7 @@ func TestLaunch_SandboxScaffoldBuildsAndRunsWithDiscoveryMounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docker args: %v", err)
 	}
-	calls := strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n")
+	calls := dropBakedInspectCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
 	if len(calls) != 3 {
 		t.Fatalf("docker calls = %d, want build, validate, and run:\n%s", len(calls), data)
 	}
