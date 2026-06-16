@@ -1,0 +1,101 @@
+# Published sandbox-base (ghcr.io/alrubinger/aileron-sandbox-base).
+#
+# Unlike the local Tier 0 Containerfile, this recipe BAKES aileron-mcp into the
+# image and stamps an `ai.aileron.mcp.version` label. A sealed customer-operated
+# runtime ships only this image with no host-side aileron-mcp to bind-mount, so
+# the binary has to travel inside the image (issue #957, the ADR-0024 image-bake
+# flip). The launcher detects the label and skips the host-mount; unlabeled
+# images (local Tier 0, devcontainers, BYO) keep the host-mount fallback.
+#
+# Build context is the REPO ROOT (`.github/workflows/sandbox-base.yml` passes
+# `context: .`), because the builder stage needs go.work and the Go source. A
+# repo-root `.dockerignore` keeps the context lean.
+#
+# The substrate (final stage below: packages, agent user, proxy-CA helpers,
+# entrypoint) MUST stay in sync with Containerfile (the local Tier 0 recipe).
+
+# Builder stage: cross-compile aileron-mcp for the target platform. buildx sets
+# TARGETOS/TARGETARCH per entry in the multi-arch matrix; --platform=$BUILDPLATFORM
+# pins this stage to the native builder arch so the Go toolchain cross-compiles
+# (fast) instead of running emulated.
+#
+# Pin the toolchain to the repo's Go version (go.work `go 1.26.0`); bump in
+# lockstep when the workspace bumps Go (stay close to upstream).
+FROM --platform=$BUILDPLATFORM golang:1.26 AS mcp-builder
+WORKDIR /build
+
+# aileron-mcp resolves its module graph through the repo workspace (go.work),
+# not as a standalone module, so a GOWORK=off build reports "updates to go.mod
+# needed". Reconstruct a minimal workspace with only the three modules
+# aileron-mcp needs (test/integration and the other cmd binaries are dropped by
+# .dockerignore and irrelevant here), and reuse the repo's go.work.sum so the
+# build is reproducible and offline-checksummed against the committed graph.
+ENV CGO_ENABLED=0
+
+COPY internal/ internal/
+COPY sdk/go/ sdk/go/
+COPY cmd/aileron-mcp/ cmd/aileron-mcp/
+COPY go.work.sum go.work.sum
+RUN go work init ./internal ./sdk/go ./cmd/aileron-mcp
+
+# Version stamp injected via the same -X ldflags `task build:mcp` uses, so the
+# baked binary's `--version` and the image label report the release identity.
+ARG AILERON_VERSION=dev
+ARG AILERON_COMMIT=unknown
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /build/cmd/aileron-mcp
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -ldflags "-s -w \
+      -X github.com/ALRubinger/aileron/internal/version.Version=${AILERON_VERSION} \
+      -X github.com/ALRubinger/aileron/internal/version.Commit=${AILERON_COMMIT}" \
+    -o /out/aileron-mcp .
+
+FROM alpine:3.24
+
+LABEL org.opencontainers.image.title="Aileron sandbox base"
+LABEL org.opencontainers.image.description="Minimal sandbox substrate for Aileron-managed agent containers."
+LABEL org.opencontainers.image.source="https://github.com/ALRubinger/aileron"
+
+# ai.aileron.mcp.version carries the baked binary's release identity. The
+# launcher reads it (skip host-mount when present) and `aileron sandbox check`
+# compares it against the host CLI to surface version skew. The Go-side reader
+# is MCPVersionLabel in internal/sandbox/container/runtime.go; keep both in
+# sync. ARGs do not cross the FROM boundary, so AILERON_VERSION is re-declared.
+ARG AILERON_VERSION=dev
+LABEL ai.aileron.mcp.version="${AILERON_VERSION}"
+
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    coreutils \
+    findutils \
+    gawk \
+    grep \
+    procps \
+    sed \
+    su-exec \
+    tini \
+    wget
+
+RUN addgroup -S agent && adduser -S -G agent -h /home/agent agent \
+    && mkdir -p /etc/aileron/proxy /opt/aileron/manifests /home/agent/workspace \
+    && touch /etc/aileron/tools.txt \
+    && chown -R agent:agent /home/agent
+
+COPY images/sandbox-base/profile.d/aileron-tools.sh /etc/profile.d/aileron-tools.sh
+COPY images/sandbox-base/bin/aileron-install-proxy-ca /usr/local/bin/aileron-install-proxy-ca
+COPY images/sandbox-base/bin/aileron-run-with-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca
+RUN chmod 0755 /usr/local/bin/aileron-install-proxy-ca /usr/local/bin/aileron-run-with-proxy-ca
+
+# Baked aileron-mcp from the builder stage. Root-owned, world-executable
+# (matches the proxy-CA helpers). The launcher's sandboxMCPBinPath const and
+# the RequireMCPBinary smoke check both target this path.
+COPY --from=mcp-builder /out/aileron-mcp /usr/local/bin/aileron-mcp
+RUN chmod 0755 /usr/local/bin/aileron-mcp
+
+WORKDIR /home/agent/workspace
+USER agent
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["/bin/bash", "-l"]
