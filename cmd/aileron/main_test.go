@@ -302,8 +302,8 @@ func TestRunSandboxInitAgentFlagSelectsRecipe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read Dockerfile: %v", err)
 	}
-	if !strings.Contains(string(body), "TODO: install the codex CLI") {
-		t.Fatalf("Dockerfile missing codex TODO stub:\n%s", string(body))
+	if !strings.Contains(string(body), "npm install -g @openai/codex") {
+		t.Fatalf("Dockerfile missing codex recipe:\n%s", string(body))
 	}
 }
 
