@@ -105,6 +105,18 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 			return 1
 		}
 
+		// aileron's own launch flags may also appear after the agent name;
+		// consume them wherever they land so `aileron launch claude
+		// --sandbox=docker` behaves identically to `aileron launch
+		// --sandbox=docker claude`. Everything else forwards to the agent.
+		// A standalone `--` stops consumption and forwards the rest
+		// verbatim, so an aileron-named flag can still be passed through.
+		agentArgs, err := applyTrailingLaunchFlags(launchFlags, launchArgs[1:])
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+
 		// Capture cwd so the daemon's session record carries working_dir
 		// (rendered by `aileron sessions list`). os.Getwd basically never
 		// errors in practice; on the rare case it does, fall through with
@@ -113,7 +125,7 @@ func run(args []string, registry *launch.Registry, stdout, stderr io.Writer) int
 
 		result, err := launchFn(context.Background(), launch.LaunchConfig{
 			Agent:              agent,
-			Args:               launchArgs[1:],
+			Args:               agentArgs,
 			Dir:                cwd,
 			LogLevel:           launch.ParseLogLevel(*logLevel),
 			SandboxRuntime:     *sandboxRuntime,
@@ -438,6 +450,74 @@ var spawnResolveFn = spawn.Resolve
 // launchFn is a package-level seam so tests can assert on the
 // LaunchConfig the CLI builds without depending on a running daemon.
 var launchFn = launch.Launch
+
+// launchFlagTakesValue reports whether an aileron launch flag consumes a
+// following value token. All current launch flags are string-valued; a
+// bool launch flag would return false here and be matched only in its
+// `--flag` / `--flag=value` forms.
+func launchFlagTakesValue(name string) bool {
+	switch name {
+	case "log-level", "sandbox", "sandbox-build", "sandbox-proxy":
+		return true
+	default:
+		return false
+	}
+}
+
+// parseLaunchFlagToken extracts a flag name and optional inline value
+// from a single- or double-dash token. It returns name == "" for any
+// non-flag token, including a bare "-" or "--".
+func parseLaunchFlagToken(arg string) (name, value string, hasValue bool) {
+	if len(arg) < 2 || arg[0] != '-' {
+		return "", "", false
+	}
+	trimmed := arg[1:]
+	if trimmed[0] == '-' {
+		trimmed = trimmed[1:]
+	}
+	if trimmed == "" { // "-" or "--"
+		return "", "", false
+	}
+	if eq := strings.IndexByte(trimmed, '='); eq >= 0 {
+		return trimmed[:eq], trimmed[eq+1:], true
+	}
+	return trimmed, "", false
+}
+
+// applyTrailingLaunchFlags consumes aileron launch flags that appear
+// after the agent name, applying each to fs, and returns the remaining
+// arguments to forward to the agent. This makes launch-flag position
+// irrelevant: `aileron launch claude --sandbox=docker` resolves the same
+// as `aileron launch --sandbox=docker claude`. A standalone "--"
+// terminates consumption — it is dropped and every following token
+// forwards verbatim, so a flag that shares an aileron launch-flag name
+// can still be passed through to the agent.
+func applyTrailingLaunchFlags(fs *flag.FlagSet, tail []string) ([]string, error) {
+	var agentArgs []string
+	for i := 0; i < len(tail); i++ {
+		arg := tail[i]
+		if arg == "--" {
+			agentArgs = append(agentArgs, tail[i+1:]...)
+			break
+		}
+		name, value, hasValue := parseLaunchFlagToken(arg)
+		if name != "" && launchFlagTakesValue(name) {
+			if !hasValue {
+				if i+1 >= len(tail) {
+					return nil, fmt.Errorf("flag --%s after the agent name needs a value", name)
+				}
+				value = tail[i+1]
+				i++
+			}
+			if err := fs.Set(name, value); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		agentArgs = append(agentArgs, arg)
+	}
+	return agentArgs, nil
+}
 
 // ensureVaultUnlockedFn is the seam for the run() vault state-machine
 // hook. Tests for the dispatched commands swap this to a no-op so they

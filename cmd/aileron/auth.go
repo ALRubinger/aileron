@@ -67,7 +67,7 @@ func runAuthImport(agentName string, registry *launch.Registry, stdout, stderr i
 	if err != nil {
 		if errors.Is(err, hostimport.ErrNotAuthenticated) {
 			fmt.Fprintf(stderr, "error: no host credentials found for %s\n", agentName)
-			fmt.Fprintf(stderr, "log in first, then re-run; or use interactive in-container login: aileron launch %s --sandbox=docker\n", agentName)
+			fmt.Fprintf(stderr, "log in first, then re-run; or use interactive in-container login: aileron launch --sandbox=docker %s\n", agentName)
 			return 1
 		}
 		// Any other extraction error (including the Linux-keyring

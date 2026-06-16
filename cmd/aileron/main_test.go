@@ -204,6 +204,57 @@ func TestRun_LaunchPropagatesSandboxProxyFlag(t *testing.T) {
 	}
 }
 
+// TestRun_LaunchFlagsAfterAgentName locks the contract that aileron's
+// own launch flags are position-independent: they resolve the same
+// whether they appear before or after the agent name, they are NOT
+// forwarded to the agent, genuinely-unknown args still forward, and a
+// standalone "--" forwards an aileron-named flag through to the agent.
+// Regression for the cryptic `unknown option '--sandbox=docker'` the
+// agent CLI emitted when the flag landed after the agent name.
+func TestRun_LaunchFlagsAfterAgentName(t *testing.T) {
+	origLaunch := launchFn
+	t.Cleanup(func() { launchFn = origLaunch })
+
+	cases := []struct {
+		name        string
+		args        []string
+		wantRuntime string
+		wantBuild   string
+		wantArgs    string // agent passthrough args, space-joined
+	}{
+		{"eq form after agent", []string{"launch", "claude", "--sandbox=docker"}, "docker", "auto", ""},
+		{"space form after agent", []string{"launch", "claude", "--sandbox", "docker"}, "docker", "auto", ""},
+		{"before agent still works", []string{"launch", "--sandbox=docker", "claude"}, "docker", "auto", ""},
+		{"split before and after", []string{"launch", "--sandbox=docker", "claude", "--sandbox-build=never"}, "docker", "never", ""},
+		{"unknown agent args forward", []string{"launch", "claude", "--model", "opus", "--sandbox=docker"}, "docker", "auto", "--model opus"},
+		{"double dash forwards through", []string{"launch", "claude", "--", "--sandbox=docker"}, "off", "auto", "--sandbox=docker"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured launch.LaunchConfig
+			launchFn = func(_ context.Context, cfg launch.LaunchConfig) (launch.LaunchResult, error) {
+				captured = cfg
+				return launch.LaunchResult{ExitCode: 0}, nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, newTestRegistry(), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit = %d (stderr=%q)", code, stderr.String())
+			}
+			if captured.SandboxRuntime != tc.wantRuntime {
+				t.Errorf("SandboxRuntime = %q, want %q", captured.SandboxRuntime, tc.wantRuntime)
+			}
+			if captured.SandboxBuildPolicy != tc.wantBuild {
+				t.Errorf("SandboxBuildPolicy = %q, want %q", captured.SandboxBuildPolicy, tc.wantBuild)
+			}
+			if got := strings.Join(captured.Args, " "); got != tc.wantArgs {
+				t.Errorf("agent Args = %q, want %q", got, tc.wantArgs)
+			}
+		})
+	}
+}
+
 func TestRun_LaunchLogLevelNoAgent(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"launch", "--log-level=debug"}, newTestRegistry(), &stdout, &stderr)
