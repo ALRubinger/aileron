@@ -20,7 +20,7 @@ The check uses the same composition plan and minimal launch validation as `ailer
 | Agent | Command | Sandbox image support | MCP under `--sandbox=docker` | Notes |
 |---|---|---|---|---|
 | Claude Code | `claude` | Documented recipe | ✓ via `--mcp-config` | First-class recipe below. Use `sandbox check --agent=claude` before launch. |
-| Codex | `codex` | Command contract only | ✓ via bind-mounted `config.toml` | Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` (ADR-0024). Host `~/.codex/config.toml` is never touched. |
+| Codex | `codex` | Documented recipe | ✓ via bind-mounted `config.toml` | Recipe below; scaffold with `sandbox init --agent=codex`. Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` (ADR-0024). Host `~/.codex/config.toml` is never touched. |
 | Goose | `goose` | Command contract only | ✓ via `--with-extension` | Install the CLI in Tier 1 or BYO images; no maintained recipe yet. |
 | OpenCode | `opencode` | Command contract only | ✓ via workspace `opencode.json` | Launcher writes `opencode.json` into the launch directory; the workspace bind-mount makes it readable in-container. |
 | Pi | `pi` | Command contract only | ✓ via `--mcp-config` | Shares Claude's MCP wiring. |
@@ -54,6 +54,29 @@ aileron launch --sandbox=docker claude
 ```
 
 Claude Code still owns its own authentication flow. Do not bake Claude, Anthropic, cloud, or Aileron credentials into the image.
+
+## Codex Recipe
+
+`aileron sandbox init --agent=codex` scaffolds a ready-to-build `.devcontainer/Dockerfile` for Codex. The `@openai/codex` npm package ships prebuilt musl binaries, so it installs cleanly on the Alpine base:
+
+```bash
+aileron sandbox init --agent=codex
+```
+
+Build and validate:
+
+```bash
+aileron sandbox build --runtime=docker
+aileron sandbox check --runtime=docker --agent=codex
+```
+
+Then launch:
+
+```bash
+aileron launch --sandbox=docker codex
+```
+
+Codex owns its own authentication flow. Do not bake OpenAI, cloud, or Aileron credentials into the image.
 
 ## BYO Image Contract
 

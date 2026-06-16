@@ -8,9 +8,9 @@ import (
 )
 
 // DefaultAgent is the agent the scaffold targets when --agent is omitted.
-// Claude Code is the only agent with a documented Tier 1 install recipe
-// today (see docs/development/sandbox-agent-images.md); other agents emit
-// a structurally correct Dockerfile with a TODO install stub.
+// Claude Code and Codex have documented Tier 1 install recipes today (see
+// docs/development/sandbox-agent-images.md); other agents emit a
+// structurally correct Dockerfile with a TODO install stub.
 const DefaultAgent = "claude"
 
 // InitOptions configures the sandbox scaffold operation.
@@ -121,6 +121,12 @@ func agentInstallSnippet(agent string) string {
 		return `# --- Claude Code ---
 RUN apk add --no-cache git nodejs npm ripgrep && \
     npm install -g @anthropic-ai/claude-code`
+	case "codex":
+		// The @openai/codex npm package ships prebuilt musl binaries, so it
+		// installs cleanly on the Alpine base.
+		return `# --- Codex ---
+RUN apk add --no-cache git nodejs npm ripgrep && \
+    npm install -g @openai/codex`
 	default:
 		return fmt.Sprintf(`# --- TODO: install the %s CLI ---
 # Aileron does not yet ship a verified install recipe for %s.
