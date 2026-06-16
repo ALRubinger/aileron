@@ -19,11 +19,15 @@ import (
 // opencode.json workspace file for OpenCode, or a bind-mounted config.toml
 // for Codex).
 //
-// Combined with the integration round-trip in
-// internal/app/sandbox_mcp_test.go (which proves aileron-mcp exposes
-// draft_email over tools/list and calls it end-to-end through a real
-// container), this is the per-agent "agent sees aileron + draft_email"
-// coverage for the Linux column of the #962 matrix.
+// This is a launcher-side contract test, NOT a live-agent launch. It does
+// not run claude/codex/goose/pi/opencode; it checks the registration
+// artifact Aileron generates for each. The integration round-trip in
+// internal/app/sandbox_mcp_test.go separately proves aileron-mcp itself
+// exposes draft_email over tools/list and round-trips through a real
+// container (with the test acting as the MCP client, not a real agent).
+// Whether each real agent actually honors the registration we generate
+// (e.g. Codex reads the bind-mounted config.toml, Goose parses
+// --with-extension) is covered by the manual smoke in #962.
 //
 // Pure Go: no Docker, no agent binaries. The registration logic is
 // host-OS-independent, so one CI run covers it; macOS and Windows
