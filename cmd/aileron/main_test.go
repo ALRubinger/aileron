@@ -408,7 +408,7 @@ func TestRunSandboxCheckValidatesAgentCommand(t *testing.T) {
 		}, nil
 	}
 	var capturedCommand string
-	sandboxCheckValidateFn = func(_ context.Context, runtimeName, workDir, image, command string) error {
+	sandboxCheckValidateFn = func(_ context.Context, runtimeName, workDir, image, command string, _ bool) error {
 		if runtimeName != "docker" || workDir != cwd || image != "ghcr.io/acme/agent:latest" {
 			t.Fatalf("validate args = %q %q %q", runtimeName, workDir, image)
 		}
@@ -468,7 +468,7 @@ func TestRunSandboxCheckRewritesBuildPolicyHint(t *testing.T) {
 	sandboxCheckBuildFn = func(context.Context, string, io.Writer, io.Writer, sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
 		return sandboxcontainer.BuildResult{}, errors.New("use --sandbox-build=auto")
 	}
-	sandboxCheckValidateFn = func(context.Context, string, string, string, string) error {
+	sandboxCheckValidateFn = func(context.Context, string, string, string, string, bool) error {
 		t.Fatal("validate should not run after build error")
 		return nil
 	}
