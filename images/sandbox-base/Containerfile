@@ -1,3 +1,14 @@
+# Local Tier 0 sandbox-base. Built with `context: images/sandbox-base` by the
+# launcher (internal/sandbox/container/runtime.go `baseBuildArgs`) and by the
+# launch integration tests. This recipe stays UNBAKED: it carries no
+# aileron-mcp and no `ai.aileron.mcp.version` label, so the launcher takes the
+# host-mount path (ADR-0024) for the v4 default topology, preserving
+# version-lockstep with the host CLI and keeping local base builds fast.
+#
+# The published image (ghcr.io) bakes aileron-mcp in. That recipe lives in
+# Containerfile.published, which needs the repo-root build context to compile
+# the binary. The substrate below (packages, user, proxy-CA helpers, entry)
+# MUST stay in sync with Containerfile.published's final stage. See issue #957.
 FROM alpine:3.24
 
 LABEL org.opencontainers.image.title="Aileron sandbox base"

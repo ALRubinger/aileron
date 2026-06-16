@@ -53,7 +53,7 @@ aileron launch --sandbox=docker "$AGENT"
 
 The launcher will:
 
-1. Resolve the host-built `aileron-mcp` binary and bind-mount it read-only into the container at `/usr/local/bin/aileron-mcp`.
+1. Resolve the host-built `aileron-mcp` binary and bind-mount it read-only into the container at `/usr/local/bin/aileron-mcp`. The launcher skips this step when the resolved image already bakes `aileron-mcp` in. It detects a baked image by reading the `ai.aileron.mcp.version` label ([issue #957](https://github.com/ALRubinger/aileron/issues/957)). The published `ghcr.io/alrubinger/aileron-sandbox-base` image bakes the binary so sealed customer-operated runtimes launch without a host `aileron-mcp`. The local Tier 0 base build stays unbaked and keeps using this host-mount.
 2. Build the MCP environment (`AILERON_URL` rewritten to `host.docker.internal:<port>`, `AILERON_SESSION_ID`, `AILERON_TOKEN`).
 3. Register `aileron-mcp` with Claude Code via `--mcp-config`.
 4. Validate the container can `command -v aileron-mcp` AND `aileron-mcp --version` exits 0 (catches arch mismatch).
@@ -170,6 +170,14 @@ docker run --rm --add-host=host.docker.internal:host-gateway alpine getent hosts
 
 macOS and Windows Docker Desktop handle this automatically. Podman's native `host.containers.internal` alias is the deferred re-add path; Podman is planned but not yet supported in v4 ([ADR-0014](/adr/0014-spawn-sandbox-technology/)).
 
+### Baked image version skew
+
+The published `sandbox-base` image ships its own `aileron-mcp` baked in. The launcher detects this through the `ai.aileron.mcp.version` label and skips the host-mount, so a baked image runs the version of `aileron-mcp` that was compiled into it. That version can differ from the host CLI's version. ADR-0024's host-mount lockstep guarantees the two match for the v4 default topology, but a baked image breaks that lockstep by design.
+
+`aileron sandbox check` surfaces the difference. It compares the baked `ai.aileron.mcp.version` label against the host CLI version. A match prints an `mcp: baked aileron-mcp <version> (matches host CLI)` line. A mismatch prints a warning that names both versions and never fails the check. Skew is expected and managed for sealed customer-operated runtimes. Skew in the v4 default topology is worth investigating, since that flow expects the unbaked local image and a host-built `aileron-mcp`.
+
+For the default unbaked flow, the host `aileron-mcp` sibling is still required. Build it with `task build:cli && task build:mcp` and keep both on `PATH`.
+
 ## Sources
 
 - [ADR-0008](/adr/0008-intent-matching/) — MCP is the canonical action-exposure surface (extended to sandbox launch).
@@ -177,3 +185,4 @@ macOS and Windows Docker Desktop handle this automatically. Podman's native `hos
 - [ADR-0018](/adr/0018-v4-single-binary-runtime/) — v4 single-binary model; sandbox MCP revival amended in.
 - [ADR-0024](/adr/0024-sandbox-mcp-parity/) — the Path B1 architecture decision this walkthrough exercises.
 - [Issue #953](https://github.com/ALRubinger/aileron/issues/953) — the tracking issue for sandbox MCP parity.
+- [Issue #957](https://github.com/ALRubinger/aileron/issues/957) — baking `aileron-mcp` into the published `sandbox-base` image.

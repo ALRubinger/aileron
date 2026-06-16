@@ -257,20 +257,27 @@ func validateSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchC
 	}
 	defer cleanupMounts()
 	mounts = append(mounts, extraMounts...)
-	// Resolve aileron-mcp and append its mount so the validate step
-	// can smoke-check the binary inside the container (ADR-0024). Prefer
-	// the cross-compiled Linux variant when present so this works off a
-	// macOS/Windows host.
-	selfPath, _ := os.Executable()
-	mcpBinHost, err := resolveSandboxMCPBinary(selfPath)
-	if err != nil {
-		return err
+	// Unbaked image: resolve aileron-mcp on the host and append its mount so
+	// the validate step can smoke-check the binary inside the container
+	// (ADR-0024). Prefer the cross-compiled Linux variant when present so
+	// this works off a macOS/Windows host.
+	//
+	// Baked image (issue #957): aileron-mcp already lives at
+	// sandboxMCPBinPath, so skip host resolution (a missing host binary is
+	// not fatal on a sealed runtime) and skip the host-mount. RequireMCPBinary
+	// still smoke-checks the in-image binary below.
+	if sandboxBakedMCPVersion(ctx, plan.Runtime, plan.Image) == "" {
+		selfPath, _ := os.Executable()
+		mcpBinHost, err := resolveSandboxMCPBinary(selfPath)
+		if err != nil {
+			return err
+		}
+		mounts = append(mounts, sandboxcontainer.Volume{
+			Source:   mcpBinHost,
+			Target:   sandboxMCPBinPath,
+			ReadOnly: true,
+		})
 	}
-	mounts = append(mounts, sandboxcontainer.Volume{
-		Source:   mcpBinHost,
-		Target:   sandboxMCPBinPath,
-		ReadOnly: true,
-	})
 	if err := validateSandboxImageForLaunch(ctx, plan, config, agentEnv, mounts, commandName); err != nil {
 		return fmt.Errorf("sandbox image %s is not launchable for %s: %w", plan.Image, config.Agent.Name(), err)
 	}
@@ -282,8 +289,8 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 		Runtime: plan.Runtime,
 		Stdout:  io.Discard,
 	}).Validate(ctx, sandboxcontainer.ValidateOptions{
-		Runtime:               plan.Runtime,
-		Image:                 plan.Image,
+		Runtime:           plan.Runtime,
+		Image:             plan.Image,
 		WorkDir:           config.Dir,
 		Env:               agentEnv,
 		Volumes:           mounts,
@@ -298,6 +305,19 @@ func validateSandboxImage(ctx context.Context, plan SandboxLaunchPlan, config La
 
 var validateSandboxForLaunch = validateSandbox
 var validateSandboxImageForLaunch = validateSandboxImage
+
+// sandboxBakedMCPVersion reports the aileron-mcp version baked into the
+// resolved sandbox image, or "" when the image is unbaked (no
+// ai.aileron.mcp.version label) or cannot be inspected. A non-empty result
+// means the image already provides aileron-mcp at sandboxMCPBinPath, so the
+// launcher skips host-binary resolution and the host bind-mount (issue #957),
+// letting sealed customer-operated runtimes launch without a host aileron-mcp.
+// Swappable in tests. validateSandbox and launchSandbox each call it once per
+// launch; an `image inspect` is a cheap local metadata read, so two calls per
+// launch is accepted rather than threading one result through the call chain.
+var sandboxBakedMCPVersion = func(ctx context.Context, runtimeName, image string) string {
+	return sandboxcontainer.BakedMCPVersion(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
+}
 
 // Launch starts the agent as a child process under Aileron's daemon.
 //
@@ -715,23 +735,30 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	defer cleanupMounts()
 	mounts = append(mounts, extraMounts...)
 
-	// Resolve aileron-mcp on the host and bind-mount it read-only at the
-	// container's well-known MCP binary path. Matches the resolution
-	// shape host launch uses and the host-mount pattern
+	// Unbaked image: resolve aileron-mcp on the host and bind-mount it
+	// read-only at the container's well-known MCP binary path. Matches the
+	// resolution shape host launch uses and the host-mount pattern
 	// sandboxDiscoveryMounts uses for tools.txt and shims (ADR-0024).
 	// Sandbox-flavored lookup picks the cross-compiled Linux variant
 	// when present so this path works off macOS/Windows hosts without
 	// per-user cross-compilation.
-	selfPath, _ := os.Executable()
-	mcpBinHost, err := resolveSandboxMCPBinary(selfPath)
-	if err != nil {
-		return LaunchResult{}, err
+	//
+	// Baked image (issue #957): the published image carries aileron-mcp at
+	// sandboxMCPBinPath, so skip host resolution (a missing host binary is
+	// not fatal on a sealed runtime) and skip the host-mount. ConfigureMCP
+	// below still targets sandboxMCPBinPath, identical on both branches.
+	if sandboxBakedMCPVersion(ctx, plan.Runtime, plan.Image) == "" {
+		selfPath, _ := os.Executable()
+		mcpBinHost, err := resolveSandboxMCPBinary(selfPath)
+		if err != nil {
+			return LaunchResult{}, err
+		}
+		mounts = append(mounts, sandboxcontainer.Volume{
+			Source:   mcpBinHost,
+			Target:   sandboxMCPBinPath,
+			ReadOnly: true,
+		})
 	}
-	mounts = append(mounts, sandboxcontainer.Volume{
-		Source:   mcpBinHost,
-		Target:   sandboxMCPBinPath,
-		ReadOnly: true,
-	})
 
 	// Build the MCP env the in-container aileron-mcp needs to reach the
 	// daemon. Reads from agentEnv so the URL rewrite for the runtime

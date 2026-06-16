@@ -197,7 +197,11 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	}
-	if err := sandboxCheckValidateFn(context.Background(), resolvedRuntime, cwd, result.Image, command); err != nil {
+	// A baked image (issue #957) carries aileron-mcp at the well-known path,
+	// so require the in-image binary smoke check; an unbaked image has no
+	// aileron-mcp mounted under sandbox check, so requiring it would fail.
+	bakedVersion := sandboxCheckBakedVersionFn(context.Background(), resolvedRuntime, result.Image)
+	if err := sandboxCheckValidateFn(context.Background(), resolvedRuntime, cwd, result.Image, command, bakedVersion != ""); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
@@ -205,8 +209,24 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "runtime: %s\n", resolvedRuntime)
 	fmt.Fprintf(stdout, "image: %s\n", result.Image)
 	fmt.Fprintf(stdout, "agent: %s\n", command)
+	if bakedVersion != "" {
+		reportBakedMCPVersion(stdout, stderr, bakedVersion, version.Version)
+	}
 	fmt.Fprintln(stdout, "support: ok")
 	return 0
+}
+
+// reportBakedMCPVersion surfaces version skew between a baked sandbox image's
+// aileron-mcp and the host CLI. ADR-0024's host-mount lockstep does not hold
+// for baked images (issue #957), so skew is an expected operational state for
+// sealed runtimes rather than an error. A match prints an OK line; a mismatch
+// prints a warning and never changes the exit code.
+func reportBakedMCPVersion(stdout, stderr io.Writer, baked, host string) {
+	if baked == host {
+		fmt.Fprintf(stdout, "mcp: baked aileron-mcp %s (matches host CLI)\n", baked)
+		return
+	}
+	fmt.Fprintf(stderr, "warning: baked aileron-mcp version %s differs from host CLI version %s. Baked images ship their own aileron-mcp under the managed-release model, so this skew is expected for sealed runtimes but worth investigating in the v4 default topology.\n", baked, host)
 }
 
 func sandboxCheckError(err error) string {
@@ -223,7 +243,7 @@ var sandboxBuildFn = func(ctx context.Context, runtimeName string, stdout, stder
 
 var sandboxCheckBuildFn = sandboxBuildFn
 
-var sandboxCheckValidateFn = func(ctx context.Context, runtimeName, workDir, image, command string) error {
+var sandboxCheckValidateFn = func(ctx context.Context, runtimeName, workDir, image, command string, requireMCPBinary bool) error {
 	return sandboxcontainer.Builder{
 		Runtime: runtimeName,
 		Stdout:  io.Discard,
@@ -233,7 +253,14 @@ var sandboxCheckValidateFn = func(ctx context.Context, runtimeName, workDir, ima
 		WorkDir:           workDir,
 		Command:           []string{command},
 		RequireProxyTrust: sandboxCheckRequiresProxyTrust(runtimeName),
+		RequireMCPBinary:  requireMCPBinary,
 	})
+}
+
+// sandboxCheckBakedVersionFn reports the aileron-mcp version baked into the
+// resolved image (empty when unbaked or uninspectable). Swappable in tests.
+var sandboxCheckBakedVersionFn = func(ctx context.Context, runtimeName, image string) string {
+	return sandboxcontainer.BakedMCPVersion(ctx, sandboxcontainer.DefaultRunner(), runtimeName, image)
 }
 
 // sandboxCheckRequiresProxyTrust reports whether `sandbox check --agent` must

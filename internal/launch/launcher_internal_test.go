@@ -2,6 +2,8 @@ package launch
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -271,6 +273,138 @@ func TestValidateSandboxPassesExtraMountsAndEnv(t *testing.T) {
 	if !hasMountTarget(gotMounts, sandboxProxyCAPath) {
 		t.Fatalf("validation mounts = %#v, missing %s", gotMounts, sandboxProxyCAPath)
 	}
+}
+
+// --- U4 / #957: baked-image host-mount skip ---
+
+// fakeBaked swaps sandboxBakedMCPVersion to report the given version and
+// restores it on cleanup. An empty version models an unbaked image.
+func fakeBaked(t *testing.T, version string) {
+	t.Helper()
+	orig := sandboxBakedMCPVersion
+	t.Cleanup(func() { sandboxBakedMCPVersion = orig })
+	sandboxBakedMCPVersion = func(context.Context, string, string) string { return version }
+}
+
+func TestValidateSandboxBakedImageSkipsHostMount(t *testing.T) {
+	fakeBaked(t, "0.0.42")
+	orig := validateSandboxImageForLaunch
+	t.Cleanup(func() { validateSandboxImageForLaunch = orig })
+	var got []sandboxcontainer.Volume
+	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, _ map[string]string, mounts []sandboxcontainer.Volume, _ string) error {
+		got = mounts
+		return nil
+	}
+
+	// No host aileron-mcp is resolved on the baked path, so this passes even
+	// when none exists on the host (the sealed-runtime case).
+	err := validateSandbox(context.Background(), SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
+		Agent: namedBinaryAgent{name: "codex"},
+		Dir:   t.TempDir(),
+	}, nil)
+	if err != nil {
+		t.Fatalf("validateSandbox: %v", err)
+	}
+	if hasMountTarget(got, sandboxMCPBinPath) {
+		t.Fatalf("baked image must not host-mount %s; mounts = %#v", sandboxMCPBinPath, got)
+	}
+}
+
+func TestValidateSandboxUnbakedImageHostMounts(t *testing.T) {
+	fakeBaked(t, "")
+	orig := validateSandboxImageForLaunch
+	t.Cleanup(func() { validateSandboxImageForLaunch = orig })
+	var got []sandboxcontainer.Volume
+	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, _ map[string]string, mounts []sandboxcontainer.Volume, _ string) error {
+		got = mounts
+		return nil
+	}
+
+	err := validateSandbox(context.Background(), SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
+		Agent: namedBinaryAgent{name: "codex"},
+		Dir:   t.TempDir(),
+	}, nil)
+	if err != nil {
+		t.Fatalf("validateSandbox: %v", err)
+	}
+	if !hasMountTarget(got, sandboxMCPBinPath) {
+		t.Fatalf("unbaked image must host-mount %s; mounts = %#v", sandboxMCPBinPath, got)
+	}
+}
+
+// launchSandboxCapturedVolumes drives launchSandbox to a clean exit with the
+// run/signal seams faked, returning the container volumes the run was given.
+func launchSandboxCapturedVolumes(t *testing.T) []sandboxcontainer.Volume {
+	t.Helper()
+	origRun := sandboxRunContainer
+	origNotify := sandboxSignalNotify
+	origStop := sandboxSignalStop
+	t.Cleanup(func() {
+		sandboxRunContainer = origRun
+		sandboxSignalNotify = origNotify
+		sandboxSignalStop = origStop
+	})
+	var got []sandboxcontainer.Volume
+	sandboxRunContainer = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.RunOptions) (sandboxcontainer.RunResult, error) {
+		got = opts.Volumes
+		return sandboxcontainer.RunResult{}, nil
+	}
+	sandboxSignalNotify = func(chan<- os.Signal, ...os.Signal) {}
+	sandboxSignalStop = func(chan<- os.Signal) {}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	_, err := launchSandbox(context.Background(), SandboxLaunchPlan{Runtime: "docker", Image: "image:test"}, LaunchConfig{
+		Agent: namedBinaryAgent{name: "claude"},
+	}, map[string]string{}, "aileron-sbx-test", func() {}, logger)
+	if err != nil {
+		t.Fatalf("launchSandbox: %v", err)
+	}
+	return got
+}
+
+func TestLaunchSandboxBakedImageSkipsHostMount(t *testing.T) {
+	fakeBaked(t, "0.0.42")
+	got := launchSandboxCapturedVolumes(t)
+	if hasMountTarget(got, sandboxMCPBinPath) {
+		t.Fatalf("baked image must not host-mount %s; volumes = %#v", sandboxMCPBinPath, got)
+	}
+}
+
+func TestLaunchSandboxUnbakedImageHostMounts(t *testing.T) {
+	fakeBaked(t, "")
+	got := launchSandboxCapturedVolumes(t)
+	if !hasMountTarget(got, sandboxMCPBinPath) {
+		t.Fatalf("unbaked image must host-mount %s; volumes = %#v", sandboxMCPBinPath, got)
+	}
+}
+
+// TestValidateSandboxImageAlwaysRequiresMCPBinary locks the branch-agnostic
+// invariant from KTD5: the validate smoke check runs against the in-image
+// binary on baked images and the host-mounted binary on unbaked ones alike.
+func TestValidateSandboxImageAlwaysRequiresMCPBinary(t *testing.T) {
+	runner := &mcpRequireRecordingRunner{}
+	err := (sandboxcontainer.Builder{Runtime: "docker", Runner: runner}).Validate(context.Background(), sandboxcontainer.ValidateOptions{
+		Runtime:          "docker",
+		Image:            "image:test",
+		WorkDir:          t.TempDir(),
+		Command:          []string{"claude"},
+		RequireMCPBinary: true,
+	})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if runner.lastArg != "1" {
+		t.Fatalf("RequireMCPBinary flag = %q, want 1", runner.lastArg)
+	}
+}
+
+type mcpRequireRecordingRunner struct{ lastArg string }
+
+func (r *mcpRequireRecordingRunner) Run(_ context.Context, _ string, args []string, _, _ io.Writer) error {
+	if len(args) > 0 {
+		r.lastArg = args[len(args)-1]
+	}
+	return nil
 }
 
 func TestNormalizeLaunchBuildPolicy(t *testing.T) {
@@ -562,7 +696,6 @@ func TestResolveSandboxMCPBinary_PropagatesMissingError(t *testing.T) {
 		t.Fatalf("error message lost the remediation hint: %v", err)
 	}
 }
-
 
 // TestValidateSandboxRuntimeRejectsPodman is the launch-path regression
 // test for #1051: --sandbox=podman must fail validation with the

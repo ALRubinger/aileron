@@ -169,7 +169,7 @@ type RunResult struct {
 
 // ValidateOptions configures a launch-time sandbox image validation run.
 type ValidateOptions struct {
-	Runtime               string
+	Runtime           string
 	Image             string
 	WorkDir           string
 	Env               map[string]string
@@ -307,6 +307,40 @@ func (b Builder) shouldBuild(ctx context.Context, runner Runner, runtimeName, im
 
 func (b Builder) imageExists(ctx context.Context, runner Runner, runtimeName, image string) bool {
 	return runner.Run(ctx, runtimeName, []string{"image", "inspect", image}, io.Discard, io.Discard) == nil
+}
+
+// MCPVersionLabel is the OCI image label the published sandbox-base image
+// carries to advertise the aileron-mcp version baked into it (issue #957).
+// The launcher reads it to detect a baked image and skip the host-mount;
+// an unlabeled image has no baked binary and takes the host-mount fallback
+// (ADR-0024). The label is stamped by images/sandbox-base/Containerfile.published;
+// keep this string in sync with that file (the Containerfile cannot import it).
+const MCPVersionLabel = "ai.aileron.mcp.version"
+
+// BakedMCPVersion reports the aileron-mcp version baked into image, read from
+// the MCPVersionLabel OCI label via `<runtime> image inspect`. It returns the
+// trimmed label value, or "" when the image is unlabeled, not present locally,
+// or the inspect fails. Callers treat "" as "not baked" and fall back to the
+// host-mount path, so an inspect error is deliberately not propagated as fatal:
+// "cannot determine" degrades to "host-mount", never a broken launch.
+func BakedMCPVersion(ctx context.Context, runner Runner, runtimeName, image string) string {
+	if runner == nil {
+		runner = execRunner{}
+	}
+	var stdout bytes.Buffer
+	format := "{{ index .Config.Labels \"" + MCPVersionLabel + "\" }}"
+	args := []string{"image", "inspect", "--format", format, image}
+	if err := runner.Run(ctx, runtimeName, args, &stdout, io.Discard); err != nil {
+		return ""
+	}
+	out := strings.TrimSpace(stdout.String())
+	// An image with no labels at all renders the missing key as the Go
+	// template "<no value>" sentinel rather than an empty string; treat it
+	// as "not baked".
+	if out == "<no value>" {
+		return ""
+	}
+	return out
 }
 
 // Run starts a one-shot sandbox container for an agent command.

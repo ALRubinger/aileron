@@ -6,6 +6,14 @@ on:
     paths:
       - ".github/workflows/sandbox-base.yml"
       - "images/sandbox-base/**"
+      # The published image now bakes aileron-mcp (issue #957), so a change to
+      # the binary's source must rebuild the image on PR. internal/** is broad
+      # but correct: aileron-mcp links the internal module.
+      - "cmd/aileron-mcp/**"
+      - "internal/**"
+      - "sdk/go/**"
+      - "go.work"
+      - "go.work.sum"
   push:
     tags:
       - "v*"
@@ -33,6 +41,19 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      # Version stamped into the baked aileron-mcp and the
+      # ai.aileron.mcp.version image label. Tag builds carry the release
+      # version (v-prefix stripped to match version.Version); PR and dispatch
+      # builds use "dev", consistent with the host CLI's default version.
+      - name: Resolve build version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate image metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -54,30 +75,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # context is the repo root so the builder stage can compile aileron-mcp
+      # from go.work + source; the baked recipe lives in Containerfile.published.
       - name: Build image
         uses: docker/build-push-action@v7
         with:
-          context: images/sandbox-base
-          file: images/sandbox-base/Containerfile
+          context: .
+          file: images/sandbox-base/Containerfile.published
           platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            AILERON_VERSION=${{ steps.ver.outputs.version }}
+            AILERON_COMMIT=${{ github.sha }}
 
       # Single-arch local load so the next step can `docker run` the image.
       # The multi-arch build above cannot use `load: true`.
       - name: Build image for smoke test
         uses: docker/build-push-action@v7
         with:
-          context: images/sandbox-base
-          file: images/sandbox-base/Containerfile
+          context: .
+          file: images/sandbox-base/Containerfile.published
           load: true
           tags: aileron-sandbox-base:smoke
+          build-args: |
+            AILERON_VERSION=${{ steps.ver.outputs.version }}
+            AILERON_COMMIT=${{ github.sha }}
 
-      # Minimal image-fidelity smoke. Earlier matrices exercised the #801
-      # shell-mediation surface that #952 fully removed; the only image
-      # invariant remaining is "bash runs in the published image and
-      # resolves to the Alpine default at /bin/bash".
+      # Image-fidelity smoke: the bash substrate plus the baked-MCP invariants
+      # (#957) -- the binary runs and the version label is present.
       - name: Smoke test image
         run: |
           set -euo pipefail
@@ -89,4 +116,21 @@ jobs:
             exit 1
           fi
           docker run --rm "$IMG" sh -c '[ ! -d /etc/aileron/shell ]'
+
+          # Baked aileron-mcp runs and reports a non-empty version.
+          mcp_version=$(docker run --rm "$IMG" aileron-mcp --version)
+          if [ -z "$mcp_version" ]; then
+            echo "baked aileron-mcp --version returned empty"
+            exit 1
+          fi
+          echo "baked aileron-mcp --version: $mcp_version"
+
+          # The ai.aileron.mcp.version label is present (launcher detection key).
+          label=$(docker inspect --format '{{ index .Config.Labels "ai.aileron.mcp.version" }}' "$IMG")
+          if [ -z "$label" ]; then
+            echo "ai.aileron.mcp.version label missing on smoke image"
+            exit 1
+          fi
+          echo "ai.aileron.mcp.version label: $label"
+
           echo "sandbox-base smoke test passed"
