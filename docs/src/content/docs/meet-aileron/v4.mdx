@@ -37,13 +37,6 @@ import Bot from '@lucide/svelte/icons/bot';
   </p>
 </div>
 
-<Alert.Root class="my-6">
-  <Alert.Title>Architecture note (2026-06-15)</Alert.Title>
-  <Alert.Description>
-    This page describes the agent's in-container tool surface as Aileron-curated connector shims on <code>$PATH</code> with "no MCP server from Aileron." That has since changed. <a href="/adr/0024-sandbox-mcp-parity/">ADR-0024</a> revived <code>aileron-mcp</code> as the in-container tool surface, and <a href="https://github.com/ALRubinger/aileron/issues/959">#959</a> retired the connector-shim/<code>tools.txt</code> surface entirely. <code>aileron-mcp</code> is now the sole in-container tool surface; the HTTPS proxy / credential-mediation data plane described here is unchanged. The shim-centric passages below are historical and pending a fuller refresh.
-  </Alert.Description>
-</Alert.Root>
-
 ## What this makes possible
 
 Concrete scenarios teams and organizations can run on Aileron:
@@ -62,21 +55,21 @@ Capabilities that compound across every agent and every team:
 
 - **One substrate for every agent.** Whatever model (Claude, GPT, Gemini, open-weights), whatever framework, whatever team: every agent runs through the same Aileron runtime, with the same policy, approvals, audit, and credential boundary.
 - **Identity at the agentic layer.** Per-user authentication, per-team vaults, RBAC on credentials and actions. Every agentic action is attributed to a human, not to "the agent."
-- **Action-level policy** declared per connector and enforced at the proxy. Idempotency, approval requirements, and audit shape are uniform across every invocation.
-- **Human-in-the-loop approval** as a first-class primitive. Irreversible actions pause; approvers grant or reject; agents continue.
+- **Action-level policy** declared per connector and enforced by the runtime. Idempotency, approval requirements, and audit shape are uniform across every invocation.
+- **Human-in-the-loop approval** as a first-class primitive. Irreversible actions pause; approvers grant or reject out of band; agents continue.
 - **Action-attributed audit** with user identity, parsed arguments, approval decision, and outcome. The audit trail compliance review actually uses.
 - **A curated connector ecosystem.** Installing a connector package gives the organization a typed action surface with policy declared. New systems light up across all teams at once.
 - **Fleet visibility.** Aileron is the single point every agentic action passes through. That makes it the natural place to report LLM spend, tool usage, approval latency, and error rates across teams, agents, and projects.
-- **Bounded agent runtime.** Container-level isolation, shell-layer mediation, PTY-owned approvals, restricted network egress. The agent's blast radius is bounded by construction.
+- **Bounded agent runtime.** Container-level isolation, a credential boundary the agent cannot reach behind, tool-level approval gating, and restricted network egress. The agent's blast radius is bounded by construction.
 - **One operating model, three deployment topologies.** Customer-operated today, BYOC Enterprise next, multi-tenant SaaS with TEE-attested credential isolation later. The architecture follows the organization from a single team's pilot to a company-wide platform.
 
 ## Thesis
 
 Aileron's product is the runtime. The runtime is a containerized service customers operate, with a deployment topology that evolves across milestones: v4 customer-operated → v4.x BYOC Enterprise → v5 multi-tenant SaaS.
 
-The agent runs inside a container bounded by the Aileron Way (shell mediation, PTY-owned approvals, host isolation, bypass-prevention). The container's `HTTPS_PROXY` points at Aileron's credential mediation proxy. Every credentialed operation flows through the same path: Aileron-curated connector shims, the agent's LLM API calls, and third-party CLIs that respect `HTTPS_PROXY` all hit the proxy. The proxy identifies the request, evaluates policy, gates approval if required, injects the real credential at the TLS boundary, and forwards upstream. The agent never holds plaintext credentials.
+The agent runs inside a Docker container Aileron composes. Two boundaries make that container safe to give real credentials to. First, the agent reaches Aileron's actions through `aileron-mcp`, the in-container MCP server that forwards each tool call to the local daemon where policy and approval are enforced. Second, the container's `HTTPS_PROXY` points at Aileron's credential mediation proxy. Credentialed third-party traffic and the agent's LLM calls route through Aileron, which identifies the request, evaluates policy, gates approval when required, injects the real credential at the TLS boundary, and forwards upstream. The agent never holds plaintext credentials.
 
-One mediation path, one credential injection mechanism, one audit point. Process count scales with throughput, not user count.
+One credential boundary, one action surface, one audit point. Process count scales with throughput, not user count.
 
 ## Trust zones
 
@@ -97,59 +90,61 @@ The HTTPS proxy and the credential service. The proxy terminates TLS from contai
 </Feature>
 
 <Feature icon={Bot} title="Agent runtime (untrusted with credentials)">
-The agent container. Bounded by the Aileron Way at the OS layer. Hosts the agent, bash, the `aileron` CLI, Aileron-curated connector shims, and user-installed tools. `HTTPS_PROXY` set to the credential mediation proxy. The trusted CA cert for the proxy is installed at session start.
+The agent container. Hosts the agent, bash, the `aileron` CLI, the in-container `aileron-mcp` tool surface, and user-installed tools. `HTTPS_PROXY` set to the credential mediation proxy. The trusted CA cert for the proxy is installed at session start. The agent reaches Aileron actions only through `aileron-mcp`, so every action crosses the daemon's policy and approval boundary.
 </Feature>
 
 </div>
 
 ## Components shipped in v4
 
-The v4 binary set is small: one `aileron` binary, plus connector packages (each a thin shim and its OpenAPI spec). No separate sidecar, no MCP server from Aileron, no proxy worker binary.
+The v4 binary set is three cooperating binaries. `aileron` is the product boundary: the CLI plus the user-scoped local daemon. `aileron-mcp` is the MCP adapter the agent calls. `aileron-enclave` is the TEE-side credential handler, post-MVP for the default install.
 
-### aileron (single multi-modal binary)
+### aileron (CLI plus local daemon)
 
-One binary, multiple modes selected by subcommand:
+One binary, multiple modes:
 
-- `aileron launch <agent>`: starts a session. Transient. Holds the master key briefly during launch, then exits.
-- `aileron service`: the long-lived runtime backend. Hosts the management plane (sessions, audit, policy, approvals) and the data plane (HTTPS proxy + credential service) as logical components. Single-user v4 colocates them all in one process; v4.x and v5 split.
-- `aileron status`, `aileron approval list`, `aileron audit query`, `aileron actions list`, `aileron secret list`, `aileron session info`: user-facing CLI subcommands. Talk to the management plane over HTTPS with the session token.
+- `aileron launch <agent>`: starts a session. Prepares the sandbox, registers the session, wires `aileron-mcp` into the agent, and runs the agent in the container. Holds the master key briefly during launch, then the daemon owns the session.
+- The local daemon (auto-spawned, long-lived): hosts the management plane (sessions, audit, policy, approvals, the connector and action stores) and the data plane (HTTPS proxy plus credential mediation) as logical components. Single-user v4 colocates them all in one process; v4.x and v5 split them.
+- `aileron status`, `aileron approval`, `aileron audit`, `aileron actions`, `aileron vault`, `aileron sessions`: user-facing CLI subcommands. Talk to the daemon over HTTPS with the session token.
+
+### aileron-mcp (the in-container tool surface)
+
+`aileron-mcp` is the single canonical way the agent reaches Aileron's actions, under both host launch and sandbox launch ([ADR-0024](/adr/0024-sandbox-mcp-parity)). It is an MCP server: it advertises each installed action as an MCP tool and forwards a `tools/call` to the daemon's `/v1/actions/{name}/run`. Under sandbox launch it runs as a stdio subprocess of the in-container agent and reaches the daemon over HTTPS. Every MCP-capable agent Aileron launches (Claude, Pi, Goose, OpenCode, Codex) sees the same first-class tool catalog it sees on the host.
+
+The earlier static surface (connector shims on `$PATH` plus an `/etc/aileron/tools.txt` manifest) was retired in [#959](https://github.com/ALRubinger/aileron/issues/959). MCP is now the only in-container tool surface.
 
 ### Connector packages (one per integrated system)
 
-Each connector ships two things:
-
-- **Connector spec** (OpenAPI definition or equivalent). Declares the upstream API surface, the curated subset Aileron exposes as actions, idempotency and approval requirements per action. Used by the proxy at runtime to match HTTPS requests to action identities and apply policy.
-- **Connector shim** (one binary in `$PATH`: `linear`, `slack`, `github`). Generated from the spec. Parses argv into the upstream HTTPS request, makes the call (which routes through `HTTPS_PROXY`), prints the response. No credential handling.
+Each connector ships a **connector spec** ([ADR-0020](/adr/0020-v4-connector-specs-and-shims)). The spec declares the upstream API surface, the curated subset Aileron exposes as actions, and per-operation idempotency, approval, and credential metadata. The daemon loads installed specs to validate connector operations on the HTTPS data plane and to drive request-to-action matching at the proxy. Connectors no longer ship a generated shim binary; the agent reaches every action through `aileron-mcp`.
 
 ### Encrypted credential store
 
-Storage layer accessed by the management plane. Vault-centric schema: each vault has its own random vault key; credentials inside are encrypted with that vault key; the vault key is wrapped (encrypted) once per authorized member. Personal vault is the trivial case of a one-member vault. File-backed in v4 (`~/.aileron/store/vaults/{vault_id}/...`); Postgres + blob storage in v4.x and v5.
+Storage layer accessed by the daemon. Vault-centric schema: each vault has its own random vault key; credentials inside are encrypted with that vault key; the vault key is wrapped (encrypted) once per authorized member. Personal vault is the trivial case of a one-member vault. File-backed in v4 (`~/.aileron/store/vaults/{vault_id}/...`); Postgres plus blob storage in v4.x and v5.
 
-### Management plane (logical component inside aileron service)
+### Management plane (logical component inside the daemon)
 
-The control plane. Sessions (start, validate, end). User CLI requests. Policy storage and lookup. Approval orchestration (surface to user via TUI, webapp, mobile; collect responses). Audit log storage. Multi-user-aware from day one. Never sees plaintext credentials.
+The control plane. Sessions (start, validate, end). User CLI requests. Policy storage and lookup. Approval orchestration (surface to the user out of band, collect responses). Audit log storage. Multi-user-aware from day one. Never sees plaintext credentials.
 
-### Credential mediation: proxy + credential service (the data plane)
+### Credential mediation: proxy plus credential service (the data plane)
 
-Together they handle all credentialed traffic. Both run inside the TEE in v5.
+Together they handle all credentialed third-party traffic. Both run inside the TEE in v5.
 
-- **HTTPS proxy.** Accepts `HTTPS_PROXY` connections from the agent container. Terminates TLS using a session-local CA installed in the container. Matches each request against the relevant connector spec to identify the action. Asks the management plane for policy and approval. Asks the credential service for the credential to inject. Strips whatever auth the agent attached, injects the real credential, re-establishes TLS upstream. Plaintext credential lives in proxy memory for a single request, zeroed after.
-- **Credential service.** Holds session-keyed material in memory keyed by session ID: master key, unwrapped vault keys cached for the session. Memory footprint per session is small (~KB). Provides decrypt operations to the proxy.
+- **HTTPS proxy.** Accepts `HTTPS_PROXY` connections from the agent container. Authenticates the session, terminates TLS using a session-local CA installed in the container, and matches each request against the relevant connector spec. When a request uniquely matches a spec operation with an Aileron-managed credential binding, the proxy strips whatever auth the agent attached, injects the real credential, re-establishes TLS upstream, and audits the operation. This is credential-injection (Model A), not an egress allowlist: a request that matches no managed binding is forwarded unmodified. Plaintext credential lives in proxy memory for a single request, zeroed after.
+- **Credential service.** Holds session-keyed material in memory keyed by session ID: master key, unwrapped vault keys cached for the session. Memory footprint per session is small (~KB). Provides decrypt operations to the proxy. In v5 this is the role `aileron-enclave` plays inside the TEE.
 
-In v4 these are colocated with the management plane in one `aileron service` process. In v4.x and v5 they split: proxy workers autoscale to traffic, credential service shards by tenant.
+In v4 these are colocated with the management plane in one daemon process. In v4.x and v5 they split: proxy workers autoscale to traffic, credential service shards by tenant.
 
-### Agent container (docker sandbox microVM)
+### Agent container (Docker sandbox)
 
-The Aileron Way environment. Contents:
+The composed runtime environment. v4 is Docker-only; Podman is deferred behind a preserved runtime seam, not rejected ([#1050](https://github.com/ALRubinger/aileron/issues/1050)). Contents:
 
-- The agent (Claude Code or other), configured to use `HTTPS_PROXY` for all outbound HTTPS, including LLM API calls.
-- A locked-down bash with a DEBUG trap for shell-layer policy mediation (non-credential).
-- The `aileron` CLI for status queries, audit, approvals, and action manifest browsing.
-- Connector shims in `$PATH` for the team's installed connectors.
-- The action catalog manifest at `/etc/aileron/actions.json`.
+- The agent (Claude Code or other), configured to use `HTTPS_PROXY` for credentialed outbound HTTPS, with its LLM endpoint pointed at the daemon.
+- `aileron-mcp`, registered with the agent as the Aileron tool surface. The published `aileron/sandbox-base` image bakes the binary in for sealed runtimes ([#957](https://github.com/ALRubinger/aileron/issues/957)); local Tier 0 and devcontainer images take it as a read-only host-mount for version-lockstep with the host CLI.
+- bash plus any user-installed tools. v4 does not intercept the shell. Container-only shell-layer mediation was prototyped under [#801](https://github.com/ALRubinger/aileron/issues/801) and withdrawn in [#952](https://github.com/ALRubinger/aileron/issues/952); container isolation, the credential boundary, and tool-level approval gating cover the named risks (see [ADR-0021](/adr/0021-v4-shell-layer-mediation), Withdrawn).
+- The `aileron` CLI for status queries, audit, approvals, and action browsing.
 - The proxy's CA certificate installed in the system trust store.
-- Placeholder auth configs for supported third-party CLIs (e.g., a dummy `~/.config/gh/hosts.yml`).
-- Any user-installed third-party tools brought in via devcontainer.json.
+- Vault-backed agent credentials materialized at launch from the user's vault ([ADR-0025](/adr/0025-vault-backed-agent-auth)), with in-container rotations captured back on clean exit.
+- Any user-installed third-party tools brought in via `devcontainer.json`.
 
 ### Sandbox composition contract
 
@@ -169,27 +164,28 @@ v4 uses `.devcontainer/devcontainer.json` as the project-local composition subst
 }
 ```
 
-`customizations.aileron.image` selects the BYO-image tier, where Aileron uses the image as supplied and injects the runtime contract at launch: the `aileron` binary/shims, discovery files, proxy bootstrap, session CA, and shell mediation files. Runtime bootstrap supplies `HTTPS_PROXY` and `AILERON_TOKEN`; non-loopback/container daemon binds are intentionally not protected until that explicit token path exists.
+`customizations.aileron.image` selects the BYO-image tier, where Aileron uses the image as supplied and injects the runtime contract at launch: `aileron-mcp`, session env, manifest mounts, proxy bootstrap, and the session CA. Images that participate in the HTTPS proxy must include the `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers; launch validation checks the contract before the agent starts.
 
 `aileron sandbox init` scaffolds the starter `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile`. The Dockerfile extends `aileron/sandbox-base:<version>`, pre-fills the install recipe for the agent named in `--agent` (defaults to `claude`), and ships additional tool snippets commented out for you to enable as needed. Tool installation remains standard container work; Aileron does not maintain an `aileron.yaml` tool resolver.
 
-<Alert.Root class="my-6">
-  <Alert.Title>What is not in v4</Alert.Title>
-  <Alert.Description>
-    No <code>aileron-mcp</code> binary, no per-session sidecar process, no separate action-executor binary, no internal RPC path from shims. The agent's tool schema from Aileron is empty (bash plus any user-MCPs only). Aileron-specific functionality is reached via the <code>aileron</code> CLI and connector shims, all reachable through bash.
-  </Alert.Description>
-</Alert.Root>
+## Tool discoverability
+
+The agent finds Aileron's actions the way it finds any MCP server's tools. `aileron-mcp` advertises each installed action as a first-class MCP tool (`mcp__aileron__<action>`) with its description and argument schema, so the LLM can select an action by description rather than by exploring a CLI. This is the same surface MCP-capable agents already use on the host, which is why sandbox launch reaches parity with host launch.
+
+The catalog is curated `action.md` actions, so it stays small and intentional. A compact dispatcher (`list_actions` / `run_action`) for very large catalogs is deferred until catalog cost warrants it. Dynamic refresh, so a newly-installed action surfaces without an MCP restart, is tracked separately in [#897](https://github.com/ALRubinger/aileron/issues/897); action install is normally a pre-launch operation, so the restart cost is low today.
+
+The user's own MCP servers, registered through their `devcontainer.json` or agent config, coexist independently. Aileron is one MCP server in the agent's set, not a gateway that aggregates the others.
 
 ## Network policy
 
-Agents need productive direct egress (read docs, install packages, fetch public data) alongside the mediated credentialed path. v4 ships a tiered model that balances both.
+Agents need productive direct egress (read docs, install packages, fetch public data) alongside the mediated credentialed path. v4 ships a tiered model that balances both ([ADR-0022](/adr/0022-v4-tiered-network-policy)).
 
 | Tier | What it covers | How it works |
 |---|---|---|
-| **Aileron-mediated HTTPS** | Connector shim calls, agent's LLM API, third-party CLI calls to known-credentialed destinations | Flow through `HTTPS_PROXY`. Proxy matches request to action, enforces policy, gates approval, injects credentials, audits. |
-| **Direct uncredentialed egress** | Public documentation, package registries (npm, pypi, brew, apt), public APIs, uncredentialed search | Routes through the proxy by default (logged, not injected). Customers can configure default-deny + allowlist for stricter posture. |
-| **Private network ranges** | `127.0.0.0/8`, `192.168.0.0/16` | Docker sandbox denies by default, with explicit bypass only for the loopback path to the Aileron proxy. |
-| **Non-HTTPS egress** | SSH, database connections, custom protocols | Outside the proxy's scope. Docker sandbox network policy handles allow/deny. v4 does not credential-mediate non-HTTPS. |
+| **Aileron-mediated HTTPS** | Connector operations Aileron credentials, the agent's LLM calls, third-party CLI calls to known-credentialed destinations | Connector operations resolve through the daemon; credentialed third-party HTTPS flows through `HTTPS_PROXY`. The proxy matches a request to a spec operation, injects the managed credential, and audits. |
+| **Direct uncredentialed egress** | Public documentation, package registries (npm, pypi, brew, apt), public APIs, uncredentialed search | Forwarded by the proxy unmodified (audited, no credential injected). Customers can configure default-deny plus allowlist for a stricter posture. |
+| **Private network ranges** | `127.0.0.0/8`, `192.168.0.0/16`, link-local, ULA, CGNAT | Denied by default, with an explicit bypass only for the loopback path to the Aileron proxy. |
+| **Non-HTTPS egress** | SSH, database connections, custom protocols | Outside the proxy's scope. The Docker sandbox network policy handles allow/deny. v4 does not credential-mediate non-HTTPS. |
 
 <Alert.Root class="my-6">
   <Alert.Title>Residual exfil risk</Alert.Title>
@@ -234,38 +230,13 @@ vaults/
 - **Grant access to a new member.** An existing member with the grant role unwraps the vault key with their own key, re-wraps it with the new member's key, stores `{new_user_id}.wrap`, updates `members.json`. No credential ciphertexts are touched.
 - **Revoke access (rotate).** Generate a new vault key. Re-encrypt every credential. Re-wrap for every remaining member. Delete the revoked member's wrapping. Revocation prevents new decryptions; it does not retroactively invalidate credentials already decrypted in memory.
 
-## Tool discoverability
+### Agent credentials at launch
 
-The agent must find and correctly invoke Aileron-curated connector shims. The shims are not third-party CLIs the LLM knows from training; they are Aileron's curated action surface generated from connector specs.
-
-v4 uses **lazy structured discovery**: a short system prompt hint, a static manifest file the LLM can read, and per-shim `--help` output. The LLM does not get all actions advertised in its MCP tool schema (which would scale poorly with the connector catalog).
-
-<div class="not-prose grid gap-4 md:grid-cols-3 my-6">
-
-<Feature title="System prompt hint">
-Aileron prefixes the agent's system prompt with one short paragraph telling it where Aileron connectors live in `$PATH`, where the action catalog is, and how to use `--help` for details. Roughly 150 tokens, paid once per inference.
-</Feature>
-
-<Feature title="Manifest at /etc/aileron/actions.json">
-Structured JSON listing every action: connector, action name, description, argument schema, idempotency declaration, approval requirement. The LLM reads it proactively when the user's intent suggests an Aileron-mediated action.
-</Feature>
-
-<Feature title="Per-shim --help">
-Shell-native discovery as the LLM's fallback. `linear --help` lists actions with descriptions. `linear create-issue --help` prints the action's argument schema.
-</Feature>
-
-</div>
-
-<Alert.Root class="my-6">
-  <Alert.Title>Empirical caveat</Alert.Title>
-  <Alert.Description>
-    Whether the LLM reliably finds and correctly invokes Aileron shims with only this much guidance is something to measure during the v4 beta. Modern LLMs are good at exploring unknown CLIs via <code>--help</code>, but if hit rate is low, fallbacks include promoting frequently-used actions into a small MCP tool schema, expanding the system prompt, or improving manifest descriptions.
-  </Alert.Description>
-</Alert.Root>
+Agents that authenticate with their own credential files (Claude's `auth.json`, Codex's `auth.json`) are seeded from the vault at launch and captured back on clean exit ([ADR-0025](/adr/0025-vault-backed-agent-auth)). The launcher materializes the agent's declared `AuthSpec` into the container as env and file bindings, the agent logs in once if the vault is empty, and any in-container rotation is written back to the vault when the session exits cleanly. A SIGINT or SIGTERM salvages the rotation before the container is torn down.
 
 ## Steady-state architecture
 
-Mid-session on a developer's laptop in v4. The `aileron service` process hosts the management plane plus the data plane (HTTPS proxy + credential service) as logical components. The agent container's `HTTPS_PROXY` points at the data plane.
+Mid-session on a developer's laptop in v4. The daemon process hosts the management plane plus the data plane (HTTPS proxy plus credential service) as logical components. The agent reaches Aileron actions through `aileron-mcp`, and credentialed third-party HTTPS leaves through `HTTPS_PROXY`.
 
 <MermaidDiagram client:load graph={`graph TB
     subgraph laptop["💻 User's Laptop"]
@@ -275,10 +246,10 @@ Mid-session on a developer's laptop in v4. The `aileron service` process hosts t
         CLI["aileron launch (transient at start)"]
       end
 
-      subgraph runtime_backend["aileron service (long-lived process)"]
+      subgraph runtime_backend["aileron daemon (long-lived process)"]
         direction TB
         subgraph mgmt["Management plane"]
-          Mgmt["Sessions, policy, approvals, audit"]
+          Mgmt["Sessions, policy, approvals, audit, actions"]
           Store[("Encrypted Store")]
           Mgmt --> Store
         end
@@ -292,15 +263,15 @@ Mid-session on a developer's laptop in v4. The `aileron service` process hosts t
       end
 
       subgraph agent_zone["Agent runtime"]
-        AgentContainer["Agent container (docker sandbox)"]
+        AgentContainer["Agent container (Docker sandbox)"]
         Agent["Agent: Claude Code"]
-        Bash["bash (DEBUG trap)"]
+        Bash["bash + user tools"]
         AileronCli["aileron CLI"]
-        Shims["Connector shims (linear, slack, ...)"]
+        MCP["aileron-mcp (MCP server)"]
         AgentContainer --- Agent
         AgentContainer --- Bash
         AgentContainer --- AileronCli
-        AgentContainer --- Shims
+        AgentContainer --- MCP
       end
     end
 
@@ -308,8 +279,9 @@ Mid-session on a developer's laptop in v4. The `aileron service` process hosts t
 
     CLI -.->|"key"| CredSvc
     CLI -->|"session bootstrap"| Mgmt
-    Agent -->|"HTTPS_PROXY"| Proxy
-    Shims -->|"HTTPS_PROXY"| Proxy
+    Agent -->|"tools/call"| MCP
+    MCP -->|"actions, policy, approval"| Mgmt
+    Bash -->|"credentialed HTTPS via HTTPS_PROXY"| Proxy
     AileronCli -->|"queries"| Mgmt
     Proxy -->|"injects, TLS upstream"| External
 
@@ -322,11 +294,11 @@ Mid-session on a developer's laptop in v4. The `aileron service` process hosts t
     class CLI purple
     class Mgmt,Store blue
     class Proxy,CredSvc green
-    class AgentContainer,Agent,Bash,AileronCli,Shims amber
+    class AgentContainer,Agent,Bash,AileronCli,MCP amber
     class External red
 `} />
 
-The agent container has one mediated egress, `HTTPS_PROXY` pointing at the data plane. All credentialed traffic (connector shims, third-party CLIs, the agent's LLM API call) flows through the same proxy. The data plane is the only outbound point to external systems.
+Aileron actions cross the daemon's policy and approval boundary through `aileron-mcp`. Credentialed third-party HTTPS and the agent's LLM calls cross the data plane. Either way, the plaintext credential is injected outside the container and never enters it.
 
 ## Startup sequence
 
@@ -341,79 +313,70 @@ What happens between `aileron launch claude "..."` being typed and the agent beg
     participant Container as Agent container
 
     User->>CLI: aileron launch claude "..."
-    CLI->>CLI: Check ~/.aileron/service.json
-    alt Backend not running
-      CLI->>Mgmt: Auto-spawn aileron service
-      Mgmt->>Mgmt: Bind localhost, write service.json
-    end
-    CLI->>User: Prompt for master key
+    CLI->>CLI: Resolve daemon (auto-spawn if needed)
+    CLI->>User: Prompt for master key (if vault locked)
     User->>CLI: Master key
     CLI->>Mgmt: Start session for user X
     Mgmt->>CLI: session_id, session bearer, HTTPS_PROXY URL, CA cert
     CLI->>CredSvc: Deliver master key (local secure channel)
     CredSvc->>CredSvc: Store session entry: session_id → master_key
-    CLI->>Container: docker sandbox create + run<br/>(HTTPS_PROXY, session token,<br/>CA cert installed,<br/>placeholder auth configs,<br/>system prompt hint)
+    CLI->>Container: docker run sandbox<br/>(HTTPS_PROXY, session token,<br/>CA cert installed,<br/>aileron-mcp registered,<br/>vault-backed agent auth)
     Container->>Container: Agent starts (no master key, no plaintext)
-    CLI->>CLI: Exit (key zeroes from CLI memory)
+    CLI->>CLI: Hand off to the daemon-owned session
     Container->>User: Agent begins work
 `} />
 
 ## Credentialed action flow
 
-Mid-session, the agent invokes a connector shim (e.g., `linear create-issue --title "x"`). Same flow applies to third-party CLIs like `gh issue create` and to the agent's LLM API call. Single mediation path.
+Mid-session, the agent invokes an Aileron action through `aileron-mcp` (e.g., `linear.create_issue`). The daemon enforces policy and approval, then executes the connector operation through the data plane so the credential is injected outside the container.
 
 <MermaidDiagram client:load graph={`sequenceDiagram
     autonumber
     participant Agent
-    participant Shim as linear (shim)
-    participant Proxy as HTTPS proxy
+    participant MCP as aileron-mcp
     participant Mgmt as Management plane
+    participant Proxy as HTTPS proxy
     participant CredSvc as Credential service
     participant Store as Encrypted Store
     participant Linear as api.linear.app
 
-    Agent->>Shim: linear create-issue --title "x"
-    Shim->>Proxy: CONNECT api.linear.app:443 (via HTTPS_PROXY)
-    Proxy->>Proxy: Authenticate (session token)
-    Shim->>Proxy: POST /issues with placeholder auth (TLS terminated)
-    Proxy->>Proxy: Match request → action: linear.create_issue
-    Proxy->>Mgmt: Evaluate policy
-    Mgmt-->>Proxy: Approval required
-    Proxy->>Mgmt: Post approval request
-    Mgmt->>User: Render approval (TUI / webapp / mobile)
+    Agent->>MCP: tools/call linear.create_issue
+    MCP->>Mgmt: POST /v1/actions/linear.create_issue/run
+    Mgmt->>Mgmt: Resolve action, evaluate policy
+    Mgmt-->>Agent: 202 Accepted + review_url (approval required)
+    Mgmt->>User: Render approval out of band (CLI / notification / web)
     User-->>Mgmt: Approve
-    Mgmt-->>Proxy: Approval token
+    Mgmt->>Proxy: Execute connector operation
     Proxy->>CredSvc: Decrypt Linear credential for session
     CredSvc->>Store: Fetch wrapped vault key (if not cached)
     Store-->>CredSvc: Wrapped vault key
     CredSvc->>CredSvc: Unwrap with master key (cache for session)
     CredSvc->>Store: Fetch encrypted Linear credential
     Store-->>CredSvc: Ciphertext
-    CredSvc->>CredSvc: Decrypt with vault key
     CredSvc-->>Proxy: Plaintext credential
-    Proxy->>Proxy: Strip placeholder auth, inject real bearer
-    Proxy->>Linear: POST /issues (new TLS upstream)
+    Proxy->>Proxy: Inject real bearer at the TLS boundary
+    Proxy->>Linear: POST /issues (TLS upstream)
     Linear-->>Proxy: 201 Created
     Proxy->>Proxy: Zero plaintext credential
     Proxy->>Mgmt: Audit: action completed
-    Proxy-->>Shim: 201 Created
-    Shim-->>Agent: stdout: created issue #123
+    Mgmt-->>MCP: result (agent polls via check_action_status)
+    MCP-->>Agent: created issue #123
 `} />
 
-The plaintext credential never enters the agent container, never appears in any tool's memory, never appears in any logged request body the operator sees. Audit captures the action with attribution to the user.
+The plaintext credential never enters the agent container, never appears in any tool's memory, never appears in any logged request body the operator sees. The same proxy injection path serves third-party CLIs (such as `gh`) that respect `HTTPS_PROXY`. Audit captures the action with attribution to the user.
 
 ## Deployment topology evolution
 
-Same architecture, three milestones. What changes is where each logical component runs and how it scales.
+Same architecture, three milestones. What changes is where each logical component runs and how it scales. The runtime is Apache-2.0 open core, so customers can operate it themselves at every stage.
 
-### v4 — Customer-operated (~6 months)
+### v4: Customer-operated (~6 months)
 
-Single developer or team on their own machine. `aileron service` hosts the management plane and the data plane in one process. Encrypted store is file-backed locally. Agent container's `HTTPS_PROXY` points at the local process.
+Single developer or team on their own machine. The daemon hosts the management plane and the data plane in one process. Encrypted store is file-backed locally. The agent container's `HTTPS_PROXY` points at the local process.
 
 <MermaidDiagram client:load graph={`graph LR
     subgraph laptop["💻 Developer's laptop"]
       CLI["aileron CLI"]
-      subgraph backend["aileron service (one process)"]
+      subgraph backend["aileron daemon (one process)"]
         Mgmt["Mgmt plane"]
         Proxy["HTTPS proxy"]
         CredSvc["Cred svc"]
@@ -443,9 +406,9 @@ Single developer or team on their own machine. `aileron service` hosts the manag
     class External red
 `} />
 
-### v4.x — BYOC Enterprise (~6 to 12 months)
+### v4.x: BYOC Enterprise (~6 to 12 months)
 
-Customer deploys the runtime backend into their own cloud account. Management plane and data plane split. Proxy workers autoscale to traffic. Credential service shards by team if needed.
+Customer deploys the runtime backend into their own cloud account. Management plane and data plane split. Proxy workers autoscale to traffic. Credential service shards by team if needed. The runtime stays in the customer's environment, so Aileron never holds customer credentials.
 
 <MermaidDiagram client:load graph={`graph LR
     subgraph cloud["☁️ Customer's cloud account"]
@@ -489,9 +452,9 @@ Customer deploys the runtime backend into their own cloud account. Management pl
     class External red
 `} />
 
-### v5 — Multi-tenant SaaS (~12 to 24 months)
+### v5: Multi-tenant SaaS (~12 to 24 months)
 
-Aileron operates the runtime backend. Management plane is multi-tenant. **Both the HTTPS proxy and the credential service run inside Trusted Execution Environments**; together they form the data plane enclave. Master key flows through an attested channel from the user's device. Plaintext never leaves the TEE boundary.
+Aileron operates the runtime backend. Management plane is multi-tenant. **Both the HTTPS proxy and the credential service run inside Trusted Execution Environments**; together they form the data plane enclave, the role `aileron-enclave` plays. Master key flows through an attested channel from the user's device. Plaintext never leaves the TEE boundary.
 
 <MermaidDiagram client:load graph={`graph LR
     subgraph aileron_cloud["☁️ Aileron multi-tenant cloud"]
@@ -499,7 +462,7 @@ Aileron operates the runtime backend. Management plane is multi-tenant. **Both t
       Store[("Postgres + blob (per-tenant)")]
       Mgmt --> Store
 
-      subgraph tee["🔒 TEE (attested) — data plane enclave"]
+      subgraph tee["🔒 TEE (attested): data plane enclave"]
         Proxy["HTTPS proxy (Confidential VMs)"]
         CredSvc["Credential service (sharded by tenant)"]
         Proxy <--> CredSvc
@@ -535,12 +498,12 @@ Aileron operates the runtime backend. Management plane is multi-tenant. **Both t
 
 | Component | v4 | v4.x | v5 |
 |---|---|---|---|
-| Management plane | Colocated in `aileron service` on user's laptop | Separate service in customer cloud | Aileron's cloud, multi-tenant |
-| HTTPS proxy | Colocated in `aileron service` | Autoscaled worker pool in customer cloud | Inside TEE, each in Confidential VM |
-| Credential service | Colocated in `aileron service` | Separate service in customer cloud | Inside TEE alongside proxy, sharded by tenant |
+| Management plane | Colocated in the daemon on user's laptop | Separate service in customer cloud | Aileron's cloud, multi-tenant |
+| HTTPS proxy | Colocated in the daemon | Autoscaled worker pool in customer cloud | Inside TEE, each in Confidential VM |
+| Credential service | Colocated in the daemon | Separate service in customer cloud | Inside TEE alongside proxy, sharded by tenant |
 | Encrypted store | Local files in `~/.aileron/store/vaults/` | Customer's Postgres + blob storage | Aileron's Postgres + object storage, per-tenant prefixed |
 | Master key custody | User's laptop (briefly) → credential service | User's device → credential service in customer cloud | User's device → TEE via attested channel |
-| Agent container | User's laptop (docker sandbox) | User's laptop or customer cloud workspace | User's laptop or Aileron cloud |
+| Agent container | User's laptop (Docker sandbox) | User's laptop or customer cloud workspace | User's laptop or Aileron cloud |
 | Audit destination | Local audit log | Customer-configured SIEM | Customer-configured SIEM (export from Aileron) |
 
 ## Zero-knowledge enforcement in v5 SaaS
@@ -578,23 +541,23 @@ Customers verify the enforcement via TEE attestation at session start and on a c
 
 ## Open architectural decisions
 
-Decisions taken in the current design that are still open for refinement. "(chosen)" means a default position has been taken pending pushback.
+Decisions taken in the current design. "(chosen)" means a default position has been taken pending pushback; "(shipped)" means it is implemented in v4.
 
-1. **One mediation path: HTTPS proxy for everything.** Aileron-curated connector shims, third-party CLIs, and the agent's LLM API call all route through the same proxy via `HTTPS_PROXY`. Connector specs drive request-to-action matching, policy enforcement, and credential routing. (chosen)
-2. **One binary, multiple modes.** `aileron` hosts the CLI subcommands and the long-lived service mode. Connector shims are spec-generated thin HTTPS clients shipped per connector package. No separate sidecar, proxy worker, MCP server, or action-executor binary. (chosen)
-3. **Management plane and data plane colocate in v4, split in v4.x.** Interface boundaries are network-call shape from day one so v4.x can deploy them separately without code change. (chosen)
-4. **Network policy is tiered.** Container's `HTTPS_PROXY` routes credentialed traffic through Aileron mediation. Uncredentialed direct egress is allowed by default for productivity (with audit). Customers can tighten to default-deny + allowlist for regulated deployments. (chosen)
-5. **Placeholder auth configs for supported third-party CLIs.** Aileron pre-populates each supported third-party CLI's local auth config at session start. (chosen)
-6. **Connector specs are mandatory.** Every Aileron connector ships an OpenAPI spec used by the proxy for request-to-action matching. (chosen)
-7. **Credential service is stateful, narrow.** Holds session-scoped material keyed by session ID. In v5, runs inside TEE with attestation. (chosen)
-8. **v5 TEE scope:** both HTTPS proxy and credential service run inside the TEE boundary; together they form the data plane enclave. Plaintext never exits the TEE. (chosen)
-9. **Master key delivery:** local secure channel in v4 (chosen); attested channel into TEE in v5. Mechanism in v4.x BYOC TBD.
-10. **Tool discoverability: lazy structured discovery.** System prompt hint plus `/etc/aileron/actions.json` manifest plus per-shim `--help`. No Aileron MCP server in v4. (chosen)
-11. **User-MCPs allowed via devcontainer.** Users add their own MCP servers in `customizations.aileron.mcps`. Aileron does not provide its own MCP server in v4. (chosen)
-12. **Credential lifecycle:** session keys cached in the credential service for the session's lifetime; plaintext credentials decrypted just-in-time per HTTPS request, zeroed after. (chosen)
+1. **MCP is the canonical in-container tool surface.** The agent reaches Aileron actions through `aileron-mcp`, the same MCP surface used on the host. The earlier shims-on-`$PATH` plus `tools.txt` surface is retired. (shipped, [#959](https://github.com/ALRubinger/aileron/issues/959))
+2. **Three cooperating binaries.** `aileron` (CLI plus local daemon, the product boundary), `aileron-mcp` (MCP adapter), and `aileron-enclave` (TEE handler, post-MVP). The daemon is the trust pivot; the others are thin clients of its HTTP API. (shipped)
+3. **One mediation path for credentialed HTTPS.** Connector operations, third-party CLIs, and the agent's LLM calls reach external systems through Aileron, which injects credentials at the TLS boundary. The proxy is cooperative credential-injection (Model A), not an egress allowlist. (chosen / partially shipped)
+4. **Management plane and data plane colocate in v4, split in v4.x.** Interface boundaries are network-call shape from day one so v4.x can deploy them separately without code change. (chosen)
+5. **Network policy is tiered.** Credentialed HTTPS routes through Aileron mediation. Uncredentialed direct egress is forwarded by default for productivity (with audit). Customers can tighten to default-deny plus allowlist for regulated deployments. (chosen)
+6. **Connector specs are mandatory.** Every Aileron connector ships a spec the daemon uses for request-to-action matching and data-plane operation validation. Connectors no longer ship a generated shim. (shipped)
+7. **Vault-backed agent credentials.** Agent auth files are seeded from the vault at launch and rotations are captured back on clean exit. (shipped, [ADR-0025](/adr/0025-vault-backed-agent-auth))
+8. **Docker-only, Podman deferred.** v4 supports Docker on macOS, Linux, and Windows. The runtime abstraction seam is preserved so Podman can return as a localized change. (shipped, [#1050](https://github.com/ALRubinger/aileron/issues/1050))
+9. **Out-of-band approvals.** Approval decisions reach the user out of band, never through the agent. v1 ships the CLI-prompt tier; biometric, notification, TUI, and web tiers are Phase 2. (chosen, [ADR-0009](/adr/0009-user-channel))
+10. **Credential service is stateful, narrow.** Holds session-scoped material keyed by session ID. In v5, runs inside the TEE with attestation. (chosen)
+11. **v5 TEE scope.** Both HTTPS proxy and credential service run inside the TEE boundary; together they form the data plane enclave. Plaintext never exits the TEE. (chosen)
+12. **Master key delivery.** Local secure channel in v4 (chosen); attested channel into TEE in v5. Mechanism in v4.x BYOC is still open.
 
 ## References
 
-The HTTPS forward proxy with credential injection at the TLS boundary is the architecture Infisical published as [Agent Vault](https://infisical.com/blog/agent-vault-the-open-source-credential-proxy-and-vault-for-agents) (2026-04-22), and the same convergence Anthropic Managed Agents and Browser Use have reached. Aileron incorporates the pattern (not a code dependency in v4) and integrates with its own policy, audit, vault, and approval systems.
+The HTTPS forward proxy with credential injection at the TLS boundary is the architecture Infisical published as [Agent Vault](https://infisical.com/blog/agent-vault-the-open-source-credential-proxy-and-vault-for-agents) (2026-04-22), and the same convergence Anthropic Managed Agents and Browser Use have reached. Aileron incorporates the pattern (not a code dependency in v4) and integrates it with its own policy, audit, vault, and approval systems.
 
-Tracked in GitHub umbrella issue #747, sub-issues #796, #801, #802, #827, #828.
+Tracked in GitHub umbrella issue [#747](https://github.com/ALRubinger/aileron/issues/747) (Milestone v4). Associated decisions: [ADR-0017](/adr/0017-sandbox-composition) (composition), [ADR-0019](/adr/0019-v4-https-data-plane) (data plane), [ADR-0022](/adr/0022-v4-tiered-network-policy) (network policy), [ADR-0024](/adr/0024-sandbox-mcp-parity) (MCP parity), and [ADR-0025](/adr/0025-vault-backed-agent-auth) (vault-backed agent auth).
