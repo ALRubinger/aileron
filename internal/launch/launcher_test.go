@@ -856,11 +856,20 @@ func TestLaunch_SandboxScaffoldBuildsAndRuns(t *testing.T) {
 
 	binDir := t.TempDir()
 	argsFile := filepath.Join(dir, "docker-args.txt")
-	docker := filepath.Join(binDir, "docker")
-	script := "#!/bin/sh\nprintf '%s\\n' '---' >> " + argsFile + "\nprintf '%s\\n' \"$@\" >> " + argsFile + "\n"
-	if err := os.WriteFile(docker, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
+	npxArgsFile := filepath.Join(dir, "npx-args.txt")
+	// The Feature-composing scaffold (no Dockerfile) builds through
+	// @devcontainers/cli, which the build path execs as `npx`. Validation and
+	// run still go through `docker`. Stub both so the launch wiring is asserted
+	// hermetically; a real Feature build is proven in the dedicated
+	// integration-sandbox-features job.
+	writeStub := func(name, dest string) {
+		script := "#!/bin/sh\nprintf '%s\\n' '---' >> " + dest + "\nprintf '%s\\n' \"$@\" >> " + dest + "\n"
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	writeStub("docker", argsFile)
+	writeStub("npx", npxArgsFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
@@ -873,26 +882,31 @@ func TestLaunch_SandboxScaffoldBuildsAndRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch: %v", err)
 	}
+	image := sandboxcontainer.ProjectImageTag(dir)
+	// The Feature scaffold builds via @devcontainers/cli (npx), not docker build.
+	npxData, err := os.ReadFile(npxArgsFile)
+	if err != nil {
+		t.Fatalf("read npx args: %v", err)
+	}
+	for _, want := range []string{
+		"@devcontainers/cli@",
+		"build\n",
+		"--workspace-folder\n" + dir + "\n",
+		"--image-name\n" + image + "\n",
+	} {
+		if !strings.Contains(string(npxData), want) {
+			t.Fatalf("devcontainers/cli build call missing %q:\n%s", want, npxData)
+		}
+	}
 	data, err := os.ReadFile(argsFile)
 	if err != nil {
 		t.Fatalf("read docker args: %v", err)
 	}
 	calls := dropBakedInspectCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
-	if len(calls) != 3 {
-		t.Fatalf("docker calls = %d, want build, validate, and run:\n%s", len(calls), data)
+	if len(calls) != 2 {
+		t.Fatalf("docker calls = %d, want validate and run (build runs via @devcontainers/cli):\n%s", len(calls), data)
 	}
-	buildCall, validateCall, runCall := calls[0], calls[1], calls[2]
-	image := sandboxcontainer.ProjectImageTag(dir)
-	dockerfile := filepath.Join(dir, ".devcontainer", "Dockerfile")
-	for _, want := range []string{
-		"build\n-t\n" + image + "\n",
-		"-f\n" + dockerfile + "\n",
-		"\n" + dir,
-	} {
-		if !strings.Contains(buildCall, want) {
-			t.Fatalf("build call missing %q:\n%s", want, buildCall)
-		}
-	}
+	validateCall, runCall := calls[0], calls[1]
 	for _, call := range []struct {
 		name string
 		args string
