@@ -1,6 +1,6 @@
 ---
 title: "ADR-0011: Local Credential Vault"
-description: "Encrypted-at-rest local vault for user credentials. Argon2id KDF from a passphrase derives a key encryption key (KEK); AES-256-GCM envelope encryption protects bindings on disk. KEK held in memory for the runtime session, never persisted. TEE and browser-enclave variants are post-MVP."
+description: "Encrypted-at-rest local vault for user credentials. Argon2id KDF from a passphrase derives a key encryption key (KEK); AES-256-GCM envelope encryption protects bindings on disk. KEK held in memory for the runtime session, never persisted. The same vault format runs unchanged when the customer operates the runtime in their own infrastructure (BYOC)."
 order: 11
 ---
 
@@ -75,7 +75,7 @@ GCM was chosen over alternatives (AES-CBC, ChaCha20-Poly1305) because:
 
 - **Authenticated:** unlike CBC, decryption fails on tampering rather than producing garbage.
 - **Standard:** widely audited, hardware-accelerated on every modern CPU, and supported by every cryptographic library Aileron might ever embed.
-- **Aligned with future stages:** the same envelope format works inside a TEE (Stage 2) without changes.
+- **Portable:** the same envelope format works unchanged when the customer operates the runtime in their own infrastructure (BYOC).
 
 ### On-disk vault format
 
@@ -180,20 +180,17 @@ This is the honest tradeoff for zero-knowledge encryption. Recovery codes, escro
 
 Recovery codes are a plausible post-MVP feature. v1 ships without them; the documentation will be explicit that passphrase loss = vault loss.
 
-### Stage 2 (TEE) and Stage 3 (browser enclave) are post-MVP
+### The same vault format runs under BYOC
 
-The same cryptographic primitives extend naturally to two future variants:
+The same cryptographic primitives carry forward when the customer operates the runtime in their own environment (BYOC). The local-vault format runs unchanged. Aileron never holds the KEK or the plaintext because the runtime that decrypts is operated by the customer, not by Aileron.
 
-- **Stage 2 — TEE-backed vault.** Credentials decrypt only inside a Trusted Execution Environment (e.g., Google Confidential Space). The KEK is transmitted to an attested enclave, never visible to the host. This enables Aileron Cloud (the hosted backend introduced in [ADR-0009](/adr/0009-user-channel) Phase 2) and async / scheduled actions where the runtime needs credential access while the user is offline.
-- **Stage 3 — Browser enclave / client-side custody.** The user's browser holds the KEK. Aileron sends an encrypted credential request to the browser; the browser decrypts and forwards the API call. True zero-knowledge for hosted Aileron — even Aileron operators cannot access plaintext.
-
-Both variants are deferred from v1. The architectural commitment ratified here is the *direction*: the local vault format is forward-compatible with TEE-backed and browser-enclave-backed variants. The on-disk file format does not change; the difference is *who holds the KEK at decryption time* (local process memory in v1; enclave memory in Stage 2; browser memory in Stage 3).
+The architectural commitment ratified here is the *direction*: the on-disk file format does not change across deployments. The difference is *who holds the KEK at decryption time* (local process memory in v1; a customer-operated runtime process under BYOC). In both cases the KEK lives only in the memory of a process the user controls.
 
 ## Implementation status
 
-The cryptographic primitives and all three stages of the broader design are already implemented in code, though only Stage 1 (the local vault) is wired into the v1 runtime. Stages 2 and 3 exist as ready-to-deploy infrastructure for the hosted backend and are under security review.
+The cryptographic primitives and the local vault are implemented in code and wired into the v1 runtime.
 
-**Stage 1 — Local vault (v1 active):**
+**Local vault (v1 active):**
 
 - `internal/crypto/kek.go` — Argon2id KDF (`DeriveKEK`, `GenerateSalt`)
 - `internal/crypto/envelope.go` — AES-256-GCM envelope encryption
@@ -206,26 +203,7 @@ The cryptographic primitives and all three stages of the broader design are alre
 - `internal/auth/kek_session.go` — KEK session cache (used in cloud mode; v1 uses runtime-lifetime memory holding directly)
 - Test coverage: `kek_test.go`, `envelope_test.go`, `encrypted_test.go`, `file_test.go`, `lockable_test.go`, `kek_session_test.go`, `vault_state_test.go`, plus the production-shape integration test in `internal/server/main_test.go::TestRun_NoTTYDaemonHonorsVaultUnlock`.
 
-**Stage 2 — TEE-backed vault (post-MVP, security review in progress):**
-
-- `internal/enclave/` — protocol types, client SPI, attestation verifier interface
-- `internal/enclave/local/` — local TEE provider for development (mock attestation)
-- `internal/enclave/gcs/` — Google Confidential Space provider with OIDC JWT attestation
-- `cmd/aileron-enclave/` — enclave binary (handler, OAuth exchange, escrow, attestation)
-- Capability system (`capability.go`, `escrow_key.go`, `request_auth.go`) for fine-grained action authorization within enclave
-- Test coverage present across all enclave components
-
-**Stage 3 — Browser enclave / client-side crypto (post-MVP, security review in progress):**
-
-- `ui/src/lib/crypto/argon2.ts` — Browser-side Argon2id (matches server parameters exactly)
-- `ui/src/lib/crypto/envelope.ts` — Browser-side AES-256-GCM (matches server format exactly)
-- `ui/src/lib/crypto/ecdh.ts` — P-256 ECDH for session establishment with enclave
-- `ui/src/lib/crypto/attestation.ts` — Confidential Space OIDC JWT verification client-side
-- Test coverage in `vault.test.ts` and `attestation.test.ts`
-
-The cloud-shaped components from the original design — PostgreSQL `user_key_materials` store, HTTP passphrase handlers (`internal/app/handlers_passphrase.go`), `UserScopedVault` decorator with multi-user semantics — exist in the codebase but are dormant in v1 user-level mode. They are wired only when the hosted backend deploys.
-
-The v1 vault implementation reuses the Stage 1 cryptographic primitives directly. The adaptation from the cloud-shaped design is in the storage and prompt layers (file-on-disk replaces database-row; CLI prompt replaces HTTP form), not in the cryptography.
+The v1 vault implementation uses these cryptographic primitives directly. Under BYOC the same primitives run unchanged on customer-operated infrastructure; the storage and prompt layers (file-on-disk, CLI prompt) are the only parts that vary by deployment, not the cryptography.
 
 ## Alternatives Considered
 
@@ -245,7 +223,7 @@ Rejected for v1 not because it's a bad idea — it's actually a strong option �
 
 - Cross-platform implementation is non-trivial. Each OS keychain has its own API, idioms, and limits. The pure-Go cross-platform story for keychain integration is patchy.
 - The OS keychain doesn't help with the "one passphrase unlocks many credentials" UX. The user would either have to authenticate per-credential (unbearable) or grant Aileron broad keychain access (defeating much of the security benefit).
-- Forward-compatibility with Stages 2 and 3 (TEE and browser enclave) is harder when the canonical credential location is OS-specific.
+- Portability across deployments (BYOC, where the customer operates the runtime in their own environment) is harder when the canonical credential location is OS-specific.
 
 A future hybrid where the OS keychain stores the passphrase (so the user doesn't re-type it) while Aileron continues to manage the encrypted vault file is plausible post-MVP.
 
@@ -259,7 +237,7 @@ Rejected because re-binding is high-friction. OAuth flows, API key copy-paste, m
 
 A YubiKey or similar hardware token holds the KEK directly; Aileron requests it via PIV / FIDO2 protocol.
 
-Rejected for v1 because hardware tokens are not universally available in the wedge audience (developers using AI coding tools; many do not own a hardware token). It's also not forward-compatible with the TEE story without significant additional design.
+Rejected for v1 because hardware tokens are not universally available in the wedge audience (developers using AI coding tools; many do not own a hardware token). It also adds significant design complexity for portability across deployments.
 
 A `--hardware-token` mode is plausible post-MVP for users who want it.
 
@@ -267,7 +245,7 @@ A `--hardware-token` mode is plausible post-MVP for users who want it.
 
 ChaCha20-Poly1305 is a strong, modern AEAD with no dependence on AES hardware acceleration. On platforms without AES-NI (some embedded environments), ChaCha20 is faster.
 
-Not chosen primarily for forward compatibility: the TEE provider (Google Confidential Space) and the browser-enclave story both align more naturally with AES-256-GCM. AES-NI is universal on the developer hardware Aileron targets. The performance difference on modern hardware is negligible.
+AES-256-GCM was chosen because AES-NI is universal on the developer hardware Aileron targets. The performance difference on modern hardware is negligible.
 
 ChaCha20-Poly1305 remains a credible alternative if a future Aileron deployment runs on AES-NI-less hardware. The decorator pattern in the existing code makes the cipher swappable.
 
@@ -296,18 +274,17 @@ ChaCha20-Poly1305 remains a credible alternative if a future Aileron deployment 
 - Vault-unlock events are auditable: each successful unlock records timestamp, source (CLI passphrase entry), and outcome. Failed unlock attempts are also recorded (without the wrong passphrase, of course).
 - The runtime refuses to start with a corrupted or tampered vault file. The verification blob's authentication tag catches modification; on failure, the runtime exits with a clear error rather than fall back to a plaintext mode.
 
-### For Phase 2 (hosted backend)
+### For BYOC (customer-operated runtime)
 
-- The Stage 1 file format and crypto primitives are forward-compatible. Upgrading to Stage 2 (TEE-backed) means changing *who holds the KEK*, not the on-disk format.
-- The KEK transmission protocol (client-side derivation → ECDH session → attested enclave) is implemented (see Implementation status); enabling it for production is a security-review and deployment concern, not a fresh design effort.
+- The file format and crypto primitives carry forward unchanged. Running under BYOC means the customer operates the runtime that holds the KEK, not Aileron, so the *operator* of the decrypting process changes while the on-disk format does not.
+- Aileron never holds the KEK or the plaintext in this model, because the runtime that decrypts is operated by the customer.
 
 ### Open implementation questions (deferred)
 
 - *Should the local vault have an inactivity-based auto-lock (re-prompt for passphrase after N minutes idle)?* — Post-MVP. The cloud-shaped session-cache code (`internal/auth/kek_session.go`) supports this pattern; wiring it into the local CLI mode is straightforward when real usage justifies it.
 - *Should Aileron offer recovery codes for passphrase loss?* — Post-MVP. v1 ships without; the documentation makes the no-recovery property explicit.
 - *Should the local vault optionally back to the OS keychain for passphrase storage (zero-friction startup)?* — Post-MVP enhancement; the trade-off is that the OS keychain becomes the new weakest link.
-- *When does Stage 2 (TEE-backed) ship, and what triggers the deployment?* — Paired with the hosted backend introduced in [ADR-0009](/adr/0009-user-channel); ratified separately when Phase 2 begins.
-- *When does Stage 3 (browser enclave) ship?* — Even later; depends on a hosted Aileron Cloud deployment.
+- *When does the BYOC deployment path (customer-operated runtime) ship, and what triggers it?* — Paired with the hosted backend introduced in [ADR-0009](/adr/0009-user-channel); ratified separately when that work begins.
 
 ## Examples
 

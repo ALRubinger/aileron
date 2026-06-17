@@ -6,13 +6,12 @@ order: 2
 
 An Aileron install currently ships multiple cooperating binaries, but the v4 runtime model treats `aileron` as the product boundary. `aileron-mcp` is the MCP adapter both host launch and v4 sandbox launch register with the agent; under sandbox launch it runs as a stdio subprocess of the in-container agent, reached via a read-only host-mount (see [ADR-0018](/adr/0018-v4-single-binary-runtime/) and [ADR-0024](/adr/0024-sandbox-mcp-parity/)).
 
-## The three binaries
+## The two binaries
 
 | Binary | Source | Trust boundary | Called by |
 |---|---|---|---|
 | `aileron` | [`cmd/aileron`](https://github.com/ALRubinger/aileron/tree/main/cmd/aileron) | CLI plus user-scoped local daemon (per [ADR-0012](/adr/0012-local-daemon-architecture)). The vault, sessions, audit log, connector store, binding store, sandbox launch, and future v4 data-plane modes live behind this runtime boundary. | The user, launch flows, the in-container `aileron-mcp` tool surface, and future runtime helpers. |
 | `aileron-mcp` | [`cmd/aileron-mcp`](https://github.com/ALRubinger/aileron/tree/main/cmd/aileron-mcp) | MCP adapter for both host launch and v4 sandbox launch. Translates an MCP `tools/call` request from the agent host into an HTTP POST to the local daemon's `/v1/actions/{name}/run`. Under sandbox launch it runs in-container as a stdio subprocess of the agent (ADR-0024). | Host-launched and sandbox-launched MCP-aware agent hosts. |
-| `aileron-enclave` | [`cmd/aileron-enclave`](https://github.com/ALRubinger/aileron/tree/main/cmd/aileron-enclave) | TEE-side handler. Runs inside a confidential VM in production (Google Confidential Space, AMD SEV-SNP) and as a local dev process when `AILERON_TEE_PROVIDER=local`. Owns the long-lived credential escrow. | The daemon (`aileron`), over HTTPS, when a credential needs TEE-mediated use. Post-MVP for the default install. |
 
 ## How they cooperate
 
@@ -39,14 +38,7 @@ An Aileron install currently ships multiple cooperating binaries, but the v4 run
         │  audit, connector       │
         │  store, executor,       │
         │  LLM gateway            │
-        └───────────┬─────────────┘
-                    │
-                    │ HTTPS (TEE-mediated credential use)
-                    ▼
-              ┌────────────────┐
-              │ aileron-enclave│
-              │ (TEE/local)    │
-              └────────────────┘
+        └─────────────────────────┘
 ```
 
 The daemon is the trust pivot. Vault unlock happens in its process; nothing outside it ever sees the master key. The other binaries are thin clients that hand requests to the daemon and surface the daemon's structured responses back to whoever called them.
@@ -59,7 +51,6 @@ Per [ADR-0015](/adr/0015-launch-audit-scope), Aileron's host-launch audit bounda
 - **`aileron launch --sandbox=auto|docker <agent>`** prepares the selected sandbox image, validates it, and runs the agent command in a container. It bind-mounts the host-built `aileron-mcp` at `/usr/local/bin/aileron-mcp:ro` and registers it with the in-container agent (ADR-0024), and injects `AILERON_API_URL` and session metadata. `aileron-mcp` is the sole in-container tool surface.
 - **`aileron daemon start|stop|status`** controls the daemon directly. Useful for diagnostics, rare in normal use.
 - **`aileron-mcp`** can be installed standalone with `task mcp:setup` when an agent host needs the MCP server outside an `aileron launch` session.
-- **`aileron-enclave`** is post-MVP for the default install. The credential vault works without it via the local-mode path in [ADR-0011](/adr/0011-local-credential-vault). When the TEE-backed escrow lands, this binary is what runs inside Confidential Space.
 
 ## Versions are coupled
 

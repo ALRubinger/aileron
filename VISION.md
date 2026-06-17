@@ -32,7 +32,7 @@ No one mandated a knowledge management system. No one asked anyone to write a ha
 
 ---
 
-Everything runs through a secure enclave. Aileron's operators cannot read your messages — not as a policy, but as a cryptographic property that your security team can independently verify through remote attestation. Your data, your keys, your approval on every action. You can disconnect at any time and take everything with you.
+You run the runtime and the vault on your own infrastructure. Aileron never sees your credentials or your messages, because the systems that handle them are operated by you, not by Aileron. Your data, your keys, your approval on every action. You can disconnect at any time and take everything with you.
 
 The AI model is pluggable. The messaging integrations are plumbing. The thing that makes Aileron *Aileron* is the context — the living, compounding memory of how you and your team actually work. A competitor can ship the same integrations and plug in the same LLM tomorrow. They cannot replicate six months of learned context. Every day you use Aileron, the gap widens.
 
