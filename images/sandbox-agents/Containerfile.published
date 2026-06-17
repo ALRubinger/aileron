@@ -1,0 +1,53 @@
+# Published per-agent sandbox image
+# (ghcr.io/alrubinger/aileron-sandbox-<agent>).
+#
+# This recipe BAKES one agent CLI onto the GHCR-published sandbox base. It is a
+# single parameterized recipe shared by every agent: the AGENT build-arg selects
+# which devcontainer Feature install script runs, so claude and codex stay in
+# lockstep with no per-agent Dockerfile duplication (issue #1086). The agent
+# Feature scripts under images/sandbox-features/<agent>/install.sh are the single
+# source of truth for the install recipe (issues #1082/#1083); CI bakes them
+# here.
+#
+# Build context is the REPO ROOT (the workflow passes `context: .`) because the
+# COPY below pulls in the images/sandbox-features tree. A repo-root .dockerignore
+# keeps the context lean; it must not exclude images/sandbox-features.
+#
+# The base already bakes aileron-mcp and stamps the ai.aileron.mcp.version label
+# (issue #957), so this recipe inherits both — it only layers the agent CLI on
+# top and never reintroduces the host-mount fallback.
+
+# BASE_IMAGE is the fully-qualified GHCR base reference resolved by the workflow
+# (e.g. ghcr.io/alrubinger/aileron-sandbox-base:latest). The workflow asserts the
+# tag exists via `docker manifest inspect` before building so a missing base
+# fails fast with a precise message instead of an opaque FROM error.
+ARG BASE_IMAGE=ghcr.io/alrubinger/aileron-sandbox-base:latest
+FROM ${BASE_IMAGE}
+
+# AGENT selects the Feature install script. It is interpolated ONLY in the RUN
+# body below, never in a COPY source path: a build-arg in a COPY source is
+# ambiguous and brittle, so the COPY pulls the whole lean features tree with a
+# literal source and the RUN picks the agent subdirectory.
+ARG AGENT
+
+LABEL org.opencontainers.image.title="Aileron sandbox ${AGENT}"
+LABEL org.opencontainers.image.description="Aileron sandbox base composed with the ${AGENT} agent CLI Feature."
+LABEL org.opencontainers.image.source="https://github.com/ALRubinger/aileron"
+
+# The Feature install scripts run as root on the Alpine base (apk add, npm -g).
+# The base's final stage drops to USER agent, so switch back to root for the
+# install, then restore the base's runtime invariants afterward.
+USER root
+
+# Literal source path (no ${AGENT} interpolation). The RUN body, where ${AGENT}
+# is unambiguous, selects the agent subdirectory and runs its install.sh. The
+# tree is removed in the same layer so the Feature sources do not bloat the
+# published image.
+COPY images/sandbox-features /tmp/aileron-features
+RUN sh "/tmp/aileron-features/${AGENT}/install.sh" \
+    && rm -rf /tmp/aileron-features
+
+# Restore the base's final-stage invariants so the composed image launches
+# exactly as the base does: non-root agent user, workspace CWD.
+WORKDIR /home/agent/workspace
+USER agent

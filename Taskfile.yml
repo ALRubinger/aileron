@@ -367,6 +367,12 @@ tasks:
       AILERON_SANDBOX_FEATURES_CONTEXT:
         sh: cd "{{.ROOT_DIR}}/images/sandbox-features" && pwd
 
+  test:integration:sandbox-agent-image:
+    desc: "Smoke-test a published per-agent sandbox image (claude/codex): assert the agent CLI is on PATH and Builder.Validate succeeds (launchability), against the image ref in AILERON_SANDBOX_AGENT_IMAGE (#1086); fail-fast — requires Docker and the env set (no self-skip)"
+    dir: internal
+    cmds:
+      - go test -tags=integration_sandbox -run TestSandboxAgentImageSmoke ./launch/...
+
   test:e2e:integration:
     desc: Run Playwright E2E tests against running services
     dir: ui

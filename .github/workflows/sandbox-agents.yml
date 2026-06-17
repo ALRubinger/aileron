@@ -1,0 +1,259 @@
+name: Sandbox Agent Images
+
+# Builds and publishes the multi-arch per-agent sandbox images
+# (ghcr.io/alrubinger/aileron-sandbox-claude and -codex), each baked from the
+# GHCR-published sandbox base (#1085) plus the agent's devcontainer Feature
+# install script (#1082). One workflow, one matrix leg per agent, so claude and
+# codex stay in lockstep with no file duplication (#1086).
+#
+# Each published image is smoke-tested by the launchability validation in
+# internal/launch/sandbox_agent_image_smoke_test.go: the agent CLI is on PATH
+# and Builder.Validate succeeds (RequireProxyTrust=false, RequireMCPBinary=false,
+# mirroring the #1121/#1083 path). Republish-on-agent-release automation is owned
+# by #1088 and out of scope here.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/sandbox-agents.yml"
+      - "images/sandbox-agents/**"
+      - "images/sandbox-features/**"
+      - "internal/launch/sandbox_agent_image_smoke_test.go"
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  BASE_IMAGE_NAME: ghcr.io/alrubinger/aileron-sandbox-base
+
+jobs:
+  build:
+    name: Build sandbox-${{ matrix.agent }}
+    runs-on: ubuntu-latest
+    # Per-agent + per-ref concurrency so the two matrix legs do NOT cancel each
+    # other (a workflow-level group keyed only by ref/workflow would, since
+    # matrix.agent is out of scope there) and a new push to the same ref + agent
+    # supersedes an in-flight run.
+    concurrency:
+      group: sandbox-agents-${{ github.ref }}-${{ matrix.agent }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # The agent name doubles as the Feature subdirectory under
+        # images/sandbox-features/<agent>, the AGENT build-arg, and the agent CLI
+        # command asserted on PATH.
+        agent: [claude, codex]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: internal/go.mod
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Log in to GHCR before any registry access on the publishing paths so the
+      # base-tag `docker manifest inspect`, the GHCR-base pull during the smoke
+      # build, and the multi-arch push are all authenticated. PRs never touch
+      # GHCR (they build the base locally), so login is skipped there.
+      - name: Log in to GitHub Container Registry
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Aileron version stamped into the image tag. Tag builds carry the release
+      # version (v-prefix stripped to match version.Version); PR and dispatch
+      # builds use "dev", consistent with sandbox-base.yml and the host CLI.
+      - name: Resolve aileron version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Resolve the base image this build will FROM.
+      #
+      # On v* tags and workflow_dispatch (the paths that PUBLISH), FROM the
+      # GHCR-published base. The base workflow (sandbox-base.yml) publishes the
+      # exact release tag (`type=ref,event=tag`, e.g. v0.0.1) plus a floating
+      # `latest` on v* tag builds. A v* build FROMs the version-pinned tag so the
+      # per-agent image deterministically composes onto THIS release's base, not
+      # whatever `latest` happens to point at (the base and per-agent workflows
+      # run concurrently on the same tag push). workflow_dispatch FROMs `latest`,
+      # the one tag reliably present from the previous release. Gate on
+      # `docker manifest inspect` so a missing base surfaces a precise error
+      # naming the absent tag instead of an opaque FROM failure deep in the build.
+      #
+      # On pull_request nothing is published and the GHCR base may not exist yet
+      # (no v* release has run sandbox-base.yml). Build the base locally from the
+      # in-repo recipe and FROM that, mirroring how the composition integration
+      # test (sandbox_features_composition_integration_test.go) builds the base
+      # rather than depending on a registry-published one. This keeps the PR bake
+      # + smoke path self-contained.
+      - name: Resolve and verify base image
+        id: base
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            BASE_REF="${BASE_IMAGE_NAME}:${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BASE_REF="${BASE_IMAGE_NAME}:latest"
+          else
+            BASE_REF=""
+          fi
+          if [[ -n "${BASE_REF}" ]]; then
+            echo "Verifying published base image ${BASE_REF} exists..."
+            if ! docker manifest inspect "${BASE_REF}" >/dev/null 2>&1; then
+              echo "::error::Base image ${BASE_REF} not found in GHCR. The sandbox-base workflow (sandbox-base.yml) publishes the release tag and 'latest' on v* tag builds; ensure the base release published that tag before building per-agent images." >&2
+              exit 1
+            fi
+            echo "base_image=${BASE_REF}" >> "$GITHUB_OUTPUT"
+            echo "Using published base image ${BASE_REF}."
+          else
+            echo "build_local=true" >> "$GITHUB_OUTPUT"
+            echo "base_image=aileron-sandbox-base:pr-local" >> "$GITHUB_OUTPUT"
+            echo "PR build: will build the base locally from images/sandbox-base/Containerfile.published."
+          fi
+
+      # On PR, build the in-repo base (single-arch, loaded) so the per-agent bake
+      # below can FROM it. The published recipe compiles aileron-mcp from source,
+      # so the repo-root context is required (it matches sandbox-base.yml).
+      #
+      # Built with plain `docker build` (the default docker driver), NOT the
+      # buildx docker-container driver from setup-buildx-action. The container
+      # driver keeps its own isolated image store, so an image it `--load`s into
+      # the daemon is invisible to a SUBSEQUENT container-driver build resolving
+      # `FROM aileron-sandbox-base:pr-local` (it would fall through to Docker Hub
+      # and fail). The default driver shares the daemon store, so the per-agent
+      # smoke build below sees this base. The multi-arch push step still uses
+      # buildx; it only runs on v*/dispatch where it FROMs the GHCR base.
+      - name: Build base image locally (PR)
+        if: ${{ steps.base.outputs.build_local == 'true' }}
+        run: |
+          docker build \
+            --file images/sandbox-base/Containerfile.published \
+            --tag aileron-sandbox-base:pr-local \
+            --build-arg AILERON_VERSION=${{ steps.ver.outputs.version }} \
+            --build-arg AILERON_COMMIT=${{ github.sha }} \
+            .
+
+      # Single-arch build into the daemon image store so the next steps can
+      # `docker run` the image to resolve the agent CLI version and run the
+      # launchability smoke. Uses plain `docker build` (default docker driver)
+      # so it both shares the daemon store with the PR base build above and
+      # leaves the resulting :smoke image visible to `docker run`. The multi-arch
+      # push build below cannot `--load` and runs only on v*/dispatch.
+      - name: Build image for smoke test
+        run: |
+          docker build \
+            --file images/sandbox-agents/Containerfile.published \
+            --tag aileron-sandbox-${{ matrix.agent }}:smoke \
+            --build-arg BASE_IMAGE=${{ steps.base.outputs.base_image }} \
+            --build-arg AGENT=${{ matrix.agent }} \
+            .
+
+      # Resolve the installed agent CLI version from the loaded image. `<agent>
+      # --version` prints a line containing a semver; extract the first semver so
+      # the tag is clean regardless of surrounding prose. The agent CLI never
+      # holds credentials, so probing --version bakes nothing sensitive.
+      - name: Resolve agent CLI version
+        id: cli
+        run: |
+          set -euo pipefail
+          IMG=aileron-sandbox-${{ matrix.agent }}:smoke
+          raw=$(docker run --rm "$IMG" ${{ matrix.agent }} --version 2>&1 || true)
+          echo "raw ${{ matrix.agent }} --version: $raw"
+          cli_version=$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+          if [ -z "$cli_version" ]; then
+            echo "::error::Could not resolve ${{ matrix.agent }} CLI version from \`${{ matrix.agent }} --version\` output: $raw" >&2
+            exit 1
+          fi
+          echo "version=${cli_version}" >> "$GITHUB_OUTPUT"
+          echo "resolved ${{ matrix.agent }} CLI version: ${cli_version}"
+
+      # Image tags: <aileron-version>-<agent-cli-version>, a git-<sha> for
+      # traceability, and floating latest on v* tag builds only.
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/alrubinger/aileron-sandbox-${{ matrix.agent }}
+          tags: |
+            type=raw,value=${{ steps.ver.outputs.version }}-${{ steps.cli.outputs.version }}
+            type=sha,prefix=git-
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=Aileron sandbox ${{ matrix.agent }}
+            org.opencontainers.image.description=Aileron sandbox base composed with the ${{ matrix.agent }} agent CLI Feature.
+
+      # Multi-arch build + push. Runs only on the publishing paths (v* tags and
+      # manual dispatch), where the base is the multi-arch GHCR image. It is
+      # skipped on PR: a PR FROMs the locally-built single-arch base, which
+      # cannot satisfy a linux/amd64,linux/arm64 build, and the single-arch
+      # smoke build above already validates the per-agent bake on PR. Context is
+      # the repo root so the Containerfile's COPY of images/sandbox-features
+      # resolves.
+      - name: Build and push image
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/sandbox-agents/Containerfile.published
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ steps.base.outputs.base_image }}
+            AGENT=${{ matrix.agent }}
+
+      # Launchability smoke against the LOADED :smoke image on PR, where nothing
+      # is pushed so there is no published manifest to pull. Asserts the agent
+      # CLI is on PATH and Builder.Validate succeeds (RequireProxyTrust=false,
+      # RequireMCPBinary=false), exactly as the launcher validates it
+      # (#1121/#1083 path).
+      - name: Smoke test loaded image
+        if: ${{ !(startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}
+        run: task test:integration:sandbox-agent-image
+        env:
+          AILERON_SANDBOX_AGENT_IMAGE: aileron-sandbox-${{ matrix.agent }}:smoke
+          AILERON_SANDBOX_AGENT_COMMAND: ${{ matrix.agent }}
+
+      # Published-manifest smoke (P2): whenever a push happened (v* tag release
+      # AND workflow_dispatch dry-run), pull the freshly published manifest back
+      # and run the same launchability validation against the PULLED ref. This
+      # exercises the published-manifest path — registry round-trip and
+      # multi-arch manifest selection — not just the locally-loaded :smoke
+      # image, so a real v* release validates the exact artifact consumers pull.
+      - name: Smoke test published image
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+        run: |
+          set -euo pipefail
+          PUSHED_REF="ghcr.io/alrubinger/aileron-sandbox-${{ matrix.agent }}:${{ steps.ver.outputs.version }}-${{ steps.cli.outputs.version }}"
+          echo "Pulling published manifest ${PUSHED_REF}..."
+          docker pull "${PUSHED_REF}"
+          task test:integration:sandbox-agent-image
+        env:
+          AILERON_SANDBOX_AGENT_IMAGE: ghcr.io/alrubinger/aileron-sandbox-${{ matrix.agent }}:${{ steps.ver.outputs.version }}-${{ steps.cli.outputs.version }}
+          AILERON_SANDBOX_AGENT_COMMAND: ${{ matrix.agent }}
