@@ -128,9 +128,25 @@ func TestSandboxFeaturesComposeViaAileron(t *testing.T) {
 		t.Fatalf("result.Image is empty")
 	}
 
-	// Both declared tools must resolve on PATH in the composed image.
-	assertCommandOnPath(ctx, t, rt, result.Image, "codex")
+	// The customer-tooling Feature's probe tool must resolve on PATH.
 	assertCommandOnPath(ctx, t, rt, result.Image, probeTool)
+
+	// Launchability: the composed image must satisfy the launch-time runtime
+	// contract, not merely carry the agent CLI on PATH. Builder.Validate runs
+	// the same probe the launcher uses — a writable /home/agent/workspace mount,
+	// CWD there, and the agent command resolvable — so the test reflects that a
+	// features-composed image is actually launchable, not just tool-on-PATH.
+	// RequireMCPBinary is false here because aileron-mcp is bind-mounted at
+	// launch (ADR-0024), not baked into the base image under test.
+	validateWorkspace := t.TempDir()
+	if err := builder.Validate(ctx, sandboxcontainer.ValidateOptions{
+		Runtime: rt,
+		Image:   result.Image,
+		WorkDir: validateWorkspace,
+		Command: []string{"codex"},
+	}); err != nil {
+		t.Fatalf("Builder.Validate (launchability of composed image): %v", err)
+	}
 }
 
 // writeProbeFeature authors a minimal local devcontainer Feature whose

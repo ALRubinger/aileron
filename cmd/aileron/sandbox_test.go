@@ -47,6 +47,38 @@ func TestRunSandboxPlanPrintsFeatures(t *testing.T) {
 	}
 }
 
+func TestRunSandboxPlanFlagsFeaturesInertOnBYOImage(t *testing.T) {
+	dir := t.TempDir()
+	devDir := filepath.Join(dir, ".devcontainer")
+	if err := os.MkdirAll(devDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A BYO image (customizations.aileron.image) with features: the image is
+	// used as-is, so the features are inert and must be flagged as such.
+	body := `{"customizations":{"aileron":{"image":"ghcr.io/acme/own:1"}},"features":{"ghcr.io/aileron/codex:1":{}}}`
+	if err := os.WriteFile(filepath.Join(devDir, "devcontainer.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write devcontainer.json: %v", err)
+	}
+	t.Chdir(dir)
+
+	var out, errb bytes.Buffer
+	if code := runSandboxPlan(nil, &out, &errb); code != 0 {
+		t.Fatalf("runSandboxPlan = %d, stderr: %s", code, errb.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "tier: byo_image") {
+		t.Fatalf("plan output missing BYO tier line:\n%s", got)
+	}
+	wantLine := "features (ignored — BYO image): ghcr.io/aileron/codex:1\n"
+	if !strings.Contains(got, wantLine) {
+		t.Fatalf("plan output missing %q:\n%s", wantLine, got)
+	}
+	// It must NOT print the unqualified "features:" line that implies they apply.
+	if strings.Contains(got, "features: ghcr.io/aileron/codex:1") {
+		t.Fatalf("BYO plan must not present features as applied:\n%s", got)
+	}
+}
+
 func TestSandboxCheckRequiresProxyTrust(t *testing.T) {
 	cases := []struct {
 		name      string
