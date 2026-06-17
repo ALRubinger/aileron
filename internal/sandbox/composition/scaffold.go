@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // DefaultAgent is the agent the scaffold targets when --agent is omitted.
@@ -115,24 +116,37 @@ USER agent
 // a documented Tier 1 recipe are pre-filled and uncommented; agents
 // without one get a TODO stub that still produces a buildable Dockerfile
 // once the user fills it in.
+//
+// The Claude/Codex snippets are derived from the canonical agentRecipes
+// table (recipes.go), which is also the source of truth for the devcontainer
+// Features under images/sandbox-features/<agent>/. There is exactly one place
+// that names the apk prerequisites and the npm package per agent.
 func agentInstallSnippet(agent string) string {
-	switch agent {
-	case "claude":
-		return `# --- Claude Code ---
-RUN apk add --no-cache git nodejs npm ripgrep && \
-    npm install -g @anthropic-ai/claude-code`
-	case "codex":
-		// The @openai/codex npm package ships prebuilt musl binaries, so it
-		// installs cleanly on the Alpine base.
-		return `# --- Codex ---
-RUN apk add --no-cache git nodejs npm ripgrep && \
-    npm install -g @openai/codex`
-	default:
-		return fmt.Sprintf(`# --- TODO: install the %s CLI ---
+	if recipe, ok := recipeForAgent(agent); ok {
+		return fmt.Sprintf(`# --- %s ---
+RUN apk add --no-cache %s && \
+    npm install -g %s`,
+			agentSnippetLabel(agent),
+			strings.Join(recipe.Prereqs, " "),
+			recipe.NPMPackage)
+	}
+	return fmt.Sprintf(`# --- TODO: install the %s CLI ---
 # Aileron does not yet ship a verified install recipe for %s.
 # Replace this stub with an install that puts %q on PATH and uses apk
 # against the Alpine base. See:
 #   https://docs.withaileron.ai/development/sandbox-agent-images/
 # RUN apk add --no-cache ...`, agent, agent, agent)
+}
+
+// agentSnippetLabel returns the human-facing heading for an agent's Dockerfile
+// install snippet (e.g. "Claude Code"). Falls back to the agent id.
+func agentSnippetLabel(agent string) string {
+	switch agent {
+	case "claude":
+		return "Claude Code"
+	case "codex":
+		return "Codex"
+	default:
+		return agent
 	}
 }

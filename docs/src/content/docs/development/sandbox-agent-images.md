@@ -34,7 +34,7 @@ The harness-free `aileron/sandbox-base` intentionally does not include agent CLI
 
 ## Claude Code Feature
 
-The Claude Code agent Feature installs the `claude` CLI onto `aileron/sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature authoring lands in [#1082](https://github.com/ALRubinger/aileron/issues/1082).
+The Claude Code agent Feature installs the `claude` CLI onto `aileron/sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature lives at `images/sandbox-features/claude/` (`devcontainer-feature.json` plus `install.sh`).
 
 For the Tier 0 zero-build path, launch the prebuilt image directly:
 
@@ -54,7 +54,7 @@ Claude Code still owns its own authentication flow. Do not bake Claude, Anthropi
 
 ## Codex Feature
 
-The Codex agent Feature installs the `codex` CLI onto `aileron/sandbox-base`. The `@openai/codex` npm package ships prebuilt musl binaries, so it installs cleanly on the Alpine base. Like the Claude Feature, it is baked into the prebuilt Codex image and composable for Tier 1, and its authoring lands in [#1082](https://github.com/ALRubinger/aileron/issues/1082).
+The Codex agent Feature installs the `codex` CLI onto `aileron/sandbox-base`. The `@openai/codex` npm package ships prebuilt musl binaries, so it installs cleanly on the Alpine base. Like the Claude Feature, it is baked into the prebuilt Codex image and composable for Tier 1. The Feature lives at `images/sandbox-features/codex/` (`devcontainer-feature.json` plus `install.sh`).
 
 For the Tier 0 zero-build path:
 

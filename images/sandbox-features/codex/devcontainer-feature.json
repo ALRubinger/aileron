@@ -1,0 +1,7 @@
+{
+  "id": "codex",
+  "version": "0.0.1",
+  "name": "Codex CLI",
+  "description": "Installs the OpenAI Codex CLI (@openai/codex) onto the Aileron Alpine sandbox base so it is on PATH for the non-root agent user.",
+  "documentationURL": "https://docs.withaileron.ai/development/sandbox-agent-images/"
+}
