@@ -139,6 +139,16 @@ func TestSandboxFeaturesComposeViaAileron(t *testing.T) {
 	// RequireMCPBinary is false here because aileron-mcp is bind-mounted at
 	// launch (ADR-0024), not baked into the base image under test.
 	validateWorkspace := t.TempDir()
+	// The workspace is bind-mounted at /home/agent/workspace and the container
+	// runs as the non-root `agent` user, whose uid does not match the host uid
+	// that owns t.TempDir() (0700). On a Linux Docker host that makes the mount
+	// unwritable to `agent`, so Validate's writable-workspace probe fails; make
+	// it world-writable so the launchability check exercises the IMAGE contract,
+	// not host/container uid mapping. (Docker Desktop masks this with permissive
+	// file sharing, which is why it only surfaces on Linux CI.)
+	if err := os.Chmod(validateWorkspace, 0o777); err != nil {
+		t.Fatalf("chmod validate workspace: %v", err)
+	}
 	if err := builder.Validate(ctx, sandboxcontainer.ValidateOptions{
 		Runtime: rt,
 		Image:   result.Image,

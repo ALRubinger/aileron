@@ -1012,22 +1012,27 @@ func TestSandboxMCP_Concurrency_DistinctApprovalsAttributedCorrectly(t *testing.
 		t.Fatalf("Decide pending[0]: %v", err)
 	}
 
-	wantChain := []model.EventType{
-		model.EventTypeApprovalRequested,
-		model.EventTypeApprovalApproved,
-		model.EventTypeExecutionStarted,
-		model.EventTypeExecutionSucceeded,
-	}
 	for _, entry := range pending {
 		waitForApprovalChain(t, h.auditStore, entry.ID, model.EventTypeExecutionSucceeded, 5*time.Second)
 		chain := eventChainForApproval(t, h.auditStore, entry.ID)
-		if len(chain) != len(wantChain) {
-			t.Fatalf("approval %q chain = %v; want %v", entry.ID, chain, wantChain)
+		if len(chain) != 4 {
+			t.Fatalf("approval %q chain = %v; want 4 events (approval.requested, approval.approved, execution.started, execution.succeeded)", entry.ID, chain)
 		}
-		for i, w := range wantChain {
-			if chain[i] != w {
-				t.Errorf("approval %q chain[%d] = %s; want %s", entry.ID, i, chain[i], w)
-			}
+		// approval.requested is always first and execution.succeeded always last.
+		// The middle pair (approval.approved from the Decide path, execution.started
+		// from the background executor goroutine) is emitted from two goroutines
+		// with no guaranteed audit-write ordering, so assert it as an unordered set
+		// rather than a fixed sequence. Approval still causally precedes execution;
+		// only the two log writes may interleave.
+		if chain[0] != model.EventTypeApprovalRequested {
+			t.Errorf("approval %q chain[0] = %s; want %s", entry.ID, chain[0], model.EventTypeApprovalRequested)
+		}
+		if chain[3] != model.EventTypeExecutionSucceeded {
+			t.Errorf("approval %q chain[3] = %s; want %s", entry.ID, chain[3], model.EventTypeExecutionSucceeded)
+		}
+		middle := map[model.EventType]bool{chain[1]: true, chain[2]: true}
+		if !middle[model.EventTypeApprovalApproved] || !middle[model.EventTypeExecutionStarted] {
+			t.Errorf("approval %q chain middle = [%s %s]; want {approval.approved, execution.started} in either order", entry.ID, chain[1], chain[2])
 		}
 	}
 
