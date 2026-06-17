@@ -31,6 +31,24 @@ const DefaultRuntime = "auto"
 const WorkspacePath = "/home/agent/workspace"
 const AgentImagesDocsURL = "https://docs.withaileron.ai/development/sandbox-agent-images/"
 
+// DevcontainerCLIVersion pins the @devcontainers/cli version Aileron uses to
+// build a Tier 1 devcontainer that declares `features`. Raw `docker build`
+// cannot apply Features, so the Features build path routes through
+// `devcontainer build` (ADR-0017). The version is exported so the Taskfile and
+// CI reference the same pin (reproducible builds, no global install state).
+const DevcontainerCLIVersion = "0.87.0"
+
+// devcontainerCLI is the package-level indirection over the @devcontainers/cli
+// invocation prefix: the executable plus the leading arguments that precede the
+// `build` subcommand. Resolved through `npx --yes @devcontainers/cli@<pinned>`
+// so the version is reproducible without a global install. It is a var (not a
+// const slice) so unit tests can assert the assembled argv deterministically
+// and CI/Taskfile can override the resolution if needed. The Runner seam
+// (ADR-0014) is preserved: this flows through container.Runner.Run with name =
+// devcontainerCLI[0]; the CLI itself shells out to Docker, adding no second
+// runtime.
+var devcontainerCLI = []string{"npx", "--yes", "@devcontainers/cli@" + DevcontainerCLIVersion}
+
 var ErrNoBuildRequired = errors.New("sandbox image does not require a build")
 
 const (
@@ -239,7 +257,13 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		result.Built = true
 		return result, nil
 	case composition.TierDevcontainer:
-		if opts.Plan.DockerfilePath == "" {
+		useFeatures := len(opts.Plan.Features) > 0
+		// A Tier 1 devcontainer with neither a Dockerfile nor features has
+		// nothing to build (it FROMs a base image directly); treat it as
+		// BYO-like. Features require a build even without a Dockerfile —
+		// @devcontainers/cli resolves the base from the devcontainer config —
+		// so a features-only plan must NOT short-circuit here.
+		if opts.Plan.DockerfilePath == "" && !useFeatures {
 			result.Image = opts.Plan.Image
 			return result, ErrNoBuildRequired
 		}
@@ -256,6 +280,22 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 			return BuildResult{}, err
 		}
 		if !shouldBuild {
+			return result, nil
+		}
+		// Features must be applied by @devcontainers/cli; raw `docker build`
+		// cannot apply them. The CLI shells out to Docker under the hood, so
+		// the Runner/runtimeName seam (ADR-0014) is preserved — runtimeName is
+		// still resolved above so the Docker-only guard fires and the result
+		// reports the runtime, but the CLI executable is what we exec.
+		if useFeatures {
+			name, args, err := devcontainerCLIBuildArgs(workDir, opts.Plan, result.Image)
+			if err != nil {
+				return BuildResult{}, err
+			}
+			if err := runner.Run(ctx, name, args, stdout, stderr); err != nil {
+				return BuildResult{}, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+			}
+			result.Built = true
 			return result, nil
 		}
 		args, err := devcontainerBuildArgs(workDir, opts.Plan, result.Image)
@@ -695,6 +735,36 @@ func devcontainerBuildArgs(workDir string, plan composition.Plan, image string) 
 	}
 	args = append(args, workDir)
 	return args, nil
+}
+
+// devcontainerCLIBuildArgs assembles the executable and arguments for a
+// `devcontainer build` invocation that applies the plan's `features`.
+// @devcontainers/cli reads `features` (and any base image / Dockerfile) from
+// the devcontainer.json under workDir, so the workspace folder is passed rather
+// than a Dockerfile. The returned name is devcontainerCLI[0]; args are the
+// remaining CLI prefix (e.g. `--yes @devcontainers/cli@<pinned>`) followed by
+// `build --workspace-folder <workDir> --image-name <image>` plus deterministic
+// (sorted) `--build-arg k=v` tokens mirroring devcontainerBuildArgs.
+func devcontainerCLIBuildArgs(workDir string, plan composition.Plan, image string) (string, []string, error) {
+	devcontainerPath := filepath.Join(workDir, composition.DefaultDevcontainerPath)
+	if _, err := os.Stat(devcontainerPath); err != nil {
+		return "", nil, fmt.Errorf("devcontainer features build requires %s: %w", devcontainerPath, err)
+	}
+	if len(devcontainerCLI) == 0 {
+		return "", nil, fmt.Errorf("devcontainer CLI invocation is not configured")
+	}
+	name := devcontainerCLI[0]
+	args := append([]string(nil), devcontainerCLI[1:]...)
+	args = append(args, "build", "--workspace-folder", workDir, "--image-name", image)
+	keys := make([]string, 0, len(plan.BuildArgs))
+	for k := range plan.BuildArgs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--build-arg", k+"="+plan.BuildArgs[k])
+	}
+	return name, args, nil
 }
 
 func resolveDockerfile(workDir string, plan composition.Plan) (string, error) {

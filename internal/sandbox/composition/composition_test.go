@@ -320,6 +320,89 @@ func TestInitForceOverwritesExistingFiles(t *testing.T) {
 	}
 }
 
+func TestDiscoverParsesFeaturesIntoPlan(t *testing.T) {
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{
+  "build": {"dockerfile": "Dockerfile"},
+  "features": {
+    "ghcr.io/aileron/codex:1": {},
+    "ghcr.io/acme/tool:2": {"version": "latest"}
+  },
+  "customizations": {"aileron": {"approval_surface": "both"}}
+}`)
+
+	plan, err := Discover(dir, "0.4.0")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierDevcontainer {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
+	}
+	if len(plan.Features) != 2 {
+		t.Fatalf("Features = %#v, want 2 keys", plan.Features)
+	}
+	if got := strings.TrimSpace(string(plan.Features["ghcr.io/aileron/codex:1"])); got != "{}" {
+		t.Fatalf("codex options = %q, want %q", got, "{}")
+	}
+	if got := strings.TrimSpace(string(plan.Features["ghcr.io/acme/tool:2"])); got != `{"version": "latest"}` {
+		t.Fatalf("tool options = %q (raw payload must be preserved verbatim)", got)
+	}
+	// Features coexist with the Dockerfile and the approval surface.
+	if plan.DockerfilePath != "Dockerfile" {
+		t.Fatalf("DockerfilePath = %q", plan.DockerfilePath)
+	}
+	if plan.Aileron.ApprovalSurface != "both" {
+		t.Fatalf("ApprovalSurface = %q", plan.Aileron.ApprovalSurface)
+	}
+}
+
+func TestDiscoverWithoutFeaturesLeavesNilMap(t *testing.T) {
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{"build": {"dockerfile": "Dockerfile"}}`)
+
+	plan, err := Discover(dir, "0.4.0")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Features != nil {
+		t.Fatalf("Features = %#v, want nil when no features block is present", plan.Features)
+	}
+}
+
+func TestDiscoverCarriesFeaturesOnBYOImagePlan(t *testing.T) {
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{
+  "features": {"ghcr.io/acme/tool:1": {}},
+  "customizations": {"aileron": {"image": "ghcr.io/acme/agent:2026"}}
+}`)
+
+	plan, err := Discover(dir, "0.4.0")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierBYOImage {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierBYOImage)
+	}
+	// Features are carried for plan inspection even though they are inert on a
+	// BYO image (no build occurs).
+	if len(plan.Features) != 1 {
+		t.Fatalf("Features = %#v, want 1 key carried on BYO plan", plan.Features)
+	}
+}
+
+func TestDiscoverRejectsNonObjectFeatures(t *testing.T) {
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{"features": ["ghcr.io/acme/tool:1"]}`)
+
+	_, err := Discover(dir, "0.4.0")
+	if err == nil {
+		t.Fatal("expected parse error for non-object features")
+	}
+	if !strings.Contains(err.Error(), "features") {
+		t.Fatalf("error = %v, want mention of features", err)
+	}
+}
+
 func writeDevcontainer(t *testing.T, dir, body string) {
 	t.Helper()
 	path := filepath.Join(dir, DefaultDevcontainerPath)
