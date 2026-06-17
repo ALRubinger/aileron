@@ -72,9 +72,22 @@ We're about to take your first flight with Aileron. In under 5 minutes, you'll b
   {
     value: "windows",
     label: "Windows",
-    lang: "powershell",
-    note: "Extract the zip and add the directory to PATH. Note that Windows support is not yet confirmed; file an issue if not working correctly.",
-    code: `Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron`,
+    note: "Windows support is still being verified on real hardware. Please file an issue if anything does not work.",
+    variants: [
+      {
+        value: "scoop",
+        label: "Scoop",
+        lang: "powershell",
+        code: `scoop bucket add aileron https://github.com/ALRubinger/scoop-aileron\nscoop install aileron`,
+      },
+      {
+        value: "zip",
+        label: "Manual (.zip)",
+        lang: "powershell",
+        note: "Extract the zip and add the directory to PATH.",
+        code: `Invoke-WebRequest -Uri https://github.com/ALRubinger/aileron/releases/latest/download/aileron_${latestRelease.version}_windows_amd64.zip -OutFile aileron.zip\nExpand-Archive aileron.zip -DestinationPath $env:USERPROFILE\\aileron`,
+      },
+    ],
   },
 ]} />
 
