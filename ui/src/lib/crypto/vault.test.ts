@@ -10,37 +10,17 @@ vi.mock('./envelope.js', () => ({
 	encrypt: vi.fn()
 }));
 
-vi.mock('./ecdh.js', () => ({
-	generateKeyPair: vi.fn(),
-	deriveSharedSecret: vi.fn()
-}));
-
-vi.mock('./attestation.js', () => ({
-	verifyAttestation: vi.fn()
-}));
-
 vi.mock('$lib/api', () => ({
 	getPassphraseSalt: vi.fn(),
 	getPassphraseVerification: vi.fn(),
-	getTeeStatus: vi.fn(),
-	initiateAttestation: vi.fn(),
-	establishTeeSession: vi.fn(),
 	unlockVaultDirect: vi.fn(),
 	setPassphrase: vi.fn()
 }));
 
 import { unlockVault } from './vault.svelte';
 import { deriveKEK } from './argon2.js';
-import { decrypt, encrypt } from './envelope.js';
-import { generateKeyPair, deriveSharedSecret } from './ecdh.js';
-import { verifyAttestation } from './attestation.js';
-import {
-	getPassphraseSalt,
-	getPassphraseVerification,
-	getTeeStatus,
-	initiateAttestation,
-	establishTeeSession
-} from '$lib/api';
+import { decrypt } from './envelope.js';
+import { getPassphraseSalt, getPassphraseVerification, unlockVaultDirect } from '$lib/api';
 
 function b64(bytes: Uint8Array): string {
 	let binary = '';
@@ -52,12 +32,9 @@ function b64(bytes: Uint8Array): string {
 
 describe('unlockVault', () => {
 	const kek = new Uint8Array([1, 2, 3, 4]);
-	const expectedIdentity = {
-		image_digest: 'sha256:expected',
-		project_id: 'expected-project'
-	};
 
 	beforeEach(() => {
+		vi.clearAllMocks();
 		vi.mocked(getPassphraseSalt).mockResolvedValue({
 			has_passphrase: true,
 			salt: b64(new Uint8Array(16).fill(7))
@@ -68,43 +45,55 @@ describe('unlockVault', () => {
 			kek_verification: b64(new Uint8Array([9, 9, 9]))
 		});
 		vi.mocked(decrypt).mockResolvedValue(new TextEncoder().encode(VERIFICATION_CONSTANT));
-		vi.mocked(getTeeStatus).mockResolvedValue({
-			enabled: true,
-			provider: 'confidential-space',
-			expected_identity: expectedIdentity
-		});
-		vi.mocked(initiateAttestation).mockResolvedValue({
-			token: 'attestation-token',
-			public_key: b64(new Uint8Array([5, 6, 7, 8])),
-			nonce: b64(new Uint8Array([9, 10]))
-		});
-		vi.mocked(verifyAttestation).mockResolvedValue({
-			verified: true,
-			enclavePublicKey: new Uint8Array([5, 6, 7, 8])
-		});
-		vi.mocked(generateKeyPair).mockResolvedValue({
-			privateKey: {} as CryptoKey,
-			publicKey: new Uint8Array([11, 12])
-		});
-		vi.mocked(deriveSharedSecret).mockResolvedValue(new Uint8Array([13, 14]));
-		vi.mocked(encrypt).mockResolvedValue(new Uint8Array([15, 16]));
-		vi.mocked(establishTeeSession).mockResolvedValue({
-			expires_at: '2026-04-29T12:00:00Z',
-			escrowed_count: 3
+		vi.mocked(unlockVaultDirect).mockResolvedValue({
+			expires_at: '2026-04-29T12:00:00Z'
 		});
 	});
 
-	it('passes expected enclave identity pins into browser attestation verification', async () => {
+	it('derives the KEK and sends it directly to the server session cache', async () => {
 		const result = await unlockVault('passphrase');
 
 		expect(result.valid).toBe(true);
-		expect(result.escrowedCount).toBe(3);
-		expect(verifyAttestation).toHaveBeenCalledWith(
-			'attestation-token',
-			new Uint8Array([5, 6, 7, 8]),
-			'aileron-enclave',
-			new Uint8Array([9, 10]),
-			expectedIdentity
+		expect(result.sessionExpiresAt).toEqual(new Date('2026-04-29T12:00:00Z'));
+		// The base64-encoded KEK is transmitted, the passphrase is not.
+		// (Captured before unlockVault zeroes the KEK buffer in its finally block.)
+		expect(unlockVaultDirect).toHaveBeenCalledWith(b64(new Uint8Array([1, 2, 3, 4])));
+	});
+
+	it('reports each unlock phase via the progress callback', async () => {
+		const steps: string[] = [];
+		await unlockVault('passphrase', (s) => steps.push(s));
+
+		expect(steps).toEqual(['deriving', 'verifying', 'establishing', 'done']);
+	});
+
+	it('returns valid:false when the passphrase is wrong (decrypt fails)', async () => {
+		vi.mocked(decrypt).mockRejectedValue(new Error('bad tag'));
+
+		const result = await unlockVault('wrong-passphrase');
+
+		expect(result.valid).toBe(false);
+		expect(unlockVaultDirect).not.toHaveBeenCalled();
+	});
+
+	it('returns valid:false when the verification constant does not match', async () => {
+		vi.mocked(decrypt).mockResolvedValue(new TextEncoder().encode('not-the-constant'));
+
+		const result = await unlockVault('wrong-passphrase');
+
+		expect(result.valid).toBe(false);
+		expect(unlockVaultDirect).not.toHaveBeenCalled();
+	});
+
+	it('throws when no passphrase is set for the account', async () => {
+		vi.mocked(getPassphraseSalt).mockResolvedValue({
+			has_passphrase: false,
+			salt: ''
+		});
+
+		await expect(unlockVault('passphrase')).rejects.toThrow(
+			'No passphrase set for this account'
 		);
+		expect(unlockVaultDirect).not.toHaveBeenCalled();
 	});
 });

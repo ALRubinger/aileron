@@ -24,7 +24,6 @@
 	const unlockProgressLabels: Record<UnlockProgress, string> = {
 		deriving: 'Deriving key...',
 		verifying: 'Verifying passphrase...',
-		attesting: 'Verifying enclave...',
 		establishing: 'Establishing secure session...',
 		done: 'Done'
 	};

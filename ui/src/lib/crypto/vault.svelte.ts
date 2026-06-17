@@ -2,45 +2,31 @@
  * Vault unlock and setup orchestrators.
  *
  * These functions coordinate the client-side crypto flow: KEK derivation,
- * passphrase verification, attestation, ECDH key exchange, and encrypted
- * KEK transmission to the enclave.
+ * local passphrase verification, and direct KEK transmission to the server's
+ * session cache. The passphrase and KEK are derived in the browser.
  */
 
 import { deriveKEK } from './argon2.js';
 import { encrypt, decrypt } from './envelope.js';
-import { generateKeyPair, deriveSharedSecret } from './ecdh.js';
-import { verifyAttestation } from './attestation.js';
 import { VERIFICATION_CONSTANT, SALT_LENGTH } from './constants.js';
 import {
 	getPassphraseSalt,
 	getPassphraseVerification,
-	getTeeStatus,
-	initiateAttestation,
-	establishTeeSession,
 	unlockVaultDirect,
 	setPassphrase
 } from '$lib/api';
 
-export type UnlockProgress =
-	| 'deriving'
-	| 'verifying'
-	| 'attesting'
-	| 'establishing'
-	| 'done';
+export type UnlockProgress = 'deriving' | 'verifying' | 'establishing' | 'done';
 
 export interface UnlockResult {
 	valid: boolean;
 	sessionExpiresAt?: Date;
-	escrowedCount?: number;
 }
 
 /**
- * Unlocks the vault by deriving the KEK client-side and verifying the
- * passphrase locally.
- *
- * If TEE is enabled: transmits KEK via end-to-end encrypted channel (ECDH).
- * If TEE is disabled: sends KEK directly over HTTPS to the server's
- * session cache. The passphrase never leaves the browser in either mode.
+ * Unlocks the vault by deriving the KEK client-side, verifying the passphrase
+ * locally, then sending the KEK over HTTPS to the server's session cache. The
+ * passphrase never leaves the browser; only the derived KEK is transmitted.
  */
 export async function unlockVault(
 	passphrase: string,
@@ -79,15 +65,7 @@ export async function unlockVault(
 			return { valid: false };
 		}
 
-		// 5. Check if TEE is available.
-		const teeStatus = await getTeeStatus();
-
-		if (teeStatus.enabled) {
-			// TEE mode: attestation + ECDH + encrypted KEK transmission.
-			return await unlockViaTee(kek, onProgress, teeStatus.expected_identity);
-		}
-
-		// Direct mode: send KEK over HTTPS to server session cache.
+		// 5. Send KEK over HTTPS to the server session cache.
 		onProgress?.('establishing');
 		const resp = await unlockVaultDirect(bytesToBase64(kek));
 
@@ -99,48 +77,6 @@ export async function unlockVault(
 	} finally {
 		kek.fill(0);
 	}
-}
-
-/**
- * TEE unlock path: attestation, ECDH key exchange, encrypted KEK transmission.
- */
-async function unlockViaTee(
-	kek: Uint8Array,
-	onProgress?: (step: UnlockProgress) => void,
-	expectedIdentity?: { image_digest?: string; project_id?: string }
-): Promise<UnlockResult> {
-	onProgress?.('attesting');
-	const attestResp = await initiateAttestation();
-	const enclavePublicKey = base64ToBytes(attestResp.public_key);
-
-	const nonce = attestResp.nonce ? base64ToBytes(attestResp.nonce) : undefined;
-	const attResult = await verifyAttestation(
-		attestResp.token,
-		enclavePublicKey,
-		'aileron-enclave',
-		nonce,
-		expectedIdentity
-	);
-	if (!attResult.verified) {
-		throw new Error('Enclave attestation verification failed');
-	}
-
-	onProgress?.('establishing');
-	const { privateKey, publicKey: clientPubKey } = await generateKeyPair();
-	const sharedSecret = await deriveSharedSecret(privateKey, attResult.enclavePublicKey);
-	const encryptedKEK = await encrypt(kek, sharedSecret);
-
-	const sessionResp = await establishTeeSession({
-		encrypted_kek: bytesToBase64(encryptedKEK),
-		client_public_key: bytesToBase64(clientPubKey)
-	});
-
-	onProgress?.('done');
-	return {
-		valid: true,
-		sessionExpiresAt: sessionResp.expires_at ? new Date(sessionResp.expires_at) : undefined,
-		escrowedCount: sessionResp.escrowed_count
-	};
 }
 
 /**

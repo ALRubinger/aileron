@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 /**
  * Playwright config for integration E2E tests that run against the
- * real Docker Compose stack (server + UI + database + enclave).
+ * real Docker Compose stack (server + UI + database).
  *
  * Prerequisites:
  *   task up -- -d --build --wait
