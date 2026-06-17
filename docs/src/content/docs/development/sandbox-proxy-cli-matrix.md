@@ -35,7 +35,7 @@ The proxy URL inside the container is `$HTTPS_PROXY`. The launcher sets it; you 
 
 ### Install
 
-`aileron/sandbox-base` ships with `curl`. For other base images:
+`ghcr.io/alrubinger/aileron-sandbox-base` ships with `curl`. For other base images:
 
 | Distro | Install |
 |---|---|

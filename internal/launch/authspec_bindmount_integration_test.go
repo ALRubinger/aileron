@@ -21,7 +21,7 @@
 //   - Skips unless GOOS == linux and a Docker runtime is on PATH
 //     (macOS/Windows Docker Desktop translates UIDs via its file-sharing
 //     shim, so the bug does not reproduce there).
-//   - Builds the aileron/sandbox-base image (Tier base).
+//   - Builds the aileron-sandbox-base image (Tier base).
 //   - Creates a transient dir exactly as prepareAuthSpec does and seeds
 //     a credential file.
 //   - Negative control: WITHOUT the chown fix, an in-container write as
@@ -51,7 +51,7 @@ import (
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
-const authSpecBindMountTestImage = "aileron/sandbox-base:authspec-bindmount-test"
+const authSpecBindMountTestImage = "aileron-sandbox-base:authspec-bindmount-test"
 
 func TestAuthSpecBindMountWritable(t *testing.T) {
 	if runtime.GOOS != "linux" {

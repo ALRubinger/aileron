@@ -682,7 +682,7 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Builds the aileron/sandbox-base image from images/sandbox-base (the
+      # Builds the aileron-sandbox-base image from images/sandbox-base (the
       # test's Builder uses the AILERON_SANDBOX_BASE_CONTEXT the task target
       # sets), then: (#1082) composes each agent Feature directly with
       # @devcontainers/cli and asserts `command -v claude` / `command -v codex`,
