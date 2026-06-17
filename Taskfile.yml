@@ -419,10 +419,15 @@ tasks:
       - task: test:integration
       - task: down
 
-  release:snapshot:
-    desc: Test GoReleaser locally (snapshot, no publish)
+  release:check:
+    desc: Validate the GoReleaser config (includes the scoops and homebrew_casks blocks)
     cmds:
-      - goreleaser release --snapshot --clean
+      - goreleaser check
+
+  release:snapshot:
+    desc: Test GoReleaser locally (snapshot, no publish). Pass extra flags after --, e.g. `task release:snapshot -- --skip=sign`.
+    cmds:
+      - goreleaser release --snapshot --clean {{.CLI_ARGS}}
 
   health:
     desc: Check the server health endpoint
