@@ -1,0 +1,7 @@
+{
+  "id": "claude",
+  "version": "0.0.1",
+  "name": "Claude Code CLI",
+  "description": "Installs the Anthropic Claude Code CLI (@anthropic-ai/claude-code) onto the Aileron Alpine sandbox base so it is on PATH for the non-root agent user.",
+  "documentationURL": "https://docs.withaileron.ai/development/sandbox-agent-images/"
+}

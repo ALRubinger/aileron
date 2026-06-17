@@ -583,6 +583,44 @@ jobs:
         if: always()
         run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml down -v
 
+  integration-sandbox-features:
+    name: Integration Tests (Sandbox Features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          cache-dependency-path: |
+            internal/go.mod
+            test/integration/go.mod
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # The repo source never calls npm directly; installing the
+      # @devcontainers/cli here in the CI shell is the toolchain the
+      # fail-fast Feature build test (#1082) drives via exec. The test FAILS
+      # (no self-skip) if the CLI, Node, Docker, or the base image is absent.
+      - name: Install @devcontainers/cli
+        run: npm install -g @devcontainers/cli
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Builds the aileron/sandbox-base image from images/sandbox-base (the
+      # test's Builder uses the AILERON_SANDBOX_BASE_CONTEXT the task target
+      # sets), composes each agent Feature with @devcontainers/cli, and asserts
+      # `command -v claude` / `command -v codex` exit 0 in the built image. The
+      # ubuntu runner has Docker; this is the fail-fast acceptance environment.
+      - name: Build sandbox Features and verify CLIs on PATH (#1082)
+        run: task test:integration:sandbox-features
+
   integration-e2e:
     name: Integration Tests (E2E)
     runs-on: ubuntu-latest
