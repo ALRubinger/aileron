@@ -207,7 +207,7 @@ func TestInitWritesFeatureComposingDevcontainer(t *testing.T) {
 }
 
 func TestFeatureReferenceNamesPublishedFeature(t *testing.T) {
-	if got, want := FeatureReference("claude"), DefaultFeatureRepository+"/claude:1"; got != want {
+	if got, want := FeatureReference("claude"), DefaultFeatureRepository+"/claude:0"; got != want {
 		t.Fatalf("FeatureReference = %q, want %q", got, want)
 	}
 }

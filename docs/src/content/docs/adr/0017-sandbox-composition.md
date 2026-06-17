@@ -62,7 +62,7 @@ Each agent install is authored once as a devcontainer Feature. A Feature is a se
 {
   "image": "aileron/sandbox-base:<version>",
   "features": {
-    "ghcr.io/alrubinger/aileron-features/<agent>:1": {},
+    "ghcr.io/alrubinger/aileron-features/<agent>:0": {},
     "ghcr.io/acme/internal-tools:1": {}
   }
 }

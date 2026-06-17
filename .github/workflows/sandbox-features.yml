@@ -1,0 +1,93 @@
+name: Sandbox Agent Features
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/sandbox-features.yml"
+      - "images/sandbox-features/**"
+  push:
+    branches: [main]
+    # The paths filter gates branch pushes so a main push only publishes when
+    # the Features change. It also applies to tag pushes, so a release tag that
+    # needs to republish the Features must touch images/sandbox-features/** or
+    # be driven through workflow_dispatch.
+    paths:
+      - "images/sandbox-features/**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: sandbox-features-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # GHCR namespace that hosts the agent Features. Matches
+  # composition.DefaultFeatureRepository (ghcr.io/alrubinger/aileron-features)
+  # and the base image owner used by sandbox-base.yml.
+  FEATURES_NAMESPACE: alrubinger/aileron-features
+
+jobs:
+  publish:
+    name: Publish agent Features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Node 22 matches the integration-sandbox-features job in ci.yml so both
+      # paths exercise the Features with one Node major.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # The repo source never calls npm directly; installing @devcontainers/cli
+      # in this CI shell is the publish toolchain. Pin to the same version the
+      # Go source pins (container.DevcontainerCLIVersion) so the compose path in
+      # ci.yml and this publish path use one reproducible CLI.
+      - name: Install @devcontainers/cli
+        run: npm install -g @devcontainers/cli@0.87.0
+
+      # PR runs validate the Features package without pushing; ci.yml's
+      # integration-sandbox-features job is the build/compose acceptance gate, so
+      # this keeps the PR path lightweight. `devcontainer features package` walks
+      # the directory, processes each sub-Feature (claude, codex), and fails on a
+      # malformed manifest. It is the same directory-walk the publish step uses,
+      # minus the push.
+      - name: Validate Features package
+        run: |
+          set -euo pipefail
+          devcontainer features package ./images/sandbox-features \
+            --output-folder "${RUNNER_TEMP}/sandbox-features-package"
+
+      # GHCR login and publish only on push to main, release tags, and manual
+      # dispatch. Pull requests stop after manifest validation. This mirrors the
+      # push gating in sandbox-base.yml.
+      - name: Log in to GitHub Container Registry
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `devcontainer features publish` walks images/sandbox-features and pushes
+      # each sub-Feature (claude, codex) to ghcr.io/<namespace>/<id>. A "0.0.1"
+      # manifest publishes the tag set 0.0.1, 0.0, 0, and latest, so the
+      # scaffold's ":0" reference resolves.
+      #
+      # First publish requires a one-time manual flip of each GHCR package to
+      # public visibility so `aileron sandbox build` (which does no docker login)
+      # can pull anonymously. See docs/development/sandbox-composition.md.
+      - name: Publish agent Features to GHCR
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          set -euo pipefail
+          devcontainer features publish \
+            ./images/sandbox-features \
+            --namespace "${FEATURES_NAMESPACE}" \
+            --registry ghcr.io
