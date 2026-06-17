@@ -3,6 +3,7 @@ package container
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -124,6 +125,173 @@ func TestBuildDevcontainerUsesProjectTagAndBuildArgs(t *testing.T) {
 	want := []string{"build", "-t", wantTag, "-f", dockerfile, "--build-arg", "A=first", "--build-arg", "Z=last", dir}
 	if !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
+// writeFeaturesDevcontainer writes a minimal .devcontainer/devcontainer.json so
+// the features build path's existence check passes; the content is irrelevant
+// to the unit-layer argv assertions (the real CLI reads it, the recordingRunner
+// does not).
+func writeFeaturesDevcontainer(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, composition.DefaultDevcontainerPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{"features":{"./tool":{}}}`), 0o644); err != nil {
+		t.Fatalf("write devcontainer.json: %v", err)
+	}
+}
+
+func TestBuildDevcontainerWithFeaturesUsesDevcontainerCLI(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	runner := &recordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: dir,
+		Plan: composition.Plan{
+			Tier:      composition.TierDevcontainer,
+			Features:  map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+			BuildArgs: map[string]string{"Z": "last", "A": "first"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	wantTag := ProjectImageTag(dir)
+	if !result.Built || result.Image != wantTag {
+		t.Fatalf("result = %+v, want built tag %s", result, wantTag)
+	}
+	if runner.name != devcontainerCLI[0] {
+		t.Fatalf("runner.name = %q, want %q", runner.name, devcontainerCLI[0])
+	}
+	want := append(append([]string(nil), devcontainerCLI[1:]...),
+		"build", "--workspace-folder", dir, "--image-name", wantTag,
+		"--build-arg", "A=first", "--build-arg", "Z=last")
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestBuildDevcontainerWithFeaturesNoBuildArgs(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: dir,
+		Plan: composition.Plan{
+			Tier:     composition.TierDevcontainer,
+			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, a := range runner.args {
+		if a == "--build-arg" {
+			t.Fatalf("args = %#v, want no --build-arg tokens", runner.args)
+		}
+	}
+}
+
+func TestBuildDevcontainerWithFeaturesNoDockerfileStillBuilds(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	runner := &recordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: dir,
+		Plan: composition.Plan{
+			// No DockerfilePath: features-only plan must still build via the CLI
+			// rather than returning ErrNoBuildRequired.
+			Tier:     composition.TierDevcontainer,
+			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v, want a CLI build (not ErrNoBuildRequired)", err)
+	}
+	if !result.Built {
+		t.Fatalf("result.Built = false, want true (features require a build)")
+	}
+	if runner.name != devcontainerCLI[0] {
+		t.Fatalf("runner.name = %q, want %q", runner.name, devcontainerCLI[0])
+	}
+}
+
+func TestBuildDevcontainerWithFeaturesNeverPolicySkipsExisting(t *testing.T) {
+	dir := t.TempDir()
+	writeFeaturesDevcontainer(t, dir)
+	// image inspect succeeds (image present) so the never policy skips the build.
+	runner := &callRecordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: dir,
+		Policy:  BuildPolicyNever,
+		Plan: composition.Plan{
+			Tier:     composition.TierDevcontainer,
+			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Built {
+		t.Fatalf("result.Built = true, want false (policy never with image present)")
+	}
+	// Only the image-inspect probe runs; no CLI build dispatch.
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", ProjectImageTag(dir)}}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v (no devcontainer build)", runner.calls, want)
+	}
+}
+
+func TestBuildDevcontainerWithoutFeaturesUsesDockerBuild(t *testing.T) {
+	// Regression guard: the no-features Tier 1 path stays byte-for-byte
+	// `docker build -t … -f … <dir>`.
+	dir := t.TempDir()
+	dockerfile := filepath.Join(dir, ".devcontainer", "Dockerfile")
+	if err := os.MkdirAll(filepath.Dir(dockerfile), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(dockerfile, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: dir,
+		Plan: composition.Plan{
+			Tier:           composition.TierDevcontainer,
+			DockerfilePath: "Dockerfile",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if runner.name != "docker" {
+		t.Fatalf("runner.name = %q, want docker", runner.name)
+	}
+	want := []string{"build", "-t", ProjectImageTag(dir), "-f", dockerfile, dir}
+	if !reflect.DeepEqual(runner.args, want) {
+		t.Fatalf("args = %#v, want %#v", runner.args, want)
+	}
+}
+
+func TestBuildBYOImageWithFeaturesNoBuild(t *testing.T) {
+	// Features on a BYO (Tier 2) image are inert; the build still short-circuits
+	// to ErrNoBuildRequired with no CLI invocation.
+	runner := &callRecordingRunner{errs: []error{errors.New("must not run")}}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Plan: composition.Plan{
+			Tier:     composition.TierBYOImage,
+			Image:    "ghcr.io/acme/agent:2026",
+			Features: map[string]json.RawMessage{"./tool": json.RawMessage("{}")},
+		},
+	})
+	if !errors.Is(err, ErrNoBuildRequired) {
+		t.Fatalf("err = %v, want ErrNoBuildRequired", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("calls = %#v, want none (BYO features are inert)", runner.calls)
 	}
 }
 

@@ -666,11 +666,15 @@ jobs:
           node-version: "22"
 
       # The repo source never calls npm directly; installing the
-      # @devcontainers/cli here in the CI shell is the toolchain the
-      # fail-fast Feature build test (#1082) drives via exec. The test FAILS
-      # (no self-skip) if the CLI, Node, Docker, or the base image is absent.
+      # @devcontainers/cli here in the CI shell is the toolchain the fail-fast
+      # Feature build tests drive: #1082's direct-CLI test execs `devcontainer`,
+      # and #1083's composition test routes through Aileron's Builder, which
+      # invokes `npx --yes @devcontainers/cli@<pinned>`. Pin to the same version
+      # the Go source pins (container.DevcontainerCLIVersion) so both paths use
+      # one reproducible CLI. The tests FAIL (no self-skip) if the CLI, Node,
+      # Docker, or the base image is absent.
       - name: Install @devcontainers/cli
-        run: npm install -g @devcontainers/cli
+        run: npm install -g @devcontainers/cli@0.87.0
 
       - name: Install Task
         uses: arduino/setup-task@v2
@@ -680,10 +684,13 @@ jobs:
 
       # Builds the aileron/sandbox-base image from images/sandbox-base (the
       # test's Builder uses the AILERON_SANDBOX_BASE_CONTEXT the task target
-      # sets), composes each agent Feature with @devcontainers/cli, and asserts
-      # `command -v claude` / `command -v codex` exit 0 in the built image. The
-      # ubuntu runner has Docker; this is the fail-fast acceptance environment.
-      - name: Build sandbox Features and verify CLIs on PATH (#1082)
+      # sets), then: (#1082) composes each agent Feature directly with
+      # @devcontainers/cli and asserts `command -v claude` / `command -v codex`,
+      # and (#1083) composes the Codex Feature plus a second Feature through
+      # Aileron's composition.Discover -> Builder.Build path and asserts both
+      # tools resolve on PATH. The ubuntu runner has Docker; this is the
+      # fail-fast acceptance environment.
+      - name: Build sandbox Features and verify CLIs on PATH (#1082, #1083)
         run: task test:integration:sandbox-features
 
   integration-e2e:

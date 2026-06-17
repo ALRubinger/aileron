@@ -40,6 +40,15 @@ type Plan struct {
 	BuildArgs        map[string]string
 	Mounts           []Mount
 	Aileron          AileronCustomization
+	// Features is the parsed devcontainer `features` block, keyed by Feature
+	// reference. The value is the raw option payload (`{}`, `true`, a string,
+	// or an object) carried verbatim — Aileron does not interpret Feature
+	// options, it forwards them to @devcontainers/cli. Nil when the
+	// devcontainer.json declares no features. A non-empty Features map on a
+	// Tier 1 (devcontainer) plan routes the build through @devcontainers/cli
+	// rather than raw `docker build`; on a Tier 2 (BYO image) plan it is inert
+	// (carried only for plan inspection).
+	Features map[string]json.RawMessage
 }
 
 // Mount is the subset of devcontainer mount configuration Aileron needs to
@@ -64,6 +73,7 @@ type devcontainerConfig struct {
 	Dockerfile     string                     `json:"dockerFile,omitempty"`
 	Build          *devcontainerBuild         `json:"build,omitempty"`
 	Mounts         []json.RawMessage          `json:"mounts,omitempty"`
+	Features       map[string]json.RawMessage `json:"features,omitempty"`
 	Customizations devcontainerCustomizations `json:"customizations,omitempty"`
 }
 
@@ -119,10 +129,19 @@ func Discover(workDir, version string) (Plan, error) {
 		}
 		plan.Mounts = append(plan.Mounts, mount)
 	}
+	if len(cfg.Features) > 0 {
+		plan.Features = make(map[string]json.RawMessage, len(cfg.Features))
+		for ref, opts := range cfg.Features {
+			// Preserve the raw option payload verbatim. Aileron does not
+			// interpret Feature options; @devcontainers/cli does.
+			plan.Features[ref] = append(json.RawMessage(nil), opts...)
+		}
+	}
 	if cfg.Customizations.Aileron.Image != "" {
 		plan.Tier = TierBYOImage
 		plan.Image = cfg.Customizations.Aileron.Image
 		plan.DockerfilePath = ""
+		// Features are carried for plan inspection but inert on a BYO image.
 		return plan, nil
 	}
 	if cfg.Image != "" {
@@ -142,6 +161,13 @@ func parseDevcontainer(b []byte) (devcontainerConfig, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(stripped))
 	if err := dec.Decode(&cfg); err != nil {
+		// The devcontainer `features` block must be a JSON object keyed by
+		// Feature reference. A non-object (e.g. an array) is a contract error;
+		// name the field so the message is actionable rather than a bare
+		// "cannot unmarshal array into Go struct field".
+		if strings.Contains(err.Error(), "field devcontainerConfig.features") {
+			return cfg, fmt.Errorf("devcontainer features must be a JSON object keyed by feature reference: %w", err)
+		}
 		return cfg, err
 	}
 	if cfg.Customizations.Aileron.ApprovalSurface != "" {

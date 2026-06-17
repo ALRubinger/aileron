@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/ALRubinger/aileron/internal/launch"
@@ -101,6 +102,14 @@ func runSandboxPlan(args []string, stdout, stderr io.Writer) int {
 	}
 	if plan.DockerfilePath != "" {
 		fmt.Fprintf(stdout, "dockerfile: %s\n", plan.DockerfilePath)
+	}
+	if len(plan.Features) > 0 {
+		refs := make([]string, 0, len(plan.Features))
+		for ref := range plan.Features {
+			refs = append(refs, ref)
+		}
+		sort.Strings(refs)
+		fmt.Fprintf(stdout, "features: %s\n", strings.Join(refs, ", "))
 	}
 	return 0
 }
