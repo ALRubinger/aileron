@@ -32,6 +32,16 @@ Docker is the only supported sandbox runtime in v4. Podman is planned but not ye
 
 The harness-free `ghcr.io/alrubinger/aileron-sandbox-base` intentionally does not include agent CLIs ([ADR-0017](/adr/0017-sandbox-composition/)). Each agent install is authored once as a devcontainer Feature, the single source of truth that Aileron CI bakes into prebuilt per-agent images and that customers compose for Tier 1. The prebuilt per-agent image is the zero-build Tier 0 default, owned by [#965](https://github.com/ALRubinger/aileron/issues/965). Use Tier 1 when you want Aileron's base runtime plus an agent plus your own tools, or Tier 2 when your team owns the full image.
 
+## Build-Free Default
+
+With no `.devcontainer` in the project, `aileron launch --sandbox=docker <agent>` is build-free for a published agent. The launcher resolves the prebuilt per-agent image `ghcr.io/alrubinger/aileron-sandbox-<agent>` and pulls it. There is no `sandbox init`, no Dockerfile, and no local image build. The published agents today are `claude` and `codex`.
+
+`sandbox check --agent=<agent>` resolves the same image, so a passing check matches what launch will run.
+
+The launcher resolves the floating `latest` tag for this build-free default. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so `latest` is the correct in-process pin. Digest pinning and the freshness policy that consumes it are owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088); the resolver is the seam where that pinned reference plugs in.
+
+When the requested agent has no published image, launch falls back to the customization tier. The image validation then emits the actionable message to install the agent CLI in the sandbox image or launch with `--sandbox=off`.
+
 ## Prebuilt Per-Agent Images
 
 Aileron CI publishes one multi-arch image per agent to GHCR. Each image is baked from the GHCR sandbox base plus that agent's devcontainer Feature install script, so the Feature stays the single source of truth.

@@ -8,7 +8,7 @@ import (
 )
 
 func TestDiscoverMissingDevcontainerUsesBaseImage(t *testing.T) {
-	plan, err := Discover(t.TempDir(), "0.4.0")
+	plan, err := Discover(t.TempDir(), "0.4.0", "")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -17,6 +17,107 @@ func TestDiscoverMissingDevcontainerUsesBaseImage(t *testing.T) {
 	}
 	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-base:0.4.0" {
 		t.Fatalf("Image = %q", plan.Image)
+	}
+}
+
+func TestDiscoverMissingDevcontainerPublishedAgentResolvesPerAgentImage(t *testing.T) {
+	for _, tc := range []struct {
+		agent     string
+		wantImage string
+	}{
+		{"claude", "ghcr.io/alrubinger/aileron-sandbox-claude:0.4.0"},
+		{"codex", "ghcr.io/alrubinger/aileron-sandbox-codex:0.4.0"},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			plan, err := Discover(t.TempDir(), "0.4.0", tc.agent)
+			if err != nil {
+				t.Fatalf("Discover: %v", err)
+			}
+			if plan.Tier != TierPublished {
+				t.Fatalf("Tier = %s, want %s", plan.Tier, TierPublished)
+			}
+			if plan.Image != tc.wantImage {
+				t.Fatalf("Image = %q, want %q", plan.Image, tc.wantImage)
+			}
+			if plan.BaseImage != BaseImage("0.4.0") {
+				t.Fatalf("BaseImage = %q, want %q", plan.BaseImage, BaseImage("0.4.0"))
+			}
+		})
+	}
+}
+
+func TestDiscoverMissingDevcontainerUnpublishedAgentFallsBackToBase(t *testing.T) {
+	// goose has no recipe/published image, so it must keep the base behavior so
+	// the downstream actionable "install the agent CLI or --sandbox=off" path
+	// stays intact.
+	plan, err := Discover(t.TempDir(), "0.4.0", "goose")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierBase {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierBase)
+	}
+	if plan.Image != BaseImage("0.4.0") {
+		t.Fatalf("Image = %q, want %q", plan.Image, BaseImage("0.4.0"))
+	}
+}
+
+func TestDiscoverMissingDevcontainerEmptyAgentStaysOnBase(t *testing.T) {
+	// `sandbox plan`/`build` pass no agent; that path must keep the base tier.
+	plan, err := Discover(t.TempDir(), "0.4.0", "")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierBase {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierBase)
+	}
+}
+
+func TestDiscoverDevcontainerIgnoresAgentForTierResolution(t *testing.T) {
+	// A present .devcontainer resolves Tier 1/Tier 2 regardless of the agent;
+	// the agent param only affects the no-.devcontainer branch.
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{
+  "image": "ghcr.io/acme/custom:1",
+  "customizations": {"aileron": {"image": "ghcr.io/acme/byo:1"}}
+}`)
+	plan, err := Discover(dir, "0.4.0", "claude")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if plan.Tier != TierBYOImage {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierBYOImage)
+	}
+	if plan.Image != "ghcr.io/acme/byo:1" {
+		t.Fatalf("Image = %q", plan.Image)
+	}
+}
+
+func TestPublishedAgentImage(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"", "ghcr.io/alrubinger/aileron-sandbox-claude:latest"},
+		{"dev", "ghcr.io/alrubinger/aileron-sandbox-claude:latest"},
+		{"0.4.0", "ghcr.io/alrubinger/aileron-sandbox-claude:0.4.0"},
+	} {
+		if got := PublishedAgentImage("claude", tc.version); got != tc.want {
+			t.Fatalf("PublishedAgentImage(claude, %q) = %q, want %q", tc.version, got, tc.want)
+		}
+	}
+}
+
+func TestPublishedAgentExists(t *testing.T) {
+	for agent, want := range map[string]bool{
+		"claude": true,
+		"codex":  true,
+		"goose":  false,
+		"":       false,
+	} {
+		if got := PublishedAgentExists(agent); got != want {
+			t.Fatalf("PublishedAgentExists(%q) = %v, want %v", agent, got, want)
+		}
 	}
 }
 
@@ -40,7 +141,7 @@ func TestDiscoverDevcontainerBuildPlan(t *testing.T) {
   }
 }`)
 
-	plan, err := Discover(dir, "dev")
+	plan, err := Discover(dir, "dev", "")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -71,7 +172,7 @@ func TestDiscoverDevcontainerRootDockerfileAndImage(t *testing.T) {
   "dockerFile": "Dockerfile.custom"
 }`)
 
-	plan, err := Discover(dir, "0.4.0")
+	plan, err := Discover(dir, "0.4.0", "")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -98,7 +199,7 @@ func TestDiscoverAileronImageIsBYOImage(t *testing.T) {
   }
 }`)
 
-	plan, err := Discover(dir, "0.4.0")
+	plan, err := Discover(dir, "0.4.0", "")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -117,7 +218,7 @@ func TestDiscoverInvalidMountReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	writeDevcontainer(t, dir, `{"mounts":[42]}`)
 
-	_, err := Discover(dir, "0.4.0")
+	_, err := Discover(dir, "0.4.0", "")
 	if err == nil {
 		t.Fatal("expected mount parse error")
 	}
@@ -180,7 +281,7 @@ func TestInitWritesFeatureComposingDevcontainer(t *testing.T) {
 
 	// Assert on the produced config shape via Discover (the contract), not on
 	// the raw scaffold text.
-	plan, err := Discover(dir, "0.4.0")
+	plan, err := Discover(dir, "0.4.0", "")
 	if err != nil {
 		t.Fatalf("Discover scaffolded devcontainer: %v", err)
 	}
@@ -258,7 +359,7 @@ func TestDiscoverParsesFeaturesIntoPlan(t *testing.T) {
   "customizations": {"aileron": {"approval_surface": "both"}}
 }`)
 
-	plan, err := Discover(dir, "0.4.0")
+	plan, err := Discover(dir, "0.4.0", "")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -287,7 +388,7 @@ func TestDiscoverWithoutFeaturesLeavesNilMap(t *testing.T) {
 	dir := t.TempDir()
 	writeDevcontainer(t, dir, `{"build": {"dockerfile": "Dockerfile"}}`)
 
-	plan, err := Discover(dir, "0.4.0")
+	plan, err := Discover(dir, "0.4.0", "")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -303,7 +404,7 @@ func TestDiscoverCarriesFeaturesOnBYOImagePlan(t *testing.T) {
   "customizations": {"aileron": {"image": "ghcr.io/acme/agent:2026"}}
 }`)
 
-	plan, err := Discover(dir, "0.4.0")
+	plan, err := Discover(dir, "0.4.0", "")
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -321,7 +422,7 @@ func TestDiscoverRejectsNonObjectFeatures(t *testing.T) {
 	dir := t.TempDir()
 	writeDevcontainer(t, dir, `{"features": ["ghcr.io/acme/tool:1"]}`)
 
-	_, err := Discover(dir, "0.4.0")
+	_, err := Discover(dir, "0.4.0", "")
 	if err == nil {
 		t.Fatal("expected parse error for non-object features")
 	}

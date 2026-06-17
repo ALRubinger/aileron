@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // DefaultAgent is the agent whose Feature the scaffold demonstrates. It is no
@@ -66,6 +67,38 @@ func Init(opts InitOptions) (InitResult, error) {
 // hard-coding a premature 1.0.0.
 func FeatureReference(agent string) string {
 	return DefaultFeatureRepository + "/" + agent + ":0"
+}
+
+// PublishedAgentImage returns the prebuilt per-agent sandbox image reference for
+// an agent (e.g. "ghcr.io/alrubinger/aileron-sandbox-claude:latest"). It is the
+// one place in Go that names the per-agent image registry path and tag,
+// mirroring BaseImage for the base image. These images bake the agent CLI and
+// aileron-mcp onto the base, so the build-free Tier 0 default pulls one instead
+// of building the agent-less base (#1086, #1087).
+//
+// The tag follows the same normalization as BaseImage: an empty or "dev"
+// version maps to "latest". The launcher resolves this floating "latest" pin at
+// launch time because a version-pinned tag (<aileron-version>-<agent-cli-version>)
+// requires the agent CLI version, which is not known here. Digest pinning and
+// the freshness policy that consumes it are owned by #1088; this helper is the
+// seam where that pinned reference plugs in.
+func PublishedAgentImage(agent, version string) string {
+	tag := strings.TrimSpace(version)
+	if tag == "" || tag == "dev" {
+		tag = "latest"
+	}
+	return DefaultPublishedImageRepository + "-" + agent + ":" + tag
+}
+
+// PublishedAgentExists reports whether agent has a prebuilt per-agent image to
+// pull for the build-free default. It reuses the agentRecipes set, which is the
+// single source of truth for "this agent has a verified recipe and ships a
+// published Feature/image" (see recipes.go). Discover and `sandbox check` share
+// this predicate so both resolve the same image (the launch/check parity
+// requirement). New agents that gain a recipe automatically gain auto-resolve.
+func PublishedAgentExists(agent string) bool {
+	_, ok := recipeForAgent(agent)
+	return ok
 }
 
 // starterDevcontainer emits the Feature-composing devcontainer.json recorded in

@@ -439,6 +439,129 @@ func TestBuildBYOImageDoesNotBuild(t *testing.T) {
 	}
 }
 
+const publishedImage = "ghcr.io/alrubinger/aileron-sandbox-claude:latest"
+
+func TestBuildPublishedAutoPullsMissingImage(t *testing.T) {
+	// image inspect fails (absent) → pull.
+	runner := &callRecordingRunner{errs: []error{errors.New("missing"), nil}}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyAuto,
+		Plan: composition.Plan{
+			Tier:  composition.TierPublished,
+			Image: publishedImage,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Built {
+		t.Fatalf("result.Built = true, want false (a pull is not a local build)")
+	}
+	if result.Image != publishedImage {
+		t.Fatalf("result.Image = %q, want %q", result.Image, publishedImage)
+	}
+	if result.Tier != composition.TierPublished {
+		t.Fatalf("result.Tier = %q, want %q", result.Tier, composition.TierPublished)
+	}
+	want := []runnerCall{
+		{name: "docker", args: []string{"image", "inspect", publishedImage}},
+		{name: "docker", args: []string{"pull", publishedImage}},
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestBuildPublishedAutoSkipsExistingImage(t *testing.T) {
+	// image inspect succeeds (present) → no pull.
+	runner := &callRecordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyAuto,
+		Plan: composition.Plan{
+			Tier:  composition.TierPublished,
+			Image: publishedImage,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Image != publishedImage {
+		t.Fatalf("result.Image = %q, want %q", result.Image, publishedImage)
+	}
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", publishedImage}}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestBuildPublishedNeverSkipsExistingImage(t *testing.T) {
+	runner := &callRecordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyNever,
+		Plan: composition.Plan{
+			Tier:  composition.TierPublished,
+			Image: publishedImage,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Image != publishedImage {
+		t.Fatalf("result.Image = %q, want %q", result.Image, publishedImage)
+	}
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", publishedImage}}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestBuildPublishedNeverErrorsOnMissingImage(t *testing.T) {
+	runner := &callRecordingRunner{errs: []error{errors.New("missing")}}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyNever,
+		Plan: composition.Plan{
+			Tier:  composition.TierPublished,
+			Image: publishedImage,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected missing image error")
+	}
+	if !strings.Contains(err.Error(), "sandbox build policy is never") {
+		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(err.Error(), publishedImage) {
+		t.Fatalf("error %v does not mention the image %q", err, publishedImage)
+	}
+}
+
+func TestBuildPublishedAlwaysPullsRegardlessOfPresence(t *testing.T) {
+	runner := &callRecordingRunner{}
+	result, err := Builder{Runtime: "docker", Runner: runner}.Build(context.Background(), BuildOptions{
+		WorkDir: t.TempDir(),
+		Policy:  BuildPolicyAlways,
+		Plan: composition.Plan{
+			Tier:  composition.TierPublished,
+			Image: publishedImage,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Image != publishedImage {
+		t.Fatalf("result.Image = %q, want %q", result.Image, publishedImage)
+	}
+	// always pulls without an inspect probe.
+	want := []runnerCall{{name: "docker", args: []string{"pull", publishedImage}}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
 func TestBuildDevcontainerImageDoesNotRequireRuntime(t *testing.T) {
 	result, err := Builder{Runtime: "definitely-not-a-runtime"}.Build(context.Background(), BuildOptions{
 		WorkDir: t.TempDir(),

@@ -81,7 +81,7 @@ func runSandboxPlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	plan, err := sandboxcomposition.Discover(cwd, version.Version)
+	plan, err := sandboxcomposition.Discover(cwd, version.Version, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -129,7 +129,7 @@ func runSandboxBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	plan, err := sandboxcomposition.Discover(cwd, version.Version)
+	plan, err := sandboxcomposition.Discover(cwd, version.Version, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -182,7 +182,11 @@ func runSandboxCheck(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
-	plan, err := sandboxcomposition.Discover(cwd, version.Version)
+	// Pass the resolved agent command so `sandbox check` resolves the same
+	// published per-agent image the launcher would (launch/check parity). With
+	// no .devcontainer and a published agent, this plans TierPublished and the
+	// build step pulls (or inspects) the per-agent image.
+	plan, err := sandboxcomposition.Discover(cwd, version.Version, command)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
