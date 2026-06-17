@@ -3,6 +3,7 @@ package composition
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,14 +81,39 @@ func TestFeatureInstallScriptsArePresentAndExecutable(t *testing.T) {
 		agent := agent
 		t.Run(agent, func(t *testing.T) {
 			path := filepath.Join(root, agent, "install.sh")
-			info, err := os.Stat(path)
-			if err != nil {
+			if _, err := os.Stat(path); err != nil {
 				t.Fatalf("stat %s: %v", path, err)
 			}
-			if info.Mode()&0o111 == 0 {
-				t.Fatalf("%s is not executable (mode %v); install.sh must have the executable bit set", path, info.Mode())
-			}
+			// The executable bit is the load-bearing contract: the devcontainer
+			// build runs install.sh, and #965's publish workflow ships exactly
+			// what git tracks. Assert git's recorded mode (100755) rather than
+			// the filesystem mode, which is platform-dependent — Windows
+			// checkouts drop the Unix exec bit, but the committed mode is the
+			// real source of truth on every platform.
+			assertGitExecutable(t, root, path)
 		})
+	}
+}
+
+// assertGitExecutable fails unless git tracks path with the executable mode
+// (100755). root is used as the git working directory so the lookup works
+// regardless of the test's cwd.
+func assertGitExecutable(t *testing.T, root, path string) {
+	t.Helper()
+	cmd := exec.Command("git", "ls-files", "--stage", "--", path)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git ls-files --stage %s (cwd %s): %v", path, root, err)
+	}
+	line := strings.TrimSpace(string(out))
+	if line == "" {
+		t.Fatalf("%s is not tracked by git; install.sh must be committed with the executable bit", path)
+	}
+	// Format: "<mode> <object> <stage>\t<file>"; mode is the first field.
+	mode := strings.Fields(line)[0]
+	if mode != "100755" {
+		t.Fatalf("%s has git mode %s, want 100755 (executable); run `git update-index --chmod=+x` or `chmod +x` before committing", path, mode)
 	}
 }
 
