@@ -193,7 +193,7 @@ func normalizeLaunchBuildPolicy(policy string) (string, error) {
 	}
 }
 
-func prepareSandbox(ctx context.Context, workDir, runtimeName, buildPolicy string, stdout, stderr io.Writer) (SandboxLaunchPlan, error) {
+func prepareSandbox(ctx context.Context, workDir, agent, runtimeName, buildPolicy string, stdout, stderr io.Writer) (SandboxLaunchPlan, error) {
 	if err := validateSandboxRuntime(runtimeName); err != nil {
 		return SandboxLaunchPlan{}, err
 	}
@@ -201,7 +201,7 @@ func prepareSandbox(ctx context.Context, workDir, runtimeName, buildPolicy strin
 	if err != nil {
 		return SandboxLaunchPlan{}, err
 	}
-	plan, err := sandboxcomposition.Discover(workDir, version.Version)
+	plan, err := sandboxcomposition.Discover(workDir, version.Version, agent)
 	if err != nil {
 		return SandboxLaunchPlan{}, err
 	}
@@ -362,7 +362,7 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 	}
 	var sandboxPlan SandboxLaunchPlan
 	if sandboxEnabled {
-		plan, err := prepareSandboxForLaunch(ctx, config.Dir, config.SandboxRuntime, config.SandboxBuildPolicy, os.Stdout, os.Stderr)
+		plan, err := prepareSandboxForLaunch(ctx, config.Dir, config.Agent.Name(), config.SandboxRuntime, config.SandboxBuildPolicy, os.Stdout, os.Stderr)
 		if err != nil {
 			return LaunchResult{}, fmt.Errorf("prepare sandbox: %w", err)
 		}

@@ -97,7 +97,7 @@ func TestSandboxFeaturesComposeViaAileron(t *testing.T) {
 	}
 
 	// Drive Aileron's own composition + build plumbing.
-	plan, err := sandboxcomposition.Discover(workspace, "test")
+	plan, err := sandboxcomposition.Discover(workspace, "test", "")
 	if err != nil {
 		t.Fatalf("composition.Discover: %v", err)
 	}

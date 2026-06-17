@@ -22,6 +22,13 @@ const (
 	// It is published to GHCR by the sandbox-base CI workflow and mirrors the
 	// DefaultFeatureRepository prefix style.
 	DefaultBaseImageRepository = "ghcr.io/alrubinger/aileron-sandbox-base"
+	// DefaultPublishedImageRepository is the registry prefix that hosts Aileron's
+	// prebuilt per-agent sandbox images. The per-agent image name is this prefix
+	// plus "-<agent>" (see PublishedAgentImage), e.g.
+	// ghcr.io/alrubinger/aileron-sandbox-claude. These images bake the agent CLI
+	// and aileron-mcp onto the base, so the default build-free launch path pulls
+	// one of them instead of building the agent-less base locally (#1086, #1087).
+	DefaultPublishedImageRepository = "ghcr.io/alrubinger/aileron-sandbox"
 	// DefaultFeatureRepository is the registry path that hosts Aileron's
 	// per-agent devcontainer Features. The scaffold composes one of these
 	// Features (see FeatureReference) into the starter devcontainer.json, and
@@ -36,6 +43,13 @@ const (
 	TierBase         Tier = "base"
 	TierDevcontainer Tier = "devcontainer"
 	TierBYOImage     Tier = "byo_image"
+	// TierPublished is the build-free Tier 0 default for an agent with a
+	// prebuilt per-agent image. With no .devcontainer present and a published
+	// agent requested, Discover resolves this tier with Image set to the
+	// per-agent image (see PublishedAgentImage). The container builder pulls the
+	// image instead of building the local base, because the base carries no
+	// agent CLI (#1086, #1087).
+	TierPublished Tier = "published"
 )
 
 // Plan is the normalized sandbox-composition plan consumed by launch/runtime
@@ -96,7 +110,16 @@ type devcontainerCustomizations struct {
 }
 
 // Discover returns the sandbox image-composition plan for workDir.
-func Discover(workDir, version string) (Plan, error) {
+//
+// agent is the launch agent's name (e.g. "claude", "codex"). It only affects
+// the no-.devcontainer branch: when a project authors no .devcontainer and the
+// agent has a published per-agent image (PublishedAgentExists), Discover
+// resolves the build-free Tier 0 default (TierPublished) whose Image is that
+// per-agent image. An empty agent or an agent with no published image keeps the
+// existing local-base behavior (TierBase), so `sandbox plan`/`build` (which pass
+// no agent) and unsupported agents are unchanged. The agent never perturbs Tier
+// 1/Tier 2 resolution when a .devcontainer is present.
+func Discover(workDir, version, agent string) (Plan, error) {
 	if workDir == "" {
 		workDir = "."
 	}
@@ -105,6 +128,13 @@ func Discover(workDir, version string) (Plan, error) {
 	b, err := os.ReadFile(devcontainerPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if agent != "" && PublishedAgentExists(agent) {
+				return Plan{
+					Tier:      TierPublished,
+					BaseImage: baseImage,
+					Image:     PublishedAgentImage(agent, version),
+				}, nil
+			}
 			return Plan{Tier: TierBase, BaseImage: baseImage, Image: baseImage}, nil
 		}
 		return Plan{}, fmt.Errorf("read %s: %w", devcontainerPath, err)

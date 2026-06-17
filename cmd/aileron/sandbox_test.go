@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 	"github.com/ALRubinger/aileron/internal/version"
 )
@@ -44,6 +45,22 @@ func TestRunSandboxPlanPrintsFeatures(t *testing.T) {
 	}
 	if !strings.Contains(got, "tier: devcontainer") {
 		t.Fatalf("plan output missing tier line:\n%s", got)
+	}
+}
+
+func TestRunSandboxPlanNoDevcontainerStaysOnBaseTier(t *testing.T) {
+	// `sandbox plan` passes no agent, so a project without a .devcontainer must
+	// keep the base tier rather than resolving a published per-agent image.
+	t.Chdir(t.TempDir())
+	var out, errb bytes.Buffer
+	if code := runSandboxPlan(nil, &out, &errb); code != 0 {
+		t.Fatalf("runSandboxPlan = %d, stderr: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "tier: base") {
+		t.Fatalf("plan output = %q, want base tier", out.String())
+	}
+	if !strings.Contains(out.String(), sandboxcomposition.BaseImage(version.Version)) {
+		t.Fatalf("plan output = %q, want base image", out.String())
 	}
 }
 
@@ -235,6 +252,60 @@ func TestRunSandboxCheckUnbakedNoSkewNoRequireMCP(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "baked aileron-mcp") || strings.Contains(errb.String(), "warning:") {
 		t.Fatalf("unbaked check must not mention baked mcp; stdout=%q stderr=%q", out.String(), errb.String())
+	}
+}
+
+// captureSandboxCheckPlan swaps the build/baked/validate seams and returns a
+// pointer to the composition plan runSandboxCheck resolves and hands to the
+// builder. It lets the test assert the resolved image without a real runtime.
+func captureSandboxCheckPlan(t *testing.T) *sandboxcomposition.Plan {
+	t.Helper()
+	origBuild := sandboxCheckBuildFn
+	origBaked := sandboxCheckBakedVersionFn
+	origValidate := sandboxCheckValidateFn
+	t.Cleanup(func() {
+		sandboxCheckBuildFn = origBuild
+		sandboxCheckBakedVersionFn = origBaked
+		sandboxCheckValidateFn = origValidate
+	})
+	var gotPlan sandboxcomposition.Plan
+	sandboxCheckBuildFn = func(_ context.Context, _ string, _, _ io.Writer, opts sandboxcontainer.BuildOptions) (sandboxcontainer.BuildResult, error) {
+		gotPlan = opts.Plan
+		return sandboxcontainer.BuildResult{Runtime: "docker", Image: opts.Plan.Image, Tier: opts.Plan.Tier}, nil
+	}
+	sandboxCheckBakedVersionFn = func(context.Context, string, string) string { return "" }
+	sandboxCheckValidateFn = func(context.Context, string, string, string, string, bool) error { return nil }
+	return &gotPlan
+}
+
+func TestRunSandboxCheckPublishedAgentResolvesPerAgentImage(t *testing.T) {
+	t.Chdir(t.TempDir())
+	plan := captureSandboxCheckPlan(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxCheck([]string{"--agent=claude"}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if plan.Tier != sandboxcomposition.TierPublished {
+		t.Fatalf("plan.Tier = %s, want %s", plan.Tier, sandboxcomposition.TierPublished)
+	}
+	want := sandboxcomposition.PublishedAgentImage("claude", version.Version)
+	if plan.Image != want {
+		t.Fatalf("plan.Image = %q, want %q (parity with launch)", plan.Image, want)
+	}
+}
+
+func TestRunSandboxCheckUnpublishedAgentUsesBaseImage(t *testing.T) {
+	t.Chdir(t.TempDir())
+	plan := captureSandboxCheckPlan(t)
+	var out, errb bytes.Buffer
+	if code := runSandboxCheck([]string{"--agent=goose"}, &out, &errb); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, errb.String())
+	}
+	if plan.Tier != sandboxcomposition.TierBase {
+		t.Fatalf("plan.Tier = %s, want %s", plan.Tier, sandboxcomposition.TierBase)
+	}
+	if plan.Image != sandboxcomposition.BaseImage(version.Version) {
+		t.Fatalf("plan.Image = %q, want base image", plan.Image)
 	}
 }
 

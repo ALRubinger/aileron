@@ -307,6 +307,35 @@ func (b Builder) Build(ctx context.Context, opts BuildOptions) (BuildResult, err
 		}
 		result.Built = true
 		return result, nil
+	case composition.TierPublished:
+		// A published per-agent image is pulled, never built locally — that is
+		// the whole point of the build-free default. The Runner/runtimeName seam
+		// (ADR-0014) is preserved: the pull threads runtimeName exactly like the
+		// build path. A pull is not a local build, so Built stays false; the
+		// launcher keys image env wiring off Image, not Built.
+		runtimeName, err := resolveRuntime(b.Runtime, b.Runner == nil)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		result.Runtime = runtimeName
+		result.Image = opts.Plan.Image
+		switch policy {
+		case BuildPolicyNever:
+			if !b.imageExists(ctx, runner, runtimeName, result.Image) {
+				return BuildResult{}, fmt.Errorf("sandbox image %s not found locally and sandbox build policy is never; run `%s pull %s` or use --sandbox-build=auto|always", result.Image, runtimeName, result.Image)
+			}
+			return result, nil
+		case BuildPolicyAuto:
+			if b.imageExists(ctx, runner, runtimeName, result.Image) {
+				return result, nil
+			}
+		}
+		// BuildPolicyAuto with the image absent, or BuildPolicyAlways: pull it.
+		pullArgs := []string{"pull", result.Image}
+		if err := runner.Run(ctx, runtimeName, pullArgs, stdout, stderr); err != nil {
+			return BuildResult{}, fmt.Errorf("%s %s: %w", runtimeName, strings.Join(pullArgs, " "), err)
+		}
+		return result, nil
 	case composition.TierBYOImage:
 		result.Image = opts.Plan.Image
 		return result, ErrNoBuildRequired

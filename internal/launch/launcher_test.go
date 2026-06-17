@@ -995,6 +995,63 @@ func TestLaunch_SandboxBuildRunsPreparedImage(t *testing.T) {
 	}
 }
 
+// publishedAgent reports a Name() that has a published per-agent sandbox image
+// (claude/codex), so the no-.devcontainer launch path resolves the build-free
+// TierPublished default and pulls the per-agent image instead of building the
+// local base.
+type publishedAgent struct {
+	scriptAgent
+	name string
+}
+
+func (a publishedAgent) Name() string { return a.name }
+
+func TestLaunch_SandboxNoDevcontainerPublishedAgentPullsPerAgentImage(t *testing.T) {
+	dir := t.TempDir()
+	// No images/sandbox-base context and no .devcontainer: the only build-free
+	// route is the published per-agent image. If the launcher fell back to the
+	// base build it would fail to find the Containerfile context.
+	binDir := t.TempDir()
+	argsFile := filepath.Join(dir, "docker-args.txt")
+	docker := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(docker, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" >> "+argsFile+"\nprintf '%s\\n' --- >> "+argsFile+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := launch.Launch(context.Background(), launch.LaunchConfig{
+		Agent:              publishedAgent{scriptAgent: scriptAgent{script: "claude"}, name: "claude"},
+		Dir:                dir,
+		Args:               []string{"--dangerously-skip-permissions"},
+		SandboxRuntime:     "docker",
+		SandboxBuildPolicy: "always",
+	})
+	if err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read docker args: %v", err)
+	}
+	args := string(data)
+	const image = "ghcr.io/alrubinger/aileron-sandbox-claude:latest"
+	for _, want := range []string{
+		"pull\n" + image + "\n",
+		"run\n--rm\n-i\n",
+		"--env\nAILERON_SANDBOX_IMAGE=" + image + "\n",
+		"--env\nAILERON_SANDBOX_TIER=published\n",
+		image + "\naileron-run-with-proxy-ca\nclaude\n--dangerously-skip-permissions\n",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("expected %q in docker args:\n%s", want, args)
+		}
+	}
+	// The published path must not build the local base image.
+	if strings.Contains(args, "build\n-t\nghcr.io/alrubinger/aileron-sandbox-base") {
+		t.Errorf("published launch unexpectedly built the local base image:\n%s", args)
+	}
+}
+
 func TestLaunch_SandboxBuildFailureFailsBeforeAgentStart(t *testing.T) {
 	dir := t.TempDir()
 	baseDir := filepath.Join(dir, "images", "sandbox-base")
