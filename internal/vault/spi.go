@@ -16,8 +16,8 @@ import (
 )
 
 // ErrCredentialUnavailable indicates that a credential could not be retrieved
-// from the vault — the vault session may be locked, the escrow stale, or the
-// KEK invalid. Callers should prompt the user to unlock their vault.
+// from the vault — the vault session may be locked or the KEK invalid.
+// Callers should prompt the user to unlock their vault.
 var ErrCredentialUnavailable = errors.New("vault: credential unavailable")
 
 // Vault stores and retrieves secrets by path.

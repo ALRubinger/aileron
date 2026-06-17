@@ -13,7 +13,6 @@ import (
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/auth"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
-	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -491,85 +490,15 @@ func TestResolveCredentialVaultPath_UnknownProvider(t *testing.T) {
 	}
 }
 
-// --- Enclave readiness tests ---
+// --- Health tests ---
 
-type failingEnclaveClient struct {
-	stubEnclaveClient
-}
-
-func (f *failingEnclaveClient) Ready(_ context.Context) error {
-	return fmt.Errorf("enclave not reachable: connection refused")
-}
-
-func TestGetHealth_NoEnclave(t *testing.T) {
+func TestGetHealth_OK(t *testing.T) {
 	s := &apiServer{log: slog.Default()}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
 	s.GetHealth(w, r)
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
-	}
-}
-
-func TestGetHealth_EnclaveHealthy(t *testing.T) {
-	s := &apiServer{
-		log:           slog.Default(),
-		enclaveClient: &stubEnclaveClient{},
-	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
-	s.GetHealth(w, r)
-	if w.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", w.Code)
-	}
-}
-
-func TestGetHealth_EnclaveNotReady(t *testing.T) {
-	s := &apiServer{
-		log:           slog.Default(),
-		enclaveClient: &failingEnclaveClient{},
-	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
-	s.GetHealth(w, r)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", w.Code)
-	}
-}
-
-func TestRequireEnclave_NoEnclave(t *testing.T) {
-	s := &apiServer{log: slog.Default()}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
-	if !s.requireEnclave(w, r) {
-		t.Error("requireEnclave should return true when no enclave configured")
-	}
-}
-
-func TestRequireEnclave_EnclaveHealthy(t *testing.T) {
-	s := &apiServer{
-		log:           slog.Default(),
-		enclaveClient: &stubEnclaveClient{},
-	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
-	if !s.requireEnclave(w, r) {
-		t.Error("requireEnclave should return true when enclave is healthy")
-	}
-}
-
-func TestRequireEnclave_EnclaveDown(t *testing.T) {
-	s := &apiServer{
-		log:           slog.Default(),
-		enclaveClient: &failingEnclaveClient{},
-	}
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/v1/test", nil)
-	if s.requireEnclave(w, r) {
-		t.Error("requireEnclave should return false when enclave is down")
-	}
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", w.Code)
 	}
 }
 
@@ -719,107 +648,6 @@ func TestExecuteGrant_VaultLocked(t *testing.T) {
 		t.Errorf("Error = %q, want 'vault locked'", result.Error)
 	}
 }
-
-func TestExecuteGrant_TEEMode_Success(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-	conn := &stubConnector{}
-	s.registry.Register(ctx, conn)
-	s.enclaveClient = &stubEnclaveClient{
-		resp: enclave.ExecuteResponse{
-			Status: "succeeded", ReceiptRef: "receipt_tee",
-			Output: map[string]any{"ok": true},
-		},
-	}
-	seedGrantAndIntent(ctx, s, "grt_tee", "int_tee")
-	result, err := s.executeGrant(ctx, "grt_tee", "usr_test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Status != api.ExecutionStatusSucceeded {
-		t.Errorf("Status = %q, want succeeded", result.Status)
-	}
-	if result.ReceiptRef != "receipt_tee" {
-		t.Errorf("ReceiptRef = %q", result.ReceiptRef)
-	}
-}
-
-func TestExecuteGrant_TEEMode_EnclaveNotReady(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-	conn := &stubConnector{}
-	s.registry.Register(ctx, conn)
-	s.enclaveClient = &failingEnclaveClient{}
-	seedGrantAndIntent(ctx, s, "grt_nr", "int_nr")
-	result, err := s.executeGrant(ctx, "grt_nr", "usr_test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Status != api.ExecutionStatusFailed {
-		t.Errorf("Status = %q, want failed", result.Status)
-	}
-	if !strings.Contains(result.Error, "enclave not ready") {
-		t.Errorf("Error = %q", result.Error)
-	}
-}
-
-func TestExecuteGrant_TEEMode_ExecuteError(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-	conn := &stubConnector{}
-	s.registry.Register(ctx, conn)
-	s.enclaveClient = &stubEnclaveClient{err: fmt.Errorf("enclave unreachable")}
-	seedGrantAndIntent(ctx, s, "grt_ee", "int_ee")
-	result, err := s.executeGrant(ctx, "grt_ee", "usr_test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Status != api.ExecutionStatusFailed {
-		t.Errorf("Status = %q, want failed", result.Status)
-	}
-}
-
-func TestExecuteGrant_TEEMode_ConnectorFailed(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-	conn := &stubConnector{}
-	s.registry.Register(ctx, conn)
-	s.enclaveClient = &stubEnclaveClient{
-		resp: enclave.ExecuteResponse{Status: "failed", Error: "permission denied"},
-	}
-	seedGrantAndIntent(ctx, s, "grt_tf", "int_tf")
-	result, err := s.executeGrant(ctx, "grt_tf", "usr_test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Status != api.ExecutionStatusFailed {
-		t.Errorf("Status = %q, want failed", result.Status)
-	}
-	if result.Error != "permission denied" {
-		t.Errorf("Error = %q", result.Error)
-	}
-}
-
-func TestExecuteGrant_TEEMode_WithEscrowIndex(t *testing.T) {
-	s := newExecutionServer()
-	ctx := context.Background()
-	conn := &stubConnector{}
-	s.registry.Register(ctx, conn)
-	s.enclaveClient = &stubEnclaveClient{
-		resp: enclave.ExecuteResponse{Status: "succeeded", ReceiptRef: "receipt_esc"},
-	}
-	seedGrantAndIntent(ctx, s, "grt_esc", "int_esc")
-	s.escrowIndex.Store("connectors/github/default", "escrow_456")
-	result, err := s.executeGrant(ctx, "grt_esc", "usr_test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Status != api.ExecutionStatusSucceeded {
-		t.Errorf("Status = %q, want succeeded", result.Status)
-	}
-}
-
-// --- buildModelDomainParams tests ---
 
 func TestBuildModelDomainParams_Email(t *testing.T) {
 	domain := model.DomainAction{

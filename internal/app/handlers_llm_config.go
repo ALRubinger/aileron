@@ -37,14 +37,6 @@ func (s *apiServer) handleUpsertUserLLMConfig(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Production enclave mode: reject plaintext API key ingress. In TEE
-	// deployments, credentials must never traverse host memory as plaintext.
-	// The local dev provider is exempt since it has no real isolation.
-	if s.enclaveClient != nil && s.teeCfg != nil && s.teeCfg.Provider != "local" {
-		writeError(w, http.StatusForbidden, "enclave_mode", "plaintext API key submission is not permitted in enclave mode")
-		return
-	}
-
 	now := time.Now().UTC()
 	cfg := model.LLMConfig{
 		ID:             "llm_" + s.newID(),
@@ -160,12 +152,6 @@ func (s *apiServer) handleUpsertEnterpriseLLMConfig(w http.ResponseWriter, r *ht
 	}
 	if req.APIKey == "" {
 		writeError(w, http.StatusBadRequest, "invalid_body", "api_key is required")
-		return
-	}
-
-	// Enclave mode: reject plaintext API key ingress.
-	if s.enclaveClient != nil {
-		writeError(w, http.StatusForbidden, "enclave_mode", "plaintext API key submission is not permitted in enclave mode")
 		return
 	}
 

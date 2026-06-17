@@ -12,15 +12,12 @@ import (
 
 	"github.com/ALRubinger/aileron/internal/account"
 	api "github.com/ALRubinger/aileron/internal/api/gen"
-	"github.com/ALRubinger/aileron/internal/config"
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
-	"github.com/ALRubinger/aileron/internal/enclave/local"
 )
 
 func newConnectedAccountServer() *apiServer {
@@ -439,30 +436,6 @@ func TestConnectAccount_VaultLocked(t *testing.T) {
 	}
 }
 
-func TestConnectAccount_TEEMode_SkipsKEKCache(t *testing.T) {
-	// In TEE mode, ConnectAccount should not require the KEK in the
-	// server-side session cache — the enclave holds the KEK.
-	srv, _ := newConnectedAccountServerWithVault()
-	srv.accountService = newGoogleAccountRegistry(srv.connectedAccounts, srv.vault)
-	srv.kekSessionCache.Clear("usr_a") // vault "locked" in server cache
-
-	// Enable TEE mode.
-	executeFn := func(_ context.Context, _ enclave.ExecuteRequest, _ []byte) (enclave.ExecuteResponse, error) {
-		return enclave.ExecuteResponse{Status: "succeeded"}, nil
-	}
-	srv.enclaveClient = local.New(executeFn)
-	srv.teeState = newTeeState()
-
-	w := httptest.NewRecorder()
-	r := mcpRequest("GET", "/v1/connect/gmail", "", userAClaims)
-	srv.ConnectAccount(w, r, "gmail", api.ConnectAccountParams{})
-
-	// Should redirect to Google OAuth, not return 423 vault_locked.
-	if w.Code != http.StatusFound {
-		t.Fatalf("expected 302 redirect, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
 func TestConnectAccountCallback_NotConfigured(t *testing.T) {
 	srv := newConnectedAccountServer()
 	srv.accountService = nil
@@ -653,26 +626,10 @@ func TestConnectedAccountToAPI(t *testing.T) {
 	}
 }
 
-func TestCreateConnectedAccount_EnclaveMode_TokenForbidden(t *testing.T) {
+func TestCreateConnectedAccount_NoToken_Allowed(t *testing.T) {
+	// Creating a connected account WITHOUT a token should work — the
+	// record is created without ingesting any plaintext credential.
 	srv := newConnectedAccountServer()
-	srv.enclaveClient = &toolsEnclaveClient{}
-	srv.teeCfg = &config.TEEConfig{Provider: "confidential-space"}
-
-	body := `{"provider":"slack","token":{"access_token":"xoxp-test"}}`
-	w := httptest.NewRecorder()
-	r := mcpRequest("POST", "/v1/connected-accounts", body, userAClaims)
-	srv.handleCreateConnectedAccount(w, r)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d: %s", w.Code, w.Body.String())
-	}
-}
-
-func TestCreateConnectedAccount_EnclaveMode_NoToken_Allowed(t *testing.T) {
-	// Creating a connected account WITHOUT a token should still work
-	// in enclave mode — only plaintext credential ingress is blocked.
-	srv := newConnectedAccountServer()
-	srv.enclaveClient = &toolsEnclaveClient{} // enclave active
 
 	body := `{"provider":"slack","external_user_id":"U123"}`
 	w := httptest.NewRecorder()

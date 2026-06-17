@@ -16,63 +16,12 @@ import (
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store/mem"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/golang-jwt/jwt/v5"
 )
 
 // kekVerificationConstant is the known plaintext encrypted with the KEK.
 // Duplicated here for test assertions — must match the client-side constant.
 var testVerificationConstant = []byte("aileron-kek-verification-ok")
-
-// mockEscrowClient records EscrowStore calls for testing auto-escrow.
-type mockEscrowClient struct {
-	escrowCalls []enclave.EscrowStoreRequest
-	escrowErr   error
-}
-
-func (c *mockEscrowClient) Attest(_ context.Context, _ enclave.AttestationRequest) (enclave.AttestationResponse, error) {
-	return enclave.AttestationResponse{}, nil
-}
-func (c *mockEscrowClient) EstablishSession(_ context.Context, _ enclave.SessionRequest) (enclave.SessionResponse, error) {
-	return enclave.SessionResponse{SessionID: "sess_test", ExpiresAt: time.Now().Add(24 * time.Hour).Format(time.RFC3339)}, nil
-}
-func (c *mockEscrowClient) TransmitKEK(_ context.Context, _ enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
-	return enclave.TransmitKEKResponse{Stored: true}, nil
-}
-func (c *mockEscrowClient) OAuthExchange(_ context.Context, _ enclave.OAuthExchangeRequest) (enclave.OAuthExchangeResponse, error) {
-	return enclave.OAuthExchangeResponse{}, nil
-}
-func (c *mockEscrowClient) Execute(_ context.Context, _ enclave.ExecuteRequest) (enclave.ExecuteResponse, error) {
-	return enclave.ExecuteResponse{}, nil
-}
-func (c *mockEscrowClient) EscrowStore(_ context.Context, req enclave.EscrowStoreRequest) (enclave.EscrowStoreResponse, error) {
-	if c.escrowErr != nil {
-		return enclave.EscrowStoreResponse{}, c.escrowErr
-	}
-	c.escrowCalls = append(c.escrowCalls, req)
-	return enclave.EscrowStoreResponse{EscrowID: "esc_test_" + req.GrantID}, nil
-}
-func (c *mockEscrowClient) EscrowList(_ context.Context) (enclave.EscrowListResponse, error) {
-	return enclave.EscrowListResponse{}, nil
-}
-func (c *mockEscrowClient) EscrowRevoke(_ context.Context, _ enclave.EscrowRevokeRequest) error {
-	return nil
-}
-func (c *mockEscrowClient) SourceExecute(_ context.Context, _ enclave.SourceExecuteRequest) (enclave.SourceExecuteResponse, error) {
-	return enclave.SourceExecuteResponse{}, nil
-}
-func (c *mockEscrowClient) Ready(_ context.Context) error { return nil }
-func (c *mockEscrowClient) Close() error                  { return nil }
-
-// failingTransmitClient is an enclave client whose TransmitKEK always fails.
-type failingTransmitClient struct {
-	mockEscrowClient
-	err error
-}
-
-func (c *failingTransmitClient) TransmitKEK(_ context.Context, _ enclave.TransmitKEKRequest) (enclave.TransmitKEKResponse, error) {
-	return enclave.TransmitKEKResponse{}, c.err
-}
 
 func passphraseServer() *apiServer {
 	return &apiServer{
@@ -498,161 +447,6 @@ func TestGetPassphraseSalt_GetStoreError(t *testing.T) {
 	}
 }
 
-// --- Auto-escrow tests ---
-
-func TestAutoEscrowCredentials_EscrowsActiveAccounts(t *testing.T) {
-	connAccounts := mem.NewConnectedAccountStore()
-	ctx := context.Background()
-
-	connAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_1", UserID: testClaims.Subject,
-		Provider: model.ConnectedAccountProviderGmail,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-	connAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_2", UserID: testClaims.Subject,
-		Provider: model.ConnectedAccountProviderGoogleCalendar,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-	connAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_3", UserID: testClaims.Subject,
-		Provider: model.ConnectedAccountProviderOutlook,
-		Status:   model.ConnectedAccountStatusRevoked,
-	})
-
-	v := vault.NewMemVault()
-	encMeta := vault.Metadata{Type: "oauth_refresh_token", Labels: map[string]string{vault.EncryptedLabel: "true"}}
-	v.Put(ctx, "connected-accounts/"+testClaims.Subject+"/gmail", []byte("encrypted-gmail"), encMeta)
-	v.Put(ctx, "connected-accounts/"+testClaims.Subject+"/google_calendar", []byte("encrypted-gcal"), encMeta)
-	v.Put(ctx, "connected-accounts/"+testClaims.Subject+"/outlook", []byte("encrypted-outlook"), encMeta)
-
-	mockClient := &mockEscrowClient{}
-	srv := &apiServer{
-		connectedAccounts: connAccounts,
-		vault:             v,
-		enclaveClient:     mockClient,
-		escrowTTL:         7 * 24 * time.Hour,
-	}
-
-	escrowed := srv.autoEscrowCredentials(ctx, testClaims.Subject)
-
-	if escrowed != 2 {
-		t.Fatalf("escrowed = %d, want 2", escrowed)
-	}
-	if len(mockClient.escrowCalls) != 2 {
-		t.Fatalf("EscrowStore calls = %d, want 2", len(mockClient.escrowCalls))
-	}
-
-	if _, ok := srv.escrowIndex.Load("connected-accounts/" + testClaims.Subject + "/gmail"); !ok {
-		t.Fatal("expected escrow index entry for gmail")
-	}
-	if _, ok := srv.escrowIndex.Load("connected-accounts/" + testClaims.Subject + "/google_calendar"); !ok {
-		t.Fatal("expected escrow index entry for google_calendar")
-	}
-}
-
-func TestAutoEscrowCredentials_NoConnectedAccounts(t *testing.T) {
-	connAccounts := mem.NewConnectedAccountStore()
-	mockClient := &mockEscrowClient{}
-	srv := &apiServer{
-		connectedAccounts: connAccounts,
-		vault:             vault.NewMemVault(),
-		enclaveClient:     mockClient,
-		escrowTTL:         time.Hour,
-	}
-
-	escrowed := srv.autoEscrowCredentials(context.Background(), testClaims.Subject)
-	if escrowed != 0 {
-		t.Fatalf("escrowed = %d, want 0", escrowed)
-	}
-}
-
-func TestAutoEscrowCredentials_SkipsUnencryptedCredentials(t *testing.T) {
-	connAccounts := mem.NewConnectedAccountStore()
-	ctx := context.Background()
-
-	connAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_1", UserID: testClaims.Subject,
-		Provider: model.ConnectedAccountProviderGmail,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-
-	v := vault.NewMemVault()
-	v.Put(ctx, "connected-accounts/"+testClaims.Subject+"/gmail", []byte("plaintext"), vault.Metadata{Type: "oauth_refresh_token"})
-
-	mockClient := &mockEscrowClient{}
-	srv := &apiServer{
-		connectedAccounts: connAccounts,
-		vault:             v,
-		enclaveClient:     mockClient,
-		escrowTTL:         time.Hour,
-	}
-
-	escrowed := srv.autoEscrowCredentials(ctx, testClaims.Subject)
-	if escrowed != 0 {
-		t.Fatalf("escrowed = %d, want 0 (unencrypted should be skipped)", escrowed)
-	}
-}
-
-func TestAutoEscrowCredentials_PartialFailure(t *testing.T) {
-	connAccounts := mem.NewConnectedAccountStore()
-	ctx := context.Background()
-
-	connAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_1", UserID: testClaims.Subject,
-		Provider: model.ConnectedAccountProviderGmail,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-	connAccounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_2", UserID: testClaims.Subject,
-		Provider: model.ConnectedAccountProviderGoogleCalendar,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-
-	v := vault.NewMemVault()
-	encMeta := vault.Metadata{Type: "oauth_refresh_token", Labels: map[string]string{vault.EncryptedLabel: "true"}}
-	v.Put(ctx, "connected-accounts/"+testClaims.Subject+"/gmail", []byte("enc-gmail"), encMeta)
-	// No vault entry for google_calendar — should fail gracefully.
-
-	mockClient := &mockEscrowClient{}
-	srv := &apiServer{
-		connectedAccounts: connAccounts,
-		vault:             v,
-		enclaveClient:     mockClient,
-		escrowTTL:         time.Hour,
-	}
-
-	escrowed := srv.autoEscrowCredentials(ctx, testClaims.Subject)
-	if escrowed != 1 {
-		t.Fatalf("escrowed = %d, want 1 (partial success)", escrowed)
-	}
-}
-
-func TestActionTypesForProvider(t *testing.T) {
-	tests := []struct {
-		provider model.ConnectedAccountProvider
-		want     []string
-	}{
-		{model.ConnectedAccountProviderGmail, []string{"email.send"}},
-		{model.ConnectedAccountProviderGoogleCalendar, []string{"calendar.create"}},
-		{model.ConnectedAccountProviderOutlook, []string{"email.send"}},
-		{model.ConnectedAccountProviderMicrosoftCalendar, []string{"calendar.create"}},
-		{"unknown_provider", nil},
-	}
-	for _, tt := range tests {
-		got := actionTypesForProvider(tt.provider)
-		if len(got) != len(tt.want) {
-			t.Errorf("actionTypesForProvider(%q) = %v, want %v", tt.provider, got, tt.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != tt.want[i] {
-				t.Errorf("actionTypesForProvider(%q)[%d] = %q, want %q", tt.provider, i, got[i], tt.want[i])
-			}
-		}
-	}
-}
-
 // --- UnlockVault / LockVault / GetVaultStatus tests ---
 
 func unlockServer() *apiServer {
@@ -701,25 +495,6 @@ func TestUnlockVault_Success(t *testing.T) {
 	}
 	if srv.kekSessionCache.Get(testClaims.Subject) == nil {
 		t.Error("expected KEK in session cache")
-	}
-}
-
-func TestUnlockVault_BlockedWhenTEEEnabled(t *testing.T) {
-	srv := unlockServer()
-	srv.enclaveClient = &mockEscrowClient{} // non-nil = TEE enabled
-
-	kek := make([]byte, 32)
-	for i := range kek {
-		kek[i] = byte(i + 1)
-	}
-	body, _ := json.Marshal(api.UnlockVaultRequest{Kek: kek})
-
-	w := httptest.NewRecorder()
-	r := authedRequest(http.MethodPost, "/v1/users/me/passphrase/unlock", string(body), testClaims)
-	srv.UnlockVault(w, r)
-
-	if w.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 when TEE enabled, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -833,33 +608,6 @@ func TestGetVaultStatus_Unlocked(t *testing.T) {
 	}
 	if resp.ExpiresAt == nil {
 		t.Error("expected expires_at")
-	}
-}
-
-func TestGetVaultStatus_TEESessionUnlocked(t *testing.T) {
-	// When TEE has an active session, vault should report unlocked even
-	// though the server-side KEK cache is empty.
-	srv := unlockServer()
-	// Don't put KEK in session cache — simulates TEE-only unlock.
-
-	// Set up active TEE session.
-	srv.teeState = newTeeState()
-	srv.teeState.userSessions[testClaims.Subject] = time.Now().Add(1 * time.Hour)
-
-	w := httptest.NewRecorder()
-	r := authedRequest(http.MethodGet, "/v1/users/me/vault/status", "", testClaims)
-	srv.GetVaultStatus(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", w.Code)
-	}
-	var resp api.VaultStatusResponse
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.Locked {
-		t.Error("expected locked=false with active TEE session")
-	}
-	if resp.ExpiresAt == nil {
-		t.Error("expected expires_at from TEE session")
 	}
 }
 
@@ -1013,37 +761,9 @@ func TestRequireKEK_InternalError(t *testing.T) {
 	}
 }
 
-func TestUserVault_EscrowDeniesPlaintext(t *testing.T) {
-	// Tier 2: KEK session cache is empty (vault locked), escrow index has
-	// entries. userVault should return a DenyPlaintextVault that refuses
-	// credential access — credentials must be accessed via SourceExecute
-	// inside the enclave, never retrieved as plaintext to the host.
-	vaultPath := "connected-accounts/usr_escrow/slack"
-
-	mockClient := &mockEscrowClient{}
-
-	srv := &apiServer{
-		vault:           vault.NewMemVault(),
-		kekSessionCache: auth.NewKEKSessionCache(24 * time.Hour),
-		enclaveClient:   mockClient,
-	}
-	srv.escrowIndex.Store(vaultPath, "esc_test_slack")
-
-	vlt := srv.userVault("usr_escrow")
-
-	// Get must fail — DenyPlaintextVault blocks all credential retrieval.
-	_, err := vlt.Get(context.Background(), vaultPath)
-	if err == nil {
-		t.Fatal("expected error from DenyPlaintextVault, got nil")
-	}
-	if !errors.Is(err, vault.ErrCredentialUnavailable) {
-		t.Errorf("expected ErrCredentialUnavailable, got: %v", err)
-	}
-}
-
-func TestUserVault_NoEscrow_ReturnsLockedVault(t *testing.T) {
-	// Tier 3: KEK session cache exists but empty, no enclave client.
-	// userVault should return a vault that fails on Get.
+func TestUserVault_NoKEK_ReturnsLockedVault(t *testing.T) {
+	// KEK session cache exists but empty. userVault should return a vault
+	// that fails on Get until the user unlocks.
 	srv := &apiServer{
 		vault:           vault.NewMemVault(),
 		kekSessionCache: auth.NewKEKSessionCache(24 * time.Hour),

@@ -119,12 +119,3 @@ func TestUserScopedVault_ListWorksWithoutKEK(t *testing.T) {
 	}
 }
 
-func TestDenyPlaintextVault_ListIsEmpty(t *testing.T) {
-	got, err := vault.NewDenyPlaintextVault().List(context.Background())
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("entries = %+v, want empty", got)
-	}
-}

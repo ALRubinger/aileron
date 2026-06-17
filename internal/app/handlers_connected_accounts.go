@@ -10,7 +10,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/vault"
-	"github.com/ALRubinger/aileron/internal/enclave"
 )
 
 // --- Connected Accounts ---
@@ -56,15 +55,6 @@ func (s *apiServer) handleCreateConnectedAccount(w http.ResponseWriter, r *http.
 
 	// Store token in vault if provided.
 	if len(req.Token) > 0 {
-		// Production enclave mode: reject plaintext token ingress. In TEE
-		// deployments, credentials must flow through the OAuth callback
-		// which routes through the enclave for KEK-encrypted storage.
-		// The local dev provider is exempt since it has no real isolation.
-		if s.enclaveClient != nil && s.teeCfg != nil && s.teeCfg.Provider != "local" {
-			writeError(w, http.StatusForbidden, "enclave_mode", "plaintext token submission is not permitted in enclave mode; use the OAuth connect flow")
-			return
-		}
-
 		tokenJSON, _ := json.Marshal(req.Token)
 		if err := s.vault.Put(r.Context(), acct.VaultPath(), tokenJSON, vault.Metadata{
 			Type: "oauth_token",
@@ -200,20 +190,7 @@ func (s *apiServer) ConnectAccount(w http.ResponseWriter, r *http.Request, provi
 	}
 
 	// Fail fast: require passphrase + unlocked vault before starting OAuth flow.
-	// In TEE mode, the enclave holds the KEK — skip the server-side cache check
-	// and verify only that a passphrase exists.
-	if s.enclaveClient != nil {
-		userID, _, ok := s.requireAuth(w, r)
-		if !ok {
-			return
-		}
-		if s.userKeyMaterials != nil {
-			if _, err := s.userKeyMaterials.Get(r.Context(), userID); err != nil && isNotFound(err) {
-				writeError(w, http.StatusBadRequest, "passphrase_required", "set a vault passphrase before connecting accounts")
-				return
-			}
-		}
-	} else if s.kekSessionCache != nil {
+	if s.kekSessionCache != nil {
 		kek, ok := s.requireKEK(w, r)
 		if !ok {
 			return
@@ -307,93 +284,7 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 
 	redirectURL := requestScheme(r) + "://" + r.Host + "/v1/connect/" + providerStr + "/callback"
 
-	// TEE mode: forward the OAuth code to the enclave. The enclave exchanges
-	// the code for tokens, encrypts them with the user's KEK, and returns
-	// only the ciphertext. The server never sees the plaintext tokens.
-	if s.enclaveClient != nil {
-		// Verify enclave is reachable before attempting OAuth exchange.
-		if !s.requireEnclave(w, r) {
-			return
-		}
-		// Verify passphrase exists (enclave has escrowed KEK).
-		if s.userKeyMaterials != nil {
-			if _, err := s.userKeyMaterials.Get(r.Context(), userID); err != nil && isNotFound(err) {
-				writeError(w, http.StatusBadRequest, "passphrase_required", "set a vault passphrase before connecting accounts")
-				return
-			}
-		}
-		providerSvc, provErr := s.accountService.ProviderFor(provider)
-		if provErr != nil {
-			writeError(w, http.StatusBadRequest, "invalid_provider", provErr.Error())
-			return
-		}
-		oauthResp, oauthErr := s.enclaveClient.OAuthExchange(r.Context(), enclave.OAuthExchangeRequest{
-			UserID:           userID,
-			Provider:         providerStr,
-			Code:             params.Code,
-			RedirectURI:      redirectURL,
-			ClientID:         providerSvc.ClientID(),
-			ClientSecret:     providerSvc.ClientSecret(),
-			Scopes:           providerSvc.ScopesFor(provider),
-			TokenEndpoint:    providerSvc.TokenEndpointFor(provider),
-			UserInfoEndpoint: providerSvc.UserInfoEndpoint(),
-		})
-		if oauthErr != nil {
-			s.log.Error("enclave OAuth exchange failed", "error", oauthErr, "provider", providerStr)
-			writeError(w, http.StatusInternalServerError, "callback_error", "failed to connect account: "+oauthErr.Error())
-			return
-		}
-
-		// Store the encrypted token in the vault — server never saw plaintext.
-		now := time.Now().UTC()
-
-		// Use provider-specific external IDs when available (e.g. Slack
-		// returns user ID + team ID in the token response). Fall back to
-		// email for providers that use standard OAuth (Google, etc.).
-		externalUserID := oauthResp.ExternalUserID
-		if externalUserID == "" {
-			externalUserID = oauthResp.Email
-		}
-
-		acct := model.ConnectedAccount{
-			ID:             "conn_" + s.newID(),
-			UserID:         userID,
-			Provider:       provider,
-			Scopes:         providerSvc.ScopesFor(provider),
-			ExternalUserID: externalUserID,
-			ExternalTeamID: oauthResp.ExternalTeamID,
-			Status:         model.ConnectedAccountStatusActive,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		}
-		if err := s.vault.Put(r.Context(), acct.VaultPath(), oauthResp.EncryptedToken, vault.Metadata{
-			Type: "oauth_refresh_token",
-			Labels: map[string]string{
-				"provider":  providerStr,
-				"user_id":   userID,
-				"encrypted": "true",
-			},
-		}); err != nil {
-			writeError(w, http.StatusInternalServerError, "vault_error", "failed to store encrypted token")
-			return
-		}
-		if _, err := s.connectedAccounts.Upsert(r.Context(), acct); err != nil {
-			writeError(w, http.StatusInternalServerError, "store_error", "failed to upsert account record")
-			return
-		}
-
-		// Auto-escrow all credentials so async flows (Slack agent) work
-		// immediately without requiring a separate vault unlock step.
-		escrowed := s.autoEscrowCredentials(r.Context(), userID)
-		if escrowed > 0 {
-			s.log.Info("auto-escrowed credentials on connect", "user_id", userID, "count", escrowed)
-		}
-
-		http.Redirect(w, r, returnTo, http.StatusFound)
-		return
-	}
-
-	// Direct mode: exchange code on the host, encrypt token with user's KEK.
+	// Exchange code on the host, encrypt token with user's KEK.
 	kek, ok := s.requireKEK(w, r)
 	if !ok {
 		return
@@ -418,14 +309,6 @@ func (s *apiServer) ConnectAccountCallback(w http.ResponseWriter, r *http.Reques
 		s.log.Error("connected account callback failed", "error", err, "provider", providerStr)
 		writeError(w, http.StatusInternalServerError, "callback_error", "failed to connect account: "+err.Error())
 		return
-	}
-
-	// Auto-escrow in direct mode (no-op if enclaveClient is nil).
-	if s.enclaveClient != nil {
-		escrowed := s.autoEscrowCredentials(r.Context(), userID)
-		if escrowed > 0 {
-			s.log.Info("auto-escrowed credentials on connect", "user_id", userID, "count", escrowed)
-		}
 	}
 
 	http.Redirect(w, r, returnTo, http.StatusFound)

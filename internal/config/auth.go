@@ -171,19 +171,6 @@ func (c *AuthConfig) KEKSessionTTL() time.Duration {
 	return d
 }
 
-// EscrowTTL returns the TTL for credentials escrowed in TEE memory.
-// Escrowed credentials persist independently of the KEK session, allowing
-// autonomous agent execution without the user being online. The escrow is
-// refreshed each time the user verifies their passphrase.
-// Env: AILERON_ESCROW_TTL (default: "168h" = 7 days)
-func (c *AuthConfig) EscrowTTL() time.Duration {
-	d, err := parseDurationOrDefault("AILERON_ESCROW_TTL", 7*24*time.Hour)
-	if err != nil {
-		return 7 * 24 * time.Hour
-	}
-	return d
-}
-
 // envTrimmed reads an environment variable and trims leading/trailing
 // whitespace. Prevents copy-paste errors in web UIs (Railway, Docker)
 // where invisible trailing spaces cause cryptic failures.

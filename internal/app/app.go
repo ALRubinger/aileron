@@ -4,7 +4,6 @@ package app
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -27,7 +26,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/connector"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/draft"
-	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/notify"
 	"github.com/ALRubinger/aileron/internal/observability"
@@ -335,10 +333,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	// --- Approval orchestrator ---
 	idGen := func() string { return uuid.New().String() }
 	orchestrator := approval.NewInMemoryOrchestrator(approvalStore, idGen)
-	grantCapabilityKey := make([]byte, 32)
-	if _, err := rand.Read(grantCapabilityKey); err != nil {
-		return nil, fmt.Errorf("grant capability key: %w", err)
-	}
 
 	// --- Notifier ---
 	// Multi-notifier: log first (machine-readable, lands in
@@ -369,18 +363,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 	}
 	openAIProxy := newGatewayProxy(gatewayCfg.OpenAIBaseURL, "openai", log)
 	anthropicProxy := newGatewayProxy(gatewayCfg.AnthropicBaseURL, "anthropic", log)
-
-	// --- TEE (optional — enabled when AILERON_TEE_PROVIDER is set) ---
-	teeCfg := config.LoadTEEConfig()
-	var enclaveClient enclave.Client
-	var enclaveVerifier enclave.Verifier
-	if teeCfg.TEEEnabled() {
-		var teeErr error
-		enclaveClient, enclaveVerifier, teeErr = newEnclaveClient(teeCfg, log, registry)
-		if teeErr != nil {
-			return nil, teeErr
-		}
-	}
 
 	// --- HTTP handler ---
 	mux := http.NewServeMux()
@@ -414,10 +396,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		llmConfigs:              llmConfigStore,
 		traces:                  traceStore,
 		sourceRegistry:          sourceReg,
-		enclaveClient:           enclaveClient,
-		enclaveVerifier:         enclaveVerifier,
-		teeCfg:                  teeCfg,
-		grantCapabilityKey:      grantCapabilityKey,
 		openAIProxy:             openAIProxy,
 		anthropicProxy:          anthropicProxy,
 		localDaemonToken:        cfg.LocalDaemonToken,
@@ -601,9 +579,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		}
 	}
 
-	if teeCfg.TEEEnabled() {
-		server.teeState = newTeeState()
-	}
 	mux.HandleFunc("GET /v1/auth/handshake", server.handleLocalAuthHandshake)
 	api.HandlerFromMux(server, mux)
 
@@ -684,7 +659,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		server.users = userStore
 		server.userAuthProviders = userAuthProviderStore
 		server.userKeyMaterials = userKeyMaterialStore
-		server.escrowTTL = authCfg.EscrowTTL()
 		server.uiBaseURL = authCfg.UIBaseURL
 
 		// KEK session cache for Phase 2 encrypted-at-rest vault.
@@ -706,34 +680,6 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		server.feedback = postgres.NewDraftFeedbackStore(db)
 		v = vault.NewPostgresVault(db.Pool)
 		server.vault = v
-		escrowIndexStore := postgres.NewEscrowIndexStore(db)
-		server.escrowIndexStore = escrowIndexStore
-
-		// Background cleanup of expired escrow index entries.
-		go func() {
-			ticker := time.NewTicker(10 * time.Minute)
-			defer ticker.Stop()
-			for range ticker.C {
-				if n, err := escrowIndexStore.DeleteExpired(context.Background()); err == nil && n > 0 {
-					log.Info("cleaned expired escrow index entries", "count", n)
-				}
-			}
-		}()
-
-		// Load persisted escrow index so async flows work after restart.
-		if idx, err := escrowIndexStore.LoadAll(ctx); err == nil {
-			for path, id := range idx {
-				server.escrowIndex.Store(path, id)
-			}
-			if len(idx) > 0 {
-				log.Info("loaded escrow index from database", "entries", len(idx))
-			}
-
-			// Reconcile: prune index entries the enclave no longer has.
-			if enclaveClient != nil && len(idx) > 0 {
-				reconcileEscrowIndex(ctx, log, enclaveClient, &server.escrowIndex, escrowIndexStore, idx)
-			}
-		}
 		log.Info("using Postgres-backed stores and vault")
 
 		tokenIssuer := auth.NewTokenIssuer(
@@ -802,9 +748,7 @@ func NewHandlerWithConfig(log *slog.Logger, cfg Config) (http.Handler, error) {
 		authHandler.RegisterRoutes(mux)
 
 		skipPaths := map[string]bool{
-			"/v1/health":     true,
-			"/v1/tee/status": true,
-			"/v1/tee/jwks":   true,
+			"/v1/health": true,
 		}
 		handler = auth.MiddlewareWithConfig(tokenIssuer, auth.MiddlewareConfig{
 			SkipPaths: skipPaths,

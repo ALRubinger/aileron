@@ -26,7 +26,6 @@ func TestStores(t *testing.T) {
 		UserInstructions:  postgres.NewUserInstructionStore(db),
 		UserKeyMaterials:  postgres.NewUserKeyMaterialStore(db),
 		LLMConfigs:        postgres.NewLLMConfigStore(db),
-		EscrowIndex:       postgres.NewEscrowIndexStore(db),
 	}
 
 	t.Run("Enterprise", func(t *testing.T) { storetest.TestEnterpriseStore(t, h) })
@@ -41,5 +40,4 @@ func TestStores(t *testing.T) {
 	t.Run("UserInstruction", func(t *testing.T) { storetest.TestUserInstructionStore(t, h) })
 	t.Run("UserKeyMaterial", func(t *testing.T) { storetest.TestUserKeyMaterialStore(t, h) })
 	t.Run("LLMConfig", func(t *testing.T) { storetest.TestLLMConfigStore(t, h) })
-	t.Run("EscrowIndex", func(t *testing.T) { storetest.TestEscrowIndexStore(t, h) })
 }

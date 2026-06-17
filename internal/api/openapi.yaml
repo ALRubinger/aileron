@@ -1,5 +1,6 @@
 
 openapi: 3.1.0
+# SENTINEL_EDIT_TEST
 info:
   title: Agentic Control Plane API
   version: 0.2.0
@@ -44,7 +45,6 @@ tags:
   - name: Traces
   - name: Analytics
   - name: Connected Accounts
-  - name: TEE
   - name: Health
   - name: Vault
     description: |
@@ -3759,96 +3759,6 @@ paths:
         "302":
           description: Redirect to connected accounts page on success
 
-  /v1/tee/status:
-    get:
-      tags: [TEE]
-      summary: Get TEE status
-      operationId: getTeeStatus
-      security: []
-      responses:
-        "200":
-          description: TEE configuration and session status
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeeStatus"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-
-  /v1/tee/attestation:
-    post:
-      tags: [TEE]
-      summary: Initiate remote attestation
-      operationId: initiateAttestation
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TeeAttestationRequest"
-      responses:
-        "200":
-          description: Attestation evidence from the enclave
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeeAttestationResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "501":
-          description: TEE not enabled
-
-  /v1/tee/jwks:
-    get:
-      tags: [TEE]
-      summary: Get JWKS for attestation token verification
-      description: |
-        Proxies the Google Confidential Space JWKS endpoint so that browser
-        clients can verify attestation JWT signatures without CORS issues.
-        Keys are cached server-side for 1 hour.
-      operationId: getTeeJwks
-      security: []
-      responses:
-        "200":
-          description: JSON Web Key Set
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Jwks"
-        "502":
-          description: Failed to fetch JWKS from upstream
-
-  /v1/tee/session:
-    post:
-      tags: [TEE]
-      summary: Establish TEE session and transmit KEK
-      description: |
-        Accepts the client's ephemeral ECDH public key and an encrypted KEK
-        blob. The server forwards both to the enclave as an opaque pass-through
-        — it cannot derive the shared secret or decrypt the KEK. The enclave
-        performs the ECDH key exchange, decrypts the KEK, and stores it in
-        hardware-isolated memory. Auto-escrows active credentials on success.
-      operationId: establishTeeSession
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TeeSessionRequest"
-      responses:
-        "200":
-          description: Session established and KEK transmitted
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/TeeSessionResponse"
-        "400":
-          description: Key exchange or KEK transmission failure
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "501":
-          description: TEE not enabled
-
   /v1/chat/completions:
     post:
       tags: [Gateway]
@@ -4140,38 +4050,6 @@ components:
             $ref: "#/components/schemas/FailureEnvelope"
 
   schemas:
-    Jwks:
-      type: object
-      required: [keys]
-      properties:
-        keys:
-          type: array
-          items:
-            $ref: "#/components/schemas/Jwk"
-
-    Jwk:
-      type: object
-      required: [kty, kid]
-      properties:
-        kty:
-          type: string
-        kid:
-          type: string
-        alg:
-          type: string
-        use:
-          type: string
-        n:
-          type: string
-        e:
-          type: string
-        crv:
-          type: string
-        x:
-          type: string
-        "y":
-          type: string
-
     HealthResponse:
       type: object
       required: [status, service, version, timestamp]
@@ -6939,22 +6817,9 @@ components:
         bounded_parameters:
           type: object
           additionalProperties: true
-        capability:
-          type: object
-          additionalProperties: true
-          description: Durable signed grant capability issued from the approved grant scope.
         expires_at:
           type: string
           format: date-time
-        escrow_policy:
-          type: string
-          enum: [none, session, escrowed]
-          default: none
-          description: |
-            How credentials are managed for this grant.
-            - none: no TEE (credentials decrypted in host process)
-            - session: credentials sent to TEE per-execution (real-time only)
-            - escrowed: credentials escrowed inside TEE for async/scheduled use
 
     ExecutionRunRequest:
       type: object
@@ -7608,113 +7473,6 @@ components:
             `agents/<name>/oauth` vault path.
         metadata:
           $ref: "#/components/schemas/AgentCredentialsMetadata"
-
-    TeeStatus:
-      type: object
-      required: [enabled, provider]
-      properties:
-        enabled:
-          type: boolean
-          description: Whether a TEE provider is configured
-        provider:
-          type: string
-          enum: [none, local, confidential-space]
-          description: The active TEE provider
-        attested:
-          type: boolean
-          description: Whether the enclave has been attested
-        session_active:
-          type: boolean
-          description: Whether an active session exists with the enclave
-        session_expires_at:
-          type: string
-          format: date-time
-          description: When the current session expires
-        expected_identity:
-          type: object
-          description: Expected enclave identity pins configured by the server and intended for browser/client verification
-          properties:
-            image_digest:
-              type: string
-              description: Expected container image digest (e.g. "sha256:abc...")
-            project_id:
-              type: string
-              description: Expected GCP project ID that owns the enclave workload
-        attestation_claims:
-          type: object
-          description: Verified attestation claims from the TEE (present only when attested)
-          properties:
-            image_digest:
-              type: string
-              description: Container image digest (e.g. "sha256:abc...")
-            project_id:
-              type: string
-              description: GCP project ID that owns the enclave workload
-            issuer:
-              type: string
-              description: Token issuer (e.g. "https://accounts.google.com")
-            hwmodel:
-              type: string
-              description: Hardware security model (e.g. "GCP_AMD_SEV")
-            issued_at:
-              type: string
-              format: date-time
-              description: When the attestation token was issued
-            expires_at:
-              type: string
-              format: date-time
-              description: When the attestation token expires
-
-    TeeAttestationRequest:
-      type: object
-      properties:
-        audience:
-          type: string
-          description: Expected audience for the attestation token
-
-    TeeAttestationResponse:
-      type: object
-      required: [nonce, token, public_key]
-      properties:
-        nonce:
-          type: string
-          format: byte
-          description: Random nonce used for attestation freshness
-        token:
-          type: string
-          description: Attestation evidence (OIDC JWT for Confidential Space, "dev-ok" for local)
-        public_key:
-          type: string
-          format: byte
-          description: Enclave's ephemeral ECDH public key (base64)
-
-    TeeSessionRequest:
-      type: object
-      required: [encrypted_kek, client_public_key]
-      properties:
-        encrypted_kek:
-          type: string
-          format: byte
-          description: KEK encrypted with the ECDH-derived shared secret (opaque to server)
-        client_public_key:
-          type: string
-          format: byte
-          description: Client's ephemeral ECDH public key for enclave key exchange
-
-    TeeSessionResponse:
-      type: object
-      required: [session_id]
-      properties:
-        session_id:
-          type: string
-          description: Session identifier
-        expires_at:
-          type: string
-          format: date-time
-          description: When the session expires
-        escrowed_count:
-          type: integer
-          description: Number of credentials auto-escrowed into TEE
 
     # --- Gateway: OpenAI Chat Completions shape ---
     #

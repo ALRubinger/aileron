@@ -2,7 +2,6 @@ go 1.26.0
 
 use (
 	./cmd/aileron
-	./cmd/aileron-enclave
 	./cmd/aileron-mcp
 	./internal
 	./sdk/go
