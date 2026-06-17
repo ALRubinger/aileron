@@ -220,6 +220,73 @@ jobs:
           # *_windows.go files that Linux runs cannot measure.
           flags: unit
 
+  release-smoke-windows:
+    # Windows release smoke for the Scoop distribution path (#1094). We
+    # cannot exercise real Windows from the dev environment, so this job
+    # is the safety net: it validates the GoReleaser config (including the
+    # scoops block), builds the Windows artifacts, and confirms the binary
+    # runs natively.
+    #
+    # The Scoop manifest (aileron.json) is written only by GoReleaser's
+    # publish pipe, which --snapshot disables, so a snapshot never emits
+    # dist/scoop/aileron.json. `goreleaser check` is therefore what
+    # validates the scoops block on a PR; the snapshot build then proves
+    # the windows/amd64 zip is produced and the binary executes.
+    name: Windows Release Smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+          # Matches the three binaries GoReleaser builds (./internal/server,
+          # ./cmd/aileron, ./cmd/aileron-mcp).
+          cache-dependency-path: |
+            internal/go.mod
+            cmd/aileron/go.mod
+            cmd/aileron-mcp/go.mod
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install GoReleaser
+        # `task release:*` invokes a bare `goreleaser` binary; nothing else
+        # in this job provisions it, so install it explicitly here (the same
+        # action release.yml uses, in install-only mode).
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      - name: Validate GoReleaser config
+        run: task release:check
+
+      - name: Build snapshot artifacts
+        # --skip=sign: cosign keyless signing needs OIDC this PR job does not
+        # provision. Signing is exercised by the real release workflow, not
+        # this smoke. aileron-server embeds internal/app/webapp_dist/, which
+        # ships a .gitkeep stub, so the snapshot compiles without a webapp
+        # build step.
+        run: task release:snapshot -- --skip=sign
+
+      - name: Verify the Windows binary runs natively
+        shell: bash
+        run: |
+          set -e
+          exe=$(find dist -name 'aileron.exe' -path '*windows_amd64*' | head -n1)
+          if [ -z "$exe" ]; then
+            echo "aileron.exe not found in dist:"
+            ls -R dist
+            exit 1
+          fi
+          echo "Running: $exe version"
+          "$exe" version
+
   test-ui:
     name: UI Tests
     runs-on: ubuntu-latest
