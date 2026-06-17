@@ -337,26 +337,3 @@ export async function unlockVaultDirect(kek: string) {
 		body: JSON.stringify({ kek })
 	});
 }
-
-// --- TEE ---
-
-export async function initiateAttestation(audience?: string) {
-	return apiFetch('/v1/tee/attestation', {
-		method: 'POST',
-		body: JSON.stringify({ audience })
-	});
-}
-
-export async function establishTeeSession(data: {
-	encrypted_kek: string;
-	client_public_key: string;
-}) {
-	return apiFetch('/v1/tee/session', {
-		method: 'POST',
-		body: JSON.stringify(data)
-	});
-}
-
-export async function getTeeStatus() {
-	return apiFetch('/v1/tee/status');
-}
