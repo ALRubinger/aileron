@@ -100,7 +100,14 @@ func runSandboxPlan(args []string, stdout, stderr io.Writer) int {
 			refs = append(refs, ref)
 		}
 		sort.Strings(refs)
-		fmt.Fprintf(stdout, "features: %s\n", strings.Join(refs, ", "))
+		// On a Tier 2 BYO image the features are parsed for inspection but never
+		// applied (the image is used as-is), so flag them as inert rather than
+		// implying they compose into the sandbox.
+		if plan.Tier == sandboxcomposition.TierBYOImage {
+			fmt.Fprintf(stdout, "features (ignored — BYO image): %s\n", strings.Join(refs, ", "))
+		} else {
+			fmt.Fprintf(stdout, "features: %s\n", strings.Join(refs, ", "))
+		}
 	}
 	return 0
 }

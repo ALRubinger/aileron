@@ -128,9 +128,35 @@ func TestSandboxFeaturesComposeViaAileron(t *testing.T) {
 		t.Fatalf("result.Image is empty")
 	}
 
-	// Both declared tools must resolve on PATH in the composed image.
-	assertCommandOnPath(ctx, t, rt, result.Image, "codex")
+	// The customer-tooling Feature's probe tool must resolve on PATH.
 	assertCommandOnPath(ctx, t, rt, result.Image, probeTool)
+
+	// Launchability: the composed image must satisfy the launch-time runtime
+	// contract, not merely carry the agent CLI on PATH. Builder.Validate runs
+	// the same probe the launcher uses — a writable /home/agent/workspace mount,
+	// CWD there, and the agent command resolvable — so the test reflects that a
+	// features-composed image is actually launchable, not just tool-on-PATH.
+	// RequireMCPBinary is false here because aileron-mcp is bind-mounted at
+	// launch (ADR-0024), not baked into the base image under test.
+	validateWorkspace := t.TempDir()
+	// The workspace is bind-mounted at /home/agent/workspace and the container
+	// runs as the non-root `agent` user, whose uid does not match the host uid
+	// that owns t.TempDir() (0700). On a Linux Docker host that makes the mount
+	// unwritable to `agent`, so Validate's writable-workspace probe fails; make
+	// it world-writable so the launchability check exercises the IMAGE contract,
+	// not host/container uid mapping. (Docker Desktop masks this with permissive
+	// file sharing, which is why it only surfaces on Linux CI.)
+	if err := os.Chmod(validateWorkspace, 0o777); err != nil {
+		t.Fatalf("chmod validate workspace: %v", err)
+	}
+	if err := builder.Validate(ctx, sandboxcontainer.ValidateOptions{
+		Runtime: rt,
+		Image:   result.Image,
+		WorkDir: validateWorkspace,
+		Command: []string{"codex"},
+	}); err != nil {
+		t.Fatalf("Builder.Validate (launchability of composed image): %v", err)
+	}
 }
 
 // writeProbeFeature authors a minimal local devcontainer Feature whose
