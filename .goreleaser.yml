@@ -121,6 +121,35 @@ homebrew_casks:
             system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", staged_path]
           end
 
+scoops:
+  # Scoop manifest auto-published to the scoop-aileron bucket on each
+  # release, giving Windows users a one-line install. After release:
+  #   scoop bucket add aileron https://github.com/ALRubinger/scoop-aileron
+  #   scoop install aileron
+  #
+  # The bucket is a separate GitHub repo (scoop-aileron); goreleaser
+  # commits the manifest (aileron.json) there using
+  # SCOOP_BUCKET_GITHUB_TOKEN — a PAT with contents:write scope on the
+  # bucket repo, set as a secret in this repo. Default GITHUB_TOKEN
+  # can't write across repos.
+  #
+  # The manifest references the bundled "aileron" archive id (the
+  # windows zip), so all three binaries (aileron, aileron-server,
+  # aileron-mcp) land on PATH. amd64-only falls out of the build matrix:
+  # windows/arm64 is ignored, so the only windows archive is the amd64
+  # zip and the manifest's architecture map carries just the 64bit entry.
+  - name: aileron
+    ids:
+      - aileron # the bundled archive id above (all three binaries)
+    repository:
+      owner: ALRubinger
+      name: scoop-aileron
+      branch: main
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
+    homepage: https://withaileron.ai
+    description: Local LLM gateway for AI agents to take consequential action without holding credentials
+    license: Apache-2.0
+
 nfpms:
   # Linux distro packages: .deb (Debian/Ubuntu), .rpm (RHEL/Fedora),
   # .apk (Alpine). One bundled "aileron" package per format/arch
