@@ -69,6 +69,12 @@ jobs:
           # across repos. Configure as a repo secret before tagging
           # the first release.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # PAT with contents:write on ALRubinger/scoop-aileron, used by
+          # goreleaser's scoops step to commit aileron.json. Same
+          # cross-repo constraint as the Homebrew tap: GITHUB_TOKEN
+          # scopes to this repo only and can't write across repos.
+          # Configure as a repo secret before tagging the first release.
+          SCOOP_BUCKET_GITHUB_TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN }}
 
       - name: Trigger docs site rebuild
         # The docs site's `$lib/data/release.ts` fetches the latest
