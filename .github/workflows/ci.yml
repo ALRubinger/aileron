@@ -663,7 +663,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
 
       # The repo source never calls npm directly; installing the
       # @devcontainers/cli here in the CI shell is the toolchain the fail-fast

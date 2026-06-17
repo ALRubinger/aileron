@@ -43,7 +43,7 @@ jobs:
       # paths exercise the Features with one Node major.
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
 
       # The repo source never calls npm directly; installing @devcontainers/cli
       # in this CI shell is the publish toolchain. Pin to the same version the
