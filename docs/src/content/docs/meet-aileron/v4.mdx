@@ -46,7 +46,7 @@ Concrete scenarios teams and organizations can run on Aileron:
 - The platform team rolls out an internal-tools agent across engineering, support, and sales. Every team's agent uses the same Aileron substrate, the same policy framework, the same audit destination. One operating model across the company, not one custom integration per team.
 - A production-touching agent runs overnight with confidence that the agent cannot bypass approval gates, exfiltrate credentials, or escape its container's blast radius. Engineers wake up to a queue of completed actions and any rejected pending requests.
 - Leadership asks for AI spend visibility across the company. Aileron shows LLM-token consumption per agent, per team, per project, alongside which actions ran, which were approved, and which upstream systems were touched.
-- A compliance review for AI-mediated production access points at integrated action-level audit, approval workflows, RBAC, and (in v5 SaaS) TEE-attested credential isolation. The audit shape matches what SOC 2 or HIPAA controls already require.
+- A compliance review for AI-mediated production access points at integrated action-level audit, approval workflows, RBAC, and BYOC credential isolation where the customer operates the runtime and Aileron never sees credentials. The audit shape matches what SOC 2 or HIPAA controls already require.
 - The platform team migrates from "agents on developer laptops" to "agents as a managed platform service" without rewriting any agent code. Same connectors, same policy, same audit. The deployment topology shifts; the architecture does not.
 
 ## What teams and organizations gain
@@ -61,7 +61,7 @@ Capabilities that compound across every agent and every team:
 - **A curated connector ecosystem.** Installing a connector package gives the organization a typed action surface with policy declared. New systems light up across all teams at once.
 - **Fleet visibility.** Aileron is the single point every agentic action passes through. That makes it the natural place to report LLM spend, tool usage, approval latency, and error rates across teams, agents, and projects.
 - **Bounded agent runtime.** Container-level isolation, a credential boundary the agent cannot reach behind, tool-level approval gating, and restricted network egress. The agent's blast radius is bounded by construction.
-- **One operating model, three deployment topologies.** Customer-operated today, BYOC Enterprise next, multi-tenant SaaS with TEE-attested credential isolation later. The architecture follows the organization from a single team's pilot to a company-wide platform.
+- **One operating model, three deployment topologies.** Customer-operated today, BYOC Enterprise next, multi-tenant SaaS later. BYOC is the strongest credential-isolation guarantee: the customer operates the runtime in their own environment, so Aileron never sees credentials. The architecture follows the organization from a single team's pilot to a company-wide platform.
 
 ## Thesis
 
@@ -78,7 +78,7 @@ Every component falls into one of these zones based on its relationship to plain
 <div class="not-prose grid gap-4 md:grid-cols-2 my-6">
 
 <Feature icon={KeyRound} title="User-side, key custody">
-The user's CLI on their laptop or the user's browser. Holds the master key briefly during launch. Delivers the key to the credential service over a local secure channel (v4) or an attested channel (v5). Does not persist the key.
+The user's CLI on their laptop or the user's browser. Holds the master key briefly during launch. Delivers the key to the credential service over a local secure channel. Does not persist the key.
 </Feature>
 
 <Feature icon={Database} title="Control plane (never plaintext)">
@@ -86,7 +86,7 @@ Sessions, user CLI requests, policy storage, audit storage, approval orchestrati
 </Feature>
 
 <Feature icon={Lock} title="Credential mediation (trusted, narrow surface)">
-The HTTPS proxy and the credential service. The proxy terminates TLS from container traffic, matches requests against connector specs, evaluates policy, calls the credential service for decryption, injects credentials, re-establishes TLS upstream. The credential service holds session keys in memory. Together they are the data plane. **In v5 SaaS, TEE attestation encloses both.**
+The HTTPS proxy and the credential service. The proxy terminates TLS from container traffic, matches requests against connector specs, evaluates policy, calls the credential service for decryption, injects credentials, re-establishes TLS upstream. The credential service holds session keys in memory. Together they are the data plane. **Under BYOC this credential mediation runs in the customer's own environment, so Aileron-as-operator never reaches plaintext.**
 </Feature>
 
 <Feature icon={Bot} title="Agent runtime (untrusted with credentials)">
@@ -97,7 +97,7 @@ The agent container. Hosts the agent, bash, the `aileron` CLI, the in-container 
 
 ## Components shipped in v4
 
-The v4 binary set is three cooperating binaries. `aileron` is the product boundary: the CLI plus the user-scoped local daemon. `aileron-mcp` is the MCP adapter the agent calls. `aileron-enclave` is the TEE-side credential handler, post-MVP for the default install.
+The v4 binary set is two cooperating binaries. `aileron` is the product boundary: the CLI plus the user-scoped local daemon. `aileron-mcp` is the MCP adapter the agent calls.
 
 ### aileron (CLI plus local daemon)
 
@@ -127,10 +127,10 @@ The control plane. Sessions (start, validate, end). User CLI requests. Policy st
 
 ### Credential mediation: proxy plus credential service (the data plane)
 
-Together they handle all credentialed third-party traffic. Both run inside the TEE in v5.
+Together they handle all credentialed third-party traffic. Under BYOC both run in the customer's own infrastructure.
 
 - **HTTPS proxy.** Accepts `HTTPS_PROXY` connections from the agent container. Authenticates the session, terminates TLS using a session-local CA installed in the container, and matches each request against the relevant connector spec. When a request uniquely matches a spec operation with an Aileron-managed credential binding, the proxy strips whatever auth the agent attached, injects the real credential, re-establishes TLS upstream, and audits the operation. This is credential-injection (Model A), not an egress allowlist: a request that matches no managed binding is forwarded unmodified. Plaintext credential lives in proxy memory for a single request, zeroed after.
-- **Credential service.** Holds session-keyed material in memory keyed by session ID: master key, unwrapped vault keys cached for the session. Memory footprint per session is small (~KB). Provides decrypt operations to the proxy. In v5 this is the role `aileron-enclave` plays inside the TEE.
+- **Credential service.** Holds session-keyed material in memory keyed by session ID: master key, unwrapped vault keys cached for the session. Memory footprint per session is small (~KB). Provides decrypt operations to the proxy. Under BYOC it runs in the customer's own infrastructure.
 
 In v4 these are colocated with the management plane in one daemon process. In v4.x and v5 they split: proxy workers autoscale to traffic, credential service shards by tenant.
 
@@ -454,7 +454,7 @@ Customer deploys the runtime backend into their own cloud account. Management pl
 
 ### v5: Multi-tenant SaaS (~12 to 24 months)
 
-Aileron operates the runtime backend. Management plane is multi-tenant. **Both the HTTPS proxy and the credential service run inside Trusted Execution Environments**; together they form the data plane enclave, the role `aileron-enclave` plays. Master key flows through an attested channel from the user's device. Plaintext never leaves the TEE boundary.
+Aileron operates the runtime backend. Management plane is multi-tenant. In this topology the HTTPS proxy and the credential service handle credentialed traffic for Aileron-hosted tenants. The strongest credential-isolation guarantee remains BYOC, where the customer operates the runtime in their own environment and Aileron never sees credentials. For the multi-tenant SaaS topology, isolation rests on the operating boundary between tenants rather than on Aileron-as-operator never holding plaintext.
 
 <MermaidDiagram client:load graph={`graph LR
     subgraph aileron_cloud["☁️ Aileron multi-tenant cloud"]
@@ -462,11 +462,9 @@ Aileron operates the runtime backend. Management plane is multi-tenant. **Both t
       Store[("Postgres + blob (per-tenant)")]
       Mgmt --> Store
 
-      subgraph tee["🔒 TEE (attested): data plane enclave"]
-        Proxy["HTTPS proxy (Confidential VMs)"]
-        CredSvc["Credential service (sharded by tenant)"]
-        Proxy <--> CredSvc
-      end
+      Proxy["HTTPS proxy (autoscaled)"]
+      CredSvc["Credential service (sharded by tenant)"]
+      Proxy <--> CredSvc
 
       CredSvc --> Store
       Mgmt <--> Proxy
@@ -476,7 +474,7 @@ Aileron operates the runtime backend. Management plane is multi-tenant. **Both t
     User["💻 User's browser / laptop"]
     External["External APIs"]
 
-    User -.->|"key via attested channel"| CredSvc
+    User -.->|"master key"| CredSvc
     User --> Mgmt
     Container -->|"HTTPS_PROXY"| Proxy
     Proxy --> External
@@ -499,43 +497,37 @@ Aileron operates the runtime backend. Management plane is multi-tenant. **Both t
 | Component | v4 | v4.x | v5 |
 |---|---|---|---|
 | Management plane | Colocated in the daemon on user's laptop | Separate service in customer cloud | Aileron's cloud, multi-tenant |
-| HTTPS proxy | Colocated in the daemon | Autoscaled worker pool in customer cloud | Inside TEE, each in Confidential VM |
-| Credential service | Colocated in the daemon | Separate service in customer cloud | Inside TEE alongside proxy, sharded by tenant |
+| HTTPS proxy | Colocated in the daemon | Autoscaled worker pool in customer cloud | Autoscaled worker pool in Aileron's cloud |
+| Credential service | Colocated in the daemon | Separate service in customer cloud | Sharded by tenant in Aileron's cloud |
 | Encrypted store | Local files in `~/.aileron/store/vaults/` | Customer's Postgres + blob storage | Aileron's Postgres + object storage, per-tenant prefixed |
-| Master key custody | User's laptop (briefly) → credential service | User's device → credential service in customer cloud | User's device → TEE via attested channel |
+| Master key custody | User's laptop (briefly) → credential service | User's device → credential service in customer cloud | User's device → credential service in Aileron's cloud |
 | Agent container | User's laptop (Docker sandbox) | User's laptop or customer cloud workspace | User's laptop or Aileron cloud |
 | Audit destination | Local audit log | Customer-configured SIEM | Customer-configured SIEM (export from Aileron) |
 
-## Zero-knowledge enforcement in v5 SaaS
+## Credential isolation under BYOC
 
-The TEE encloses the entire data plane: the HTTPS proxy and the credential service. Plaintext credentials, master keys, and unwrapped vault keys never exist outside the TEE boundary. This is what makes the zero-knowledge promise enforceable against Aileron as operator, not just asserted.
+BYOC is the strongest credential-isolation guarantee Aileron offers. The customer operates the runtime, the data plane, and the vault in their own infrastructure. Aileron-as-vendor is not in a position to see plaintext credentials at all, because the systems that hold them are operated by the customer rather than by Aileron. This is what makes the isolation property real rather than a policy promise.
 
-**An Aileron operator with full infrastructure access CAN see:**
+**Aileron-as-vendor CANNOT see, because the customer operates the runtime:**
 
-- Encrypted blob storage contents (ciphertext only)
-- Network traffic between components (all TLS-encrypted)
-- TLS SNI showing upstream destinations (api.linear.app, anthropic.com, etc.)
-- Audit log entries (who performed what action, when)
-- Management plane state (sessions, policies, approvals, RBAC)
-- Agent container execution (filesystem, processes, stdout)
-- Attestation reports proving the TEE is running expected code
+- Master keys (live only in the customer-operated credential service memory)
+- Unwrapped vault keys (live only in the customer-operated credential service memory)
+- Decrypted credentials at any moment (decryption happens in the customer's environment)
+- Request bodies after TLS termination at the proxy (the proxy runs in the customer's environment)
+- Upstream HTTPS payloads (mediated in the customer's environment)
+- The plaintext credential injection step (happens in the customer's environment)
 
-**An Aileron operator CANNOT see:**
+**What still applies regardless of topology:**
 
-- Master keys (live only inside TEE memory)
-- Unwrapped vault keys (live only inside TEE memory)
-- Decrypted credentials at any moment (TEE memory only)
-- Request bodies after TLS termination at the proxy (decrypted inside TEE)
-- Upstream HTTPS payloads (decrypted inside TEE)
-- The plaintext credential injection step (happens inside TEE)
-- Anything else inside TEE memory pages
-
-Customers verify the enforcement via TEE attestation at session start and on a continuous basis. Attestation is cryptographic proof that the TEE is running the audited, signed Aileron data plane code without modification. An operator cannot patch the TEE to leak secrets without breaking attestation and being detected.
+- The encrypted store holds ciphertext only.
+- Network traffic between components is TLS-encrypted.
+- The audit log records who performed what action and when.
+- The customer operates the runtime that writes the audit log, so its integrity rests on infrastructure the customer controls.
 
 <Alert.Root class="my-6">
   <Alert.Title>Threat model boundaries</Alert.Title>
   <Alert.Description>
-    The TEE protects against passive observation, root access on the host VM, and most insider-threat scenarios. It does not protect against side-channel attacks on the TEE silicon (an active research area), supply-chain compromise of the Aileron-signed TEE image (mitigated via reproducible builds and customer-verified attestation), or the LLM provider seeing prompts and tool results.
+    Under BYOC the credential boundary protects against Aileron-as-vendor seeing plaintext, because the customer operates the runtime end to end. It does not protect against compromise of the customer's own infrastructure, nor against the LLM provider seeing prompts and tool results.
   </Alert.Description>
 </Alert.Root>
 
@@ -544,7 +536,7 @@ Customers verify the enforcement via TEE attestation at session start and on a c
 Decisions taken in the current design. "(chosen)" means a default position has been taken pending pushback; "(shipped)" means it is implemented in v4.
 
 1. **MCP is the canonical in-container tool surface.** The agent reaches Aileron actions through `aileron-mcp`, the same MCP surface used on the host. The earlier shims-on-`$PATH` plus `tools.txt` surface is retired. (shipped, [#959](https://github.com/ALRubinger/aileron/issues/959))
-2. **Three cooperating binaries.** `aileron` (CLI plus local daemon, the product boundary), `aileron-mcp` (MCP adapter), and `aileron-enclave` (TEE handler, post-MVP). The daemon is the trust pivot; the others are thin clients of its HTTP API. (shipped)
+2. **Two cooperating binaries.** `aileron` (CLI plus local daemon, the product boundary) and `aileron-mcp` (MCP adapter). The daemon is the trust pivot; `aileron-mcp` is a thin client of its HTTP API. (shipped)
 3. **One mediation path for credentialed HTTPS.** Connector operations, third-party CLIs, and the agent's LLM calls reach external systems through Aileron, which injects credentials at the TLS boundary. The proxy is cooperative credential-injection (Model A), not an egress allowlist. (chosen / partially shipped)
 4. **Management plane and data plane colocate in v4, split in v4.x.** Interface boundaries are network-call shape from day one so v4.x can deploy them separately without code change. (chosen)
 5. **Network policy is tiered.** Credentialed HTTPS routes through Aileron mediation. Uncredentialed direct egress is forwarded by default for productivity (with audit). Customers can tighten to default-deny plus allowlist for regulated deployments. (chosen)
@@ -552,9 +544,8 @@ Decisions taken in the current design. "(chosen)" means a default position has b
 7. **Vault-backed agent credentials.** Agent auth files are seeded from the vault at launch and rotations are captured back on clean exit. (shipped, [ADR-0025](/adr/0025-vault-backed-agent-auth))
 8. **Docker-only, Podman deferred.** v4 supports Docker on macOS, Linux, and Windows. The runtime abstraction seam is preserved so Podman can return as a localized change. (shipped, [#1050](https://github.com/ALRubinger/aileron/issues/1050))
 9. **Out-of-band approvals.** Approval decisions reach the user out of band, never through the agent. v1 ships the CLI-prompt tier; biometric, notification, TUI, and web tiers are Phase 2. (chosen, [ADR-0009](/adr/0009-user-channel))
-10. **Credential service is stateful, narrow.** Holds session-scoped material keyed by session ID. In v5, runs inside the TEE with attestation. (chosen)
-11. **v5 TEE scope.** Both HTTPS proxy and credential service run inside the TEE boundary; together they form the data plane enclave. Plaintext never exits the TEE. (chosen)
-12. **Master key delivery.** Local secure channel in v4 (chosen); attested channel into TEE in v5. Mechanism in v4.x BYOC is still open.
+10. **Credential service is stateful, narrow.** Holds session-scoped material keyed by session ID. Under BYOC it runs in the customer's own infrastructure. (chosen)
+11. **Master key delivery.** Local secure channel in v4 (chosen). Under BYOC the customer operates the credential service that receives it. Mechanism in v4.x BYOC is still open.
 
 ## References
 

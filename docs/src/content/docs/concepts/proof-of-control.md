@@ -1,12 +1,12 @@
 ---
 title: "Proof of Control"
-description: "Auditability is not a log file — it is a verifiability property. Aileron records every consequential decision in a structured form designed to satisfy the Proof of Control spectrum: self-verifiable today, independently and cryptographically verifiable as the runtime moves into a TEE."
+description: "Auditability is a verifiability property, not just a log file. Aileron records every consequential decision in a structured form designed against the Proof of Control spectrum. The log is self-verifiable today. It becomes trustworthy on a stronger basis under BYOC, where the customer operates the runtime that writes it."
 order: 5
 ---
 
 When an agent posts a message, charges a card, or files a ticket on your behalf, the question that matters afterward isn't *what does the log say?* It's *can I trust the log?* The agent host wrote it. The connector contributed to it. If something went wrong, the same code path that produced the bad action also produced the record of the action.
 
-The [Advanced AI Society's Proof of Control framework](https://www.advancedaisociety.org/proof-of-control) names this gap and the spectrum that closes it: **self-verifiable**, **independently verifiable**, and **cryptographically verifiable**. Aileron's audit story is designed deliberately against this spectrum, not as a free-form log.
+The [Advanced AI Society's Proof of Control framework](https://www.advancedaisociety.org/proof-of-control) names this gap and the spectrum of verifiability that closes it, from self-verifiable through stronger independent guarantees. Aileron's audit story is designed deliberately against this spectrum, not as a free-form log. Aileron is self-verifiable today and reaches operator-trustworthy auditability under BYOC, where the customer runs the runtime that writes the log.
 
 ## What gets recorded
 
@@ -21,10 +21,8 @@ A reader of `~/.aileron/audit/` can answer "what did the agent do, with what aut
 
 ## Where Aileron sits on the spectrum
 
-**Self-verifiable (v1).** The records are local, structured, and complete. The user and operator are the same person, so the log's integrity is bounded by the integrity of the machine — adequate when the trust domain is one user.
+**Self-verifiable (v1).** The records are local, structured, and complete. The user and operator are the same person, so the log's integrity is bounded by the integrity of the machine. This is adequate when the trust domain is one user.
 
-**Independently verifiable (Stage 2).** When [the vault](/concepts/the-vault/) moves into a TEE-backed Aileron Cloud, the runtime emitting the audit record runs in attested hardware the operator cannot inspect. The record gains a property the local runtime cannot provide: *the system that wrote it could not have rewritten it*.
+**Operator-trustworthy (BYOC).** When the customer operates the runtime in their own environment (BYOC), the system that wrote the audit record is operated by the customer, not by Aileron. Its integrity rests on infrastructure the customer controls rather than on trusting Aileron-as-operator. The audit log gains a property the local single-user runtime does not need to claim: the party that could rewrite it is the customer themselves.
 
-**Cryptographically verifiable (Stage 3).** Audit records signed inside the enclave, with hash-chained continuity, become evidence a third party can check against the attestation transcript without trusting Aileron at all. This is the destination the v1 schema is forward-compatible with.
-
-The point of starting at self-verifiable is honesty: cryptographic verifiability is the goal, but it has to be earned by infrastructure that doesn't exist yet on a single laptop. The schema and the discipline land first; the cryptographic teeth land with the TEE.
+The point of starting at self-verifiable is honesty. The schema and the discipline land first on a single laptop. The stronger operator-trust property lands when the customer runs the runtime themselves under BYOC.

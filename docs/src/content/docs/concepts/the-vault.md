@@ -119,9 +119,6 @@ This is the honest trade-off for zero-knowledge encryption. Adding a recovery me
 
 ## Beyond v1: where the vault is going
 
-The Stage 1 design (a local encrypted file with passphrase-derived key) is what v1 ships. The same on-disk format and cryptographic primitives extend naturally to two future variants, both of which are already implemented in the codebase but not yet wired into v1:
+The v1 design (a local encrypted file with a passphrase-derived key) is what ships today. The same on-disk format and cryptographic primitives run unchanged when the customer operates the runtime in their own infrastructure (BYOC).
 
-- **Stage 2 — TEE-backed.** When Aileron Cloud (the hosted backend) ships, credentials decrypt only inside a Trusted Execution Environment (Google Confidential Space). Even Aileron operators cannot inspect credential memory. This enables async / scheduled actions where the runtime needs credential access while you're offline.
-- **Stage 3 — Browser enclave.** The KEK never leaves your browser. Aileron sends encrypted credential requests; the browser decrypts and forwards them. True zero-knowledge for hosted Aileron — even Aileron's infrastructure cannot access plaintext.
-
-Both are post-MVP and are pending security review. They're forward-compatible with the v1 file format: the same vault file gets a stronger custodian without a migration.
+Under BYOC the runtime that decrypts credentials runs in the customer's own environment. Aileron never holds the KEK or the plaintext, because the process that performs decryption is operated by the customer rather than by Aileron. The vault file does not change. The party that controls the decrypting process is the customer.
