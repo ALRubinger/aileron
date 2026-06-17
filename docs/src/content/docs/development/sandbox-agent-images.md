@@ -32,6 +32,34 @@ Docker is the only supported sandbox runtime in v4. Podman is planned but not ye
 
 The harness-free `ghcr.io/alrubinger/aileron-sandbox-base` intentionally does not include agent CLIs ([ADR-0017](/adr/0017-sandbox-composition/)). Each agent install is authored once as a devcontainer Feature, the single source of truth that Aileron CI bakes into prebuilt per-agent images and that customers compose for Tier 1. The prebuilt per-agent image is the zero-build Tier 0 default, owned by [#965](https://github.com/ALRubinger/aileron/issues/965). Use Tier 1 when you want Aileron's base runtime plus an agent plus your own tools, or Tier 2 when your team owns the full image.
 
+## Prebuilt Per-Agent Images
+
+Aileron CI publishes one multi-arch image per agent to GHCR. Each image is baked from the GHCR sandbox base plus that agent's devcontainer Feature install script, so the Feature stays the single source of truth.
+
+| Agent | Image |
+|---|---|
+| Claude Code | `ghcr.io/alrubinger/aileron-sandbox-claude` |
+| Codex | `ghcr.io/alrubinger/aileron-sandbox-codex` |
+
+Each image is built for `linux/amd64` and `linux/arm64`, so a `docker pull` resolves the manifest for your platform automatically.
+
+The tag scheme is `<aileron-version>-<agent-cli-version>` plus a floating `latest`. The `<aileron-version>` is the Aileron release the image was built from. The `<agent-cli-version>` is the agent CLI version baked into the image, resolved at build time from the installed package. A git-traceability tag `git-<sha>` is also published.
+
+Pull the latest image:
+
+```bash
+docker pull ghcr.io/alrubinger/aileron-sandbox-claude:latest
+docker pull ghcr.io/alrubinger/aileron-sandbox-codex:latest
+```
+
+Pull a pinned version, for example Aileron `0.0.1` with the Claude CLI at `2.1.179`:
+
+```bash
+docker pull ghcr.io/alrubinger/aileron-sandbox-claude:0.0.1-2.1.179
+```
+
+CI smoke-tests every published image for launchability before it ships. The smoke asserts the agent CLI resolves on `PATH` and that the launcher's image validation succeeds. Republishing an image when a new agent CLI version releases is tracked by [#1088](https://github.com/ALRubinger/aileron/issues/1088).
+
 ## Claude Code Feature
 
 The Claude Code agent Feature installs the `claude` CLI onto `ghcr.io/alrubinger/aileron-sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature lives at `images/sandbox-features/claude/` (`devcontainer-feature.json` plus `install.sh`).
