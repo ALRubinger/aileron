@@ -12,33 +12,21 @@ This page covers the user-facing workflow. Runtime launch support can scaffold, 
 
 | Tier | Use when | How to configure |
 |---|---|---|
-| Tier 0: base image | You want the minimal Aileron runtime substrate with no extra project tools. | Do not create `.devcontainer/devcontainer.json`. |
-| Tier 1: devcontainer | You want to extend Aileron's base image with project tools. | Create `.devcontainer/devcontainer.json` and a Dockerfile. |
+| Tier 0: prebuilt per-agent image | You want a working agent sandbox with no init and no local build. | Do not create `.devcontainer/devcontainer.json`; launch auto-resolves the prebuilt per-agent image baked from the agent Feature. Publishing and auto-resolution are owned by [#965](https://github.com/ALRubinger/aileron/issues/965). |
+| Tier 1: devcontainer | You want Aileron's base image plus an agent plus your own project tools. | Create `.devcontainer/devcontainer.json` listing the base image, an agent Feature, and an optional customer-tooling Feature under `features`. |
 | Tier 2: BYO image | Your team already owns a compliant image. | Set `customizations.aileron.image` in `.devcontainer/devcontainer.json`. |
 
 ## Scaffold a Starter Devcontainer
 
-From a project root:
+Tier 1 is the customization tier. You reach for it when you want Aileron's base image plus an agent plus your own project tools in one sandbox. The recorded model ([ADR-0017](/adr/0017-sandbox-composition/)) is that `aileron sandbox init` scaffolds a Feature-composing `.devcontainer/devcontainer.json` rather than a per-agent Dockerfile:
 
-```bash
-aileron sandbox init
-```
-
-This creates:
-
-```text
-.devcontainer/
-  devcontainer.json
-  Dockerfile
-```
-
-The generated `devcontainer.json` is deliberately small:
-
-```json
+```jsonc
 {
   "name": "Aileron sandbox",
-  "build": {
-    "dockerfile": "Dockerfile"
+  "image": "aileron/sandbox-base:<version>",
+  "features": {
+    "ghcr.io/alrubinger/aileron-features/<agent>:1": {},
+    "ghcr.io/acme/internal-tools:1": {}
   },
   "customizations": {
     "aileron": {
@@ -49,19 +37,9 @@ The generated `devcontainer.json` is deliberately small:
 }
 ```
 
-The generated Dockerfile starts from `aileron/sandbox-base:<version>`, switches to `USER root` for installs, and switches back to `USER agent` before launch. The chosen agent's install recipe is pre-filled and ready to build; additional tool snippets (GitHub CLI, Node.js, Python, kubectl, Terraform) ship commented out for you to enable as needed.
+The agent is selected by the agent Feature you list, and your own tooling is its own Feature alongside it. The same agent Feature is the single source of truth that Aileron CI bakes into the prebuilt per-agent images ([#965](https://github.com/ALRubinger/aileron/issues/965)), so the customization tier and the zero-build default share one install recipe per agent.
 
-By default `aileron sandbox init` scaffolds for Claude Code. Pass `--agent=<name>` to scaffold for a different agent — Aileron writes a ready-to-build recipe when one is documented, or a `TODO` install stub otherwise:
-
-```bash
-aileron sandbox init --agent=codex
-```
-
-Use `--force` only when you intentionally want to replace the existing scaffold:
-
-```bash
-aileron sandbox init --force
-```
+The `sandbox init` reposition to scaffold this Feature-composing devcontainer, and the removal of the per-agent Dockerfile and the `--agent` flag, are implemented in [#1084](https://github.com/ALRubinger/aileron/issues/1084). The `features`-composing build path is implemented in [#1083](https://github.com/ALRubinger/aileron/issues/1083).
 
 ## Inspect the Plan
 
@@ -78,13 +56,12 @@ tier: base
 image: aileron/sandbox-base:latest
 ```
 
-With the starter scaffold, the output is Tier 1 and includes the Dockerfile:
+With the starter scaffold, the output is Tier 1 and names the composed devcontainer:
 
 ```text
 tier: devcontainer
 image: aileron/sandbox-base:latest
 devcontainer: .devcontainer/devcontainer.json
-dockerfile: Dockerfile
 ```
 
 ## Build the Image
@@ -108,8 +85,8 @@ Build behavior by tier:
 
 | Tier | Build behavior |
 |---|---|
-| Tier 0 | Builds the local `images/sandbox-base/Containerfile` as `aileron/sandbox-base:<version>`. |
-| Tier 1 | Builds the devcontainer Dockerfile and tags it as a deterministic local `aileron/sandbox-project:<hash>` image unless `--tag` is supplied. |
+| Tier 0 | Resolves the prebuilt per-agent image baked from the agent Feature. Publishing and auto-resolution are owned by [#965](https://github.com/ALRubinger/aileron/issues/965). |
+| Tier 1 | Composes the devcontainer Features onto the base image and tags the result as a deterministic local `aileron/sandbox-project:<hash>` image unless `--tag` is supplied. The recorded build engine is `@devcontainers/cli` so standard `features` compose ([ADR-0017](/adr/0017-sandbox-composition/)); the `features`-composing build path lands in [#1083](https://github.com/ALRubinger/aileron/issues/1083). |
 | Tier 2 | Does not build. The BYO image is reported as-is; launch validates it before agent startup. |
 
 When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_CONTEXT` to the directory containing the sandbox-base `Containerfile`.
@@ -177,7 +154,7 @@ Before running the agent, launch validates the selected image with the same env,
 - allow a temporary file to be written in the mounted workspace
 - resolve the agent command on `PATH`
 
-The agent command must already exist in the selected image. For Tier 1, install the agent CLI in your devcontainer Dockerfile. Tier 2 uses the BYO image as supplied while Aileron's runtime injection remains limited to session env, manifest mounts, and the `aileron-mcp` tool surface. See the [sandbox agent image matrix](/development/sandbox-agent-images/) for the current support contract and recipes.
+The agent command must already exist in the selected image. For Tier 1, list the agent Feature in your `devcontainer.json` so the agent CLI installs onto the base. Tier 2 uses the BYO image as supplied while Aileron's runtime injection remains limited to session env, manifest mounts, and the `aileron-mcp` tool surface. See the [sandbox agent image matrix](/development/sandbox-agent-images/) for the current support contract and recipes.
 
 ## Use a BYO Image
 
