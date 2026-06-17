@@ -113,7 +113,7 @@
   style="background-image: var(--pattern-sidebar); background-repeat: repeat;"
 >
   <div class="p-4 flex flex-col h-full">
-    <nav class="flex-1 min-h-0 overflow-y-auto pr-4 -mr-4 flex flex-col gap-4 {mounted ? 'visible' : 'invisible'}" aria-label="Documentation">
+    <nav class="flex-1 min-h-0 overflow-y-auto pr-4 -mr-4 flex flex-col gap-4" aria-label="Documentation">
       {#each navigation as item}
         {#if isSection(item)}
           {@render section(item, 0)}
@@ -136,7 +136,7 @@
     </nav>
 
     <!-- External links pinned to the bottom of the sidebar. -->
-    <nav class="mt-6 shrink-0 bg-neutral-600 rounded-lg p-2 shadow-low {mounted ? 'visible' : 'invisible'}" aria-label="References">
+    <nav class="mt-6 shrink-0 bg-neutral-600 rounded-lg p-2 shadow-low" aria-label="References">
       {#each externalLinks as link}
         {@const active = currentPath === link.href || currentPath === link.href + '/'}
         {@const Icon = iconMap[link.label]}
