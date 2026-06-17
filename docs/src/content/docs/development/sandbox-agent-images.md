@@ -19,9 +19,9 @@ The check uses the same composition plan and minimal launch validation as `ailer
 
 | Agent | Command | Sandbox image support | MCP under `--sandbox=docker` | Notes |
 |---|---|---|---|---|
-| Claude Code | `claude` | Documented recipe | ✓ via `--mcp-config` | First-class recipe below. Use `sandbox check --agent=claude` before launch. |
-| Codex | `codex` | Documented recipe | ✓ via bind-mounted `config.toml` | Recipe below; scaffold with `sandbox init --agent=codex`. Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` (ADR-0024). Host `~/.codex/config.toml` is never touched. |
-| Goose | `goose` | Command contract only | ✓ via `--with-extension` | Install the CLI in Tier 1 or BYO images; no maintained recipe yet. |
+| Claude Code | `claude` | Agent Feature | ✓ via `--mcp-config` | First-class Feature below. Use `sandbox check --agent=claude` before launch. |
+| Codex | `codex` | Agent Feature | ✓ via bind-mounted `config.toml` | Feature below. Sandbox launch writes a generated `config.toml` to a host tempdir and bind-mounts it into `/home/agent/.codex/config.toml` ([ADR-0024](/adr/0024-sandbox-mcp-parity/)). Host `~/.codex/config.toml` is never touched. |
+| Goose | `goose` | Command contract only | ✓ via `--with-extension` | List the agent Feature in Tier 1, or install the CLI in a BYO image; no maintained Feature yet. |
 | OpenCode | `opencode` | Command contract only | ✓ via workspace `opencode.json` | Launcher writes `opencode.json` into the launch directory; the workspace bind-mount makes it readable in-container. |
 | Pi | `pi` | Command contract only | ✓ via `--mcp-config` | Shares Claude's MCP wiring. |
 | Other agents | varies | Unsupported | n/a | Add an Aileron launch agent and an image recipe before relying on sandbox launch. |
@@ -30,49 +30,43 @@ Under `--sandbox=docker` the launcher resolves the host-built `aileron-mcp` bina
 
 Docker is the only supported sandbox runtime in v4. Podman is planned but not yet supported; its `host.containers.internal` host alias is the deferred re-add path, and passing `--runtime=podman` fails with `podman runtime is not supported yet (v4 is Docker-only); see ADR-0014` (see [ADR-0014](/adr/0014-spawn-sandbox-technology/)).
 
-Tier 0 `aileron/sandbox-base` intentionally does not include agent CLIs. Use Tier 1 when you want Aileron's base runtime plus an installed agent, or Tier 2 when your team owns the full image.
+The harness-free `aileron/sandbox-base` intentionally does not include agent CLIs ([ADR-0017](/adr/0017-sandbox-composition/)). Each agent install is authored once as a devcontainer Feature, the single source of truth that Aileron CI bakes into prebuilt per-agent images and that customers compose for Tier 1. The prebuilt per-agent image is the zero-build Tier 0 default, owned by [#965](https://github.com/ALRubinger/aileron/issues/965). Use Tier 1 when you want Aileron's base runtime plus an agent plus your own tools, or Tier 2 when your team owns the full image.
 
-## Claude Code Recipe
+## Claude Code Feature
 
-`aileron sandbox init` scaffolds for Claude Code by default — the generated `.devcontainer/Dockerfile` already extends `aileron/sandbox-base`, switches to `USER root`, runs the Claude install, and switches back to `USER agent`. No edits required:
+The Claude Code agent Feature installs the `claude` CLI onto `aileron/sandbox-base`. It is the single source of truth that Aileron CI bakes into the prebuilt Claude image and that you compose for Tier 1. The Feature authoring lands in [#1082](https://github.com/ALRubinger/aileron/issues/1082).
 
-```bash
-aileron sandbox init
-```
-
-Build and validate:
-
-```bash
-aileron sandbox build --runtime=docker
-aileron sandbox check --runtime=docker --agent=claude
-```
-
-Then launch:
+For the Tier 0 zero-build path, launch the prebuilt image directly:
 
 ```bash
 aileron launch --sandbox=docker claude
 ```
 
-Claude Code still owns its own authentication flow. Do not bake Claude, Anthropic, cloud, or Aileron credentials into the image.
-
-## Codex Recipe
-
-`aileron sandbox init --agent=codex` scaffolds a ready-to-build `.devcontainer/Dockerfile` for Codex. The `@openai/codex` npm package ships prebuilt musl binaries, so it installs cleanly on the Alpine base:
+For the Tier 1 customization path, list the Claude Feature in your `devcontainer.json` (see [Scaffold a Starter Devcontainer](/development/sandbox-composition/#scaffold-a-starter-devcontainer)), then validate and launch:
 
 ```bash
-aileron sandbox init --agent=codex
+aileron sandbox build --runtime=docker
+aileron sandbox check --runtime=docker --agent=claude
+aileron launch --sandbox=docker claude
 ```
 
-Build and validate:
+Claude Code still owns its own authentication flow. Do not bake Claude, Anthropic, cloud, or Aileron credentials into the image.
+
+## Codex Feature
+
+The Codex agent Feature installs the `codex` CLI onto `aileron/sandbox-base`. The `@openai/codex` npm package ships prebuilt musl binaries, so it installs cleanly on the Alpine base. Like the Claude Feature, it is baked into the prebuilt Codex image and composable for Tier 1, and its authoring lands in [#1082](https://github.com/ALRubinger/aileron/issues/1082).
+
+For the Tier 0 zero-build path:
+
+```bash
+aileron launch --sandbox=docker codex
+```
+
+For the Tier 1 customization path, list the Codex Feature in your `devcontainer.json`, then validate and launch:
 
 ```bash
 aileron sandbox build --runtime=docker
 aileron sandbox check --runtime=docker --agent=codex
-```
-
-Then launch:
-
-```bash
 aileron launch --sandbox=docker codex
 ```
 
