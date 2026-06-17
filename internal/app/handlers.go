@@ -18,13 +18,11 @@ import (
 	"github.com/ALRubinger/aileron/internal/auth"
 	"github.com/ALRubinger/aileron/internal/binding"
 	"github.com/ALRubinger/aileron/internal/comms"
-	"github.com/ALRubinger/aileron/internal/config"
 	connectorpkg "github.com/ALRubinger/aileron/internal/connector"
 	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/crypto"
 	"github.com/ALRubinger/aileron/internal/cstore"
 	"github.com/ALRubinger/aileron/internal/draft"
-	"github.com/ALRubinger/aileron/internal/enclave"
 	"github.com/ALRubinger/aileron/internal/failure"
 	"github.com/ALRubinger/aileron/internal/hub"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -35,7 +33,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/source"
 	"github.com/ALRubinger/aileron/internal/store"
 	"github.com/ALRubinger/aileron/internal/store/mem"
-	"github.com/ALRubinger/aileron/internal/store/postgres"
 	"github.com/ALRubinger/aileron/internal/vault"
 	"github.com/ALRubinger/aileron/internal/version"
 )
@@ -72,14 +69,6 @@ type apiServer struct {
 	userAuthProviders    store.UserAuthProviderStore // nil when auth is disabled
 	userKeyMaterials     store.UserKeyMaterialStore  // nil when auth is disabled
 	kekSessionCache      *auth.KEKSessionCache       // nil when auth is disabled
-	enclaveClient        enclave.Client              // nil when TEE is disabled
-	enclaveVerifier      enclave.Verifier            // nil when TEE is disabled
-	teeCfg               *config.TEEConfig           // nil when TEE is disabled
-	teeState             *teeState                   // nil when TEE is disabled
-	escrowTTL            time.Duration               // TTL for auto-escrowed credentials
-	grantCapabilityKey   []byte                      // HMAC key for durable grant capabilities
-	escrowIndex          sync.Map                    // vault path (string) -> escrow ID (string)
-	escrowIndexStore     *postgres.EscrowIndexStore  // nil when auth is disabled; persists escrowIndex across restarts
 	uiBaseURL            string                      // base URL for the web UI (for constructing unlock links)
 	openAIProxy          http.Handler                // upstream proxy for /v1/chat/completions; nil disables the endpoint
 	anthropicProxy       http.Handler                // upstream proxy for /v1/messages; nil disables the endpoint
@@ -165,20 +154,6 @@ func isNotFound(err error) bool {
 // --- Health ---
 
 func (s *apiServer) GetHealth(w http.ResponseWriter, r *http.Request) {
-	// When TEE is configured, verify the enclave is reachable.
-	if s.enclaveClient != nil {
-		if err := s.enclaveClient.Ready(r.Context()); err != nil {
-			s.log.Warn("health check: enclave not ready", "error", err)
-			writeJSON(w, http.StatusServiceUnavailable, api.HealthResponse{
-				Status:    "enclave_not_ready",
-				Service:   "aileron",
-				Version:   version.Version,
-				Timestamp: time.Now().UTC(),
-			})
-			return
-		}
-	}
-
 	writeJSON(w, http.StatusOK, api.HealthResponse{
 		Status:    "ok",
 		Service:   "aileron",
@@ -834,66 +809,6 @@ func (s *apiServer) RunExecution(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "vault_error", "failed to resolve credential")
 		return
 	}
-	issuedCapability, err := s.verifyExecutionGrantCapability(grant, intent, params, execUserID, vaultPath, connProvider, secret.Metadata.Type)
-	if err != nil && s.enclaveClient != nil {
-		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", err.Error())
-		writeError(w, http.StatusForbidden, "invalid_grant_capability", err.Error())
-		return
-	}
-
-	// TEE mode: delegate execution to enclave. The credential stays
-	// KEK-encrypted; only the enclave (which holds the user's KEK) can
-	// decrypt it. The server never sees the plaintext credential.
-	if s.enclaveClient != nil {
-		if !s.requireEnclave(w, r) {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "enclave not ready")
-			return
-		}
-		execReq := enclave.ExecuteRequest{
-			RequestID:           execID,
-			UserID:              execUserID,
-			GrantID:             grant.GrantId,
-			IntentID:            grant.IntentId,
-			ActionType:          intent.Action.Type,
-			ConnectorID:         connType + "/" + connProvider,
-			VaultPath:           vaultPath,
-			Provider:            connProvider,
-			Parameters:          params,
-			EncryptedCredential: secret.Value,
-			CredentialType:      secret.Metadata.Type,
-		}
-		if issuedCapability != nil {
-			applyIssuedCapabilityToExecuteRequest(&execReq, issuedCapability.Capability)
-			execReq.Capability = issuedCapability
-			execReq.IssuedCapability = issuedCapability
-		}
-		// If credential is escrowed in TEE memory, use the escrow ID
-		// instead of sending the encrypted credential. This allows
-		// execution without an active KEK session.
-		if escrowID, ok := s.escrowIndex.Load(vaultPath); ok {
-			execReq.EscrowID = escrowID.(string)
-			execReq.EncryptedCredential = nil
-		}
-		enclaveResp, enclaveErr := s.enclaveClient.Execute(ctx, execReq)
-		if enclaveErr != nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", enclaveErr.Error())
-			writeError(w, http.StatusInternalServerError, "enclave_error", enclaveErr.Error())
-			return
-		}
-
-		enclaveStatus := api.ExecutionStatusSucceeded
-		if enclaveResp.Status == "failed" {
-			enclaveStatus = api.ExecutionStatusFailed
-		}
-		finishExecution(s, ctx, exec, intent, enclaveStatus, &enclaveResp.Output, enclaveResp.ReceiptRef, enclaveResp.Error)
-
-		writeJSON(w, http.StatusAccepted, api.ExecutionRunResponse{
-			ExecutionId: execID,
-			Status:      api.Accepted,
-		})
-		return
-	}
-
 	// Direct mode: all credentials are encrypted — decrypt with user's KEK.
 	kek := s.getUserKEK(execUserID)
 	if kek == nil {
@@ -2159,59 +2074,6 @@ func (s *apiServer) executeGrant(ctx context.Context, grantID, userID string) (*
 		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "credential not found: "+vaultPath)
 		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "credential not found"}, nil
 	}
-	issuedCapability, err := s.verifyExecutionGrantCapability(grant, intent, params, userID, vaultPath, connProvider, secret.Metadata.Type)
-	if err != nil && s.enclaveClient != nil {
-		finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", err.Error())
-		return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: err.Error()}, nil
-	}
-
-	// TEE mode.
-	if s.enclaveClient != nil {
-		if err := s.enclaveClient.Ready(ctx); err != nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", "enclave not ready")
-			return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: "enclave not ready"}, nil
-		}
-		execReq := enclave.ExecuteRequest{
-			RequestID:           execID,
-			UserID:              userID,
-			GrantID:             grant.GrantId,
-			IntentID:            grant.IntentId,
-			ActionType:          intent.Action.Type,
-			ConnectorID:         connType + "/" + connProvider,
-			VaultPath:           vaultPath,
-			Provider:            connProvider,
-			Parameters:          params,
-			EncryptedCredential: secret.Value,
-			CredentialType:      secret.Metadata.Type,
-		}
-		if issuedCapability != nil {
-			applyIssuedCapabilityToExecuteRequest(&execReq, issuedCapability.Capability)
-			execReq.Capability = issuedCapability
-			execReq.IssuedCapability = issuedCapability
-		}
-		if escrowID, ok := s.escrowIndex.Load(vaultPath); ok {
-			execReq.EscrowID = escrowID.(string)
-			execReq.EncryptedCredential = nil
-		}
-		enclaveResp, enclaveErr := s.enclaveClient.Execute(ctx, execReq)
-		if enclaveErr != nil {
-			finishExecution(s, ctx, exec, intent, api.ExecutionStatusFailed, nil, "", enclaveErr.Error())
-			return &executeGrantResult{ExecutionID: execID, Status: api.ExecutionStatusFailed, Error: enclaveErr.Error()}, nil
-		}
-		enclaveStatus := api.ExecutionStatusSucceeded
-		if enclaveResp.Status == "failed" {
-			enclaveStatus = api.ExecutionStatusFailed
-		}
-		finishExecution(s, ctx, exec, intent, enclaveStatus, &enclaveResp.Output, enclaveResp.ReceiptRef, enclaveResp.Error)
-		return &executeGrantResult{
-			ExecutionID: execID,
-			Status:      enclaveStatus,
-			Output:      enclaveResp.Output,
-			ReceiptRef:  enclaveResp.ReceiptRef,
-			Error:       enclaveResp.Error,
-		}, nil
-	}
-
 	// Direct mode.
 	kek := s.getUserKEK(userID)
 	if kek == nil {
@@ -2322,28 +2184,6 @@ func (s *apiServer) resolveCredentialVaultPath(ctx context.Context, connProvider
 
 	// Fall back to infrastructure credential.
 	return fmt.Sprintf("connectors/%s/default", connProvider)
-}
-
-// enclaveReady checks whether the enclave is reachable. Returns nil if TEE
-// is not configured or the enclave is healthy. Returns an error if TEE is
-// configured but the enclave is unreachable.
-func (s *apiServer) enclaveReady(ctx context.Context) error {
-	if s.enclaveClient == nil {
-		return nil
-	}
-	return s.enclaveClient.Ready(ctx)
-}
-
-// requireEnclave checks enclave readiness and writes a 503 error if it's
-// unavailable. Returns true if the enclave is ready (or not configured).
-func (s *apiServer) requireEnclave(w http.ResponseWriter, r *http.Request) bool {
-	if err := s.enclaveReady(r.Context()); err != nil {
-		s.log.Error("enclave not ready", "error", err)
-		writeError(w, http.StatusServiceUnavailable, "enclave_not_ready",
-			"Aileron is still starting up — please try again in a moment.")
-		return false
-	}
-	return true
 }
 
 // buildModelDomainParams extracts connector parameters from a model.DomainAction.

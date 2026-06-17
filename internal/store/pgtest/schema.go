@@ -144,14 +144,6 @@ CREATE TABLE draft_feedback (
 );
 CREATE INDEX idx_draft_feedback_user ON draft_feedback(user_id);
 
-CREATE TABLE escrow_index (
-	vault_path varchar(512) NOT NULL PRIMARY KEY,
-	escrow_id varchar(128) NOT NULL,
-	user_id varchar(64) NOT NULL,
-	expires_at timestamptz NOT NULL,
-	created_at timestamptz NOT NULL DEFAULT now()
-);
-
 CREATE TABLE llm_configs (
 	id varchar(64) NOT NULL PRIMARY KEY,
 	owner_type varchar(32) NOT NULL,

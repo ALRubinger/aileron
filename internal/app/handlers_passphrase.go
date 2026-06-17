@@ -152,13 +152,6 @@ func (s *apiServer) UnlockVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// When TEE is available, direct unlock is disabled — KEK must be
-	// transmitted via the encrypted enclave session (Phase 3).
-	if s.enclaveClient != nil {
-		writeError(w, http.StatusForbidden, "tee_required", "direct unlock disabled — use TEE session")
-		return
-	}
-
 	var req api.UnlockVaultRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "invalid request body")
@@ -240,18 +233,6 @@ func (s *apiServer) GetVaultStatus(w http.ResponseWriter, r *http.Request) {
 	expiresAt := s.kekSessionCache.ExpiresAt(userID)
 	locked := expiresAt == nil
 
-	// In TEE mode, the enclave holds the KEK — check for an active TEE
-	// session instead of the server-side cache.
-	if locked && s.teeState != nil {
-		s.teeState.mu.Lock()
-		teeExpiry, hasTeeSession := s.teeState.userSessions[userID]
-		s.teeState.mu.Unlock()
-		if hasTeeSession && time.Now().Before(teeExpiry) {
-			locked = false
-			expiresAt = &teeExpiry
-		}
-	}
-
 	writeJSON(w, http.StatusOK, api.VaultStatusResponse{
 		Locked:        locked,
 		HasPassphrase: hasPassphrase,
@@ -306,20 +287,7 @@ func (s *apiServer) userVault(userID string) vault.Vault {
 	if kek := s.getUserKEK(userID); kek != nil {
 		return vault.NewUserScopedVault(s.vault, kek)
 	}
-	// Tier 2: Escrowed credentials in TEE — credential access must go
-	// through SourceExecute inside the enclave. DenyPlaintextVault ensures
-	// any host-side credential retrieval fails loudly.
-	if s.enclaveClient != nil {
-		hasEscrow := false
-		s.escrowIndex.Range(func(_, _ any) bool {
-			hasEscrow = true
-			return false
-		})
-		if hasEscrow {
-			return vault.NewDenyPlaintextVault()
-		}
-	}
-	// Tier 3: No KEK available — UserScopedVault will return a clear error.
+	// No KEK available — UserScopedVault will return a clear error.
 	return vault.NewUserScopedVault(s.vault, nil)
 }
 

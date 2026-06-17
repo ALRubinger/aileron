@@ -33,7 +33,6 @@ type Harness struct {
 	UserInstructions  store.UserInstructionStore
 	UserKeyMaterials  store.UserKeyMaterialStore
 	LLMConfigs        store.LLMConfigStore
-	EscrowIndex       store.EscrowIndexStore
 }
 
 var seq atomic.Int64

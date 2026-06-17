@@ -60,8 +60,8 @@ type Service interface {
 }
 
 // ProviderService extends Service with OAuth introspection methods needed
-// by the TEE callback path. Each provider (Google, Slack, etc.) implements
-// this interface so the enclave can exchange OAuth codes on the user's behalf.
+// by the OAuth callback path. Each provider (Google, Slack, etc.) implements
+// this interface so the host can exchange OAuth codes on the user's behalf.
 type ProviderService interface {
 	Service
 

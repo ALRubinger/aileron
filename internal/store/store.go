@@ -8,7 +8,6 @@ package store
 
 import (
 	"context"
-	"time"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -270,15 +269,6 @@ type LLMConfigStore interface {
 	GetByOwner(ctx context.Context, ownerType model.LLMConfigOwnerType, ownerID string) (model.LLMConfig, error)
 	// Delete removes an LLM config by ID.
 	Delete(ctx context.Context, configID string) error
-}
-
-// EscrowIndexStore persists and retrieves the server-side escrow index mapping
-// vault paths to TEE escrow IDs.
-type EscrowIndexStore interface {
-	Upsert(ctx context.Context, vaultPath, escrowID, userID string, expiresAt time.Time) error
-	Delete(ctx context.Context, vaultPath string) error
-	LoadAll(ctx context.Context) (map[string]string, error)
-	DeleteExpired(ctx context.Context) (int, error)
 }
 
 // ErrNotFound is returned when a requested entity does not exist.

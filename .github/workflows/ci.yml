@@ -23,7 +23,6 @@ jobs:
           cache-dependency-path: |
             internal/go.mod
             cmd/aileron/go.mod
-            cmd/aileron-enclave/go.mod
             cmd/aileron-mcp/go.mod
             sdk/go/go.mod
             test/integration/go.mod
@@ -83,7 +82,6 @@ jobs:
           cache-dependency-path: |
             internal/go.mod
             cmd/aileron/go.mod
-            cmd/aileron-enclave/go.mod
             cmd/aileron-mcp/go.mod
             sdk/go/go.mod
             test/integration/go.mod

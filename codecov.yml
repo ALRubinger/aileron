@@ -25,14 +25,12 @@ flags:
     paths:
       - internal/
       - cmd/aileron/
-      - cmd/aileron-enclave/
       - cmd/aileron-mcp/
       - sdk/go/
     carryforward: false
   integration:
     paths:
       - internal/
-      - cmd/aileron-enclave/
       - cmd/aileron-mcp/
     carryforward: false
   ui:

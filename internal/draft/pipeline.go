@@ -30,11 +30,6 @@ import (
 	"github.com/ALRubinger/aileron/internal/vault"
 )
 
-// SourceExecutor executes a source connector tool. When set on the pipeline,
-// it is used instead of vault.Get() + local ExecuteTool. This enables
-// enclave-based execution where credentials never leave the TEE.
-type SourceExecutor func(ctx context.Context, tool string, params map[string]any, vaultPath string) (map[string]any, error)
-
 // Pipeline orchestrates draft generation for incoming messages.
 type Pipeline struct {
 	researchLLM       llm.Client
@@ -44,7 +39,6 @@ type Pipeline struct {
 	connectedAccounts store.ConnectedAccountStore
 	instructions      store.UserInstructionStore
 	vault             vault.Vault
-	sourceExecutor    SourceExecutor // optional; enclave-based source tool execution
 	log               *slog.Logger
 	researchPrompt          string
 	intentResolutionPrompt  string
@@ -103,17 +97,6 @@ func (p *Pipeline) WithClock(clock func() time.Time) *Pipeline {
 func (p *Pipeline) WithVault(v vault.Vault) *Pipeline {
 	cp := *p
 	cp.vault = v
-	return &cp
-}
-
-// WithSourceExecutor returns a copy of the pipeline that uses the given
-// executor for source tool calls. When set, the pipeline delegates tool
-// execution to the executor (typically the TEE enclave) instead of
-// retrieving credentials from the vault and executing locally. This
-// ensures credentials never leave the enclave.
-func (p *Pipeline) WithSourceExecutor(e SourceExecutor) *Pipeline {
-	cp := *p
-	cp.sourceExecutor = e
 	return &cp
 }
 
@@ -1021,8 +1004,8 @@ func (t *authErrorTracker) failed() []string {
 
 func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, accounts []model.ConnectedAccount, authTracker *authErrorTracker) llm.ToolExecutor {
 	return func(execCtx context.Context, tool string, params map[string]any) (map[string]any, error) {
-		if p.sourceRegistry == nil && p.sourceExecutor == nil {
-			return nil, fmt.Errorf("no source registry or executor configured")
+		if p.sourceRegistry == nil {
+			return nil, fmt.Errorf("no source registry configured")
 		}
 
 		// Resolve the tool to a provider.
@@ -1044,37 +1027,12 @@ func (p *Pipeline) buildToolExecutor(ctx context.Context, userID string, account
 			return nil, fmt.Errorf("no connected %s account for user %s", provider, userID)
 		}
 
-		// Enclave execution path: delegate to the source executor so
-		// credentials never leave the TEE. The executor handles credential
-		// retrieval, token refresh, and escrow updates internally.
-		if p.sourceExecutor != nil {
-			result, execErr := p.sourceExecutor(execCtx, tool, params, acct.VaultPath())
-			if execErr != nil {
-				if errors.Is(execErr, source.ErrAuthFailed) {
-					authTracker.record(provider)
-					p.log.Warn("tool auth failed via enclave",
-						"tool", tool, "provider", provider, "error", execErr)
-				}
-				p.log.Error("tool execution failed", "tool", tool, "provider", provider, "error", execErr)
-			} else {
-				resultSize := 0
-				if result != nil {
-					if b, err := json.Marshal(result); err == nil {
-						resultSize = len(b)
-					}
-				}
-				p.log.Debug("tool execution succeeded (enclave)", "tool", tool, "provider", provider, "result_bytes", resultSize)
-			}
-			return result, execErr
-		}
-
-		// Local execution path: retrieve credential from vault and execute
-		// on the host. Used when vault is unlocked (KEK available).
+		// Retrieve credential from vault and execute on the host.
 
 		// Get the OAuth token from the vault. Any failure here is fatal —
-		// the vault is either locked, the escrow is stale, or the KEK is
-		// wrong. All subsequent tool calls for this provider will fail too,
-		// so abort the LLM loop and let the handler tell the user directly.
+		// the vault is either locked or the KEK is wrong. All subsequent
+		// tool calls for this provider will fail too, so abort the LLM loop
+		// and let the handler tell the user directly.
 		secret, err := p.vault.Get(ctx, acct.VaultPath())
 		if err != nil {
 			return nil, &llm.ToolFatalError{Err: fmt.Errorf(

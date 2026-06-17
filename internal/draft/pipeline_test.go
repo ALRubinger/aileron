@@ -1054,68 +1054,6 @@ func TestRefineDraft(t *testing.T) {
 	}
 }
 
-func TestPipeline_GenerateDraft_ToolExecutor_DenyPlaintextVault(t *testing.T) {
-	// When the pipeline uses DenyPlaintextVault (enclave mode with escrowed
-	// credentials), any host-side credential access should return a
-	// ToolFatalError wrapping ErrCredentialUnavailable so the LLM loop aborts
-	// and the caller (Slack handler) can post a direct unlock message.
-	mock := &mockLLMClient{
-		researchResp:   &llm.GenerateResponse{Text: "context gathered"},
-		ghostwriteResp: &llm.GenerateResponse{Text: "draft"},
-	}
-
-	accounts := mem.NewConnectedAccountStore()
-	ctx := context.Background()
-
-	accounts.Create(ctx, model.ConnectedAccount{
-		ID:       "conn_s1",
-		UserID:   "usr_1",
-		Provider: model.ConnectedAccountProviderSlack,
-		Status:   model.ConnectedAccountStatusActive,
-	})
-
-	sourceReg := source.NewRegistry()
-	sourceReg.Register(&mockSourceConnector{})
-
-	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
-		vault.NewDenyPlaintextVault(), slog.Default(),
-		draft.Prompts{Research: "test research", Ghostwrite: "test ghostwrite"})
-
-	_, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
-		ID: "msg_1", Service: "slack", Channel: "#backend", Author: "Sarah", Body: "Hello",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Extract the tool executor from the research round request.
-	if len(mock.requests) < 1 {
-		t.Fatal("expected at least 1 LLM call")
-	}
-	researchReq := mock.requests[0]
-	if researchReq.ToolExecutor == nil {
-		t.Fatal("expected ToolExecutor in research round")
-	}
-
-	// Execute a tool — should return a ToolFatalError wrapping ErrCredentialUnavailable.
-	_, execErr := researchReq.ToolExecutor(ctx, "slack_channel_history", map[string]any{"channel": "C123"})
-	if execErr == nil {
-		t.Fatal("expected error from DenyPlaintextVault")
-	}
-
-	// Must be a ToolFatalError so the LLM client aborts the loop.
-	var fatal *llm.ToolFatalError
-	if !errors.As(execErr, &fatal) {
-		t.Fatalf("expected *llm.ToolFatalError, got %T: %v", execErr, execErr)
-	}
-
-	// The wrapped error must chain to ErrCredentialUnavailable so the handler
-	// can detect it and post the vault-locked message directly to the user.
-	if !errors.Is(fatal.Err, vault.ErrCredentialUnavailable) {
-		t.Errorf("expected ToolFatalError to wrap ErrCredentialUnavailable, got: %v", fatal.Err)
-	}
-}
-
 func TestPipeline_GenerateDraft_CredentialUnavailable_Propagates(t *testing.T) {
 	// When GenerateWithTools returns ErrCredentialUnavailable (e.g. from a
 	// ToolFatalError unwrapped by the LLM client), GenerateDraft should
@@ -1297,59 +1235,6 @@ func TestPipeline_GenerateDraftStream_AuthFailed_Propagates(t *testing.T) {
 	}
 	if !errors.Is(err, source.ErrAuthFailed) {
 		t.Errorf("expected error wrapping ErrAuthFailed, got: %v", err)
-	}
-}
-
-func TestPipeline_WithSourceExecutor_BypassesVault(t *testing.T) {
-	// When a SourceExecutor is set, the pipeline should use it instead of
-	// retrieving credentials from the vault. This ensures zero-knowledge:
-	// credentials never leave the enclave.
-	executorCalled := false
-	executor := draft.SourceExecutor(func(_ context.Context, tool string, params map[string]any, vaultPath string) (map[string]any, error) {
-		executorCalled = true
-		if tool != "slack_channel_history" {
-			t.Errorf("expected tool slack_channel_history, got %s", tool)
-		}
-		if vaultPath != "connected-accounts/usr_1/slack" {
-			t.Errorf("expected vault path connected-accounts/usr_1/slack, got %s", vaultPath)
-		}
-		return map[string]any{"messages": []string{"hello"}}, nil
-	})
-
-	mock := &toolCallingLLMClient{
-		toolName:       "slack_channel_history",
-		toolParams:     map[string]any{"channel": "C123"},
-		ghostwriteResp: &llm.GenerateResponse{Text: "draft reply"},
-	}
-
-	accounts := mem.NewConnectedAccountStore()
-	ctx := context.Background()
-	accounts.Create(ctx, model.ConnectedAccount{
-		ID: "conn_s1", UserID: "usr_1", Provider: "slack",
-		Status: model.ConnectedAccountStatusActive,
-	})
-
-	sourceReg := source.NewRegistry()
-	sourceReg.Register(&mockSourceConnector{})
-
-	// Vault is empty — if the pipeline tries to use it, it will fail.
-	v := vault.NewMemVault()
-
-	p := draft.NewPipeline(mock, mock, sourceReg, accounts, mem.NewUserInstructionStore(),
-		v, slog.Default(), draft.Prompts{Research: "test", Ghostwrite: "test"}).
-		WithSourceExecutor(executor)
-
-	result, err := p.GenerateDraft(ctx, "usr_1", comms.IncomingMessage{
-		ID: "msg_1", Service: "slack", Channel: "#test", Author: "Alice", Body: "hi",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !executorCalled {
-		t.Error("SourceExecutor was not called — vault was used instead")
-	}
-	if result == "" {
-		t.Error("expected draft output")
 	}
 }
 
