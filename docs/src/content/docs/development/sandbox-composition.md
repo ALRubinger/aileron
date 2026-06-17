@@ -18,15 +18,24 @@ This page covers the user-facing workflow. Runtime launch support can scaffold, 
 
 ## Scaffold a Starter Devcontainer
 
-Tier 1 is the customization tier. You reach for it when you want Aileron's base image plus an agent plus your own project tools in one sandbox. The recorded model ([ADR-0017](/adr/0017-sandbox-composition/)) is that `aileron sandbox init` scaffolds a Feature-composing `.devcontainer/devcontainer.json` rather than a per-agent Dockerfile:
+Tier 1 is the customization tier. You reach for it when you want Aileron's base image plus an agent plus your own project tools in one sandbox. `aileron sandbox init` scaffolds a Feature-composing `.devcontainer/devcontainer.json` ([ADR-0017](/adr/0017-sandbox-composition/)). It writes only that file. It does not write a per-agent Dockerfile, and it takes no agent flag:
+
+```bash
+aileron sandbox init
+```
+
+The scaffold composes the base image with the Claude agent Feature as the worked example, and demonstrates a commented customer-tooling Feature slot:
 
 ```jsonc
 {
   "name": "Aileron sandbox",
   "image": "aileron/sandbox-base:<version>",
   "features": {
-    "ghcr.io/alrubinger/aileron-features/<agent>:1": {},
-    "ghcr.io/acme/internal-tools:1": {}
+    // The agent Feature installs the agent CLI onto the base image. Swap
+    // "claude" for another published agent (e.g. "codex"), or list several.
+    "ghcr.io/alrubinger/aileron-features/claude:1": {}
+    // Add your own tooling as its own Feature alongside the agent Feature:
+    // "ghcr.io/acme/internal-tools:1": {}
   },
   "customizations": {
     "aileron": {
@@ -37,9 +46,7 @@ Tier 1 is the customization tier. You reach for it when you want Aileron's base 
 }
 ```
 
-The agent is selected by the agent Feature you list, and your own tooling is its own Feature alongside it. The same agent Feature is the single source of truth that Aileron CI bakes into the prebuilt per-agent images ([#965](https://github.com/ALRubinger/aileron/issues/965)), so the customization tier and the zero-build default share one install recipe per agent.
-
-The `sandbox init` reposition to scaffold this Feature-composing devcontainer, and the removal of the per-agent Dockerfile and the `--agent` flag, are implemented in [#1084](https://github.com/ALRubinger/aileron/issues/1084). The `features`-composing build path is implemented in [#1083](https://github.com/ALRubinger/aileron/issues/1083).
+The agent is selected by the agent Feature you list, and your own tooling is its own Feature alongside it. Swap the agent reference or uncomment the tooling slot to suit your project. The same agent Feature is the single source of truth that Aileron CI bakes into the prebuilt per-agent images ([#965](https://github.com/ALRubinger/aileron/issues/965)), so the customization tier and the zero-build default share one install recipe per agent. The `features`-composing build path is implemented in [#1083](https://github.com/ALRubinger/aileron/issues/1083).
 
 ## Inspect the Plan
 

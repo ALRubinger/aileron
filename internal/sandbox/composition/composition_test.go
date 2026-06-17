@@ -164,124 +164,51 @@ func TestParseDevcontainerRejectsUnterminatedBlockComment(t *testing.T) {
 	}
 }
 
-func TestInitWritesStarterDevcontainerAndDockerfile(t *testing.T) {
+func TestInitWritesFeatureComposingDevcontainer(t *testing.T) {
 	dir := t.TempDir()
 	result, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0"})
 	if err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	if result.DevcontainerPath != DefaultDevcontainerPath || result.DockerfilePath != DefaultDockerfilePath {
-		t.Fatalf("result = %+v", result)
+	if result.DevcontainerPath != DefaultDevcontainerPath {
+		t.Fatalf("DevcontainerPath = %q, want %q", result.DevcontainerPath, DefaultDevcontainerPath)
 	}
-	dev, err := os.ReadFile(filepath.Join(dir, DefaultDevcontainerPath))
+	// init no longer writes a per-agent Dockerfile.
+	if _, err := os.Stat(filepath.Join(dir, DefaultDockerfilePath)); !os.IsNotExist(err) {
+		t.Fatalf("init should not write a Dockerfile: stat err = %v", err)
+	}
+
+	// Assert on the produced config shape via Discover (the contract), not on
+	// the raw scaffold text.
+	plan, err := Discover(dir, "0.4.0")
 	if err != nil {
-		t.Fatalf("read devcontainer: %v", err)
+		t.Fatalf("Discover scaffolded devcontainer: %v", err)
 	}
-	if !strings.Contains(string(dev), `"customizations"`) || !strings.Contains(string(dev), `"aileron"`) {
-		t.Fatalf("devcontainer missing Aileron customization:\n%s", string(dev))
+	if plan.Tier != TierDevcontainer {
+		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
 	}
-	dockerfile, err := os.ReadFile(filepath.Join(dir, DefaultDockerfilePath))
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
+	if plan.Image != "aileron/sandbox-base:0.4.0" {
+		t.Fatalf("Image = %q, want the base image", plan.Image)
 	}
-	if !strings.Contains(string(dockerfile), "FROM aileron/sandbox-base:0.4.0") {
-		t.Fatalf("Dockerfile =\n%s", string(dockerfile))
+	// Exactly one active Feature: the default agent Feature. The customer
+	// tooling slot is commented out, so Discover must not see it.
+	if len(plan.Features) != 1 {
+		t.Fatalf("Features = %#v, want exactly one active feature", plan.Features)
 	}
-	for _, line := range strings.Split(string(dockerfile), "\n") {
-		trimmed := strings.TrimLeft(line, "# ")
-		if strings.HasPrefix(trimmed, "RUN ") && strings.Contains(trimmed, "apt-get") {
-			t.Fatalf("Dockerfile snippets must use apk against the Alpine base, not apt-get:\n%s", string(dockerfile))
-		}
+	if _, ok := plan.Features[FeatureReference("claude")]; !ok {
+		t.Fatalf("Features missing %q: %#v", FeatureReference("claude"), plan.Features)
 	}
-	for _, snippet := range []string{"--- GitHub CLI ---", "--- Node.js ---", "--- Python ---", "--- kubectl ---", "--- Terraform ---"} {
-		if !strings.Contains(string(dockerfile), snippet) {
-			t.Fatalf("Dockerfile missing menu snippet %q:\n%s", snippet, string(dockerfile))
-		}
+	if plan.Aileron.Mediation != "default" {
+		t.Fatalf("Aileron.Mediation = %q, want default", plan.Aileron.Mediation)
+	}
+	if plan.Aileron.ApprovalSurface != "both" {
+		t.Fatalf("Aileron.ApprovalSurface = %q, want both", plan.Aileron.ApprovalSurface)
 	}
 }
 
-func TestInitDefaultsToClaudeRecipeReadyToBuild(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0"}); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	dockerfile, err := os.ReadFile(filepath.Join(dir, DefaultDockerfilePath))
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
-	}
-	body := string(dockerfile)
-	for _, want := range []string{
-		"\nUSER root\n",
-		"\nUSER agent\n",
-		"--- Claude Code ---",
-		"npm install -g @anthropic-ai/claude-code",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("default Dockerfile missing %q:\n%s", want, body)
-		}
-	}
-	// The Claude install RUN must NOT be commented out — that was the
-	// pre-#963 footgun.
-	for _, line := range strings.Split(body, "\n") {
-		if strings.Contains(line, "@anthropic-ai/claude-code") && strings.HasPrefix(strings.TrimSpace(line), "#") {
-			t.Fatalf("Claude install RUN should be uncommented:\n%s", body)
-		}
-	}
-}
-
-func TestInitWithCodexRecipeReadyToBuild(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0", Agent: "codex"}); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	dockerfile, err := os.ReadFile(filepath.Join(dir, DefaultDockerfilePath))
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
-	}
-	body := string(dockerfile)
-	for _, want := range []string{
-		"\nUSER root\n",
-		"\nUSER agent\n",
-		"--- Codex ---",
-		"npm install -g @openai/codex",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("codex Dockerfile missing %q:\n%s", want, body)
-		}
-	}
-	if strings.Contains(body, "@anthropic-ai/claude-code") {
-		t.Fatalf("codex Dockerfile should not include the Claude recipe:\n%s", body)
-	}
-	// The Codex install RUN must NOT be commented out.
-	for _, line := range strings.Split(body, "\n") {
-		if strings.Contains(line, "@openai/codex") && strings.HasPrefix(strings.TrimSpace(line), "#") {
-			t.Fatalf("Codex install RUN should be uncommented:\n%s", body)
-		}
-	}
-}
-
-func TestInitWithUnknownAgentEmitsTODOStub(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := Init(InitOptions{WorkDir: dir, Version: "0.4.0", Agent: "frobnicate"}); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	dockerfile, err := os.ReadFile(filepath.Join(dir, DefaultDockerfilePath))
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
-	}
-	body := string(dockerfile)
-	for _, want := range []string{
-		"\nUSER root\n",
-		"\nUSER agent\n",
-		"TODO: install the frobnicate CLI",
-		"sandbox-agent-images",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("frobnicate Dockerfile missing %q:\n%s", want, body)
-		}
-	}
-	if strings.Contains(body, "@anthropic-ai/claude-code") {
-		t.Fatalf("frobnicate Dockerfile should not include the Claude recipe:\n%s", body)
+func TestFeatureReferenceNamesPublishedFeature(t *testing.T) {
+	if got, want := FeatureReference("claude"), DefaultFeatureRepository+"/claude:1"; got != want {
+		t.Fatalf("FeatureReference = %q, want %q", got, want)
 	}
 }
 
@@ -299,24 +226,24 @@ func TestInitDoesNotOverwriteWithoutForce(t *testing.T) {
 	}
 }
 
-func TestInitForceOverwritesExistingFiles(t *testing.T) {
+func TestInitForceOverwritesExistingDevcontainer(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := Init(InitOptions{WorkDir: dir}); err != nil {
 		t.Fatalf("first Init: %v", err)
 	}
-	path := filepath.Join(dir, DefaultDockerfilePath)
+	path := filepath.Join(dir, DefaultDevcontainerPath)
 	if err := os.WriteFile(path, []byte("custom"), 0o644); err != nil {
-		t.Fatalf("write custom Dockerfile: %v", err)
+		t.Fatalf("write custom devcontainer: %v", err)
 	}
 	if _, err := Init(InitOptions{WorkDir: dir, Force: true, Version: "0.4.0"}); err != nil {
 		t.Fatalf("force Init: %v", err)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
+		t.Fatalf("read devcontainer: %v", err)
 	}
 	if string(got) == "custom" {
-		t.Fatal("Dockerfile was not overwritten")
+		t.Fatal("devcontainer was not overwritten")
 	}
 }
 

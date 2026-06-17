@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
-// DefaultAgent is the agent the scaffold targets when --agent is omitted.
-// Claude Code and Codex have documented Tier 1 install recipes today (see
-// docs/development/sandbox-agent-images.md); other agents emit a
-// structurally correct Dockerfile with a TODO install stub.
+// DefaultAgent is the agent whose Feature the scaffold demonstrates. It is no
+// longer selectable from the CLI; `aileron sandbox init` always emits the
+// Claude Feature as the worked example of the compose model, and customers
+// swap or add Feature references by hand. Claude Code and Codex have published
+// agent Features today (see docs/development/sandbox-agent-images.md).
 const DefaultAgent = "claude"
 
 // InitOptions configures the sandbox scaffold operation.
@@ -19,16 +19,17 @@ type InitOptions struct {
 	WorkDir string
 	Version string
 	Force   bool
-	Agent   string
 }
 
 // InitResult reports which files were written.
 type InitResult struct {
 	DevcontainerPath string
-	DockerfilePath   string
 }
 
-// Init writes the starter devcontainer scaffold for sandbox composition.
+// Init writes the starter devcontainer scaffold for sandbox composition. The
+// scaffold composes the Aileron base image with a per-agent Feature, which is
+// the Tier 1 customization model recorded in ADR-0017. It no longer writes a
+// per-agent Dockerfile; the zero-build per-agent-image flow is owned by #965.
 func Init(opts InitOptions) (InitResult, error) {
 	workDir := opts.WorkDir
 	if workDir == "" {
@@ -36,38 +37,45 @@ func Init(opts InitOptions) (InitResult, error) {
 	}
 	dir := filepath.Join(workDir, ".devcontainer")
 	devcontainerPath := filepath.Join(workDir, DefaultDevcontainerPath)
-	dockerfilePath := filepath.Join(workDir, DefaultDockerfilePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return InitResult{}, fmt.Errorf("create %s: %w", dir, err)
 	}
-	for _, path := range []string{devcontainerPath, dockerfilePath} {
-		if _, err := os.Stat(path); err == nil && !opts.Force {
-			return InitResult{}, fmt.Errorf("%s already exists (use --force to overwrite)", path)
-		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return InitResult{}, fmt.Errorf("stat %s: %w", path, err)
-		}
+	if _, err := os.Stat(devcontainerPath); err == nil && !opts.Force {
+		return InitResult{}, fmt.Errorf("%s already exists (use --force to overwrite)", devcontainerPath)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return InitResult{}, fmt.Errorf("stat %s: %w", devcontainerPath, err)
 	}
-	if err := os.WriteFile(devcontainerPath, []byte(starterDevcontainer()), 0o644); err != nil {
+	if err := os.WriteFile(devcontainerPath, []byte(starterDevcontainer(opts.Version)), 0o644); err != nil {
 		return InitResult{}, fmt.Errorf("write %s: %w", devcontainerPath, err)
 	}
-	agent := opts.Agent
-	if agent == "" {
-		agent = DefaultAgent
-	}
-	if err := os.WriteFile(dockerfilePath, []byte(starterDockerfile(opts.Version, agent)), 0o644); err != nil {
-		return InitResult{}, fmt.Errorf("write %s: %w", dockerfilePath, err)
-	}
-	return InitResult{
-		DevcontainerPath: DefaultDevcontainerPath,
-		DockerfilePath:   DefaultDockerfilePath,
-	}, nil
+	return InitResult{DevcontainerPath: DefaultDevcontainerPath}, nil
 }
 
-func starterDevcontainer() string {
-	return `{
+// FeatureReference returns the canonical devcontainer Feature reference for an
+// agent (e.g. "ghcr.io/alrubinger/aileron-features/claude:1"). It is the one
+// place in Go that names the Feature registry path and tag, mirroring the
+// BaseImage helper for the base image. The same reference identifies the
+// Features authored under images/sandbox-features/<agent>/ and composed by the
+// Tier 1 build path (#1083).
+func FeatureReference(agent string) string {
+	return DefaultFeatureRepository + "/" + agent + ":1"
+}
+
+// starterDevcontainer emits the Feature-composing devcontainer.json recorded in
+// docs/development/sandbox-composition.md. It composes the Aileron base image
+// with the default agent Feature and demonstrates the customer-tooling slot as
+// a commented Feature so `Discover` parses exactly one active Feature. JSONC
+// comments are valid here because Discover strips them before parsing.
+func starterDevcontainer(version string) string {
+	return fmt.Sprintf(`{
   "name": "Aileron sandbox",
-  "build": {
-    "dockerfile": "Dockerfile"
+  "image": %q,
+  "features": {
+    // The agent Feature installs the agent CLI onto the base image. Swap
+    // "claude" for another published agent (e.g. "codex"), or list several.
+    %q: {}
+    // Add your own tooling as its own Feature alongside the agent Feature:
+    // "ghcr.io/acme/internal-tools:1": {}
   },
   "customizations": {
     "aileron": {
@@ -76,77 +84,5 @@ func starterDevcontainer() string {
     }
   }
 }
-`
-}
-
-func starterDockerfile(version, agent string) string {
-	return fmt.Sprintf(`FROM %s
-
-# Aileron's base image is Alpine-based and runs as the non-root "agent"
-# user. Switch to root to install tools, then switch back to agent before
-# launch. All install snippets use apk; do not use apt-get here.
-
-USER root
-
-%s
-
-# Uncomment additional tool snippets below as needed. Keep rarely
-# changing snippets earlier for better layer caching.
-#
-# # --- GitHub CLI ---
-# RUN apk add --no-cache github-cli
-#
-# # --- Node.js ---
-# RUN apk add --no-cache nodejs npm
-#
-# # --- Python ---
-# RUN apk add --no-cache python3 py3-pip
-#
-# # --- kubectl ---
-# RUN apk add --no-cache kubectl
-#
-# # --- Terraform ---
-# RUN apk add --no-cache terraform
-
-USER agent
-`, BaseImage(version), agentInstallSnippet(agent))
-}
-
-// agentInstallSnippet returns the install recipe for agent. Agents with
-// a documented Tier 1 recipe are pre-filled and uncommented; agents
-// without one get a TODO stub that still produces a buildable Dockerfile
-// once the user fills it in.
-//
-// The Claude/Codex snippets are derived from the canonical agentRecipes
-// table (recipes.go), which is also the source of truth for the devcontainer
-// Features under images/sandbox-features/<agent>/. There is exactly one place
-// that names the apk prerequisites and the npm package per agent.
-func agentInstallSnippet(agent string) string {
-	if recipe, ok := recipeForAgent(agent); ok {
-		return fmt.Sprintf(`# --- %s ---
-RUN apk add --no-cache %s && \
-    npm install -g %s`,
-			agentSnippetLabel(agent),
-			strings.Join(recipe.Prereqs, " "),
-			recipe.NPMPackage)
-	}
-	return fmt.Sprintf(`# --- TODO: install the %s CLI ---
-# Aileron does not yet ship a verified install recipe for %s.
-# Replace this stub with an install that puts %q on PATH and uses apk
-# against the Alpine base. See:
-#   https://docs.withaileron.ai/development/sandbox-agent-images/
-# RUN apk add --no-cache ...`, agent, agent, agent)
-}
-
-// agentSnippetLabel returns the human-facing heading for an agent's Dockerfile
-// install snippet (e.g. "Claude Code"). Falls back to the agent id.
-func agentSnippetLabel(agent string) string {
-	switch agent {
-	case "claude":
-		return "Claude Code"
-	case "codex":
-		return "Codex"
-	default:
-		return agent
-	}
+`, BaseImage(version), FeatureReference(DefaultAgent))
 }
