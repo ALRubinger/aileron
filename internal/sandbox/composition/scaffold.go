@@ -52,13 +52,20 @@ func Init(opts InitOptions) (InitResult, error) {
 }
 
 // FeatureReference returns the canonical devcontainer Feature reference for an
-// agent (e.g. "ghcr.io/alrubinger/aileron-features/claude:1"). It is the one
+// agent (e.g. "ghcr.io/alrubinger/aileron-features/claude:0"). It is the one
 // place in Go that names the Feature registry path and tag, mirroring the
 // BaseImage helper for the base image. The same reference identifies the
 // Features authored under images/sandbox-features/<agent>/ and composed by the
 // Tier 1 build path (#1083).
+//
+// The tag is ":0", the broadest in-house major tag. A "0.0.1" Feature manifest
+// publishes the tag set "0.0.1", "0.0", "0", and "latest" through
+// `devcontainer features publish`, so pinning ":0" lets 0.0.x patch bumps
+// resolve without re-scaffolding. The scaffold stays on the major tag while the
+// manifest holds the 0.0.x house version, keeping the two consistent without
+// hard-coding a premature 1.0.0.
 func FeatureReference(agent string) string {
-	return DefaultFeatureRepository + "/" + agent + ":1"
+	return DefaultFeatureRepository + "/" + agent + ":0"
 }
 
 // starterDevcontainer emits the Feature-composing devcontainer.json recorded in

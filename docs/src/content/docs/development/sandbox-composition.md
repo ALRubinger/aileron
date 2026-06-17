@@ -33,7 +33,7 @@ The scaffold composes the base image with the Claude agent Feature as the worked
   "features": {
     // The agent Feature installs the agent CLI onto the base image. Swap
     // "claude" for another published agent (e.g. "codex"), or list several.
-    "ghcr.io/alrubinger/aileron-features/claude:1": {}
+    "ghcr.io/alrubinger/aileron-features/claude:0": {}
     // Add your own tooling as its own Feature alongside the agent Feature:
     // "ghcr.io/acme/internal-tools:1": {}
   },
@@ -47,6 +47,14 @@ The scaffold composes the base image with the Claude agent Feature as the worked
 ```
 
 The agent is selected by the agent Feature you list, and your own tooling is its own Feature alongside it. Swap the agent reference or uncomment the tooling slot to suit your project. The same agent Feature is the single source of truth that Aileron CI bakes into the prebuilt per-agent images ([#965](https://github.com/ALRubinger/aileron/issues/965)), so the customization tier and the zero-build default share one install recipe per agent. The `features`-composing build path is implemented in [#1083](https://github.com/ALRubinger/aileron/issues/1083).
+
+### How the agent Features are published
+
+The agent Features under `images/sandbox-features/<agent>/` are published to GitHub Container Registry by the `.github/workflows/sandbox-features.yml` workflow. The workflow runs `devcontainer features publish` on push to `main` when `images/sandbox-features/**` changes, and on release tags. Pull-request runs validate the Feature manifests without publishing.
+
+Each Feature manifest stays on the `0.0.1` house version. `devcontainer features publish` emits the tag set `0.0.1`, `0.0`, `0`, and `latest` from that manifest. The scaffold pins the broadest in-house major tag, `:0`, so a 0.0.x patch bump republishes the `0` tag and the scaffold keeps resolving without re-scaffolding.
+
+The first publish requires a one-time manual step. CI cannot set the visibility of a GHCR package on its first push, so each new package starts private. `aileron sandbox build` pulls Features anonymously and performs no `docker login`, so each package must be flipped to public in its GHCR package settings after the first publish. This is a one-time operator step per package, not a recurring CI action.
 
 ## Inspect the Plan
 

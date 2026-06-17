@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -73,6 +74,87 @@ func TestFeatureManifestsAreValid(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestScaffoldFeatureReferenceMatchesManifestVersion guards the drift class that
+// motivated #1123: the scaffold once pinned ":1" while the Features published a
+// "0.0.1" manifest, so a fresh `sandbox init` + `sandbox build` could not
+// resolve the Feature. `devcontainer features publish` emits the tag set
+// {major.minor.patch, major.minor, major, latest} from a semver manifest, so the
+// scaffold's reference tag is only valid when it is a member of that set. This
+// test encodes the Option-B invariant (scaffold pins the major tag, manifest
+// stays on the 0.0.x house version) as a contract rather than a literal: a
+// future manifest bump to e.g. "0.1.0" still passes because "0" stays in the
+// published set, while a scaffold drift to ":1" against a "0.x" manifest or a
+// manifest bump that drops the "0" major fails loudly here.
+func TestScaffoldFeatureReferenceMatchesManifestVersion(t *testing.T) {
+	root := featuresContext(t)
+	for _, agent := range []string{"claude", "codex"} {
+		agent := agent
+		t.Run(agent, func(t *testing.T) {
+			path := filepath.Join(root, agent, "devcontainer-feature.json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			var m featureManifest
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("%s is not valid JSON: %v", path, err)
+			}
+
+			tags := publishedTagSet(t, m.Version)
+			ref := FeatureReference(agent)
+			refTag := referenceTag(t, ref)
+			if !tags[refTag] {
+				t.Fatalf("scaffold reference %q pins tag %q, which is not in the tag set %v published by `devcontainer features publish` for manifest version %q; reconcile internal/sandbox/composition/scaffold.go with %s",
+					ref, refTag, sortedKeys(tags), m.Version, path)
+			}
+		})
+	}
+}
+
+// publishedTagSet returns the tags `devcontainer features publish` emits for a
+// semver manifest version: the full "major.minor.patch", the "major.minor"
+// prefix, the "major" prefix, and "latest".
+func publishedTagSet(t *testing.T, version string) map[string]bool {
+	t.Helper()
+	v := strings.TrimSpace(version)
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		t.Fatalf("manifest version %q is not major.minor.patch semver", version)
+	}
+	for _, p := range parts {
+		if p == "" {
+			t.Fatalf("manifest version %q has an empty component", version)
+		}
+	}
+	return map[string]bool{
+		parts[0]:                  true, // major
+		parts[0] + "." + parts[1]: true, // major.minor
+		parts[0] + "." + parts[1] + "." + parts[2]: true, // major.minor.patch
+		"latest": true,
+	}
+}
+
+// referenceTag extracts the tag from a Feature reference of the form
+// "<registry>/<path>:<tag>". The registry host carries no port in any Aileron
+// reference, so the final ":" segment is the tag.
+func referenceTag(t *testing.T, ref string) string {
+	t.Helper()
+	idx := strings.LastIndex(ref, ":")
+	if idx < 0 || idx == len(ref)-1 {
+		t.Fatalf("Feature reference %q has no tag", ref)
+	}
+	return ref[idx+1:]
+}
+
+func sortedKeys(m map[string]bool) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func TestFeatureInstallScriptsArePresentAndExecutable(t *testing.T) {
