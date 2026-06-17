@@ -144,8 +144,14 @@ func buildSandboxFeaturesBaseImage(ctx context.Context, t *testing.T, rt string)
 }
 
 // buildComposedImage writes a minimal devcontainer.json that FROMs the test
-// base image and references the local Feature directory by path, then runs
-// `devcontainer build` and returns the resulting image id.
+// base image and references the local Feature directory by a RELATIVE path,
+// then runs `devcontainer build` and returns the resulting image id.
+//
+// @devcontainers/cli rejects an absolute path as a feature id ("An Absolute
+// path to a local feature is not allowed"). Local Features must live beneath
+// the workspace's .devcontainer/ and be referenced relative to it (e.g.
+// "./claude"). The source Feature is copied into the transient workspace so
+// the test never mutates the repo tree.
 func buildComposedImage(ctx context.Context, t *testing.T, featureDir, agent string) string {
 	t.Helper()
 	workspace := t.TempDir()
@@ -154,13 +160,16 @@ func buildComposedImage(ctx context.Context, t *testing.T, featureDir, agent str
 		t.Fatalf("mkdir .devcontainer: %v", err)
 	}
 
-	// Reference the local Feature directory by absolute path. @devcontainers/cli
-	// accepts a filesystem path as a feature id, building it from source.
+	// Copy the Feature into .devcontainer/<agent>/ so it can be referenced by
+	// the only path form the CLI accepts: relative to .devcontainer.
+	localFeatureDir := filepath.Join(devDir, agent)
+	copyFeatureDir(t, featureDir, localFeatureDir)
+
 	dc := map[string]any{
 		"name":  "aileron-sandbox-feature-" + agent,
 		"image": sandboxFeaturesBaseImage,
 		"features": map[string]any{
-			featureDir: map[string]any{},
+			"./" + agent: map[string]any{},
 		},
 	}
 	raw, err := json.MarshalIndent(dc, "", "  ")
@@ -186,6 +195,43 @@ func buildComposedImage(ctx context.Context, t *testing.T, featureDir, agent str
 	}
 	t.Logf("devcontainer build %s ->\n%s", agent, stdout.String())
 	return image
+}
+
+// copyFeatureDir copies the Feature's files (devcontainer-feature.json,
+// install.sh) from src into dst, preserving file modes so install.sh keeps
+// its executable bit. The Feature directory is flat (no subdirectories), so a
+// shallow copy suffices.
+func copyFeatureDir(t *testing.T, src, dst string) {
+	t.Helper()
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir feature dst %s: %v", dst, err)
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read feature dir %s: %v", src, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			t.Fatalf("stat %s: %v", e.Name(), err)
+		}
+		raw, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		dstPath := filepath.Join(dst, e.Name())
+		if err := os.WriteFile(dstPath, raw, info.Mode().Perm()); err != nil {
+			t.Fatalf("write %s: %v", e.Name(), err)
+		}
+		// WriteFile's create mode is masked by umask, so re-apply the source
+		// mode explicitly to preserve install.sh's executable bit.
+		if err := os.Chmod(dstPath, info.Mode().Perm()); err != nil {
+			t.Fatalf("chmod %s: %v", e.Name(), err)
+		}
+	}
 }
 
 // assertCommandOnPath runs the built image and asserts `command -v <cmd>`
