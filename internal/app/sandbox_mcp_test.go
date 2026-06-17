@@ -718,19 +718,24 @@ func TestSandboxMCP_Approval_RoundTripsWithApprovedDecide(t *testing.T) {
 	waitForChain(t, h.auditStore, sessionID, model.EventTypeExecutionSucceeded, 5*time.Second)
 
 	chain := eventChainForSession(t, h.auditStore, sessionID)
-	want := []model.EventType{
-		model.EventTypeApprovalRequested,
-		model.EventTypeApprovalApproved,
-		model.EventTypeExecutionStarted,
-		model.EventTypeExecutionSucceeded,
+	if len(chain) != 4 {
+		t.Fatalf("event chain = %v; want 4 events (approval.requested, approval.approved, execution.started, execution.succeeded)", chain)
 	}
-	if len(chain) != len(want) {
-		t.Fatalf("event chain = %v; want %v", chain, want)
+	// approval.requested is always first and execution.succeeded always last.
+	// The middle pair (approval.approved from the Decide path, execution.started
+	// from the background executor goroutine) is emitted from two goroutines with
+	// no guaranteed audit-write ordering, so assert it as an unordered set rather
+	// than a fixed sequence. Approval still causally precedes execution; only the
+	// two log writes may interleave.
+	if chain[0] != model.EventTypeApprovalRequested {
+		t.Errorf("chain[0] = %s; want %s", chain[0], model.EventTypeApprovalRequested)
 	}
-	for i, w := range want {
-		if chain[i] != w {
-			t.Errorf("chain[%d] = %s; want %s", i, chain[i], w)
-		}
+	if chain[3] != model.EventTypeExecutionSucceeded {
+		t.Errorf("chain[3] = %s; want %s", chain[3], model.EventTypeExecutionSucceeded)
+	}
+	middle := map[model.EventType]bool{chain[1]: true, chain[2]: true}
+	if !middle[model.EventTypeApprovalApproved] || !middle[model.EventTypeExecutionStarted] {
+		t.Errorf("chain middle = [%s %s]; want {approval.approved, execution.started} in either order", chain[1], chain[2])
 	}
 }
 
