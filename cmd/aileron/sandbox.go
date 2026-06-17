@@ -23,7 +23,7 @@ func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writ
 	}
 	switch args[0] {
 	case "init":
-		return runSandboxInit(args[1:], registry, stdout, stderr)
+		return runSandboxInit(args[1:], stdout, stderr)
 	case "plan":
 		return runSandboxPlan(args[1:], stdout, stderr)
 	case "build":
@@ -37,21 +37,15 @@ func runSandbox(args []string, registry *launch.Registry, stdout, stderr io.Writ
 	}
 }
 
-func runSandboxInit(args []string, registry *launch.Registry, stdout, stderr io.Writer) int {
+func runSandboxInit(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("sandbox init", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	force := flags.Bool("force", false, "Overwrite existing .devcontainer files")
-	agent := flags.String("agent", sandboxcomposition.DefaultAgent, "Agent CLI to scaffold the install recipe for")
+	force := flags.Bool("force", false, "Overwrite an existing .devcontainer/devcontainer.json")
 	if err := flags.Parse(args); err != nil {
 		return 1
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: aileron sandbox init [--force] [--agent=<name>]")
-		return 1
-	}
-	if _, ok := registry.Get(*agent); !ok {
-		fmt.Fprintf(stderr, "unknown agent: %q\n", *agent)
-		fmt.Fprintf(stderr, "available agents: %s\n", strings.Join(registry.Names(), ", "))
+		fmt.Fprintln(stderr, "usage: aileron sandbox init [--force]")
 		return 1
 	}
 	cwd, err := os.Getwd()
@@ -63,15 +57,12 @@ func runSandboxInit(args []string, registry *launch.Registry, stdout, stderr io.
 		WorkDir: cwd,
 		Version: version.Version,
 		Force:   *force,
-		Agent:   *agent,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(stdout, "created %s\n", result.DevcontainerPath)
-	fmt.Fprintf(stdout, "created %s\n", result.DockerfilePath)
-	fmt.Fprintf(stdout, "agent: %s\n", *agent)
 	return 0
 }
 

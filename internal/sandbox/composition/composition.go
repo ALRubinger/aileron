@@ -14,10 +14,17 @@ import (
 const (
 	// DefaultDevcontainerPath is the canonical project-local devcontainer file.
 	DefaultDevcontainerPath = ".devcontainer/devcontainer.json"
-	// DefaultDockerfilePath is the starter Dockerfile path scaffolded by Aileron.
+	// DefaultDockerfilePath is the conventional Dockerfile path Discover assumes
+	// for a hand-authored Tier 1 devcontainer that declares a build without
+	// naming a dockerfile. `sandbox init` no longer scaffolds this file.
 	DefaultDockerfilePath = ".devcontainer/Dockerfile"
 	// DefaultBaseImageRepository is the image Aileron owns for Tier 0 and Tier 1.
 	DefaultBaseImageRepository = "aileron/sandbox-base"
+	// DefaultFeatureRepository is the registry path that hosts Aileron's
+	// per-agent devcontainer Features. The scaffold composes one of these
+	// Features (see FeatureReference) into the starter devcontainer.json, and
+	// the same Features are baked into the prebuilt per-agent images (#965).
+	DefaultFeatureRepository = "ghcr.io/alrubinger/aileron-features"
 )
 
 // Tier describes how a sandbox image should be composed.

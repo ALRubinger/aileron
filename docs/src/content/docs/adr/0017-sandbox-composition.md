@@ -91,7 +91,7 @@ This ADR follows the updated sandbox runtime direction:
 
 ## CLI surface
 
-`aileron sandbox init` scaffolds a Feature-composing `.devcontainer/devcontainer.json` for the customization tier. The scaffold lists `aileron/sandbox-base:<version>` as the base image and an agent Feature plus an optional customer-tooling Feature under `features`, so users compose their own tooling alongside the agent through standard devcontainer workflows. Under the Feature model `init` no longer scaffolds a per-agent `.devcontainer/Dockerfile`, and the `--agent` flag is removed because the agent is selected by the listed Feature rather than a baked recipe. The `init` reposition and the `--agent` removal land in [#1084](https://github.com/ALRubinger/aileron/issues/1084).
+`aileron sandbox init` scaffolds a Feature-composing `.devcontainer/devcontainer.json` for the customization tier. The scaffold lists `aileron/sandbox-base:<version>` as the base image and an agent Feature plus an optional customer-tooling Feature under `features`, so users compose their own tooling alongside the agent through standard devcontainer workflows. Under the Feature model `init` no longer scaffolds a per-agent `.devcontainer/Dockerfile`, and the `--agent` flag is removed because the agent is selected by the listed Feature rather than a baked recipe.
 
 `aileron sandbox plan` is an inspection helper that reports the normalized tier/image/dockerfile plan, including a `features:` summary line listing the parsed Feature references when the devcontainer declares any.
 

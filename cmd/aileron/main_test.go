@@ -330,8 +330,10 @@ func TestRunSandboxInitCreatesDevcontainerScaffold(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".devcontainer", "devcontainer.json")); err != nil {
 		t.Fatalf("devcontainer.json not created: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".devcontainer", "Dockerfile")); err != nil {
-		t.Fatalf("Dockerfile not created: %v", err)
+	// init scaffolds a Feature-composing devcontainer.json only; it no longer
+	// writes a per-agent Dockerfile.
+	if _, err := os.Stat(filepath.Join(dir, ".devcontainer", "Dockerfile")); !os.IsNotExist(err) {
+		t.Fatalf("Dockerfile should not be created: stat err = %v", err)
 	}
 }
 
@@ -375,55 +377,29 @@ func TestRunSandboxRequiresSubcommand(t *testing.T) {
 	}
 }
 
-func TestRunSandboxInitAgentFlagSelectsRecipe(t *testing.T) {
-	dir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+func TestRunSandboxInitRejectsAgentFlag(t *testing.T) {
+	// The --agent flag was removed (no deprecation). The standard flag parser
+	// rejects the unknown flag and surfaces the new usage text without writing
+	// any scaffold.
+	for _, arg := range []string{"--agent=claude", "--agent=anything"} {
+		dir := t.TempDir()
+		oldWd, _ := os.Getwd()
+		if err := os.Chdir(dir); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	reg := newTestRegistry()
-	reg.Register(agents.Codex{})
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"sandbox", "init", "--agent=codex"}, reg, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("expected exit code 0, got %d; stderr=%q", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "agent: codex") {
-		t.Fatalf("stdout missing agent line: %q", stdout.String())
-	}
-	body, err := os.ReadFile(filepath.Join(dir, ".devcontainer", "Dockerfile"))
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
-	}
-	if !strings.Contains(string(body), "npm install -g @openai/codex") {
-		t.Fatalf("Dockerfile missing codex recipe:\n%s", string(body))
-	}
-}
-
-func TestRunSandboxInitAgentFlagRejectsUnknownAgent(t *testing.T) {
-	dir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-
-	var stdout, stderr bytes.Buffer
-	code := run([]string{"sandbox", "init", "--agent=bogus"}, newTestRegistry(), &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("expected exit code 1, got %d", code)
-	}
-	if !strings.Contains(stderr.String(), `unknown agent: "bogus"`) {
-		t.Fatalf("stderr = %q", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "available agents:") {
-		t.Fatalf("stderr missing agent list: %q", stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(dir, ".devcontainer")); !os.IsNotExist(err) {
-		t.Fatalf("scaffold should not be written for unknown agent: stat err = %v", err)
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"sandbox", "init", arg}, newTestRegistry(), &stdout, &stderr)
+		if code != 1 {
+			t.Fatalf("%s: expected exit code 1, got %d; stderr=%q", arg, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "flag provided but not defined: -agent") {
+			t.Fatalf("%s: stderr missing flag error: %q", arg, stderr.String())
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".devcontainer", "devcontainer.json")); !os.IsNotExist(err) {
+			t.Fatalf("%s: scaffold should not be written when the flag is rejected: stat err = %v", arg, err)
+		}
 	}
 }
 
@@ -7218,7 +7194,6 @@ func TestPreviewSuiteRefs_NonOKSurfacesDaemonError(t *testing.T) {
 		}
 	}
 }
-
 
 // TestRunSandboxBuildRejectsPodman is the CLI-surface regression test for
 // #1051: passing --runtime=podman to `sandbox build` must surface the
