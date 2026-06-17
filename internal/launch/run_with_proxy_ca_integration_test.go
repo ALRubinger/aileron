@@ -48,7 +48,7 @@ import (
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
-const runWithProxyCATestImage = "aileron/sandbox-base:run-with-proxy-ca-test"
+const runWithProxyCATestImage = "aileron-sandbox-base:run-with-proxy-ca-test"
 
 func TestRunWithProxyCAPassesFlaggedCommand(t *testing.T) {
 	rt, err := sandboxcontainer.ResolveRuntime("docker")

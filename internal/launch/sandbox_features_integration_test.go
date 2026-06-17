@@ -10,7 +10,7 @@
 // It drives @devcontainers/cli directly (NOT Aileron's own
 // composition.Discover build path — that wiring is #1083's scope):
 //
-//   - Build the aileron/sandbox-base image (Tier base) via the Builder.
+//   - Build the aileron-sandbox-base image (Tier base) via the Builder.
 //   - Generate a minimal devcontainer.json that FROMs the freshly built base
 //     and references the local Feature directory by path.
 //   - `devcontainer build` the composed image.
@@ -45,7 +45,7 @@ import (
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
-const sandboxFeaturesBaseImage = "aileron/sandbox-base:features-test"
+const sandboxFeaturesBaseImage = "aileron-sandbox-base:features-test"
 
 // sandboxFeatureCase is one agent's build-and-verify contract.
 type sandboxFeatureCase struct {

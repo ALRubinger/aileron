@@ -19,7 +19,9 @@ const (
 	// naming a dockerfile. `sandbox init` no longer scaffolds this file.
 	DefaultDockerfilePath = ".devcontainer/Dockerfile"
 	// DefaultBaseImageRepository is the image Aileron owns for Tier 0 and Tier 1.
-	DefaultBaseImageRepository = "aileron/sandbox-base"
+	// It is published to GHCR by the sandbox-base CI workflow and mirrors the
+	// DefaultFeatureRepository prefix style.
+	DefaultBaseImageRepository = "ghcr.io/alrubinger/aileron-sandbox-base"
 	// DefaultFeatureRepository is the registry path that hosts Aileron's
 	// per-agent devcontainer Features. The scaffold composes one of these
 	// Features (see FeatureReference) into the starter devcontainer.json, and

@@ -29,7 +29,7 @@ The scaffold composes the base image with the Claude agent Feature as the worked
 ```jsonc
 {
   "name": "Aileron sandbox",
-  "image": "aileron/sandbox-base:<version>",
+  "image": "ghcr.io/alrubinger/aileron-sandbox-base:<version>",
   "features": {
     // The agent Feature installs the agent CLI onto the base image. Swap
     // "claude" for another published agent (e.g. "codex"), or list several.
@@ -60,14 +60,14 @@ With no `.devcontainer/devcontainer.json`, the output is Tier 0:
 
 ```text
 tier: base
-image: aileron/sandbox-base:latest
+image: ghcr.io/alrubinger/aileron-sandbox-base:latest
 ```
 
 With the starter scaffold, the output is Tier 1 and names the composed devcontainer:
 
 ```text
 tier: devcontainer
-image: aileron/sandbox-base:latest
+image: ghcr.io/alrubinger/aileron-sandbox-base:latest
 devcontainer: .devcontainer/devcontainer.json
 ```
 

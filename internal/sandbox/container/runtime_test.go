@@ -82,16 +82,16 @@ func TestBuildBaseImageUsesLocalContainerfile(t *testing.T) {
 		WorkDir: dir,
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if !result.Built || result.Image != "aileron/sandbox-base:test" {
+	if !result.Built || result.Image != "aileron-sandbox-base:test" {
 		t.Fatalf("result = %+v", result)
 	}
-	want := []string{"build", "-t", "aileron/sandbox-base:test", "-f", containerfile, filepath.Dir(containerfile)}
+	want := []string{"build", "-t", "aileron-sandbox-base:test", "-f", containerfile, filepath.Dir(containerfile)}
 	if runner.name != "docker" || !reflect.DeepEqual(runner.args, want) {
 		t.Fatalf("runner = %s %#v, want docker %#v", runner.name, runner.args, want)
 	}
@@ -310,7 +310,7 @@ func TestBuildBaseImageAutoSkipsExistingImage(t *testing.T) {
 		Policy:  BuildPolicyAuto,
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err != nil {
@@ -319,7 +319,7 @@ func TestBuildBaseImageAutoSkipsExistingImage(t *testing.T) {
 	if result.Built {
 		t.Fatalf("result.Built = true, want false")
 	}
-	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", "aileron/sandbox-base:test"}}}
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", "aileron-sandbox-base:test"}}}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
 	}
@@ -340,7 +340,7 @@ func TestBuildBaseImageAutoBuildsMissingImage(t *testing.T) {
 		Policy:  BuildPolicyAuto,
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err != nil {
@@ -350,8 +350,8 @@ func TestBuildBaseImageAutoBuildsMissingImage(t *testing.T) {
 		t.Fatalf("result.Built = false, want true")
 	}
 	want := []runnerCall{
-		{name: "docker", args: []string{"image", "inspect", "aileron/sandbox-base:test"}},
-		{name: "docker", args: []string{"build", "-t", "aileron/sandbox-base:test", "-f", containerfile, filepath.Dir(containerfile)}},
+		{name: "docker", args: []string{"image", "inspect", "aileron-sandbox-base:test"}},
+		{name: "docker", args: []string{"build", "-t", "aileron-sandbox-base:test", "-f", containerfile, filepath.Dir(containerfile)}},
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
@@ -365,7 +365,7 @@ func TestBuildBaseImageNeverRequiresExistingImage(t *testing.T) {
 		Policy:  BuildPolicyNever,
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err == nil {
@@ -383,7 +383,7 @@ func TestBuildBaseImageNeverSkipsExistingImage(t *testing.T) {
 		Policy:  BuildPolicyNever,
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err != nil {
@@ -392,7 +392,7 @@ func TestBuildBaseImageNeverSkipsExistingImage(t *testing.T) {
 	if result.Built {
 		t.Fatalf("result.Built = true, want false")
 	}
-	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", "aileron/sandbox-base:test"}}}
+	want := []runnerCall{{name: "docker", args: []string{"image", "inspect", "aileron-sandbox-base:test"}}}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("calls = %#v, want %#v", runner.calls, want)
 	}
@@ -404,7 +404,7 @@ func TestBuildRejectsUnsupportedPolicy(t *testing.T) {
 		Policy:  "sometimes",
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err == nil {
@@ -460,7 +460,7 @@ func TestBuildBaseImageRejectsUnsupportedRuntime(t *testing.T) {
 		WorkDir: t.TempDir(),
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err == nil {
@@ -591,7 +591,7 @@ func TestExecRunnerRun(t *testing.T) {
 }
 
 func TestBaseBuildArgsReportsMissingContext(t *testing.T) {
-	_, err := baseBuildArgs(t.TempDir(), "aileron/sandbox-base:test")
+	_, err := baseBuildArgs(t.TempDir(), "aileron-sandbox-base:test")
 	if err == nil {
 		t.Fatal("expected missing context error")
 	}
@@ -670,7 +670,7 @@ func TestBuilderStreamsRuntimeOutput(t *testing.T) {
 		WorkDir: dir,
 		Plan: composition.Plan{
 			Tier:  composition.TierBase,
-			Image: "aileron/sandbox-base:test",
+			Image: "aileron-sandbox-base:test",
 		},
 	})
 	if err != nil {
@@ -697,7 +697,7 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 	dir := t.TempDir()
 	runner := &recordingRunner{}
 	result, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image:   "aileron/sandbox-base:test",
+		Image:   "aileron-sandbox-base:test",
 		WorkDir: dir,
 		Env: map[string]string{
 			"Z_VAR": "last",
@@ -717,7 +717,7 @@ func TestRunMountsWorkspaceAndExecutesCommand(t *testing.T) {
 		"--volume", dir + ":" + WorkspacePath,
 		"--env", "A_VAR=first",
 		"--env", "Z_VAR=last",
-		"aileron/sandbox-base:test",
+		"aileron-sandbox-base:test",
 		"codex", "--model", "gpt-5",
 	}
 	if runner.name != "docker" || !reflect.DeepEqual(runner.args, want) {
@@ -730,7 +730,7 @@ func TestRunCanOverrideContainerUser(t *testing.T) {
 	dir := t.TempDir()
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image:   "aileron/sandbox-base:test",
+		Image:   "aileron-sandbox-base:test",
 		WorkDir: dir,
 		User:    "root",
 		Command: []string{"aileron-run-with-proxy-ca", "codex"},
@@ -743,7 +743,7 @@ func TestRunCanOverrideContainerUser(t *testing.T) {
 		"--user", "root",
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
-		"aileron/sandbox-base:test",
+		"aileron-sandbox-base:test",
 		"aileron-run-with-proxy-ca", "codex",
 	}
 	if !reflect.DeepEqual(runner.args, want) {
@@ -760,7 +760,7 @@ func TestRunMountsAdditionalReadOnlyVolumes(t *testing.T) {
 	}
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image:   "aileron/sandbox-base:test",
+		Image:   "aileron-sandbox-base:test",
 		WorkDir: dir,
 		Volumes: []Volume{{
 			Source:   extra,
@@ -778,7 +778,7 @@ func TestRunMountsAdditionalReadOnlyVolumes(t *testing.T) {
 		"--workdir", WorkspacePath,
 		"--volume", dir + ":" + WorkspacePath,
 		"--volume", absExtra + ":/opt/aileron/manifests/actions:ro",
-		"aileron/sandbox-base:test",
+		"aileron-sandbox-base:test",
 		"codex",
 	}
 	if !reflect.DeepEqual(runner.args, want) {
@@ -794,7 +794,7 @@ func TestRunMountsAdditionalReadWriteVolumes(t *testing.T) {
 	}
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image:   "aileron/sandbox-base:test",
+		Image:   "aileron-sandbox-base:test",
 		WorkDir: dir,
 		Volumes: []Volume{{
 			Source: extra,
@@ -821,7 +821,7 @@ func TestRunMountsAdditionalReadWriteVolumes(t *testing.T) {
 
 func TestRunRejectsIncompleteAdditionalVolume(t *testing.T) {
 	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Run(context.Background(), RunOptions{
-		Image:   "aileron/sandbox-base:test",
+		Image:   "aileron-sandbox-base:test",
 		Volumes: []Volume{{Target: "/opt/aileron/manifests/actions"}},
 		Command: []string{"codex"},
 	})
@@ -833,7 +833,7 @@ func TestRunRejectsIncompleteAdditionalVolume(t *testing.T) {
 func TestRunAddsTTYWhenRequested(t *testing.T) {
 	runner := &recordingRunner{}
 	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
-		Image:   "aileron/sandbox-base:test",
+		Image:   "aileron-sandbox-base:test",
 		Command: []string{"claude"},
 		TTY:     true,
 	})
@@ -856,7 +856,7 @@ func TestRunRejectsMissingImage(t *testing.T) {
 
 func TestRunRejectsMissingCommand(t *testing.T) {
 	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Run(context.Background(), RunOptions{
-		Image: "aileron/sandbox-base:test",
+		Image: "aileron-sandbox-base:test",
 	})
 	if err == nil {
 		t.Fatal("expected missing command error")

@@ -15,7 +15,7 @@ func TestDiscoverMissingDevcontainerUsesBaseImage(t *testing.T) {
 	if plan.Tier != TierBase {
 		t.Fatalf("Tier = %s, want %s", plan.Tier, TierBase)
 	}
-	if plan.Image != "aileron/sandbox-base:0.4.0" {
+	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-base:0.4.0" {
 		t.Fatalf("Image = %q", plan.Image)
 	}
 }
@@ -47,7 +47,7 @@ func TestDiscoverDevcontainerBuildPlan(t *testing.T) {
 	if plan.Tier != TierDevcontainer {
 		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
 	}
-	if plan.BaseImage != "aileron/sandbox-base:latest" {
+	if plan.BaseImage != "ghcr.io/alrubinger/aileron-sandbox-base:latest" {
 		t.Fatalf("BaseImage = %q", plan.BaseImage)
 	}
 	if plan.DockerfilePath != "Dockerfile" {
@@ -187,7 +187,7 @@ func TestInitWritesFeatureComposingDevcontainer(t *testing.T) {
 	if plan.Tier != TierDevcontainer {
 		t.Fatalf("Tier = %s, want %s", plan.Tier, TierDevcontainer)
 	}
-	if plan.Image != "aileron/sandbox-base:0.4.0" {
+	if plan.Image != "ghcr.io/alrubinger/aileron-sandbox-base:0.4.0" {
 		t.Fatalf("Image = %q, want the base image", plan.Image)
 	}
 	// Exactly one active Feature: the default agent Feature. The customer

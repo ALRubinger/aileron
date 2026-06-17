@@ -546,12 +546,12 @@ fi
 if [ "${2:-0}" = "1" ]; then
   if ! command -v aileron-install-proxy-ca >/dev/null 2>&1; then
     echo "sandbox proxy bootstrap requires aileron-install-proxy-ca in the sandbox image" >&2
-    echo "extend the current aileron/sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
+    echo "extend the current ghcr.io/alrubinger/aileron-sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
     exit 127
   fi
   if ! command -v aileron-run-with-proxy-ca >/dev/null 2>&1; then
     echo "sandbox proxy bootstrap requires aileron-run-with-proxy-ca in the sandbox image" >&2
-    echo "extend the current aileron/sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
+    echo "extend the current ghcr.io/alrubinger/aileron-sandbox-base image or disable AILERON_SANDBOX_PROXY_BOOTSTRAP" >&2
     exit 127
   fi
   aileron-install-proxy-ca --check "${AILERON_SANDBOX_PROXY_CA_FILE:-/etc/aileron/proxy/ca.pem}"

@@ -21,7 +21,7 @@ This page is the human-readable index of CLI commands grouped by concern. Each c
 
 | Command | Purpose | Ratified by |
 |---|---|---|
-| `aileron sandbox init [--force]` | Scaffold a Feature-composing `.devcontainer/devcontainer.json` for Tier 1 sandbox composition. It sets `aileron/sandbox-base:<version>` as the base image, lists the Claude agent Feature as the worked example, and shows a commented customer-tooling Feature slot. | [ADR-0017](/adr/0017-sandbox-composition) |
+| `aileron sandbox init [--force]` | Scaffold a Feature-composing `.devcontainer/devcontainer.json` for Tier 1 sandbox composition. It sets `ghcr.io/alrubinger/aileron-sandbox-base:<version>` as the base image, lists the Claude agent Feature as the worked example, and shows a commented customer-tooling Feature slot. | [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron sandbox plan` | Inspect the normalized composition tier and image Aileron infers from the current project. | [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron sandbox build` | Build the Tier 0 sandbox-base image or Tier 1 devcontainer image with Docker. Tier 2 BYO images are reported without build or injection. | [ADR-0017](/adr/0017-sandbox-composition) |
 | `aileron sandbox check [--runtime=auto\|docker] [--build=auto\|always\|never] --agent=<command>` | Validate that the selected sandbox image can launch an agent command before starting a session. | [ADR-0017](/adr/0017-sandbox-composition) |

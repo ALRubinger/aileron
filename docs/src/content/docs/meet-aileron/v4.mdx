@@ -139,7 +139,7 @@ In v4 these are colocated with the management plane in one daemon process. In v4
 The composed runtime environment. v4 is Docker-only; Podman is deferred behind a preserved runtime seam, not rejected ([#1050](https://github.com/ALRubinger/aileron/issues/1050)). Contents:
 
 - The agent (Claude Code or other), configured to use `HTTPS_PROXY` for credentialed outbound HTTPS, with its LLM endpoint pointed at the daemon.
-- `aileron-mcp`, registered with the agent as the Aileron tool surface. The published `aileron/sandbox-base` image bakes the binary in for sealed runtimes ([#957](https://github.com/ALRubinger/aileron/issues/957)); local Tier 0 and devcontainer images take it as a read-only host-mount for version-lockstep with the host CLI.
+- `aileron-mcp`, registered with the agent as the Aileron tool surface. The published `ghcr.io/alrubinger/aileron-sandbox-base` image bakes the binary in for sealed runtimes ([#957](https://github.com/ALRubinger/aileron/issues/957)); local Tier 0 and devcontainer images take it as a read-only host-mount for version-lockstep with the host CLI.
 - bash plus any user-installed tools. v4 does not intercept the shell. Container-only shell-layer mediation was prototyped under [#801](https://github.com/ALRubinger/aileron/issues/801) and withdrawn in [#952](https://github.com/ALRubinger/aileron/issues/952); container isolation, the credential boundary, and tool-level approval gating cover the named risks (see [ADR-0021](/adr/0021-v4-shell-layer-mediation), Withdrawn).
 - The `aileron` CLI for status queries, audit, approvals, and action browsing.
 - The proxy's CA certificate installed in the system trust store.
@@ -148,7 +148,7 @@ The composed runtime environment. v4 is Docker-only; Podman is deferred behind a
 
 ### Sandbox composition contract
 
-v4 uses `.devcontainer/devcontainer.json` as the project-local composition substrate ([ADR-0017](/adr/0017-sandbox-composition)). If the file is absent, Aileron uses `aileron/sandbox-base:<version>` directly. If present, Aileron reads standard devcontainer build/image settings and the Aileron-specific `customizations.aileron` block.
+v4 uses `.devcontainer/devcontainer.json` as the project-local composition substrate ([ADR-0017](/adr/0017-sandbox-composition)). If the file is absent, Aileron uses `ghcr.io/alrubinger/aileron-sandbox-base:<version>` directly. If present, Aileron reads standard devcontainer build/image settings and the Aileron-specific `customizations.aileron` block.
 
 ```json
 {
@@ -166,7 +166,7 @@ v4 uses `.devcontainer/devcontainer.json` as the project-local composition subst
 
 `customizations.aileron.image` selects the BYO-image tier, where Aileron uses the image as supplied and injects the runtime contract at launch: `aileron-mcp`, session env, manifest mounts, proxy bootstrap, and the session CA. Images that participate in the HTTPS proxy must include the `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers; launch validation checks the contract before the agent starts.
 
-`aileron sandbox init` scaffolds the starter `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile`. The Dockerfile extends `aileron/sandbox-base:<version>`, pre-fills the install recipe for the agent named in `--agent` (defaults to `claude`), and ships additional tool snippets commented out for you to enable as needed. Tool installation remains standard container work; Aileron does not maintain an `aileron.yaml` tool resolver.
+`aileron sandbox init` scaffolds the starter `.devcontainer/devcontainer.json` and `.devcontainer/Dockerfile`. The Dockerfile extends `ghcr.io/alrubinger/aileron-sandbox-base:<version>`, pre-fills the install recipe for the agent named in `--agent` (defaults to `claude`), and ships additional tool snippets commented out for you to enable as needed. Tool installation remains standard container work; Aileron does not maintain an `aileron.yaml` tool resolver.
 
 ## Tool discoverability
 
