@@ -1,0 +1,224 @@
+name: Sandbox Agent Image Freshness
+
+# Keeps the published per-agent sandbox images
+# (ghcr.io/alrubinger/aileron-sandbox-{claude,codex}) fresh against upstream
+# agent-CLI npm releases by detecting drift and re-triggering sandbox-agents.yml.
+#
+# Corrected mechanism (verified against shipped reality):
+#   - The agent Feature install scripts run `npm install -g <pkg>` with NO
+#     version pin (images/sandbox-features/<agent>/install.sh), so a fresh
+#     sandbox-agents.yml run already bakes the *latest* CLI at build time and
+#     stamps the resolved version into the tag. Freshness therefore needs NO
+#     source edit, only a re-trigger of the existing workflow.
+#   - The baked CLI version is recoverable from GHCR: sandbox-agents.yml pushes
+#     `edge` and `dev-<cli-version>` to the SAME digest in one workflow_dispatch
+#     build. This watcher resolves the `edge` manifest digest, finds the
+#     sibling `dev-<semver>` tag on that same digest, and parses the semver as
+#     the baked version. No OCI-label probing or image pull is required.
+#
+# Freshness target = `edge` only (and its `dev-<cli>` sibling). The watcher
+# dispatches sandbox-agents.yml on workflow_dispatch, which republishes `edge`
+# (aileron version resolves to "dev"); `latest` and the release-pinned
+# `<aileron-version>-<agent-cli-version>` tags move ONLY on `v*` tag pushes.
+# Dev/main consumers pull `edge` (per imageTag resolution in
+# internal/sandbox/composition/composition.go) and get freshness automatically.
+# `latest` freshness between releases is an ACCEPTED, INTENTIONAL gap: a release
+# is an immutable point and `latest` names the most-recent release, so a
+# background job must never clobber it. This is documented in
+# docs/src/content/docs/development/sandbox-agent-images.md.
+#
+# sandbox-agents.yml has a hardcoded [claude, codex] matrix and a bare
+# workflow_dispatch (no inputs). A single `gh workflow run sandbox-agents.yml`
+# rebuilds BOTH agents. This watcher dispatches the whole workflow when *either*
+# agent is stale; rebuilding the non-stale agent is a harmless no-op `edge`
+# republish (same digest, same version). We deliberately do NOT add a
+# workflow_dispatch input to scope dispatch per-agent (keeps sandbox-agents.yml
+# untouched, per the #1088 plan).
+#
+# Re-pushing `edge`/`dev-<cli>` to the existing aileron-sandbox-<agent> package
+# preserves its current visibility (visibility is per-package, not per-tag; the
+# packages already exist from #1086/#1138), so no visibility automation is
+# needed.
+#
+# Digest pinning of the resolved image is OUT of scope here (owned by #1233).
+#
+# Uses only GITHUB_TOKEN. No secrets, no baked credentials.
+
+on:
+  schedule:
+    # Daily at 07:00 UTC, an off-peak hour for both US and EU working days,
+    # so a drift-triggered rebuild lands before the workday rather than during
+    # peak Actions contention.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Detect drift and report without dispatching the rebuild"
+        type: boolean
+        default: true
+
+permissions:
+  # packages: read enumerates GHCR tags / resolves manifest digests.
+  # actions: write dispatches sandbox-agents.yml via `gh workflow run`.
+  # No contents: write, no packages: write — the watcher never edits the repo
+  # nor pushes images itself.
+  packages: read
+  actions: write
+
+concurrency:
+  group: sandbox-agents-watch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  watch:
+    name: Detect agent CLI drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detect drift and conditionally dispatch rebuild
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # github.event.inputs.dry_run is empty on schedule; treat empty as
+          # false so scheduled runs dispatch on drift.
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          OWNER="alrubinger"
+
+          # Agent -> npm package. Mirrors the [claude, codex] matrix in
+          # sandbox-agents.yml and NPMPackage in
+          # internal/sandbox/composition/recipes.go (the source of truth for the
+          # package names; kept inline here to avoid a repo checkout). A case
+          # lookup (not an associative array) keeps this portable across bash
+          # versions under `set -u`.
+          npm_pkg_for() {
+            case "$1" in
+              claude) echo "@anthropic-ai/claude-code" ;;
+              codex) echo "@openai/codex" ;;
+              *) return 1 ;;
+            esac
+          }
+
+          any_stale=false
+
+          {
+            echo "## Sandbox agent image freshness"
+            echo
+            echo "Mode: ${DRY_RUN:-false (scheduled)}"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Mint a GHCR registry pull token from GITHUB_TOKEN for a repository,
+          # then echo the bearer token.
+          ghcr_token() {
+            local repo="$1"
+            curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" \
+              | jq -r '.token'
+          }
+
+          # Resolve the manifest digest for a tag (works for multi-arch image
+          # indexes; we only need the digest identity, not its contents).
+          manifest_digest() {
+            local token="$1" repo="$2" ref="$3"
+            curl -fsSL -o /dev/null -D - \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json" \
+              -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+              -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/${repo}/manifests/${ref}" \
+              | tr -d '\r' \
+              | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}'
+          }
+
+          for agent in claude codex; do
+            pkg="$(npm_pkg_for "${agent}")"
+            repo="${OWNER}/aileron-sandbox-${agent}"
+
+            # npm-latest. Fail the step if it cannot be resolved: a watcher that
+            # silently can't see upstream must not pass green.
+            npm_latest="$(npm view "${pkg}" version 2>/dev/null || true)"
+            if [ -z "${npm_latest}" ]; then
+              echo "::error::Could not resolve npm-latest version for ${pkg} (agent ${agent})." >&2
+              exit 1
+            fi
+
+            token="$(ghcr_token "${repo}" || true)"
+            if [ -z "${token}" ] || [ "${token}" = "null" ]; then
+              echo "::error::Could not mint a GHCR pull token for ${repo} (agent ${agent})." >&2
+              exit 1
+            fi
+
+            edge_digest="$(manifest_digest "${token}" "${repo}" "edge" || true)"
+            if [ -z "${edge_digest}" ]; then
+              echo "::error::Could not resolve the 'edge' manifest digest for ${repo} (agent ${agent}). Has sandbox-agents.yml ever published 'edge'?" >&2
+              exit 1
+            fi
+
+            # Enumerate tags; find the dev-<semver> tag co-located on the edge
+            # digest. That semver is the baked CLI version.
+            tags="$(curl -fsSL \
+              -H "Authorization: Bearer ${token}" \
+              "https://ghcr.io/v2/${repo}/tags/list" \
+              | jq -r '.tags[]' || true)"
+            if [ -z "${tags}" ]; then
+              echo "::error::Could not enumerate tags for ${repo} (agent ${agent})." >&2
+              exit 1
+            fi
+
+            baked=""
+            while IFS= read -r tag; do
+              case "${tag}" in
+                dev-*) ;;
+                *) continue ;;
+              esac
+              d="$(manifest_digest "${token}" "${repo}" "${tag}" || true)"
+              if [ "${d}" = "${edge_digest}" ]; then
+                candidate="${tag#dev-}"
+                # Accept only a clean semver as the baked version.
+                if printf '%s' "${candidate}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+                  baked="${candidate}"
+                  break
+                fi
+              fi
+            done <<< "${tags}"
+
+            if [ -z "${baked}" ]; then
+              echo "::error::Could not parse the baked CLI version for ${repo} (agent ${agent}): no dev-<semver> tag found on the edge digest ${edge_digest}." >&2
+              exit 1
+            fi
+
+            if [ "${npm_latest}" != "${baked}" ]; then
+              any_stale=true
+              if [ "${DRY_RUN}" = "true" ]; then
+                echo "- \`${agent}\`: npm \`${npm_latest}\` vs baked \`${baked}\` → would dispatch (dry-run)" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "- \`${agent}\`: npm \`${npm_latest}\` vs baked \`${baked}\` → stale, will dispatch rebuild" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            else
+              echo "- \`${agent}\`: npm \`${npm_latest}\` vs baked \`${baked}\` → in sync, skipped" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+
+          # Conditional dispatch: any agent stale AND not a dry run.
+          if [ "${any_stale}" != "true" ]; then
+            echo "All agents in sync; no rebuild dispatched." >> "$GITHUB_STEP_SUMMARY"
+            echo "All agents in sync; no rebuild dispatched."
+            exit 0
+          fi
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "Drift detected, but dry-run requested: rebuild NOT dispatched." >> "$GITHUB_STEP_SUMMARY"
+            echo "Drift detected, but dry-run requested: rebuild NOT dispatched."
+            exit 0
+          fi
+
+          # Dispatch the whole sandbox-agents.yml (no inputs). Rebuilding the
+          # non-stale agent is a harmless no-op edge republish.
+          gh workflow run sandbox-agents.yml --ref "${GITHUB_REF_NAME}"
+          echo "Drift detected: dispatched sandbox-agents.yml to refresh edge images." >> "$GITHUB_STEP_SUMMARY"
+          echo "Drift detected: dispatched sandbox-agents.yml to refresh edge images."

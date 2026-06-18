@@ -38,7 +38,7 @@ With no `.devcontainer` in the project, `aileron launch --sandbox=docker <agent>
 
 `sandbox check --agent=<agent>` resolves the same image, so a passing check matches what launch will run.
 
-The launcher resolves a floating tag for this build-free default: a release build pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (published on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the correct in-process pin. Digest pinning and the freshness policy that consumes it are owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088); the resolver is the seam where that pinned reference plugs in.
+The launcher resolves a floating tag for this build-free default: a release build pulls `latest` (which the image workflows move only on a `v*` tag), and a dev build off `main` pulls `edge` (published on `workflow_dispatch`). So `latest` always names the most recent release and a dev run never clobbers it. A version-pinned tag (`<aileron-version>-<agent-cli-version>`) needs the agent CLI version, which the launcher does not know at resolve time, so the floating tag is the correct in-process pin. The freshness policy that keeps `edge` current is owned by [#1088](https://github.com/ALRubinger/aileron/issues/1088). Digest pinning is owned by [#1233](https://github.com/ALRubinger/aileron/issues/1233); the resolver is the seam where that pinned reference plugs in.
 
 When the requested agent has no published image, launch falls back to the customization tier. The image validation then emits the actionable message to install the agent CLI in the sandbox image or launch with `--sandbox=off`.
 
@@ -70,7 +70,13 @@ Pull a pinned version, for example Aileron `0.0.1` with the Claude CLI at `2.1.1
 docker pull ghcr.io/alrubinger/aileron-sandbox-claude:0.0.1-2.1.179
 ```
 
-CI smoke-tests every published image for launchability before it ships. The smoke asserts the agent CLI resolves on `PATH` and that the launcher's image validation succeeds. Republishing an image when a new agent CLI version releases is tracked by [#1088](https://github.com/ALRubinger/aileron/issues/1088).
+CI smoke-tests every published image for launchability before it ships. The smoke asserts the agent CLI resolves on `PATH` and that the launcher's image validation succeeds.
+
+A daily watcher workflow (`sandbox-agents-watch.yml`) keeps the `edge` images fresh against upstream agent-CLI releases. It polls npm for the latest `@anthropic-ai/claude-code` and `@openai/codex` versions. It compares each against the CLI version baked into the `edge` image, recovered from the `dev-<cli-version>` tag co-located on the `edge` manifest digest. On drift it re-triggers `sandbox-agents.yml`, which rebuilds from the unpinned Feature install scripts and so bakes the latest CLI. The refreshed build publishes `edge` and `dev-<cli-version>`. Dev and main consumers pull `edge`, so they pick up new agent CLIs automatically without a release.
+
+`latest` and the release-pinned `<aileron-version>-<agent-cli-version>` tags move on `v*` releases only, by design. A released user on `latest` stays pinned to that release's CLI version until the next release. This is intentional. A release is an immutable point and `latest` names the most-recent release, so a background job must never clobber it. Keeping `latest` fresh between releases is an accepted gap, not a bug.
+
+The watcher supports a `dry_run` `workflow_dispatch` input for demonstration, which detects and reports drift without dispatching a rebuild. It uses only `GITHUB_TOKEN` and bakes no credentials anywhere. Digest pinning of the resolved image is tracked separately by [#1233](https://github.com/ALRubinger/aileron/issues/1233).
 
 ## Claude Code Feature
 
