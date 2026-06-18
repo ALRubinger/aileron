@@ -527,6 +527,41 @@ func TestUserCredentials_InvalidServiceOmitsRawServiceFromAudit(t *testing.T) {
 	}
 }
 
+// TestUserCredentials_SessionHeaderAttributesActor proves the optional
+// X-Aileron-Session-Id header attributes a user-credential operation to that
+// session: the actor ID and the `aileron.session.id` payload key both carry the
+// sanitized value, and the slog line records `session`. Mirrors the per-agent
+// session-attribution contract for the user namespace.
+func TestUserCredentials_SessionHeaderAttributesActor(t *testing.T) {
+	s, store, logBuf := newAuditingUserCredentialsServer(t, vault.NewMemVault())
+
+	body := api.AgentCredentials{Value: []byte(vaultCredentialSecret)}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/vault/user/github/credentials",
+		bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Aileron-Session-Id", "sess-123")
+	rec := httptest.NewRecorder()
+	s.PutUserCredentials(rec, req, "github")
+	assertStatus(t, rec, http.StatusNoContent)
+
+	events := listVaultCredentialEvents(t, store)
+	ev := requireSingleEvent(t, events, model.EventTypeVaultUserCredentialWrite)
+	if ev.Actor.Type != model.ActorTypeService || ev.Actor.ID != "sess-123" {
+		t.Errorf("actor = %+v, want service/sess-123", ev.Actor)
+	}
+	if ev.Payload["aileron.session.id"] != "sess-123" {
+		t.Errorf("session id = %v, want sess-123", ev.Payload["aileron.session.id"])
+	}
+	if !strings.Contains(logBuf.String(), "session=sess-123") {
+		t.Errorf("slog line missing session attribution: %q", logBuf.String())
+	}
+	assertNoCredentialLeak(t, events, logBuf)
+}
+
 // --- 500 branches ---
 
 func TestGetUserCredentials_GetErrorReturns500(t *testing.T) {
