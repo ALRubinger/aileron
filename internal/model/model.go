@@ -317,6 +317,15 @@ const (
 	// credential is injected. See ADR-0019.
 	EventTypeSandboxProxyPassthrough EventType = "sandbox.proxy.passthrough"
 
+	// Sandbox proxy event for cooperative HTTPS requests that are a
+	// WebSocket (or other HTTP Upgrade) handshake whose upstream no
+	// installed connector spec matched. The proxy preserves the
+	// Upgrade/Connection/Sec-WebSocket-* headers, relays the upstream's
+	// 101 (or non-101) response verbatim, and opens a bidirectional byte
+	// tunnel between the in-container client and the upstream. No
+	// credential is injected. See ADR-0019.
+	EventTypeSandboxProxyUpgrade EventType = "sandbox.proxy.upgrade"
+
 	// Sandbox proxy event for launches that proceed (or refuse to
 	// proceed) without the HTTPS data-plane bootstrap. Emitted by the
 	// launcher when proxy bootstrap is opted out, preflight fails, or

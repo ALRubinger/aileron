@@ -171,6 +171,27 @@ var (
 		},
 	}
 
+	sandboxProxyUpgradeShape = sandboxProxyEventShape{
+		eventType: "sandbox.proxy.upgrade",
+		requiredFields: []string{
+			"aileron.proxy.boundary",
+			"aileron.proxy.mediation",
+			"aileron.proxy.source",
+			"aileron.proxy.decision",
+			"aileron.proxy.method",
+			"aileron.proxy.upstream.scheme",
+			"aileron.proxy.upstream.host",
+			"aileron.proxy.upstream.path",
+			"aileron.proxy.upstream.status",
+		},
+		allowedFields: []string{
+			"aileron.session.id",
+		},
+		forbiddenSubstrs: []string{
+			"lin_secret", "Bearer ", "Authorization",
+		},
+	}
+
 	sandboxProxyDisabledShape = sandboxProxyEventShape{
 		eventType: "sandbox.proxy.disabled",
 		requiredFields: []string{
@@ -272,6 +293,28 @@ func TestSandboxProxyAuditShape_SandboxProxyPassthroughConforms(t *testing.T) {
 	sandboxProxyPassthroughShape.validate(t, events[0].Payload)
 }
 
+func TestSandboxProxyAuditShape_SandboxProxyUpgradeConforms(t *testing.T) {
+	auditStore := audit.NewMemStore()
+	srv := &apiServer{
+		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-shape-upgrade" }),
+	}
+	req := httptest.NewRequest(http.MethodConnect, "/", nil)
+	req.Header.Set("X-Aileron-Session-Id", "session-shape-test")
+	upstream, _ := url.Parse("https://api.unknown.test/backend-api/codex/responses")
+	srv.recordSandboxProxyUpgrade(req, sandboxProxySourceTransparentConnectTLS, "GET", upstream, http.StatusSwitchingProtocols)
+	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventType != model.EventTypeSandboxProxyUpgrade {
+		t.Fatalf("event type = %q", events[0].EventType)
+	}
+	sandboxProxyUpgradeShape.validate(t, events[0].Payload)
+	if got := events[0].Payload["aileron.proxy.upstream.status"]; got != http.StatusSwitchingProtocols {
+		t.Errorf("upstream status = %v, want 101", got)
+	}
+}
+
 // TestSandboxProxyAuditShape_SandboxProxyDisabledConforms pins the
 // sandbox.proxy.disabled family (gate A). RecordSandboxProxyDisabled is
 // the daemon endpoint the launcher posts to once per launch session
@@ -368,6 +411,7 @@ func TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies(t *testing.T) {
 	srv.recordSandboxProxyRejected(proxyReq, sandboxProxySourceTransparentConnectTLS, fqn, "linear", "GET", upstream, op, "upstream_transport_failed")
 	srv.recordSandboxProxyProtocolRejected(proxyReq, sandboxProxySourceTransparentConnectTLS, "GET", upstream, "session_ca_unavailable")
 	srv.recordSandboxProxyPassthrough(proxyReq, sandboxProxySourceTransparentConnectTLS, "GET", upstream, 200)
+	srv.recordSandboxProxyUpgrade(proxyReq, sandboxProxySourceTransparentConnectTLS, "GET", upstream, http.StatusSwitchingProtocols)
 	srv.recordConnectorOperationRejected(proxyReq, fqn, "linear", op)
 
 	mode := "docker"
@@ -383,8 +427,8 @@ func TestSandboxProxyAuditShape_NoCredentialLeakAcrossFamilies(t *testing.T) {
 	srv.RecordSandboxProxyDisabled(httptest.NewRecorder(), disabledReq)
 
 	events, _ := auditStore.ListEvents(context.Background(), audit.EventFilter{})
-	if len(events) != 6 {
-		t.Fatalf("events = %d, want 6 (one per emitter)", len(events))
+	if len(events) != 7 {
+		t.Fatalf("events = %d, want 7 (one per emitter)", len(events))
 	}
 	for _, ev := range events {
 		payloadJSON, _ := json.Marshal(ev.Payload)

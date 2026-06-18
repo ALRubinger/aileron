@@ -664,6 +664,39 @@ func (s *apiServer) recordSandboxProxyPassthrough(r *http.Request, source, metho
 	)
 }
 
+// recordSandboxProxyUpgrade emits sandbox.proxy.upgrade for a WebSocket
+// (or other HTTP Upgrade) handshake forwarded through the passthrough
+// boundary. The upstream's handshake status is recorded; no credential
+// is injected and the tunnel bytes never appear in the payload.
+func (s *apiServer) recordSandboxProxyUpgrade(r *http.Request, source, method string, upstream *url.URL, upstreamStatus int) string {
+	if s.auditRecorder == nil {
+		if s.newID != nil {
+			return s.newID()
+		}
+		return audit.DefaultIDFn()
+	}
+	payload := map[string]any{
+		"aileron.proxy.boundary":        "https_proxy",
+		"aileron.proxy.mediation":       "https_proxy",
+		"aileron.proxy.source":          source,
+		"aileron.proxy.decision":        "upgrade",
+		"aileron.proxy.method":          method,
+		"aileron.proxy.upstream.scheme": upstream.Scheme,
+		"aileron.proxy.upstream.host":   upstream.Host,
+		"aileron.proxy.upstream.path":   sandboxProxyUpstreamPath(upstream),
+		"aileron.proxy.upstream.status": upstreamStatus,
+	}
+	if sessionID := strings.TrimSpace(r.Header.Get("X-Aileron-Session-Id")); sessionID != "" {
+		payload["aileron.session.id"] = sessionID
+	}
+	return s.auditRecorder.RecordSuccess(
+		r.Context(),
+		model.EventTypeSandboxProxyUpgrade,
+		model.ActorRef{Type: model.ActorTypeAgent, ID: "sandbox-proxy"},
+		payload,
+	)
+}
+
 // recordSandboxProxyProtocolRejected emits sandbox.proxy.rejected for
 // protocol-level failures only: non-CONNECT proxy requests, session CA
 // unavailable, connector specs invalid/unavailable, and passthrough
