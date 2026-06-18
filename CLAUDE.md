@@ -1,3 +1,23 @@
+# Worktree Discipline (enforced)
+
+All work happens in a **git worktree**, never in the primary checkout. Branch in a
+worktree → PR → squash-merge; the primary checkout only ever `git fetch` /
+`git pull --ff-only`. A direct commit on the primary checkout's default branch is
+what makes a later `git pull` report divergent branches, so it is **blocked**.
+
+Enforcement is a committed `pre-commit` hook (`.githooks/pre-commit`) that refuses
+commits made in the primary checkout (commits in linked worktrees are allowed).
+Activate it once per clone:
+
+```sh
+task setup    # sets core.hooksPath=.githooks
+```
+
+This is not advisory — it is the mechanism that keeps the default branch a clean
+fast-forward mirror of origin. Start work with `git worktree add` (or the
+`EnterWorktree` tool). A rare, deliberate primary-checkout commit can bypass with
+`ALLOW_PRIMARY_COMMIT=1 git commit ...`.
+
 # OpenAPI Spec is the Source of Truth
 
 The OpenAPI specification at `internal/api/openapi.yaml` is the authoritative definition of the Aileron API. All API changes — new endpoints, schema modifications, parameter changes — **must** be made in the spec first. The Go server interface and types are generated from it:

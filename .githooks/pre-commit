@@ -1,0 +1,36 @@
+#!/bin/sh
+# Refuse commits in the PRIMARY working tree — all work must happen in a git
+# worktree, so the primary checkout's default branch only ever fast-forwards from
+# origin (never gets a local-only commit that diverges on the next pull).
+#
+# Activate after clone with:  task setup     (sets core.hooksPath=.githooks)
+#
+# Linked worktrees have a git-dir under .../worktrees/<name>; the primary does not.
+# This hook is shared across every worktree of the repo; we allow the linked ones
+# and block only the primary checkout.
+#
+# Deliberate one-off (rare, e.g. a README edit on the default branch):
+#   ALLOW_PRIMARY_COMMIT=1 git commit ...
+
+case "$(git rev-parse --absolute-git-dir)" in
+  */worktrees/*) exit 0 ;;   # linked worktree → allowed
+esac
+
+[ -n "$ALLOW_PRIMARY_COMMIT" ] && exit 0
+
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo DETACHED)"
+cat >&2 <<EOF
+✗ Refusing to commit in the primary checkout (branch: $branch).
+
+  All work must happen in a git worktree so the default branch only
+  fast-forwards from origin. A direct commit here is what makes 'git pull'
+  report divergent branches.
+
+  Do this instead:
+    git worktree add ../<name> -b <branch>     # or use EnterWorktree
+    cd ../<name> && <make changes> && git commit ...
+
+  Deliberate one-off (rare, e.g. a README edit):
+    ALLOW_PRIMARY_COMMIT=1 git commit ...
+EOF
+exit 1

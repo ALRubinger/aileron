@@ -12,6 +12,15 @@ tasks:
     cmds:
       - task --list
 
+  setup:
+    desc: One-time local setup after clone (activates committed git hooks)
+    cmds:
+      # Point git at the committed hooks so they survive re-clone and are shared
+      # across all worktrees. The pre-commit hook refuses commits in the primary
+      # checkout, keeping the default branch a pure fast-forward mirror of origin.
+      - git config core.hooksPath .githooks
+      - 'echo "git hooks activated (core.hooksPath=.githooks)"'
+
   generate:
     desc: Run all code generators
     cmds:
