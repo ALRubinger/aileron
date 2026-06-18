@@ -133,6 +133,14 @@ type containerDeviceFlow struct {
 // container, then tears the container down. The teardown is deferred so
 // a mid-flow failure still removes the container.
 func (c *containerDeviceFlow) Capture(ctx context.Context) ([]byte, error) {
+	// Clear any container left behind by a prior run that died before its
+	// teardown (e.g. SIGKILL): the name is deterministic, so a stale
+	// container would make `run --name` fail with "name already in use".
+	// rm -f on a nonexistent name is a harmless no-op, so the error is
+	// ignored.
+	_ = c.runner.Run(ctx, c.runtimeExe,
+		[]string{"rm", "-f", c.containerName}, io.Discard, io.Discard)
+
 	// Start one long-lived container we exec into twice. --rm is not used
 	// because we explicitly `rm -f` in the deferred teardown; sleep keeps
 	// it alive between the login and token execs.
