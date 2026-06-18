@@ -165,6 +165,50 @@ func TestDiscoverDevcontainerBuildPlan(t *testing.T) {
 	}
 }
 
+func TestDiscoverParsesCachePaths(t *testing.T) {
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{
+  "customizations": {
+    "aileron": {
+      "cache_paths": [
+        {"cli": "npm", "identity": "workspace-A", "container_path": "/home/agent/.npm"},
+        {"cli": "pip", "identity": "workspace-A", "container_path": "/home/agent/.cache/pip"}
+      ]
+    }
+  }
+}`)
+
+	plan, err := Discover(dir, "dev", "")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(plan.Aileron.CachePaths) != 2 {
+		t.Fatalf("CachePaths = %+v, want 2 entries", plan.Aileron.CachePaths)
+	}
+	first := plan.Aileron.CachePaths[0]
+	if first.CLI != "npm" || first.Identity != "workspace-A" || first.ContainerPath != "/home/agent/.npm" {
+		t.Fatalf("first CachePath = %+v", first)
+	}
+	second := plan.Aileron.CachePaths[1]
+	if second.CLI != "pip" || second.ContainerPath != "/home/agent/.cache/pip" {
+		t.Fatalf("second CachePath = %+v", second)
+	}
+}
+
+func TestDiscoverNoCachePathsWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	writeDevcontainer(t, dir, `{
+  "customizations": {"aileron": {"approval_surface": "tui"}}
+}`)
+	plan, err := Discover(dir, "dev", "")
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(plan.Aileron.CachePaths) != 0 {
+		t.Fatalf("CachePaths = %+v, want none", plan.Aileron.CachePaths)
+	}
+}
+
 func TestDiscoverDevcontainerRootDockerfileAndImage(t *testing.T) {
 	dir := t.TempDir()
 	writeDevcontainer(t, dir, `{

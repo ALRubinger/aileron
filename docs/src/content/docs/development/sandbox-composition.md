@@ -191,6 +191,44 @@ Set `customizations.aileron.image` when your team owns the complete image:
 
 In BYO-image mode, launch uses the image as supplied and layers on Aileron's session env, manifest mounts, and the `aileron-mcp` tool surface. Images that participate in the v4 HTTPS proxy must include `aileron-install-proxy-ca` and `aileron-run-with-proxy-ca` helpers that meet the [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract). `aileron sandbox check --agent=...` validates both contracts for every Docker run.
 
+## Cache Volumes
+
+Tools the agent runs inside the sandbox (package managers, language toolchains) build up caches that are expensive to rebuild on every launch. Declare an Aileron-managed cache under `customizations.aileron.cache_paths` to persist one across launches in a named Docker volume:
+
+```jsonc
+{
+  "customizations": {
+    "aileron": {
+      "cache_paths": [
+        // Each entry is keyed by (cli, identity). The same key reuses the same
+        // volume across launches; a different identity keys a fresh store.
+        { "cli": "npm", "identity": "acme-workspace", "container_path": "/home/agent/.npm" },
+        { "cli": "pip", "identity": "acme-workspace", "container_path": "/home/agent/.cache/pip" }
+      ]
+    }
+  }
+}
+```
+
+Each entry has three fields:
+
+| Field | Meaning |
+|---|---|
+| `cli` | The tool the cache belongs to. Required. It is part of the volume key and is sanitized into the volume name for legibility. |
+| `identity` | The credential or workspace identity the cache is scoped to. Re-authenticating to a different identity keys a different volume, so caches never leak across identities. It is hashed into the volume name and never written to the host in plaintext. |
+| `container_path` | The absolute in-container mount point for the cache. Required. |
+
+On launch, Aileron mounts each declared cache as a read-write Docker named volume named `aileron-cache-<cli>-<hash-of-identity>`. Docker creates the volume on first mount and reuses it on every launch with the same key. The volume holds plaintext on the host, which is acceptable for v4 single-user/local mode; it is not an encrypted or sealed mount.
+
+Eviction is manual. There is no max-age or auto-expiry policy. Remove every Aileron-managed cache volume with:
+
+```bash
+aileron sandbox cache clear
+aileron sandbox cache clear --runtime=docker
+```
+
+`cache clear` removes only volumes carrying the `aileron-cache-` prefix and is safe to run between launches; Docker recreates a volume on the next launch that mounts it.
+
 ## What Belongs in the Image
 
 Put ordinary project tooling in the devcontainer: language runtimes, CLIs, package managers, private CA bundles, and internal helper tools.

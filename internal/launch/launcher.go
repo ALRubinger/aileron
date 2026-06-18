@@ -86,6 +86,10 @@ type SandboxLaunchPlan struct {
 	Image   string
 	Tier    sandboxcomposition.Tier
 	Built   bool
+	// CachePaths carries the Aileron-managed cache-volume declarations from the
+	// project's customizations.aileron block. launchSandbox turns each entry
+	// into a deterministically named Docker volume mounted at ContainerPath.
+	CachePaths []sandboxcomposition.CachePath
 }
 
 // ResolveBinary searches PATH for the first matching binary name from
@@ -221,19 +225,21 @@ func prepareSandbox(ctx context.Context, workDir, agent, runtimeName, buildPolic
 			return SandboxLaunchPlan{}, runtimeErr
 		}
 		return SandboxLaunchPlan{
-			Runtime: runtime,
-			Image:   result.Image,
-			Tier:    result.Tier,
+			Runtime:    runtime,
+			Image:      result.Image,
+			Tier:       result.Tier,
+			CachePaths: plan.Aileron.CachePaths,
 		}, nil
 	}
 	if err != nil {
 		return SandboxLaunchPlan{}, err
 	}
 	return SandboxLaunchPlan{
-		Runtime: result.Runtime,
-		Image:   result.Image,
-		Tier:    result.Tier,
-		Built:   result.Built,
+		Runtime:    result.Runtime,
+		Image:      result.Image,
+		Tier:       result.Tier,
+		Built:      result.Built,
+		CachePaths: plan.Aileron.CachePaths,
 	}, nil
 }
 
@@ -819,6 +825,16 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	}
 	mounts = append(mounts, extraMounts...)
 
+	// Aileron-managed cache volumes: each declared (CLI, identity) cache becomes
+	// a deterministically named Docker volume mounted read-write at its
+	// container path. Docker auto-creates the volume on first mount and persists
+	// it across launches; re-auth to a different identity keys a fresh volume.
+	cacheMounts, err := sandboxCacheVolumes(plan.CachePaths)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	mounts = append(mounts, cacheMounts...)
+
 	// Unbaked image: resolve aileron-mcp on the host and bind-mount it
 	// read-only at the container's well-known MCP binary path. Matches the
 	// resolution shape host launch uses (ADR-0024). Sandbox-flavored lookup
@@ -1063,6 +1079,38 @@ func sandboxRuntimeMounts() ([]sandboxcontainer.Volume, error) {
 			continue
 		}
 		mounts = append(mounts, candidate)
+	}
+	return mounts, nil
+}
+
+// sandboxCacheVolumes maps each declared cache path to a Docker named-volume
+// mount. The volume name is derived deterministically from (CLI, identity) so a
+// tool's cache survives across launches while a different identity keys a fresh
+// store. ContainerPath must be an absolute in-container path; a CLI is required
+// because it is part of the volume key. The volumes are mounted read-write
+// (caches are writable by definition).
+func sandboxCacheVolumes(paths []sandboxcomposition.CachePath) ([]sandboxcontainer.Volume, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	mounts := make([]sandboxcontainer.Volume, 0, len(paths))
+	for _, p := range paths {
+		cli := strings.TrimSpace(p.CLI)
+		if cli == "" {
+			return nil, fmt.Errorf("sandbox cache path requires a cli")
+		}
+		containerPath := strings.TrimSpace(p.ContainerPath)
+		if containerPath == "" {
+			return nil, fmt.Errorf("sandbox cache path for cli %q requires a container_path", cli)
+		}
+		if !path.IsAbs(containerPath) {
+			return nil, fmt.Errorf("sandbox cache container_path %q for cli %q must be absolute", containerPath, cli)
+		}
+		mounts = append(mounts, sandboxcontainer.Volume{
+			Source: sandboxcomposition.CacheVolumeName(cli, p.Identity),
+			Target: containerPath,
+			Named:  true,
+		})
 	}
 	return mounts, nil
 }

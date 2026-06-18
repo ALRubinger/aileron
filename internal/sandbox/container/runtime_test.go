@@ -1013,6 +1013,69 @@ func TestRunMountsAdditionalReadWriteVolumes(t *testing.T) {
 	}
 }
 
+func TestRunMountsNamedVolumeVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image:   "aileron-sandbox-base:test",
+		WorkDir: dir,
+		Volumes: []Volume{{
+			Source: "aileron-cache-npm-deadbeef0123",
+			Target: "/home/agent/.npm",
+			Named:  true,
+		}},
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// A named volume must be emitted verbatim as <name>:<target>; filepath.Abs
+	// must NOT run on it (that would mangle the volume name into a host path).
+	wantSpec := "aileron-cache-npm-deadbeef0123:/home/agent/.npm"
+	found := false
+	for i := 0; i < len(runner.args)-1; i++ {
+		if runner.args[i] == "--volume" && runner.args[i+1] == wantSpec {
+			found = true
+		}
+		// Guard against the named volume being absolutized: no arg may contain
+		// the workdir-joined form of the volume name.
+		if strings.Contains(runner.args[i+1], filepath.Join(dir, "aileron-cache-npm-deadbeef0123")) {
+			t.Fatalf("named volume was absolutized: %q", runner.args[i+1])
+		}
+	}
+	if !found {
+		t.Fatalf("named volume spec %q missing from args: %#v", wantSpec, runner.args)
+	}
+}
+
+func TestRunMountsNamedVolumeReadOnly(t *testing.T) {
+	runner := &recordingRunner{}
+	_, err := Builder{Runtime: "docker", Runner: runner}.Run(context.Background(), RunOptions{
+		Image: "aileron-sandbox-base:test",
+		Volumes: []Volume{{
+			Source:   "aileron-cache-pip-abc123",
+			Target:   "/cache",
+			Named:    true,
+			ReadOnly: true,
+		}},
+		Command: []string{"codex"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	wantSpec := "aileron-cache-pip-abc123:/cache:ro"
+	found := false
+	for i := 0; i < len(runner.args)-1; i++ {
+		if runner.args[i] == "--volume" && runner.args[i+1] == wantSpec {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("read-only named volume spec %q missing from args: %#v", wantSpec, runner.args)
+	}
+}
+
 func TestRunRejectsIncompleteAdditionalVolume(t *testing.T) {
 	_, err := Builder{Runtime: "docker", Runner: &recordingRunner{}}.Run(context.Background(), RunOptions{
 		Image:   "aileron-sandbox-base:test",
