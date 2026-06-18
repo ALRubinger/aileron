@@ -12,9 +12,13 @@
 # Deliberate one-off (rare, e.g. a README edit on the default branch):
 #   ALLOW_PRIMARY_COMMIT=1 git commit ...
 
-case "$(git rev-parse --absolute-git-dir)" in
-  */worktrees/*) exit 0 ;;   # linked worktree → allowed
-esac
+# A linked worktree's git-dir differs from the common git-dir; the primary
+# checkout's two are identical. Comparing them is path-name agnostic — a repo
+# that happens to live under a directory named "worktrees" won't fool it.
+gitdir="$(git rev-parse --absolute-git-dir)"
+commondir="$(git rev-parse --git-common-dir)"
+case "$commondir" in /*) ;; *) commondir="$(CDPATH= cd -- "$commondir" && pwd)" ;; esac
+[ "$gitdir" != "$commondir" ] && exit 0   # linked worktree → allowed
 
 [ -n "$ALLOW_PRIMARY_COMMIT" ] && exit 0
 
