@@ -1,8 +1,10 @@
 package launch
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
+	"strings"
 	"testing"
 )
 
@@ -34,5 +36,24 @@ func TestOpenControllingTerminal(t *testing.T) {
 
 	if f.Fd() == 0 && f.Name() == "" {
 		t.Fatalf("openControllingTerminal returned an unusable handle")
+	}
+}
+
+// TestPromptAndOpenVault_NoTerminalFailsGracefully exercises the real
+// default vault prompter (not the injectable `OpenVaultFunc` seam) when no
+// controlling terminal is available. The contract is that it surfaces a
+// clear "cannot open terminal" error rather than hanging or panicking. We
+// guard against a hang by only running when the terminal is genuinely
+// absent; if a tty is attached, term.ReadPassword would block, so we skip.
+func TestPromptAndOpenVault_NoTerminalFailsGracefully(t *testing.T) {
+	if f, err := openControllingTerminal(); err == nil {
+		f.Close()
+		t.Skip("controlling terminal present; skipping to avoid blocking on read")
+	}
+	var buf bytes.Buffer
+	if _, err := promptAndOpenVault(&buf); err == nil {
+		t.Fatal("expected error when no controlling terminal is available")
+	} else if !strings.Contains(err.Error(), "cannot open terminal") {
+		t.Fatalf("err = %v, want 'cannot open terminal'", err)
 	}
 }

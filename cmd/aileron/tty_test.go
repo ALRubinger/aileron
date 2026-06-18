@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
+	"strings"
 	"testing"
 )
 
@@ -35,5 +37,25 @@ func TestOpenControllingTerminal(t *testing.T) {
 
 	if f.Fd() == 0 && f.Name() == "" {
 		t.Fatalf("openControllingTerminal returned an unusable handle")
+	}
+}
+
+// TestDefaultPromptPassphrase_NoTerminalFailsGracefully exercises the real
+// default prompt (not the injectable `promptPassphrase` seam) when no
+// controlling terminal is available. The contract is that it surfaces a
+// clear "cannot open terminal" error rather than hanging or panicking — the
+// same fallback a user hits running non-interactively. We guard against a
+// hang by only running when the terminal is genuinely absent; if a tty is
+// attached, term.ReadPassword would block, so we skip.
+func TestDefaultPromptPassphrase_NoTerminalFailsGracefully(t *testing.T) {
+	if f, err := openControllingTerminal(); err == nil {
+		f.Close()
+		t.Skip("controlling terminal present; skipping to avoid blocking on read")
+	}
+	var buf bytes.Buffer
+	if _, err := defaultPromptPassphrase("passphrase: ", &buf); err == nil {
+		t.Fatal("expected error when no controlling terminal is available")
+	} else if !strings.Contains(err.Error(), "cannot open terminal") {
+		t.Fatalf("err = %v, want 'cannot open terminal'", err)
 	}
 }
