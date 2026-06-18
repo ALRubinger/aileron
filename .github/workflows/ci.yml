@@ -476,7 +476,42 @@ jobs:
 
       - name: Install Playwright browsers
         working-directory: webapp
-        run: pnpm exec playwright install --with-deps chromium
+        # #1218: bound the apt acquire path so a stalled or unreachable apt
+        # mirror fails fast instead of hanging unbounded. The apt config is the
+        # real fail-fast lever: `Acquire::http::Timeout` aborts any single
+        # connection that stalls for 30s, and `Acquire::Retries` retries it a
+        # few times before giving up. A stalled/unreachable mirror can no
+        # longer hang the install indefinitely; apt itself bounds every
+        # acquire. The retry loop wraps the whole install (apt-get internal to
+        # `--with-deps` *and* the browser download) for transient failures;
+        # before each retry it heals any half-applied dpkg state with
+        # `dpkg --configure -a` + `apt-get -f install` so a retry can succeed
+        # rather than dying on a stale dpkg lock. `timeout --kill-after` is a
+        # belt-and-suspenders ceiling that escalates SIGTERM->SIGKILL.
+        run: |
+          sudo tee /etc/apt/apt.conf.d/99aileron-ci-timeouts >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          EOF
+          for attempt in 1 2 3; do
+            if timeout --kill-after=30 900 pnpm exec playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "Playwright install attempt ${attempt} failed; healing dpkg state and retrying" >&2
+            # `timeout` only signals the direct child; an apt-get spawned by
+            # `--with-deps` can be orphaned and keep holding the dpkg lock.
+            # Reap any lingering apt/dpkg, then repair half-applied state so
+            # the next attempt does not die on a stale lock.
+            sudo pkill -9 -x apt-get || true
+            sudo pkill -9 -x dpkg || true
+            sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock || true
+            sudo dpkg --configure -a || true
+            sudo apt-get -f install -y || true
+            sleep $((attempt * 15))
+          done
+          echo "Playwright install failed after 3 attempts" >&2
+          exit 1
 
       - name: Run integration E2E (real daemon + seed fixture)
         run: webapp/scripts/run-integration-e2e.sh
@@ -790,9 +825,43 @@ jobs:
 
       - name: Install Playwright dependencies
         working-directory: ui
+        # #1218: bound the apt acquire path so a stalled or unreachable apt
+        # mirror fails fast instead of hanging unbounded. The apt config is the
+        # real fail-fast lever: `Acquire::http::Timeout` aborts any single
+        # connection that stalls for 30s, and `Acquire::Retries` retries it a
+        # few times before giving up. A stalled/unreachable mirror can no
+        # longer hang the install indefinitely; apt itself bounds every
+        # acquire. The retry loop wraps the whole install (apt-get internal to
+        # `--with-deps` *and* the browser download) for transient failures;
+        # before each retry it heals any half-applied dpkg state with
+        # `dpkg --configure -a` + `apt-get -f install` so a retry can succeed
+        # rather than dying on a stale dpkg lock. `timeout --kill-after` is a
+        # belt-and-suspenders ceiling that escalates SIGTERM->SIGKILL.
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec playwright install --with-deps chromium
+          sudo tee /etc/apt/apt.conf.d/99aileron-ci-timeouts >/dev/null <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          EOF
+          for attempt in 1 2 3; do
+            if timeout --kill-after=30 900 pnpm exec playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "Playwright install attempt ${attempt} failed; healing dpkg state and retrying" >&2
+            # `timeout` only signals the direct child; an apt-get spawned by
+            # `--with-deps` can be orphaned and keep holding the dpkg lock.
+            # Reap any lingering apt/dpkg, then repair half-applied state so
+            # the next attempt does not die on a stale lock.
+            sudo pkill -9 -x apt-get || true
+            sudo pkill -9 -x dpkg || true
+            sudo rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock || true
+            sudo dpkg --configure -a || true
+            sudo apt-get -f install -y || true
+            sleep $((attempt * 15))
+          done
+          echo "Playwright install failed after 3 attempts" >&2
+          exit 1
 
       - name: Run Playwright integration E2E tests
         working-directory: ui
