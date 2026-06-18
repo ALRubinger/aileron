@@ -14,20 +14,57 @@ import (
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
 )
 
-// dropBakedInspectCalls removes the baked-MCP image-label detection calls
-// (`docker image inspect --format '{{ ... ai.aileron.mcp.version }}'`) the
-// launcher issues to choose between the host-mount and baked paths (#957).
-// validateSandbox and launchSandbox each issue one; the surrounding contract
-// assertions care only about the build/validate/run calls.
-func dropBakedInspectCalls(calls []string) []string {
+// dropAuxiliaryDockerCalls removes the launcher's out-of-band runtime calls
+// so the surrounding contract assertions count only the build/validate/run
+// sequence. Two kinds are dropped:
+//
+//   - the baked-MCP image-label detection calls
+//     (`docker image inspect --format '{{ ... ai.aileron.mcp.version }}'`) the
+//     launcher issues to choose between the host-mount and baked paths (#957);
+//     validateSandbox and launchSandbox each issue one.
+//   - the Linux-only no-op-gitconfig chown helper call
+//     (`docker run --entrypoint chown ... -R <uid> /mnt`) that the
+//     always-mount gitconfig path delegates to a short-lived root container so
+//     the non-root agent can read the host-owned bind-mounted dir (#1204).
+//     It fires only on linux and only when the image resolves a non-root agent
+//     UID, so without dropping it call-count assertions are platform-dependent.
+func dropAuxiliaryDockerCalls(calls []string) []string {
 	out := make([]string, 0, len(calls))
 	for _, c := range calls {
 		if strings.Contains(c, sandboxcontainer.MCPVersionLabel) {
 			continue
 		}
+		if strings.Contains(c, "--entrypoint\nchown") {
+			continue
+		}
 		out = append(out, c)
 	}
 	return out
+}
+
+// TestDropAuxiliaryDockerCalls pins the filter that makes call-count
+// assertions platform-independent: the launcher's out-of-band image-inspect
+// and (linux-only) no-op-gitconfig chown helper calls must be dropped while
+// the build/validate/run sequence is preserved. Regression for #1204: the
+// always-mount gitconfig path added a `docker run --entrypoint chown` call on
+// linux that broke TestLaunch_SandboxScaffoldBuildsAndRuns' "exactly two
+// calls" assertion (the call is a no-op on darwin, so it only failed in CI).
+func TestDropAuxiliaryDockerCalls(t *testing.T) {
+	inspectCall := "image\ninspect\n--format\n{{ index .Config.Labels \"" + sandboxcontainer.MCPVersionLabel + "\" }}\nimg:test"
+	chownCall := "run\n--rm\n--user\n0\n--entrypoint\nchown\n--volume\n/host/transient:/mnt\nimg:test\n-R\n1000\n/mnt"
+	validateCall := "run\n--rm\nimg:test\n/bin/sh\n-c\nprobe"
+	runCall := "run\n--rm\n-it\nimg:test"
+
+	got := dropAuxiliaryDockerCalls([]string{inspectCall, validateCall, chownCall, runCall})
+	want := []string{validateCall, runCall}
+	if len(got) != len(want) {
+		t.Fatalf("dropAuxiliaryDockerCalls kept %d calls, want %d:\n%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("call %d = %q, want %q", i, got[i], want[i])
+		}
+	}
 }
 
 func TestResolveBinary_Found(t *testing.T) {
@@ -713,7 +750,7 @@ func TestLaunch_SandboxDiscoverySmokeMountsShimsForValidateAndRun(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read docker args: %v", err)
 	}
-	calls := dropBakedInspectCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
+	calls := dropAuxiliaryDockerCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
 	if len(calls) != 2 {
 		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
 	}
@@ -813,7 +850,7 @@ func TestLaunch_SandboxConnectorSpecPresentEmitsNoShim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docker args: %v", err)
 	}
-	calls := dropBakedInspectCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
+	calls := dropAuxiliaryDockerCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
 	if len(calls) != 2 {
 		t.Fatalf("docker calls = %d, want validate and run:\n%s", len(calls), data)
 	}
@@ -902,7 +939,7 @@ func TestLaunch_SandboxScaffoldBuildsAndRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docker args: %v", err)
 	}
-	calls := dropBakedInspectCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
+	calls := dropAuxiliaryDockerCalls(strings.Split(strings.TrimPrefix(string(data), "---\n"), "\n---\n"))
 	if len(calls) != 2 {
 		t.Fatalf("docker calls = %d, want validate and run (build runs via @devcontainers/cli):\n%s", len(calls), data)
 	}
