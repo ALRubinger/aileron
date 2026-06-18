@@ -680,3 +680,35 @@ func TestCollapseNestedMCPMounts_PreservesNonNestedMount(t *testing.T) {
 		t.Errorf("non-nested mount ReadOnly = false, want preserved true")
 	}
 }
+
+// TestCollapseNestedMCPMounts_MissingSourceErrors confirms a relocation
+// surfaces an error when the rendered MCP config file is missing rather
+// than silently dropping it — a launch must fail loudly if the agent's
+// ConfigureMCP promised a file that is not on disk.
+func TestCollapseNestedMCPMounts_MissingSourceErrors(t *testing.T) {
+	existing := []sandboxcontainer.Volume{
+		{Source: t.TempDir(), Target: "/home/agent/.codex", ReadOnly: false},
+	}
+	mcp := []MCPMount{
+		{Source: filepath.Join(t.TempDir(), "does-not-exist.toml"), Target: "/home/agent/.codex/config.toml", ReadOnly: true},
+	}
+	if _, err := collapseNestedMCPMounts(existing, mcp); err == nil {
+		t.Fatal("expected error for missing MCP config source, got nil")
+	}
+}
+
+// TestEnclosingDirMount_IdentityTargetNotEnclosing confirms a mount whose
+// target exactly equals another mount's target is not treated as nested
+// (only a strict parent encloses), so an identical-target MCP mount is
+// appended rather than relocated.
+func TestEnclosingDirMount_IdentityTargetNotEnclosing(t *testing.T) {
+	mounts := []sandboxcontainer.Volume{
+		{Source: "/h/a", Target: "/home/agent/.codex"},
+	}
+	if got := enclosingDirMount(mounts, "/home/agent/.codex"); got != nil {
+		t.Fatalf("enclosingDirMount returned %+v for identical target, want nil", got)
+	}
+	if got := enclosingDirMount(mounts, "/home/agent/.codex/config.toml"); got == nil {
+		t.Fatal("enclosingDirMount returned nil for nested target, want the dir mount")
+	}
+}
