@@ -347,6 +347,12 @@ tasks:
     cmds:
       - go test -tags=integration_sandbox -race -run TestSandboxMCP ./internal/app/...
 
+  test:integration:auth-github-route:
+    desc: "Run the auth github route-drift guard (#1157): stands up the real daemon handler over a MemVault and asserts the CLI's hardcoded vault path still resolves to the spec-registered route. In-process, no external prereqs (no self-skip)."
+    dir: cmd/aileron
+    cmds:
+      - go test -tags=integration -race -run TestRunAuthGitHub_PUTReachesRealDaemonRoute .
+
   test:integration:authspec-bindmount:
     desc: "Run the AuthSpec bind-mount writability integration test on a Linux Docker host (#988); self-skips on non-Linux or when no Docker runtime is on PATH"
     dir: internal

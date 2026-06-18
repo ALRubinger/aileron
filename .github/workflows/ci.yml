@@ -612,6 +612,21 @@ jobs:
         run: go test -tags=integration_sandbox -race -run TestSandboxMCP ./app/...
         working-directory: internal
 
+      - name: Run auth github route-drift guard (#1157)
+        # Guards against silent drift between the CLI's HARDCODED vault path
+        # in cmd/aileron/auth_github.go ("/vault/user/github/credentials") and
+        # the daemon's spec-registered route ("/v1/vault/user/{service}/
+        # credentials"). The build-tagged test stands up the real daemon
+        # handler over a MemVault, points runAuthGitHub at it with a stubbed
+        # device flow, and asserts the PUT resolves to the real handler (exit
+        # 0 / "Stored user/github") rather than 404/405. It is in-process with
+        # no external prereqs, so it never self-skips. Build-tagged
+        # (`integration`) so it stays out of the default unit suite; this
+        # dedicated step is the only place it runs. Additive step so a failure
+        # is attributable to this specific contract.
+        run: go test -tags=integration -race -run TestRunAuthGitHub_PUTReachesRealDaemonRoute .
+        working-directory: cmd/aileron
+
       - name: Stop server to flush coverage data
         if: ${{ !cancelled() }}
         run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.coverage.yml stop server
