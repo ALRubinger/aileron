@@ -16,22 +16,30 @@ import (
 
 // dropAuxiliaryDockerCalls removes the launcher's out-of-band runtime calls
 // so the surrounding contract assertions count only the build/validate/run
-// sequence. Two kinds are dropped:
+// sequence. Three kinds are dropped:
 //
 //   - the baked-MCP image-label detection calls
 //     (`docker image inspect --format '{{ ... ai.aileron.mcp.version }}'`) the
 //     launcher issues to choose between the host-mount and baked paths (#957);
 //     validateSandbox and launchSandbox each issue one.
-//   - the Linux-only no-op-gitconfig chown helper call
-//     (`docker run --entrypoint chown ... -R <uid> /mnt`) that the
-//     always-mount gitconfig path delegates to a short-lived root container so
-//     the non-root agent can read the host-owned bind-mounted dir (#1204).
-//     It fires only on linux and only when the image resolves a non-root agent
-//     UID, so without dropping it call-count assertions are platform-dependent.
+//   - the Linux-only agent-UID resolution inspect
+//     (`docker image inspect --format '{{.Config.User}}'`) the no-op-gitconfig
+//     chown hook issues to decide whether the host-owned bind-mounted dir
+//     needs chowning to the image's non-root agent UID (#1204, agent_uid.go).
+//   - the Linux-only chown helper call itself
+//     (`docker run --entrypoint chown ... -R <uid> /mnt`), delegated to a
+//     short-lived root container when that UID is non-root.
+//
+// The latter two fire only on linux (the hook returns early on other GOOS),
+// so without dropping them call-count assertions are platform-dependent —
+// the cause of the #1204 CI-only regression in TestLaunch_SandboxScaffold*.
 func dropAuxiliaryDockerCalls(calls []string) []string {
 	out := make([]string, 0, len(calls))
 	for _, c := range calls {
 		if strings.Contains(c, sandboxcontainer.MCPVersionLabel) {
+			continue
+		}
+		if strings.Contains(c, "{{.Config.User}}") {
 			continue
 		}
 		if strings.Contains(c, "--entrypoint\nchown") {
@@ -50,12 +58,13 @@ func dropAuxiliaryDockerCalls(calls []string) []string {
 // linux that broke TestLaunch_SandboxScaffoldBuildsAndRuns' "exactly two
 // calls" assertion (the call is a no-op on darwin, so it only failed in CI).
 func TestDropAuxiliaryDockerCalls(t *testing.T) {
-	inspectCall := "image\ninspect\n--format\n{{ index .Config.Labels \"" + sandboxcontainer.MCPVersionLabel + "\" }}\nimg:test"
+	mcpInspect := "image\ninspect\n--format\n{{ index .Config.Labels \"" + sandboxcontainer.MCPVersionLabel + "\" }}\nimg:test"
+	uidInspect := "image\ninspect\n--format\n{{.Config.User}}\nimg:test"
 	chownCall := "run\n--rm\n--user\n0\n--entrypoint\nchown\n--volume\n/host/transient:/mnt\nimg:test\n-R\n1000\n/mnt"
 	validateCall := "run\n--rm\nimg:test\n/bin/sh\n-c\nprobe"
 	runCall := "run\n--rm\n-it\nimg:test"
 
-	got := dropAuxiliaryDockerCalls([]string{inspectCall, validateCall, chownCall, runCall})
+	got := dropAuxiliaryDockerCalls([]string{mcpInspect, validateCall, uidInspect, chownCall, runCall})
 	want := []string{validateCall, runCall}
 	if len(got) != len(want) {
 		t.Fatalf("dropAuxiliaryDockerCalls kept %d calls, want %d:\n%v", len(got), len(want), got)
