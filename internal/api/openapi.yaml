@@ -784,6 +784,162 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/vault/user/{service}/credentials:
+    parameters:
+      - name: service
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        description: |
+          User-level service identifier (e.g. "github", "gitlab"). This
+          namespace is agent-independent: the credential belongs to the
+          user, not to a single agent. The daemon scopes the underlying
+          vault path to `user/<service>` with no purpose suffix (contrast
+          the per-agent `agents/<name>/oauth` scheme).
+
+          Because `{service}` flows straight into the raw vault map key,
+          the daemon validates it against `^[a-z0-9][a-z0-9_-]*$` before
+          constructing the path. A value containing `/`, `..`, or
+          percent-encoded separators is rejected with `400`
+          (`invalid_request`) so it cannot escape the `user/` namespace.
+    get:
+      tags: [Vault]
+      summary: Read the user-level credential envelope from the local vault
+      description: |
+        Returns the credential envelope (`{value: base64, metadata: {...}}`)
+        stored for a user-level service at `user/<service>`. Unlike the
+        per-agent endpoint, this credential is agent-independent: it is the
+        backing store for user-scoped capture (#1148) and injection (#1149).
+        The daemon owns the unlocked vault per ADR-0011/0012; callers must
+        not open the vault file themselves.
+
+        Error codes are surfaced in the response body so callers
+        discriminate by code rather than status alone:
+          - `vault_not_found` (404) — no entry at `user/<service>`.
+          - `vault_locked` (423) — the local vault is locked; unlock it
+            before reading user credentials.
+      operationId: getUserCredentials
+      security: []
+      responses:
+        "200":
+          description: Credential envelope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCredentials"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No credential entry at the user service vault path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Vault read failed for a reason other than missing entry or locked vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    put:
+      tags: [Vault]
+      summary: Write the user-level credential envelope to the local vault
+      description: |
+        Writes the credential envelope to the local vault at
+        `user/<service>`. This is the backing store for user-scoped
+        capture (#1148): once written, the credential is available to any
+        agent launch that injects the user-level namespace (#1149).
+
+        Returns 423 with body code `vault_locked` when the vault is
+        locked, so callers discriminate by code rather than status alone.
+      operationId: putUserCredentials
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCredentials"
+      responses:
+        "204":
+          description: Credential written
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "423":
+          description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Vault write failed for a reason other than a locked vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      tags: [Vault]
+      summary: Delete the user-level credential envelope from the local vault
+      description: |
+        Removes the credential envelope stored at `user/<service>`.
+
+        Error codes are surfaced in the response body so callers
+        discriminate by code rather than status alone:
+          - `vault_not_found` (404) — no entry at `user/<service>`.
+          - `vault_locked` (423) — the local vault is locked; unlock it
+            before deleting user credentials.
+      operationId: deleteUserCredentials
+      security: []
+      responses:
+        "204":
+          description: Credential deleted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No credential entry at the user service vault path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: Vault is locked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Vault delete failed for a reason other than missing entry or locked vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/vault/agents:
     get:
       tags: [Vault]
