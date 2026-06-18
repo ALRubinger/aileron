@@ -53,6 +53,8 @@ Aileron CI publishes one multi-arch image per agent to GHCR. Each image is baked
 
 Each image is built for `linux/amd64` and `linux/arm64`, so a `docker pull` resolves the manifest for your platform automatically.
 
+The base image (`sandbox-base.yml`) and the per-agent images (`sandbox-agents.yml`) are two separate workflows, both triggered directly by a `v*` tag push, so they run concurrently on the same tag. A per-agent build `FROM`s the version-pinned base tag, so before that `FROM` it waits for the base tag to publish: it polls the registry on a bounded retry loop until the concurrently-building base tag appears. A base that never publishes surfaces a precise timeout error naming the absent tag rather than failing mid-build.
+
 The tag scheme is `<aileron-version>-<agent-cli-version>` plus two floating tags: `latest`, moved only by a `v*` tag release, and `edge`, moved by a `workflow_dispatch` publish off `main`. The `<aileron-version>` is the Aileron release the image was built from. The `<agent-cli-version>` is the agent CLI version baked into the image, resolved at build time from the installed package. A git-traceability tag `git-<sha>` is also published.
 
 Pull the most recent release (`latest`), or the latest dev publish off `main` (`edge`):

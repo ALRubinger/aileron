@@ -100,11 +100,21 @@ jobs:
       # `latest` on v* tag builds, and a floating `edge` on workflow_dispatch. A
       # v* build FROMs the version-pinned tag so the per-agent image
       # deterministically composes onto THIS release's base, not whatever
-      # `latest` happens to point at (the base and per-agent workflows run
-      # concurrently on the same tag push). workflow_dispatch FROMs `edge`, the
-      # base tip just published off the same dev branch. Gate on
-      # `docker manifest inspect` so a missing base surfaces a precise error
-      # naming the absent tag instead of an opaque FROM failure deep in the build.
+      # `latest` happens to point at.
+      #
+      # sandbox-base.yml and this workflow are two SEPARATE workflows, both
+      # triggered directly by `push: tags: v*`, so on a tag push they start
+      # CONCURRENTLY. This step therefore cannot assume the base tag is already
+      # published: when the agent build reaches it before sandbox-base.yml has
+      # finished its multi-arch push, the base tag is briefly absent. So poll
+      # `docker manifest inspect` on a bounded retry loop, WAITING for the base
+      # tag to appear before FROM-ing it (issue #1256). A base that genuinely
+      # never publishes still surfaces the precise error naming the absent tag
+      # after the timeout, instead of an opaque FROM failure deep in the build.
+      # workflow_dispatch FROMs `edge`, the base tip just published off the same
+      # dev branch (the watcher in sandbox-agents-watch.yml dispatches this
+      # workflow directly, and an `edge` published by an earlier base run is
+      # already present, so the poll returns immediately).
       #
       # On pull_request nothing is published and the GHCR base may not exist yet
       # (no v* release has run sandbox-base.yml). Build the base locally from the
@@ -114,6 +124,13 @@ jobs:
       # + smoke path self-contained.
       - name: Resolve and verify base image
         id: base
+        env:
+          # Bounded wait for the concurrently-building base tag to publish.
+          # ~10 min at 15s intervals (40 attempts) comfortably covers a
+          # multi-arch base build + push while still failing fast enough on a
+          # base that never publishes.
+          BASE_WAIT_ATTEMPTS: "40"
+          BASE_WAIT_INTERVAL_SECONDS: "15"
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -124,11 +141,17 @@ jobs:
             BASE_REF=""
           fi
           if [[ -n "${BASE_REF}" ]]; then
-            echo "Verifying published base image ${BASE_REF} exists..."
-            if ! docker manifest inspect "${BASE_REF}" >/dev/null 2>&1; then
-              echo "::error::Base image ${BASE_REF} not found in GHCR. The sandbox-base workflow (sandbox-base.yml) publishes the release tag and 'latest' on v* tag builds, and 'edge' on workflow_dispatch; run sandbox-base for this ref before building per-agent images." >&2
-              exit 1
-            fi
+            echo "Waiting for published base image ${BASE_REF} (up to ${BASE_WAIT_ATTEMPTS} attempts, ${BASE_WAIT_INTERVAL_SECONDS}s apart)..."
+            attempt=1
+            while ! docker manifest inspect "${BASE_REF}" >/dev/null 2>&1; do
+              if [[ "${attempt}" -ge "${BASE_WAIT_ATTEMPTS}" ]]; then
+                echo "::error::Base image ${BASE_REF} not found in GHCR after ${BASE_WAIT_ATTEMPTS} attempts over $((BASE_WAIT_ATTEMPTS * BASE_WAIT_INTERVAL_SECONDS))s. The sandbox-base workflow (sandbox-base.yml) publishes the release tag and 'latest' on v* tag builds, and 'edge' on workflow_dispatch; it runs concurrently with this workflow on the same tag push, so this step waits for it. If it never appears, confirm sandbox-base ran for this ref." >&2
+                exit 1
+              fi
+              echo "Base image ${BASE_REF} not present yet (attempt ${attempt}/${BASE_WAIT_ATTEMPTS}); retrying in ${BASE_WAIT_INTERVAL_SECONDS}s..."
+              sleep "${BASE_WAIT_INTERVAL_SECONDS}"
+              attempt=$((attempt + 1))
+            done
             echo "base_image=${BASE_REF}" >> "$GITHUB_OUTPUT"
             echo "Using published base image ${BASE_REF}."
           else
