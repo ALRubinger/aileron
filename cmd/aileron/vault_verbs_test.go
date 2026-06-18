@@ -417,3 +417,146 @@ func TestAgentCredentialsBody_ValueIsBase64(t *testing.T) {
 		t.Errorf("value = %q, want base64 of abc", wire.Value)
 	}
 }
+
+// vault list --scope user|all contract (#1180):
+//
+//   - --scope user routes to GET /vault/user and surfaces service names,
+//     never the credential bytes.
+//   - --scope all surfaces both agent names and user services.
+//   - --scope user --json emits NDJSON keyed by service, and [] when empty.
+//   - An invalid --scope is rejected before any HTTP call.
+//   - --prefix agents/ together with a user-bearing scope is a usage error.
+//   - 503 from /vault/user maps to the daemon-not-configured message.
+
+func TestRunVaultList_ScopeUser(t *testing.T) {
+	const secret = "gho_SECRETBYTES"
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/vault/user" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"services":[{"service":"github","metadata":{"type":"oauth_access_token"}}]}`)
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--scope", "user"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "github" {
+		t.Errorf("stdout = %q, want github", stdout.String())
+	}
+	if strings.Contains(stdout.String(), secret) || strings.Contains(stdout.String(), "value") {
+		t.Errorf("stdout leaked credential material: %q", stdout.String())
+	}
+}
+
+func TestRunVaultList_ScopeUserJSON(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"services":[{"service":"github"}]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--scope", "user", "--json"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var u userSummary
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &u); err != nil {
+		t.Fatalf("NDJSON not valid: %v (%q)", err, stdout.String())
+	}
+	if u.Service != "github" {
+		t.Errorf("service = %q, want github", u.Service)
+	}
+}
+
+func TestRunVaultList_ScopeUserEmpty(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"services":[]}`)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--scope", "user"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "No user credentials stored.") {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+
+	var jout, jerr bytes.Buffer
+	code = runVault([]string{"list", "--scope", "user", "--json"}, strings.NewReader(""), &jout, &jerr)
+	if code != 0 {
+		t.Fatalf("json exit = %d, want 0", code)
+	}
+	if strings.TrimSpace(jout.String()) != "[]" {
+		t.Errorf("json stdout = %q, want []", jout.String())
+	}
+}
+
+func TestRunVaultList_ScopeAll(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/vault/agents":
+			_, _ = io.WriteString(w, `{"agents":[{"name":"claude"}]}`)
+		case "/vault/user":
+			_, _ = io.WriteString(w, `{"services":[{"service":"github"}]}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--scope", "all"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	lines := strings.Fields(stdout.String())
+	if len(lines) != 2 || lines[0] != "claude" || lines[1] != "github" {
+		t.Errorf("output = %q, want claude then github", stdout.String())
+	}
+}
+
+func TestRunVaultList_InvalidScopeRejectedNoCall(t *testing.T) {
+	called := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--scope", "bogus"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for invalid scope")
+	}
+	if called {
+		t.Errorf("HTTP issued for rejected scope")
+	}
+	if !strings.Contains(stderr.String(), "scope") {
+		t.Errorf("stderr = %q; want scope error", stderr.String())
+	}
+}
+
+func TestRunVaultList_PrefixAgentsConflictsWithUserScope(t *testing.T) {
+	called := false
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--prefix", "agents/", "--scope", "all"},
+		strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for prefix/scope conflict")
+	}
+	if called {
+		t.Errorf("HTTP issued despite conflicting flags")
+	}
+}
+
+func TestRunVaultList_ScopeUserNoVault(t *testing.T) {
+	fakeVaultServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	var stdout, stderr bytes.Buffer
+	code := runVault([]string{"list", "--scope", "user"}, strings.NewReader(""), &stdout, &stderr)
+	if code == 0 {
+		t.Errorf("exit = 0, want non-zero for 503")
+	}
+	if !strings.Contains(stderr.String(), "vault") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
