@@ -18,6 +18,7 @@ If you're looking for end-user docs, the [Getting Started](/getting-started/) gu
 - [Sandbox Agent Images](/development/sandbox-agent-images/) — which agent commands are supported by the selected sandbox image and how to check them before launch.
 - [Sandbox Connector Specs](/development/sandbox-connector-specs/) — how installed connector specs drive data-plane operation validation in sandboxed launch sessions.
 - [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/) — verify the v4 HTTPS proxy works with `curl`, `gh`, and `aws`; success and failure cases with expected audit events.
+- [v4 Acceptance Scorecard](/development/v4-acceptance/) — the living "is v4 done?" runbook and pass/fail scorecard mapped 1:1 to the v4 bar in issue #747, with the current verdict and what gates closure.
 - [Submitting Changes](/development/submitting-changes/) — branch and PR conventions, commit message format, ADR amendments, what gets reviewed.
 - [Adding an Agent](/development/adding-an-agent/) — how to wire a new AI coding agent into `aileron launch` via the `Agent` SPI.
 - [Sandbox Agent Auth](/development/sandbox-agent-auth/) — vault-backed credential injection for `aileron launch <agent> --sandbox=docker`: vault path scheme, per-agent envelope schemas, the in-container-login-then-snapshot flow, manual seeding via `aileron vault put`, and the recovery path.
