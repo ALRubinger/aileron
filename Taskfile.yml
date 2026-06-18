@@ -41,6 +41,21 @@ tasks:
       - docs/src/styles/tokens.generated.css
       - webapp/src/tokens.generated.css
 
+  generate:agent-digests:
+    desc: >-
+      Regenerate the sandbox image digest lockfile at release prep. Resolves each
+      published per-agent image's immutable digest from the registry and writes
+      internal/sandbox/composition/agent-images.lock.json so a release pins a
+      fixed image by @sha256 instead of the floating `latest` tag (#1233). Run
+      AFTER the release's images are published, BEFORE tagging the binary.
+      Requires docker buildx + registry read access. Override the resolved tag
+      with TAG=<tag> (default: latest).
+    dir: internal
+    vars:
+      TAG: '{{.TAG | default "latest"}}'
+    cmds:
+      - go run ./tools/agentdigests -tag {{.TAG}} -out sandbox/composition/agent-images.lock.json
+
   build:
     desc: Build everything (containers, server, MCP, CLI, webapp, docs)
     cmds:
