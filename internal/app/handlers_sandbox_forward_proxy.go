@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -152,10 +153,21 @@ func (s *apiServer) handleSandboxForwardProxyConnect(w http.ResponseWriter, r *h
 	s.handleSandboxForwardProxyDecrypted(tlsConn, decrypted, auth, targetHost)
 }
 
-func (s *apiServer) handleSandboxForwardProxyDecrypted(conn io.Writer, decrypted *http.Request, auth sandboxProxyAuth, targetHost string) {
+func (s *apiServer) handleSandboxForwardProxyDecrypted(conn net.Conn, decrypted *http.Request, auth sandboxProxyAuth, targetHost string) {
 	upstream, err := sandboxForwardProxyUpstreamURL(targetHost, decrypted)
 	if err != nil {
 		writeSandboxForwardProxyError(conn, http.StatusBadRequest, auth.SessionID, targetHost, "sandbox proxy decrypted request target is invalid")
+		return
+	}
+	// A WebSocket (or other HTTP Upgrade) handshake cannot be served by
+	// the buffered client.Do path: the upstream answers 101 and opens a
+	// bidirectional byte tunnel, not a single buffered response. These
+	// requests are forwarded through the passthrough boundary with the
+	// Upgrade/Connection/Sec-WebSocket-* headers preserved. No connector
+	// spec match is attempted because credential injection is not
+	// meaningful for a raw byte tunnel (ADR-0019 passthrough posture).
+	if sandboxForwardProxyIsWebSocketUpgrade(decrypted) {
+		s.upgradeSandboxForwardProxy(conn, decrypted, auth, targetHost, upstream)
 		return
 	}
 	match, ok, err := s.matchSandboxForwardProxyOperation(decrypted.Method, upstream)
@@ -211,7 +223,7 @@ func (s *apiServer) handleSandboxForwardProxyDecrypted(conn io.Writer, decrypted
 // agent should never see. Hostnames that resolve to private IPs are
 // not blocked at this layer (DNS-rebinding is out of scope for this
 // control; container-level network hardening is the deeper defense).
-func (s *apiServer) passthroughSandboxForwardProxy(conn io.Writer, decrypted *http.Request, auth sandboxProxyAuth, targetHost string, upstream *url.URL) {
+func (s *apiServer) passthroughSandboxForwardProxy(conn net.Conn, decrypted *http.Request, auth sandboxProxyAuth, targetHost string, upstream *url.URL) {
 	if sandboxForwardProxyTargetIsPrivateIPLiteral(targetHost) {
 		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_target_not_allowed")
 		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy passthrough refuses private, loopback, or link-local IP literals")
@@ -253,6 +265,236 @@ func (s *apiServer) passthroughSandboxForwardProxy(conn io.Writer, decrypted *ht
 
 	s.recordSandboxProxyPassthrough(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, resp.StatusCode)
 	writeSandboxForwardProxyPassthroughResponse(conn, auth.SessionID, targetHost, resp, body)
+}
+
+// sandboxForwardProxyIsWebSocketUpgrade reports whether the decrypted
+// request is a WebSocket handshake: method GET, a Connection header
+// whose token list contains "upgrade", and an Upgrade header naming
+// "websocket". The token checks are case-insensitive per RFC 6455 and
+// RFC 7230 (Connection is a comma-separated token list).
+func sandboxForwardProxyIsWebSocketUpgrade(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+		return false
+	}
+	return headerListContainsToken(r.Header.Values("Connection"), "upgrade")
+}
+
+// headerListContainsToken reports whether any of the comma-separated
+// header values contains the given token (case-insensitive).
+func headerListContainsToken(values []string, token string) bool {
+	for _, v := range values {
+		for _, field := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(field), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// upgradeSandboxForwardProxy relays a WebSocket (or other HTTP Upgrade)
+// handshake through the passthrough boundary and, on a successful 101,
+// opens a bidirectional byte tunnel between the in-container client and
+// the upstream. The Upgrade/Connection/Sec-WebSocket-* headers are
+// preserved verbatim (unlike the buffered passthrough path, which
+// strips hop-by-hop headers). The upstream is dialed over TLS using the
+// configured sandbox proxy transport's dialer and TLS config. No
+// credential is injected (ADR-0019 passthrough posture).
+//
+// The tunnel is byte-for-byte with no response-size cap, consistent
+// with the passthrough model's no-cap rationale: resource budgets are
+// operator-managed at the container runtime layer, not the proxy. The
+// private-IP-literal refusal guard applies here exactly as it does on
+// the buffered passthrough path.
+func (s *apiServer) upgradeSandboxForwardProxy(conn net.Conn, decrypted *http.Request, auth sandboxProxyAuth, targetHost string, upstream *url.URL) {
+	if sandboxForwardProxyTargetIsPrivateIPLiteral(targetHost) {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_target_not_allowed")
+		writeSandboxForwardProxyError(conn, http.StatusForbidden, auth.SessionID, targetHost, "sandbox proxy passthrough refuses private, loopback, or link-local IP literals")
+		return
+	}
+
+	upstreamConn, err := s.dialSandboxForwardProxyUpstreamTLS(decrypted.Context(), targetHost)
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_upstream_unreachable")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy upgrade upstream unreachable")
+		return
+	}
+	defer upstreamConn.Close()
+
+	upstreamReq := sandboxForwardProxyUpgradeRequest(decrypted, targetHost, upstream)
+	if err := upstreamReq.Write(upstreamConn); err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_upstream_unreachable")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy upgrade upstream write failed")
+		return
+	}
+
+	upstreamReader := bufio.NewReader(upstreamConn)
+	resp, err := http.ReadResponse(upstreamReader, upstreamReq)
+	if err != nil {
+		s.recordSandboxProxyProtocolRejected(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, "passthrough_upstream_read_failed")
+		writeSandboxForwardProxyError(conn, http.StatusBadGateway, auth.SessionID, targetHost, "sandbox proxy upgrade upstream response read failed")
+		return
+	}
+
+	// Relay the upstream's handshake response (status line + headers)
+	// verbatim back to the in-container client. The X-Aileron headers are
+	// injected so the client can correlate the tunnel with its session.
+	if err := writeSandboxForwardProxyUpgradeResponse(conn, auth.SessionID, targetHost, resp); err != nil {
+		resp.Body.Close()
+		return
+	}
+
+	s.recordSandboxProxyUpgrade(decrypted, sandboxProxySourceTransparentConnectTLS, decrypted.Method, upstream, resp.StatusCode)
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		// Upstream declined the upgrade. The status and headers have been
+		// relayed; drain and close without opening a tunnel.
+		resp.Body.Close()
+		return
+	}
+	resp.Body.Close()
+
+	sandboxForwardProxyTunnel(conn, upstreamConn, upstreamReader)
+}
+
+// dialSandboxForwardProxyUpstreamTLS dials the upstream over TLS,
+// reusing the configured sandbox proxy transport's DialContext and TLS
+// config when present so tests (and any custom transport wiring) take
+// effect for the upgrade path exactly as they do for buffered
+// passthrough.
+func (s *apiServer) dialSandboxForwardProxyUpstreamTLS(ctx context.Context, targetHost string) (net.Conn, error) {
+	addr := targetHost
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = net.JoinHostPort(targetHost, "443")
+	}
+	serverName := targetHost
+	if h, _, err := net.SplitHostPort(targetHost); err == nil {
+		serverName = h
+	}
+
+	dialContext := (&net.Dialer{Timeout: 30 * time.Second}).DialContext
+	var tlsConfig *tls.Config
+	if s.sandboxProxyClient != nil {
+		if tr, ok := s.sandboxProxyClient.Transport.(*http.Transport); ok && tr != nil {
+			if tr.DialContext != nil {
+				dialContext = tr.DialContext
+			}
+			if tr.TLSClientConfig != nil {
+				tlsConfig = tr.TLSClientConfig.Clone()
+			}
+		}
+	}
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if tlsConfig.ServerName == "" {
+		tlsConfig.ServerName = serverName
+	}
+
+	rawConn, err := dialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tlsConn := tls.Client(rawConn, tlsConfig)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
+}
+
+// sandboxForwardProxyUpgradeRequest builds the upstream-facing upgrade
+// request, copying every client header verbatim (including the
+// Upgrade, Connection, and Sec-WebSocket-* headers that the buffered
+// passthrough path strips as hop-by-hop). The proxy-specific session
+// header is removed so it never leaks to the upstream.
+func sandboxForwardProxyUpgradeRequest(decrypted *http.Request, targetHost string, upstream *url.URL) *http.Request {
+	req := &http.Request{
+		Method:     http.MethodGet,
+		URL:        &url.URL{Path: upstream.Path, RawQuery: upstream.RawQuery},
+		Host:       targetHost,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header, len(decrypted.Header)),
+	}
+	for k, vs := range decrypted.Header {
+		if http.CanonicalHeaderKey(k) == "X-Aileron-Session-Id" {
+			continue
+		}
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	return req
+}
+
+// writeSandboxForwardProxyUpgradeResponse relays the upstream handshake
+// response (status line and headers) verbatim to the in-container
+// client, appending the X-Aileron correlation headers.
+func writeSandboxForwardProxyUpgradeResponse(conn net.Conn, sessionID, targetHost string, resp *http.Response) error {
+	sessionID = sandboxForwardProxyHeaderValue(sessionID)
+	targetHost = sandboxForwardProxyHeaderValue(targetHost)
+
+	var sb strings.Builder
+	statusText := resp.Status
+	if i := strings.IndexByte(statusText, ' '); i >= 0 {
+		statusText = strings.TrimSpace(statusText[i+1:])
+	}
+	if statusText == "" {
+		statusText = http.StatusText(resp.StatusCode)
+	}
+	fmt.Fprintf(&sb, "HTTP/1.1 %d %s\r\n", resp.StatusCode, statusText)
+	for _, k := range sortedHeaderKeys(resp.Header) {
+		for _, v := range resp.Header.Values(k) {
+			fmt.Fprintf(&sb, "%s: %s\r\n", k, sandboxForwardProxyHeaderValue(v))
+		}
+	}
+	fmt.Fprintf(&sb, "X-Aileron-Session-Id: %s\r\nX-Aileron-Proxy-Upstream-Host: %s\r\n\r\n", sessionID, targetHost)
+
+	_, err := io.WriteString(conn, sb.String())
+	return err
+}
+
+// sandboxForwardProxyTunnel copies bytes bidirectionally between the
+// in-container client connection and the upstream connection until
+// either side closes. Any bytes already buffered in upstreamReader
+// (read past the handshake response) are flushed to the client first.
+func sandboxForwardProxyTunnel(clientConn, upstreamConn net.Conn, upstreamReader *bufio.Reader) {
+	done := make(chan struct{}, 2)
+	go func() {
+		if n := upstreamReader.Buffered(); n > 0 {
+			if buffered, err := upstreamReader.Peek(n); err == nil {
+				_, _ = clientConn.Write(buffered)
+				_, _ = upstreamReader.Discard(n)
+			}
+		}
+		_, _ = io.Copy(clientConn, upstreamReader)
+		closeWriteOrConn(clientConn)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(upstreamConn, clientConn)
+		closeWriteOrConn(upstreamConn)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+}
+
+// closeWriteOrConn half-closes the write side of conn when supported
+// (TLS and TCP conns expose CloseWrite), signaling EOF to the peer
+// without tearing down the read direction. Falls back to a full close.
+func closeWriteOrConn(conn net.Conn) {
+	type closeWriter interface{ CloseWrite() error }
+	if cw, ok := conn.(closeWriter); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = conn.Close()
 }
 
 // sandboxForwardProxyTargetIsPrivateIPLiteral reports whether the

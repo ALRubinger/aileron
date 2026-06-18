@@ -33,6 +33,7 @@ type passthroughIntegrationSetup struct {
 	client      *http.Client
 	auditStore  *audit.MemStore
 	logicalHost string
+	roots       *x509.CertPool
 }
 
 func newPassthroughIntegrationSetup(t *testing.T, upstreamHandler http.Handler) *passthroughIntegrationSetup {
@@ -97,6 +98,7 @@ func newPassthroughIntegrationSetup(t *testing.T, upstreamHandler http.Handler) 
 		client:      newSandboxForwardProxyClient(t, proxyURL, roots),
 		auditStore:  auditStore,
 		logicalHost: logicalHost,
+		roots:       roots,
 	}
 }
 
