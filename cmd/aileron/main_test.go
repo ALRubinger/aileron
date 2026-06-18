@@ -4587,6 +4587,152 @@ func TestRunActionAdd_HubCompositeYesFlagAutoAccepts(t *testing.T) {
 	}
 }
 
+// TestRunActionAdd_HubCompositeAllAlreadyTrustedAutoAccepts: when every
+// authority in the action composite carries trust_state
+// "already_trusted", the y/n/d prompt is skipped, but the composite
+// panel still renders for transparency and the install proceeds.
+// Regression for feedback #1150.
+func TestRunActionAdd_HubCompositeAllAlreadyTrustedAutoAccepts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	hubCalled := 0
+	installCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			hubCalled++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"action","fqn":"github://acme/conn/actions/run",
+				"description":"x","publisher_github":"acme",
+				"connector_fqn":"github://acme/conn",
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"already_trusted",
+					"publisher_footprint":[],"risk_indicators":[]
+				}]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			installCalled = true
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// No "y" for the composite prompt — it auto-accepts. The single "y"
+	// answers the downstream per-action install consent.
+	stdin := bufio.NewReader(strings.NewReader("y\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubCalled != 1 || !installCalled {
+		t.Errorf("expected hub composite to fire once and install to run; hub=%d install=%v", hubCalled, installCalled)
+	}
+	out := stdout.String()
+	// The y/n/d prompt MUST NOT render when every authority is already
+	// trusted.
+	if strings.Contains(out, "Trust these publishers and install?") {
+		t.Errorf("composite prompt fired despite all authorities already trusted:\n%s", out)
+	}
+	// The composite panel still renders for transparency.
+	for _, want := range []string{
+		"Hub install-decision (action)",
+		"Action:    github://acme/conn/actions/run",
+		"already trusted",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAdd_HubCompositeMixedTrustStillPrompts: when the action
+// composite mixes an already_trusted authority with an unknown one, the
+// y/n/d prompt still fires. Auto-accept only applies when every
+// authority is already trusted. Regression for feedback #1150.
+func TestRunActionAdd_HubCompositeMixedTrustStillPrompts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	withMockGitHubRaw(t, map[string][]byte{
+		"/acme/conn/HEAD/keys/publisher.pub": pemBytes,
+	})
+
+	hubCalled := 0
+	previewCalled := false
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/hub/action-install-decision":
+			hubCalled++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"action","fqn":"github://acme/conn/actions/run",
+				"description":"x","publisher_github":"acme",
+				"connector_fqn":"github://acme/conn",
+				"authorities":[
+					{
+						"fqn":"github://acme/conn","publisher_github":"acme",
+						"fingerprint":"sha256:any","trust_state":"already_trusted",
+						"publisher_footprint":[],"risk_indicators":[]
+					},
+					{
+						"fqn":"github://other/dep","publisher_github":"other",
+						"fingerprint":"sha256:other","trust_state":"unknown",
+						"publisher_footprint":[],"risk_indicators":["x"]
+					}
+				]
+			}`)
+		case "/actions/preview":
+			previewCalled = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"fqn":"github://acme/conn/actions/run","version":"0.1.0","hash":"sha256:abc","name":"my-action","signature_status":"verified","connector_deps":[]}`)
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"name":"my-action","fqn":"github://acme/conn/actions/run","version":"0.1.0","source":"x","path":"/p"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// Decline at the composite prompt to prove it fired.
+	stdin := bufio.NewReader(strings.NewReader("n\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAdd(
+		[]string{"github://acme/conn/actions/run@0.1.0"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubCalled != 1 {
+		t.Errorf("composite should fire exactly once, got %d", hubCalled)
+	}
+	if previewCalled {
+		t.Error("declining the composite should abort before preview")
+	}
+	out := stdout.String()
+	// The y/n/d prompt MUST fire when the set mixes trust states.
+	if !strings.Contains(out, "Trust these publishers and install?") {
+		t.Errorf("composite prompt should fire on mixed trust states:\n%s", out)
+	}
+	if !strings.Contains(out, "Cancelled.") {
+		t.Errorf("expected decline to cancel:\n%s", out)
+	}
+}
+
 // TestRunActionAdd_HubComposite422FallsThroughToLegacy: when the
 // composite endpoint can't precompute the trust panel (e.g. action's
 // connector_fqn isn't Hub-listed), the CLI falls through to the
@@ -6524,6 +6670,173 @@ actions = ["actions/foo"]
 	// Composite prompt MUST NOT render when --yes is in effect.
 	if strings.Contains(stdout.String(), "Trust these publishers and continue?") {
 		t.Errorf("composite prompt fired despite --yes:\n%s", stdout.String())
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubCompositeAllAlreadyTrustedAutoAccepts:
+// when every authority in the suite composite carries trust_state
+// "already_trusted", the y/n/d prompt is skipped (the operator already
+// trusts every publisher), but the composite panel still renders for
+// transparency and the install proceeds. Regression for feedback #1150.
+func TestRunActionAddSuiteRemote_HubCompositeAllAlreadyTrustedAutoAccepts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "hub-suite"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	hubHits := 0
+	installed := map[string]int{}
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			hubHits++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"suite","fqn":"github://acme/conn/suite",
+				"description":"x","publisher_github":"acme",
+				"member_actions":["github://acme/conn/actions/foo"],
+				"authorities":[{
+					"fqn":"github://acme/conn","publisher_github":"acme",
+					"fingerprint":"sha256:any","trust_state":"already_trusted",
+					"publisher_footprint":[],"risk_indicators":[]
+				}]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			installed[req.FQN]++
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// No "y" for the composite prompt — it auto-accepts. The single "y"
+	// answers the downstream suite-install consent.
+	stdin := bufio.NewReader(strings.NewReader("y\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubHits != 1 {
+		t.Errorf("composite should fire exactly once, got %d", hubHits)
+	}
+	if installed["github://acme/conn/actions/foo"] != 1 {
+		t.Errorf("expected action installed; got %v", installed)
+	}
+	out := stdout.String()
+	// The y/n/d prompt MUST NOT render when every authority is already
+	// trusted — auto-accept is the whole point of the fix.
+	if strings.Contains(out, "Trust these publishers and continue?") {
+		t.Errorf("composite prompt fired despite all authorities already trusted:\n%s", out)
+	}
+	// The composite panel still renders for transparency.
+	for _, want := range []string{
+		"Hub install-decision (suite)",
+		"Suite:     github://acme/conn/suite",
+		"already trusted",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunActionAddSuiteRemote_HubCompositeMixedTrustStillPrompts: when
+// the suite composite mixes an already_trusted authority with an
+// unknown one, the y/n/d prompt still fires — auto-accept only applies
+// when every authority is already trusted. Regression for feedback #1150.
+func TestRunActionAddSuiteRemote_HubCompositeMixedTrustStillPrompts(t *testing.T) {
+	withTempHome(t)
+	_, pemBytes := genTestKey(t)
+	const suiteTOML = `
+name = "hub-suite"
+description = "x"
+actions = ["actions/foo"]
+`
+	suiteAndKeyRawServer(t, "acme", "conn", "suite.toml", "v0.0.6", suiteTOML, pemBytes)
+
+	hubHits := 0
+	fakeBindingServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			FQN string `json:"fqn"`
+		}
+		_ = json.Unmarshal(body, &req)
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		switch r.URL.Path {
+		case "/hub/suite-install-decision":
+			hubHits++
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{
+				"kind":"suite","fqn":"github://acme/conn/suite",
+				"description":"x","publisher_github":"acme",
+				"member_actions":["github://acme/conn/actions/foo"],
+				"authorities":[
+					{
+						"fqn":"github://acme/conn","publisher_github":"acme",
+						"fingerprint":"sha256:any","trust_state":"already_trusted",
+						"publisher_footprint":[],"risk_indicators":[]
+					},
+					{
+						"fqn":"github://other/dep","publisher_github":"other",
+						"fingerprint":"sha256:other","trust_state":"unknown",
+						"publisher_footprint":[],"risk_indicators":["First connector by this publisher you've installed"]
+					}
+				]
+			}`)
+		case "/actions/preview":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"fqn":%q,"version":"0.0.6","hash":"sha256:abc","name":%q,"signature_status":"verified","connector_deps":[]}`,
+				req.FQN, lastSegment(req.FQN))
+		case "/actions/install":
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"name":%q,"fqn":%q,"version":"0.0.6","source":"x","path":"/p"}`,
+				lastSegment(req.FQN), req.FQN)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	// Decline at the composite prompt to prove it fired. An "n" aborts
+	// the suite install before preview/install run.
+	stdin := bufio.NewReader(strings.NewReader("n\n"))
+	var stdout, stderr bytes.Buffer
+	code := runActionAddSuite(
+		[]string{"github://acme/conn/suite.toml@v0.0.6"},
+		stdin, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr=%s", code, stderr.String())
+	}
+	if hubHits != 1 {
+		t.Errorf("composite should fire exactly once, got %d", hubHits)
+	}
+	out := stdout.String()
+	// The y/n/d prompt MUST fire when the set mixes trust states.
+	if !strings.Contains(out, "Trust these publishers and continue?") {
+		t.Errorf("composite prompt should fire on mixed trust states:\n%s", out)
+	}
+	if !strings.Contains(out, "Cancelled.") {
+		t.Errorf("expected decline to cancel:\n%s", out)
 	}
 }
 
