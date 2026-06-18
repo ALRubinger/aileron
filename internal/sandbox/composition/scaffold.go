@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // DefaultAgent is the agent whose Feature the scaffold demonstrates. It is no
@@ -76,18 +75,16 @@ func FeatureReference(agent string) string {
 // aileron-mcp onto the base, so the build-free Tier 0 default pulls one instead
 // of building the agent-less base (#1086, #1087).
 //
-// The tag follows the same normalization as BaseImage: an empty or "dev"
-// version maps to "latest". The launcher resolves this floating "latest" pin at
-// launch time because a version-pinned tag (<aileron-version>-<agent-cli-version>)
-// requires the agent CLI version, which is not known here. Digest pinning and
-// the freshness policy that consumes it are owned by #1088; this helper is the
-// seam where that pinned reference plugs in.
+// The tag follows the same normalization as BaseImage (see imageTag): a dev or
+// empty version pulls the floating `edge` tag published off main on
+// workflow_dispatch, and a release version pulls `latest`, which moves only on a
+// v* tag build. The launcher resolves the floating pin at launch time because a
+// version-pinned tag (<aileron-version>-<agent-cli-version>) requires the agent
+// CLI version, which is not known here. Digest pinning and the freshness policy
+// that consumes it are owned by #1088; this helper is the seam where that pinned
+// reference plugs in.
 func PublishedAgentImage(agent, version string) string {
-	tag := strings.TrimSpace(version)
-	if tag == "" || tag == "dev" {
-		tag = "latest"
-	}
-	return DefaultPublishedImageRepository + "-" + agent + ":" + tag
+	return DefaultPublishedImageRepository + "-" + agent + ":" + imageTag(version)
 }
 
 // PublishedAgentExists reports whether agent has a prebuilt per-agent image to

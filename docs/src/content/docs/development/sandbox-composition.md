@@ -68,14 +68,16 @@ With no `.devcontainer/devcontainer.json`, the output is Tier 0:
 
 ```text
 tier: base
-image: ghcr.io/alrubinger/aileron-sandbox-base:latest
+image: ghcr.io/alrubinger/aileron-sandbox-base:edge
 ```
+
+The base image tag tracks the CLI: a dev build off `main` resolves the floating `edge` tag, and a released CLI resolves `latest` (the most recent release).
 
 With the starter scaffold, the output is Tier 1 and names the composed devcontainer:
 
 ```text
 tier: devcontainer
-image: ghcr.io/alrubinger/aileron-sandbox-base:latest
+image: ghcr.io/alrubinger/aileron-sandbox-base:edge
 devcontainer: .devcontainer/devcontainer.json
 ```
 
@@ -106,7 +108,7 @@ Build behavior by tier:
 
 When building the base image outside the source tree, set `AILERON_SANDBOX_BASE_CONTEXT` to the directory containing the sandbox-base `Containerfile`.
 
-Release tags also build the sandbox-base image for `linux/amd64` and `linux/arm64` and publish it to GitHub Container Registry as `ghcr.io/alrubinger/aileron-sandbox-base:<version>`. Pull-request runs build both platforms without publishing, so image regressions are caught before release.
+Release tags also build the sandbox-base image for `linux/amd64` and `linux/arm64` and publish it to GitHub Container Registry as `ghcr.io/alrubinger/aileron-sandbox-base:<version>` and the floating `latest`. A `workflow_dispatch` run publishes the same multi-arch image under the floating `edge` tag, the tip-of-`main` build that dev CLIs resolve. Pull-request runs build both platforms without publishing, so image regressions are caught before release.
 
 ## Check Agent Support
 
