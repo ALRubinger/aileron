@@ -2,6 +2,7 @@ package launch
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	sandboxcomposition "github.com/ALRubinger/aileron/internal/sandbox/composition"
 	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/version"
 )
 
 type emptyBinaryAgent struct{}
@@ -37,6 +40,21 @@ func (a namedBinaryAgent) ConfigureMCP(string, map[string]string, string, Mode) 
 	return nil, nil, nil
 }
 func (a namedBinaryAgent) AuthSpec() AuthSpec { return AuthSpec{} }
+
+// publishedNameAgent reports its name as a published agent id (e.g. "claude")
+// so Discover/EnrichValidateError treat it as having a published per-agent
+// image. namedBinaryAgent hardcodes Name() to "named", which is unpublished.
+type publishedNameAgent struct{ name string }
+
+func (a publishedNameAgent) Name() string           { return a.name }
+func (a publishedNameAgent) BinaryNames() []string  { return []string{a.name} }
+func (a publishedNameAgent) Args() []string         { return nil }
+func (a publishedNameAgent) Env() map[string]string { return nil }
+func (a publishedNameAgent) LLMEndpointEnv() string { return "" }
+func (a publishedNameAgent) ConfigureMCP(string, map[string]string, string, Mode) ([]string, []MCPMount, error) {
+	return nil, nil, nil
+}
+func (a publishedNameAgent) AuthSpec() AuthSpec { return AuthSpec{} }
 
 func TestFirstAgentBinaryHandlesEmptyAgent(t *testing.T) {
 	if got := firstAgentBinary(emptyBinaryAgent{}); got != "" {
@@ -162,6 +180,42 @@ func TestValidateSandboxPassesRuntimeMounts(t *testing.T) {
 	for _, absent := range []string{"/etc/aileron/tools.txt", "/usr/local/bin/google"} {
 		if hasMountTarget(got, absent) {
 			t.Fatalf("validateSandbox mounts = %#v, should not include retired shim surface %s", got, absent)
+		}
+	}
+}
+
+// TestValidateSandboxEnrichesDevcontainerMismatch covers the wiring of the
+// CWD-determined-tier enrichment into the launch validate path. When the
+// underlying validate reports the agent CLI is missing on a devcontainer-tier
+// plan for a published agent, validateSandbox must surface the enriched message
+// naming the tier, the discovered devcontainer path, and the published image.
+func TestValidateSandboxEnrichesDevcontainerMismatch(t *testing.T) {
+	orig := validateSandboxImageForLaunch
+	t.Cleanup(func() { validateSandboxImageForLaunch = orig })
+	validateSandboxImageForLaunch = func(_ context.Context, _ SandboxLaunchPlan, _ LaunchConfig, _ map[string]string, _ []sandboxcontainer.Volume, _ string) error {
+		return errors.New("validate sandbox image image:test: agent command not found in sandbox image: claude: exit status 127")
+	}
+
+	workDir := t.TempDir()
+	err := validateSandbox(context.Background(), SandboxLaunchPlan{
+		Runtime: "docker",
+		Image:   "image:test",
+		Tier:    sandboxcomposition.TierDevcontainer,
+	}, LaunchConfig{
+		Agent: publishedNameAgent{name: "claude"},
+		Dir:   workDir,
+	}, nil)
+	if err == nil {
+		t.Fatal("validateSandbox: want error, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		string(sandboxcomposition.TierDevcontainer),
+		filepath.Join(workDir, sandboxcomposition.DefaultDevcontainerPath),
+		sandboxcomposition.PublishedAgentImage("claude", version.Version),
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("validateSandbox error missing %q: %s", want, msg)
 		}
 	}
 }
