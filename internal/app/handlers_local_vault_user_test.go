@@ -619,3 +619,150 @@ func TestDeleteUserCredentials_DeleteErrorReturns500(t *testing.T) {
 	assertStatus(t, rec, http.StatusInternalServerError)
 	assertErrorCode(t, rec, "vault_delete_failed")
 }
+
+// ListUserCredentials contract (#1180):
+//
+//   - A stored user/<service> entry appears in the list with its plaintext
+//     metadata and WITHOUT the credential bytes (ADR-0011).
+//   - An empty vault returns 200 with a non-nil empty services array.
+//   - A locked vault still returns 200 with an empty array — listing never
+//     decrypts a stored value, so no 423.
+//   - Non-user paths (agent OAuth envelopes, arbitrary keys) are filtered out.
+//   - No vault wired returns 503 no_local_vault.
+//   - A List store error surfaces as 500 vault_list_failed.
+
+func TestListUserCredentials_RoundTripMetadataOnly(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newUserCredentialsServer(t, v)
+
+	body := api.AgentCredentials{
+		Value:    []byte(`SECRETBYTES`),
+		Metadata: &api.AgentCredentialsMetadata{Type: strPtr("oauth_access_token")},
+	}
+	putRec := putUserCredential(t, s, "github", body)
+	assertStatus(t, putRec, http.StatusNoContent)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/user", nil)
+	s.ListUserCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	// The raw body must not leak credential bytes (ADR-0011).
+	if strings.Contains(rec.Body.String(), "SECRETBYTES") ||
+		strings.Contains(rec.Body.String(), "value") {
+		t.Fatalf("list body leaked credential material: %s", rec.Body.String())
+	}
+
+	var got api.UserCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if len(got.Services) != 1 || got.Services[0].Service != "github" {
+		t.Fatalf("services = %v, want only github", got.Services)
+	}
+	meta := got.Services[0].Metadata
+	if meta == nil || meta.Type == nil || *meta.Type != "oauth_access_token" {
+		t.Errorf("service github metadata = %v, want type oauth_access_token", meta)
+	}
+}
+
+func TestListUserCredentials_EmptyVaultReturnsEmptyArray(t *testing.T) {
+	s := newUserCredentialsServer(t, vault.NewMemVault())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/user", nil)
+	s.ListUserCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.UserCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if got.Services == nil {
+		t.Fatal("services must be a non-nil (empty) array")
+	}
+	if len(got.Services) != 0 {
+		t.Errorf("services = %v, want empty", got.Services)
+	}
+}
+
+func TestListUserCredentials_LockedVaultReturnsEmptyOK(t *testing.T) {
+	// Listing never decrypts a stored value, so a locked vault returns 200
+	// with an empty array rather than 423. Pin that contract.
+	lv := vault.NewLockableVault()
+	s := newUserCredentialsServer(t, lv)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/user", nil)
+	s.ListUserCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.UserCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if got.Services == nil {
+		t.Fatal("services must be a non-nil (empty) array")
+	}
+	if len(got.Services) != 0 {
+		t.Errorf("services = %v, want empty on locked vault", got.Services)
+	}
+}
+
+func TestListUserCredentials_FiltersNonUserPaths(t *testing.T) {
+	v := vault.NewMemVault()
+	s := newUserCredentialsServer(t, v)
+	// Seed an agent OAuth envelope and an arbitrary key alongside one user entry.
+	if err := v.Put(context.Background(), "agents/claude/oauth", []byte("x"), vault.Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Put(context.Background(), "some/other/path", []byte("y"), vault.Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Put(context.Background(), "user/github", []byte("z"), vault.Metadata{}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/user", nil)
+	s.ListUserCredentials(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var got api.UserCredentialsList
+	mustDecode(t, rec.Body, &got)
+	if len(got.Services) != 1 || got.Services[0].Service != "github" {
+		t.Errorf("services = %v, want only github", got.Services)
+	}
+}
+
+func TestListUserCredentials_NoVaultReturnsServiceUnavailable(t *testing.T) {
+	s := &apiServer{log: slog.Default()}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/user", nil)
+	s.ListUserCredentials(rec, req)
+	assertStatus(t, rec, http.StatusServiceUnavailable)
+}
+
+func TestListUserCredentials_ListErrorReturns500(t *testing.T) {
+	s := newUserCredentialsServer(t, listErrVault{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/vault/user", nil)
+	s.ListUserCredentials(rec, req)
+	assertStatus(t, rec, http.StatusInternalServerError)
+	assertErrorCode(t, rec, "vault_list_failed")
+}
+
+func TestUserServiceFromVaultPath(t *testing.T) {
+	cases := []struct {
+		path   string
+		want   string
+		wantOK bool
+	}{
+		{"user/github", "github", true},
+		{"user/git-hub_1", "git-hub_1", true},
+		{"agents/claude/oauth", "", false},
+		{"user/", "", false},
+		{"user/has/slash", "", false},
+		{"user/Bad", "", false},
+		{"other/github", "", false},
+	}
+	for _, c := range cases {
+		got, ok := userServiceFromVaultPath(c.path)
+		if ok != c.wantOK || got != c.want {
+			t.Errorf("userServiceFromVaultPath(%q) = (%q, %v), want (%q, %v)",
+				c.path, got, ok, c.want, c.wantOK)
+		}
+	}
+}

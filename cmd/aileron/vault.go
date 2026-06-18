@@ -62,7 +62,7 @@ const vaultUsage = `usage:
   aileron vault init [--passphrase-file <path>]
   aileron vault put agents/<name>/oauth --from-file <path>
   aileron vault delete agents/<name>/oauth [--yes]
-  aileron vault list [--prefix agents/] [--json]`
+  aileron vault list [--scope agent|user|all] [--prefix agents/] [--json]`
 
 // runVault dispatches `aileron vault <subcommand>`.
 //
@@ -122,16 +122,29 @@ type agentCredentialsBody struct {
 	Value []byte `json:"value"`
 }
 
+// vaultSummaryMetadata is the local subset of api.AgentCredentialsMetadata
+// the list verbs decode, shared by both the agent and user summaries.
+type vaultSummaryMetadata struct {
+	Type        string            `json:"type,omitempty"`
+	Environment string            `json:"environment,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+}
+
 // agentSummary is the local subset of api.AgentCredentialSummary the
 // list verb decodes. Notably it has no Value field — the daemon never
 // returns credential bytes from the list endpoint (ADR-0011).
 type agentSummary struct {
-	Name     string `json:"name"`
-	Metadata *struct {
-		Type        string            `json:"type,omitempty"`
-		Environment string            `json:"environment,omitempty"`
-		Labels      map[string]string `json:"labels,omitempty"`
-	} `json:"metadata,omitempty"`
+	Name     string                `json:"name"`
+	Metadata *vaultSummaryMetadata `json:"metadata,omitempty"`
+}
+
+// userSummary is the local subset of api.UserCredentialSummary the list
+// verb decodes for the user scope. Like agentSummary it has no Value
+// field — the daemon never returns credential bytes from the list
+// endpoint (ADR-0011).
+type userSummary struct {
+	Service  string                `json:"service"`
+	Metadata *vaultSummaryMetadata `json:"metadata,omitempty"`
 }
 
 // runVaultPut stores a credential envelope read verbatim from a file
@@ -253,14 +266,25 @@ func runVaultDelete(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 }
 
-// runVaultList prints the agent credential entries the daemon holds.
-// Output mirrors `aileron secret list`: one name per line by default,
-// or NDJSON (one entry per line) with --json. Only the agents/ prefix
-// is supported; any other --prefix is rejected with a clear error.
+// runVaultList prints the credential entries the daemon holds. Output
+// mirrors `aileron secret list`: one identifier per line by default, or
+// NDJSON (one entry per line) with --json.
+//
+// The --scope flag selects which namespace(s) to surface:
+//   - agent (default): per-agent OAuth envelopes at agents/<name>/oauth,
+//     keyed by agent name. Preserves the historical behavior.
+//   - user: user-level credentials at user/<service> (e.g. the entry
+//     `aileron auth github` stores), keyed by service name.
+//   - all: both, agents first then user.
+//
+// The legacy --prefix flag still restricts to agents/ for backward
+// symmetry; passing --prefix together with a non-agent --scope is a usage
+// error since the two would disagree.
 func runVaultList(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("vault list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	prefix := flags.String("prefix", "", "Restrict to a path prefix (only agents/ is supported)")
+	scope := flags.String("scope", "agent", "Which namespace to list: agent, user, or all")
 	asJSON := flags.Bool("json", false, "Render entries as NDJSON, one entry per line")
 	if err := flags.Parse(args); err != nil {
 		return 1
@@ -270,56 +294,139 @@ func runVaultList(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	status, respBody, err := vaultDoRequest(http.MethodGet, "/vault/agents", nil)
-	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	switch status {
-	case http.StatusOK:
-		// handled below
-	case http.StatusServiceUnavailable:
-		fmt.Fprintln(stderr, "error: daemon is not configured with a vault")
-		return 1
+	listAgents, listUser := false, false
+	switch *scope {
+	case "agent":
+		listAgents = true
+	case "user":
+		listUser = true
+	case "all":
+		listAgents, listUser = true, true
 	default:
-		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		fmt.Fprintf(stderr, "error: --scope must be agent, user, or all (got %q)\n", *scope)
+		return 1
+	}
+	// The legacy --prefix agents/ filter narrows to the agent namespace; it
+	// cannot coexist with a scope that also asks for user entries.
+	if *prefix == "agents/" && listUser {
+		fmt.Fprintf(stderr, "error: --prefix agents/ conflicts with --scope %s\n", *scope)
 		return 1
 	}
 
-	var out struct {
-		Agents []agentSummary `json:"agents"`
-	}
-	if err := json.Unmarshal(respBody, &out); err != nil {
-		fmt.Fprintf(stderr, "error: decode response: %v\n", err)
-		return 1
+	// In text mode entries are collected and printed at the end (so the
+	// "nothing stored" message fires only when every scope is empty). In
+	// JSON mode each entry is streamed as it decodes; emitted counts the
+	// rows written so the empty-array fallback is correct across scopes.
+	var lines []string
+	var enc *json.Encoder
+	emitted := 0
+	if *asJSON {
+		enc = json.NewEncoder(stdout)
 	}
 
-	if len(out.Agents) == 0 {
-		if *asJSON {
-			// Mirror `aileron secret list --json`: emit an empty array
-			// so scripts get parseable JSON for the empty case.
-			fmt.Fprintln(stdout, "[]")
-			return 0
+	if listAgents {
+		respBody, code := vaultListFetch("/vault/agents", stderr)
+		if code != 0 {
+			return code
 		}
-		fmt.Fprintln(stdout, "No agent credentials stored.")
-		return 0
+		var out struct {
+			Agents []agentSummary `json:"agents"`
+		}
+		if err := json.Unmarshal(respBody, &out); err != nil {
+			fmt.Fprintf(stderr, "error: decode response: %v\n", err)
+			return 1
+		}
+		for _, a := range out.Agents {
+			if *asJSON {
+				if err := enc.Encode(a); err != nil {
+					fmt.Fprintf(stderr, "encode: %v\n", err)
+					return 1
+				}
+				emitted++
+			} else {
+				lines = append(lines, a.Name)
+			}
+		}
+	}
+
+	if listUser {
+		respBody, code := vaultListFetch("/vault/user", stderr)
+		if code != 0 {
+			return code
+		}
+		var out struct {
+			Services []userSummary `json:"services"`
+		}
+		if err := json.Unmarshal(respBody, &out); err != nil {
+			fmt.Fprintf(stderr, "error: decode response: %v\n", err)
+			return 1
+		}
+		for _, u := range out.Services {
+			if *asJSON {
+				if err := enc.Encode(u); err != nil {
+					fmt.Fprintf(stderr, "encode: %v\n", err)
+					return 1
+				}
+				emitted++
+			} else {
+				lines = append(lines, u.Service)
+			}
+		}
 	}
 
 	if *asJSON {
-		enc := json.NewEncoder(stdout)
-		for _, a := range out.Agents {
-			if err := enc.Encode(a); err != nil {
-				fmt.Fprintf(stderr, "encode: %v\n", err)
-				return 1
-			}
+		if emitted == 0 {
+			// json.Encoder already streamed any entries above. When there
+			// were none, emit an empty array so scripts get parseable JSON,
+			// mirroring `aileron secret list --json`.
+			fmt.Fprintln(stdout, "[]")
 		}
 		return 0
 	}
 
-	for _, a := range out.Agents {
-		fmt.Fprintln(stdout, a.Name)
+	if len(lines) == 0 {
+		fmt.Fprintln(stdout, vaultListEmptyMessage(*scope))
+		return 0
+	}
+	for _, l := range lines {
+		fmt.Fprintln(stdout, l)
 	}
 	return 0
+}
+
+// vaultListEmptyMessage returns the human-readable "nothing stored"
+// message for the given scope.
+func vaultListEmptyMessage(scope string) string {
+	switch scope {
+	case "user":
+		return "No user credentials stored."
+	case "all":
+		return "No credentials stored."
+	default:
+		return "No agent credentials stored."
+	}
+}
+
+// vaultListFetch issues a GET against a vault list endpoint and maps the
+// daemon's status codes. On success it returns the body and a zero exit
+// code; on any handled error it prints to stderr and returns a non-zero
+// code the caller propagates.
+func vaultListFetch(path string, stderr io.Writer) ([]byte, int) {
+	status, respBody, err := vaultDoRequest(http.MethodGet, path, nil)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return nil, 1
+	}
+	switch status {
+	case http.StatusOK:
+		return respBody, 0
+	case http.StatusServiceUnavailable:
+		fmt.Fprintln(stderr, "error: daemon is not configured with a vault")
+		return nil, 1
+	default:
+		fmt.Fprintf(stderr, "server returned %d: %s\n", status, string(respBody))
+		return nil, 1
+	}
 }
 
 // vaultDoRequest is a thin daemon-backed HTTP-client helper mirroring

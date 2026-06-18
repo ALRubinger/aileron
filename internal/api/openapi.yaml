@@ -974,6 +974,40 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /v1/vault/user:
+    get:
+      tags: [Vault]
+      summary: List user-level credential entries in the local vault
+      description: |
+        Returns the service names that have a credential envelope stored at
+        `user/<service>`, with their plaintext metadata only. The credential
+        `value` is never included.
+
+        Per ADR-0011 listing works on a locked vault — metadata is stored
+        in plaintext and the operation never decrypts a credential — so no
+        `vault_locked` (423) response is defined.
+      operationId: listUserCredentials
+      security: []
+      responses:
+        "200":
+          description: User-level credential entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserCredentialsList"
+        "500":
+          description: Vault list failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: The daemon is not configured with a vault
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/sessions:
     post:
       tags: [Sessions]
@@ -7627,6 +7661,35 @@ components:
           description: |
             Agent identifier (e.g. "claude", "codex"), derived from the
             `agents/<name>/oauth` vault path.
+        metadata:
+          $ref: "#/components/schemas/AgentCredentialsMetadata"
+
+    UserCredentialsList:
+      type: object
+      required: [services]
+      description: |
+        The set of user-level credential entries stored in the local
+        vault. Metadata only — the credential `value` is never listed
+        (ADR-0011).
+      properties:
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/UserCredentialSummary"
+
+    UserCredentialSummary:
+      type: object
+      required: [service]
+      description: |
+        A single user-level credential entry: the service name plus its
+        plaintext metadata. Mirrors the `vault.Entry` shape with the
+        `user/<service>` path reduced to its service name.
+      properties:
+        service:
+          type: string
+          description: |
+            Service identifier (e.g. "github"), derived from the
+            `user/<service>` vault path.
         metadata:
           $ref: "#/components/schemas/AgentCredentialsMetadata"
 

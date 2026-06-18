@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 
 	api "github.com/ALRubinger/aileron/internal/api/gen"
 	"github.com/ALRubinger/aileron/internal/model"
@@ -260,4 +261,55 @@ func (s *apiServer) DeleteUserCredentials(w http.ResponseWriter, r *http.Request
 
 	s.emitVaultUserCredentialEvent(ctx, model.EventTypeVaultUserCredentialDelete, service, actor, sessionID, "")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// userServiceFromVaultPath is the inverse of userCredentialVaultPath: it
+// extracts the service name from a `user/<service>` vault path. It returns
+// false for any path that does not match the scheme so the list filter
+// ignores non-user entries (agent OAuth envelopes, bindings, etc.). The
+// returned service must still pass validateUserService — a stored path that
+// somehow contains a `/` or other metacharacter in the service segment is
+// rejected rather than surfaced.
+func userServiceFromVaultPath(path string) (string, bool) {
+	const prefix = "user/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	service := path[len(prefix):]
+	if !validateUserService(service) {
+		return "", false
+	}
+	return service, true
+}
+
+// ListUserCredentials returns the service names that have a user-level
+// credential envelope stored at `user/<service>`, with plaintext metadata
+// only — never the credential value (ADR-0011). It works on a locked vault
+// because List never decrypts a stored value (see vault.Vault.List).
+func (s *apiServer) ListUserCredentials(w http.ResponseWriter, r *http.Request) {
+	if s.vault == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_local_vault",
+			"daemon is not configured with a vault")
+		return
+	}
+
+	entries, err := s.vault.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "vault_list_failed", err.Error())
+		return
+	}
+
+	list := api.UserCredentialsList{Services: []api.UserCredentialSummary{}}
+	for _, e := range entries {
+		service, ok := userServiceFromVaultPath(e.Path)
+		if !ok {
+			continue
+		}
+		list.Services = append(list.Services, api.UserCredentialSummary{
+			Service:  service,
+			Metadata: agentMetadataToWire(e.Metadata),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, list)
 }
