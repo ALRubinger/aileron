@@ -25,14 +25,14 @@
 // # Scope
 //
 // This package defines the descriptor format and the two-layer loader.
-// It does not implement the binding-table consult (#1193), the injectors
-// (#1194), or the sentinel-swap mechanism (#1196, mechanism B); it only
-// validates the emit_mechanism field against the implemented set. Because
-// the sentinel-swap egress path is not yet wired (#1196), this loader
-// accepts only mechanism "A" and rejects emit_mechanism "B" at load time;
-// "B" becomes a valid descriptor value once #1196 lands. Persisting a
-// stateful CLI's local cache across ephemeral sandboxes is out of scope
-// and tracked separately (#1190).
+// It does not implement the binding-table consult (#1193) or the injectors
+// (#1194). It accepts both emit mechanisms: mechanism "A" (inject at the
+// proxy) and mechanism "B" (sentinel-swap). A mechanism-B binding declares
+// a non-secret `sentinel` block (a placeholder value plus the env-var name
+// the launcher plants it under); this loader validates that schema while
+// the egress code that consumes those fields lands separately (#1247).
+// Persisting a stateful CLI's local cache across ephemeral sandboxes is out
+// of scope and tracked separately (#1190).
 //
 // [ADR-0019]: https://docs.withaileron.ai/adr/0019-v4-https-data-plane
 package proxybinding
@@ -58,16 +58,14 @@ const SchemaVersion = "v1"
 // may declare at load time. Mechanism "A" injects unconditionally at the
 // proxy (the client emits a no-credential request). Mechanism "B" is
 // sentinel-swap (the launcher plants a non-secret sentinel the proxy swaps
-// for the real credential at egress), and is intentionally absent from
-// this set: until the sentinel-swap egress path is wired (#1196), a
-// descriptor that declares emit_mechanism "B" is rejected at load time
-// rather than accepted into a table no code can honor. This keeps the
-// fail-closed posture: a descriptor never validates against a mechanism
-// the proxy cannot enforce. The canonical internal/binding.EmitMechanismB
-// constant is kept for the future #1196 code; this loader simply does not
-// accept it yet.
+// for the real credential at egress); a mechanism-B binding must declare a
+// `sentinel` block naming the placeholder value and the env-var name the
+// launcher plants it under. A value outside this set (e.g. "C") is a
+// load-time error, so a descriptor never validates against a mechanism the
+// proxy cannot enforce.
 var EmitMechanisms = map[string]struct{}{
 	string(binding.EmitMechanismA): {},
+	string(binding.EmitMechanismB): {},
 }
 
 // Descriptor is a parsed, versioned binding-descriptor document. One
@@ -113,12 +111,21 @@ type Entry struct {
 	Scheme string `yaml:"scheme"`
 
 	// EmitMechanism declares how the credential reaches egress: "A"
-	// (inject at the proxy) or "B" (sentinel-swap, #1196). Optional;
-	// empty defaults to "A". Until the sentinel-swap egress path is wired
-	// (#1196), only "A" is accepted: "B" is rejected at load time rather
-	// than admitted into a table no code can honor. Any other value is
-	// also a load-time error.
+	// (inject at the proxy) or "B" (sentinel-swap). Optional; empty
+	// defaults to "A". A mechanism-B binding must declare a non-empty
+	// [Entry.Sentinel] block; a mechanism-A binding (explicit or defaulted)
+	// must declare none. Any value outside the closed set is a load-time
+	// error.
 	EmitMechanism string `yaml:"emit_mechanism"`
+
+	// Sentinel is the mechanism-B placeholder declaration: the non-secret
+	// value the launcher plants inside the container and the env-var name it
+	// plants under. It is required and non-empty for mechanism "B" and
+	// forbidden for mechanism "A" (a stray sentinel on a mechanism-A binding
+	// is a load-time error, since the field is meaningless without B). It is
+	// a pointer so an absent block is distinguishable from a present block
+	// with empty fields. See [Sentinel].
+	Sentinel *Sentinel `yaml:"sentinel"`
 
 	// Username is the non-secret HTTP basic-auth username, required only
 	// for the basic scheme (e.g. "x-access-token" for git-over-HTTPS).
@@ -138,6 +145,30 @@ type Entry struct {
 	// QueryParam is the query-parameter name to set, required only for the
 	// query-param scheme.
 	QueryParam string `yaml:"query_param"`
+}
+
+// Sentinel is the per-binding mechanism-B placeholder declaration. It makes
+// both the placeholder value and its plant location data rather than Go
+// constants, so a token-in-env CLI is expressible purely by a descriptor.
+//
+// Every field is non-secret. The Value carries no authority: presenting it
+// upstream authenticates nothing, so it is safe to embed in source, commit,
+// and print in logs. The launcher plants Value under the Env env-var name
+// inside the container so the CLI's local validation passes and it issues
+// the request; the proxy then recognizes Value at egress and swaps in the
+// real credential. The placeholder bytes never reach upstream.
+type Sentinel struct {
+	// Value is the non-secret, format-mimicking placeholder the launcher
+	// plants and the proxy recognizes (e.g.
+	// "ghp_AILERONSENTINELAAAAAAAAAAAAAAAAAAAAA"). It is required and
+	// non-empty for mechanism "B". It is non-secret and safe to commit.
+	Value string `yaml:"value"`
+
+	// Env is the environment-variable name the launcher sets to [Sentinel.Value]
+	// inside the container (e.g. "GH_TOKEN"). It is required and non-empty for
+	// mechanism "B". It generalizes the plant target so the launcher is not
+	// hardcoded to a single CLI's env var.
+	Env string `yaml:"env"`
 }
 
 // TokenPlaceholder is the substring a header-template's Template
@@ -210,9 +241,28 @@ func (e *Entry) Validate() error {
 		mech = string(binding.EmitMechanismA)
 	}
 	if _, ok := EmitMechanisms[mech]; !ok {
-		// "B" (sentinel-swap) is rejected at load time until #1196 wires
-		// the egress path; only "A" is accepted today.
-		return fmt.Errorf("unsupported emit_mechanism %q (only %q is accepted until sentinel-swap (#1196) lands)", e.EmitMechanism, string(binding.EmitMechanismA))
+		return fmt.Errorf("unknown emit_mechanism %q (want one of %q or %q)", e.EmitMechanism, string(binding.EmitMechanismA), string(binding.EmitMechanismB))
+	}
+
+	// Mechanism B requires a non-empty sentinel block (value + env);
+	// mechanism A (explicit or defaulted) forbids one. The sentinel names
+	// the placeholder the launcher plants and the env var it plants it
+	// under, so the field is meaningless without B (fail closed).
+	switch mech {
+	case string(binding.EmitMechanismB):
+		if e.Sentinel == nil {
+			return fmt.Errorf("emit_mechanism %q requires a sentinel block", string(binding.EmitMechanismB))
+		}
+		if e.Sentinel.Value == "" {
+			return fmt.Errorf("emit_mechanism %q requires a non-empty sentinel.value", string(binding.EmitMechanismB))
+		}
+		if e.Sentinel.Env == "" {
+			return fmt.Errorf("emit_mechanism %q requires a non-empty sentinel.env", string(binding.EmitMechanismB))
+		}
+	default:
+		if e.Sentinel != nil {
+			return fmt.Errorf("emit_mechanism %q must not declare a sentinel block (sentinel applies only to mechanism %q)", string(binding.EmitMechanismA), string(binding.EmitMechanismB))
+		}
 	}
 
 	switch e.Scheme {
