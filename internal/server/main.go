@@ -532,7 +532,8 @@ func isLoopbackBind(bindAddr string) bool {
 // is local-daemon-only, so a missing file there is benign.
 //
 // `prompter` is forwarded to [launch.EnsureVault] for the interactive
-// path; nil means use the package default which reads from `/dev/tty`.
+// path; nil means use the package default which reads from the
+// controlling terminal (/dev/tty on POSIX, CONIN$ on Windows).
 func selectVault(log *slog.Logger, vaultPath string, isTTY bool, prompter launch.PassphrasePrompter, w io.Writer) (app.Config, error) {
 	if os.Getenv("AILERON_DATABASE_URL") != "" {
 		log.Info("cloud-shaped daemon: skipping local vault (postgres-backed)")

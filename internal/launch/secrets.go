@@ -79,13 +79,13 @@ func ValidateTokenRef(field, value string) error {
 
 // OpenVaultFunc is the function used to open the vault when vault
 // references are found in token fields. Defaults to prompting for a
-// passphrase on /dev/tty. Replaceable in tests.
+// passphrase on the controlling terminal. Replaceable in tests.
 var OpenVaultFunc = promptAndOpenVault
 
 func promptAndOpenVault(w io.Writer) (vault.Vault, error) {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	tty, err := openControllingTerminal()
 	if err != nil {
-		return nil, fmt.Errorf("cannot open /dev/tty for passphrase prompt: %w", err)
+		return nil, fmt.Errorf("cannot open terminal for passphrase prompt: %w", err)
 	}
 	defer tty.Close()
 
