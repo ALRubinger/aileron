@@ -342,6 +342,15 @@ tasks:
       AILERON_API_URL: http://localhost:8080
       AILERON_UI_BASE_URL: http://localhost:3000
 
+  test:integration:cli-vault-route:
+    desc: "Run the auth-github vault-route drift guard (#1157): stands up the real daemon handler in-process and drives the CLI's vault path against the generated route"
+    cmds:
+      # Self-contained: the test stands up app.NewHandlerWithConfig on an
+      # httptest server and overrides AILERON_API_URL per-test, so it needs
+      # no running services. Build-tagged `integration` so it stays out of
+      # the default unit suite.
+      - go test -tags=integration -race ./cmd/aileron/...
+
   test:integration:sandbox:
     desc: Run the sandbox MCP parity integration test (in-process daemon + aileron-mcp host subprocess; see internal/app/sandbox_mcp_test.go for the contract)
     cmds:

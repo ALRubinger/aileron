@@ -584,6 +584,18 @@ jobs:
           AILERON_API_URL: http://localhost:8080
           AILERON_UI_BASE_URL: http://localhost:3000
 
+      - name: Run auth-github vault-route drift guard (#1157)
+        # In-process drift guard for the `aileron auth github` CLI vault
+        # path: stands up the real daemon handler (app.NewHandlerWithConfig
+        # + a MemVault, route from the generated mux) on an httptest server
+        # and drives runAuthGitHub against it. Catches a CLI-vs-route path
+        # mismatch the fake-server unit tests cannot. Self-contained — it
+        # overrides AILERON_API_URL per-test, so it does not depend on the
+        # full stack started above. Additive step so a failure is
+        # attributable to this specific contract. Raw `go test` (not task)
+        # to match the sibling steps in this job, which has no setup-task.
+        run: go test -tags=integration -race ./cmd/aileron/...
+
       - name: Run AuthSpec bind-mount writability integration test (#988)
         # The ubuntu runner has rootful Docker, where the host operator's
         # UID owns the transient AuthSpec dir but the container runs as the
