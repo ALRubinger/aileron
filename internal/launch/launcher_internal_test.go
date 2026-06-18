@@ -612,7 +612,7 @@ func nestedMountTarget(mounts []sandboxcontainer.Volume) string {
 func TestCollapseNestedMCPMounts_CollapsesFileIntoParentDir(t *testing.T) {
 	dirSource := t.TempDir() // host-side source for /home/agent/.codex/
 	cfgSource := filepath.Join(t.TempDir(), "config.toml")
-	cfgBody := []byte("cli_auth_credentials_store = \"file\"\n\n[mcp_servers.aileron]\ncommand = \"/usr/local/bin/aileron-mcp\"\n")
+	cfgBody := []byte("sandbox_mode = \"danger-full-access\"\ncli_auth_credentials_store = \"file\"\n\n[mcp_servers.aileron]\ncommand = \"/usr/local/bin/aileron-mcp\"\n")
 	if err := os.WriteFile(cfgSource, cfgBody, 0o600); err != nil {
 		t.Fatalf("seed config.toml: %v", err)
 	}

@@ -148,10 +148,13 @@ func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]s
 	// Sandbox mode emits only our [mcp_servers.aileron] block — no
 	// merge with a host-side config. The empty-string baseline mirrors
 	// what mergeCodexMCPBlock produces when called with no prior file.
-	// Sandbox mode also emits `cli_auth_credentials_store = "file"`
-	// as a top-level key so the in-container Codex resolves auth
-	// from auth.json — the AuthSpec FileBinding writes auth.json
-	// into the same directory at launch (R22).
+	// Sandbox mode also emits two top-level keys:
+	// `sandbox_mode = "danger-full-access"` disables Codex's redundant
+	// in-container OS sandbox (the Alpine image ships no bubblewrap, so
+	// it would only warn and fall back), and
+	// `cli_auth_credentials_store = "file"` so the in-container Codex
+	// resolves auth from auth.json — the AuthSpec FileBinding writes
+	// auth.json into the same directory at launch (R22).
 	body := mergeCodexSandboxConfig(mcpBin, mcpEnv)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		return nil, nil, fmt.Errorf("writing codex sandbox config: %w", err)
@@ -165,16 +168,33 @@ func (c Codex) configureSandboxMCP(mcpBin string, mcpEnv map[string]string) ([]s
 }
 
 // mergeCodexSandboxConfig is the ModeSandbox variant of the merge.
-// In addition to the [mcp_servers.aileron] block, it prepends
-// `cli_auth_credentials_store = "file"` as a top-level key so the
-// in-container Codex CLI reads auth.json instead of trying to use
-// the macOS Keychain / Linux secret-tool keyring (which do not
-// exist inside the sandbox). The host config is never touched
-// under ModeSandbox.
+// In addition to the [mcp_servers.aileron] block, it prepends two
+// top-level keys:
+//
+//   - `sandbox_mode = "danger-full-access"` disables Codex's own
+//     OS sandbox (bubblewrap/Landlock on the Linux container) for
+//     local exec. The Alpine sandbox-base image ships no bwrap binary,
+//     so
+//     leaving Codex's sandbox enabled prints a "could not find
+//     bubblewrap on PATH" warning on every launch and falls back to a
+//     bundled copy. The outer Aileron Docker container is the real
+//     isolation boundary — Codex's sandbox/approval machinery governs
+//     only its local exec while Aileron mediates MCP/gateway actions —
+//     so the nested in-container sandbox is redundant. This key
+//     silences the warning at the source. It is sandbox-mode only;
+//     configureHostMCP is untouched, so host launches keep Codex's
+//     normal sandboxing.
+//   - `cli_auth_credentials_store = "file"` so the in-container Codex
+//     CLI reads auth.json instead of trying to use the macOS Keychain
+//     / Linux secret-tool keyring (which do not exist inside the
+//     sandbox).
+//
+// The host config is never touched under ModeSandbox.
 func mergeCodexSandboxConfig(mcpBin string, mcpEnv map[string]string) string {
-	// Start with the top-level key, then append the [mcp_servers.*]
+	// Start with the top-level keys, then append the [mcp_servers.*]
 	// block via the existing merge over an empty baseline.
-	return `cli_auth_credentials_store = "file"` + "\n" +
+	return `sandbox_mode = "danger-full-access"` + "\n" +
+		`cli_auth_credentials_store = "file"` + "\n" +
 		mergeCodexMCPBlock("", mcpBin, mcpEnv)
 }
 
