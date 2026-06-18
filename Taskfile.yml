@@ -299,7 +299,7 @@ tasks:
     desc: Run Go tests with coverage; print summary excluding generated and test-helper code
     cmds:
       - go test -coverprofile=coverage-raw.txt {{.GO_TEST_PACKAGES}}
-      - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
+      - grep -v -E '/(api/gen|sessions/sessionstest|tools)/' coverage-raw.txt > coverage.txt
       - rm coverage-raw.txt
       - go tool cover -func=coverage.txt | tail -1
 
@@ -307,14 +307,15 @@ tasks:
     desc: Run Go tests with race, coverage, and JUnit output (single-shot; local equivalent of the CI shards combined)
     cmds:
       - gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt {{.GO_TEST_PACKAGES}}
-      # Strip generated code (oapi-codegen) and test-helper packages
-      # (e.g. sessions/sessionstest) from the coverage profile. Test
-      # helpers' err-check branches only fire when the SUT misbehaves;
-      # measuring their coverage as production code is a category
-      # mismatch. Belt-and-suspenders alongside codecov.yml's ignore
-      # directive so local `go tool cover` summaries agree with
-      # Codecov reports.
-      - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
+      # Strip generated code (oapi-codegen), test-helper packages
+      # (e.g. sessions/sessionstest), and release-prep dev tooling
+      # (internal/tools, which shells out to docker) from the coverage
+      # profile. Test helpers' err-check branches only fire when the SUT
+      # misbehaves and dev tools are not production code; measuring either
+      # as production code is a category mismatch. Belt-and-suspenders
+      # alongside codecov.yml's ignore directive so local `go tool cover`
+      # summaries agree with Codecov reports.
+      - grep -v -E '/(api/gen|sessions/sessionstest|tools)/' coverage-raw.txt > coverage.txt
       - rm coverage-raw.txt
 
   test:go:ci:sandbox:
@@ -326,7 +327,7 @@ tasks:
     desc: Run CI Go tests for the internal/sandbox/... shard
     cmds:
       - gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt ./internal/sandbox/...
-      - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
+      - grep -v -E '/(api/gen|sessions/sessionstest|tools)/' coverage-raw.txt > coverage.txt
       - rm coverage-raw.txt
 
   test:go:ci:rest:
@@ -341,7 +342,7 @@ tasks:
         set -euo pipefail
         pkgs=$(go list {{.GO_TEST_PACKAGES}} | grep -vE '/sandbox(/|$)' | tr '\n' ' ')
         gotestsum --junitfile junit.xml -- -race -coverprofile=coverage-raw.txt $pkgs
-      - grep -v -E '/(api/gen|sessions/sessionstest)/' coverage-raw.txt > coverage.txt
+      - grep -v -E '/(api/gen|sessions/sessionstest|tools)/' coverage-raw.txt > coverage.txt
       - rm coverage-raw.txt
 
   vet:go:
