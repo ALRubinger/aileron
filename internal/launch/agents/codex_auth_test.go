@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -373,6 +374,60 @@ func TestCodex_SandboxConfig_EmitsCliAuthCredentialsStoreFile(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "[mcp_servers.aileron]") {
 		t.Errorf("config.toml missing [mcp_servers.aileron] block:\n%s", body)
+	}
+}
+
+func TestCodex_SandboxConfig_EmitsSandboxModeDangerFullAccess(t *testing.T) {
+	// #1163: sandbox-mode config.toml must include
+	// `sandbox_mode = "danger-full-access"` as a top-level key so the
+	// in-container Codex disables its own OS sandbox (bubblewrap). The
+	// Alpine sandbox-base image ships no bwrap, so leaving Codex's
+	// sandbox on prints a "could not find bubblewrap on PATH" warning
+	// on every launch. The outer Aileron Docker container is the real
+	// isolation boundary, so the nested Codex sandbox is redundant.
+	_, mounts, err := agents.Codex{}.ConfigureMCP("/usr/local/bin/aileron-mcp",
+		map[string]string{"AILERON_URL": "http://x"}, "", launch.ModeSandbox)
+	if err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("mounts = %d, want 1", len(mounts))
+	}
+	body, err := readFile(mounts[0].Source)
+	if err != nil {
+		t.Fatalf("read mount: %v", err)
+	}
+	if !strings.Contains(string(body), `sandbox_mode = "danger-full-access"`) {
+		t.Errorf("config.toml missing sandbox_mode top-level key:\n%s", body)
+	}
+}
+
+func TestCodex_HostConfig_OmitsSandboxMode(t *testing.T) {
+	// #1163 guard: the sandbox-mode fix must NOT leak into host-mode
+	// config. Host launches keep Codex's normal OS sandbox, so
+	// configureHostMCP must never write `sandbox_mode` into the user's
+	// ~/.codex/config.toml. ModeHost merges into a home-directory file,
+	// so isolate HOME to a tempdir for the duration of the test.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	args, mounts, err := agents.Codex{}.ConfigureMCP("/usr/local/bin/aileron-mcp",
+		map[string]string{"AILERON_URL": "http://x"}, "", launch.ModeHost)
+	if err != nil {
+		t.Fatalf("ConfigureMCP: %v", err)
+	}
+	if args != nil {
+		t.Errorf("ModeHost args = %v, want nil", args)
+	}
+	if mounts != nil {
+		t.Errorf("ModeHost mounts = %v, want nil", mounts)
+	}
+	body, err := readFile(filepath.Join(tmpHome, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read host config.toml: %v", err)
+	}
+	if strings.Contains(string(body), "sandbox_mode") {
+		t.Errorf("host config.toml must not contain sandbox_mode:\n%s", body)
 	}
 }
 
