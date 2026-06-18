@@ -3,8 +3,13 @@ package inject
 import (
 	"encoding/base64"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -206,6 +211,77 @@ func TestInjectNoSecretLeakInErrors(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), sentinelSecret) {
 			t.Errorf("%s: error string leaked secret: %q", c.name, err.Error())
 		}
+	}
+}
+
+// TestNoLoggingCallsInPackage enforces the no-logging invariant the
+// package doc claims ("This package contains no logging calls"). The
+// no-secret-leak guarantee depends on the secret never reaching a log
+// sink, so this scans the package's own non-test .go sources and fails
+// if any logging facility is imported or called. This makes the
+// invariant enforced rather than only asserted by construction: if a
+// future edit introduces a log/slog/fmt.Print* call, this test breaks.
+func TestNoLoggingCallsInPackage(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+
+	// Import paths that are logging sinks. fmt is handled separately
+	// below because only its Print* family writes output; fmt is
+	// otherwise used legitimately for fmt.Errorf.
+	bannedImports := map[string]bool{
+		"log":      true,
+		"log/slog": true,
+	}
+
+	var scanned int
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		scanned++
+
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+
+		for _, imp := range file.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if bannedImports[path] {
+				t.Errorf("%s imports logging package %q; the inject package must contain no logging calls", name, path)
+			}
+		}
+
+		ast.Inspect(file, func(n ast.Node) bool {
+			callExpr, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := callExpr.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			pkgIdent, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			// Ban any fmt.Print* call (Print, Println, Printf), which
+			// writes to stdout and could surface a secret.
+			if pkgIdent.Name == "fmt" && strings.HasPrefix(sel.Sel.Name, "Print") {
+				pos := fset.Position(callExpr.Pos())
+				t.Errorf("%s:%d calls fmt.%s; the inject package must contain no logging/print calls", name, pos.Line, sel.Sel.Name)
+			}
+			return true
+		})
+	}
+
+	if scanned == 0 {
+		cwd, _ := filepath.Abs(".")
+		t.Fatalf("scanned 0 source files in %s; guard test would silently pass", cwd)
 	}
 }
 

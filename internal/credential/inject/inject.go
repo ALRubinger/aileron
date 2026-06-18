@@ -39,8 +39,10 @@ import (
 )
 
 // tokenPlaceholder is the substring substituted with the secret in a
-// [SchemeHeaderTemplate] [Params.Template]. It mirrors the "{key}"
-// convention used by the connector manifest's credentialFormat field.
+// [SchemeHeaderTemplate] [Params.Template]. The injector uses "{token}"
+// while the connector manifest's credentialFormat field uses "{key}";
+// these are intentionally distinct placeholder strings, not a shared
+// convention.
 const tokenPlaceholder = "{token}"
 
 // Params carries the scheme-specific, non-secret inputs to [Inject].
