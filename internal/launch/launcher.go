@@ -527,6 +527,29 @@ func Launch(ctx context.Context, config LaunchConfig) (LaunchResult, error) {
 			fmt.Fprintf(os.Stderr, "[launcher] no credentials in vault for %s; agent will prompt for login\n",
 				config.Agent.Name())
 		}
+
+		// User-level GitHub injection runs on every sandbox launch,
+		// independent of the per-agent AuthSpec: it reads the
+		// agent-independent `user/github` token from the vault and, when
+		// present, exports GH_TOKEN and mounts a static git
+		// credential-helper gitconfig at /home/agent/.gitconfig so both
+		// `gh` and git-over-HTTPS authenticate inside the sandbox. A
+		// missing entry or locked vault is a clean, non-fatal skip — the
+		// launch proceeds with GitHub operations unauthenticated. The
+		// chown hook mirrors the AuthSpec one: on rootful Docker Linux
+		// the host operator owns the transient dir, so the tree is
+		// chowned to the image's agent UID before mounting. See #1149.
+		ghChownHook := newAgentDirChownHook(ctx, sandboxcontainer.DefaultRunner(),
+			sandboxPlan.Runtime, sandboxPlan.Image)
+		ghPrep, err := prepareGitHubInject(ctx, client, sessionLog, os.Stderr, ghChownHook)
+		if err != nil {
+			return LaunchResult{}, fmt.Errorf("prepare github inject: %w", err)
+		}
+		defer ghPrep.Cleanup()
+		for k, v := range ghPrep.EnvAdditions {
+			agentEnv[k] = v
+		}
+		proxyBootstrap.Mounts = append(proxyBootstrap.Mounts, ghPrep.Mounts...)
 	}
 
 	// captureOnce wraps the AuthSpec Capture so the clean-exit gate
