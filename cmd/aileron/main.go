@@ -2144,6 +2144,31 @@ func renderHubInstallDecision(w io.Writer, d *hubInstallDecisionWire, verbose bo
 	fmt.Fprintln(w)
 }
 
+// allAuthoritiesAlreadyTrusted reports whether every authority in the
+// composite carries trust_state "already_trusted". An empty slice
+// returns false — the install-decision flows guard against empty
+// payloads before reaching the prompt, so an all-trusted determination
+// only makes sense when there is at least one authority to vouch for.
+//
+// When this holds, the operator has previously established trust in
+// every publisher the install touches, so the y/n/d prompt would only
+// re-confirm a decision already on record. Risk indicators on
+// already-trusted authorities are informational (colorizeRisk renders
+// non-conflict risks as a "•" note), and a real key conflict would set
+// the state to "conflict" rather than "already_trusted", so a uniformly
+// already-trusted set is safe to auto-accept.
+func allAuthoritiesAlreadyTrusted(auths []hubInstallAuthorityWire) bool {
+	if len(auths) == 0 {
+		return false
+	}
+	for _, a := range auths {
+		if a.TrustState != "already_trusted" {
+			return false
+		}
+	}
+	return true
+}
+
 // tryHubActionInstallDecisionFlow asks the daemon for the composite
 // install-decision payload for an action FQN. Returns:
 //
@@ -2199,6 +2224,15 @@ func tryHubActionInstallDecisionFlow(actionFQN string, autoYes bool, stdin io.Re
 	}
 
 	if autoYes {
+		return true, false, true, &d
+	}
+
+	// When every authority is already trusted, the prompt would only
+	// re-confirm a decision already on record. Render the composite
+	// panel for transparency, then auto-accept — the same return as the
+	// autoYes short-circuit.
+	if allAuthoritiesAlreadyTrusted(d.Authorities) {
+		renderHubActionCompositeDecision(stdout, &d, false)
 		return true, false, true, &d
 	}
 
@@ -2311,6 +2345,15 @@ func tryHubSuiteInstallDecisionFlow(suiteFQN string, autoYes bool, stdin io.Read
 	}
 
 	if autoYes {
+		return true, false, true, &d
+	}
+
+	// When every authority is already trusted, the prompt would only
+	// re-confirm a decision already on record. Render the composite
+	// panel for transparency, then auto-accept — the same return as the
+	// autoYes short-circuit.
+	if allAuthoritiesAlreadyTrusted(d.Authorities) {
+		renderHubSuiteCompositeDecision(stdout, &d, false)
 		return true, false, true, &d
 	}
 
