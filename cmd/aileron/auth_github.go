@@ -17,6 +17,29 @@ import (
 	"golang.org/x/term"
 )
 
+// userGitHubCredentialKind is the metadata Type stamped on the
+// user/github vault entry. It must equal the first segment of the
+// host-binding credential-ref (`user/github`) so the daemon's
+// VaultResolver kind check passes when a github.com / api.github.com
+// request is sealed at the TLS boundary (ADR-0019, #1195).
+const userGitHubCredentialKind = "user"
+
+// userCredentialsBody is the wire shape the user-credential PUT
+// marshals: the secret bytes plus optional non-secret metadata. It is a
+// local subset of api.AgentCredentials (cmd/aileron does not depend on
+// internal/api/gen, matching the agentCredentialsBody precedent).
+type userCredentialsBody struct {
+	Value    []byte                   `json:"value"`
+	Metadata *userCredentialsMetadata `json:"metadata,omitempty"`
+}
+
+// userCredentialsMetadata is the local subset of
+// api.AgentCredentialsMetadata the user-credential PUT sets. Only Type
+// is carried today; the daemon binding resolver keys on it.
+type userCredentialsMetadata struct {
+	Type string `json:"type,omitempty"`
+}
+
 // stdinIsTerminal reports whether the operator's stdin is a real
 // terminal. It is a package var so tests can drive both branches.
 // gh's interactive device-flow login renders a prompt through a
@@ -106,9 +129,21 @@ func runAuthGitHub(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Marshaling a struct with a single []byte field cannot fail; the
-	// error is discarded here matching runAuthImport's precedent.
-	body, _ := json.Marshal(agentCredentialsBody{Value: token})
+	// Stamp the credential's metadata Type as "user" so the daemon's
+	// host->credential binding resolver (ADR-0019) can validate the kind
+	// it resolves for user/github. The binding's credential-ref is
+	// `user/github`, whose first segment ("user") is the expected kind;
+	// VaultResolver fails closed if the stored Type does not match. Older
+	// entries written before this stamp carry an empty Type and will not
+	// resolve through a binding until re-run, which is the intended
+	// fail-closed posture rather than a silent unauthenticated request.
+	//
+	// Marshaling cannot fail for these field types; the error is
+	// discarded matching runAuthImport's precedent.
+	body, _ := json.Marshal(userCredentialsBody{
+		Value:    token,
+		Metadata: &userCredentialsMetadata{Type: userGitHubCredentialKind},
+	})
 	status, respBody, err := vaultDoRequest(http.MethodPut,
 		"/vault/user/github/credentials", body)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/ALRubinger/aileron/internal/binding"
 	connectorspec "github.com/ALRubinger/aileron/internal/connector/spec"
 	"github.com/ALRubinger/aileron/internal/credential"
+	"github.com/ALRubinger/aileron/internal/credential/inject"
 	"github.com/ALRubinger/aileron/internal/model"
 	"github.com/ALRubinger/aileron/internal/sandbox/discovery"
 	"github.com/ALRubinger/aileron/internal/vault"
@@ -561,24 +562,50 @@ func (s *apiServer) injectSandboxProxyHostBindingCredential(ctx context.Context,
 		}
 		return false, hostBindingRejectCredentialUnavailable
 	}
-	return applyHostBindingScheme(req, hb.Scheme, cred)
+	return applyHostBindingScheme(req, hb, cred)
 }
 
 // applyHostBindingScheme applies the named injection scheme to the
-// upstream request using the resolved credential. This is the narrow
-// seam #1194's scheme-keyed injector replaces: its signature is
-// (req, scheme, cred) so the binding-match wiring is untouched when the
-// closed scheme set lands. v1 implements `bearer`; every other scheme
-// in binding.HostBindingSchemes is accepted at config time but rejected
-// here until #1194 fills it in, which fails closed rather than silently
-// passing an un-injected request upstream.
-func applyHostBindingScheme(req *http.Request, scheme string, cred credential.Credential) (bool, string) {
-	switch scheme {
-	case binding.SchemeBearer:
-		req.Header.Set("Authorization", "Bearer "+string(cred.Value))
-		return true, ""
-	default:
+// upstream request using the resolved credential. It is the narrow seam
+// over the #1194 scheme-keyed injector (internal/credential/inject):
+// the binding-match wiring is untouched and the injector owns the wire
+// shape of every scheme, so a header convention lives in exactly one
+// place. `bearer` and `basic` are implemented (basic carries the
+// non-secret username from the binding); the remaining members of
+// binding.HostBindingSchemes are accepted at config time but rejected
+// here, which fails closed rather than silently passing an un-injected
+// request upstream.
+//
+// The resolved credential bytes flow only into [inject.Inject], which
+// writes them solely onto the request's Authorization header. They are
+// never copied into the returned reject reason or any audit payload.
+func applyHostBindingScheme(req *http.Request, hb binding.HostBinding, cred credential.Credential) (bool, string) {
+	scheme, params, ok := hostBindingInjectScheme(hb)
+	if !ok {
 		return false, hostBindingRejectUnsupportedScheme
+	}
+	if err := inject.Inject(req, scheme, cred.Value, params); err != nil {
+		// A missing param or an unimplemented scheme fails closed; the
+		// error never carries the secret (inject keeps it off every
+		// observable surface) so it is safe to map to a stable reason.
+		return false, hostBindingRejectUnsupportedScheme
+	}
+	return true, ""
+}
+
+// hostBindingInjectScheme maps a binding's scheme string and its
+// non-secret params onto the closed [inject.Scheme] set. It returns
+// ok=false for any scheme this proxy does not yet inject (a member of
+// binding.HostBindingSchemes whose wire shape is deferred), so the
+// caller fails closed instead of dialing upstream un-injected.
+func hostBindingInjectScheme(hb binding.HostBinding) (inject.Scheme, inject.Params, bool) {
+	switch hb.Scheme {
+	case binding.SchemeBearer:
+		return inject.SchemeBearer, inject.Params{}, true
+	case binding.SchemeBasic:
+		return inject.SchemeBasic, inject.Params{Username: hb.BasicUsername}, true
+	default:
+		return "", inject.Params{}, false
 	}
 }
 

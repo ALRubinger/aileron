@@ -306,8 +306,9 @@ func TestSandboxForwardProxy_HostBindingMissingCredentialFailsClosed(t *testing.
 
 // TestSandboxForwardProxy_HostBindingUnsupportedSchemeFailsClosed
 // asserts a binding declaring a scheme in the closed set but not yet
-// implemented (the #1194 seam: e.g. `basic`) fails closed rather than
-// dialing upstream with an un-injected request.
+// injected by the proxy (e.g. `sigv4-resign`, which the #1194 injector
+// enumerates but defers) fails closed rather than dialing upstream with
+// an un-injected request.
 func TestSandboxForwardProxy_HostBindingUnsupportedSchemeFailsClosed(t *testing.T) {
 	auditStore := audit.NewMemStore()
 	srv := &apiServer{
@@ -315,7 +316,7 @@ func TestSandboxForwardProxy_HostBindingUnsupportedSchemeFailsClosed(t *testing.
 		auditRecorder: audit.NewRecorder(auditStore, nil, func() string { return "audit-scheme" }),
 		specLoader:    func() ([]connectorspec.Spec, error) { return nil, nil },
 		vault:         mustVaultWith(t, "api_key/github/octocat", "api_key", []byte("hb_secret")),
-		hostBindings:  mustHostBindingTable(t, "api.example.test", "api_key/github/octocat", "basic"),
+		hostBindings:  mustHostBindingTable(t, "api.example.test", "api_key/github/octocat", "sigv4-resign"),
 		sandboxProxyClient: &http.Client{Transport: sandboxProxyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 			t.Errorf("upstream must not be dialed for an unsupported scheme; got %s", req.URL)
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(""))}, nil
