@@ -2,7 +2,7 @@ package composition
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -40,7 +40,12 @@ func EnrichValidateError(err error, tier Tier, agent, version, workDir string) e
 	if wd == "" {
 		wd = "."
 	}
-	devcontainerPath := filepath.Join(wd, DefaultDevcontainerPath)
+	// Use path.Join (forward-slash) rather than filepath.Join: this builds an
+	// informational path describing the launch CWD and the devcontainer file for
+	// an error message. DefaultDevcontainerPath is a forward-slash literal and
+	// the sandbox is a Linux container, so the displayed path must stay POSIX on
+	// every host OS rather than picking up Windows backslashes.
+	devcontainerPath := path.Join(wd, DefaultDevcontainerPath)
 	publishedImage := PublishedAgentImage(agent, version)
 	return fmt.Errorf("%w\n"+
 		"resolved tier=%s because %s exists in the working directory %s; "+
