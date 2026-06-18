@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -709,6 +710,75 @@ func launchHost(ctx context.Context, config LaunchConfig, daemonURL, sessionID s
 	return launchDirect(cmd, config)
 }
 
+// collapseNestedMCPMounts merges an agent's ConfigureMCP mounts into the
+// existing volume list, relocating any MCP *file* mount whose target sits
+// strictly inside an already-mounted directory rather than adding it as a
+// separate nested bind mount.
+//
+// Nested file-inside-directory bind mounts are the failure mode behind
+// issue #1143: Codex's AuthSpec emits a writable directory mount at
+// /home/agent/.codex/ (so the in-container login can write auth.json),
+// while ConfigureMCP emits a separate single-file mount of config.toml at
+// /home/agent/.codex/config.toml. On macOS Docker Desktop (virtiofs), runc
+// rejects creating the inner mountpoint with "mountpoint ... is outside of
+// rootfs" and container init dies. Collapsing the file into the parent
+// directory's host-side source means a single directory mount carries both
+// files and no nested bind exists.
+//
+// When an MCP mount's target is not nested under any existing directory
+// mount, it is appended unchanged — preserving the prior behavior for every
+// agent that does not collide with an AuthSpec directory mount.
+func collapseNestedMCPMounts(existing []sandboxcontainer.Volume, mcpMounts []MCPMount) ([]sandboxcontainer.Volume, error) {
+	out := existing
+	for _, m := range mcpMounts {
+		parent := enclosingDirMount(out, m.Target)
+		if parent == nil {
+			out = append(out, sandboxcontainer.Volume{
+				Source:   m.Source,
+				Target:   m.Target,
+				ReadOnly: m.ReadOnly,
+			})
+			continue
+		}
+		// Relocate the file into the parent directory mount's host-side
+		// source so the single directory mount exposes it at m.Target.
+		// path.Base mirrors the in-container layout the agent reads.
+		rel := strings.TrimPrefix(m.Target, parent.Target)
+		rel = strings.TrimPrefix(rel, "/")
+		dst := filepath.Join(parent.Source, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return nil, fmt.Errorf("create parent dir for %s: %w", dst, err)
+		}
+		data, err := os.ReadFile(m.Source)
+		if err != nil {
+			return nil, fmt.Errorf("read MCP config %s: %w", m.Source, err)
+		}
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return nil, fmt.Errorf("write MCP config into %s: %w", dst, err)
+		}
+	}
+	return out, nil
+}
+
+// enclosingDirMount returns the volume in mounts whose target is a
+// directory strictly containing target, or nil when target is not nested
+// inside any of them. A directory mount is identified by target shape: an
+// MCP single-file mount and a directory mount are distinguished only by
+// whether target is a strict path prefix of another mount's target.
+func enclosingDirMount(mounts []sandboxcontainer.Volume, target string) *sandboxcontainer.Volume {
+	clean := path.Clean(target)
+	for i := range mounts {
+		dir := path.Clean(mounts[i].Target)
+		if dir == clean {
+			continue
+		}
+		if strings.HasPrefix(clean, dir+"/") {
+			return &mounts[i]
+		}
+	}
+	return nil
+}
+
 func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchConfig, agentEnv map[string]string, containerName string, captureOnce func(), sessionLog *slog.Logger, extraMounts ...sandboxcontainer.Volume) (LaunchResult, error) {
 	commandName := firstAgentBinary(config.Agent)
 	if commandName == "" {
@@ -751,13 +821,11 @@ func launchSandbox(ctx context.Context, plan SandboxLaunchPlan, config LaunchCon
 	if mcpErr != nil {
 		return LaunchResult{}, fmt.Errorf("configuring MCP for %s: %w", config.Agent.Name(), mcpErr)
 	}
-	for _, m := range mcpMounts {
-		mounts = append(mounts, sandboxcontainer.Volume{
-			Source:   m.Source,
-			Target:   m.Target,
-			ReadOnly: m.ReadOnly,
-		})
+	collapsed, err := collapseNestedMCPMounts(mounts, mcpMounts)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("placing MCP config for %s: %w", config.Agent.Name(), err)
 	}
+	mounts = collapsed
 
 	command := append([]string{commandName}, config.Agent.Args()...)
 	command = append(command, extraArgs...)
