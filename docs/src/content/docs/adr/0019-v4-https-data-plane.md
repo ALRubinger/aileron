@@ -67,6 +67,46 @@ Cooperative HTTPS requests whose decrypted target does not uniquely match an ins
 
 The product claim is "sealed credentials" full stop. The agent never sees raw secret bytes, the daemon controls every credentialed call. The proxy is cooperative with the in-container client and is not a hard egress boundary. A hostile in-container process can still bypass the proxy by opening raw TCP sockets to an external host; container-level network hardening (network namespaces, egress firewalls) lives at a different layer and is out of scope for this ADR.
 
+### Credential sealing as a general substrate
+
+Model A above resolves credentials from installed connector specs. That is the first source the proxy consults, and it stays authoritative. The same TLS-boundary injection generalizes into a substrate that also seals credentials the user has bound to a host directly, without any connector spec. The substrate is the union of the two match sources plus passthrough, and the subsections below define its match sources, its scheme set, its emit mechanisms, and the rule that decides whether a given credential is sealable at all.
+
+#### User-level host→credential bindings
+
+A user can declare a binding as the triple `{host pattern, vault credential-ref, injection scheme}`. The binding is keyed on the host the request targets, not on the name of any CLI. There is no fake "github connector" spec standing in for `gh`; the binding names the host (`api.github.com`) and the vault credential-ref directly. This is a second, narrower match source that sits alongside connector specs. It does not replace connector specs and it does not outrank them.
+
+Host-keying is the right shape because raw CLIs are not MCP tools. The rendered CLI-shim surface was retired in [#959](https://github.com/ALRubinger/aileron/issues/959), and `aileron-mcp` ([ADR-0024](/adr/0024-sandbox-mcp-parity)) is now the sole in-container tool surface. A tool like `gh` or `git` runs as a plain CLI inside the sandbox and talks HTTPS to its host; the substrate seals it at the host boundary it actually targets, with no per-CLI shim to model.
+
+When the proxy decrypts a target it resolves the request in this order: connector-spec operation match, then user binding match, then passthrough. A request that uniquely matches an installed connector spec operation takes the connector path. A request that matches no connector spec but does match a user binding takes the binding path and receives the bound credential via the binding's declared scheme. A request that matches neither is forwarded unmodified as passthrough, exactly as in Model A. The connector path stays authoritative because it is consulted first; user bindings cover hosts the user wants sealed that no installed spec describes.
+
+Connector specs carry governance that bare host bindings do not. A connector operation gives typed audit and per-operation approval gating under [ADR-0009](/adr/0009-user-channel) and [ADR-0010](/adr/0010-failure-handling). A user binding seals a credential for a host but offers no per-operation typing or approval surface. Users who need governed, approvable operations install a connector; users who only need a host's credential injected reach for a binding.
+
+#### Injection schemes
+
+The injection scheme set is closed. The five schemes are `bearer`, `basic`, `header-template`, `query-param`, and `sigv4-resign`. `bearer` attaches the credential as an `Authorization: Bearer` token. `basic` attaches it as HTTP Basic auth. `header-template` writes the credential into an arbitrary header per a verbatim template. `query-param` attaches it as a named query-string parameter. `sigv4-resign` re-signs the request with an AWS SigV4 signature derived from the credential.
+
+The concrete header shape is per service, not per scheme alone. The GitHub API takes `bearer`. Git over HTTPS takes `basic`. Linear takes `header-template` with its header written verbatim. The scheme names the mechanism; the service determines the exact wire form.
+
+The initial implementation lands four schemes fully (`bearer`, `basic`, `header-template`, `query-param`) plus `sigv4-resign` as a documented stub pending an AWS-style consumer. This is implementation staging, not a design gap. The design names all five and the stub is filled in when the first SigV4 consumer arrives.
+
+#### Emit mechanisms
+
+The substrate emits the injected credential to the upstream by one of two mechanisms.
+
+The first is empty or no-op credential config. The agent holds no credential material and the request carries no placeholder; the proxy adds the credential at the TLS boundary on a request that arrived without one.
+
+The second is sentinel-swap. The agent holds a non-secret, format-mimicking placeholder that looks like a credential of the right shape but carries no secret value. The agent puts the sentinel where the credential would go, and the proxy swaps the sentinel for the real secret at egress. This covers clients that refuse to issue a request unless a syntactically valid credential is present.
+
+Both mechanisms preserve the sealing claim. The agent only ever holds the sentinel, which is useless on its own, so the "agent never sees raw secret bytes" decision above still holds. Raw credential bytes are still never written to container env, image layers, mounted project files, or command-line args; the swap happens at the proxy, not in the container.
+
+#### Sealability rule and residual exception
+
+A credential is proxy-sealable if and only if some scheme plus emit-mechanism combination completes its request at the proxy boundary. Most credentials are sealable: pick the scheme the service expects, pick empty config or sentinel-swap depending on whether the client tolerates a missing credential, and the proxy finishes the request without the agent ever holding the secret.
+
+The residual exception is narrow. It is the conjunction of two conditions: a CLI that short-circuits the proxy (it does not honor `HTTPS_PROXY` or otherwise bypasses the TLS boundary) and that also rejects a syntactically valid sentinel (so sentinel-swap cannot satisfy it). A CLI that does only one of these is still sealable. Only the conjunction forces env injection, which is unsealed. This sits inside the existing threat-model scope: the cooperative-client assumption already governs whether the proxy sees the request, and a short-circuiting client is the same class of non-cooperative behavior described in [the threat model scope](#threat-model-scope) below.
+
+When a credential cannot be sealed and must be env-injected, the daemon emits a `sandbox.credential.unsealed` audit event. The event marks that an env-injected, unsealed credential was used for a launch, so the unsealed path is never silent. Like every other event in this ADR it carries no secret bytes: it records the credential binding reference, the host, and the reason the credential could not be sealed, not the credential value. The emission of this event lands with the code sub-issues that implement the substrate; this ADR names and describes it as design-of-record.
+
 ### Threat model scope
 
 The HTTPS data plane assumes the in-container client cooperates with `HTTPS_PROXY`. Common third-party CLIs (`gh`, `aws`, `curl`, etc.) honor `HTTPS_PROXY` by default, so the cooperative model covers the dominant case. Hostile or proxy-bypassing client behavior is not in scope for this control. The sealing claim covers credentials, not exfiltration; an exfiltration threat is a different control and a different ADR.
@@ -108,8 +148,14 @@ The proxy/data-plane implementation stands on its own; it never depended on shel
 - [Issue #896](https://github.com/ALRubinger/aileron/issues/896) — HTTPS proxy/data-plane implementation
 - [Issue #898](https://github.com/ALRubinger/aileron/issues/898) — runtime audit-schema cross-cut
 - [Credential-injection-only requirements brainstorm](https://github.com/ALRubinger/aileron/blob/main/docs/brainstorms/2026-06-10-v4-proxy-credential-injection-only-requirements.md) — Model A pivot rationale, threat-model framing, and the work split that drives this amendment
+- [ADR-0009](/adr/0009-user-channel) — typed audit and per-operation governance that connector specs carry and bare host bindings do not
+- [ADR-0010](/adr/0010-failure-handling) — per-operation approval gating connector operations receive
 - [ADR-0017](/adr/0017-sandbox-composition) — current sandbox runtime cut
 - [ADR-0018](/adr/0018-v4-single-binary-runtime) — single-binary runtime model
+- [ADR-0024](/adr/0024-sandbox-mcp-parity) — `aileron-mcp` as the sole in-container tool surface; raw CLIs are not MCP tools, so the substrate seals them at the host boundary
+- [Issue #959](https://github.com/ALRubinger/aileron/issues/959) — retirement of the rendered CLI-shim surface
+- [Umbrella #1191](https://github.com/ALRubinger/aileron/issues/1191) — credential-sealing substrate generalization; this amendment is wave 1
+- [Feedback #1181](https://github.com/ALRubinger/aileron/issues/1181) — the dogfooding feedback that motivated generalizing Model A into a substrate
 - [BYO Image Proxy Contract](/development/sandbox-agent-images/#byo-image-proxy-contract) — the two helpers the proxy bootstrap requires from the in-container trust store
 - [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/) — manual recipes for `curl`, `gh`, `aws`, plus the automated `curl` integration test contract
 
