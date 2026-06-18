@@ -1,0 +1,84 @@
+package launch
+
+import (
+	"context"
+	"testing"
+
+	sandboxcontainer "github.com/ALRubinger/aileron/internal/sandbox/container"
+	"github.com/ALRubinger/aileron/internal/vault"
+)
+
+// Launcher wiring contract (#1149): the launcher merges the GitHub
+// injector's EnvAdditions into the composed agentEnv and appends its
+// mounts onto the sandbox volume list. These tests exercise that exact
+// merge — env merge plus mount append — against a fake daemon, so the
+// wiring is verified without standing up the full container launch.
+//
+// The merge mirrors launcher.go's sandbox-only block:
+//
+//	for k, v := range ghPrep.EnvAdditions { agentEnv[k] = v }
+//	proxyMounts = append(proxyMounts, ghPrep.Mounts...)
+
+func TestLauncherMergesGitHubInject_TokenPresent(t *testing.T) {
+	daemon := &fakeUserCredsDaemon{secret: vault.Secret{Value: []byte("ghp_launch")}}
+
+	// Pre-existing agent env (e.g. AuthSpec EnvBindings) with a distinct
+	// key set — GH_TOKEN must not clobber it and vice-versa.
+	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
+	var proxyMounts []sandboxcontainer.Volume
+
+	ghPrep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareGitHubInject: %v", err)
+	}
+	defer ghPrep.Cleanup()
+	for k, v := range ghPrep.EnvAdditions {
+		agentEnv[k] = v
+	}
+	proxyMounts = append(proxyMounts, ghPrep.Mounts...)
+
+	if agentEnv["GH_TOKEN"] != "ghp_launch" {
+		t.Errorf("agentEnv[GH_TOKEN] = %q, want ghp_launch", agentEnv["GH_TOKEN"])
+	}
+	if agentEnv["CLAUDE_CODE_OAUTH_TOKEN"] != "agent-oauth" {
+		t.Errorf("GitHub inject clobbered the AuthSpec env binding: %q", agentEnv["CLAUDE_CODE_OAUTH_TOKEN"])
+	}
+
+	var found bool
+	for _, m := range proxyMounts {
+		if m.Target == "/home/agent/.gitconfig" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("mount list missing /home/agent/.gitconfig; got %+v", proxyMounts)
+	}
+}
+
+func TestLauncherMergesGitHubInject_NoEntryIsCleanSkip(t *testing.T) {
+	daemon := &fakeUserCredsDaemon{err: ErrUserCredentialsNotFound}
+
+	agentEnv := map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "agent-oauth"}
+	var proxyMounts []sandboxcontainer.Volume
+
+	ghPrep, err := prepareGitHubInject(context.Background(), daemon, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("prepareGitHubInject: %v", err)
+	}
+	defer ghPrep.Cleanup()
+	for k, v := range ghPrep.EnvAdditions {
+		agentEnv[k] = v
+	}
+	proxyMounts = append(proxyMounts, ghPrep.Mounts...)
+
+	if _, ok := agentEnv["GH_TOKEN"]; ok {
+		t.Errorf("GH_TOKEN injected on clean skip; want absent")
+	}
+	if len(proxyMounts) != 0 {
+		t.Errorf("mounts appended on clean skip; want none, got %+v", proxyMounts)
+	}
+	// The unrelated AuthSpec env survives the no-op merge.
+	if agentEnv["CLAUDE_CODE_OAUTH_TOKEN"] != "agent-oauth" {
+		t.Errorf("clean skip disturbed existing env: %q", agentEnv["CLAUDE_CODE_OAUTH_TOKEN"])
+	}
+}
