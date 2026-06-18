@@ -62,7 +62,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,prefix=git-
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
           labels: |
             org.opencontainers.image.title=Aileron sandbox base
             org.opencontainers.image.description=Minimal sandbox substrate for Aileron-managed agent containers.

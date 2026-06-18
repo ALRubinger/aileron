@@ -92,6 +92,10 @@ homebrew_casks:
   # with contents:write scope on the tap repo, set as a secret in this
   # repo. Default GITHUB_TOKEN can't write across repos.
   - name: aileron
+    # Prerelease tags (a hyphen in the version, e.g. v0.0.5-cr-1) exist to
+    # smoke-test the publish pipeline; they must not move the stable tap. `auto`
+    # skips the tap commit whenever release.prerelease resolves true.
+    skip_upload: "auto"
     ids:
       - aileron # the bundled archive id above (all four binaries)
     repository:
@@ -139,6 +143,10 @@ scoops:
   # windows/arm64 is ignored, so the only windows archive is the amd64
   # zip and the manifest's architecture map carries just the 64bit entry.
   - name: aileron
+    # Prerelease tags (a hyphen in the version, e.g. v0.0.5-cr-1) exist to
+    # smoke-test the publish pipeline; they must not move the stable bucket.
+    # `auto` skips the manifest commit whenever release.prerelease resolves true.
+    skip_upload: "auto"
     ids:
       - aileron # the bundled archive id above (all three binaries)
     repository:
