@@ -333,4 +333,19 @@ const (
 	EventTypeVaultCredentialRead   EventType = "vault.credential.read"
 	EventTypeVaultCredentialWrite  EventType = "vault.credential.write"
 	EventTypeVaultCredentialDelete EventType = "vault.credential.delete"
+
+	// User-level vault credential events. These namespace the user-level
+	// (agent-independent) credential verbs at
+	// /v1/vault/user/{service}/credentials, which back the user-scoped
+	// vault path `user/<service>`. They are deliberately distinct from the
+	// per-agent EventTypeVaultCredential* constants so a user operation on a
+	// service named e.g. "github" is never mislabeled as an agent named
+	// "github". The payload carries `aileron.vault.user.service` (never
+	// `aileron.vault.agent`), the requester actor, a recorder-stamped
+	// timestamp, and on failure an `aileron.failure.class` error class. The
+	// credential bytes NEVER appear in the payload — only metadata about the
+	// operation.
+	EventTypeVaultUserCredentialRead   EventType = "vault.user.credential.read"
+	EventTypeVaultUserCredentialWrite  EventType = "vault.user.credential.write"
+	EventTypeVaultUserCredentialDelete EventType = "vault.user.credential.delete"
 )
