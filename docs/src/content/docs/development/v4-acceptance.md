@@ -1,65 +1,127 @@
 ---
-title: "v4 Acceptance Scorecard"
-description: "The living 'is v4 done?' runbook and pass/fail scorecard, mapped 1:1 to the v4 acceptance bar in issue #747."
+title: "v4 Manual Acceptance Runbook"
+description: "The hands-on steps an operator runs to perform the manual half of v4 acceptance: build Aileron, launch an agent in a Docker sandbox, and verify the agent sees the aileron tool surface."
 order: 11
 ---
 
-This page is the living checkpoint for v4 delivery. It answers one question: is the containerized AI-native runtime done?
+This page is the operator runbook for the manual half of v4 acceptance. It is the concrete, copy-pasteable sequence you run by hand to fill the macOS and Windows cells of the v4 matrix in [issue #747](https://github.com/ALRubinger/aileron/issues/747). The Linux column is automated in CI, so you never hand-run it (it is green when CI is green).
 
-The v4 bar comes from [issue #747](https://github.com/ALRubinger/aileron/issues/747): an agent launches in the sandbox, authenticates, exercises actions and connectors through the Aileron HTTPS data plane, and every flow is audited, verified across macOS, Linux, and Windows (Docker), for every supported agent, with a recorded walkthrough. Per the 2026-06-15 scope note, Docker is the only runtime on all three operating systems (Podman stays descoped), and verification is automated on Linux with a light per-agent manual smoke on macOS and Windows.
+For the at-a-glance "is v4 done?" verdict and how each item maps to the #747 bar, jump to [Current status](#current-status) at the bottom. The rest of this page is the procedure.
 
-This page orients and links. It does not duplicate the proof-out steps; those live in the walkthrough and auth pages below. Update the scorecard here as gating items move.
+## The acceptance bar, in one sentence
 
-## Current verdict
+For each agent on each operating system, the bar is: **the agent launches inside a Docker container and lists `aileron` with its `draft_email` tool**. That is the whole bar for a macOS or Windows cell. Every step below exists to get you to that check.
 
-**v4 is NOT yet delivered.** Two gating items are outstanding: the macOS and Windows manual smoke for the Manual E2E item ([#962](https://github.com/ALRubinger/aileron/issues/962)), and the demo script plus recorded walkthrough ([#852](https://github.com/ALRubinger/aileron/issues/852)). Everything else in the v4 bar is shipped.
+A full action round-trip (through to a real Gmail draft, with the HITL approval and audit chain) is the optional gold-standard check on at least one agent per OS. It is covered in [Step 6](#step-6-optional-full-action-round-trip).
 
-## How to prove v4 end-to-end
+## Before you start
 
-The full launch, authenticate, exercise-actions-and-connectors-through-the-HTTPS-data-plane, and confirm-audit sequence is already written. Compose these pages rather than re-running ad hoc steps:
+You need:
 
-1. **Launch and exercise the data plane.** The [Sandbox MCP Manual Verification Walkthrough](/development/sandbox-mcp-walkthrough/) walks an action end-to-end inside a v4 sandbox container through the agent's MCP transport, with a real connector and a HITL approval, and verifies the `approval.requested → approval.approved → execution.started → execution.succeeded` audit chain.
-2. **Authenticate the agent.** The [Sandbox Agent Auth](/development/sandbox-agent-auth/) page covers vault-backed credential injection for `aileron launch <agent> --sandbox=docker`: the vault path scheme, the per-agent envelope schemas, the in-container login-then-snapshot flow, and the recovery path.
-3. **Verify CLI traffic through the proxy.** The [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/) verifies the v4 HTTPS proxy with `curl`, `gh`, and `aws`, with the expected audit events for each.
+- **Docker** installed and running. Docker Desktop on macOS and Windows both run the same Linux `sandbox-base` image (Windows via the WSL2 backend).
+- The **Go toolchain** and **[Task](https://taskfile.dev)** to build from source.
+- A clone of this repo, and `jq` on `PATH` (used by the optional audit check in Step 6).
+- For the optional full round-trip only: a Google OAuth client configured via `aileron binding setup gmail`. The light smoke does not need it.
 
-### The supported matrix
+## Step 1: Build the binaries
 
-The v4 bar requires every supported agent on Docker across all three operating systems:
+The sandbox launch needs two host binaries on `PATH`: the `aileron` CLI and its `aileron-mcp` sibling.
 
-| Agent | macOS Docker | Linux Docker | Windows Docker |
+```bash
+task build:cli && task build:mcp
+export PATH="$PWD/build:$PATH"
+```
+
+`build:cli` produces `build/aileron`. `build:mcp` produces `build/aileron-mcp`, and on a macOS or Windows host it also cross-builds a `build/aileron-mcp-linux-<arch>` sibling, because the launcher bind-mounts a Linux `aileron-mcp` into the Linux container. Confirm both resolve:
+
+```bash
+aileron --version && aileron-mcp --version
+```
+
+## Step 2: Install the action the smoke looks for
+
+The smoke checks that the agent sees `draft_email`. That tool comes from the Google connector's draft-email action, so install both to put it in the catalog:
+
+```bash
+aileron connector install github://ALRubinger/aileron-connector-google
+aileron action install github://ALRubinger/aileron-connector-google/actions/draft-email
+```
+
+Without an installed action, the `aileron` MCP server registers but exposes no tools, and the smoke has nothing to look for.
+
+## Step 3: Check the container image before launching
+
+Validate that the sandbox image can run your chosen agent. This catches an image or arch problem before a daemon-backed launch starts:
+
+```bash
+AGENT=claude   # one of: claude | pi | goose | opencode | codex
+aileron sandbox check --runtime=docker --agent="$AGENT"
+```
+
+Expect `support: ok`, along with the selected tier, runtime, image, and command. A development build resolves the floating `edge` base image tag, and launch pulls it automatically. No separate image build is needed for the smoke.
+
+## Step 4: Launch the agent inside the container
+
+```bash
+aileron launch --sandbox=docker "$AGENT"
+```
+
+The launcher resolves and pulls the base image, bind-mounts `aileron-mcp` into the container, rewrites `AILERON_URL` to `host.docker.internal:<port>`, registers `aileron-mcp` with the agent (the mechanism differs per agent, see the table in [Step 5](#step-5-verify-the-agent-sees-aileron--draft_email)), validates the container can run `aileron-mcp`, and starts the agent. If the agent has no vaulted credential, it runs its normal in-container login on first launch; see [Sandbox Agent Auth](/development/sandbox-agent-auth/) for seeding credentials ahead of time.
+
+## Step 5: Verify the agent sees `aileron` + `draft_email`
+
+This is the acceptance check. How you list tools depends on the agent:
+
+| Agent | How to verify |
+|---|---|
+| Claude | Type `/mcp`. Expect one server named `aileron`. Look for `draft_email`. |
+| Codex | Type `/mcp`. Same expectation as Claude. |
+| Pi | Ask the agent to list its available tools, or make a draft request and confirm it invokes the Aileron tool. |
+| Goose | Same as Pi. |
+| OpenCode | Same as Pi. |
+
+The runtime-agnostic proof, valid for every agent, is in the session log: `.aileron/session.log` under the launch directory records `aileron-mcp`'s discovery call against the daemon. If the agent lists `aileron` with `draft_email` (or the session log shows the successful discovery call), **that cell passes**. Exit the agent.
+
+Codex is the highest-risk cell on any OS, because it is the only agent whose MCP registration is a bind-mounted `config.toml` rather than a CLI flag or workspace file. Validate it deliberately.
+
+## Step 6 (optional): full action round-trip
+
+For the gold-standard check on at least one agent per OS, run an action end to end: ask the agent to draft an email, approve the HITL request, and confirm the `approval.requested → approval.approved → execution.started → execution.succeeded` audit chain plus the real Gmail draft. The full sequence, the exact prompt, and the `jq` audit assertion are in the [Sandbox MCP Manual Verification Walkthrough](/development/sandbox-mcp-walkthrough/#run). That page also has the [troubleshooting](/development/sandbox-mcp-walkthrough/#troubleshooting) for the common failures (tools missing from a cross-arch host, `host.docker.internal` not resolving on Linux, baked-image version skew).
+
+## Step 7: Record the result
+
+Record each agent × OS cell you ran in [issue #962](https://github.com/ALRubinger/aileron/issues/962), in the issue body rather than a comment, so the matrix always reflects current state. Note the environment for each cell: OS, arch, Docker version, Aileron CLI commit, agent version, and any deviation. If you also ran the optional round-trip, note that the audit assertion printed `PASS` and the draft landed in Gmail.
+
+### The matrix you are filling
+
+The v4 bar requires every supported agent on Docker across all three operating systems. You hand-run only the macOS and Windows columns:
+
+| Agent ↓ / Runtime → | macOS Docker (manual smoke) | Linux Docker (CI) | Windows Docker (manual smoke) |
 |---|---|---|---|
-| Claude | manual smoke | automated (CI) | manual smoke |
-| Pi | manual smoke | automated (CI) | manual smoke |
-| Goose | manual smoke | automated (CI) | manual smoke |
-| OpenCode | manual smoke | automated (CI) | manual smoke |
-| Codex | manual smoke | automated (CI) | manual smoke |
+| Claude | ☐ | automated | ☐ |
+| Pi | ☐ | automated | ☐ |
+| Goose | ☐ | automated | ☐ |
+| OpenCode | ☐ | automated | ☐ |
+| Codex | ☐ | automated | ☐ |
 
-The Linux column is automated in CI (the per-agent MCP-registration matrix plus the `aileron-mcp`↔daemon round-trip, merged in PR [#1064](https://github.com/ALRubinger/aileron/pull/1064)), so those cells are green when CI is green and you do not hand-run them. The macOS and Windows columns are a light per-agent manual smoke (the agent lists `aileron` with `draft_email`), recorded in [#962](https://github.com/ALRubinger/aileron/issues/962), because GitHub-hosted mac and Windows runners cannot run Linux Docker containers. The walkthrough documents this split and the per-agent×runtime table in full, including the per-agent MCP registration mechanism and the Codex troubleshooting notes.
+The Linux cells are covered by `TestSandboxMCPRegistration_Matrix` (unit suite) and `TestSandboxMCP` (integration job, build tag `integration_sandbox`), merged in PR [#1064](https://github.com/ALRubinger/aileron/pull/1064). They are green when CI is green.
 
-## Acceptance scorecard
+## Current status
 
-This maps 1:1 to the "Verify and prove" bar in [#747](https://github.com/ALRubinger/aileron/issues/747). Status legend: ✅ done, ☐ pending.
+**v4 is NOT yet delivered.** Everything in the v4 bar is shipped except two gating items in the "Verify and prove" section of [#747](https://github.com/ALRubinger/aileron/issues/747):
 
-### Gating items (these gate v4 closure)
-
-| Item | Status | Notes |
+| Gating item | Status | Notes |
 |---|---|---|
-| Integration test variants — in-container, never-approved, concurrency ([#960](https://github.com/ALRubinger/aileron/issues/960)) | ✅ | Merged via PR [#1037](https://github.com/ALRubinger/aileron/pull/1037) on 2026-06-13. |
-| Manual E2E ([#962](https://github.com/ALRubinger/aileron/issues/962)) | ☐ | Linux automated and green via PR [#1064](https://github.com/ALRubinger/aileron/pull/1064) for all five agents. macOS and Windows light per-agent smoke pending. Claude × macOS full round-trip done 2026-06-15. |
+| Integration test variants — in-container, never-approved, concurrency ([#960](https://github.com/ALRubinger/aileron/issues/960)) | ✅ | Merged via PR [#1037](https://github.com/ALRubinger/aileron/pull/1037). |
+| Manual E2E ([#962](https://github.com/ALRubinger/aileron/issues/962)) | ☐ | Linux automated and green for all five agents. macOS and Windows light per-agent smoke pending (this runbook). Claude × macOS full round-trip done 2026-06-15. |
 | Demo script + recorded walkthrough ([#852](https://github.com/ALRubinger/aileron/issues/852)) | ☐ | Pending. |
 
-Two gating items remain open, so the verdict above is NOT yet delivered.
-
-### Non-gating items (visibly distinguished; these do NOT gate v4 closure)
-
-| Item | Status | Why it does not gate v4 |
-|---|---|---|
-| Agent auth v4.x deferral ([#1027](https://github.com/ALRubinger/aileron/issues/1027)) | ☐ | Now just [#1025](https://github.com/ALRubinger/aileron/issues/1025) (container integration test), explicitly v4.x. [#987](https://github.com/ALRubinger/aileron/issues/987) (read-only-FS EnvBinding) was re-parented to v5 [#1065](https://github.com/ALRubinger/aileron/issues/1065) on 2026-06-17. |
-| Platform packaging — Scoop, Homebrew ([#1094](https://github.com/ALRubinger/aileron/issues/1094)) | ✅ | Windows install via Scoop supports the v4 Windows requirement but does not gate closure. Closure gates on the runtime smoke ([#962](https://github.com/ALRubinger/aileron/issues/962)), not packaging. |
+Not gating v4 closure: the agent-auth v4.x deferral ([#1027](https://github.com/ALRubinger/aileron/issues/1027), closed; its container integration test [#1025](https://github.com/ALRubinger/aileron/issues/1025) landed, and [#987](https://github.com/ALRubinger/aileron/issues/987) moved to v5 [#1065](https://github.com/ALRubinger/aileron/issues/1065)) and platform packaging ([#1094](https://github.com/ALRubinger/aileron/issues/1094)).
 
 ## Sources
 
-- [Issue #747](https://github.com/ALRubinger/aileron/issues/747) — the v4 milestone, its "Verify and prove" bar, and the 2026-06-15 scope note this scorecard tracks.
-- [Sandbox MCP Manual Verification Walkthrough](/development/sandbox-mcp-walkthrough/) — the per-agent×runtime proof-out steps and the automated-Linux / manual-mac-Windows split.
-- [Sandbox Agent Auth](/development/sandbox-agent-auth/) — the authenticate step of the v4 bar.
-- [Sandbox Proxy CLI Verification Matrix](/development/sandbox-proxy-cli-matrix/) — the data-plane proxy verification with `curl`, `gh`, and `aws`.
+- [Issue #747](https://github.com/ALRubinger/aileron/issues/747) — the v4 milestone, its "Verify and prove" bar, and the 2026-06-15 scope note.
+- [Issue #962](https://github.com/ALRubinger/aileron/issues/962) — where you record the macOS and Windows manual-smoke results.
+- [Sandbox MCP Manual Verification Walkthrough](/development/sandbox-mcp-walkthrough/) — the optional full round-trip steps, the per-agent registration detail, and troubleshooting.
+- [Sandbox Agent Auth](/development/sandbox-agent-auth/) — seeding vault-backed agent credentials before launch.
+- [Sandbox Composition](/development/sandbox-composition/) — `aileron sandbox` plan, build, and check; how the base image tag resolves.
